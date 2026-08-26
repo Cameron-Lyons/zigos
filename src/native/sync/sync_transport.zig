@@ -50,12 +50,13 @@ pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
 pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 3;
 pub const COMPACT_CAPTURE_METADATA = true;
+pub const DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE = true;
 pub const COMPACT_NATIVE_RESULT_METADATA = true;
 pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
-pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_880;
-pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_104;
+pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_840;
+pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_048;
 pub const NATIVE_DELIVERY_SIZE_CEILING_BYTES: usize = 520;
 pub const OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES: usize = 288;
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PacketTooLarge);
@@ -176,8 +177,6 @@ const CapturedPacketArena = indexed_arena.IndexedArenaWithKey(u64, CapturedPacke
 pub const PacketCapture = struct {
     packets: CapturedPacketArena = CapturedPacketArena.init(),
     next_packet_id: u64 = 1,
-    last_packet_id: u64 = 0,
-    captured_count: usize = 0,
     dropped_count: usize = 0,
 
     pub fn ensureCapacity(self: *PacketCapture) Error!void {
@@ -188,7 +187,8 @@ pub const PacketCapture = struct {
 
     pub fn record(self: *PacketCapture, frame: []const u8) Error!void {
         if (frame.len > network_driver_task.MAX_NATIVE_FRAME_BYTES) return error.PacketTooLarge;
-        const packet_id = self.allocatePacketId();
+        std.debug.assert(self.next_packet_id != 0);
+        const packet_id = self.next_packet_id;
         const slot_index = self.packets.reserveIndex(packet_id) orelse {
             self.dropped_count += 1;
             return error.PacketCaptureFull;
@@ -197,8 +197,11 @@ pub const PacketCapture = struct {
         slot.packet_id = packet_id;
         slot.len = @intCast(frame.len);
         @memcpy(slot.bytes[0..frame.len], frame);
-        self.last_packet_id = packet_id;
-        self.captured_count += 1;
+        self.next_packet_id = packetIdAfter(packet_id);
+    }
+
+    pub fn capturedCount(self: *const PacketCapture) usize {
+        return self.packets.countInUse();
     }
 
     pub fn last(self: *const PacketCapture) ?CapturedPacket {
@@ -207,15 +210,9 @@ pub const PacketCapture = struct {
     }
 
     pub fn lastPtr(self: *const PacketCapture) ?*const CapturedPacket {
-        if (self.last_packet_id == 0) return null;
-        return self.packets.getConst(self.last_packet_id);
-    }
-
-    fn allocatePacketId(self: *PacketCapture) u64 {
-        const packet_id = self.next_packet_id;
-        self.next_packet_id +%= 1;
-        if (self.next_packet_id == 0) self.next_packet_id = 1;
-        return packet_id;
+        if (self.packets.countInUse() == 0) return null;
+        std.debug.assert(self.next_packet_id != 0);
+        return self.packets.getConst(packetIdBefore(self.next_packet_id));
     }
 
     comptime {
@@ -224,6 +221,15 @@ pub const PacketCapture = struct {
         }
     }
 };
+
+fn packetIdAfter(packet_id: u64) u64 {
+    const next = packet_id +% 1;
+    return if (next == 0) 1 else next;
+}
+
+fn packetIdBefore(next_packet_id: u64) u64 {
+    return if (next_packet_id == 1) std.math.maxInt(u64) else next_packet_id - 1;
+}
 
 pub const NativeConnection = struct {
     session: TransportSession,
@@ -964,10 +970,10 @@ test "native sync transport uses endpoints and reconnects without the in-process
 
     const oversized_payload = [_]u8{0xA5} ** (MAX_NATIVE_PAYLOAD_BYTES + 1);
     const endpoint_frames_before_oversized = native_transport.endpoint_frame_count;
-    const captured_frames_before_oversized = native_transport.capture.captured_count;
+    const captured_frames_before_oversized = native_transport.capture.capturedCount();
     try std.testing.expectError(error.PacketTooLarge, native_transport.sendSigned(&connection, &oversized_payload, signer));
     try std.testing.expectEqual(endpoint_frames_before_oversized, native_transport.endpoint_frame_count);
-    try std.testing.expectEqual(captured_frames_before_oversized, native_transport.capture.captured_count);
+    try std.testing.expectEqual(captured_frames_before_oversized, native_transport.capture.capturedCount());
     try std.testing.expectEqual(@as(usize, 1), native_transport.opened_connections);
     try std.testing.expectEqual(@as(usize, 1), native_transport.disconnected_connections);
     try std.testing.expectEqual(@as(usize, 1), native_transport.reconnect_count);
@@ -1054,7 +1060,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expectEqual(@as(u64, 1), delivered.sequence);
     try std.testing.expectEqual(@as(usize, 1), Driver.send_count);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0, 0, 0, 0, 0x52 }, &Driver.last_destination);
-    try std.testing.expectEqual(@as(usize, 1), native_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 1), native_transport.capture.capturedCount());
     const captured = native_transport.capture.last().?;
     try std.testing.expect(std.mem.startsWith(u8, captured.slice(), "ZGST"));
     try std.testing.expect(std.mem.indexOf(u8, captured.slice(), "object delta") == null);
@@ -1212,6 +1218,10 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expectEqual(network_frames_before_capture_full, native_transport.network_frame_count);
     try std.testing.expectEqual(next_sequence_before_capture_full, connection.next_sequence);
     try std.testing.expectEqual(@as(usize, 1), native_transport.capture.dropped_count);
+    const next_packet_id_before_direct_full = native_transport.capture.next_packet_id;
+    try std.testing.expectError(error.PacketCaptureFull, native_transport.capture.record("direct-full"));
+    try std.testing.expectEqual(next_packet_id_before_direct_full, native_transport.capture.next_packet_id);
+    try std.testing.expectEqual(@as(usize, 2), native_transport.capture.dropped_count);
     native_transport.capture = .{};
 
     connection.next_sequence = 3;
@@ -1232,7 +1242,7 @@ test "native sync transport captures encrypted driver packets and handles replay
 
     const endpoint_frames_before_exhaustion = native_transport.endpoint_frame_count;
     const network_frames_before_exhaustion = native_transport.network_frame_count;
-    const captured_frames_before_exhaustion = native_transport.capture.captured_count;
+    const captured_frames_before_exhaustion = native_transport.capture.capturedCount();
     try std.testing.expectError(
         error.NativeTransportSequenceExhausted,
         native_transport.sendSigned(&connection, "exhausted", signer),
@@ -1240,7 +1250,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expectEqual(@as(u64, 0), connection.next_sequence);
     try std.testing.expectEqual(endpoint_frames_before_exhaustion, native_transport.endpoint_frame_count);
     try std.testing.expectEqual(network_frames_before_exhaustion, native_transport.network_frame_count);
-    try std.testing.expectEqual(captured_frames_before_exhaustion, native_transport.capture.captured_count);
+    try std.testing.expectEqual(captured_frames_before_exhaustion, native_transport.capture.capturedCount());
     try std.testing.expectEqual(@as(usize, 1), native_transport.replay_rejection_count);
 }
 
@@ -1440,7 +1450,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     try std.testing.expectError(error.NativeTransportHardwareProofMissing, production_transport.sendSigned(&production_connection, "blocked until i225 proof", frame_signer));
     try std.testing.expectEqual(@as(usize, 0), production_transport.endpoint_frame_count);
     try std.testing.expectEqual(@as(usize, 0), production_transport.network_frame_count);
-    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.capturedCount());
     try std.testing.expectEqual(@as(usize, 0), production_connection.in_flight_frames);
     try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
 
@@ -1455,7 +1465,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     try std.testing.expectEqual(@as(usize, 0), production_relay_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, 0), production_transport.endpoint_frame_count);
     try std.testing.expectEqual(@as(usize, 0), production_transport.network_frame_count);
-    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 0), production_transport.capture.capturedCount());
     try std.testing.expectEqual(@as(usize, 0), network_driver_task.activeDriverTransmitCount());
 
     const peer_attestation_signer = signing.SignerIdentity{
@@ -1574,7 +1584,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     try std.testing.expect(production_delivery.network_delivered);
     try std.testing.expectEqual(@as(usize, 1), production_transport.endpoint_frame_count);
     try std.testing.expectEqual(@as(usize, 1), production_transport.network_frame_count);
-    try std.testing.expectEqual(@as(usize, 1), production_transport.capture.captured_count);
+    try std.testing.expectEqual(@as(usize, 1), production_transport.capture.capturedCount());
     try std.testing.expectEqual(@as(usize, 1), ProductionDriver.authorized_native_frames);
     try std.testing.expectEqual(@as(usize, 1), ProductionDriver.send_count);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x02, 0x15, 0xF2, 0, 0, 9 }, &ProductionDriver.last_destination);
@@ -1666,13 +1676,30 @@ test "native sync transport falls back through booted relay and encrypts object 
 }
 
 test "compact capture metadata preserves maximum native frames" {
+    try std.testing.expect(DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE);
+    try std.testing.expect(!@hasField(PacketCapture, "last_packet_id"));
+    try std.testing.expect(!@hasField(PacketCapture, "captured_count"));
+    try std.testing.expectEqual(@as(usize, PACKET_CAPTURE_SIZE_CEILING_BYTES), @sizeOf(PacketCapture));
+    try std.testing.expectEqual(@as(usize, NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES), @sizeOf(NativeTransportService));
+
     const frame = [_]u8{0xA5} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
     var capture = PacketCapture{};
+    try std.testing.expectEqual(@as(usize, 0), capture.capturedCount());
+    try std.testing.expect(capture.lastPtr() == null);
     try capture.record(&frame);
 
     const captured = capture.lastPtr().?;
+    try std.testing.expectEqual(@as(usize, 1), capture.capturedCount());
     try std.testing.expectEqual(@as(u16, network_driver_task.MAX_NATIVE_FRAME_BYTES), captured.len);
     try std.testing.expectEqualSlices(u8, &frame, captured.slice());
+
+    var wrapping = PacketCapture{ .next_packet_id = std.math.maxInt(u64) };
+    try wrapping.record("maximum");
+    try std.testing.expectEqual(std.math.maxInt(u64), wrapping.lastPtr().?.packet_id);
+    try std.testing.expectEqual(@as(u64, 1), wrapping.next_packet_id);
+    try wrapping.record("wrapped");
+    try std.testing.expectEqual(@as(u64, 1), wrapping.lastPtr().?.packet_id);
+    try std.testing.expectEqual(@as(usize, 2), wrapping.capturedCount());
 }
 
 test "compact native result metadata preserves bounded payload capacities" {
