@@ -1292,6 +1292,12 @@ pub const indexed_hot_path_tables = .{
             !@hasField(object_store.VersionRecord, "parent_count"),
         .packs_version_type_into_trailing_padding = object_store.PACKS_VERSION_TYPE_INTO_TRAILING_PADDING and
             @sizeOf(object_store.VersionRecord) <= object_store.VERSION_RECORD_SIZE_CEILING_BYTES,
+        .packs_object_store_membership_into_record_padding = object_store.PACKS_OBJECT_STORE_MEMBERSHIP_INTO_RECORD_PADDING and
+            @hasField(object_store.ObjectRecord, "arena_in_use") and
+            @hasField(object_store.VersionRecord, "arena_in_use") and
+            @sizeOf(object_store.ObjectRecord) <= object_store.OBJECT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(object_store.VersionRecord) <= object_store.VERSION_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
         .derives_blob_merkle_root_from_canonical_chunks = object_store.DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS and
             !@hasField(object_store.BlobRecord, "merkle_root") and
             @sizeOf(object_store.BlobRecord) <= object_store.BLOB_RECORD_SIZE_CEILING_BYTES and

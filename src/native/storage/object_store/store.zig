@@ -55,13 +55,16 @@ pub const DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH = true;
 pub const CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES = true;
 pub const PACKS_BLOB_STATE_INTO_BOUNDED_METADATA = true;
 pub const PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE = true;
+pub const PACKS_OBJECT_STORE_MEMBERSHIP_INTO_RECORD_PADDING = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 320;
 pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 64;
 pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 64;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_323_248;
+pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
+pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 320;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_315_568;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -319,6 +322,7 @@ pub const ObjectRecord = struct {
     object_type: ObjectType,
     latest_version_id: ids.VersionId,
     version_count: u16,
+    arena_in_use: bool = false,
 
     comptime {
         if (@sizeOf(@This()) > OBJECT_RECORD_SIZE_CEILING_BYTES) {
@@ -335,6 +339,7 @@ pub const VersionRecord = struct {
     metadata: SignedMetadata,
     blob_slot_index: VersionBlobSlotIndex,
     object_type: ObjectType,
+    arena_in_use: bool = false,
 
     pub fn previousVersionId(self: *const VersionRecord) ids.VersionId {
         return self.parent_version_ids[0];
@@ -499,17 +504,29 @@ pub const SignMetadataError = error{ ContentTypeTooLong, LabelTooLong, NoSpaceLe
 pub const PutLocallySignedError = Error || SignMetadataError;
 
 const ObjectSlot = struct {
-    in_use: bool = false,
     object: ObjectRecord = .{
         .id = ids.ObjectId.zero,
         .object_type = .blob,
         .latest_version_id = ids.VersionId.zero,
         .version_count = 0,
     },
+
+    pub fn arenaInUse(self: *const ObjectSlot) bool {
+        return self.object.arena_in_use;
+    }
+
+    pub fn setArenaInUse(self: *ObjectSlot, in_use: bool) void {
+        self.object.arena_in_use = in_use;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > OBJECT_SLOT_SIZE_CEILING_BYTES) {
+            @compileError("object slot exceeds its compact size ceiling");
+        }
+    }
 };
 
 const VersionSlot = struct {
-    in_use: bool = false,
     version: VersionRecord = .{
         .id = ids.VersionId.zero,
         .object_id = ids.ObjectId.zero,
@@ -519,6 +536,20 @@ const VersionSlot = struct {
         .metadata = .{},
         .blob_slot_index = 0,
     },
+
+    pub fn arenaInUse(self: *const VersionSlot) bool {
+        return self.version.arena_in_use;
+    }
+
+    pub fn setArenaInUse(self: *VersionSlot, in_use: bool) void {
+        self.version.arena_in_use = in_use;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > VERSION_SLOT_SIZE_CEILING_BYTES) {
+            @compileError("version slot exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const BlobSlot = struct {
@@ -719,14 +750,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             self.max_blob_payload_bytes = 0;
             if (initialize_indexes or self.objects.next_unclaimed_index != 0) {
                 for (self.objects.slots[0..self.objects.next_unclaimed_index]) |*slot| {
-                    if (slot.in_use) slot.* = ObjectSlot{};
+                    if (slot.arenaInUse()) slot.* = ObjectSlot{};
                 }
                 self.objects.resetRetainingPayloads();
                 self.object_type_index.reset();
             }
             if (initialize_indexes or self.versions.next_unclaimed_index != 0) {
                 for (self.versions.slots[0..self.versions.next_unclaimed_index]) |*slot| {
-                    if (slot.in_use) slot.* = VersionSlot{};
+                    if (slot.arenaInUse()) slot.* = VersionSlot{};
                 }
                 self.versions.resetRetainingPayloads();
             }
@@ -916,7 +947,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             var latest: ?*const VersionRecord = null;
             for (self.versions.slots[0..self.versions.claimedCount()]) |*slot| {
-                if (!slot.in_use) continue;
+                if (!slot.arenaInUse()) continue;
                 if (latest == null or slot.version.id.raw() > latest.?.id.raw()) {
                     latest = &slot.version;
                 }
@@ -954,7 +985,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             }
 
             for (&self.objects.slots) |*slot| {
-                if (!slot.in_use) continue;
+                if (!slot.arenaInUse()) continue;
                 self.appendQueryObject(query, output, &count, &slot.object);
             }
             std.sort.heap(ObjectQueryResult, output[0..count], {}, compareObjectQueryResults);
@@ -1240,6 +1271,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 .latest_version_id = ids.VersionId.zero,
                 .version_count = 0,
             };
+            slot.setArenaInUse(true);
             self.indexObjectTypeSlot(slot_index);
             if (object_id.raw() >= self.next_object_id) {
                 self.next_object_id = object_id.raw() +% 1;
@@ -1250,14 +1282,14 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         fn rebuildObjectTypeIndex(self: *Self) void {
             self.object_type_index.reset();
             for (&self.objects.slots, 0..) |*slot, slot_index| {
-                if (!slot.in_use) continue;
+                if (!slot.arenaInUse()) continue;
                 self.indexObjectTypeSlot(slot_index);
             }
         }
 
         fn indexObjectTypeSlot(self: *Self, slot_index: usize) void {
             const slot = &self.objects.slots[slot_index];
-            if (!slot.in_use) native_util.impossibleByInvariant("object type index points at a free object slot");
+            if (!slot.arenaInUse()) native_util.impossibleByInvariant("object type index points at a free object slot");
             if (!self.object_type_index.append(slot.object.object_type, slot_index)) {
                 native_util.impossibleByInvariant("object type index capacity covers object slots");
             }
