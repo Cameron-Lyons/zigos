@@ -473,7 +473,7 @@ fn proveNativeDriverPacketCapture(
     if (view.abi_version != sync_transport.NativeTransportAbi.version or
         !view.encrypted() or
         !view.egressAllowed() or
-        native_transport.capture.captured_count != 1 or
+        native_transport.capture.capturedCount() != 1 or
         native_transport.network_frame_count != 1)
     {
         return false;
@@ -527,5 +527,5 @@ fn proveNativeDriverPacketCapture(
 
     return DriverEgress.authorized_native_frames == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES and
         native_transport.network_frame_count == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES and
-        native_transport.capture.captured_count == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES;
+        native_transport.capture.capturedCount() == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES;
 }

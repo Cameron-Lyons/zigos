@@ -1054,7 +1054,9 @@ pub const indexed_hot_path_tables = .{
         .keeps_native_results_within_ceilings = @sizeOf(sync_transport.NativeDelivery) <= sync_transport.NATIVE_DELIVERY_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport.ObjectShareEnvelope) <= sync_transport.OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES,
         .uses_packet_capture_arena = @hasDecl(@FieldType(sync_transport.PacketCapture, "packets"), "reserveIndex"),
-        .tracks_last_packet_id = @hasField(sync_transport.PacketCapture, "last_packet_id"),
+        .derives_capture_metadata_from_arena_state = sync_transport.DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE and
+            !@hasField(sync_transport.PacketCapture, "last_packet_id") and
+            !@hasField(sync_transport.PacketCapture, "captured_count"),
     },
     .device_graph = .{
         .stores_compact_identity_metadata = device_graph.COMPACT_IDENTITY_METADATA and
