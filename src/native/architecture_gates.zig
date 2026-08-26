@@ -1046,8 +1046,13 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(sync_transport_harness.Relay) <= sync_transport_harness.RELAY_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport_harness.BootedOverlayRelayService) <= sync_transport_harness.BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport_harness.TransportSession) <= sync_transport_harness.TRANSPORT_SESSION_SIZE_CEILING_BYTES,
-        .uses_relay_packet_arena = @hasField(sync_transport_harness.Relay, "packets"),
-        .uses_relay_session_index = @hasField(sync_transport_harness.Relay, "session_index"),
+        .heap_backs_relay_queue_on_freestanding = sync_transport_harness.HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING and
+            sync_transport_harness.relay_queue_layout.heap_backs_queue_on_freestanding and
+            sync_transport_harness.relay_queue_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
+            sync_transport_harness.relay_queue_layout.backing_size_bytes == 7_000 and
+            sync_transport_harness.relay_queue_layout.freestanding_resident_savings_bytes == 6_992,
+        .uses_relay_packet_arena = sync_transport_harness.relay_queue_layout.uses_packet_arena,
+        .uses_relay_session_index = sync_transport_harness.relay_queue_layout.uses_session_index,
     },
     .sync_transport = .{
         .stores_compact_capture_metadata = sync_transport.COMPACT_CAPTURE_METADATA and
