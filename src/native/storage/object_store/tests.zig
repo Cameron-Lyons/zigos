@@ -112,8 +112,6 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expectEqual(@as(u8, 1), store.version(second.version_id).?.parent_count);
     try std.testing.expectEqual(first.version_id, store.version(second.version_id).?.parent_version_ids[0]);
     try std.testing.expectEqualStrings("zigos-storage-key", store.latestVersion(first.object_id).?.metadata.signature.signer);
-    const object = store.object(first.object_id).?;
-    try std.testing.expect(object.isPrimaryUserDataModel());
     const model = try store.objectOperatingModel(first.object_id);
     try std.testing.expect(model.isWholeOsObject());
     try std.testing.expectEqual(first.object_id, model.object_id);
@@ -133,16 +131,15 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(model.has_sync_policy);
     try std.testing.expect(model.has_sharing_policy);
     try std.testing.expect(model.recoverable);
-    try std.testing.expectEqual(@as(u64, 10), object.provenance.created_at_ticks);
-    try std.testing.expectEqual(@as(u64, 11), object.provenance.updated_at_ticks);
     try std.testing.expect(object_store.DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD);
     try std.testing.expect(object_store.DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT);
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "snapshot_state"));
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "sync_state"));
     try std.testing.expect(object_store.DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA);
-    try std.testing.expect(!@hasField(object_store.ObjectProvenance, "latest_version_addressed"));
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "sharing_policy"));
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "recovery_history"));
+    try std.testing.expect(object_store.DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS);
+    try std.testing.expect(!@hasField(object_store.ObjectRecord, "provenance"));
     try std.testing.expectEqual(@as(usize, object_store.OBJECT_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectRecord));
 }
 

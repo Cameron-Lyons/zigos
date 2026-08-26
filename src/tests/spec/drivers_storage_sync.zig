@@ -481,7 +481,6 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expectEqual(@as(usize, 1), storage.objectCount());
     try std.testing.expectEqual(@as(usize, 2), storage.versionCount());
     const report_object = storage.object(draft_v2.object_id).?;
-    try std.testing.expect(report_object.isPrimaryUserDataModel());
     const report_model = try storage.objectOperatingModel(draft_v2.object_id);
     try std.testing.expect(report_model.isWholeOsObject());
     try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, report_model.access_model);
