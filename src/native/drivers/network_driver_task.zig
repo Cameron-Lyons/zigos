@@ -45,9 +45,11 @@ pub const NetworkDevice = struct {
 pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
 pub const MAX_PEER_LINKS: usize = 32;
 pub const COMPACT_BOUNDED_METADATA = true;
+pub const COMPACT_NETWORK_TELEMETRY = true;
 pub const DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT = true;
 pub const HEAP_BACKED_PEER_LINK_DIRECTORY_ON_FREESTANDING = true;
-pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 48 else 2_096;
+pub const NetworkTelemetryCount = u32;
+pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 32 else 2_080;
 const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
 const PeerLinkIndex = indexed_arena.UniqueIndex(PEER_LINK_INDEX_CAPACITY);
 
@@ -346,10 +348,10 @@ comptime {
 
 pub const NativeNetworkStack = struct {
     peer_links: PeerLinkDirectory = .{},
-    attempted_connections: usize = 0,
-    denied_before_transmit: usize = 0,
+    attempted_connections: NetworkTelemetryCount = 0,
+    denied_before_transmit: NetworkTelemetryCount = 0,
     opened_connections: usize = 0,
-    transmitted_packets: usize = 0,
+    transmitted_packets: NetworkTelemetryCount = 0,
     last_denial_reason: network_policy.EgressDecisionReason = .none,
 
     pub fn init() NativeNetworkStack {
@@ -371,7 +373,7 @@ pub const NativeNetworkStack = struct {
         source_device: principal.PrincipalId,
         target_device: principal.PrincipalId,
     ) Error!NativeServiceIdentityConnection {
-        self.attempted_connections += 1;
+        self.attempted_connections +|= 1;
         const device = active_device orelse return self.denyOpen(.policy_denied);
         const service_identity = switch (request.evidence.destination) {
             .service_identity => |identity| identity,
@@ -439,7 +441,7 @@ pub const NativeNetworkStack = struct {
             request.attested_boot,
             request.trusted_root,
         ) orelse {
-            self.attempted_connections += 1;
+            self.attempted_connections +|= 1;
             return self.denyOpen(.attestation_required);
         };
         return self.openServiceIdentity(broker, .{
@@ -458,7 +460,7 @@ pub const NativeNetworkStack = struct {
         request: network_policy.EgressConnectionRequest,
         source_device: principal.PrincipalId,
     ) Error!NativeLocalDiscoveryConnection {
-        self.attempted_connections += 1;
+        self.attempted_connections +|= 1;
         const device = active_device orelse return self.denyOpen(.policy_denied);
         const discovery_class = switch (request.evidence.destination) {
             .discovery_class => |class| class,
@@ -522,7 +524,7 @@ pub const NativeNetworkStack = struct {
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeNativeFrame(wire_frame[0..], connection, &frame);
         if (!device.send(connection.target_mac, encoded)) return error.TransmitFailed;
-        self.transmitted_packets += 1;
+        self.transmitted_packets +|= 1;
         return frame;
     }
 
@@ -583,7 +585,7 @@ pub const NativeNetworkStack = struct {
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeDiscoveryFrame(wire_frame[0..], connection, &frame);
         if (!device.send(BROADCAST_MAC, encoded)) return error.TransmitFailed;
-        self.transmitted_packets += 1;
+        self.transmitted_packets +|= 1;
         return frame;
     }
 
@@ -608,13 +610,13 @@ pub const NativeNetworkStack = struct {
     }
 
     fn denyOpen(self: *NativeNetworkStack, reason: network_policy.EgressDecisionReason) Error {
-        self.denied_before_transmit += 1;
+        self.denied_before_transmit +|= 1;
         self.last_denial_reason = reason;
         return error.EgressDenied;
     }
 
     fn denySend(self: *NativeNetworkStack, reason: network_policy.EgressDecisionReason) Error {
-        self.denied_before_transmit += 1;
+        self.denied_before_transmit +|= 1;
         self.last_denial_reason = reason;
         return error.EgressDenied;
     }
@@ -1120,6 +1122,11 @@ test "peer link directory binds stable unicast routes and rejects ambiguity" {
 }
 
 test "network driver keeps bounded frame metadata compact" {
+    try std.testing.expect(COMPACT_NETWORK_TELEMETRY);
+    try std.testing.expectEqual(NetworkTelemetryCount, @FieldType(NativeNetworkStack, "attempted_connections"));
+    try std.testing.expectEqual(NetworkTelemetryCount, @FieldType(NativeNetworkStack, "denied_before_transmit"));
+    try std.testing.expectEqual(usize, @FieldType(NativeNetworkStack, "opened_connections"));
+    try std.testing.expectEqual(NetworkTelemetryCount, @FieldType(NativeNetworkStack, "transmitted_packets"));
     try std.testing.expectEqual(u16, @FieldType(ReceiveResult, "length"));
     try std.testing.expectEqual(u8, @FieldType(NativeServiceIdentityConnection, "service_identity_len"));
     try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryConnection, "discovery_class_len"));

@@ -780,6 +780,11 @@ pub const indexed_hot_path_tables = .{
             network_driver_task.peer_link_directory_layout.freestanding_resident_savings_bytes == 2_048 and
             network_driver_task.peer_link_directory_layout.uses_device_index and
             network_driver_task.peer_link_directory_layout.uses_mac_index,
+        .stores_compact_telemetry = network_driver_task.COMPACT_NETWORK_TELEMETRY and
+            @FieldType(network_driver_task.NativeNetworkStack, "attempted_connections") == network_driver_task.NetworkTelemetryCount and
+            @FieldType(network_driver_task.NativeNetworkStack, "denied_before_transmit") == network_driver_task.NetworkTelemetryCount and
+            @FieldType(network_driver_task.NativeNetworkStack, "opened_connections") == usize and
+            @FieldType(network_driver_task.NativeNetworkStack, "transmitted_packets") == network_driver_task.NetworkTelemetryCount,
         .stores_compact_bounded_metadata = network_driver_task.COMPACT_BOUNDED_METADATA and
             @FieldType(network_driver_task.ReceiveResult, "length") == u16 and
             @FieldType(network_driver_task.NativeServiceIdentityConnection, "service_identity_len") == u8 and
