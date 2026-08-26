@@ -94,7 +94,7 @@ pub const testing = struct {
         return default_manager.inputRouterPtr();
     }
 
-    pub fn backgroundDispatchPtr() *background_dispatch.Controller {
+    pub fn backgroundDispatchPtr() error{NoSpaceLeft}!*background_dispatch.Controller {
         return default_manager.backgroundDispatchPtr();
     }
 

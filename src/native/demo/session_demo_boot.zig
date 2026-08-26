@@ -26,6 +26,10 @@ else
 
 pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
     var graph = manager.beginServiceGraph() orelse return;
+    graph.env.background_dispatcher = manager.backgroundDispatchPtr() catch {
+        manager.failBoot();
+        return;
+    };
     bootstrap_packages.seed(
         manager.packageServicePtr(),
         manager.capabilityTablePtr(),

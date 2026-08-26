@@ -225,7 +225,9 @@ fn runSyncPermissionFlow(
         if (!decision.allowed and decision.reason == .budget_exhausted) {
             common.printBootMarker("ZIGOS:PERMISSION:DENY:BACKGROUND");
         } else if (decision.allowed) {
-            const dispatch = env.background_dispatcher.dispatch(
+            const background_dispatcher = env.background_dispatcher orelse
+                native_util.impossibleByInvariant("permission demo requires initialized background dispatch state");
+            const dispatch = background_dispatcher.dispatch(
                 env.runtime,
                 sync_task.id,
                 sync_manifest,
@@ -234,7 +236,7 @@ fn runSyncPermissionFlow(
                 21,
             ) catch |err| native_util.bootProofFailure("permission flows", err);
             if (dispatch.allowed and !dispatch.delayed) {
-                _ = env.background_dispatcher.complete(env.runtime, .{
+                _ = background_dispatcher.complete(env.runtime, .{
                     .record_id = dispatch.record_id.?,
                     .expected_task_id = sync_task.id,
                     .expected_background_task_id = "sync",

@@ -37,6 +37,8 @@ else
     };
 
 pub fn runProduction(manager: anytype, graph: anytype) bool {
+    var evidence_env = graph.env;
+    evidence_env.background_dispatcher = manager.backgroundDispatchPtr() catch |err| native_util.bootProofFailure("booted evidence", err);
     bootstrap_packages.seed(
         manager.packageServicePtr(),
         manager.capabilityTablePtr(),
@@ -108,7 +110,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     common.printBootMarker(boot_markers.permission_policy_port_ready);
 
     const notes_review = permission_flows.run(
-        &graph.env,
+        &evidence_env,
         &graph.state,
         graph.kernel_port,
         &review_port,

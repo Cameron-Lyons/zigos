@@ -505,6 +505,7 @@ pub const indexed_hot_path_tables = .{
         .uses_fair_reuse_cursor = @hasField(background_dispatch.Controller, "next_reusable_slot"),
         .tracks_latest_record_id = @hasField(background_dispatch.Controller, "latest_record_id"),
         .resolves_expiration_task_once = background_dispatch.EXPIRATION_TASK_ID_LOOKUPS_PER_RECORD == 1,
+        .initializes_allocated_controller_state = @hasDecl(background_dispatch.Controller, "initializeAllocated"),
     },
     .indexing_service = .{
         .uses_bounded_document_scan = indexing_service.BOUNDED_DOCUMENT_SCAN,
@@ -1274,6 +1275,10 @@ pub const indexed_hot_path_tables = .{
         .heap_backs_userspace_scheduler_on_freestanding = session_manager_boot_flow.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING,
         .heap_backs_task_runtime_on_freestanding = session_manager_boot_flow.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING,
         .heap_backs_package_service_on_freestanding = session_manager_boot_flow.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING,
+        .heap_backs_background_dispatch_on_freestanding = session_manager_boot_flow.HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING and
+            session_manager_boot_flow.background_dispatch_layout.heap_backs_log_on_freestanding and
+            session_manager_boot_flow.background_dispatch_layout.freestanding_handle_size_bytes <=
+                session_manager_boot_flow.BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES,
         .heap_backs_review_ux_controller_on_freestanding = session_manager_boot_flow.HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING and
             session_manager_boot_flow.recovery_context_layout.heap_backs_review_ux_controller_on_freestanding and
             session_manager_boot_flow.recovery_context_layout.freestanding_review_ux_controller_handle_size_bytes <=
