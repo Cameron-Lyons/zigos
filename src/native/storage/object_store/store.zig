@@ -39,6 +39,7 @@ pub const DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT = true;
 pub const DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA = true;
 pub const DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS = true;
 pub const DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS = true;
+pub const DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
@@ -304,7 +305,6 @@ pub const ObjectRecord = struct {
 pub const VersionRecord = struct {
     id: ids.VersionId,
     object_id: ids.ObjectId,
-    parent_count: u8,
     parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
     object_type: ObjectType,
     version_address: VersionAddress,
@@ -312,7 +312,15 @@ pub const VersionRecord = struct {
     blob_slot_index: VersionBlobSlotIndex,
 
     pub fn previousVersionId(self: *const VersionRecord) ids.VersionId {
-        return if (self.parent_count == 0) ids.VersionId.zero else self.parent_version_ids[0];
+        return self.parent_version_ids[0];
+    }
+
+    pub fn parentCount(self: *const VersionRecord) u8 {
+        return countVersionParents(self.parent_version_ids);
+    }
+
+    pub fn hasCanonicalParents(self: *const VersionRecord) bool {
+        return versionParentsAreCanonical(self.parent_version_ids);
     }
 };
 
@@ -439,7 +447,6 @@ const VersionSlot = struct {
     version: VersionRecord = .{
         .id = ids.VersionId.zero,
         .object_id = ids.ObjectId.zero,
-        .parent_count = 0,
         .parent_version_ids = [_]ids.VersionId{ids.VersionId.zero} ** MAX_VERSION_PARENTS,
         .object_type = .blob,
         .version_address = crypto_hash.zero_digest,
@@ -777,12 +784,11 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const blob_address = blobManifestAddressFromMerkleRoot(request.payload.len, chunk_count, merkle_root);
             const blob_slot_index = try self.putBlobPrepared(blob_address, merkle_root, request.payload, &chunk_refs, chunk_count);
             const parents = versionParents(previous_version_id);
-            const parent_count = parentCount(parents);
+            const parent_count = countVersionParents(parents);
             const version_address = computeVersionAddress(parents[0..@as(usize, @intCast(parent_count))], request.metadata, blob_address);
             try self.insertVersion(.{
                 .id = version_id,
                 .object_id = target_object.id,
-                .parent_count = parent_count,
                 .parent_version_ids = parents,
                 .object_type = request.object_type,
                 .version_address = version_address,
@@ -1185,7 +1191,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         fn insertVersion(self: *Self, request: struct {
             id: ids.VersionId,
             object_id: ids.ObjectId,
-            parent_count: u8,
             parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
             object_type: ObjectType,
             version_address: VersionAddress,
@@ -1195,7 +1200,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot = self.versions.reserve(request.id) orelse return error.VersionTableFull;
             slot.version.id = request.id;
             slot.version.object_id = request.object_id;
-            slot.version.parent_count = request.parent_count;
             slot.version.parent_version_ids = request.parent_version_ids;
             slot.version.object_type = request.object_type;
             slot.version.version_address = request.version_address;
@@ -1379,7 +1383,7 @@ fn historyEntryFor(version_record: *const VersionRecord, payload_len: usize) Obj
         .object_id = version_record.object_id,
         .version_id = version_record.id,
         .previous_version_id = version_record.previousVersionId(),
-        .parent_count = version_record.parent_count,
+        .parent_count = version_record.parentCount(),
         .object_type = version_record.object_type,
         .payload_len = @intCast(payload_len),
         .created_at_ticks = version_record.metadata.created_at_ticks,
@@ -1570,12 +1574,24 @@ fn versionParents(previous_version_id: ids.VersionId) [MAX_VERSION_PARENTS]ids.V
     return parents;
 }
 
-fn parentCount(parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId) u8 {
+fn countVersionParents(parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId) u8 {
     var count: u8 = 0;
     for (parent_version_ids) |parent_version_id| {
         if (!parent_version_id.isZero()) count += 1;
     }
     return count;
+}
+
+fn versionParentsAreCanonical(parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId) bool {
+    var found_empty = false;
+    for (parent_version_ids) |parent_version_id| {
+        if (parent_version_id.isZero()) {
+            found_empty = true;
+        } else if (found_empty) {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn blobManifestMatches(store: anytype, blob_record: BlobRecord, payload_len: usize, chunk_refs: []const ChunkRef) bool {
