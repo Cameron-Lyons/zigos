@@ -3006,11 +3006,12 @@ fn serviceBootImageRegistryCheck(
     const image = userspace_registry.findByServiceClass(class) orelse return false;
     const catalog_entry = service_catalog.entryForClass(class) orelse return false;
     const build_image = catalog_entry.userspace_image orelse return false;
+    const provided_interfaces = image.providedInterfaces();
     return std.mem.eql(u8, image.bundle_id, bundle_id) and
         std.mem.eql(u8, build_image.artifact_name, artifact_name) and
         std.mem.eql(u8, build_image.source_path, "src/userspace/service_main.zig") and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, interface_name);
+        provided_interfaces.len == 1 and
+        std.mem.eql(u8, provided_interfaces[0].name, interface_name);
 }
 
 fn securePasteboardBootstrapContractCheck() bool {
@@ -3845,6 +3846,7 @@ fn indexSearchBootstrapContractCheck() bool {
     const launch = entry.service_bootstrap orelse return false;
     const contract = service_catalog.serviceContractForClass(.indexing_search) orelse return false;
     const image = userspace_registry.findByServiceClass(.indexing_search) orelse return false;
+    const provided_interfaces = image.providedInterfaces();
     return entry.published_native_service and
         entry.userspace_image != null and
         launch.mode == .kernel_contract and
@@ -3852,8 +3854,8 @@ fn indexSearchBootstrapContractCheck() bool {
         launch.grants[0] == .service_task_authority and
         contract.interface_id == .index_search and
         std.mem.eql(u8, contract.interface.name, "zigos.index.search") and
-        image.provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.index.search");
+        provided_interfaces.len == 1 and
+        std.mem.eql(u8, provided_interfaces[0].name, "zigos.index.search");
 }
 
 const IdentityCredentialEvidence = struct {
@@ -7346,6 +7348,7 @@ fn personalContextCatalogBindingCheck() bool {
     const launch = entry.service_bootstrap orelse return false;
     const contract = service_catalog.serviceContractForClass(.personal_context) orelse return false;
     const image = userspace_registry.findByServiceClass(.personal_context) orelse return false;
+    const provided_interfaces = image.providedInterfaces();
     return entry.published_native_service and
         entry.userspace_image != null and
         launch.mode == .kernel_contract and
@@ -7353,9 +7356,9 @@ fn personalContextCatalogBindingCheck() bool {
         launch.grants[0] == .service_task_authority and
         contract.interface_id == .personal_context and
         typed_component_abi.interfaceId(.personal_context) == .personal_context and
-        image.provided_interfaces.len == 1 and
+        provided_interfaces.len == 1 and
         std.mem.eql(u8, image.bundle_id, "zigos.system.personal-context") and
-        std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.personal.context");
+        std.mem.eql(u8, provided_interfaces[0].name, "zigos.personal.context");
 }
 
 test "OS contract keeps sixteen modernization features satisfied" {
