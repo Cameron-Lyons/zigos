@@ -1841,11 +1841,19 @@ fn validateNuc11tnki5KernelProofSources(
         "pollWakeTarget",
         "pollAbiForTask",
         "abi.InputEventDescriptor",
+        "pub const HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING = true",
+        "const EventSlotBacking = if (heap_backed_event_slots) ?*EventSlotArray else EventSlotArray",
+        "const allocation = kernel_memory.kmalloc(@sizeOf(EventSlotArray)) orelse return null",
+        "kernel_memory.kfree(@ptrCast(slots))",
+        "pub fn deinit(self: *Router) void",
     };
     for (required_input_router_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_router_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 compositor input ownership must retain focused-router snippet: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, input_router_source, "event_slots: [MAX_QUEUED_EVENTS]EventSlot =") != null) {
+        try common.addError(errors, allocator, "NUC11TNKi5 input event slots must not return to inline freestanding router storage", .{});
     }
     const required_userspace_input_snippets = [_]struct {
         label: []const u8,
@@ -3376,6 +3384,7 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "pub fn bindFocusedInputReceiver" },
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.input_recv" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "syscall surface delivers focused input only through task-scoped authority" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.input_router.deinit()" },
     };
     for (focused_input_abi_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {

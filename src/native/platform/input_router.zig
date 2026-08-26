@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const xhci = @import("../../kernel/drivers/xhci.zig");
 const abi = @import("../core/abi.zig");
@@ -6,12 +7,15 @@ const native_util = @import("../core/util.zig");
 const input_driver_task = @import("../drivers/input_driver_task.zig");
 const compositor_session = @import("compositor_session.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const root = @import("root");
 
 pub const MAX_KEYBOARDS: usize = 4;
 pub const MAX_INBOXES: usize = compositor_session.MAX_WINDOWS + 1;
 pub const MAX_QUEUED_EVENTS: usize = 32;
 pub const MAX_EVENTS_PER_INBOX: usize = 16;
 pub const DEFAULT_REPORT_BUDGET: usize = 16;
+pub const HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING = true;
+pub const EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 const NO_EVENT_INDEX: u8 = std.math.maxInt(u8);
 const NO_INBOX_INDEX: u8 = std.math.maxInt(u8);
@@ -88,6 +92,14 @@ const EventSlot = struct {
     next: u8 = NO_EVENT_INDEX,
 };
 
+const EventSlotArray = [MAX_QUEUED_EVENTS]EventSlot;
+const heap_backed_event_slots = builtin.target.os.tag == .freestanding and HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING;
+const EventSlotBacking = if (heap_backed_event_slots) ?*EventSlotArray else EventSlotArray;
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
+
 const Inbox = struct {
     in_use: bool = false,
     task_id: u64 = 0,
@@ -114,7 +126,7 @@ pub const Router = struct {
     active_inbox_tail: u8 = NO_INBOX_INDEX,
     wake_head: u8 = NO_INBOX_INDEX,
     wake_tail: u8 = NO_INBOX_INDEX,
-    event_slots: [MAX_QUEUED_EVENTS]EventSlot = [_]EventSlot{.{}} ** MAX_QUEUED_EVENTS,
+    event_slots: EventSlotBacking = if (heap_backed_event_slots) null else [_]EventSlot{.{}} ** MAX_QUEUED_EVENTS,
     free_event_head: u8 = NO_EVENT_INDEX,
     event_pool_initialized: bool = false,
     queued_event_count: u8 = 0,
@@ -128,6 +140,48 @@ pub const Router = struct {
     events_dropped: usize = 0,
     stale_events_dropped: usize = 0,
     focus_switches: usize = 0,
+
+    comptime {
+        if (heap_backed_event_slots and @sizeOf(EventSlotBacking) > EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES) {
+            @compileError("heap-backed input event slots exceed their handle size ceiling");
+        }
+    }
+
+    fn eventSlots(self: *Router) ?*EventSlotArray {
+        if (comptime heap_backed_event_slots) return self.event_slots;
+        return &self.event_slots;
+    }
+
+    fn ensureEventSlots(self: *Router) ?*EventSlotArray {
+        if (self.eventSlots()) |slots| return slots;
+        if (comptime heap_backed_event_slots) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(EventSlotArray)) orelse return null;
+            const slots: *EventSlotArray = @ptrCast(@alignCast(allocation));
+            initializeEventSlots(slots);
+            self.free_event_head = 0;
+            self.queued_event_count = 0;
+            self.event_pool_initialized = true;
+            self.event_slots = slots;
+            return slots;
+        }
+        return &self.event_slots;
+    }
+
+    pub fn deinit(self: *Router) void {
+        self.dropAllInboxes();
+        if (comptime heap_backed_event_slots) {
+            if (self.event_slots) |slots| {
+                @memset(std.mem.asBytes(slots), 0);
+                kernel_memory.kfree(@ptrCast(slots));
+                self.event_slots = null;
+            }
+        } else {
+            self.event_slots = [_]EventSlot{.{}} ** MAX_QUEUED_EVENTS;
+        }
+        self.free_event_head = NO_EVENT_INDEX;
+        self.event_pool_initialized = false;
+        self.queued_event_count = 0;
+    }
 
     pub fn bindHardwareSource(self: *Router, source: HardwareReportSource) void {
         self.dropAllInboxes();
@@ -214,7 +268,9 @@ pub const Router = struct {
         const inbox = &self.inboxes.slots[inbox_index];
         if (inbox.count == 0) return null;
         const event_index = inbox.head;
-        const event_slot = &self.event_slots[event_index];
+        const event_slots = self.eventSlots() orelse
+            native_util.impossibleByInvariant("queued input events retain their slot backing");
+        const event_slot = &event_slots[event_index];
         const event = event_slot.event;
         inbox.head = event_slot.next;
         inbox.count -= 1;
@@ -337,12 +393,14 @@ pub const Router = struct {
             self.events_dropped += 1;
             return false;
         };
+        const event_slots = self.eventSlots() orelse
+            native_util.impossibleByInvariant("allocated input events retain their slot backing");
         const was_empty = inbox.count == 0;
-        self.event_slots[event_index] = .{ .event = routed };
+        event_slots[event_index] = .{ .event = routed };
         if (inbox.tail == NO_EVENT_INDEX) {
             inbox.head = event_index;
         } else {
-            self.event_slots[inbox.tail].next = event_index;
+            event_slots[inbox.tail].next = event_index;
         }
         inbox.tail = event_index;
         inbox.count += 1;
@@ -471,40 +529,45 @@ pub const Router = struct {
     }
 
     fn allocateEvent(self: *Router) ?u8 {
+        const event_slots = self.ensureEventSlots() orelse return null;
         if (!self.event_pool_initialized) self.resetEventPool();
         if (self.free_event_head == NO_EVENT_INDEX) return null;
         const event_index = self.free_event_head;
-        self.free_event_head = self.event_slots[event_index].next;
-        self.event_slots[event_index].next = NO_EVENT_INDEX;
+        self.free_event_head = event_slots[event_index].next;
+        event_slots[event_index].next = NO_EVENT_INDEX;
         self.queued_event_count += 1;
         return event_index;
     }
 
     fn releaseEvent(self: *Router, event_index: u8) void {
-        self.event_slots[event_index].next = self.free_event_head;
+        const event_slots = self.eventSlots() orelse
+            native_util.impossibleByInvariant("released input events retain their slot backing");
+        event_slots[event_index].next = self.free_event_head;
         self.free_event_head = event_index;
         self.queued_event_count -= 1;
     }
 
     fn releaseInboxEvents(self: *Router, inbox: *Inbox) void {
+        const event_slots = self.eventSlots() orelse {
+            if (inbox.head != NO_EVENT_INDEX) {
+                native_util.impossibleByInvariant("input inbox events retain their slot backing");
+            }
+            return;
+        };
         var event_index = inbox.head;
         while (event_index != NO_EVENT_INDEX) {
-            const next = self.event_slots[event_index].next;
+            const next = event_slots[event_index].next;
             self.releaseEvent(event_index);
             event_index = next;
         }
     }
 
     fn resetEventPool(self: *Router) void {
-        for (&self.event_slots, 0..) |*slot, index| {
-            slot.next = if (index + 1 < self.event_slots.len)
-                @intCast(index + 1)
-            else
-                NO_EVENT_INDEX;
-        }
-        self.free_event_head = 0;
+        const event_slots = self.eventSlots();
+        if (event_slots) |slots| initializeEventSlots(slots);
+        self.free_event_head = if (event_slots != null) 0 else NO_EVENT_INDEX;
         self.queued_event_count = 0;
-        self.event_pool_initialized = true;
+        self.event_pool_initialized = event_slots != null;
     }
 
     fn linkActiveInbox(self: *Router, inbox_index: usize) void {
@@ -547,6 +610,30 @@ pub const Router = struct {
         inbox.next_active_index = NO_INBOX_INDEX;
     }
 };
+
+pub const event_slot_layout = .{
+    .heap_backs_slots_on_freestanding = HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING,
+    .slot_backing_size_bytes = @sizeOf(EventSlotArray),
+    .freestanding_handle_size_bytes = if (HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING) @sizeOf(?*EventSlotArray) else @sizeOf(EventSlotArray),
+};
+
+fn initializeEventSlots(event_slots: *EventSlotArray) void {
+    for (event_slots, 0..) |*slot, index| {
+        slot.next = if (index + 1 < event_slots.len)
+            @intCast(index + 1)
+        else
+            NO_EVENT_INDEX;
+    }
+}
+
+test "allocated input event slots initialize their reusable free list" {
+    const event_slots = try std.testing.allocator.create(EventSlotArray);
+    defer std.testing.allocator.destroy(event_slots);
+    initializeEventSlots(event_slots);
+
+    try std.testing.expectEqual(@as(u8, 1), event_slots[0].next);
+    try std.testing.expectEqual(NO_EVENT_INDEX, event_slots[MAX_QUEUED_EVENTS - 1].next);
+}
 
 fn validTopology(report: xhci.HardwareBootKeyboardReport) bool {
     return report.sequence != 0 and report.port_id != 0 and report.slot_id != 0 and
