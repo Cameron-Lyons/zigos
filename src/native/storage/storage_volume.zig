@@ -780,9 +780,9 @@ const ReplayIdBounds = struct {
 
     fn fitRoot(self: ReplayIdBounds, root: RootState) bool {
         return issuedBeforeNext(self.max_object_id, root.next_object_id) and
-            self.max_version_id <= root.last_version_id and
+            self.max_version_id <= volume_root_slot.versionWatermark(root) and
             issuedBeforeNext(self.max_workspace_id, root.next_workspace_id) and
-            self.max_snapshot_id <= root.last_snapshot_id;
+            self.max_snapshot_id <= volume_root_slot.snapshotWatermark(root);
     }
 };
 
@@ -795,16 +795,18 @@ fn buildDeltaLog(
 ) Error!BuiltLog {
     var writer = CursorWriter{ .buffer = buffer };
     try volume_log.appendRecordPayload(&writer, .segment_boundary, &.{});
+    const version_watermark = volume_root_slot.versionWatermark(root);
+    const snapshot_watermark = volume_root_slot.snapshotWatermark(root);
 
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.object(object_id) orelse continue;
-        if (object_record.latest_version_id.raw() <= root.last_version_id) continue;
+        if (object_record.latest_version_id.raw() <= version_watermark) continue;
         try appendObjectRecord(&writer, object_record);
     }
 
     for (store.dirtyVersionIds()) |version_id| {
         const version_record = store.version(version_id) orelse continue;
-        if (version_record.id.raw() <= root.last_version_id) continue;
+        if (version_record.id.raw() <= version_watermark) continue;
         try appendVersionPayloadChunks(&writer, store, version_record);
         const blob = store.versionBlob(version_record) orelse return error.CorruptImage;
         try appendBlobRecord(&writer, store, blob);
@@ -823,7 +825,7 @@ fn buildDeltaLog(
 
     for (workspaces.dirtySnapshotIds()) |snapshot_id| {
         const snapshot_record = workspaces.findSnapshotConst(snapshot_id) orelse continue;
-        if (snapshot_record.id.raw() <= root.last_snapshot_id) continue;
+        if (snapshot_record.id.raw() <= snapshot_watermark) continue;
         try appendSnapshotRecord(&writer, snapshot_record);
     }
 
@@ -849,26 +851,27 @@ fn tryBuildAppendDelta(
 }
 
 fn canAppendToRoot(root: RootState, store: *const object_store.Store, workspaces: *const workspace.Directory) bool {
-    if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return false;
+    const version_watermark = volume_root_slot.versionWatermark(root);
+    const snapshot_watermark = volume_root_slot.snapshotWatermark(root);
     if (volume_root_slot.lastIssuedId(root.next_object_id) > volume_root_slot.lastIssuedId(store.next_object_id)) return false;
-    if (root.last_version_id > volume_root_slot.lastIssuedId(store.next_version_id)) return false;
+    if (version_watermark > volume_root_slot.lastIssuedId(store.next_version_id)) return false;
     if (volume_root_slot.lastIssuedId(root.next_workspace_id) > volume_root_slot.lastIssuedId(workspaces.next_workspace_id)) return false;
-    if (root.last_snapshot_id > volume_root_slot.lastIssuedId(workspaces.next_snapshot_id)) return false;
+    if (snapshot_watermark > volume_root_slot.lastIssuedId(workspaces.next_snapshot_id)) return false;
 
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.objectConst(object_id) orelse return false;
-        if (object_record.latest_version_id.raw() <= root.last_version_id) return false;
+        if (object_record.latest_version_id.raw() <= version_watermark) return false;
     }
     for (store.dirtyVersionIds()) |version_id| {
         _ = store.versionConst(version_id) orelse return false;
-        if (version_id.raw() <= root.last_version_id) return false;
+        if (version_id.raw() <= version_watermark) return false;
     }
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
         _ = workspaces.findConst(workspace_id) orelse return false;
     }
     for (workspaces.dirtySnapshotIds()) |snapshot_id| {
         _ = workspaces.findSnapshotConst(snapshot_id) orelse return false;
-        if (snapshot_id.raw() <= root.last_snapshot_id) return false;
+        if (snapshot_id.raw() <= snapshot_watermark) return false;
     }
     return true;
 }
@@ -891,8 +894,6 @@ fn buildRootState(
         .next_version_id = store.next_version_id,
         .next_workspace_id = workspaces.next_workspace_id,
         .next_snapshot_id = workspaces.next_snapshot_id,
-        .last_version_id = volume_root_slot.lastIssuedId(store.next_version_id),
-        .last_snapshot_id = volume_root_slot.lastIssuedId(workspaces.next_snapshot_id),
     };
     for (&workspaces.workspaces.slots) |*slot| {
         if (!persistableWorkspaceSlot(slot)) continue;
@@ -916,7 +917,6 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
 }
 
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
-    if (!volume_root_slot.hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     store.reset();
     workspaces.reset();
     self.resetSignerText();
@@ -1937,33 +1937,33 @@ test "inline replay ID bounds preserve root watermark validation" {
 
     try std.testing.expect(bounds.fitRoot(.{
         .next_object_id = 9,
-        .last_version_id = 12,
+        .next_version_id = 13,
         .next_workspace_id = 4,
-        .last_snapshot_id = 9,
+        .next_snapshot_id = 10,
     }));
     try std.testing.expect(!bounds.fitRoot(.{
         .next_object_id = 8,
-        .last_version_id = 12,
+        .next_version_id = 13,
         .next_workspace_id = 4,
-        .last_snapshot_id = 9,
+        .next_snapshot_id = 10,
     }));
     try std.testing.expect(!bounds.fitRoot(.{
         .next_object_id = 9,
-        .last_version_id = 11,
+        .next_version_id = 12,
         .next_workspace_id = 4,
-        .last_snapshot_id = 9,
+        .next_snapshot_id = 10,
     }));
     try std.testing.expect(!bounds.fitRoot(.{
         .next_object_id = 9,
-        .last_version_id = 12,
+        .next_version_id = 13,
         .next_workspace_id = 3,
-        .last_snapshot_id = 9,
+        .next_snapshot_id = 10,
     }));
     try std.testing.expect(!bounds.fitRoot(.{
         .next_object_id = 9,
-        .last_version_id = 12,
+        .next_version_id = 13,
         .next_workspace_id = 4,
-        .last_snapshot_id = 8,
+        .next_snapshot_id = 9,
     }));
 }
 
@@ -1978,15 +1978,9 @@ test "storage append rejects issuance watermark rewind" {
 
     try std.testing.expect(canAppendToRoot(.{}, store, workspaces));
     try std.testing.expect(!canAppendToRoot(.{ .next_object_id = 2 }, store, workspaces));
-    try std.testing.expect(!canAppendToRoot(.{
-        .next_version_id = 2,
-        .last_version_id = 1,
-    }, store, workspaces));
+    try std.testing.expect(!canAppendToRoot(.{ .next_version_id = 2 }, store, workspaces));
     try std.testing.expect(!canAppendToRoot(.{ .next_workspace_id = 2 }, store, workspaces));
-    try std.testing.expect(!canAppendToRoot(.{
-        .next_snapshot_id = 2,
-        .last_snapshot_id = 1,
-    }, store, workspaces));
+    try std.testing.expect(!canAppendToRoot(.{ .next_snapshot_id = 2 }, store, workspaces));
 }
 
 test "storage volume interns repeated signer labels within a bounded pool" {

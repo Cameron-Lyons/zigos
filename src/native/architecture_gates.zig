@@ -1252,6 +1252,9 @@ pub const indexed_hot_path_tables = .{
     .storage_volume = .{
         .stores_compact_root_summary_metadata = storage_root_slot.COMPACT_ROOT_SUMMARY_METADATA and
             @FieldType(storage_root_slot.RootState, "workspace_summary_count") == u8,
+        .derives_delta_watermarks_from_allocation_cursors = storage_root_slot.DERIVES_DELTA_WATERMARKS_FROM_ALLOCATION_CURSORS and
+            !@hasField(storage_root_slot.RootState, "last_version_id") and
+            !@hasField(storage_root_slot.RootState, "last_snapshot_id"),
         .keeps_root_state_within_ceiling = @sizeOf(storage_root_slot.RootState) <= storage_root_slot.ROOT_STATE_SIZE_CEILING_BYTES,
         .persists_workspace_state = @hasDecl(storage_volume, "saveToImage"),
         .replays_state_by_primary_index = @hasDecl(storage_volume, "loadFromImage"),
