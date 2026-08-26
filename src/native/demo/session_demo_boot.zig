@@ -47,7 +47,10 @@ pub fn bootScenarioWorld(manager: *session_boot_flow.SessionManager) void {
         manager,
         graph.state.services.review_service_record.id,
         graph.state.review_service_task.id,
-    );
+    ) catch {
+        manager.failBoot();
+        return;
+    };
     var compositor_checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(
         graph.state.services.compositor_service.id,
@@ -100,7 +103,7 @@ fn initReviewService(
     manager: *session_boot_flow.SessionManager,
     review_service_id: u64,
     review_task_id: u64,
-) permission_review_service.Service {
+) error{NoSpaceLeft}!permission_review_service.Service {
     return permission_review_service.Service.initProfiled(
         review_service_id,
         review_task_id,
@@ -108,7 +111,7 @@ fn initReviewService(
         &[_][]const u8{},
         bootstrap_review_profile.rules[0..],
         manager.compositorSessionPtr(),
-        manager.reviewUxControllerPtr(),
+        try manager.reviewUxControllerPtr(),
     );
 }
 

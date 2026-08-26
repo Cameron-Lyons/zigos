@@ -3252,8 +3252,10 @@ fn validateUserspaceDriverDataPathTrack(
     const syscall_dispatch_path = "src/native/kernel_api/syscall_dispatch.zig";
     const syscall_surface_path = "src/native/kernel_api/syscall_surface.zig";
     const compositor_session_path = "src/native/platform/compositor_session.zig";
+    const native_ux_path = "src/native/platform/native_ux.zig";
     const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
     const session_manager_contexts_path = "src/native/session/session_manager_contexts.zig";
+    const booted_evidence_path = "src/native/session/booted_evidence.zig";
     const userspace_mailbox_path = "src/native/task/userspace_bootstrap_mailbox.zig";
     const userspace_executor_path = "src/native/task/userspace_executor.zig";
     const userspace_runtime_path = "src/userspace/runtime.zig";
@@ -3274,8 +3276,10 @@ fn validateUserspaceDriverDataPathTrack(
     const syscall_dispatch_source = try readRequiredSource(allocator, io, errors, syscall_dispatch_path) orelse return;
     const syscall_surface_source = try readRequiredSource(allocator, io, errors, syscall_surface_path) orelse return;
     const compositor_session_source = try readRequiredSource(allocator, io, errors, compositor_session_path) orelse return;
+    const native_ux_source = try readRequiredSource(allocator, io, errors, native_ux_path) orelse return;
     const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
     const session_manager_contexts_source = try readRequiredSource(allocator, io, errors, session_manager_contexts_path) orelse return;
+    const booted_evidence_source = try readRequiredSource(allocator, io, errors, booted_evidence_path) orelse return;
     const userspace_mailbox_source = try readRequiredSource(allocator, io, errors, userspace_mailbox_path) orelse return;
     const userspace_executor_source = try readRequiredSource(allocator, io, errors, userspace_executor_path) orelse return;
     const userspace_runtime_source = try readRequiredSource(allocator, io, errors, userspace_runtime_path) orelse return;
@@ -3378,6 +3382,27 @@ fn validateUserspaceDriverDataPathTrack(
     }
     if (std.mem.indexOf(u8, session_manager_contexts_source, "endpoint_table: endpoint_mod.Table =") != null) {
         try common.addError(errors, allocator, "Endpoint table must not return to inline freestanding session storage", .{});
+    }
+    const review_ux_controller_storage_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = native_ux_path, .source = native_ux_source, .snippet = "pub fn initializeAllocated(self: *Controller) void" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "pub const HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING = true" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const ReviewUxControllerBacking = if (heap_backed_review_ux_controller) ?*native_ux.Controller else native_ux.Controller" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(native_ux.Controller)) orelse return error.NoSpaceLeft" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "kernel_memory.kfree(@ptrCast(controller))" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.recovery_context.releaseReviewUxController()" },
+        .{ .path = booted_evidence_path, .source = booted_evidence_source, .snippet = "manager.reviewUxControllerPtr() catch" },
+    };
+    for (review_ux_controller_storage_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Review UX controller must retain on-demand freestanding storage in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    if (std.mem.indexOf(u8, session_manager_contexts_source, "review_ux_controller: native_ux.Controller =") != null) {
+        try common.addError(errors, allocator, "Review UX controller must not return to inline freestanding session storage", .{});
     }
     const protected_endpoint_send_snippets = [_]struct {
         path: []const u8,

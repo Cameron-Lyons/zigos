@@ -89,7 +89,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         &[_][]const u8{},
     );
     review_service.compositor = manager.compositorSessionPtr();
-    review_service.ux = manager.reviewUxControllerPtr();
+    review_service.ux = manager.reviewUxControllerPtr() catch |err| native_util.bootProofFailure("booted evidence", err);
     review_service.bindModeledInput(&modeled_review_input);
     var compositor_checkpoint_store = compositor_session.CheckpointStore{};
     var compositor_service = compositor_session.Service.initWithCheckpoint(

@@ -965,6 +965,8 @@ pub const indexed_hot_path_tables = .{
         .uses_compact_flow_lengths = @FieldType(native_ux.FlowRecord, "detail_len") == u8 and
             @FieldType(native_ux.FlowRecord, "bundle_id_len") == u8,
         .supports_ordered_flow_lookup = @hasDecl(native_ux.Controller, "flowAtOrder"),
+        .initializes_allocated_controller_state = @hasDecl(native_ux.Controller, "initializeAllocated"),
+        .keeps_controller_within_ceiling = @sizeOf(native_ux.Controller) <= native_ux.CONTROLLER_SIZE_CEILING_BYTES,
     },
     .sync_transport_harness = .{
         .stores_compact_relay_metadata = sync_transport_harness.COMPACT_RELAY_METADATA and
@@ -1272,5 +1274,9 @@ pub const indexed_hot_path_tables = .{
         .heap_backs_userspace_scheduler_on_freestanding = session_manager_boot_flow.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING,
         .heap_backs_task_runtime_on_freestanding = session_manager_boot_flow.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING,
         .heap_backs_package_service_on_freestanding = session_manager_boot_flow.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING,
+        .heap_backs_review_ux_controller_on_freestanding = session_manager_boot_flow.HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING and
+            session_manager_boot_flow.recovery_context_layout.heap_backs_review_ux_controller_on_freestanding and
+            session_manager_boot_flow.recovery_context_layout.freestanding_review_ux_controller_handle_size_bytes <=
+                session_manager_boot_flow.REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES,
     },
 };

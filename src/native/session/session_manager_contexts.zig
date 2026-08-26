@@ -22,17 +22,21 @@ pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = true;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = true;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = true;
+pub const HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING = true;
 pub const ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
+pub const REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 const heap_backed_capability_table = builtin.target.os.tag == .freestanding and HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
 const heap_backed_endpoint_table = builtin.target.os.tag == .freestanding and HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING;
 const heap_backed_userspace_catalog = builtin.target.os.tag == .freestanding and HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 const heap_backed_userspace_scheduler = builtin.target.os.tag == .freestanding and HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 const heap_backed_task_runtime = builtin.target.os.tag == .freestanding and HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
+const heap_backed_review_ux_controller = builtin.target.os.tag == .freestanding and HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING;
 const CapabilityTableBacking = if (heap_backed_capability_table) ?*capability.CapabilityTable else capability.CapabilityTable;
 const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint_mod.Table else endpoint_mod.Table;
 const UserspaceCatalogBacking = if (heap_backed_userspace_catalog) ?*userspace_loader.Catalog else userspace_loader.Catalog;
 const UserspaceSchedulerBacking = if (heap_backed_userspace_scheduler) ?*userspace_scheduler.Scheduler else userspace_scheduler.Scheduler;
 const TaskRuntimeBacking = if (heap_backed_task_runtime) ?*task_runtime.Runtime else task_runtime.Runtime;
+const ReviewUxControllerBacking = if (heap_backed_review_ux_controller) ?*native_ux.Controller else native_ux.Controller;
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
 else
@@ -323,10 +327,51 @@ pub const RuntimeContext = struct {
 
 pub const RecoveryContext = struct {
     review_compositor_session: compositor_session.Session = compositor_session.Session.init(),
-    review_ux_controller: native_ux.Controller = native_ux.Controller.init(),
+    review_ux_controller: ReviewUxControllerBacking = if (heap_backed_review_ux_controller) null else native_ux.Controller.init(),
     diagnostic_ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
+
+    comptime {
+        if (heap_backed_review_ux_controller and @sizeOf(ReviewUxControllerBacking) > REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES) {
+            @compileError("heap-backed review UX controller exceeds its handle size ceiling");
+        }
+    }
 
     pub fn init() RecoveryContext {
         return .{};
     }
+
+    pub fn reviewUxController(self: *RecoveryContext) ?*native_ux.Controller {
+        if (comptime heap_backed_review_ux_controller) return self.review_ux_controller;
+        return &self.review_ux_controller;
+    }
+
+    pub fn ensureReviewUxController(self: *RecoveryContext) error{NoSpaceLeft}!*native_ux.Controller {
+        if (self.reviewUxController()) |controller| return controller;
+        if (comptime heap_backed_review_ux_controller) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(native_ux.Controller)) orelse return error.NoSpaceLeft;
+            const controller: *native_ux.Controller = @ptrCast(@alignCast(allocation));
+            controller.initializeAllocated();
+            self.review_ux_controller = controller;
+            return controller;
+        }
+        return &self.review_ux_controller;
+    }
+
+    pub fn releaseReviewUxController(self: *RecoveryContext) void {
+        if (comptime heap_backed_review_ux_controller) {
+            if (self.review_ux_controller) |controller| {
+                @memset(std.mem.asBytes(controller), 0);
+                kernel_memory.kfree(@ptrCast(controller));
+                self.review_ux_controller = null;
+            }
+        } else {
+            self.review_ux_controller = native_ux.Controller.init();
+        }
+    }
+};
+
+pub const recovery_context_layout = .{
+    .heap_backs_review_ux_controller_on_freestanding = HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING,
+    .review_ux_controller_size_bytes = native_ux.CONTROLLER_SIZE_CEILING_BYTES,
+    .freestanding_review_ux_controller_handle_size_bytes = if (HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING) @sizeOf(?*native_ux.Controller) else native_ux.CONTROLLER_SIZE_CEILING_BYTES,
 };

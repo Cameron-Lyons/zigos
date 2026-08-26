@@ -18,6 +18,7 @@ pub const MAX_FLOWS: usize = 16;
 pub const MAX_DETAIL_BYTES: usize = 128;
 pub const MAX_BUNDLE_ID_BYTES: usize = 64;
 pub const APPEND_ONLY_FLOW_LOG = true;
+pub const CONTROLLER_SIZE_CEILING_BYTES: usize = MAX_FLOWS * 256 + @sizeOf(usize);
 const REVIEW_FLOW_TEST_BUFFER_BYTES: usize = 384;
 
 pub const FlowKind = enum(u8) {
@@ -89,8 +90,15 @@ pub const Controller = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *Controller) void {
+        @memset(std.mem.asBytes(self), 0);
+        for (&self.flows) |*flow| {
+            flow.subject.kind = .service;
+        }
+    }
+
     comptime {
-        if (@sizeOf(@This()) > 5 * 1024) {
+        if (@sizeOf(@This()) > CONTROLLER_SIZE_CEILING_BYTES) {
             @compileError("native UX controller exceeds its compact append-only layout");
         }
     }
@@ -369,6 +377,20 @@ fn zeroFlow() FlowRecord {
         .id = 0,
         .kind = .start_task,
     };
+}
+
+test "allocated native ux controller initializes empty reusable flow state" {
+    const controller = try std.testing.allocator.create(Controller);
+    defer std.testing.allocator.destroy(controller);
+    controller.initializeAllocated();
+
+    const subject = principal.PrincipalId{ .kind = .user, .serial = 7 };
+    try controller.recoverSystem(11, subject, "allocated recovery");
+    const flow = controller.flowAtOrder(0).?;
+    try std.testing.expectEqual(@as(u64, 1), flow.id);
+    try std.testing.expectEqual(FlowKind.recover_system, flow.kind);
+    try std.testing.expect(flow.subject.eql(subject));
+    try std.testing.expectEqualStrings("allocated recovery", flow.detailSlice());
 }
 
 fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype) !void {
