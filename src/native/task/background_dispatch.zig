@@ -14,9 +14,10 @@ pub const MAX_RECORDS: usize = 16;
 pub const MAX_TASK_ID_BYTES: usize = 48;
 pub const BOUNDED_RECORD_SCAN = true;
 pub const COMPACT_DISPATCH_METADATA = true;
+pub const DERIVES_LATEST_RECORD_ID_FROM_ALLOCATION_CURSOR = true;
 pub const EXPIRATION_TASK_ID_LOOKUPS_PER_RECORD: u8 = 1;
 pub const DISPATCH_RECORD_SIZE_CEILING_BYTES: usize = 120;
-pub const CONTROLLER_SIZE_CEILING_BYTES: usize = 2_056;
+pub const CONTROLLER_SIZE_CEILING_BYTES: usize = 2_048;
 
 comptime {
     if (MAX_RECORDS > std.math.maxInt(u8) or MAX_TASK_ID_BYTES > std.math.maxInt(u8)) {
@@ -127,7 +128,6 @@ pub const Controller = struct {
     policy_subjects: policy_object.SubjectSet = .{},
     next_record_id: u64 = 1,
     active_count: u8 = 0,
-    latest_record_id: u64 = 0,
     records: [MAX_RECORDS]DispatchRecord = [_]DispatchRecord{zeroRecord()} ** MAX_RECORDS,
     record_count: u8 = 0,
     next_reusable_slot: u8 = 0,
@@ -289,8 +289,12 @@ pub const Controller = struct {
     }
 
     pub fn latestRecord(self: *const Controller) ?DispatchRecord {
-        if (self.latest_record_id == 0) return null;
-        const record = self.findRecordConst(self.latest_record_id) orelse {
+        if (self.record_count == 0) return null;
+        if (self.next_record_id == 0) {
+            native_util.impossibleByInvariant("background dispatch allocation cursor is never zero");
+        }
+        const latest_record_id = recordIdBefore(self.next_record_id);
+        const record = self.findRecordConst(latest_record_id) orelse {
             native_util.impossibleByInvariant("background dispatch latest record id points at a live record");
         };
         return record.*;
@@ -392,7 +396,6 @@ pub const Controller = struct {
         const slot_index = self.reserveRecordSlot(record_id) orelse return error.DispatchTableFull;
         self.records[slot_index] = record;
         if (record.state == .running) self.activateRecord(&self.records[slot_index]);
-        self.latest_record_id = record_id;
         self.advanceNextRecordIdFrom(record_id);
         return record_id;
     }
@@ -487,6 +490,10 @@ fn nextRecordIdAfter(record_id: u64) u64 {
     return normalizeRecordId(next);
 }
 
+fn recordIdBefore(next_record_id: u64) u64 {
+    return if (next_record_id == 1) std.math.maxInt(u64) else next_record_id - 1;
+}
+
 fn budgetWithinPolicy(task: manifest.BackgroundTaskDecl, policy: DispatchPolicy) bool {
     return task.expected_duration_seconds <= policy.max_expected_duration_seconds and
         task.budget.cpu_time_ticks <= policy.max_cpu_time_ticks and
@@ -526,6 +533,10 @@ fn zeroRecord() DispatchRecord {
 }
 
 test "allocated background dispatch controller initializes reusable log state" {
+    try std.testing.expect(DERIVES_LATEST_RECORD_ID_FROM_ALLOCATION_CURSOR);
+    try std.testing.expect(!@hasField(Controller, "latest_record_id"));
+    try std.testing.expectEqual(@as(usize, CONTROLLER_SIZE_CEILING_BYTES), @sizeOf(Controller));
+
     const controller = try std.testing.allocator.create(Controller);
     defer std.testing.allocator.destroy(controller);
     controller.initializeAllocated();
@@ -964,17 +975,20 @@ test "background dispatch record ids wrap without zero and skip active records" 
     const max = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 60);
     try std.testing.expectEqual(std.math.maxInt(u64), max.record_id.?);
     try std.testing.expectEqual(@as(u64, 1), controller.next_record_id);
+    try std.testing.expectEqual(max.record_id.?, controller.latestRecord().?.id);
     try std.testing.expect(controller.findActiveRecord(0) == null);
 
     const wrapped = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 61);
     try std.testing.expectEqual(@as(u64, 1), wrapped.record_id.?);
     try std.testing.expectEqual(@as(u64, 2), controller.next_record_id);
+    try std.testing.expectEqual(wrapped.record_id.?, controller.latestRecord().?.id);
     try std.testing.expect(controller.findActiveRecord(0) == null);
 
     controller.next_record_id = 1;
     const skipped = try controller.dispatch(&runtime, task.id, bundle, TEST_SYNC_BACKGROUND_ID, .sync_completion, 62);
     try std.testing.expectEqual(@as(u64, 2), skipped.record_id.?);
     try std.testing.expectEqual(@as(u64, 3), controller.next_record_id);
+    try std.testing.expectEqual(skipped.record_id.?, controller.latestRecord().?.id);
     try std.testing.expect(controller.findActiveRecord(0) == null);
 
     var full_controller = Controller.init();
@@ -999,6 +1013,7 @@ test "background dispatch record ids wrap without zero and skip active records" 
         90,
     ));
     try std.testing.expectEqual(next_before_full, full_controller.next_record_id);
+    try std.testing.expectEqual(@as(u64, MAX_RECORDS), full_controller.latestRecord().?.id);
     try std.testing.expectEqual(MAX_RECORDS, full_controller.activeRecordCount());
 }
 
@@ -1024,7 +1039,7 @@ test "background dispatch expires overdue work and releases reservations" {
     try std.testing.expectEqual(TEST_SYNC_BACKGROUND_MEMORY_BYTES, task.background_reserved_memory_bytes);
     try std.testing.expectEqual(@as(usize, 1), controller.activeRecordCount());
     try std.testing.expectEqual(@as(usize, 0), controller.reusableRecordCount());
-    try std.testing.expectEqual(decision.record_id.?, controller.latest_record_id);
+    try std.testing.expectEqual(decision.record_id.?, controller.latestRecord().?.id);
 
     try std.testing.expectEqual(@as(usize, 0), try controller.expireOverdue(&runtime, 129));
     try std.testing.expectEqual(@as(u16, 1), task.background_active_count);
