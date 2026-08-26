@@ -18,14 +18,18 @@ const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const root = @import("root");
 
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = true;
+pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = true;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = true;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = true;
+pub const ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 const heap_backed_capability_table = builtin.target.os.tag == .freestanding and HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
+const heap_backed_endpoint_table = builtin.target.os.tag == .freestanding and HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING;
 const heap_backed_userspace_catalog = builtin.target.os.tag == .freestanding and HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 const heap_backed_userspace_scheduler = builtin.target.os.tag == .freestanding and HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 const heap_backed_task_runtime = builtin.target.os.tag == .freestanding and HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 const CapabilityTableBacking = if (heap_backed_capability_table) ?*capability.CapabilityTable else capability.CapabilityTable;
+const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint_mod.Table else endpoint_mod.Table;
 const UserspaceCatalogBacking = if (heap_backed_userspace_catalog) ?*userspace_loader.Catalog else userspace_loader.Catalog;
 const UserspaceSchedulerBacking = if (heap_backed_userspace_scheduler) ?*userspace_scheduler.Scheduler else userspace_scheduler.Scheduler;
 const TaskRuntimeBacking = if (heap_backed_task_runtime) ?*task_runtime.Runtime else task_runtime.Runtime;
@@ -36,15 +40,18 @@ else
 
 pub const KernelContext = struct {
     capability_table: CapabilityTableBacking = if (heap_backed_capability_table) null else capability.CapabilityTable.init(),
-    endpoint_table: endpoint_mod.Table = endpoint_mod.Table.init(),
+    endpoint_table: EndpointTableBacking = if (heap_backed_endpoint_table) null else endpoint_mod.Table.init(),
     shared_memory_table: shared_memory_mod.Table = shared_memory_mod.Table.init(),
     kernel_instance: native_kernel.Kernel = undefined,
     kernel_port_instance: component_port.KernelPort = undefined,
     kernel_port_ready: bool = false,
 
     comptime {
-        if (heap_backed_capability_table and @sizeOf(@This()) > 12 * 1024) {
+        if ((heap_backed_capability_table or heap_backed_endpoint_table) and @sizeOf(@This()) > 12 * 1024) {
             @compileError("heap-backed kernel contexts exceed their compact resident layout");
+        }
+        if (heap_backed_endpoint_table and @sizeOf(EndpointTableBacking) > ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES) {
+            @compileError("heap-backed endpoint table exceeds its handle size ceiling");
         }
     }
 
@@ -85,6 +92,37 @@ pub const KernelContext = struct {
         }
     }
 
+    pub fn endpointTable(self: *KernelContext) ?*endpoint_mod.Table {
+        if (comptime heap_backed_endpoint_table) return self.endpoint_table;
+        return &self.endpoint_table;
+    }
+
+    pub fn ensureEndpointTable(self: *KernelContext) error{NoSpaceLeft}!*endpoint_mod.Table {
+        if (self.endpointTable()) |table| return table;
+        if (comptime heap_backed_endpoint_table) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(endpoint_mod.Table)) orelse return error.NoSpaceLeft;
+            const table: *endpoint_mod.Table = @ptrCast(@alignCast(allocation));
+            table.initializeAllocated();
+            self.endpoint_table = table;
+            return table;
+        }
+        return &self.endpoint_table;
+    }
+
+    pub fn releaseEndpointTable(self: *KernelContext) void {
+        if (comptime heap_backed_endpoint_table) {
+            if (self.endpoint_table) |table| {
+                table.deinit();
+                @memset(std.mem.asBytes(table), 0);
+                kernel_memory.kfree(@ptrCast(table));
+                self.endpoint_table = null;
+            }
+        } else {
+            self.endpoint_table.deinit();
+            self.endpoint_table = endpoint_mod.Table.init();
+        }
+    }
+
     pub fn port(self: *KernelContext) ?*component_port.KernelPort {
         if (!self.kernel_port_ready) return null;
         return &self.kernel_port_instance;
@@ -97,11 +135,12 @@ pub const KernelContext = struct {
         driver_runtime: *driver_runtime_mod.Runtime,
     ) *component_port.KernelPort {
         const capability_table = self.capabilityTable() orelse unreachable;
+        const endpoint_table = self.endpointTable() orelse unreachable;
         self.kernel_instance = native_kernel.Kernel.init(
             policy_authority,
             runtime_service.runtimePtr(),
             capability_table,
-            &self.endpoint_table,
+            endpoint_table,
             &self.shared_memory_table,
         );
         self.kernel_port_instance = component_port.KernelPort.init(&self.kernel_instance);
@@ -109,6 +148,12 @@ pub const KernelContext = struct {
         self.kernel_port_ready = true;
         return &self.kernel_port_instance;
     }
+};
+
+pub const kernel_context_layout = .{
+    .freestanding_endpoint_table_size_ceiling_bytes = endpoint_mod.FREESTANDING_TABLE_SIZE_CEILING_BYTES,
+    .freestanding_endpoint_table_handle_size_bytes = @sizeOf(?*endpoint_mod.Table),
+    .heap_backs_endpoint_table_on_freestanding = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING,
 };
 
 pub const RuntimeContext = struct {
