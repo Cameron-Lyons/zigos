@@ -3526,6 +3526,15 @@ fn validateUserspaceDriverDataPathTrack(
             try common.addError(errors, allocator, "Userspace input ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
+    const retired_authority_failure_counters = [_][]const u8{
+        "input_authority_failures",
+        "surface_authority_failures",
+    };
+    for (retired_authority_failure_counters) |counter| {
+        if (std.mem.indexOf(u8, session_manager_boot_flow_source, counter) != null) {
+            try common.addError(errors, allocator, "Session managers must not retain unobserved authority failure counter: {s}", .{counter});
+        }
+    }
     const compact_endpoint_receive_snippets = [_]struct {
         path: []const u8,
         source: []const u8,
