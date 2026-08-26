@@ -1451,9 +1451,12 @@ pub const indexed_hot_path_tables = .{
     .service_catalog = .{
         .uses_bootstrap_owner_keys = @hasField(service_catalog.ServiceCatalogEntry, "owner_key"),
         .uses_bootstrap_service_record_keys = @hasField(service_catalog.ServiceCatalogEntry, "service_record_key"),
-        .uses_catalog_class_index = service_catalog.service_catalog_indexing.uses_catalog_class_index,
-        .uses_service_contract_class_index = service_catalog.service_catalog_indexing.uses_service_contract_class_index,
-        .uses_published_contract_class_index = service_catalog.service_catalog_indexing.uses_published_contract_class_index,
+        .uses_catalog_class_index = service_catalog.DIRECT_SERVICE_CLASS_SLOTS and
+            service_catalog.service_catalog_indexing.uses_catalog_class_index,
+        .uses_service_contract_class_index = service_catalog.service_catalog_indexing.uses_service_contract_class_index and
+            service_catalog.service_catalog_indexing.hash_probes_per_query == 0,
+        .uses_published_contract_class_index = service_catalog.service_catalog_indexing.uses_published_contract_class_index and
+            service_catalog.service_catalog_indexing.total_slot_bytes == service_catalog.SERVICE_CLASS_COUNT * 3,
     },
     .supervisor = .{
         .uses_service_arena = supervisor.supervisor_indexing.uses_service_arena,

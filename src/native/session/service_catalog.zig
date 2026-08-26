@@ -1,5 +1,4 @@
 const std = @import("std");
-const id_index = @import("../core/id_index.zig");
 const capability = @import("../kernel_api/capability.zig");
 const component_abi_schema = @import("../services/component_abi_schema.zig");
 const driver_service = @import("../drivers/driver_service.zig");
@@ -44,6 +43,20 @@ pub const ServiceClass = enum(u8) {
     sensitive_capture,
     secret_vault,
 };
+
+pub const DIRECT_SERVICE_CLASS_SLOTS = true;
+pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
+pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(ServiceClass).len;
+pub const ServiceClassSlotIndex = u8;
+const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
+
+comptime {
+    for (std.meta.fields(ServiceClass), 0..) |field, class_index| {
+        if (field.value != class_index) {
+            @compileError("service classes must remain dense for direct catalog lookup");
+        }
+    }
+}
 
 pub const PERMISSION_REVIEW_UI_SURFACE_ID: u64 = 0x100;
 
@@ -904,17 +917,17 @@ pub const ordered_published_native_service_contracts = blk: {
     break :blk derived;
 };
 
-const CATALOG_CLASS_INDEX_CAPACITY: usize = catalog.len * 2;
-const catalog_class_index = buildCatalogClassIndex();
-const SERVICE_CONTRACT_CLASS_INDEX_CAPACITY: usize = ordered_service_contracts.len * 2;
-const service_contract_class_index = buildServiceContractClassIndex();
-const PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY: usize = ordered_published_native_service_contracts.len * 2;
-const published_native_class_index = buildPublishedNativeClassIndex();
+const ServiceClassSlots = [SERVICE_CLASS_COUNT]ServiceClassSlotIndex;
+const catalog_class_slots = buildCatalogClassSlots();
+const service_contract_class_slots = buildServiceContractClassSlots();
+const published_native_class_slots = buildPublishedNativeClassSlots();
 
 pub const service_catalog_indexing = .{
-    .uses_catalog_class_index = @TypeOf(catalog_class_index) == id_index.Table(CATALOG_CLASS_INDEX_CAPACITY),
-    .uses_service_contract_class_index = @TypeOf(service_contract_class_index) == id_index.Table(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY),
-    .uses_published_contract_class_index = @TypeOf(published_native_class_index) == id_index.Table(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY),
+    .uses_catalog_class_index = @TypeOf(catalog_class_slots) == ServiceClassSlots,
+    .uses_service_contract_class_index = @TypeOf(service_contract_class_slots) == ServiceClassSlots,
+    .uses_published_contract_class_index = @TypeOf(published_native_class_slots) == ServiceClassSlots,
+    .hash_probes_per_query = SERVICE_CLASS_HASH_PROBES_PER_QUERY,
+    .total_slot_bytes = @sizeOf(ServiceClassSlots) * 3,
 };
 
 pub fn entryForClass(class: ServiceClass) ?ServiceCatalogEntry {
@@ -938,7 +951,7 @@ pub fn publishedNativeServiceContractForClass(class: ServiceClass) ?PublishedNat
 }
 
 pub fn orderedServiceIndex(class: ServiceClass) ?usize {
-    const entry_index = id_index.lookup(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY, &service_contract_class_index, serviceClassIndexKey(class)) orelse {
+    const entry_index = publicServiceClassSlot(service_contract_class_slots[serviceClassIndex(class)]) orelse {
         debugAssertServiceContractClassIndexMissAbsent(class);
         return null;
     };
@@ -952,7 +965,7 @@ pub fn orderedServiceIndex(class: ServiceClass) ?usize {
 }
 
 pub fn orderedPublishedNativeServiceIndex(class: ServiceClass) ?usize {
-    const entry_index = id_index.lookup(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY, &published_native_class_index, serviceClassIndexKey(class)) orelse {
+    const entry_index = publicServiceClassSlot(published_native_class_slots[serviceClassIndex(class)]) orelse {
         debugAssertPublishedNativeClassIndexMissAbsent(class);
         return null;
     };
@@ -1035,12 +1048,8 @@ pub fn allowsDriverClass(class: ServiceClass, device_class: driver_service.Devic
     return expected == device_class;
 }
 
-fn serviceClassIndexKey(class: ServiceClass) u64 {
-    return @as(u64, @intFromEnum(class)) + 1;
-}
-
 fn catalogClassIndex(class: ServiceClass) ?usize {
-    const entry_index = id_index.lookup(CATALOG_CLASS_INDEX_CAPACITY, &catalog_class_index, serviceClassIndexKey(class)) orelse {
+    const entry_index = publicServiceClassSlot(catalog_class_slots[serviceClassIndex(class)]) orelse {
         debugAssertCatalogClassIndexMissAbsent(class);
         return null;
     };
@@ -1053,31 +1062,52 @@ fn catalogClassIndex(class: ServiceClass) ?usize {
     return entry_index;
 }
 
-fn buildCatalogClassIndex() id_index.Table(CATALOG_CLASS_INDEX_CAPACITY) {
-    @setEvalBranchQuota(10_000);
-    var index = id_index.emptyTable(CATALOG_CLASS_INDEX_CAPACITY);
+fn buildCatalogClassSlots() ServiceClassSlots {
+    var slots = emptyServiceClassSlots();
     for (catalog, 0..) |entry, entry_index| {
-        id_index.insert(CATALOG_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(entry.class), entry_index, "service catalog class index covers catalog entries");
+        setServiceClassSlot(&slots, entry.class, entry_index, "service catalog contains duplicate classes");
     }
-    return index;
+    return slots;
 }
 
-fn buildServiceContractClassIndex() id_index.Table(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY) {
-    @setEvalBranchQuota(10_000);
-    var index = id_index.emptyTable(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY);
+fn buildServiceContractClassSlots() ServiceClassSlots {
+    var slots = emptyServiceClassSlots();
     for (ordered_service_contracts, 0..) |entry, entry_index| {
-        id_index.insert(SERVICE_CONTRACT_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(entry.class), entry_index, "service contract class index covers ordered contracts");
+        setServiceClassSlot(&slots, entry.class, entry_index, "service contracts contain duplicate classes");
     }
-    return index;
+    return slots;
 }
 
-fn buildPublishedNativeClassIndex() id_index.Table(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY) {
-    @setEvalBranchQuota(10_000);
-    var index = id_index.emptyTable(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY);
+fn buildPublishedNativeClassSlots() ServiceClassSlots {
+    var slots = emptyServiceClassSlots();
     for (ordered_published_native_service_contracts, 0..) |entry, entry_index| {
-        id_index.insert(PUBLISHED_NATIVE_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(entry.class), entry_index, "published native service class index covers ordered contracts");
+        setServiceClassSlot(&slots, entry.class, entry_index, "published native service contracts contain duplicate classes");
     }
-    return index;
+    return slots;
+}
+
+fn emptyServiceClassSlots() ServiceClassSlots {
+    return [_]ServiceClassSlotIndex{NO_SERVICE_CLASS_SLOT} ** SERVICE_CLASS_COUNT;
+}
+
+fn setServiceClassSlot(
+    slots: *ServiceClassSlots,
+    class: ServiceClass,
+    entry_index: usize,
+    comptime duplicate_message: []const u8,
+) void {
+    if (entry_index >= NO_SERVICE_CLASS_SLOT) @compileError("service class slot index exceeds compact range");
+    const class_index = serviceClassIndex(class);
+    if (slots[class_index] != NO_SERVICE_CLASS_SLOT) @compileError(duplicate_message);
+    slots[class_index] = @intCast(entry_index);
+}
+
+fn serviceClassIndex(class: ServiceClass) usize {
+    return @intFromEnum(class);
+}
+
+fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
+    return if (slot == NO_SERVICE_CLASS_SLOT) null else slot;
 }
 
 fn debugAssertCatalogClassIndexMissAbsent(class: ServiceClass) void {
@@ -1212,6 +1242,9 @@ fn publishedNativeServiceCount() usize {
 }
 
 test "service catalog derives descriptors and bootstrap contracts from one source" {
+    try std.testing.expect(DIRECT_SERVICE_CLASS_SLOTS);
+    try std.testing.expectEqual(@as(u8, 0), SERVICE_CLASS_HASH_PROBES_PER_QUERY);
+    try std.testing.expectEqual(@as(usize, SERVICE_CLASS_COUNT * 3), service_catalog_indexing.total_slot_bytes);
     try std.testing.expectEqual(@as(usize, catalog.len), default_services.len);
     try std.testing.expectEqual(@as(usize, 16), ordered_service_contracts.len);
     try std.testing.expectEqual(@as(usize, 15), ordered_published_native_service_contracts.len);
