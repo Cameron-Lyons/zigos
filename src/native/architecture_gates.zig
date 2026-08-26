@@ -726,6 +726,9 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(driver_runtime.Runtime) <= driver_runtime.RUNTIME_SIZE_CEILING_BYTES,
     },
     .network_driver_task = .{
+        .heap_backs_receive_queue_on_freestanding = network_driver_task.HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING and
+            network_driver_task.bounded_metadata_layout.heap_backs_receive_queue_on_freestanding and
+            network_driver_task.bounded_metadata_layout.freestanding_receive_queue_handle_size_bytes <= network_driver_task.RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES,
         .stores_compact_bounded_metadata = network_driver_task.COMPACT_BOUNDED_METADATA and
             @FieldType(network_driver_task.ReceiveResult, "length") == u16 and
             @FieldType(network_driver_task.NativeServiceIdentityConnection, "service_identity_len") == u8 and

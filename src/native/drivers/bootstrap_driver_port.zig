@@ -296,7 +296,10 @@ pub fn activateNetworkDeviceForTask(device_id: u64, service_id: u64, task_id: u6
             publication.network_device = activator(device_id) orelse return false;
         }
         if (!kernel_network_claim.recordDriverClaim(device_id, service_id)) return false;
-        if (!network_driver_task.activateDeviceForTask(publication.network_device.?, service_id, task_id)) return false;
+        if (!network_driver_task.activateDeviceForTask(publication.network_device.?, service_id, task_id)) {
+            _ = kernel_network_claim.clearDriverClaim(service_id);
+            return false;
+        }
         publication.active_service_id = service_id;
         return true;
     }
