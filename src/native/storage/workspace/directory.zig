@@ -171,16 +171,25 @@ pub const EntryMutation = struct {
 const MutationEntries = [MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation;
 const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
 const RecoverableDeleteEntries = [MAX_RECOVERABLE_DELETES]Entry;
+const WorkspaceEntries = [MAX_WORKSPACE_ENTRIES]Entry;
 pub const HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING = true;
 const heap_backed_recoverable_delete_logs = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
-pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables) 15_024 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables) 126_168 else 357_400;
+pub const HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING = true;
+const heap_backed_workspace_entries = HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 3_512 else 43_928;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 34_072 else 357_400;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
+const WorkspaceEntryBacking = if (heap_backed_workspace_entries) ?*WorkspaceEntries else WorkspaceEntries;
 pub const recoverable_delete_layout = .{
     .heap_backs_log_on_freestanding = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING,
     .freestanding_handle_size_bytes = @sizeOf(?*RecoverableDeleteEntries),
     .backing_size_bytes = @sizeOf(RecoverableDeleteEntries),
+};
+pub const workspace_entry_layout = .{
+    .heap_backs_entries_on_freestanding = HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*WorkspaceEntries),
+    .backing_size_bytes = @sizeOf(WorkspaceEntries),
 };
 
 pub const CreateRequest = struct {
@@ -322,12 +331,52 @@ pub const ExportPackage = struct {
 };
 
 pub const WorkspacePathIndex = struct {
-    entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+    entry_backing: WorkspaceEntryBacking = if (heap_backed_workspace_entries) null else [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
     path_slots: [ENTRY_INDEX_CAPACITY]EntryIndexSlot = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
     object_slots: [ENTRY_OBJECT_INDEX_CAPACITY]EntryObjectIndexSlot = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY),
     leaf_hashes: [MAX_WORKSPACE_ENTRIES]SnapshotRootAddress =
         [_]SnapshotRootAddress{workspace_merkle.zeroRootAddress()} ** MAX_WORKSPACE_ENTRIES,
     root_address: SnapshotRootAddress = workspace_merkle.zeroRootAddress(),
+
+    pub fn ensureEntryBacking(self: *WorkspacePathIndex) error{NoSpaceLeft}!void {
+        if (comptime heap_backed_workspace_entries) {
+            if (self.entry_backing != null) return;
+            const allocation = kernel_memory.kmalloc(@sizeOf(WorkspaceEntries)) orelse return error.NoSpaceLeft;
+            const backing: *WorkspaceEntries = @ptrCast(@alignCast(allocation));
+            backing.* = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+            self.entry_backing = backing;
+        }
+    }
+
+    pub fn entries(self: *WorkspacePathIndex) *WorkspaceEntries {
+        if (comptime heap_backed_workspace_entries) {
+            return self.entry_backing orelse
+                native_util.impossibleByInvariant("non-empty workspace entries retain backing");
+        }
+        return &self.entry_backing;
+    }
+
+    pub fn entriesConst(self: *const WorkspacePathIndex, count: usize) []const Entry {
+        if (count == 0) return &.{};
+        if (comptime heap_backed_workspace_entries) {
+            const backing = self.entry_backing orelse
+                native_util.impossibleByInvariant("non-empty workspace entries retain backing");
+            return backing[0..count];
+        }
+        return self.entry_backing[0..count];
+    }
+
+    pub fn releaseEntryBacking(self: *WorkspacePathIndex) void {
+        if (comptime heap_backed_workspace_entries) {
+            if (self.entry_backing) |backing| {
+                @memset(std.mem.asBytes(backing), 0);
+                kernel_memory.kfree(@ptrCast(backing));
+                self.entry_backing = null;
+            }
+        } else {
+            @memset(std.mem.asBytes(&self.entry_backing), 0);
+        }
+    }
 };
 
 pub const WorkspaceMutationLog = struct {
@@ -563,7 +612,7 @@ pub const WorkspaceRecord = struct {
 
     pub fn resolveBorrowedWithPathHash(self: *const WorkspaceRecord, path: []const u8, path_hash: u64) Error!*const Entry {
         const index = findWorkspaceEntryIndexWithPathHash(self, path, path_hash) orelse return error.EntryNotFound;
-        return &self.path_index.entries[index];
+        return &self.path_index.entriesConst(self.counts.entry_count)[index];
     }
 };
 
@@ -602,10 +651,13 @@ comptime {
     if (heap_backed_workspace_share_tables and @sizeOf(WorkspaceShareTable) > @sizeOf(?*anyopaque)) {
         @compileError("heap-backed workspace sharing state exceeds its compact handle");
     }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
+    if (heap_backed_workspace_entries and @sizeOf(@FieldType(WorkspacePathIndex, "entry_backing")) > @sizeOf(?*anyopaque)) {
+        @compileError("heap-backed workspace entries exceed their compact handle");
+    }
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and @sizeOf(WorkspaceSlot) > 15_032) {
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceSlot) > 3_520) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -714,6 +766,7 @@ pub const Directory = struct {
                 slot.workspace.mutation_log.releaseBacking();
                 slot.workspace.recoverable_deletes.releaseBacking();
                 slot.workspace.share_table.releaseBacking();
+                slot.workspace.path_index.releaseEntryBacking();
                 slot.* = WorkspaceSlot{};
             }
         }
@@ -994,12 +1047,12 @@ pub const Directory = struct {
     pub fn resolveObject(self: *const Directory, workspace_id: ids.WorkspaceId, object_id: ids.ObjectId) Error!Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
         const index = findWorkspaceEntryObjectIndex(workspace, object_id) orelse return error.EntryNotFound;
-        return workspace.path_index.entries[index];
+        return workspace.path_index.entriesConst(workspace.counts.entry_count)[index];
     }
 
     pub fn entries(self: *const Directory, workspace_id: ids.WorkspaceId) Error![]const Entry {
         const workspace = self.lookupConst(workspace_id) orelse return error.WorkspaceNotFound;
-        return workspace.path_index.entries[0..workspace.counts.entry_count];
+        return workspace.path_index.entriesConst(workspace.counts.entry_count);
     }
 
     pub fn snapshot(
@@ -1022,7 +1075,7 @@ pub const Directory = struct {
         snapshot_record.generation = workspace.generation;
         snapshot_record.label = label_copy;
         snapshot_record.label_len = @intCast(label_len);
-        const snapshot_entries = workspace.path_index.entries[0..workspace.counts.entry_count];
+        const snapshot_entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
         snapshot_record.entry_count = @intCast(snapshot_entries.len);
         snapshot_record.root_address = workspace.path_index.root_address;
         signSnapshotRecord(&snapshot_record, snapshot_entries, identity) catch return error.InvalidSignature;
@@ -1044,7 +1097,7 @@ pub const Directory = struct {
         if (!snapshot_record.workspace_id.eql(workspace_id)) return error.SnapshotNotFound;
         var materialized_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
         const snapshot_entries = if (snapshot_record.generation == workspace.generation)
-            workspace.path_index.entries[0..workspace.counts.entry_count]
+            workspace.path_index.entriesConst(workspace.counts.entry_count)
         else blk: {
             const snapshot_entry_count = try materializeEntriesAtGeneration(workspace, snapshot_record.generation, &materialized_entries);
             break :blk materialized_entries[0..snapshot_entry_count];
@@ -1071,10 +1124,11 @@ pub const Directory = struct {
             if (!std.mem.eql(u8, entry.pathSlice(), path)) continue;
             if (workspace.counts.entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
             if (workspace.counts.entry_mutation_count >= MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
+            try workspace.path_index.ensureEntryBacking();
 
             workspace.generation += 1;
             try appendEntryMutation(workspace, workspace.generation, entry);
-            try insertSortedEntry(&workspace.path_index.entries, &workspace.counts.entry_count, entry);
+            try insertSortedEntry(workspace.path_index.entries(), &workspace.counts.entry_count, entry);
             rebuildWorkspaceEntryIndex(workspace);
             self.markWorkspaceDirty(workspace_id);
             return true;
@@ -1096,7 +1150,7 @@ pub const Directory = struct {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         var materialized_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
         const snapshot_entries = if (snapshot_record.generation == workspace.generation)
-            workspace.path_index.entries[0..workspace.counts.entry_count]
+            workspace.path_index.entriesConst(workspace.counts.entry_count)
         else blk: {
             const snapshot_entry_count = try materializeEntriesAtGeneration(workspace, snapshot_record.generation, &materialized_entries);
             break :blk materialized_entries[0..snapshot_entry_count];
@@ -1470,7 +1524,9 @@ fn writeLengthPrefixed(writer: *BinaryWriter, bytes: []const u8) error{NoSpaceLe
 }
 
 fn normalizeAndRebuildWorkspaceIndexes(workspace: *WorkspaceRecord) void {
-    sortEntries(workspace.path_index.entries[0..workspace.counts.entry_count]);
+    if (workspace.counts.entry_count != 0) {
+        sortEntries(workspace.path_index.entries()[0..workspace.counts.entry_count]);
+    }
     rebuildWorkspaceEntryIndex(workspace);
     rebuildShareGrantIndex(workspace);
     workspace.oldest_snapshot_generation = NO_SNAPSHOT_GENERATION;
@@ -1528,18 +1584,20 @@ fn debugAssertShareGrantIndexMissAbsent(workspace: *const WorkspaceRecord, princ
 }
 
 fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
-    debugAssertEntriesSorted(workspace.path_index.entries[0..workspace.counts.entry_count]);
+    const entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
+    debugAssertEntriesSorted(entries);
     workspace_index.rebuildPathSlots(
         ENTRY_INDEX_CAPACITY,
         &workspace.path_index.path_slots,
-        workspace.path_index.entries[0..workspace.counts.entry_count],
+        entries,
     );
     workspace_index.rebuildObjectSlots(
         ENTRY_OBJECT_INDEX_CAPACITY,
         &workspace.path_index.object_slots,
-        workspace.path_index.entries[0..workspace.counts.entry_count],
+        entries,
     );
-    workspace_merkle.rebuildPathMerkle(&workspace.path_index, workspace.counts.entry_count);
+    workspace_merkle.rebuildPathMerkle(&workspace.path_index, entries);
+    if (workspace.counts.entry_count == 0) workspace.path_index.releaseEntryBacking();
 }
 
 fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
@@ -1547,14 +1605,14 @@ fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) 
 }
 
 fn findWorkspaceEntryIndexWithPathHash(workspace: *const WorkspaceRecord, path: []const u8, path_hash: u64) ?usize {
-    const entries = workspace.path_index.entries[0..workspace.counts.entry_count];
+    const entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
     if (workspace_index.findIndexedEntryPathWithHash(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, path, path_hash)) |index| return index;
     debugAssertPathIndexMissAbsent(entries, path);
     return null;
 }
 
 fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: ids.ObjectId) ?usize {
-    const entries = workspace.path_index.entries[0..workspace.counts.entry_count];
+    const entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
     if (workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, object_id)) |index| return index;
     debugAssertObjectIndexMissAbsent(entries, object_id);
     return null;
@@ -1742,18 +1800,20 @@ fn appendEntryMutation(workspace: *WorkspaceRecord, generation: u32, entry: Entr
 }
 
 fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Entry, generation: u32) Error!void {
+    const had_entries = workspace.counts.entry_count != 0;
+    if (source_entries.len != 0) try workspace.path_index.ensureEntryBacking();
+    if (had_entries or source_entries.len != 0) clearEntries(workspace.path_index.entries());
     workspace.counts.entry_count = 0;
     workspace.counts.entry_mutation_count = 0;
     workspace.path_index.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
     workspace.path_index.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
-    clearEntries(&workspace.path_index.entries);
     for (workspace.mutation_log.entries()) |*mutation| {
         mutation.* = EntryMutation{};
     }
 
     for (source_entries) |entry| {
         if (isDeleteTombstone(entry)) continue;
-        try insertSortedEntry(&workspace.path_index.entries, &workspace.counts.entry_count, entry);
+        try insertSortedEntry(workspace.path_index.entries(), &workspace.counts.entry_count, entry);
         try appendEntryMutation(workspace, generation, entry);
     }
     rebuildWorkspaceEntryIndex(workspace);
@@ -1762,7 +1822,7 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
 fn compactMutationLogToCurrentEntries(workspace: *WorkspaceRecord) Error!void {
     var current_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
     const count = workspace.counts.entry_count;
-    for (workspace.path_index.entries[0..count], 0..) |entry, index| {
+    for (workspace.path_index.entriesConst(count), 0..) |entry, index| {
         current_entries[index] = entry;
     }
 
@@ -1802,6 +1862,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
     var deletion_needed = false;
     var current_index: usize = 0;
     var target_index: usize = 0;
+    const current_entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
     while (current_index < workspace.counts.entry_count or target_index < target_count) {
         if (current_index >= workspace.counts.entry_count) {
             mutation_count_needed += 1;
@@ -1815,7 +1876,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
             continue;
         }
 
-        switch (compareEntryPath(workspace.path_index.entries[current_index].pathSlice(), target_entries[target_index].pathSlice())) {
+        switch (compareEntryPath(current_entries[current_index].pathSlice(), target_entries[target_index].pathSlice())) {
             .lt => {
                 mutation_count_needed += 1;
                 deletion_needed = true;
@@ -1826,7 +1887,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
                 target_index += 1;
             },
             .eq => {
-                if (!entryContentEql(workspace.path_index.entries[current_index], target_entries[target_index])) {
+                if (!entryContentEql(current_entries[current_index], target_entries[target_index])) {
                     mutation_count_needed += 1;
                 }
                 current_index += 1;
@@ -1836,44 +1897,46 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
     }
     if (workspace.counts.entry_mutation_count + mutation_count_needed > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
     if (deletion_needed) try workspace.recoverable_deletes.ensureBacking();
+    if (target_count != 0) try workspace.path_index.ensureEntryBacking();
 
     const next_generation = workspace.generation + 1;
     current_index = 0;
     target_index = 0;
+    const entries = if (workspace.counts.entry_count != 0 or target_count != 0) workspace.path_index.entries() else null;
     while (current_index < workspace.counts.entry_count or target_index < target_count) {
         if (current_index >= workspace.counts.entry_count) {
             const target_entry = target_entries[target_index];
-            try insertSortedEntry(&workspace.path_index.entries, &workspace.counts.entry_count, target_entry);
+            try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
             try appendEntryMutation(workspace, next_generation, target_entry);
             current_index += 1;
             target_index += 1;
             continue;
         }
         if (target_index >= target_count) {
-            const deleted_entry = workspace.path_index.entries[current_index];
+            const deleted_entry = entries.?[current_index];
             appendDeleted(workspace, deleted_entry);
             try appendEntryMutation(workspace, next_generation, try deleteTombstone(deleted_entry.pathSlice()));
-            removeEntry(&workspace.path_index.entries, &workspace.counts.entry_count, current_index);
+            removeEntry(entries.?, &workspace.counts.entry_count, current_index);
             continue;
         }
 
-        const current_entry = workspace.path_index.entries[current_index];
+        const current_entry = entries.?[current_index];
         const target_entry = target_entries[target_index];
         switch (compareEntryPath(current_entry.pathSlice(), target_entry.pathSlice())) {
             .lt => {
                 appendDeleted(workspace, current_entry);
                 try appendEntryMutation(workspace, next_generation, try deleteTombstone(current_entry.pathSlice()));
-                removeEntry(&workspace.path_index.entries, &workspace.counts.entry_count, current_index);
+                removeEntry(entries.?, &workspace.counts.entry_count, current_index);
             },
             .gt => {
-                try insertSortedEntry(&workspace.path_index.entries, &workspace.counts.entry_count, target_entry);
+                try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
                 try appendEntryMutation(workspace, next_generation, target_entry);
                 current_index += 1;
                 target_index += 1;
             },
             .eq => {
                 if (!entryContentEql(current_entry, target_entry)) {
-                    workspace.path_index.entries[current_index] = target_entry;
+                    entries.?[current_index] = target_entry;
                     try appendEntryMutation(workspace, next_generation, target_entry);
                 }
                 current_index += 1;
@@ -1886,8 +1949,9 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
 }
 
 fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
-    debugAssertEntriesSorted(workspace.path_index.entries[0..workspace.counts.entry_count]);
+    debugAssertEntriesSorted(workspace.path_index.entriesConst(workspace.counts.entry_count));
     if (workspace.counts.entry_mutation_count + @as(usize, workspace.staging.staged_entry_count) > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
+    if (workspace.staging.staged_effective_entry_count != 0) try workspace.path_index.ensureEntryBacking();
     const next_generation = workspace.generation + 1;
     const staged_entry_start = workspace.counts.entry_mutation_count;
     const staged_entry_count: usize = workspace.staging.staged_entry_count;
@@ -1897,26 +1961,30 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
         try workspace.recoverable_deletes.ensureBacking();
         break;
     }
+    const entries = if (workspace.counts.entry_count != 0 or workspace.staging.staged_effective_entry_count != 0)
+        workspace.path_index.entries()
+    else
+        null;
     var structural_change = false;
     var object_index_dirty = false;
     for (0..staged_entry_count) |staged_index| {
         const staged_entry = mutations[staged_entry_start + staged_index].entry;
         if (isDeleteTombstone(staged_entry)) {
-            const existing_index = findEntryIndex(workspace.path_index.entries[0..workspace.counts.entry_count], staged_entry.pathSlice()) orelse return error.EntryNotFound;
-            appendDeleted(workspace, workspace.path_index.entries[existing_index]);
-            removeEntry(&workspace.path_index.entries, &workspace.counts.entry_count, existing_index);
+            const existing_index = findEntryIndex(entries.?[0..workspace.counts.entry_count], staged_entry.pathSlice()) orelse return error.EntryNotFound;
+            appendDeleted(workspace, entries.?[existing_index]);
+            removeEntry(entries.?, &workspace.counts.entry_count, existing_index);
             structural_change = true;
             try appendEntryMutation(workspace, next_generation, staged_entry);
             continue;
         }
 
-        if (findEntryIndex(workspace.path_index.entries[0..workspace.counts.entry_count], staged_entry.pathSlice())) |existing_index| {
+        if (findEntryIndex(entries.?[0..workspace.counts.entry_count], staged_entry.pathSlice())) |existing_index| {
             object_index_dirty = object_index_dirty or
-                !workspace.path_index.entries[existing_index].object_id.eql(staged_entry.object_id);
-            workspace.path_index.entries[existing_index] = staged_entry;
-            workspace_merkle.updatePathLeaf(&workspace.path_index, existing_index);
+                !entries.?[existing_index].object_id.eql(staged_entry.object_id);
+            entries.?[existing_index] = staged_entry;
+            workspace_merkle.updatePathLeaf(&workspace.path_index, existing_index, staged_entry);
         } else {
-            try insertSortedEntry(&workspace.path_index.entries, &workspace.counts.entry_count, staged_entry);
+            try insertSortedEntry(entries.?, &workspace.counts.entry_count, staged_entry);
             structural_change = true;
         }
         try appendEntryMutation(workspace, next_generation, staged_entry);
@@ -1929,7 +1997,7 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
             workspace_index.rebuildObjectSlots(
                 ENTRY_OBJECT_INDEX_CAPACITY,
                 &workspace.path_index.object_slots,
-                workspace.path_index.entries[0..workspace.counts.entry_count],
+                entries.?[0..workspace.counts.entry_count],
             );
         }
         workspace_merkle.refreshPathRoot(&workspace.path_index, workspace.counts.entry_count);
@@ -1988,6 +2056,12 @@ test "workspace recoverable deletion history uses on-demand freestanding backing
     try std.testing.expectEqual(@as(usize, 2_880), recoverable_delete_layout.backing_size_bytes);
 }
 
+test "workspace current entries use on-demand freestanding backing" {
+    try std.testing.expect(workspace_entry_layout.heap_backs_entries_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), workspace_entry_layout.freestanding_handle_size_bytes);
+    try std.testing.expectEqual(@as(usize, 11_520), workspace_entry_layout.backing_size_bytes);
+}
+
 fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
@@ -2016,7 +2090,7 @@ test "workspace borrowed resolution returns the directory owned entry" {
 
     const borrowed = try directory.resolveBorrowed(workspace.id, "documents/note.md");
     const stored_workspace = directory.findConst(workspace.id).?;
-    try std.testing.expect(borrowed == &stored_workspace.path_index.entries[0]);
+    try std.testing.expect(borrowed == &stored_workspace.path_index.entriesConst(stored_workspace.counts.entry_count)[0]);
     try std.testing.expectEqual(ids.object(7), borrowed.object_id);
     try std.testing.expectEqual(ids.version(11), borrowed.version_id);
     try std.testing.expectEqual(borrowed.*, try directory.resolve(workspace.id, "documents/note.md"));
@@ -2040,7 +2114,7 @@ test "workspace commits preserve path order and index rebuilds normalize loaded 
     try std.testing.expectEqualStrings("m-middle", entries[1].pathSlice());
     try std.testing.expectEqualStrings("z-last", entries[2].pathSlice());
 
-    std.mem.swap(Entry, &workspace.path_index.entries[0], &workspace.path_index.entries[2]);
+    std.mem.swap(Entry, &workspace.path_index.entries()[0], &workspace.path_index.entries()[2]);
     workspace.path_index.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
     workspace.path_index.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
     const zero_root = workspace_merkle.zeroRootAddress();
@@ -2105,7 +2179,7 @@ test "directory reset scrubs live workspace and snapshot records" {
     workspace_slot.workspace.label_len = 6;
     @memcpy(workspace_slot.workspace.label[0..6], "secret");
     workspace_slot.workspace.counts.entry_count = 1;
-    workspace_slot.workspace.path_index.entries[0] = try Entry.init("secret", ids.object(8), ids.version(9), .document);
+    workspace_slot.workspace.path_index.entries()[0] = try Entry.init("secret", ids.object(8), ids.version(9), .document);
 
     const snapshot_slot_index = directory.snapshots.reserveIndex(ids.snapshot(10)).?;
     const snapshot_slot = &directory.snapshots.slots[snapshot_slot_index];
