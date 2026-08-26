@@ -41,10 +41,14 @@ pub const DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS = true;
 pub const DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS = true;
 pub const DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS = true;
 pub const PACKS_VERSION_TYPE_INTO_TRAILING_PADDING = true;
+pub const DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 320;
+pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 100;
+pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 104;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_348_848;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -339,7 +343,6 @@ pub const ChunkRef = struct {
 
 pub const BlobRecord = struct {
     address: BlobAddress,
-    merkle_root: BlobAddress,
     payload_len: u32,
     chunk_count: u16,
     chunk_slot_indexes: [MAX_BLOB_CHUNKS]BlobChunkSlotIndex,
@@ -348,6 +351,12 @@ pub const BlobRecord = struct {
 
     pub fn payloadLen(self: *const BlobRecord) usize {
         return @intCast(self.payload_len);
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > BLOB_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("blob record exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -467,13 +476,18 @@ pub const BlobSlot = struct {
     in_use: bool = false,
     blob: BlobRecord = .{
         .address = crypto_hash.zero_digest,
-        .merkle_root = crypto_hash.zero_digest,
         .payload_len = 0,
         .chunk_count = 0,
         .chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS,
         .ref_count = 0,
         .manifest_verified = false,
     },
+
+    comptime {
+        if (@sizeOf(@This()) > BLOB_SLOT_SIZE_CEILING_BYTES) {
+            @compileError("blob slot exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const ChunkSlot = struct {
@@ -790,7 +804,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const chunk_count = try buildChunkRefs(request.payload, &chunk_refs);
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             const blob_address = blobManifestAddressFromMerkleRoot(request.payload.len, chunk_count, merkle_root);
-            const blob_slot_index = try self.putBlobPrepared(blob_address, merkle_root, request.payload, &chunk_refs, chunk_count);
+            const blob_slot_index = try self.putBlobPrepared(blob_address, request.payload, &chunk_refs, chunk_count);
             const parents = versionParents(previous_version_id);
             const parent_count = countVersionParents(parents);
             const version_address = computeVersionAddress(parents[0..@as(usize, @intCast(parent_count))], request.metadata, blob_address);
@@ -1239,13 +1253,12 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             const computed_address = blobManifestAddressFromMerkleRoot(payload.len, chunk_count, merkle_root);
             if (!std.mem.eql(u8, &computed_address, &address)) return error.CorruptBlob;
-            return self.putBlobPrepared(address, merkle_root, payload, &chunk_refs, chunk_count);
+            return self.putBlobPrepared(address, payload, &chunk_refs, chunk_count);
         }
 
         fn putBlobPrepared(
             self: *Self,
             address: BlobAddress,
-            merkle_root: BlobAddress,
             payload: []const u8,
             chunk_refs: *[MAX_BLOB_CHUNKS]ChunkRef,
             chunk_count: usize,
@@ -1268,7 +1281,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index = self.blobs.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
             const slot = self.blobSlotAt(slot_index);
             slot.blob.address = address;
-            slot.blob.merkle_root = merkle_root;
             slot.blob.payload_len = @intCast(payload.len);
             slot.blob.chunk_count = @intCast(chunk_count);
             slot.blob.chunk_slot_indexes = chunk_slot_indexes;
@@ -1321,9 +1333,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
             const live_chunk_refs = try self.copyBlobChunkRefs(&slot.blob, &chunk_refs);
-            if (!std.mem.eql(u8, &computeBlobMerkleRoot(live_chunk_refs), &slot.blob.merkle_root)) {
-                return error.CorruptBlob;
-            }
             if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payloadLen(), live_chunk_refs), &slot.blob.address)) {
                 return error.CorruptBlob;
             }
@@ -1606,7 +1615,6 @@ fn blobManifestMatches(store: anytype, blob_record: BlobRecord, payload_len: usi
     if (blob_record.payloadLen() != payload_len) return false;
     const chunk_count: usize = @intCast(blob_record.chunk_count);
     if (chunk_count != chunk_refs.len) return false;
-    if (!std.mem.eql(u8, &blob_record.merkle_root, &computeBlobMerkleRoot(chunk_refs))) return false;
     var index: usize = 0;
     while (index < chunk_count) : (index += 1) {
         const stored_chunk_ref = store.blobChunkRef(&blob_record, index) catch return false;

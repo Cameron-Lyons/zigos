@@ -1050,7 +1050,6 @@ fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadCh
 
 fn encodeBlobBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
     try writer.writeBytes(&record.address);
-    try writer.writeBytes(&record.merkle_root);
     try writer.writeU32(record.payload_len);
     try writer.writeU16(record.ref_count);
     try writer.writeU16(record.chunk_count);
@@ -1155,8 +1154,6 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     var reader = CursorReader{ .buffer = payload };
     var address: object_store.BlobAddress = undefined;
     try reader.readBytes(&address);
-    var merkle_root: object_store.BlobAddress = undefined;
-    try reader.readBytes(&merkle_root);
     const payload_len: usize = @intCast(try reader.readU32());
     const ref_count = try reader.readU16();
     const chunk_count: usize = @intCast(try reader.readU16());
@@ -1172,7 +1169,6 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
         if (!chunk_slot.in_use or chunk_slot.chunk.payload_len != chunk_refs[chunk_index].payload_len) return error.CorruptImage;
         chunk_slot_indexes[chunk_index] = @intCast(chunk_slot_index);
     }
-    if (!std.mem.eql(u8, &object_store.computeBlobMerkleRoot(chunk_refs[0..chunk_count]), &merkle_root)) return error.CorruptImage;
     if (!std.mem.eql(u8, &object_store.computeBlobManifestAddress(payload_len, chunk_refs[0..chunk_count]), &address)) return error.CorruptImage;
     const slot_index = if (store.blobSlotIndex(address)) |existing_index|
         existing_index
@@ -1180,7 +1176,6 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
         store.reserveBlobSlot(address) orelse return error.CorruptImage;
     const slot = store.blobSlotAt(slot_index);
     slot.blob.address = address;
-    slot.blob.merkle_root = merkle_root;
     slot.blob.payload_len = @intCast(payload_len);
     slot.blob.ref_count = ref_count;
     slot.blob.chunk_count = @intCast(chunk_count);
@@ -1410,13 +1405,11 @@ fn deserializeState(
         const payload_start = reader.offset;
         var address: object_store.BlobAddress = undefined;
         try reader.readBytes(&address);
-        var merkle_root: object_store.BlobAddress = undefined;
-        try reader.readBytes(&merkle_root);
         const payload_len: usize = @intCast(try reader.readU32());
         _ = try reader.readU16();
         const chunk_ref_count: usize = @intCast(try reader.readU16());
         if (payload_len > object_store.MAX_PAYLOAD_BYTES or chunk_ref_count > object_store.MAX_BLOB_CHUNKS) return error.CorruptImage;
-        const payload_end = payload_start + 32 + 32 + 4 + 2 + 2 + chunk_ref_count * (32 + 2);
+        const payload_end = payload_start + 32 + 4 + 2 + 2 + chunk_ref_count * (32 + 2);
         if (payload_end > reader.buffer.len) return error.CorruptImage;
         reader.offset = payload_start;
         try applyBlobRecord(store, reader.buffer[payload_start..payload_end]);
