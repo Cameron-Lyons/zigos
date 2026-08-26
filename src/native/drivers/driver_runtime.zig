@@ -18,8 +18,9 @@ pub const MAX_ACTIVATIONS: usize = 8;
 pub const COMPACT_ACTIVATION_METADATA = true;
 pub const DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION = true;
 pub const DERIVES_ACTIVATION_STATE_FLAGS = true;
+pub const DERIVES_ACTIVATION_GENERATION_FROM_DRIVER = true;
 pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 32;
-pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_056;
+pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_048;
 const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
 
 pub const ActivationMode = enum(u8) {
@@ -81,7 +82,6 @@ const ActivationServiceIndex = indexed_arena.MultimapIndex(MAX_ACTIVATIONS, MAX_
 
 pub const Runtime = struct {
     kernel_port: ?*component_port.KernelPort = null,
-    next_activation_generation: u32 = 1,
     arena: ActivationArena = ActivationArena.init(),
     class_index: ActivationClassIndex = ActivationClassIndex.init(),
     service_index: ActivationServiceIndex = ActivationServiceIndex.init(),
@@ -123,7 +123,7 @@ pub const Runtime = struct {
             .device_class = driver.device_class,
             .dma_domain_id = driver.dma_domain_id,
             .mode = .control_only,
-            .activation_generation = 0,
+            .activation_generation = driver.restart_generation,
         };
 
         switch (driver.device_class) {
@@ -176,7 +176,6 @@ pub const Runtime = struct {
             },
         }
 
-        record.activation_generation = self.nextActivationGeneration();
         return self.upsert(record);
     }
 
@@ -249,11 +248,6 @@ pub const Runtime = struct {
         return self.arena.get(activationKeyFor(service_id, device_class));
     }
 
-    fn nextActivationGeneration(self: *Runtime) u32 {
-        defer self.next_activation_generation += 1;
-        return self.next_activation_generation;
-    }
-
     comptime {
         if (@sizeOf(@This()) > RUNTIME_SIZE_CEILING_BYTES) {
             @compileError("driver runtime exceeds its compact size ceiling");
@@ -295,6 +289,8 @@ fn zeroActivation() ActivationRecord {
 test "driver runtime uses compact bounded activation metadata" {
     try std.testing.expect(COMPACT_ACTIVATION_METADATA);
     try std.testing.expect(DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION);
+    try std.testing.expect(DERIVES_ACTIVATION_GENERATION_FROM_DRIVER);
+    try std.testing.expect(!@hasField(Runtime, "next_activation_generation"));
     try std.testing.expectEqual(@as(usize, ACTIVATION_RECORD_SIZE_CEILING_BYTES), @sizeOf(ActivationRecord));
     try std.testing.expectEqual(@as(usize, RUNTIME_SIZE_CEILING_BYTES), @sizeOf(Runtime));
 }
@@ -574,6 +570,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
     var runtime = Runtime.init();
     const activation = try runtime.activateAt(driver, 1);
     try std.testing.expectEqual(ActivationMode.published_data_plane, activation.mode);
+    try std.testing.expectEqual(driver.restart_generation, activation.activation_generation);
     try std.testing.expectEqual(@as(usize, 1), FakeBackend.activation_count);
     try std.testing.expect(storage_volume.hasProductionStorageBackend());
 
@@ -589,6 +586,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
     const restarted = try runtime.activateAt(driver, 2);
     try std.testing.expectEqual(ActivationMode.published_data_plane, restarted.mode);
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
+    try std.testing.expectEqual(driver.restart_generation, restarted.activation_generation);
 
     var readback = [_]u8{0} ** storage_volume.sector_size;
     try std.testing.expect(bootstrap_driver_port.activeStorageRead(service_id, 4, readback[0..]));
@@ -658,6 +656,8 @@ test "runtime deactivates only the requested driver class for shared services" {
     const input_activation = try runtime.activateAt(&input_driver, 11);
     try std.testing.expectEqual(ActivationMode.published_data_plane, graphics_activation.mode);
     try std.testing.expectEqual(ActivationMode.published_data_plane, input_activation.mode);
+    try std.testing.expectEqual(graphics_driver.restart_generation, graphics_activation.activation_generation);
+    try std.testing.expectEqual(input_driver.restart_generation, input_activation.activation_generation);
     try std.testing.expectEqualStrings("zigos.system.compositor", graphics_activation.publisherSlice());
     try std.testing.expectEqualStrings("zigos.system.compositor", input_activation.publisherSlice());
     try std.testing.expectEqual(@as(usize, 2), runtime.service_index.count(serviceKey(service_id)));

@@ -748,6 +748,8 @@ pub const indexed_hot_path_tables = .{
         .uses_activation_service_index = @hasField(driver_runtime.Runtime, "service_index"),
         .stores_compact_activation_metadata = driver_runtime.COMPACT_ACTIVATION_METADATA and
             driver_runtime.DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION and
+            driver_runtime.DERIVES_ACTIVATION_GENERATION_FROM_DRIVER and
+            !@hasField(driver_runtime.Runtime, "next_activation_generation") and
             @hasDecl(driver_runtime.ActivationRecord, "publisherSlice") and
             !@hasField(driver_runtime.ActivationRecord, "publisher_len") and
             !@hasField(driver_runtime.ActivationRecord, "publisher") and
