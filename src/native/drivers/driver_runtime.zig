@@ -631,7 +631,6 @@ test "runtime deactivates only the requested driver class for shared services" {
         false,
     ));
 
-    const empty_dma_ranges = [_]driver_service.DmaRange{.{ .base = 0, .length = 0 }} ** driver_service.MAX_DMA_RANGES;
     const graphics_driver = driver_service.DriverRecord{
         .service_id = service_id,
         .owner_task_id = 191,
@@ -642,8 +641,6 @@ test "runtime deactivates only the requested driver class for shared services" {
         .bootstrap_transport = .none,
         .dma_domain_id = 391,
         .dma_protection = .iommu_enforced,
-        .dma_range_count = 0,
-        .dma_ranges = empty_dma_ranges,
         .signer_len = 0,
         .signer = [_]u8{0} ** driver_service.MAX_SIGNER_BYTES,
     };
@@ -657,8 +654,6 @@ test "runtime deactivates only the requested driver class for shared services" {
         .bootstrap_transport = .none,
         .dma_domain_id = 392,
         .dma_protection = .iommu_enforced,
-        .dma_range_count = 0,
-        .dma_ranges = empty_dma_ranges,
         .signer_len = 0,
         .signer = [_]u8{0} ** driver_service.MAX_SIGNER_BYTES,
     };

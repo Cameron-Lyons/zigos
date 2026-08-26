@@ -234,8 +234,9 @@ pub fn proveBootedDriverPermissions(
     try std.testing.expect(storage_authority.rights.has(.object_read));
     try std.testing.expect(storage_authority.rights.has(.object_write));
     try std.testing.expect(!storage_authority.rights.has(.network_local));
-    try std.testing.expect(storage_driver.allowsDma(storage_driver.dma_ranges[0].base, DMA_PAGE_BYTES));
-    try std.testing.expect(!storage_driver.allowsDma(storage_driver.dma_ranges[0].base + storage_driver.dma_ranges[0].length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PAGE_BYTES));
+    const storage_dma_range = storage_driver.dmaRange(0).?;
+    try std.testing.expect(storage_driver.allowsDma(storage_dma_range.base, DMA_PAGE_BYTES));
+    try std.testing.expect(!storage_driver.allowsDma(storage_dma_range.base + storage_dma_range.length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PAGE_BYTES));
 
     device_broker.reset();
     defer device_broker.reset();

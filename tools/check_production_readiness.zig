@@ -3366,7 +3366,9 @@ fn validateUserspaceDriverDataPathTrack(
     const native_smoke_markers_path = "src/native_smoke_markers.zig";
     const trust_boot_path = "src/native/session/trust_boot.zig";
     const bootstrap_driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
+    const driver_service_path = "src/native/drivers/driver_service.zig";
     const driver_runtime_path = "src/native/drivers/driver_runtime.zig";
+    const measured_boot_path = "src/native/platform/measured_boot.zig";
     const driver_spec_path = "src/tests/spec/drivers_storage_sync.zig";
     const backlog_gate_path = "src/tests/spec/backlog_gates.zig";
     const broker_source = try readRequiredSource(allocator, io, errors, broker_path) orelse return;
@@ -3390,7 +3392,9 @@ fn validateUserspaceDriverDataPathTrack(
     const native_smoke_markers_source = try readRequiredSource(allocator, io, errors, native_smoke_markers_path) orelse return;
     const trust_boot_source = try readRequiredSource(allocator, io, errors, trust_boot_path) orelse return;
     const bootstrap_driver_port_source = try readRequiredSource(allocator, io, errors, bootstrap_driver_port_path) orelse return;
+    const driver_service_source = try readRequiredSource(allocator, io, errors, driver_service_path) orelse return;
     const driver_runtime_source = try readRequiredSource(allocator, io, errors, driver_runtime_path) orelse return;
+    const measured_boot_source = try readRequiredSource(allocator, io, errors, measured_boot_path) orelse return;
     const driver_spec_source = try readRequiredSource(allocator, io, errors, driver_spec_path) orelse return;
     const backlog_gate_source = try readRequiredSource(allocator, io, errors, backlog_gate_path) orelse return;
 
@@ -3610,6 +3614,32 @@ fn validateUserspaceDriverDataPathTrack(
     for (storage_dma_wiring_snippets) |snippet| {
         if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) == null) {
             try common.addError(errors, allocator, "Userspace driver data path must confine the real storage DMA engine through the broker: {s}", .{snippet});
+        }
+    }
+
+    const derived_dma_policy_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = driver_service_path, .source = driver_service_source, .snippet = "pub const DERIVES_DMA_WINDOWS_FROM_DEVICE_POLICY = true" },
+        .{ .path = driver_service_path, .source = driver_service_source, .snippet = "pub fn dmaRangeCount(self: *const DriverRecord) usize" },
+        .{ .path = driver_service_path, .source = driver_service_source, .snippet = "pub fn dmaRange(self: *const DriverRecord, index: usize) ?DmaRange" },
+        .{ .path = measured_boot_path, .source = measured_boot_source, .snippet = "const dma_range_count = driver.dmaRangeCount()" },
+        .{ .path = measured_boot_path, .source = measured_boot_source, .snippet = "const range = driver.dmaRange(range_index).?" },
+    };
+    for (derived_dma_policy_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Driver DMA policy must retain derived device-class windows in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    const retired_dma_storage_snippets = [_][]const u8{
+        "dma_range_count: u8",
+        "dma_ranges: [MAX_DMA_RANGES]DmaRange",
+    };
+    for (retired_dma_storage_snippets) |snippet| {
+        if (std.mem.indexOf(u8, driver_service_source, snippet) != null) {
+            try common.addError(errors, allocator, "Driver DMA policy must not restore mutable per-record range storage: {s}", .{snippet});
         }
     }
 
