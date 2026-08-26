@@ -6,11 +6,12 @@ pub const MAX_BINDINGS: usize = typed_component_abi.INTERFACE_COUNT;
 pub const DERIVES_STATIC_CONTRACT_METADATA = true;
 pub const COMPACT_BINDING_METADATA = true;
 pub const DIRECT_INTERFACE_BINDINGS = true;
+pub const DERIVES_BINDING_COUNT_FROM_SLOTS = true;
 pub const TYPED_ID_ONLY_API = true;
 pub const AUTHENTICATED_BINDINGS_ONLY = true;
 pub const REQUIRED_BINDING_FLAGS: u16 = abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
 pub const BINDING_SIZE_CEILING_BYTES: usize = 32;
-pub const REGISTRY_SIZE_CEILING_BYTES: usize = 1_000;
+pub const REGISTRY_SIZE_CEILING_BYTES: usize = 992;
 
 pub const BootstrapEndpoint = struct {
     task_id: u64,
@@ -94,7 +95,6 @@ fn validateBootstrap(bootstrap: ?BootstrapEndpoint) Error!void {
 
 pub const Registry = struct {
     bindings: [MAX_BINDINGS]Binding = [_]Binding{zeroBinding()} ** MAX_BINDINGS,
-    binding_count: u8 = 0,
 
     pub fn init() Registry {
         return .{};
@@ -123,7 +123,6 @@ pub const Registry = struct {
             .endpoint_id = endpoint_id,
             .endpoint_capability_id = endpoint_capability_id,
         };
-        self.binding_count += 1;
     }
 
     pub fn connect(self: *const Registry, interface_id: typed_component_abi.InterfaceId) Error!abi.ServiceConnectionDescriptor {
@@ -137,7 +136,11 @@ pub const Registry = struct {
     }
 
     pub fn bindingCount(self: *const Registry) usize {
-        return self.binding_count;
+        var count: usize = 0;
+        for (self.bindings) |binding| {
+            if (binding.service_id != 0) count += 1;
+        }
+        return count;
     }
 
     fn find(self: *const Registry, interface_id: typed_component_abi.InterfaceId) ?*const Binding {
@@ -162,7 +165,6 @@ fn zeroBinding() Binding {
         .endpoint_capability_id = 0,
     };
 }
-
 
 test "service registry stores one direct slot per typed interface" {
     try std.testing.expect(DIRECT_INTERFACE_BINDINGS);
