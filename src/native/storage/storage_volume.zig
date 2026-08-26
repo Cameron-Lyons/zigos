@@ -1021,10 +1021,8 @@ fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRec
     try writeSignature(writer, record.provenance.creator_signature);
     try writer.writeByte(if (record.provenance.latest_version_addressed) 1 else 0);
     try writer.writeU16(record.snapshot_state.snapshot_count);
-    try writer.writeU64(record.snapshot_state.latest_snapshot_version_id.raw());
     try writer.writeU32(record.sync_state.sync_generation);
     try writer.writeU16(record.sync_state.version_watermark);
-    try writer.writeU64(record.sync_state.last_synced_version_id.raw());
     try writer.writeU32(record.sharing_policy.policy_generation);
     try writer.writeByte(if (record.sharing_policy.requires_explicit_file_bridge_grant) 1 else 0);
     try writer.writeByte(if (record.sharing_policy.export_only_file_bridge) 1 else 0);
@@ -1546,10 +1544,8 @@ fn readObjectUserDataTail(
     record.provenance.creator_signature = try readSignature(self, reader);
     record.provenance.latest_version_addressed = (try reader.readByte()) != 0;
     record.snapshot_state.snapshot_count = try reader.readU16();
-    record.snapshot_state.latest_snapshot_version_id = ids.version(try reader.readU64());
     record.sync_state.sync_generation = try reader.readU32();
     record.sync_state.version_watermark = try reader.readU16();
-    record.sync_state.last_synced_version_id = ids.version(try reader.readU64());
     record.sharing_policy.policy_generation = try reader.readU32();
     record.sharing_policy.requires_explicit_file_bridge_grant = (try reader.readByte()) != 0;
     record.sharing_policy.export_only_file_bridge = (try reader.readByte()) != 0;

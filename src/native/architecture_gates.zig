@@ -1277,6 +1277,12 @@ pub const indexed_hot_path_tables = .{
             storage_volume.signer_text_layout.pool_size_bytes == storage_volume.SIGNER_TEXT_POOL_BYTES,
         .derives_latest_inserted_version_from_arena_state = object_store.DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE and
             !@hasField(object_store.Store, "latest_inserted_version_id"),
+        .derives_object_model_version_ids_from_canonical_head = object_store.DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD and
+            !@hasField(object_store.ObjectSnapshotState, "latest_snapshot_version_id") and
+            !@hasField(object_store.ObjectSyncState, "last_synced_version_id"),
+        .keeps_object_model_state_within_ceilings = @sizeOf(object_store.ObjectRecord) <= object_store.OBJECT_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(object_store.ObjectSnapshotState) <= object_store.OBJECT_SNAPSHOT_STATE_SIZE_CEILING_BYTES and
+            @sizeOf(object_store.ObjectSyncState) <= object_store.OBJECT_SYNC_STATE_SIZE_CEILING_BYTES,
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
         .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and

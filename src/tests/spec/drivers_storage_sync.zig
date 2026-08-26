@@ -489,8 +489,7 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, report_model.history_policy);
     try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, report_model.file_bridge_policy);
     try std.testing.expect(report_object.sharing_policy.export_only_file_bridge);
-    try std.testing.expectEqual(draft_v2.version_id, report_object.snapshot_state.latest_snapshot_version_id);
-    try std.testing.expectEqual(draft_v2.version_id, report_object.sync_state.last_synced_version_id);
+    try std.testing.expectEqual(draft_v2.version_id, report_object.latest_version_id);
 
     var exported = workspace.emptyExportPackage();
     try storage.exportSnapshotInto(workspace_record.id, baseline.id, storage_signer, &exported);
