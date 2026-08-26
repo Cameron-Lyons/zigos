@@ -1198,9 +1198,11 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sync_state_store.PathSet, "fingerprints") == [workspace.MAX_WORKSPACE_ENTRIES]u32 and
             !@hasField(sync_state_store.PathSet, "hashes"),
         .bounds_sync_record_paths_to_schema = sync_state_store.BOUNDS_SYNC_RECORD_PATHS_TO_SCHEMA and
-            @FieldType(sync_state_store.PathSet, "paths") == [workspace.MAX_WORKSPACE_ENTRIES][sync_state_store.MAX_RECORD_PATH_BYTES]u8 and
-            @FieldType(sync_state_store.StalePathList, "paths") == [workspace.MAX_WORKSPACE_ENTRIES][workspace.MAX_ENTRY_PATH_BYTES]u8 and
-            @sizeOf(sync_state_store.PathSet) + @sizeOf(sync_state_store.StalePathList) <= sync_state_store.PERSIST_PATH_STACK_SIZE_CEILING_BYTES,
+            @FieldType(sync_state_store.PathSet, "paths") == [workspace.MAX_WORKSPACE_ENTRIES][sync_state_store.MAX_RECORD_PATH_BYTES]u8,
+        .tracks_stale_sync_paths_by_index = sync_state_store.TRACKS_STALE_SYNC_PATHS_BY_INDEX and
+            @sizeOf(sync_state_store.StalePathIndex) == 1 and
+            @FieldType(sync_state_store.StalePathIndexes, "indexes") == [workspace.MAX_WORKSPACE_ENTRIES]sync_state_store.StalePathIndex and
+            @sizeOf(sync_state_store.PathSet) + @sizeOf(sync_state_store.StalePathIndexes) <= sync_state_store.PERSIST_PATH_STACK_SIZE_CEILING_BYTES,
         .keeps_path_set_within_ceiling = @sizeOf(sync_state_store.PathSet) <= sync_state_store.PATH_SET_SIZE_CEILING_BYTES,
         .uses_workspace_policy_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "workspace_policies"), "reserveIndex"),
         .uses_replica_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "replica_entries"), "reserveIndex"),

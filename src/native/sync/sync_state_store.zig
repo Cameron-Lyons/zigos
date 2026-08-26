@@ -29,11 +29,13 @@ const max_principal_kind_decimal_bytes: usize = 1;
 pub const COMPACT_PATH_SET_METADATA = true;
 pub const COMPACT_PATH_SET_FINGERPRINTS = true;
 pub const BOUNDS_SYNC_RECORD_PATHS_TO_SCHEMA = true;
+pub const TRACKS_STALE_SYNC_PATHS_BY_INDEX = true;
+pub const StalePathIndex = u8;
 pub const MAX_RECORD_PATH_BYTES: usize = record_prefix.len + 1 + 1 + max_u64_decimal_bytes + 1 +
     max_principal_kind_decimal_bytes + 1 + max_u64_decimal_bytes + 1 + max_u64_hex_bytes;
 pub const PATH_SET_SIZE_CEILING_BYTES: usize = 7_300;
-pub const STALE_PATH_LIST_SIZE_CEILING_BYTES: usize = 9_313;
-pub const PERSIST_PATH_STACK_SIZE_CEILING_BYTES: usize = 16_613;
+pub const STALE_PATH_INDEXES_SIZE_CEILING_BYTES: usize = 97;
+pub const PERSIST_PATH_STACK_SIZE_CEILING_BYTES: usize = 7_397;
 
 comptime {
     if (workspace.MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8) or
@@ -104,25 +106,19 @@ pub const PathSet = struct {
     }
 };
 
-pub const StalePathList = struct {
-    paths: [workspace.MAX_WORKSPACE_ENTRIES][workspace.MAX_ENTRY_PATH_BYTES]u8 =
-        [_][workspace.MAX_ENTRY_PATH_BYTES]u8{[_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
-    lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = [_]u8{0} ** workspace.MAX_WORKSPACE_ENTRIES,
+pub const StalePathIndexes = struct {
+    indexes: [workspace.MAX_WORKSPACE_ENTRIES]StalePathIndex = [_]StalePathIndex{0} ** workspace.MAX_WORKSPACE_ENTRIES,
     count: u8 = 0,
 
-    fn add(self: *StalePathList, path: []const u8) Error!void {
-        if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
-        const index: usize = self.count;
-        if (index >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
-        @memset(self.paths[index][0..], 0);
-        @memcpy(self.paths[index][0..path.len], path);
-        self.lens[index] = @intCast(path.len);
+    fn add(self: *StalePathIndexes, entry_index: usize) Error!void {
+        if (entry_index >= workspace.MAX_WORKSPACE_ENTRIES or self.count >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
+        self.indexes[self.count] = @intCast(entry_index);
         self.count += 1;
     }
 
     comptime {
-        if (@sizeOf(@This()) > STALE_PATH_LIST_SIZE_CEILING_BYTES) {
-            @compileError("stale sync path list exceeded its stack-size ceiling");
+        if (@sizeOf(@This()) > STALE_PATH_INDEXES_SIZE_CEILING_BYTES) {
+            @compileError("stale sync path indexes exceeded their stack-size ceiling");
         }
     }
 };
@@ -243,12 +239,12 @@ fn deleteStaleRecords(
     live_paths: *const PathSet,
     resident: *state_support.ResidentState,
 ) Error!void {
-    var stale = StalePathList{};
+    var stale = StalePathIndexes{};
     const entries = try storage.entries(workspace_id);
-    for (entries) |entry| {
+    for (entries, 0..) |entry, entry_index| {
         const path = entry.pathSlice();
         if (!isManagedRecordPath(path) or live_paths.contains(path)) continue;
-        try stale.add(path);
+        try stale.add(entry_index);
     }
     if (stale.count == 0) return;
 
@@ -256,7 +252,8 @@ fn deleteStaleRecords(
     try storage.beginTransaction(workspace_id);
     var index: usize = 0;
     while (index < @as(usize, stale.count)) : (index += 1) {
-        try storage.stageDelete(workspace_id, stale.paths[index][0..@as(usize, stale.lens[index])]);
+        const entry_index: usize = stale.indexes[index];
+        try storage.stageDelete(workspace_id, entries[entry_index].pathSlice());
     }
     _ = try storage.commit(workspace_id, tick);
 }
@@ -1098,8 +1095,8 @@ test "persistence path sets retain full capacity with compact metadata" {
     try std.testing.expect(@FieldType(PathSet, "fingerprints") == [workspace.MAX_WORKSPACE_ENTRIES]u32);
     try std.testing.expect(@FieldType(PathSet, "count") == u8);
     try std.testing.expectEqual(@as(usize, PATH_SET_SIZE_CEILING_BYTES), @sizeOf(PathSet));
-    try std.testing.expectEqual(@as(usize, STALE_PATH_LIST_SIZE_CEILING_BYTES), @sizeOf(StalePathList));
-    try std.testing.expectEqual(@as(usize, PERSIST_PATH_STACK_SIZE_CEILING_BYTES), @sizeOf(PathSet) + @sizeOf(StalePathList));
+    try std.testing.expectEqual(@as(usize, STALE_PATH_INDEXES_SIZE_CEILING_BYTES), @sizeOf(StalePathIndexes));
+    try std.testing.expectEqual(@as(usize, PERSIST_PATH_STACK_SIZE_CEILING_BYTES), @sizeOf(PathSet) + @sizeOf(StalePathIndexes));
 
     var paths = PathSet{};
     var path = [_]u8{ 'p', 0 };
@@ -1122,11 +1119,11 @@ test "persistence path sets retain full capacity with compact metadata" {
     try std.testing.expectError(error.PathTooLong, boundary_paths.add(&overlong_path));
     try std.testing.expect(!boundary_paths.contains(&overlong_path));
 
-    var stale_paths = StalePathList{};
-    const max_stale_path = [_]u8{'s'} ** workspace.MAX_ENTRY_PATH_BYTES;
-    try stale_paths.add(&max_stale_path);
+    var stale_paths = StalePathIndexes{};
+    try stale_paths.add(workspace.MAX_WORKSPACE_ENTRIES - 1);
     try std.testing.expectEqual(@as(u8, 1), stale_paths.count);
-    try std.testing.expectEqualSlices(u8, &max_stale_path, stale_paths.paths[0][0..stale_paths.lens[0]]);
+    try std.testing.expectEqual(@as(StalePathIndex, workspace.MAX_WORKSPACE_ENTRIES - 1), stale_paths.indexes[0]);
+    try std.testing.expectError(error.StateTooLarge, stale_paths.add(workspace.MAX_WORKSPACE_ENTRIES));
 }
 
 test "sync record path capacity covers the longest schema key" {
