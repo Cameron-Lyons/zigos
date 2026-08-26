@@ -505,15 +505,15 @@ pub fn generatedUserspaceArchiveMatchesManifest(manifest: *const BuildArtifactMa
     const generated_archive = @import("userspace_archive");
 
     if (manifest.countKind(.userspace_image) != generated_archive.artifacts.len) return false;
-    for (generated_archive.artifacts) |artifact| {
-        if (!generatedArtifactMatchesManifest(manifest, artifact)) return false;
+    for (generated_archive.artifacts, 0..) |artifact, artifact_index| {
+        const spec = userspace_boot_registry.specAt(artifact_index) orelse return false;
+        if (!generatedArtifactMatchesManifest(manifest, spec, artifact)) return false;
     }
 
     return true;
 }
 
-fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, artifact: anytype) bool {
-    const spec = userspace_boot_registry.find(artifact.bundle_id) orelse return false;
+fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, spec: anytype, artifact: anytype) bool {
     userspace_boot_registry.validateGeneratedArtifactMatchesSpec(spec, artifact) catch return false;
     const file = embedded_file.File.fromChunkedArtifact(artifact);
     if (!file.isPresent()) return false;
@@ -522,7 +522,7 @@ fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, arti
 
     const digest = file.sha256() orelse return false;
     if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
-    if (!buildArtifactDigestMatches(manifest, .userspace_image, artifact.bundle_id, &digest)) return false;
+    if (!buildArtifactDigestMatches(manifest, .userspace_image, spec.bundle_id, &digest)) return false;
 
     const inspection = elf_image_inspector.inspectFile(file) catch return false;
     if (artifact.entry_point != inspection.entry_point) return false;
@@ -555,11 +555,11 @@ pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
 
     var stale_metadata = generated_archive.artifacts[0];
     stale_metadata.entry_point +%= 0x1000;
-    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, stale_metadata));
+    const first_spec = userspace_boot_registry.specAt(0) orelse return error.ManifestMismatch;
+    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, first_spec, stale_metadata));
 
-    var stale_registry_identity = generated_archive.artifacts[0];
-    stale_registry_identity.publisher = "stale.publisher";
-    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, stale_registry_identity));
+    const wrong_spec = userspace_boot_registry.specAt(1) orelse return error.ManifestMismatch;
+    try std.testing.expect(!generatedArtifactMatchesManifest(&manifest, wrong_spec, generated_archive.artifacts[0]));
 }
 
 pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!BuildArtifactEntry {

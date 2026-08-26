@@ -240,7 +240,21 @@ const SERVICE_CLASS_INDEX_CAPACITY: usize = production_boot_image_specs.len * 2;
 const service_class_index = buildServiceClassIndex();
 
 pub fn findProduction(bundle_id: []const u8) ?*const ImageSpec {
-    return findInCatalog(
+    const spec_index = indexInCatalog(
+        PRODUCTION_BUNDLE_INDEX_CAPACITY,
+        &production_boot_image_specs,
+        &production_bundle_index,
+        bundle_id,
+    ) orelse return null;
+    return &production_boot_image_specs[spec_index];
+}
+
+pub fn findForRole(bundle_id: []const u8) ?*const ImageSpec {
+    return findProduction(bundle_id);
+}
+
+pub fn indexForRole(bundle_id: []const u8) ?usize {
+    return indexInCatalog(
         PRODUCTION_BUNDLE_INDEX_CAPACITY,
         &production_boot_image_specs,
         &production_bundle_index,
@@ -248,16 +262,12 @@ pub fn findProduction(bundle_id: []const u8) ?*const ImageSpec {
     );
 }
 
-pub fn findForRole(bundle_id: []const u8) ?*const ImageSpec {
-    return findProduction(bundle_id);
-}
-
-fn findInCatalog(
+fn indexInCatalog(
     comptime capacity: usize,
     specs: []const ImageSpec,
     index: *const id_index.Table(capacity),
     bundle_id: []const u8,
-) ?*const ImageSpec {
+) ?usize {
     const key = bundleIndexKey(bundle_id);
     const spec_index = id_index.lookup(capacity, index, key) orelse {
         debugAssertBundleIndexMissAbsent(specs, bundle_id);
@@ -269,7 +279,7 @@ fn findInCatalog(
     if (!std.mem.eql(u8, specs[spec_index].bundle_id, bundle_id)) {
         native_util.impossibleByInvariant("boot bundle id index points at the wrong registry spec");
     }
-    return &specs[spec_index];
+    return spec_index;
 }
 
 pub fn productionContractFor(bundle_id: []const u8) ?ContractSpec {
@@ -361,6 +371,7 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     for (production_boot_image_specs, 0..) |spec, index| {
         try std.testing.expect(spec.role_tag != 0);
         try std.testing.expect(spec.heartbeat_increment != 0);
+        try std.testing.expectEqual(index, indexForRole(spec.bundle_id).?);
         if (spec.service_class) |class| {
             const indexed = findByServiceClass(class) orelse return error.MissingServiceClassIndexEntry;
             try std.testing.expectEqualStrings(spec.bundle_id, indexed.bundle_id);

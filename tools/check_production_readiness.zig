@@ -3521,9 +3521,9 @@ fn validateNativeOnlyLaunchTrack(
 
     const required_boot_registry_snippets = [_][]const u8{
         "const archive_index = @import(\"userspace_archive_index.zig\")",
-        "GeneratedArtifactMissing",
-        "validateGeneratedArchiveHasOnlyRegisteredSpecs",
-        "generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing",
+        "for (active_boot_image_specs, 0..) |spec, artifact_index|",
+        "const artifact = archive_index.artifacts[artifact_index]",
+        "validateGeneratedArtifactMatchesSpec(&spec, artifact)",
         "catalog.registerBuildValidatedArtifact",
         "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session-manager\").?.embedsElf())",
     };
@@ -3534,14 +3534,23 @@ fn validateNativeOnlyLaunchTrack(
     }
     const required_archive_index_snippets = [_][]const u8{
         "const archive = @import(\"userspace_archive\")",
-        "const bundle_index = buildBundleIndex()",
-        "id_index.lookup",
-        "return artifact",
+        "role_registry.indexForRole(bundle_id)",
+        "return archive.artifacts[artifact_index]",
         "test \"userspace archive index resolves every generated artifact bundle\"",
     };
     for (required_archive_index_snippets) |snippet| {
         if (std.mem.indexOf(u8, archive_index_source, snippet) == null) {
             try common.addError(errors, allocator, "Native-only launch track must keep indexed archive lookup snippet: {s}", .{snippet});
+        }
+    }
+    const forbidden_archive_index_snippets = [_][]const u8{
+        "@import(\"../core/id_index.zig\")",
+        "const bundle_index = buildBundleIndex()",
+        "fn bundleIndexKey(",
+    };
+    for (forbidden_archive_index_snippets) |snippet| {
+        if (std.mem.indexOf(u8, archive_index_source, snippet) != null) {
+            try common.addError(errors, allocator, "Native-only launch track must not duplicate the role registry index in the userspace archive: {s}", .{snippet});
         }
     }
 

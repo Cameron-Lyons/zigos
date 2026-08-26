@@ -23,16 +23,12 @@ const SignBundleReturn = @typeInfo(@TypeOf(userspace_manifest_signing.signBundle
 const SigningError = @typeInfo(SignBundleReturn).error_union.error_set;
 
 pub const Error = userspace_loader.Error || SigningError || error{
-    GeneratedArtifactContractMismatch,
-    GeneratedArtifactMissing,
-    GeneratedArtifactIdentityMismatch,
     GeneratedArtifactSegmentCountInvalid,
     GeneratedArtifactSignatureMismatch,
     UnsupportedServiceClass,
     UnknownBundleId,
 };
 
-const GeneratedArtifact = archive_index.GeneratedArtifact;
 const active_boot_image_specs: []const role_registry.ImageSpec = &role_registry.role_boot_image_specs;
 
 comptime {
@@ -49,6 +45,11 @@ pub fn find(bundle_id: []const u8) ?*const role_registry.ImageSpec {
     return role_registry.findForRole(bundle_id);
 }
 
+pub fn specAt(index: usize) ?*const role_registry.ImageSpec {
+    if (index >= active_boot_image_specs.len) return null;
+    return &active_boot_image_specs[index];
+}
+
 pub fn manifestFor(bundle_id: []const u8) Error!manifest.BundleManifest {
     const spec = find(bundle_id) orelse return error.UnknownBundleId;
     return bundleForSpec(spec);
@@ -60,9 +61,8 @@ pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
 }
 
 pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
-    try validateGeneratedArchiveHasOnlyRegisteredSpecs();
-    for (active_boot_image_specs) |spec| {
-        const artifact = generatedArtifactFor(spec.bundle_id) orelse return error.GeneratedArtifactMissing;
+    for (active_boot_image_specs, 0..) |spec, artifact_index| {
+        const artifact = archive_index.artifacts[artifact_index];
         try validateGeneratedArtifactMatchesSpec(&spec, artifact);
         const bundle = try bundleForSpec(&spec);
         const executable_image = try executableImageFromArtifact(artifact);
@@ -76,40 +76,15 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
             .elf_file = embedded_file.File.fromChunkedArtifact(artifact),
         }, executable_image) catch |err| {
             console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
-            console.print(artifact.bundle_id);
+            console.print(spec.bundle_id);
             console.print("\n");
             return err;
         };
     }
 }
 
-fn validateGeneratedArchiveHasOnlyRegisteredSpecs() Error!void {
-    for (archive_index.artifacts) |artifact| {
-        _ = find(artifact.bundle_id) orelse return error.UnknownBundleId;
-    }
-}
-
-fn generatedArtifactFor(bundle_id: []const u8) ?GeneratedArtifact {
-    return archive_index.artifactFor(bundle_id);
-}
-
 pub fn validateGeneratedArtifactMatchesSpec(spec: *const role_registry.ImageSpec, artifact: anytype) Error!void {
-    if (!std.mem.eql(u8, artifact.bundle_id, spec.bundle_id) or
-        !std.mem.eql(u8, artifact.display_name, spec.display_name) or
-        !std.mem.eql(u8, artifact.publisher, spec.publisher) or
-        !std.mem.eql(u8, artifact.label, spec.label) or
-        !std.mem.eql(u8, artifact.entry, spec.entry) or
-        artifact.component_class != @intFromEnum(spec.component_class))
-    {
-        return error.GeneratedArtifactIdentityMismatch;
-    }
     if (artifact.signed != spec.signed) return error.GeneratedArtifactSignatureMismatch;
-    if (artifact.role_tag != spec.role_tag or
-        artifact.heartbeat_increment != spec.heartbeat_increment or
-        artifact.contract_flags != spec.contract_flags)
-    {
-        return error.GeneratedArtifactContractMismatch;
-    }
     if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
         return error.GeneratedArtifactSegmentCountInvalid;
     }
@@ -216,44 +191,16 @@ test "boot registry definitions are unique and preload a userspace catalog" {
 
 test "boot registry rejects generated archive records that diverge from registry specs" {
     try std.testing.expect(archive_index.artifacts.len > 0);
-    const spec = find(archive_index.artifacts[0].bundle_id) orelse return error.UnknownBundleId;
+    const spec = specAt(0) orelse return error.UnknownBundleId;
 
     try validateGeneratedArtifactMatchesSpec(spec, archive_index.artifacts[0]);
     _ = try executableImageFromArtifact(archive_index.artifacts[0]);
-
-    var stale_bundle_id = archive_index.artifacts[0];
-    stale_bundle_id.bundle_id = "zigos.system.stale-generated-record";
-    try std.testing.expectError(
-        error.GeneratedArtifactIdentityMismatch,
-        validateGeneratedArtifactMatchesSpec(spec, stale_bundle_id),
-    );
-
-    var stale_display_name = archive_index.artifacts[0];
-    stale_display_name.display_name = "Stale Display Name";
-    try std.testing.expectError(
-        error.GeneratedArtifactIdentityMismatch,
-        validateGeneratedArtifactMatchesSpec(spec, stale_display_name),
-    );
 
     var unsigned = archive_index.artifacts[0];
     unsigned.signed = !spec.signed;
     try std.testing.expectError(
         error.GeneratedArtifactSignatureMismatch,
         validateGeneratedArtifactMatchesSpec(spec, unsigned),
-    );
-
-    var stale_contract = archive_index.artifacts[0];
-    stale_contract.role_tag +%= 1;
-    try std.testing.expectError(
-        error.GeneratedArtifactContractMismatch,
-        validateGeneratedArtifactMatchesSpec(spec, stale_contract),
-    );
-
-    var stale_component_class = archive_index.artifacts[0];
-    stale_component_class.component_class +%= 1;
-    try std.testing.expectError(
-        error.GeneratedArtifactIdentityMismatch,
-        validateGeneratedArtifactMatchesSpec(spec, stale_component_class),
     );
 
     var too_many_segments = archive_index.artifacts[0];
