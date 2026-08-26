@@ -29,6 +29,8 @@ pub const max_payload_bytes = volume_layout.max_payload_bytes;
 pub const required_device_sectors = volume_layout.required_device_sectors;
 pub const max_signer_bytes = volume_layout.max_signer_bytes;
 pub const SIGNER_TEXT_POOL_BYTES: usize = 12 * 1024;
+pub const HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING = true;
+pub const SIGNER_TEXT_POOL_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const SCRUBS_ONLY_USED_SIGNER_TEXT = true;
 pub const replay_gate_records = volume_layout.max_replay_log_records;
 pub const replay_gate_segments = volume_layout.max_log_segments;
@@ -38,12 +40,24 @@ pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
 pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
+const SignerTextPool = [SIGNER_TEXT_POOL_BYTES]u8;
+const heap_backed_signer_text_pool = builtin.target.os.tag == .freestanding and HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING;
+const SignerTextPoolBacking = if (heap_backed_signer_text_pool) ?*SignerTextPool else SignerTextPool;
 
 comptime {
     if (SIGNER_TEXT_POOL_BYTES > std.math.maxInt(u16)) {
         @compileError("signer text pool exceeds its compact length field");
     }
+    if (heap_backed_signer_text_pool and @sizeOf(SignerTextPoolBacking) > SIGNER_TEXT_POOL_HANDLE_SIZE_CEILING_BYTES) {
+        @compileError("heap-backed signer text pool exceeds its handle size ceiling");
+    }
 }
+
+pub const signer_text_layout = .{
+    .pool_size_bytes = @sizeOf(SignerTextPool),
+    .freestanding_handle_size_bytes = @sizeOf(?*SignerTextPool),
+    .heap_backs_pool_on_freestanding = HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING,
+};
 
 const data_start_byte = volume_layout.data_start_byte;
 const data_region_bytes = DATA_REGION_BYTES;
@@ -110,7 +124,7 @@ pub const Volume = struct {
     attached_backend_flush: *const fn () callconv(.c) bool = volume_backend.unattachedFlush,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
     signer_text_len: u16 = 0,
-    signer_text_pool: [SIGNER_TEXT_POOL_BYTES]u8 = [_]u8{0} ** SIGNER_TEXT_POOL_BYTES,
+    signer_text_pool: SignerTextPoolBacking = if (heap_backed_signer_text_pool) null else [_]u8{0} ** SIGNER_TEXT_POOL_BYTES,
     workspace_state_hashes: WorkspaceStateHashCache = .{},
 
     pub fn init() Volume {
@@ -151,10 +165,32 @@ pub const Volume = struct {
         }
     }
 
-    // Keep the variable-length secure scrub out of replay's hot instruction path.
+    fn signerTextPool(self: *Volume) ?*SignerTextPool {
+        if (comptime heap_backed_signer_text_pool) return self.signer_text_pool;
+        return &self.signer_text_pool;
+    }
+
+    fn ensureSignerTextPool(self: *Volume) Error!*SignerTextPool {
+        if (self.signerTextPool()) |pool| return pool;
+        if (comptime heap_backed_signer_text_pool) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(SignerTextPool)) orelse return error.NoSpaceLeft;
+            const pool: *SignerTextPool = @ptrCast(@alignCast(allocation));
+            self.signer_text_pool = pool;
+            return pool;
+        }
+        return &self.signer_text_pool;
+    }
+
+    // Keep the variable-length secure scrub and release out of replay's hot instruction path.
     noinline fn resetSignerText(self: *Volume) void {
-        const used = @min(@as(usize, self.signer_text_len), self.signer_text_pool.len);
-        if (used != 0) @memset(self.signer_text_pool[0..used], 0);
+        const used = @min(@as(usize, self.signer_text_len), SIGNER_TEXT_POOL_BYTES);
+        if (self.signerTextPool()) |pool| {
+            if (used != 0) @memset(pool[0..used], 0);
+            if (comptime heap_backed_signer_text_pool) {
+                kernel_memory.kfree(@ptrCast(pool));
+                self.signer_text_pool = null;
+            }
+        }
         self.signer_text_len = 0;
     }
 
@@ -164,26 +200,27 @@ pub const Volume = struct {
             return error.InvalidSignatureEncoding;
         }
 
+        const pool = try self.ensureSignerTextPool();
         const used: usize = self.signer_text_len;
         var offset: usize = 0;
         while (offset < used) {
-            const stored_len: usize = self.signer_text_pool[offset];
+            const stored_len: usize = pool[offset];
             const start = offset + 1;
             const end = start + stored_len;
             if (end > used) return error.InvalidSignatureEncoding;
-            if (std.mem.eql(u8, self.signer_text_pool[start..end], signer)) {
-                return self.signer_text_pool[start..end];
+            if (std.mem.eql(u8, pool[start..end], signer)) {
+                return pool[start..end];
             }
             offset = end;
         }
 
         const start = used + 1;
         const end = start + signer.len;
-        if (end > self.signer_text_pool.len) return error.InvalidSignatureEncoding;
-        self.signer_text_pool[used] = @intCast(signer.len);
-        @memcpy(self.signer_text_pool[start..end], signer);
+        if (end > pool.len) return error.InvalidSignatureEncoding;
+        pool[used] = @intCast(signer.len);
+        @memcpy(pool[start..end], signer);
         self.signer_text_len = @intCast(end);
-        return self.signer_text_pool[start..end];
+        return pool[start..end];
     }
 
     pub fn attachBackend(self: *Volume, backend: Backend) void {
@@ -1953,6 +1990,10 @@ test "storage append rejects issuance watermark rewind" {
 }
 
 test "storage volume interns repeated signer labels within a bounded pool" {
+    try std.testing.expectEqual(SIGNER_TEXT_POOL_BYTES, signer_text_layout.pool_size_bytes);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), signer_text_layout.freestanding_handle_size_bytes);
+    try std.testing.expect(signer_text_layout.heap_backs_pool_on_freestanding);
+
     var volume = Volume.init();
     const first = try volume.internSigner("persistent-key");
     const repeated = try volume.internSigner("persistent-key");

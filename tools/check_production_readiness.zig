@@ -2898,6 +2898,22 @@ fn validateStorageModernOnlyTrack(
             try common.addError(errors, allocator, "Storage production track must keep modern-only/indexed replay snippet: {s}", .{snippet});
         }
     }
+    const signer_text_pool_snippets = [_][]const u8{
+        "pub const HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING = true",
+        "pub const SIGNER_TEXT_POOL_HANDLE_SIZE_CEILING_BYTES: usize = 8",
+        "const SignerTextPoolBacking = if (heap_backed_signer_text_pool) ?*SignerTextPool else SignerTextPool",
+        "const allocation = kernel_memory.kmalloc(@sizeOf(SignerTextPool)) orelse return error.NoSpaceLeft",
+        "if (used != 0) @memset(pool[0..used], 0)",
+        "kernel_memory.kfree(@ptrCast(pool))",
+    };
+    for (signer_text_pool_snippets) |snippet| {
+        if (std.mem.indexOf(u8, source, snippet) == null) {
+            try common.addError(errors, allocator, "Storage production track must keep on-demand signer text storage: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, source, "signer_text_pool: [SIGNER_TEXT_POOL_BYTES]u8") != null) {
+        try common.addError(errors, allocator, "Storage production track must not restore the freestanding inline signer text pool", .{});
+    }
     const production_attachment_snippets = [_][]const u8{
         "pub fn attachNvmePciBackend(self: *Volume, backend: Backend) void",
         "pub fn hasProductionStorageBackend(self: *const Volume) bool",
