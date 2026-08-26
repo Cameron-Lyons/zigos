@@ -2194,6 +2194,8 @@ fn validateNuc11tnki5KernelProofSources(
         "configureDeviceSlots",
         "SUPPORTED_PROTOCOL_CAPABILITY_ID: u8 = 2",
         "SUPPORTED_PROTOCOL_USB_NAME_STRING: u32 = 0x2042_5355",
+        "SUPPORTED_PROTOCOLS_SIZE_CEILING_BYTES: usize = 770",
+        "SupportedProtocolRange",
         "parseSupportedProtocols",
         "OverlappingSupportedProtocolPorts",
         "endpointZeroMaxPacketSize",
@@ -2259,6 +2261,9 @@ fn validateNuc11tnki5KernelProofSources(
         if (std.mem.indexOf(u8, xhci_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 xHCI proof source must enforce hardware-owned event-ring snippet: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, xhci_source, "ports: [256]?PortProtocol") != null) {
+        try common.addError(errors, allocator, "xHCI supported protocols must remain stored as capability ranges", .{});
     }
     const required_xhci_hw_snippets = [_][]const u8{
         "pci.memoryBar0(device_info)",

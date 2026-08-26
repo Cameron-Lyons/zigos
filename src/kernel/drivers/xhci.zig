@@ -64,6 +64,7 @@ pub const ENDPOINT_ZERO_DCI: u5 = 1;
 pub const CAPABILITY_REGISTERS_BYTES: usize = 0x20;
 pub const MAX_EXTENDED_CAPABILITY_OFFSET: u32 = @as(u32, std.math.maxInt(u16)) << 2;
 pub const MAX_EXTENDED_CAPABILITIES: usize = 64;
+pub const SUPPORTED_PROTOCOLS_SIZE_CEILING_BYTES: usize = 770;
 pub const CONTROLLER_HALT_TIMEOUT_MILLISECONDS: u64 = 16;
 pub const CONTROLLER_HANDSHAKE_TIMEOUT_MILLISECONDS: u64 = 1_000;
 
@@ -788,14 +789,65 @@ fn fullOrLowSpeedInterruptInterval(descriptor_interval: u8) u8 {
     return interval;
 }
 
+const SupportedProtocolRange = struct {
+    first_port: u8 = 0,
+    port_count: u8 = 0,
+    protocol: PortProtocol = .{ .kind = .usb2, .slot_type = 0 },
+
+    fn contains(self: SupportedProtocolRange, port_id: u8) bool {
+        const port = @as(u16, port_id);
+        const first = @as(u16, self.first_port);
+        return port >= first and port < first + self.port_count;
+    }
+
+    fn overlaps(self: SupportedProtocolRange, first_port: u8, port_count: u8) bool {
+        const self_first = @as(u16, self.first_port);
+        const self_end = self_first + self.port_count;
+        const other_first = @as(u16, first_port);
+        const other_end = other_first + port_count;
+        return self_first < other_end and other_first < self_end;
+    }
+};
+
 pub const SupportedProtocols = struct {
-    ports: [256]?PortProtocol = [_]?PortProtocol{null} ** 256,
+    ranges: [MAX_EXTENDED_CAPABILITIES]SupportedProtocolRange =
+        [_]SupportedProtocolRange{.{}} ** MAX_EXTENDED_CAPABILITIES,
+    range_count: u8 = 0,
 
     pub fn forPort(self: *const SupportedProtocols, port_id: u8) ?PortProtocol {
         if (port_id == 0) return null;
-        return self.ports[port_id];
+        for (self.ranges[0..self.range_count]) |range| {
+            if (range.contains(port_id)) return range.protocol;
+        }
+        return null;
+    }
+
+    fn append(
+        self: *SupportedProtocols,
+        first_port: u8,
+        port_count: u8,
+        protocol: PortProtocol,
+    ) Error!void {
+        for (self.ranges[0..self.range_count]) |range| {
+            if (range.overlaps(first_port, port_count)) {
+                return error.OverlappingSupportedProtocolPorts;
+            }
+        }
+        if (self.range_count == self.ranges.len) return error.ExtendedCapabilityTraversalLimit;
+        self.ranges[self.range_count] = .{
+            .first_port = first_port,
+            .port_count = port_count,
+            .protocol = protocol,
+        };
+        self.range_count += 1;
     }
 };
+
+comptime {
+    if (@sizeOf(SupportedProtocols) > SUPPORTED_PROTOCOLS_SIZE_CEILING_BYTES) {
+        @compileError("xHCI supported-protocol metadata exceeds its compact size ceiling");
+    }
+}
 
 pub const PortStatus = struct {
     connected: bool,
@@ -2319,7 +2371,6 @@ pub fn parseSupportedProtocols(
     }
 
     var protocols = SupportedProtocols{};
-    var found = false;
     var terminal = false;
     var offset = first_offset;
     var visited: usize = 0;
@@ -2466,23 +2517,14 @@ pub fn parseSupportedProtocols(
                 }
                 if (pending_asymmetric_rx != null) return error.InvalidSupportedProtocol;
             }
-            var port: u16 = first_port;
-            const port_end = @as(u16, first_port) + port_count;
-            while (port < port_end) : (port += 1) {
-                const index: usize = port;
-                if (protocols.ports[index] != null) {
-                    return error.OverlappingSupportedProtocolPorts;
-                }
-                protocols.ports[index] = .{
-                    .kind = kind,
-                    .slot_type = slot_type,
-                    .speed_ids = speed_ids,
-                    .low_speed_ids = low_speed_ids,
-                    .full_speed_ids = full_speed_ids,
-                    .high_speed_ids = high_speed_ids,
-                };
-            }
-            found = true;
+            try protocols.append(first_port, port_count, .{
+                .kind = kind,
+                .slot_type = slot_type,
+                .speed_ids = speed_ids,
+                .low_speed_ids = low_speed_ids,
+                .full_speed_ids = full_speed_ids,
+                .high_speed_ids = high_speed_ids,
+            });
         }
 
         const next_dwords = (header >> EXTENDED_CAPABILITY_NEXT_POINTER_SHIFT) &
@@ -2499,7 +2541,7 @@ pub fn parseSupportedProtocols(
         offset += delta;
     }
     if (!terminal) return error.ExtendedCapabilityTraversalLimit;
-    if (!found) return error.MissingSupportedProtocols;
+    if (protocols.range_count == 0) return error.MissingSupportedProtocols;
     return protocols;
 }
 
@@ -3485,6 +3527,8 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
     capabilities.max_ports = 12;
     const reader = TestExtendedCapabilityReader{ .bytes = &registers };
     const protocols = try parseSupportedProtocols(capabilities, 0x40, reader);
+    try std.testing.expectEqual(@as(usize, 770), @sizeOf(SupportedProtocols));
+    try std.testing.expectEqual(@as(u8, 2), protocols.range_count);
     try std.testing.expectEqual(ProtocolKind.usb2, protocols.forPort(1).?.kind);
     try std.testing.expectEqual(@as(u5, 0), protocols.forPort(6).?.slot_type);
     try std.testing.expectEqual(@as(u16, 64), try endpointZeroMaxPacketSize(protocols.forPort(1).?, 3));
@@ -3499,6 +3543,10 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
         endpointZeroMaxPacketSize(protocols.forPort(7).?, 3),
     );
     try std.testing.expect(protocols.forPort(0) == null);
+
+    var full_range = SupportedProtocols{};
+    try full_range.append(1, std.math.maxInt(u8), .{ .kind = .usb3, .slot_type = 1 });
+    try std.testing.expectEqual(ProtocolKind.usb3, full_range.forPort(std.math.maxInt(u8)).?.kind);
 
     writeU32Le(registers[0x58..0x5C], 6 | (@as(u32, 6) << 8));
     try std.testing.expectError(
