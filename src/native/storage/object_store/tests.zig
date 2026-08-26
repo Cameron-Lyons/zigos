@@ -128,6 +128,7 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(model.signed);
     try std.testing.expect(model.versioned);
     try std.testing.expectEqual(@as(u32, 2), model.sync_generation);
+    try std.testing.expectEqual(@as(u32, 1), model.sharing_policy_generation);
     try std.testing.expect(model.has_history);
     try std.testing.expect(model.has_sync_policy);
     try std.testing.expect(model.has_sharing_policy);
@@ -138,10 +139,11 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(object_store.DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT);
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "snapshot_state"));
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "sync_state"));
+    try std.testing.expect(object_store.DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA);
+    try std.testing.expect(!@hasField(object_store.ObjectProvenance, "latest_version_addressed"));
+    try std.testing.expect(!@hasField(object_store.ObjectRecord, "sharing_policy"));
+    try std.testing.expect(!@hasField(object_store.ObjectRecord, "recovery_history"));
     try std.testing.expectEqual(@as(usize, object_store.OBJECT_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectRecord));
-    try std.testing.expect(object.sharing_policy.requires_explicit_file_bridge_grant);
-    try std.testing.expect(object.sharing_policy.export_only_file_bridge);
-    try std.testing.expectEqual(first.version_id, object.recovery_history.latest_recoverable_version_id);
 }
 
 test "signed metadata rejects overlong labels instead of truncating" {
