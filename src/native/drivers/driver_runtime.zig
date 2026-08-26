@@ -19,9 +19,22 @@ pub const COMPACT_ACTIVATION_METADATA = true;
 pub const DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION = true;
 pub const DERIVES_ACTIVATION_STATE_FLAGS = true;
 pub const DERIVES_ACTIVATION_GENERATION_FROM_DRIVER = true;
+pub const DIRECT_ACTIVATION_CLASS_SLOTS = true;
+pub const ACTIVATION_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 32;
-pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_048;
+pub const RUNTIME_SIZE_CEILING_BYTES: usize = 896;
 const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
+pub const ACTIVATION_CLASS_COUNT: usize = std.meta.fields(driver_service.DeviceClass).len;
+pub const ActivationClassSlotIndex = indexed_arena.ReusableIndex(MAX_ACTIVATIONS);
+const NO_ACTIVATION_CLASS_SLOT = indexed_arena.reusableNoIndex(MAX_ACTIVATIONS);
+
+comptime {
+    for (std.meta.fields(driver_service.DeviceClass), 0..) |field, class_index| {
+        if (field.value != class_index) {
+            @compileError("driver device classes must remain dense for direct activation lookup");
+        }
+    }
+}
 
 pub const ActivationMode = enum(u8) {
     control_only,
@@ -77,13 +90,12 @@ const ActivationSlot = struct {
 };
 
 const ActivationArena = indexed_arena.IndexedArena(ActivationSlot, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY, activationSlotKey);
-const ActivationClassIndex = indexed_arena.UniqueIndex(SERVICE_INDEX_CAPACITY);
 const ActivationServiceIndex = indexed_arena.MultimapIndex(MAX_ACTIVATIONS, MAX_ACTIVATIONS, SERVICE_INDEX_CAPACITY);
 
 pub const Runtime = struct {
     kernel_port: ?*component_port.KernelPort = null,
     arena: ActivationArena = ActivationArena.init(),
-    class_index: ActivationClassIndex = ActivationClassIndex.init(),
+    class_slots: [ACTIVATION_CLASS_COUNT]ActivationClassSlotIndex = [_]ActivationClassSlotIndex{NO_ACTIVATION_CLASS_SLOT} ** ACTIVATION_CLASS_COUNT,
     service_index: ActivationServiceIndex = ActivationServiceIndex.init(),
 
     pub fn init() Runtime {
@@ -184,7 +196,8 @@ pub const Runtime = struct {
     }
 
     pub fn findByClass(self: *const Runtime, device_class: driver_service.DeviceClass) ?ActivationRecord {
-        const slot_index = self.class_index.lookup(deviceClassKey(device_class)) orelse return null;
+        const slot_index = self.class_slots[activationClassIndex(device_class)];
+        if (slot_index == NO_ACTIVATION_CLASS_SLOT) return null;
         if (slot_index >= MAX_ACTIVATIONS) return null;
         const slot = self.arena.slots[slot_index];
         if (!slot.in_use or slot.activation.device_class != device_class) return null;
@@ -226,10 +239,9 @@ pub const Runtime = struct {
 
     fn upsert(self: *Runtime, activation: ActivationRecord) Error!ActivationRecord {
         if (self.findByServiceClassSlot(activation.service_id, activation.device_class)) |slot| {
-            self.class_index.remove(deviceClassKey(slot.activation.device_class));
             slot.activation = activation;
             const slot_index = self.arena.slotIndexOf(activationKeyFor(activation.service_id, activation.device_class)).?;
-            self.class_index.insert(deviceClassKey(activation.device_class), slot_index);
+            self.class_slots[activationClassIndex(activation.device_class)] = @intCast(slot_index);
             return slot.activation;
         }
 
@@ -240,7 +252,7 @@ pub const Runtime = struct {
             _ = self.arena.removeIndex(slot_index);
             return error.ActivationTableFull;
         }
-        self.class_index.insert(deviceClassKey(activation.device_class), slot_index);
+        self.class_slots[activationClassIndex(activation.device_class)] = @intCast(slot_index);
         return slot.activation;
     }
 
@@ -275,6 +287,10 @@ fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
     return @as(u64, @intFromEnum(device_class)) + 1;
 }
 
+fn activationClassIndex(device_class: driver_service.DeviceClass) usize {
+    return @intFromEnum(device_class);
+}
+
 fn zeroActivation() ActivationRecord {
     return .{
         .service_id = 0,
@@ -288,11 +304,40 @@ fn zeroActivation() ActivationRecord {
 
 test "driver runtime uses compact bounded activation metadata" {
     try std.testing.expect(COMPACT_ACTIVATION_METADATA);
+    try std.testing.expect(DIRECT_ACTIVATION_CLASS_SLOTS);
+    try std.testing.expectEqual(@as(u8, 0), ACTIVATION_CLASS_HASH_PROBES_PER_QUERY);
+    try std.testing.expect(@FieldType(Runtime, "class_slots") == [ACTIVATION_CLASS_COUNT]ActivationClassSlotIndex);
+    try std.testing.expect(!@hasField(Runtime, "class_index"));
     try std.testing.expect(DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION);
     try std.testing.expect(DERIVES_ACTIVATION_GENERATION_FROM_DRIVER);
     try std.testing.expect(!@hasField(Runtime, "next_activation_generation"));
     try std.testing.expectEqual(@as(usize, ACTIVATION_RECORD_SIZE_CEILING_BYTES), @sizeOf(ActivationRecord));
     try std.testing.expectEqual(@as(usize, RUNTIME_SIZE_CEILING_BYTES), @sizeOf(Runtime));
+}
+
+test "direct activation class slots follow the latest upsert" {
+    var runtime = Runtime.init();
+    var first = zeroActivation();
+    first.service_id = 41;
+    first.device_id = 401;
+    first.device_class = .network_adapter;
+    first.dma_domain_id = 4_001;
+    first.activation_generation = 1;
+    _ = try runtime.upsert(first);
+    try std.testing.expectEqual(first.service_id, runtime.findByClass(.network_adapter).?.service_id);
+
+    var second = first;
+    second.service_id = 42;
+    second.device_id = 402;
+    second.dma_domain_id = 4_002;
+    _ = try runtime.upsert(second);
+    try std.testing.expectEqual(second.service_id, runtime.findByClass(.network_adapter).?.service_id);
+
+    first.activation_generation = 2;
+    _ = try runtime.upsert(first);
+    const latest = runtime.findByClass(.network_adapter).?;
+    try std.testing.expectEqual(first.service_id, latest.service_id);
+    try std.testing.expectEqual(first.activation_generation, latest.activation_generation);
 }
 
 test "kernel bootstrap cannot publish network data-plane transports" {
