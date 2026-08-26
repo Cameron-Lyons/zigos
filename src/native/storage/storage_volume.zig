@@ -1085,7 +1085,7 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
         try writeShareGrant(writer, grant);
     }
     try writer.writeU16(@intCast(record.counts.deleted_count));
-    for (record.recoverable_deletes.deleted_entries[0..record.counts.deleted_count]) |entry| {
+    for (record.recoverable_deletes.entriesConst(record.counts.deleted_count)) |entry| {
         try writeEntry(writer, entry);
     }
 }
@@ -1250,13 +1250,27 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
         }
     }
     slot.workspace.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, &reader, workspace.MAX_RECOVERABLE_DELETES);
-    for (0..slot.workspace.counts.deleted_count) |entry_index| {
-        slot.workspace.recoverable_deletes.deleted_entries[entry_index] = try readEntry(&reader);
+    if (slot.workspace.counts.deleted_count != 0) {
+        slot.workspace.recoverable_deletes.ensureBacking() catch {
+            if (existing_slot == null) {
+                slot.workspace.mutation_log.releaseBacking();
+                std.debug.assert(workspaces.workspaces.remove(workspace_id));
+            }
+            return error.NoSpaceLeft;
+        };
     }
-    if (slot.workspace.counts.deleted_count < previous_deleted_count) {
-        for (slot.workspace.recoverable_deletes.deleted_entries[slot.workspace.counts.deleted_count..previous_deleted_count]) |*entry| {
-            entry.* = .{};
+    if (slot.workspace.counts.deleted_count != 0) {
+        const deleted_entries = slot.workspace.recoverable_deletes.entries();
+        for (0..slot.workspace.counts.deleted_count) |entry_index| {
+            deleted_entries[entry_index] = try readEntry(&reader);
         }
+        if (slot.workspace.counts.deleted_count < previous_deleted_count) {
+            for (deleted_entries[slot.workspace.counts.deleted_count..previous_deleted_count]) |*entry| {
+                entry.* = .{};
+            }
+        }
+    } else if (previous_deleted_count != 0) {
+        slot.workspace.recoverable_deletes.releaseBacking();
     }
 
     slot.workspace.staging.transaction_open = false;
@@ -1471,8 +1485,16 @@ fn deserializeState(
             slot.workspace.share_table.share_grants[grant_index] = try readShareGrant(&reader);
         }
         slot.workspace.counts.deleted_count = try readBoundedCount(workspace.RecoverableDeleteCount, &reader, workspace.MAX_RECOVERABLE_DELETES);
-        for (0..slot.workspace.counts.deleted_count) |entry_index| {
-            slot.workspace.recoverable_deletes.deleted_entries[entry_index] = try readEntry(&reader);
+        if (slot.workspace.counts.deleted_count != 0) {
+            slot.workspace.recoverable_deletes.ensureBacking() catch {
+                slot.workspace.mutation_log.releaseBacking();
+                std.debug.assert(workspaces.workspaces.remove(workspace_id));
+                return error.NoSpaceLeft;
+            };
+            const deleted_entries = slot.workspace.recoverable_deletes.entries();
+            for (0..slot.workspace.counts.deleted_count) |entry_index| {
+                deleted_entries[entry_index] = try readEntry(&reader);
+            }
         }
     }
 
@@ -1825,8 +1847,8 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     live.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 42 } };
     live.share_table.share_grants[1] = .{ .principal_id = .{ .kind = .user, .serial = 43 } };
     live.counts.deleted_count = 2;
-    live.recoverable_deletes.deleted_entries[0] = live.path_index.entries[0];
-    live.recoverable_deletes.deleted_entries[1] = live.path_index.entries[1];
+    live.recoverable_deletes.entries()[0] = live.path_index.entries[0];
+    live.recoverable_deletes.entries()[1] = live.path_index.entries[1];
     live.staging.transaction_open = true;
     live.staging.staged_entry_count = 1;
     live.staging.staged_effective_entry_count = 2;
@@ -1849,7 +1871,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     replacement.counts.share_grant_count = 1;
     replacement.share_table.share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 44 } };
     replacement.counts.deleted_count = 1;
-    replacement.recoverable_deletes.deleted_entries[0] = replacement.path_index.entries[0];
+    replacement.recoverable_deletes.entries()[0] = replacement.path_index.entries[0];
 
     const payload = try allocator.alloc(u8, max_payload_bytes);
     defer allocator.free(payload);
@@ -1865,7 +1887,7 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[1]);
     try std.testing.expectEqual(principal.PrincipalKind.service, live.share_table.share_grants[1].principal_id.kind);
     try std.testing.expectEqual(@as(u64, 0), live.share_table.share_grants[1].principal_id.serial);
-    try std.testing.expectEqualDeep(workspace.Entry{}, live.recoverable_deletes.deleted_entries[1]);
+    try std.testing.expectEqualDeep(workspace.Entry{}, live.recoverable_deletes.entries()[1]);
     try std.testing.expect(!live.staging.transaction_open);
     try std.testing.expectEqual(@as(usize, 0), live.staging.staged_entry_count);
     try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[2]);
