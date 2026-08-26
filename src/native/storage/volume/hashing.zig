@@ -20,8 +20,11 @@ pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_error
     }
 
     hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.share_grant_count));
-    for (record.share_table.share_grants[0..record.counts.share_grant_count]) |grant| {
-        hash = hashShareGrant(hash, grant);
+    if (record.counts.share_grant_count != 0) {
+        const share_table = record.share_table.dataConst();
+        for (share_table.share_grants[0..record.counts.share_grant_count]) |grant| {
+            hash = hashShareGrant(hash, grant);
+        }
     }
 
     hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.deleted_count));

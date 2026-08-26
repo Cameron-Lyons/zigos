@@ -525,7 +525,7 @@ test "workspace sharing acts as a mutable policy container" {
         .audit_visibility = .shared_participants,
     });
     const app_grant_key = workspace_model.shareGrantPrincipalKey(.{ .kind = .app, .serial = 7 });
-    try std.testing.expectEqual(@as(usize, 1), notes.share_table.share_grant_principal_index.count(app_grant_key));
+    try std.testing.expectEqual(@as(usize, 1), notes.share_table.data().share_grant_principal_index.count(app_grant_key));
     const initial = directory.findShareGrant(notes.id, .{ .kind = .app, .serial = 7 }).?;
     try std.testing.expectEqual(ShareNetworkScope.trusted_overlay, initial.network_scope);
     try std.testing.expectEqual(ResharePolicy.admin_only, initial.reshare_policy);
@@ -556,7 +556,7 @@ test "workspace sharing acts as a mutable policy container" {
         .reshare_policy = .owner_only,
         .audit_visibility = .organization_policy,
     });
-    try std.testing.expectEqual(@as(usize, 1), notes.share_table.share_grant_principal_index.count(app_grant_key));
+    try std.testing.expectEqual(@as(usize, 1), notes.share_table.data().share_grant_principal_index.count(app_grant_key));
     const updated = directory.findShareGrant(notes.id, .{ .kind = .app, .serial = 7 }).?;
     try std.testing.expectEqual(ShareNetworkScope.local_only, updated.network_scope);
     try std.testing.expectEqual(ResharePolicy.owner_only, updated.reshare_policy);

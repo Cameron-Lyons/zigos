@@ -1216,7 +1216,7 @@ pub const indexed_hot_path_tables = .{
         .uses_path_index = @hasField(workspace.WorkspaceRecord, "path_index"),
         .tracks_mutation_log = @hasField(workspace.WorkspaceRecord, "mutation_log"),
         .tracks_share_table = @hasField(workspace.WorkspaceRecord, "share_table"),
-        .uses_share_grant_principal_index = @hasField(workspace.WorkspaceShareTable, "share_grant_principal_index"),
+        .uses_share_grant_principal_index = workspace.workspace_share_table_layout.uses_principal_index,
         .tracks_staging_state = @hasField(workspace.WorkspaceRecord, "staging"),
         .reuses_mutation_log_tail_for_staging = !@hasField(workspace.WorkspaceStagingState, "staged_entries"),
         .stores_compact_staging_metadata = workspace.COMPACT_STAGING_METADATA and
@@ -1250,6 +1250,10 @@ pub const indexed_hot_path_tables = .{
             workspace.recoverable_delete_layout.heap_backs_log_on_freestanding and
             workspace.recoverable_delete_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
             workspace.recoverable_delete_layout.backing_size_bytes == @sizeOf(workspace.Entry) * workspace.MAX_RECOVERABLE_DELETES,
+        .heap_backs_workspace_sharing_on_freestanding = workspace.HEAP_BACKED_WORKSPACE_SHARE_TABLES_ON_FREESTANDING and
+            workspace.workspace_share_table_layout.heap_backs_table_on_freestanding and
+            workspace.workspace_share_table_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
+            workspace.workspace_share_table_layout.backing_size_bytes == 1_472,
         .uses_compact_path_lengths = @sizeOf(workspace.WorkspacePathLength) == 1,
         .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),

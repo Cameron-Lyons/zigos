@@ -1072,8 +1072,7 @@ fn shareSlotAvailable(record: *const workspace.WorkspaceRecord, principal_id: pr
 }
 
 fn findGrantInRecord(record: *const workspace.WorkspaceRecord, principal_id: principal.PrincipalId) ?workspace.ShareGrant {
-    const grant_index = workspace.shareGrantSlotIndex(record, principal_id) orelse return null;
-    return record.share_table.share_grants[grant_index];
+    return record.findShareGrant(principal_id);
 }
 
 fn boundedGrantExpiry(requested_expiry: u64, authority_expiry: u64) u64 {
