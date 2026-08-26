@@ -737,7 +737,14 @@ pub const indexed_hot_path_tables = .{
             driver_runtime.DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION and
             @hasDecl(driver_runtime.ActivationRecord, "publisherSlice") and
             !@hasField(driver_runtime.ActivationRecord, "publisher_len") and
-            !@hasField(driver_runtime.ActivationRecord, "publisher"),
+            !@hasField(driver_runtime.ActivationRecord, "publisher") and
+            driver_runtime.DERIVES_ACTIVATION_STATE_FLAGS and
+            @hasDecl(driver_runtime.ActivationRecord, "iommuEnforced") and
+            @hasDecl(driver_runtime.ActivationRecord, "hasExclusiveClaim") and
+            @hasDecl(driver_runtime.ActivationRecord, "kernelBootstrap") and
+            !@hasField(driver_runtime.ActivationRecord, "iommu_enforced") and
+            !@hasField(driver_runtime.ActivationRecord, "exclusive_claim") and
+            !@hasField(driver_runtime.ActivationRecord, "kernel_bootstrap"),
         .keeps_activation_state_within_ceilings = @sizeOf(driver_runtime.ActivationRecord) <= driver_runtime.ACTIVATION_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(driver_runtime.Runtime) <= driver_runtime.RUNTIME_SIZE_CEILING_BYTES,
     },

@@ -93,9 +93,9 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         const activation = driver_runtime.findByClass(expectation.device_class) orelse return error.MissingBootedDriverBinding;
         try std.testing.expectEqual(driver.service_id, activation.service_id);
         try std.testing.expectEqual(driver.device_id, activation.device_id);
-        try std.testing.expect(activation.iommu_enforced);
-        try std.testing.expect(!activation.kernel_bootstrap);
-        try std.testing.expect(activation.exclusive_claim);
+        try std.testing.expect(activation.iommuEnforced());
+        try std.testing.expect(!activation.kernelBootstrap());
+        try std.testing.expect(activation.hasExclusiveClaim());
         switch (expectation.device_class) {
             .storage_controller => try std.testing.expect(
                 activation.mode == .published_data_plane or

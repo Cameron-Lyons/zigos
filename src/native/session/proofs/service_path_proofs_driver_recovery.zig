@@ -136,8 +136,8 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
 
     const initial_activation = try driver_runtime.activateAt(storage_driver, 780);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, initial_activation.mode);
-    try std.testing.expect(initial_activation.exclusive_claim);
-    try std.testing.expect(initial_activation.iommu_enforced);
+    try std.testing.expect(initial_activation.hasExclusiveClaim());
+    try std.testing.expect(initial_activation.iommuEnforced());
 
     runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
     const descriptor_before = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 781);
@@ -385,7 +385,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(input_driver.service_id, compositor_service_record.id);
     try std.testing.expectEqual(input_activation_before.activation_generation, input_activation_after.activation_generation);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_activation_after.mode);
-    try std.testing.expect(input_activation_after.exclusive_claim);
+    try std.testing.expect(input_activation_after.hasExclusiveClaim());
     try std.testing.expectEqual(compositor_service_record.id, bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
     try std.testing.expectEqual(network_restart_count_before, network_service.restart_count);
     try std.testing.expectEqual(network_process_generation_before, network_task.process_generation);

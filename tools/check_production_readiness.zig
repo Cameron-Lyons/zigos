@@ -3668,6 +3668,28 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
 
+    const derived_activation_state_snippets = [_][]const u8{
+        "pub const DERIVES_ACTIVATION_STATE_FLAGS = true",
+        "pub fn iommuEnforced(self: *const ActivationRecord) bool",
+        "pub fn hasExclusiveClaim(self: *const ActivationRecord) bool",
+        "pub fn kernelBootstrap(self: *const ActivationRecord) bool",
+    };
+    for (derived_activation_state_snippets) |snippet| {
+        if (std.mem.indexOf(u8, driver_runtime_source, snippet) == null) {
+            try common.addError(errors, allocator, "Driver activation metadata must retain derived state invariant: {s}", .{snippet});
+        }
+    }
+    const retired_activation_state_snippets = [_][]const u8{
+        "iommu_enforced: bool",
+        "exclusive_claim: bool",
+        "kernel_bootstrap: bool",
+    };
+    for (retired_activation_state_snippets) |snippet| {
+        if (std.mem.indexOf(u8, driver_runtime_source, snippet) != null) {
+            try common.addError(errors, allocator, "Driver activation metadata must not restore duplicate state flags: {s}", .{snippet});
+        }
+    }
+
     const network_activation_snippets = [_][]const u8{
         "networkPublicationMatchesTargetI225",
         "device_inventory.requireProductionDriverDeviceId(.network_adapter)",

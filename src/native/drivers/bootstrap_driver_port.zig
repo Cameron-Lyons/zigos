@@ -268,6 +268,30 @@ pub fn activePublicationPublisher(
     };
 }
 
+pub fn publicationUsesKernelBootstrap(
+    device_class: driver_service.DeviceClass,
+    device_id: u64,
+) bool {
+    return switch (device_class) {
+        .network_adapter => if (published_network) |*publication|
+            publication.device_id == device_id and publication.kernel_bootstrap
+        else
+            false,
+        .storage_controller => if (published_storage) |*publication|
+            publication.device_id == device_id and publication.kernel_bootstrap
+        else
+            false,
+        .usb_controller, .graphics_adapter, .audio_print_io, .input_device, .compositor_policy => blk: {
+            if (published_device_planes[deviceClassIndex(device_class)]) |*publication| {
+                break :blk publication.device_class == device_class and
+                    publication.device_id == device_id and
+                    publication.kernel_bootstrap;
+            }
+            break :blk false;
+        },
+    };
+}
+
 pub fn hasActiveNetworkDevice() bool {
     return network_driver_task.hasActiveDevice();
 }
