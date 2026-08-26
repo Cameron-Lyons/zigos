@@ -3186,6 +3186,7 @@ fn validateResourceSchedulerTelemetryTrack(
     const platform_policy_signals_path = "src/native/platform/platform_policy_signals.zig";
     const benchmark_path = "src/kernel/boot/benchmark/suite.zig";
     const service_graph_builder_path = "src/native/session/service_graph_builder.zig";
+    const supervisor_path = "src/native/session/supervisor.zig";
     const session_manager_support_path = "src/native/session/session_manager_support.zig";
     const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
     const session_demo_boot_path = "src/native/demo/session_demo_boot.zig";
@@ -3196,6 +3197,7 @@ fn validateResourceSchedulerTelemetryTrack(
     const platform_policy_signals_source = try readRequiredSource(allocator, io, errors, platform_policy_signals_path) orelse return;
     const benchmark_source = try readRequiredSource(allocator, io, errors, benchmark_path) orelse return;
     const service_graph_builder_source = try readRequiredSource(allocator, io, errors, service_graph_builder_path) orelse return;
+    const supervisor_source = try readRequiredSource(allocator, io, errors, supervisor_path) orelse return;
     const session_manager_support_source = try readRequiredSource(allocator, io, errors, session_manager_support_path) orelse return;
     const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
     const session_demo_boot_source = try readRequiredSource(allocator, io, errors, session_demo_boot_path) orelse return;
@@ -3278,6 +3280,28 @@ fn validateResourceSchedulerTelemetryTrack(
     }
     if (std.mem.indexOf(u8, service_graph_builder_source, "background_dispatcher: background_dispatch.Controller =") != null) {
         try common.addError(errors, allocator, "Background dispatch must not return to inline freestanding service-graph storage", .{});
+    }
+
+    const supervisor_diagnostic_storage_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "pub const ACTIONABLE_DIAGNOSTICS_ONLY = true" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "pub const HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING = true" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "const DiagnosticBacking = if (heap_backed_actionable_diagnostics) ?*DiagnosticArray else DiagnosticArray" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(DiagnosticArray)) orelse return null" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "@memset(std.mem.asBytes(diagnostics), 0)" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "kernel_memory.kfree(@ptrCast(diagnostics))" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.service_graph_builder.supervisor.deinit()" },
+    };
+    for (supervisor_diagnostic_storage_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Supervisor diagnostics must retain actionable on-demand freestanding storage in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    if (std.mem.indexOf(u8, supervisor_source, "diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent") != null) {
+        try common.addError(errors, allocator, "Supervisor diagnostics must not return to inline freestanding ring storage", .{});
     }
 }
 

@@ -129,6 +129,7 @@ pub const SessionManager = struct {
         self.recovery_context.review_compositor_session.deinit();
         self.recovery_context.releaseReviewUxController();
         self.recovery_context.diagnostic_ledger.deinit();
+        self.service_graph_builder.supervisor.deinit();
         self.service_graph_builder.releaseBackgroundDispatch();
         self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();

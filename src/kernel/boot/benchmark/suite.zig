@@ -768,20 +768,11 @@ fn prepareSupervisorReadyFixture() void {
         service(94),
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark supervisor readiness fixture", err);
     supervisor_ready_context.service_id = service_record.id;
-    if (!supervisor_ready_context.supervisor.noteContractBound(service_record.id, 194, 1)) {
+    if (!supervisor_ready_context.supervisor.noteContractBound(service_record.id, 194)) {
         benchmark_reporting.benchStepFailure("benchmark supervisor contract binding", error.ContractBindingFailed);
     }
     if (!supervisor_ready_context.supervisor.markHealthy(service_record.id, 2)) {
         benchmark_reporting.benchStepFailure("benchmark supervisor health", error.HealthTransitionFailed);
-    }
-
-    for (0..supervisor_mod.MAX_DIAGNOSTICS) |index| {
-        if (!supervisor_ready_context.supervisor.markHealthy(
-            service_record.id,
-            3 + @as(u64, @intCast(index)),
-        )) {
-            benchmark_reporting.benchStepFailure("benchmark supervisor diagnostic rollover", error.HealthTransitionFailed);
-        }
     }
 }
 
@@ -2672,7 +2663,7 @@ fn registerHealthyServiceForBenchmark(
     tick: u64,
 ) u64 {
     const service_record = supervisor.register(class, owner) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    if (!supervisor.noteContractBound(service_record.id, 100 + service_record.id, tick)) unreachable;
+    if (!supervisor.noteContractBound(service_record.id, 100 + service_record.id)) unreachable;
     if (!supervisor.markHealthy(service_record.id, tick)) unreachable;
     return service_record.id;
 }

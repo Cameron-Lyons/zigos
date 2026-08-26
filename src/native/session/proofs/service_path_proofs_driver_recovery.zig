@@ -273,7 +273,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(swapped_driver.dma_domain_id, booted_runtime.last_dma_domain_id);
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, storage_service_record.state);
     try std.testing.expectEqual(storage_restart_count_before + 2, storage_service_record.restart_count);
-    try std.testing.expect(supervisor.hasDiagnostic(storage_service_record.id, .driver_attached));
     try std.testing.expect(supervisor.hasDiagnostic(storage_service_record.id, .restart_completed));
     try std.testing.expectEqual(next_authority.id, ledger.latestKind(.driver_restart).?.related_id);
     try std.testing.expectEqual(network_restart_count_before, network_service.restart_count);
@@ -381,7 +380,6 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(swapped_graphics.dma_domain_id, booted_runtime.last_dma_domain_id);
     try std.testing.expectEqual(supervisor_mod.ServiceState.healthy, compositor_service_record.state);
     try std.testing.expectEqual(graphics_restart_count_before + 1, compositor_service_record.restart_count);
-    try std.testing.expect(supervisor.hasDiagnostic(compositor_service_record.id, .driver_attached));
     try std.testing.expect(supervisor.hasDiagnostic(compositor_service_record.id, .restart_completed));
     try std.testing.expectEqual(graphics_authority.id, ledger.latestKind(.driver_restart).?.related_id);
     try std.testing.expectEqual(input_driver.service_id, compositor_service_record.id);

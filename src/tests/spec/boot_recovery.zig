@@ -338,11 +338,11 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     const sync_service_record = try supervisor_instance.register(.sync_replication, owner);
     const network_service = try supervisor_instance.register(.network_stack, owner);
     const compositor_service = try supervisor_instance.register(.compositor_ui_session, owner);
-    try std.testing.expect(supervisor_instance.noteContractBound(policy_service.id, 5001, 12));
-    try std.testing.expect(supervisor_instance.noteContractBound(package_service.id, 5002, 12));
-    try std.testing.expect(supervisor_instance.noteContractBound(sync_service_record.id, 5003, 12));
-    try std.testing.expect(supervisor_instance.noteContractBound(network_service.id, 5004, 12));
-    try std.testing.expect(supervisor_instance.noteContractBound(compositor_service.id, 5005, 12));
+    try std.testing.expect(supervisor_instance.noteContractBound(policy_service.id, 5001));
+    try std.testing.expect(supervisor_instance.noteContractBound(package_service.id, 5002));
+    try std.testing.expect(supervisor_instance.noteContractBound(sync_service_record.id, 5003));
+    try std.testing.expect(supervisor_instance.noteContractBound(network_service.id, 5004));
+    try std.testing.expect(supervisor_instance.noteContractBound(compositor_service.id, 5005));
     try std.testing.expect(supervisor_instance.markHealthy(policy_service.id, 12));
     try std.testing.expect(supervisor_instance.markHealthy(package_service.id, 12));
     try std.testing.expect(supervisor_instance.markHealthy(sync_service_record.id, 12));
