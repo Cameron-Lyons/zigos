@@ -16,13 +16,14 @@ pub const MAX_DIAGNOSTICS: usize = 64;
 pub const COMPACT_DIAGNOSTIC_RING_METADATA = true;
 pub const ACTIONABLE_DIAGNOSTICS_ONLY = true;
 pub const HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING = true;
-pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 32;
+pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 24;
 pub const DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const SCHEMA_DERIVED_SERVICE_METADATA = true;
 pub const SERVICE_ID_IS_ISOLATION_DOMAIN = true;
 pub const OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS = true;
+pub const OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES = true;
 pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 4_408;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_888;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
 
 comptime {
@@ -69,7 +70,6 @@ pub const DiagnosticKind = enum(u8) {
 };
 
 pub const DiagnosticEvent = struct {
-    sequence: u64,
     service_id: u64,
     tick: u64,
     detail: u32 = 0,
@@ -144,7 +144,6 @@ pub const Supervisor = struct {
     next_service_id: u64 = 1,
     service_arena: ServiceArena = ServiceArena.init(),
     service_class_index: ServiceClassIndex = ServiceClassIndex.init(),
-    next_diagnostic_sequence: u64 = 1,
     diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
     diagnostic_count: u8 = 0,
     next_diagnostic_slot: u8 = 0,
@@ -175,7 +174,6 @@ pub const Supervisor = struct {
         } else {
             self.diagnostics = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS;
         }
-        self.next_diagnostic_sequence = 1;
         self.diagnostic_count = 0;
         self.next_diagnostic_slot = 0;
     }
@@ -456,7 +454,6 @@ pub const Supervisor = struct {
     ) void {
         const diagnostics = self.ensureDiagnostics() orelse return;
         const event = DiagnosticEvent{
-            .sequence = self.nextDiagnosticSequence(),
             .service_id = service_id,
             .tick = tick,
             .detail = detail,
@@ -496,15 +493,6 @@ pub const Supervisor = struct {
         return slot_index;
     }
 
-    fn nextDiagnosticSequence(self: *Supervisor) u64 {
-        const sequence = self.next_diagnostic_sequence;
-        if (sequence == 0) {
-            native_util.impossibleByInvariant("supervisor diagnostic sequence exhausted");
-        }
-        self.next_diagnostic_sequence = sequence +% 1;
-        return sequence;
-    }
-
     fn findConst(self: *const Supervisor, service_id: u64) ?*const ServiceRecord {
         const slot = self.service_arena.getConst(service_id) orelse return null;
         return &slot.service;
@@ -540,7 +528,6 @@ fn zeroService() ServiceRecord {
 
 fn zeroDiagnostic() DiagnosticEvent {
     return .{
-        .sequence = 0,
         .service_id = 0,
         .tick = 0,
         .detail = 0,
@@ -643,16 +630,6 @@ test "supervisor service ids do not advance when the table is full" {
     try std.testing.expectEqual(MAX_SERVICES, supervisor.serviceCount());
 }
 
-test "supervisor diagnostic sequences stop at exhaustion" {
-    var supervisor = Supervisor.init();
-
-    supervisor.next_diagnostic_sequence = std.math.maxInt(u64);
-    const service = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 20 });
-    try std.testing.expect(supervisor.recordCrash(service.id, 1, 0xD1));
-    try std.testing.expectEqual(std.math.maxInt(u64), supervisor.latestDiagnostic(service.id).?.sequence);
-    try std.testing.expectEqual(@as(u64, 0), supervisor.next_diagnostic_sequence);
-}
-
 test "restart requests only succeed for restartable services" {
     var supervisor = Supervisor.init();
     const task_runtime = try supervisor.register(.task_runtime, .{ .kind = .service, .serial = 2 });
@@ -704,15 +681,18 @@ test "supervisor keeps diagnostics queryable while recycling the bounded ring" {
 test "supervisor keeps bounded diagnostic metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "diagnostic_count"));
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "next_diagnostic_slot"));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(DiagnosticEvent));
-    try std.testing.expectEqual(@as(usize, 2_048), actionable_diagnostic_layout.ring_bytes);
+    try std.testing.expect(OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES);
+    try std.testing.expect(!@hasField(DiagnosticEvent, "sequence"));
+    try std.testing.expect(!@hasField(Supervisor, "next_diagnostic_sequence"));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(DiagnosticEvent));
+    try std.testing.expectEqual(@as(usize, 1_536), actionable_diagnostic_layout.ring_bytes);
     try std.testing.expect(OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS);
     try std.testing.expect(!@hasField(ServiceRecord, "last_transition_tick"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceRecord));
-    try std.testing.expectEqual(@as(usize, 4_408), @sizeOf(Supervisor));
+    try std.testing.expectEqual(@as(usize, 3_888), @sizeOf(Supervisor));
 }
 
-test "supervisor deinit clears retained diagnostics and sequence state" {
+test "supervisor deinit clears retained diagnostic state" {
     var supervisor = Supervisor.init();
     const network = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 44 });
     try std.testing.expect(supervisor.recordCrash(network.id, 10, 1));
@@ -722,7 +702,6 @@ test "supervisor deinit clears retained diagnostics and sequence state" {
 
     try std.testing.expectEqual(@as(u8, 0), supervisor.diagnostic_count);
     try std.testing.expectEqual(@as(u8, 0), supervisor.next_diagnostic_slot);
-    try std.testing.expectEqual(@as(u64, 1), supervisor.next_diagnostic_sequence);
     try std.testing.expect(supervisor.latestDiagnostic(network.id) == null);
 }
 
