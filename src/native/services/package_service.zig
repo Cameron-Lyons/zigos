@@ -40,6 +40,7 @@ pub const MAX_MODEL_FAMILY_BYTES = model.MAX_MODEL_FAMILY_BYTES;
 pub const MAX_SIGNATURE_FORMAT_BYTES = model.MAX_SIGNATURE_FORMAT_BYTES;
 pub const MAX_SIGNATURE_SIGNER_BYTES = model.MAX_SIGNATURE_SIGNER_BYTES;
 pub const MAX_INSTALL_SOURCE_BYTES = model.MAX_INSTALL_SOURCE_BYTES;
+pub const DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS = model.DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS;
 pub const COMPACT_PACKAGE_RESULT_METADATA = model.COMPACT_PACKAGE_RESULT_METADATA;
 pub const REMOVE_RESULT_SIZE_CEILING_BYTES = model.REMOVE_RESULT_SIZE_CEILING_BYTES;
 pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES = model.OFFBOARD_RESULT_SIZE_CEILING_BYTES;
@@ -348,7 +349,7 @@ pub const Service = struct {
     fn remove(self: *Service, request: RemoveRequest) Error!RemoveResult {
         const bundle = self.find(request.bundle_id) orelse return error.BundleNotFound;
         try requireActiveRevisionDigest(bundle, request.expected_active_digest);
-        const removed_revision_count = bundle.revision_count;
+        const removed_revision_count = bundle.revisionCount();
         _ = self.bundleArena().?.remove(bundleKey(request.bundle_id));
         return .{
             .removed_existing = true,
@@ -1347,7 +1348,7 @@ test "package revision identifiers issue the maximum once and stop before mutati
     );
 
     try std.testing.expectEqual(@as(u64, 1), bundle.activeRevision().revision_id);
-    bundle.next_revision_id = std.math.maxInt(u64);
+    bundle.activeRevisionMut().revision_id = std.math.maxInt(u64) - 1;
 
     var v2 = v1;
     v2.version_minor = 1;
@@ -1360,8 +1361,8 @@ test "package revision identifiers issue the maximum once and stop before mutati
     );
 
     try std.testing.expectEqual(std.math.maxInt(u64), bundle.activeRevision().revision_id);
-    try std.testing.expectEqual(@as(u64, 1), bundle.rollbackRevision().?.revision_id);
-    try std.testing.expectEqual(@as(u64, 0), bundle.next_revision_id);
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, bundle.rollbackRevision().?.revision_id);
+    try std.testing.expectEqual(@as(u64, 0), bundle.nextRevisionId());
 
     const exhausted = bundle;
     var v3 = v2;
@@ -1374,6 +1375,45 @@ test "package revision identifiers issue the maximum once and stop before mutati
         permission_digest,
     ));
     try std.testing.expectEqualDeep(exhausted, bundle);
+}
+
+test "package revision identifiers remain monotonic across rollback" {
+    var bundle = zeroBundle();
+    const v1 = manifest_fixtures.notesBundle();
+    const permission_digest = bundle_digest.permissionDigest(v1.requested_permissions);
+    try bundle_ops.installNewValidated(
+        &bundle,
+        v1,
+        "store:zigos",
+        1,
+        permission_digest,
+    );
+
+    var v2 = v1;
+    v2.version_minor = 1;
+    try bundle_ops.installRevisionValidated(
+        &bundle,
+        v2,
+        "store:zigos",
+        1,
+        permission_digest,
+    );
+    try std.testing.expectEqual(@as(u64, 2), bundle.activeRevision().revision_id);
+
+    bundle_ops.rollback(&bundle);
+    try std.testing.expectEqual(@as(u64, 1), bundle.activeRevision().revision_id);
+
+    var v3 = v2;
+    v3.version_minor = 2;
+    try bundle_ops.installRevisionValidated(
+        &bundle,
+        v3,
+        "store:zigos",
+        1,
+        permission_digest,
+    );
+    try std.testing.expectEqual(@as(u64, 3), bundle.activeRevision().revision_id);
+    try std.testing.expectEqual(@as(u64, 1), bundle.rollbackRevision().?.revision_id);
 }
 
 test "package revision rewrites reuse inaccessible metadata backing" {
@@ -2294,7 +2334,7 @@ test "package bundle ops reject semantically invalid manifests before storage" {
         error.DuplicatePermissionRequest,
         bundle_ops.installNew(&service.slots.slots[0].bundle, bundle, "store:zigos", 1, crypto_hash.digestFromByte(0x66)),
     );
-    try std.testing.expectEqual(@as(u32, 0), service.slots.slots[0].bundle.revision_count);
+    try std.testing.expectEqual(@as(u8, 0), service.slots.slots[0].bundle.revisionCount());
 }
 
 test "package revisions pool permission text and preserve rollback values" {
@@ -2434,7 +2474,7 @@ test "package permission text storage enforces individual and revision budgets" 
         error.PermissionTextBudgetExceeded,
         bundle_ops.installNew(&bundle, source, "store:zigos", 1, crypto_hash.digestFromByte(0x41)),
     );
-    try std.testing.expectEqual(@as(usize, 0), bundle.revision_count);
+    try std.testing.expectEqual(@as(u8, 0), bundle.revisionCount());
 
     const oversized_resource = [_]u8{'r'} ** (MAX_PERMISSION_RESOURCE_BYTES + 1);
     const oversized_permission = [_]manifest.PermissionRequest{.{
@@ -2448,7 +2488,7 @@ test "package permission text storage enforces individual and revision budgets" 
         error.PermissionResourceTooLong,
         bundle_ops.installNew(&bundle, source, "store:zigos", 1, crypto_hash.digestFromByte(0x42)),
     );
-    try std.testing.expectEqual(@as(usize, 0), bundle.revision_count);
+    try std.testing.expectEqual(@as(u8, 0), bundle.revisionCount());
 }
 
 test "package service rejects example writer manifest updates that widen permissions without declaration" {

@@ -687,6 +687,9 @@ pub const indexed_hot_path_tables = .{
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(package_service.BundleArena, "reserve"),
+        .derives_revision_metadata_from_retained_slots = package_service.DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS and
+            !@hasField(package_service.InstalledBundle, "revision_count") and
+            !@hasField(package_service.InstalledBundle, "next_revision_id"),
         .uses_single_typed_component_model = !@hasField(manifest.ExecutionComponentDecl, "abi") and
             !@hasField(package_service.StoredComponent, "abi"),
         .reuses_revision_metadata_backing = package_service.REUSES_REVISION_METADATA_BACKING,

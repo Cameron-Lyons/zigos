@@ -32,6 +32,7 @@ pub const MAX_SIGNATURE_FORMAT_BYTES: usize = 16;
 pub const MAX_SIGNATURE_SIGNER_BYTES: usize = 64;
 pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
 pub const MAX_REVISIONS_PER_BUNDLE: usize = 2;
+pub const DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS = true;
 pub const COMPACT_PACKAGE_RESULT_METADATA = true;
 pub const REMOVE_RESULT_SIZE_CEILING_BYTES: usize = 2;
 pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES: usize = 48;
@@ -523,8 +524,6 @@ fn digestIsZero(digest: crypto_hash.Digest) bool {
 pub const InstalledBundle = struct {
     bundle_id_len: u8,
     bundle_id: [MAX_LABEL_BYTES]u8,
-    revision_count: u8,
-    next_revision_id: u64,
     active_revision_slot: u8,
     rollback_revision_slot: ?u8,
     revisions: [2]BundleRevision,
@@ -548,6 +547,20 @@ pub const InstalledBundle = struct {
 
     pub fn rollbackAvailable(self: *const InstalledBundle) bool {
         return self.rollback_revision_slot != null;
+    }
+
+    pub fn revisionCount(self: *const InstalledBundle) u8 {
+        if (self.activeRevision().revision_id == 0) return 0;
+        return 1 + @as(u8, @intFromBool(self.rollback_revision_slot != null));
+    }
+
+    pub fn nextRevisionId(self: *const InstalledBundle) u64 {
+        var latest_revision_id: u64 = 0;
+        for (self.revisions) |revision| {
+            latest_revision_id = @max(latest_revision_id, revision.revision_id);
+        }
+        if (latest_revision_id == std.math.maxInt(u64)) return 0;
+        return latest_revision_id + 1;
     }
 
     pub fn displayNameSlice(self: *const InstalledBundle) []const u8 {
@@ -593,10 +606,13 @@ pub const BundleSlot = struct {
 };
 
 test "package catalog uses capacity-sized resident metadata" {
+    try std.testing.expect(DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS);
+    try std.testing.expect(!@hasField(InstalledBundle, "revision_count"));
+    try std.testing.expect(!@hasField(InstalledBundle, "next_revision_id"));
     try std.testing.expectEqual(@as(usize, 114), @sizeOf(StoredComponent));
     try std.testing.expectEqual(@as(usize, 180), @sizeOf(StoredSignature));
     try std.testing.expectEqual(@as(usize, 10_400), @sizeOf(BundleRevision));
-    try std.testing.expectEqual(@as(usize, 20_888), @sizeOf(BundleSlot));
+    try std.testing.expectEqual(@as(usize, 20_880), @sizeOf(BundleSlot));
 }
 
 test "package results use compact bounded metadata" {
@@ -614,8 +630,6 @@ pub fn zeroBundle() InstalledBundle {
     return .{
         .bundle_id_len = 0,
         .bundle_id = [_]u8{0} ** MAX_LABEL_BYTES,
-        .revision_count = 0,
-        .next_revision_id = 1,
         .active_revision_slot = 0,
         .rollback_revision_slot = null,
         .revisions = [_]BundleRevision{zeroBundleRevision()} ** MAX_REVISIONS_PER_BUNDLE,
