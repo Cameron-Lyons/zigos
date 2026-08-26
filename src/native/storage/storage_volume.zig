@@ -1016,9 +1016,6 @@ fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRec
     try writer.writeByte(@intFromEnum(record.object_type));
     try writer.writeU64(record.latest_version_id.raw());
     try writer.writeU16(record.version_count);
-    try writer.writeU64(record.provenance.created_at_ticks);
-    try writer.writeU64(record.provenance.updated_at_ticks);
-    try writeSignature(writer, record.provenance.creator_signature);
 }
 
 fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.VersionRecord) Error!void {
@@ -1107,7 +1104,7 @@ fn encodeSnapshotBody(writer: *CursorWriter, record: *const workspace.SnapshotRe
     try writer.writeU16(@intCast(record.entry_count));
 }
 
-fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const u8) Error!u64 {
+fn applyObjectRecord(_: *Volume, store: *object_store.Store, payload: []const u8) Error!u64 {
     var reader = CursorReader{ .buffer = payload };
     const object_id = ids.object(try reader.readU64());
     const existing_slot_index = store.objects.slotIndexOf(object_id);
@@ -1118,13 +1115,12 @@ fn applyObjectRecord(self: *Volume, store: *object_store.Store, payload: []const
     }
     const latest_version_id = ids.version(try reader.readU64());
     const version_count = try reader.readU16();
-    var object_record = object_store.ObjectRecord{
+    const object_record = object_store.ObjectRecord{
         .id = object_id,
         .object_type = object_type,
         .latest_version_id = latest_version_id,
         .version_count = version_count,
     };
-    try readObjectUserDataTail(self, &reader, &object_record);
     store.objects.slots[slot_index].object = object_record;
     if (existing_slot_index == null) store.indexReplayedObjectSlot(slot_index);
     return object_id.raw();
@@ -1401,7 +1397,6 @@ fn deserializeState(
         slot.object.object_type = try parseObjectType(try reader.readByte());
         slot.object.latest_version_id = ids.version(try reader.readU64());
         slot.object.version_count = try reader.readU16();
-        try readObjectUserDataTail(self, &reader, &slot.object);
         store.indexReplayedObjectSlot(slot_index);
     }
 
@@ -1522,16 +1517,6 @@ fn readMetadata(self: *Volume, reader: *CursorReader) Error!object_store.SignedM
     metadata.created_at_ticks = try reader.readU64();
     metadata.signature = try readSignature(self, reader);
     return metadata;
-}
-
-fn readObjectUserDataTail(
-    self: *Volume,
-    reader: *CursorReader,
-    record: *object_store.ObjectRecord,
-) Error!void {
-    record.provenance.created_at_ticks = try reader.readU64();
-    record.provenance.updated_at_ticks = try reader.readU64();
-    record.provenance.creator_signature = try readSignature(self, reader);
 }
 
 fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {

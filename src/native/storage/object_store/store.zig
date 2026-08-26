@@ -37,9 +37,10 @@ pub const DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE = true;
 pub const DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD = true;
 pub const DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT = true;
 pub const DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA = true;
+pub const DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
-pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 160;
+pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -291,42 +292,12 @@ pub const ObjectRecord = struct {
     object_type: ObjectType,
     latest_version_id: ids.VersionId,
     version_count: u16,
-    provenance: ObjectProvenance = .{},
-
-    pub fn isPrimaryUserDataModel(self: *const ObjectRecord) bool {
-        const model = self.operatingModel();
-        return model.isWholeOsObject();
-    }
-
-    pub fn operatingModel(self: *const ObjectRecord) ObjectOperatingModel {
-        return .{
-            .object_id = self.id,
-            .object_type = self.object_type,
-            .latest_version_id = self.latest_version_id,
-            .version_count = self.version_count,
-            .typed = true,
-            .signed = self.provenance.creator_signature.isPresent() and !self.latest_version_id.isZero(),
-            .versioned = self.version_count > 0 and !self.latest_version_id.isZero(),
-            .sync_generation = @as(u32, self.version_count),
-            .sharing_policy_generation = 1,
-            .has_history = self.version_count > 0 and !self.latest_version_id.isZero(),
-            .has_sync_policy = self.version_count > 0 and !self.latest_version_id.isZero(),
-            .has_sharing_policy = true,
-            .recoverable = self.version_count > 0 and !self.latest_version_id.isZero(),
-        };
-    }
 
     comptime {
         if (@sizeOf(@This()) > OBJECT_RECORD_SIZE_CEILING_BYTES) {
             @compileError("object record exceeds its compact size ceiling");
         }
     }
-};
-
-pub const ObjectProvenance = struct {
-    created_at_ticks: u64 = 0,
-    updated_at_ticks: u64 = 0,
-    creator_signature: manifest.Signature = .{},
 };
 
 pub const VersionRecord = struct {
@@ -819,11 +790,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             target_object.latest_version_id = version_id;
             target_object.version_count += 1;
-            target_object.provenance.updated_at_ticks = request.metadata.created_at_ticks;
-            if (!target_object.provenance.creator_signature.isPresent()) {
-                target_object.provenance.created_at_ticks = request.metadata.created_at_ticks;
-                target_object.provenance.creator_signature = request.metadata.signature;
-            }
             self.markObjectDirty(target_object.id);
             self.markVersionDirty(version_id);
 
@@ -922,8 +888,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             if (query.object_type) |object_type| {
                 if (object_record.object_type != object_type) return;
             }
-            if (object_record.provenance.updated_at_ticks < query.updated_since_ticks) return;
             const latest = self.versionConst(object_record.latest_version_id) orelse return;
+            const updated_at_ticks = latest.metadata.created_at_ticks;
+            if (updated_at_ticks < query.updated_since_ticks) return;
             if (query.content_type.len != 0 and !std.mem.eql(u8, latest.metadata.contentTypeSlice(), query.content_type)) return;
             if (query.label_contains.len != 0 and indexOfFold(latest.metadata.labelSlice(), query.label_contains) == null) return;
             if (count.* < output.len) {
@@ -933,7 +900,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 return;
             }
             if (!queryKeyComesBefore(
-                object_record.provenance.updated_at_ticks,
+                updated_at_ticks,
                 object_record.id.raw(),
                 output[0].updated_at_ticks,
                 output[0].object_id.raw(),
@@ -962,10 +929,23 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn objectOperatingModel(self: *const Self, object_id: anytype) Error!ObjectOperatingModel {
             const object_record = self.objectConst(object_id) orelse return error.ObjectNotFound;
-            var model = object_record.operatingModel();
             const latest = self.versionConst(object_record.latest_version_id) orelse return error.VersionNotFound;
-            model.signed = model.signed and latest.metadata.isSigned();
-            return model;
+            const has_canonical_version = object_record.version_count > 0 and !object_record.latest_version_id.isZero();
+            return .{
+                .object_id = object_record.id,
+                .object_type = object_record.object_type,
+                .latest_version_id = object_record.latest_version_id,
+                .version_count = object_record.version_count,
+                .typed = true,
+                .signed = has_canonical_version and latest.metadata.isSigned(),
+                .versioned = has_canonical_version,
+                .sync_generation = @as(u32, object_record.version_count),
+                .sharing_policy_generation = 1,
+                .has_history = has_canonical_version,
+                .has_sync_policy = has_canonical_version,
+                .has_sharing_policy = true,
+                .recoverable = has_canonical_version,
+            };
         }
 
         /// Materializes small objects into store-owned scratch memory. Larger objects remain
@@ -1385,7 +1365,7 @@ fn queryResultFor(object_record: *const ObjectRecord, latest: *const VersionReco
         .object_type = object_record.object_type,
         .version_count = object_record.version_count,
         .snapshot_count = object_record.version_count,
-        .updated_at_ticks = object_record.provenance.updated_at_ticks,
+        .updated_at_ticks = latest.metadata.created_at_ticks,
     };
     result.label_len = latest.metadata.label_len;
     result.label = latest.metadata.label;
