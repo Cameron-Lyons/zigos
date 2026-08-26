@@ -61,6 +61,7 @@ test "boot assembles core services without running explicit scenarios" {
     const storage_service = supervisor.findByClass(.storage_object).?;
     const sync_service = supervisor.findByClass(.sync_replication).?;
     const package_service = supervisor.findByClass(.package_install_update).?;
+    const compositor_service = supervisor.findByClass(.compositor_ui_session).?;
     const network_activation = driver_runtime.findByClass(.network_adapter).?;
     const storage_activation = driver_runtime.findByClass(.storage_controller).?;
     const usb_activation = driver_runtime.findByClass(.usb_controller).?;
@@ -119,7 +120,9 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
     try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(session_task.id, 0) == null);
-    try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(review_task.id, 0) != null);
+    const review_surface_capability_id = session_manager.system().surfacePresentationCapabilityForTask(review_task.id, 0).?;
+    const review_surface_capability = try session_manager.system().capabilityTablePtr().requireUsable(review_surface_capability_id, 0);
+    try std.testing.expectEqual(compositor_service.id, review_surface_capability.audit.broker_service_id);
     try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(compositor_task.id, 0) != null);
     try std.testing.expectEqual(compositor_task.id, compositor.findWindowConst(compositor.active_window_id).?.subject_task_id);
     try std.testing.expectEqual(storage_driver_task.id, driver_directory.findByClass(.storage_controller).?.owner_task_id);

@@ -57,6 +57,7 @@ pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HE
 pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING;
 pub const STACK_LOCAL_BOOT_SERVICE_BINDINGS = service_graph_builder.STACK_LOCAL_BOOT_SERVICE_BINDINGS;
 pub const WAITS_FOR_CURRENT_USERSPACE_SURFACE_PRESENTATION = true;
+pub const DERIVES_COMPOSITOR_BROKER_SERVICE_ID = true;
 pub const BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES = service_graph_builder.BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES;
 pub const boot_service_bindings_layout = service_graph_builder.boot_service_bindings_layout;
 pub const background_dispatch_layout = service_graph_builder.background_dispatch_layout;
@@ -105,7 +106,6 @@ pub const SessionManager = struct {
     native_store: native_store_mount.NativeStoreMount = native_store_mount.NativeStoreMount.init(),
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
     input_router: input_router_mod.Router = .{},
-    compositor_broker_service_id: u64 = 0,
     surface_authority_scanned_lifecycle_generation: u64 = 0,
 
     pub fn init() SessionManager {
@@ -327,7 +327,7 @@ pub const SessionManager = struct {
     fn ensureFocusedInputCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         const task = self.runtimePtr().find(task_id) orelse return null;
         if (self.focusedInputCapabilityForResolvedTask(task, now_ticks)) |capability_id| return capability_id;
-        if (self.compositor_broker_service_id == 0) return null;
+        const compositor_broker_service_id = self.compositorBrokerServiceId() orelse return null;
         const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
@@ -346,7 +346,7 @@ pub const SessionManager = struct {
             .audit = .{
                 .policy_generation = 1,
                 .source_task_id = self.input_router.compositor_task_id,
-                .broker_service_id = self.compositor_broker_service_id,
+                .broker_service_id = compositor_broker_service_id,
                 .user_visible_entitlement = true,
             },
         }) catch return null;
@@ -379,7 +379,8 @@ pub const SessionManager = struct {
 
     fn ensureSurfacePresentationCapabilityForResolvedTask(self: *SessionManager, task: *task_runtime.TaskRecord, now_ticks: u64) ?u64 {
         if (self.surfacePresentationCapabilityForResolvedTask(task, now_ticks)) |capability_id| return capability_id;
-        if (!self.taskOwnsUiSurface(task) or self.compositor_broker_service_id == 0) return null;
+        if (!self.taskOwnsUiSurface(task)) return null;
+        const compositor_broker_service_id = self.compositorBrokerServiceId() orelse return null;
         const granted = self.capabilityTablePtr().mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
@@ -398,7 +399,7 @@ pub const SessionManager = struct {
             .audit = .{
                 .policy_generation = 1,
                 .source_task_id = self.input_router.compositor_task_id,
-                .broker_service_id = self.compositor_broker_service_id,
+                .broker_service_id = compositor_broker_service_id,
                 .user_visible_entitlement = true,
             },
         }) catch return null;
@@ -407,6 +408,12 @@ pub const SessionManager = struct {
             return null;
         };
         return granted.id;
+    }
+
+    fn compositorBrokerServiceId(self: *SessionManager) ?u64 {
+        if (self.input_router.compositor_task_id == 0) return null;
+        const service = self.service_graph_builder.supervisor.findByClass(.compositor_ui_session) orelse return null;
+        return service.id;
     }
 
     fn provisionSurfacePresentationCapabilities(self: *SessionManager, now_ticks: u64) bool {
@@ -616,7 +623,6 @@ pub const SessionManager = struct {
             &self.recovery_context.review_compositor_session,
             compositor_task_id,
         );
-        self.compositor_broker_service_id = graph.state.services.compositor_service.id;
         self.kernel_context.kernel_instance.bindFocusedInputReceiver(.{
             .context = &self.input_router,
             .poll = pollFocusedInputForKernel,
@@ -758,7 +764,6 @@ pub const SessionManager = struct {
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
         self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();
         self.input_router.clearCompositor();
-        self.compositor_broker_service_id = 0;
         self.surface_authority_scanned_lifecycle_generation = 0;
         permission_review_service.clearSystemInputRouter();
         self.kernel_context.resetPort();
