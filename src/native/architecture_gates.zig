@@ -1245,6 +1245,17 @@ pub const indexed_hot_path_tables = .{
     .supervisor = .{
         .uses_service_arena = supervisor.supervisor_indexing.uses_service_arena,
         .uses_service_class_index = supervisor.supervisor_indexing.uses_service_class_index,
+        .derives_service_metadata_from_schema = supervisor.SCHEMA_DERIVED_SERVICE_METADATA and
+            !@hasField(supervisor.ServiceRecord, "boundary") and
+            !@hasField(supervisor.ServiceRecord, "restartable") and
+            !@hasField(supervisor.ServiceRecord, "network_privilege") and
+            !@hasField(supervisor.ServiceRecord, "storage_privilege") and
+            !@hasField(supervisor.ServiceRecord, "ui_privilege") and
+            !@hasField(supervisor.ServiceRecord, "driver_class"),
+        .uses_service_ids_as_isolation_domains = supervisor.SERVICE_ID_IS_ISOLATION_DOMAIN and
+            !@hasField(supervisor.ServiceRecord, "isolation_domain_id") and
+            !@hasField(supervisor.Supervisor, "next_isolation_domain_id"),
+        .stores_compact_service_records = @sizeOf(supervisor.ServiceRecord) <= supervisor.SERVICE_RECORD_SIZE_CEILING_BYTES,
         .scans_bounded_diagnostic_ring = supervisor.supervisor_indexing.scans_bounded_diagnostic_ring,
         .scans_diagnostics_newest_first = supervisor.supervisor_indexing.scans_diagnostics_newest_first,
         .uses_diagnostic_ring_cursor = @hasField(supervisor.Supervisor, "next_diagnostic_slot"),

@@ -18,7 +18,10 @@ pub const ACTIONABLE_DIAGNOSTICS_ONLY = true;
 pub const HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING = true;
 pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 32;
 pub const DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES: usize = 8;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 4_992;
+pub const SCHEMA_DERIVED_SERVICE_METADATA = true;
+pub const SERVICE_ID_IS_ISOLATION_DOMAIN = true;
+pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 48;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 4_600;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
 
 comptime {
@@ -36,19 +39,27 @@ pub const ServiceState = enum(u8) {
 
 pub const ServiceRecord = struct {
     id: u64,
-    isolation_domain_id: u64,
     class: contract.ServiceClass,
-    boundary: contract.ServiceBoundary,
     owner: principal.PrincipalId,
-    restartable: bool,
-    network_privilege: contract.NetworkPrivilege,
-    storage_privilege: contract.StoragePrivilege,
-    ui_privilege: contract.UiPrivilege,
-    driver_class: ?driver_service.DeviceClass,
     contract_endpoint_id: u64,
     state: ServiceState,
     restart_count: u16,
     last_transition_tick: u64,
+
+    pub fn isolationDomainId(self: *const ServiceRecord) u64 {
+        return self.id;
+    }
+
+    pub fn descriptor(self: *const ServiceRecord) contract.ServiceDescriptor {
+        return contract.serviceDescriptor(self.class) orelse
+            native_util.impossibleByInvariant("registered supervisor services retain a schema descriptor");
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > SERVICE_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("supervisor service record exceeds its compact dynamic layout");
+        }
+    }
 };
 
 pub const DiagnosticKind = enum(u8) {
@@ -131,7 +142,6 @@ pub const supervisor_indexing = .{
 
 pub const Supervisor = struct {
     next_service_id: u64 = 1,
-    next_isolation_domain_id: u64 = 1,
     service_arena: ServiceArena = ServiceArena.init(),
     service_class_index: ServiceClassIndex = ServiceClassIndex.init(),
     next_diagnostic_sequence: u64 = 1,
@@ -171,24 +181,16 @@ pub const Supervisor = struct {
     }
 
     pub fn register(self: *Supervisor, class: contract.ServiceClass, owner: principal.PrincipalId) Error!*ServiceRecord {
-        const descriptor = contract.serviceDescriptor(class) orelse return error.UnknownServiceClass;
+        if (contract.serviceDescriptor(class) == null) return error.UnknownServiceClass;
 
         const service_id = self.nextReservableServiceId() orelse return error.ServiceTableFull;
-        const isolation_domain_id = self.nextReservableIsolationDomainId() orelse return error.ServiceTableFull;
         const slot_index = self.service_arena.reserveIndex(service_id) orelse return error.ServiceTableFull;
         const slot = &self.service_arena.slots[slot_index];
 
         slot.service = .{
             .id = service_id,
-            .isolation_domain_id = isolation_domain_id,
             .class = class,
-            .boundary = descriptor.boundary,
             .owner = owner,
-            .restartable = descriptor.restartable,
-            .network_privilege = descriptor.isolation.network,
-            .storage_privilege = descriptor.isolation.storage,
-            .ui_privilege = descriptor.isolation.ui,
-            .driver_class = descriptor.isolation.driver_class,
             .contract_endpoint_id = 0,
             .state = .registered,
             .restart_count = 0,
@@ -196,7 +198,6 @@ pub const Supervisor = struct {
         };
         self.service_class_index.insert(serviceClassKey(class), slot_index);
         self.advanceNextServiceIdFrom(service_id);
-        self.advanceNextIsolationDomainIdFrom(isolation_domain_id);
         return &slot.service;
     }
 
@@ -223,7 +224,7 @@ pub const Supervisor = struct {
     pub fn isolationSeparated(self: *const Supervisor, left_service_id: u64, right_service_id: u64) bool {
         const left = self.findConst(left_service_id) orelse return false;
         const right = self.findConst(right_service_id) orelse return false;
-        return left.isolation_domain_id != right.isolation_domain_id;
+        return left.isolationDomainId() != right.isolationDomainId();
     }
 
     pub fn markHealthy(self: *Supervisor, service_id: u64, tick: u64) bool {
@@ -275,7 +276,7 @@ pub const Supervisor = struct {
     ) !DriverRecoveryReport {
         const service = self.find(service_id) orelse return error.ServiceNotFound;
         const driver = directory.findByService(service_id) orelse return error.DriverNotFound;
-        if (!service.restartable) return error.ServiceNotRestartable;
+        if (!service.descriptor().restartable) return error.ServiceNotRestartable;
 
         const restart_detail = if (detail.len != 0)
             detail
@@ -336,7 +337,7 @@ pub const Supervisor = struct {
         detail: []const u8,
     ) !DriverHotSwapReport {
         const service = self.find(request.service_id) orelse return error.ServiceNotFound;
-        if (!service.restartable) return error.ServiceNotRestartable;
+        if (!service.descriptor().restartable) return error.ServiceNotRestartable;
         if (!contract.allowsDriverClass(service.class, request.device_class)) {
             return error.DriverAttachmentDenied;
         }
@@ -433,7 +434,7 @@ pub const Supervisor = struct {
     }
 
     fn requestRestartForService(self: *Supervisor, service: *ServiceRecord, tick: u64) bool {
-        if (!service.restartable) return false;
+        if (!service.descriptor().restartable) return false;
         service.state = .restarting;
         service.restart_count += 1;
         service.last_transition_tick = tick;
@@ -449,15 +450,6 @@ pub const Supervisor = struct {
 
     fn advanceNextServiceIdFrom(self: *Supervisor, service_id: u64) void {
         self.next_service_id = service_id +% 1;
-    }
-
-    fn nextReservableIsolationDomainId(self: *const Supervisor) ?u64 {
-        if (self.serviceCount() >= MAX_SERVICES or self.next_isolation_domain_id == 0) return null;
-        return self.next_isolation_domain_id;
-    }
-
-    fn advanceNextIsolationDomainIdFrom(self: *Supervisor, isolation_domain_id: u64) void {
-        self.next_isolation_domain_id = isolation_domain_id +% 1;
     }
 
     fn record(
@@ -543,15 +535,8 @@ fn serviceClassKey(class: contract.ServiceClass) u64 {
 fn zeroService() ServiceRecord {
     return .{
         .id = 0,
-        .isolation_domain_id = 0,
         .class = .task_runtime,
-        .boundary = .userspace_service,
         .owner = .{ .kind = .service, .serial = 0 },
-        .restartable = true,
-        .network_privilege = .none,
-        .storage_privilege = .none,
-        .ui_privilege = .none,
-        .driver_class = null,
         .contract_endpoint_id = 0,
         .state = .registered,
         .restart_count = 0,
@@ -632,24 +617,22 @@ test "supervisor registers services using the contract boundary map" {
     var supervisor = Supervisor.init();
     const service = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 1 });
 
-    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, service.boundary);
-    try std.testing.expectEqual(contract.UiPrivilege.session_surface, service.ui_privilege);
-    try std.testing.expectEqual(@as(u64, 1), service.isolation_domain_id);
-    try std.testing.expect(service.restartable);
+    try std.testing.expectEqual(contract.ServiceBoundary.userspace_service, service.descriptor().boundary);
+    try std.testing.expectEqual(contract.UiPrivilege.session_surface, service.descriptor().isolation.ui);
+    try std.testing.expectEqual(@as(u64, 1), service.isolationDomainId());
+    try std.testing.expect(service.descriptor().restartable);
     try std.testing.expect(supervisor.markHealthy(service.id, 10));
     try std.testing.expectEqual(ServiceState.healthy, service.state);
 }
 
-test "supervisor service and isolation identifiers stop at exhaustion" {
+test "supervisor service identifiers stop at exhaustion" {
     var supervisor = Supervisor.init();
 
     supervisor.next_service_id = std.math.maxInt(u64);
-    supervisor.next_isolation_domain_id = std.math.maxInt(u64);
     const max_service = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 10 });
     try std.testing.expectEqual(std.math.maxInt(u64), max_service.id);
-    try std.testing.expectEqual(std.math.maxInt(u64), max_service.isolation_domain_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), max_service.isolationDomainId());
     try std.testing.expectEqual(@as(u64, 0), supervisor.next_service_id);
-    try std.testing.expectEqual(@as(u64, 0), supervisor.next_isolation_domain_id);
     try std.testing.expect(supervisor.find(0) == null);
     try std.testing.expectError(error.ServiceTableFull, supervisor.register(.task_runtime, .{ .kind = .service, .serial = 11 }));
 }
@@ -661,10 +644,8 @@ test "supervisor service ids do not advance when the table is full" {
     }
 
     const next_service_before = supervisor.next_service_id;
-    const next_isolation_before = supervisor.next_isolation_domain_id;
     try std.testing.expectError(error.ServiceTableFull, supervisor.register(.session_manager, .{ .kind = .service, .serial = 200 }));
     try std.testing.expectEqual(next_service_before, supervisor.next_service_id);
-    try std.testing.expectEqual(next_isolation_before, supervisor.next_isolation_domain_id);
     try std.testing.expectEqual(MAX_SERVICES, supervisor.serviceCount());
 }
 
@@ -731,7 +712,8 @@ test "supervisor keeps bounded diagnostic metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "next_diagnostic_slot"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DiagnosticEvent));
     try std.testing.expectEqual(@as(usize, 2_048), actionable_diagnostic_layout.ring_bytes);
-    try std.testing.expectEqual(@as(usize, 4_992), @sizeOf(Supervisor));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ServiceRecord));
+    try std.testing.expectEqual(@as(usize, 4_600), @sizeOf(Supervisor));
 }
 
 test "supervisor deinit clears retained diagnostics and sequence state" {

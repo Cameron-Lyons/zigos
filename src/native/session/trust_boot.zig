@@ -837,16 +837,17 @@ fn hashPrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, id: principal.Pri
 }
 
 fn hashServiceRecord(hasher: *crypto_hash.Hasher, service: *const supervisor_mod.ServiceRecord) void {
+    const descriptor = service.descriptor();
     crypto_hash.updateInt(hasher, "service-id", service.id);
-    crypto_hash.updateInt(hasher, "service-isolation-domain-id", service.isolation_domain_id);
+    crypto_hash.updateInt(hasher, "service-isolation-domain-id", service.isolationDomainId());
     crypto_hash.updateEnum(hasher, "service-class", service.class);
-    crypto_hash.updateEnum(hasher, "service-boundary", service.boundary);
+    crypto_hash.updateEnum(hasher, "service-boundary", descriptor.boundary);
     hashPrincipal(hasher, "service-owner", service.owner);
-    crypto_hash.updateBool(hasher, "service-restartable", service.restartable);
-    crypto_hash.updateEnum(hasher, "service-network-privilege", service.network_privilege);
-    crypto_hash.updateEnum(hasher, "service-storage-privilege", service.storage_privilege);
-    crypto_hash.updateEnum(hasher, "service-ui-privilege", service.ui_privilege);
-    if (service.driver_class) |driver_class| {
+    crypto_hash.updateBool(hasher, "service-restartable", descriptor.restartable);
+    crypto_hash.updateEnum(hasher, "service-network-privilege", descriptor.isolation.network);
+    crypto_hash.updateEnum(hasher, "service-storage-privilege", descriptor.isolation.storage);
+    crypto_hash.updateEnum(hasher, "service-ui-privilege", descriptor.isolation.ui);
+    if (descriptor.isolation.driver_class) |driver_class| {
         crypto_hash.updateBool(hasher, "service-driver-class-present", true);
         crypto_hash.updateEnum(hasher, "service-driver-class", driver_class);
     } else {
