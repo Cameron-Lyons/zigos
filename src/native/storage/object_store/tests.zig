@@ -130,6 +130,16 @@ test "object store record arenas derive keys from payloads" {
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(VersionArena, "slot_keys")));
 }
 
+test "object store dirty id indexes retain bounded load headroom" {
+    try std.testing.expect(object_store.RIGHT_SIZES_OBJECT_STORE_DIRTY_ID_INDEXES);
+    const ObjectArena = @FieldType(Store, "objects");
+    const VersionArena = @FieldType(Store, "versions");
+    try std.testing.expectEqual(@as(usize, 256), ObjectArena.dirty_id_index_capacity);
+    try std.testing.expectEqual(@as(usize, 1_024), VersionArena.dirty_id_index_capacity);
+    try std.testing.expect(@sizeOf(@FieldType(ObjectArena, "dirty_id_index")) < @sizeOf(@FieldType(ObjectArena, "primary_index")));
+    try std.testing.expect(@sizeOf(@FieldType(VersionArena, "dirty_id_index")) < @sizeOf(@FieldType(VersionArena, "primary_index")));
+}
+
 test "object query and history outputs use compact bounded metadata" {
     try std.testing.expect(object_store.COMPACT_OBJECT_RESULT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(object_store.ObjectQueryResult, "label_len"));
