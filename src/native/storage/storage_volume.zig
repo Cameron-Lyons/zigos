@@ -1019,13 +1019,6 @@ fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRec
     try writer.writeU64(record.provenance.created_at_ticks);
     try writer.writeU64(record.provenance.updated_at_ticks);
     try writeSignature(writer, record.provenance.creator_signature);
-    try writer.writeByte(if (record.provenance.latest_version_addressed) 1 else 0);
-    try writer.writeU32(record.sharing_policy.policy_generation);
-    try writer.writeByte(if (record.sharing_policy.requires_explicit_file_bridge_grant) 1 else 0);
-    try writer.writeByte(if (record.sharing_policy.export_only_file_bridge) 1 else 0);
-    try writer.writeU32(record.recovery_history.recovery_generation);
-    try writer.writeByte(if (record.recovery_history.recoverable) 1 else 0);
-    try writer.writeU64(record.recovery_history.latest_recoverable_version_id.raw());
 }
 
 fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.VersionRecord) Error!void {
@@ -1539,13 +1532,6 @@ fn readObjectUserDataTail(
     record.provenance.created_at_ticks = try reader.readU64();
     record.provenance.updated_at_ticks = try reader.readU64();
     record.provenance.creator_signature = try readSignature(self, reader);
-    record.provenance.latest_version_addressed = (try reader.readByte()) != 0;
-    record.sharing_policy.policy_generation = try reader.readU32();
-    record.sharing_policy.requires_explicit_file_bridge_grant = (try reader.readByte()) != 0;
-    record.sharing_policy.export_only_file_bridge = (try reader.readByte()) != 0;
-    record.recovery_history.recovery_generation = try reader.readU32();
-    record.recovery_history.recoverable = (try reader.readByte()) != 0;
-    record.recovery_history.latest_recoverable_version_id = ids.version(try reader.readU64());
 }
 
 fn writeSignature(writer: *CursorWriter, signature: anytype) Error!void {
