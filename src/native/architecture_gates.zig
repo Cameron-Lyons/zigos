@@ -812,6 +812,8 @@ pub const indexed_hot_path_tables = .{
             @FieldType(policy_object.PolicyObject, "allowed_sync_destination_lens") == [policy_object.MAX_ALLOW_LIST]u8,
         .keeps_policy_state_within_ceilings = @sizeOf(policy_object.PolicyObject) <= policy_object.POLICY_OBJECT_SIZE_CEILING_BYTES and
             @sizeOf(policy_object.Directory) <= policy_object.DIRECTORY_SIZE_CEILING_BYTES,
+        .derives_policy_ids_from_arena_count = policy_object.DERIVES_POLICY_IDS_FROM_ARENA_COUNT and
+            !@hasField(policy_object.Directory, "next_policy_id"),
         .uses_policy_arena = @hasDecl(@FieldType(policy_object.Directory, "policies"), "reserve"),
         .uses_scope_index = @hasField(policy_object.Directory, "scope_index"),
     },

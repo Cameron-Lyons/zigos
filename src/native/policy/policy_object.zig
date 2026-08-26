@@ -12,8 +12,9 @@ pub const MAX_POLICIES: usize = 16;
 pub const MAX_ALLOW_LIST = model.MAX_ALLOW_LIST;
 pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
 pub const COMPACT_POLICY_METADATA = model.COMPACT_POLICY_METADATA;
+pub const DERIVES_POLICY_IDS_FROM_ARENA_COUNT = true;
 pub const POLICY_OBJECT_SIZE_CEILING_BYTES = model.POLICY_OBJECT_SIZE_CEILING_BYTES;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 33_264;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 33_232;
 const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
 
 pub const Scope = model.Scope;
@@ -60,7 +61,6 @@ const PolicyArena = indexed_arena.IndexedArena(PolicySlot, MAX_POLICIES, POLICY_
 const PolicyScopeIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_INDEX_CAPACITY);
 
 pub const Directory = struct {
-    next_policy_id: u64 = 1,
     policies: PolicyArena = PolicyArena.init(),
     scope_index: PolicyScopeIndex = PolicyScopeIndex.init(),
 
@@ -77,9 +77,10 @@ pub const Directory = struct {
         if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
         if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
 
-        if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
+        const policy_count = self.policies.countInUse();
+        if (policy_count >= MAX_POLICIES) return error.PolicyTableFull;
 
-        const policy_id = self.next_policy_id;
+        const policy_id: u64 = @intCast(policy_count + 1);
         var policy = zeroPolicy();
         policy.id = policy_id;
         policy.generation = nextGeneration(self, request.scope, request.subject_id);
@@ -197,7 +198,6 @@ pub const Directory = struct {
         const slot = &self.policies.slots[slot_index];
         slot.policy = policy;
         self.indexPolicy(slot_index);
-        self.next_policy_id += 1;
         return &slot.policy;
     }
 
@@ -2235,6 +2235,7 @@ test "policy directory indexes policy slots by id and scope through a full table
             .screen_capture_allowed = policy_index % 2 == 0,
         }, signer);
         if (policy_index == 0) first_policy_id = policy.id;
+        try std.testing.expectEqual(@as(u64, @intCast(policy_index + 1)), policy.id);
         try std.testing.expect(directory.verify(policy.id));
     }
 
@@ -2253,4 +2254,7 @@ test "policy directory indexes policy slots by id and scope through a full table
     const revoked_count = directory.revokePoliciesForScope(.workspace, subject_id);
     try std.testing.expectEqual(@as(usize, MAX_POLICIES - 1), revoked_count);
     try std.testing.expect(directory.activeForScope(.workspace, subject_id) == null);
+    try std.testing.expect(DERIVES_POLICY_IDS_FROM_ARENA_COUNT);
+    try std.testing.expect(!@hasField(Directory, "next_policy_id"));
+    try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
 }
