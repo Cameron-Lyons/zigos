@@ -42,14 +42,6 @@ pub const RoutedKeyboardEvent = struct {
     event: input_driver_task.KeyboardEvent,
 };
 
-pub const ServiceResult = struct {
-    reports_polled: usize = 0,
-    reports_accepted: usize = 0,
-    events_routed: usize = 0,
-    events_dropped: usize = 0,
-    focus_switches: usize = 0,
-};
-
 const KeyboardIdentity = struct {
     port_id: u8,
     slot_id: u8,
@@ -131,15 +123,7 @@ pub const Router = struct {
     event_pool_initialized: bool = false,
     queued_event_count: u8 = 0,
     last_sequence: u64 = 0,
-    reports_polled: usize = 0,
     reports_accepted: usize = 0,
-    invalid_reports: usize = 0,
-    stale_reports: usize = 0,
-    untracked_keyboard_reports: usize = 0,
-    events_routed: usize = 0,
-    events_dropped: usize = 0,
-    stale_events_dropped: usize = 0,
-    focus_switches: usize = 0,
 
     comptime {
         if (heap_backed_event_slots and @sizeOf(EventSlotBacking) > EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES) {
@@ -217,50 +201,33 @@ pub const Router = struct {
         self.dropAllInboxes();
     }
 
-    pub fn service(self: *Router, now_ticks: u64, report_budget: usize) ServiceResult {
-        var result = ServiceResult{};
-        const source = self.source orelse return result;
-        const compositor = self.compositor orelse return result;
-        const focus_switches_before = self.focus_switches;
+    pub fn service(self: *Router, now_ticks: u64, report_budget: usize) usize {
+        var events_routed: usize = 0;
+        const source = self.source orelse return 0;
+        const compositor = self.compositor orelse return 0;
         self.pruneStaleInboxes(compositor);
 
-        while (result.reports_polled < report_budget) {
+        for (0..report_budget) |_| {
             const report = source.poll_report() orelse break;
-            result.reports_polled += 1;
-            self.reports_polled += 1;
 
-            if (!validTopology(report)) {
-                self.invalid_reports += 1;
-                continue;
-            }
+            if (!validTopology(report)) continue;
             if (self.last_sequence != 0 and report.sequence <= self.last_sequence) {
-                self.stale_reports += 1;
                 continue;
             }
             self.last_sequence = report.sequence;
 
-            const keyboard = self.keyboardFor(report) orelse {
-                self.untracked_keyboard_reports += 1;
-                continue;
-            };
-            _ = keyboard.decoder.submit(report.bytes) catch {
-                self.invalid_reports += 1;
-                continue;
-            };
-            result.reports_accepted += 1;
+            const keyboard = self.keyboardFor(report) orelse continue;
+            _ = keyboard.decoder.submit(report.bytes) catch continue;
             self.reports_accepted += 1;
 
             while (keyboard.decoder.poll()) |event| {
                 if (self.routeEvent(compositor, report, event, now_ticks)) {
-                    result.events_routed += 1;
-                } else {
-                    result.events_dropped += 1;
+                    events_routed += 1;
                 }
             }
         }
 
-        result.focus_switches = self.focus_switches - focus_switches_before;
-        return result;
+        return events_routed;
     }
 
     pub fn pollForTask(self: *Router, task_id: u64) ?RoutedKeyboardEvent {
@@ -311,7 +278,6 @@ pub const Router = struct {
         self.unlinkWake(inbox_index);
         self.unlinkActiveInbox(inbox_index);
         if (!self.inboxes.removeIndex(inbox_index)) native_util.impossibleByInvariant("indexed input inbox remains live until task drop");
-        self.events_dropped += dropped;
         return dropped;
     }
 
@@ -341,11 +307,8 @@ pub const Router = struct {
         switch (event.kind) {
             .task_switch_next, .task_switch_previous => {
                 _ = compositor.switchVisible(if (event.kind == .task_switch_next) .next else .previous) catch {
-                    self.events_dropped += 1;
                     return false;
                 };
-                self.focus_switches += 1;
-                self.events_routed += 1;
                 self.markWake(self.compositor_task_id);
                 return true;
             },
@@ -365,10 +328,7 @@ pub const Router = struct {
                 self.compositor_task_id
         else
             self.compositor_task_id;
-        if (target_task_id == 0) {
-            self.events_dropped += 1;
-            return false;
-        }
+        if (target_task_id == 0) return false;
 
         const routed = RoutedKeyboardEvent{
             .sequence = report.sequence,
@@ -380,19 +340,10 @@ pub const Router = struct {
             .slot_id = report.slot_id,
             .event = event,
         };
-        const inbox_index = self.inboxForIndex(target_task_id) orelse {
-            self.events_dropped += 1;
-            return false;
-        };
+        const inbox_index = self.inboxForIndex(target_task_id) orelse return false;
         const inbox = &self.inboxes.slots[inbox_index];
-        if (inbox.count == MAX_EVENTS_PER_INBOX) {
-            self.events_dropped += 1;
-            return false;
-        }
-        const event_index = self.allocateEvent() orelse {
-            self.events_dropped += 1;
-            return false;
-        };
+        if (inbox.count == MAX_EVENTS_PER_INBOX) return false;
+        const event_index = self.allocateEvent() orelse return false;
         const event_slots = self.eventSlots() orelse
             native_util.impossibleByInvariant("allocated input events retain their slot backing");
         const was_empty = inbox.count == 0;
@@ -404,7 +355,6 @@ pub const Router = struct {
         }
         inbox.tail = event_index;
         inbox.count += 1;
-        self.events_routed += 1;
         if (was_empty) self.queueWake(inbox_index);
         return true;
     }
@@ -502,7 +452,6 @@ pub const Router = struct {
                 inbox_index = next_index;
                 continue;
             }
-            self.stale_events_dropped += inbox.count;
             self.releaseInboxEvents(inbox);
             self.unlinkWake(inbox_index);
             self.unlinkActiveInbox(inbox_index);
@@ -517,7 +466,6 @@ pub const Router = struct {
             if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox reset points outside slots");
             const inbox = &self.inboxes.slots[inbox_index];
             if (!inbox.in_use) native_util.impossibleByInvariant("active input inbox reset points at a free slot");
-            self.stale_events_dropped += inbox.count;
             inbox_index = inbox.next_active_index;
         }
         self.inboxes.reset();
@@ -723,8 +671,8 @@ test "input router gives each keyboard independent transitions and targets modal
     var router = Router{};
     router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
     router.bindCompositor(&compositor, 99);
-    const serviced = router.service(10, DEFAULT_REPORT_BUDGET);
-    try std.testing.expectEqual(@as(usize, 2), serviced.reports_accepted);
+    const events_routed = router.service(10, DEFAULT_REPORT_BUDGET);
+    try std.testing.expectEqual(@as(usize, 2), events_routed);
     try std.testing.expectEqual(@as(usize, 2), router.queuedForTask(77));
     const wire_event = router.pollAbiForTask(77).?;
     try std.testing.expectEqual(@as(u64, 1), wire_event.sequence);
@@ -833,8 +781,8 @@ test "input router applies task switching before routing later reports" {
     var router = Router{};
     router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
     router.bindCompositor(&compositor, 99);
-    const serviced = router.service(20, DEFAULT_REPORT_BUDGET);
-    try std.testing.expectEqual(@as(usize, 1), serviced.focus_switches);
+    const events_routed = router.service(20, DEFAULT_REPORT_BUDGET);
+    try std.testing.expectEqual(@as(usize, 3), events_routed);
     try std.testing.expectEqual(first_window.id, compositor.active_window_id);
     try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(second.id).?.event.text);
     try std.testing.expectEqual(@as(u8, 'b'), router.pollForTask(first.id).?.event.text);
@@ -872,10 +820,9 @@ test "input router rejects stale and malformed reports and prunes closed-window 
     var router = Router{};
     router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
     router.bindCompositor(&compositor, 99);
-    const serviced = router.service(30, DEFAULT_REPORT_BUDGET);
-    try std.testing.expectEqual(@as(usize, 1), serviced.reports_accepted);
-    try std.testing.expectEqual(@as(usize, 1), router.stale_reports);
-    try std.testing.expectEqual(@as(usize, 1), router.invalid_reports);
+    const events_routed = router.service(30, DEFAULT_REPORT_BUDGET);
+    try std.testing.expectEqual(@as(usize, 1), events_routed);
+    try std.testing.expectEqual(@as(usize, 1), router.reports_accepted);
     try std.testing.expectEqual(@as(usize, 1), router.queuedForTask(app.id));
 
     const compositor_inbox_index = router.inboxForIndex(99).?;
@@ -887,7 +834,6 @@ test "input router rejects stale and malformed reports and prunes closed-window 
     try std.testing.expectEqual(@as(usize, 1), compositor.closeWindowsForTask(app.id));
     _ = router.service(31, DEFAULT_REPORT_BUDGET);
     try std.testing.expectEqual(@as(usize, 0), router.queuedForTask(app.id));
-    try std.testing.expectEqual(@as(usize, 1), router.stale_events_dropped);
     try std.testing.expect(router.inboxes.slotIndexOf(app.id) == null);
     try std.testing.expect(router.inboxes.slotIndexOf(404) == null);
     try std.testing.expectEqual(@as(?usize, compositor_inbox_index), router.inboxes.slotIndexOf(99));
@@ -940,8 +886,6 @@ test "input router keeps compositor switching responsive when a focused inbox is
     try std.testing.expect(!router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'b' }, 41));
     try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .task_switch_next }, 42));
     try std.testing.expectEqual(first_window.id, compositor.active_window_id);
-    try std.testing.expectEqual(@as(usize, 1), router.events_dropped);
-    try std.testing.expectEqual(@as(usize, 1), router.focus_switches);
 
     for (0..MAX_EVENTS_PER_INBOX) |_| {
         try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'c' }, 43));
@@ -954,11 +898,8 @@ test "input router keeps compositor switching responsive when a focused inbox is
     try std.testing.expect(router.pollForTask(third.id) != null);
     try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'd' }, 46));
     try std.testing.expectEqual(@as(u8, MAX_QUEUED_EVENTS), router.queued_event_count);
-    try std.testing.expectEqual(@as(usize, 2), router.events_dropped);
-    try std.testing.expectEqual(@as(usize, 2), router.focus_switches);
 
     try std.testing.expectEqual(@as(usize, MAX_EVENTS_PER_INBOX - 1), router.dropForTask(third.id));
     try std.testing.expectEqual(@as(usize, 0), router.queuedForTask(third.id));
     try std.testing.expectEqual(@as(u8, MAX_EVENTS_PER_INBOX + 1), router.queued_event_count);
-    try std.testing.expectEqual(@as(usize, MAX_EVENTS_PER_INBOX + 1), router.events_dropped);
 }

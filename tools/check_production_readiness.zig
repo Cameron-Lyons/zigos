@@ -1838,7 +1838,6 @@ fn validateNuc11tnki5KernelProofSources(
         "window.modal and window.reviewer_task_id != 0",
         "window.subject_task_id",
         "compositor.switchVisible",
-        "self.events_dropped",
         "pruneStaleInboxes",
         "pollWakeTarget",
         "pollAbiForTask",
@@ -1848,6 +1847,7 @@ fn validateNuc11tnki5KernelProofSources(
         "const allocation = kernel_memory.kmalloc(@sizeOf(EventSlotArray)) orelse return null",
         "kernel_memory.kfree(@ptrCast(slots))",
         "pub fn deinit(self: *Router) void",
+        "for (0..report_budget) |_|",
     };
     for (required_input_router_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_router_source, snippet) == null) {
@@ -1856,6 +1856,33 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (std.mem.indexOf(u8, input_router_source, "event_slots: [MAX_QUEUED_EVENTS]EventSlot =") != null) {
         try common.addError(errors, allocator, "NUC11TNKi5 input event slots must not return to inline freestanding router storage", .{});
+    }
+    const retired_input_router_telemetry_snippets = [_][]const u8{
+        "pub const ServiceResult",
+        "reports_polled: usize",
+        "untracked_keyboard_reports: usize",
+        "invalid_reports: usize",
+        "stale_reports: usize",
+        "events_dropped: usize",
+        "stale_events_dropped: usize",
+        "focus_switches: usize",
+        "result.reports_accepted += 1",
+        "result.events_routed += 1",
+        "result.events_dropped += 1",
+        "result.focus_switches =",
+        "self.reports_polled += 1",
+        "self.untracked_keyboard_reports += 1",
+        "self.events_routed += 1",
+        "self.invalid_reports += 1",
+        "self.stale_reports += 1",
+        "self.events_dropped += 1",
+        "self.stale_events_dropped += inbox.count",
+        "self.focus_switches += 1",
+    };
+    for (retired_input_router_telemetry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, input_router_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 input router must not restore unobserved telemetry: {s}", .{snippet});
+        }
     }
     const required_input_decoder_snippets = [_][]const u8{
         "pub const QUEUE_ONLY_DECODER_STATE = true",

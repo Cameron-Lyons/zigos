@@ -292,7 +292,7 @@ pub const SessionManager = struct {
     }
 
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
-        const result = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
+        const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
         while (self.input_router.pollWakeTarget()) |task_id| {
             if (self.ensureFocusedInputCapability(task_id, now_ticks) == null) {
                 self.input_authority_failures += 1;
@@ -306,7 +306,7 @@ pub const SessionManager = struct {
                 now_ticks +% 1,
             );
         }
-        return result.events_routed;
+        return events_routed;
     }
 
     pub fn focusedInputCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
