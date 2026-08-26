@@ -26,7 +26,8 @@ const ids = object_store.ids;
 const signMetadata = object_store.signMetadata;
 
 test "blob manifests store compact chunk slot edges" {
-    try std.testing.expectEqual(@as(usize, 2), @sizeOf(BlobChunkSlotIndex));
+    try std.testing.expect(object_store.CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES);
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(BlobChunkSlotIndex));
     try std.testing.expect(@hasField(object_store.BlobRecord, "chunk_slot_indexes"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
