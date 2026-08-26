@@ -137,7 +137,6 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
     const service_record = request.kernel_port.kernel.runtime.find(service_task_id) orelse return error.TaskNotFound;
     try request.service_directory.register(
         request.service_id,
-        service_task_id,
         endpoint.endpoint.endpoint_id,
         endpoint.capability_id,
         request.entry.interface_id,
@@ -323,7 +322,6 @@ test "contractsReady requires every ordered service contract" {
     for (service_contract.ordered_service_contracts, 0..) |entry, index| {
         try registry.register(
             10 + @as(u64, @intCast(index)),
-            20 + @as(u64, @intCast(index)),
             30 + @as(u64, @intCast(index)),
             40 + @as(u64, @intCast(index)),
             entry.interface_id,

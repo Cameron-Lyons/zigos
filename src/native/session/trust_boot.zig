@@ -591,7 +591,7 @@ pub const TrustBoot = struct {
             if (binding.service_id == 0) continue;
             const contract = &typed_component_abi.contracts[interface_index];
             crypto_hash.updateInt(&hasher, "registry-service-id", binding.service_id);
-            crypto_hash.updateInt(&hasher, "registry-owner-task-id", binding.owner_task_id);
+            crypto_hash.updateInt(&hasher, "registry-owner-task-id", self.registeredServiceOwnerTaskId(binding));
             crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
             crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(contract.interface_id));
@@ -602,6 +602,15 @@ pub const TrustBoot = struct {
             crypto_hash.updateInt(&hasher, "registry-contract-hash", contract.contract_hash);
         }
         return crypto_hash.finalize(&hasher);
+    }
+
+    fn registeredServiceOwnerTaskId(
+        self: *const TrustBoot,
+        binding: *const native_service_registry.Binding,
+    ) u64 {
+        const endpoint_capability = self.capability_table.query(binding.endpoint_capability_id) orelse return 0;
+        if (endpoint_capability.target.kind != .endpoint or endpoint_capability.target.id != binding.endpoint_id) return 0;
+        return endpoint_capability.scope.task_id orelse 0;
     }
 
     fn criticalServiceImage(

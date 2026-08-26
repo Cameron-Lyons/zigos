@@ -110,7 +110,6 @@ pub fn run(
         native_util.impossibleByInvariant("storage task registered earlier in this bootstrap remains findable");
     env.service_directory.register(
         state.services.storage_service.id,
-        storage_task_desc.task_id,
         storage_endpoint.endpoint.endpoint_id,
         storage_endpoint.capability_id,
         typed_component_abi.interfaceId(.bootstrap_workspace),
