@@ -23,15 +23,29 @@ const transport_cursor_path = record_prefix ++ "qc";
 const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
+const max_u64_decimal_bytes: usize = 20;
+const max_u64_hex_bytes: usize = 16;
+const max_principal_kind_decimal_bytes: usize = 1;
 pub const COMPACT_PATH_SET_METADATA = true;
 pub const COMPACT_PATH_SET_FINGERPRINTS = true;
-pub const PATH_SET_SIZE_CEILING_BYTES: usize = 9_700;
+pub const BOUNDS_SYNC_RECORD_PATHS_TO_SCHEMA = true;
+pub const MAX_RECORD_PATH_BYTES: usize = record_prefix.len + 1 + 1 + max_u64_decimal_bytes + 1 +
+    max_principal_kind_decimal_bytes + 1 + max_u64_decimal_bytes + 1 + max_u64_hex_bytes;
+pub const PATH_SET_SIZE_CEILING_BYTES: usize = 7_300;
+pub const STALE_PATH_LIST_SIZE_CEILING_BYTES: usize = 9_313;
+pub const PERSIST_PATH_STACK_SIZE_CEILING_BYTES: usize = 16_613;
 
 comptime {
     if (workspace.MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8) or
         workspace.MAX_ENTRY_PATH_BYTES > std.math.maxInt(u8))
     {
         @compileError("sync persistence path metadata no longer fits in u8");
+    }
+    if (MAX_RECORD_PATH_BYTES > workspace.MAX_ENTRY_PATH_BYTES) {
+        @compileError("sync record paths exceed workspace path capacity");
+    }
+    if (@intFromEnum(principal.PrincipalKind.policy_authority) >= 10) {
+        @compileError("sync record principal kinds exceed their decimal path field");
     }
 }
 
@@ -53,14 +67,14 @@ const Envelope = struct {
 };
 
 pub const PathSet = struct {
-    paths: [workspace.MAX_WORKSPACE_ENTRIES][workspace.MAX_ENTRY_PATH_BYTES]u8 =
-        [_][workspace.MAX_ENTRY_PATH_BYTES]u8{[_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
+    paths: [workspace.MAX_WORKSPACE_ENTRIES][MAX_RECORD_PATH_BYTES]u8 =
+        [_][MAX_RECORD_PATH_BYTES]u8{[_]u8{0} ** MAX_RECORD_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
     lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = [_]u8{0} ** workspace.MAX_WORKSPACE_ENTRIES,
     fingerprints: [workspace.MAX_WORKSPACE_ENTRIES]u32 = [_]u32{0} ** workspace.MAX_WORKSPACE_ENTRIES,
     count: u8 = 0,
 
     fn add(self: *PathSet, path: []const u8) Error!void {
-        if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+        if (path.len > MAX_RECORD_PATH_BYTES) return error.PathTooLong;
         if (self.contains(path)) return;
         const index: usize = self.count;
         if (index >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
@@ -72,6 +86,7 @@ pub const PathSet = struct {
     }
 
     fn contains(self: *const PathSet, path: []const u8) bool {
+        if (path.len > MAX_RECORD_PATH_BYTES) return false;
         const fingerprint = pathFingerprint(path);
         var index: usize = 0;
         while (index < @as(usize, self.count)) : (index += 1) {
@@ -85,6 +100,29 @@ pub const PathSet = struct {
     comptime {
         if (@sizeOf(@This()) > PATH_SET_SIZE_CEILING_BYTES) {
             @compileError("sync persistence path set exceeded its stack-size ceiling");
+        }
+    }
+};
+
+pub const StalePathList = struct {
+    paths: [workspace.MAX_WORKSPACE_ENTRIES][workspace.MAX_ENTRY_PATH_BYTES]u8 =
+        [_][workspace.MAX_ENTRY_PATH_BYTES]u8{[_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
+    lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = [_]u8{0} ** workspace.MAX_WORKSPACE_ENTRIES,
+    count: u8 = 0,
+
+    fn add(self: *StalePathList, path: []const u8) Error!void {
+        if (path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+        const index: usize = self.count;
+        if (index >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
+        @memset(self.paths[index][0..], 0);
+        @memcpy(self.paths[index][0..path.len], path);
+        self.lens[index] = @intCast(path.len);
+        self.count += 1;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > STALE_PATH_LIST_SIZE_CEILING_BYTES) {
+            @compileError("stale sync path list exceeded its stack-size ceiling");
         }
     }
 };
@@ -154,7 +192,7 @@ pub fn persist(
 }
 
 fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     try out.add(transport_cursor_path);
 
     for (resident.persisted_state.graph.user_roots.slots) |slot| {
@@ -205,7 +243,7 @@ fn deleteStaleRecords(
     live_paths: *const PathSet,
     resident: *state_support.ResidentState,
 ) Error!void {
-    var stale = PathSet{};
+    var stale = StalePathList{};
     const entries = try storage.entries(workspace_id);
     for (entries) |entry| {
         const path = entry.pathSlice();
@@ -224,7 +262,7 @@ fn deleteStaleRecords(
 }
 
 fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.graph.user_roots.slots) |slot| {
         if (!slot.in_use) continue;
@@ -235,7 +273,7 @@ fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, reside
 }
 
 fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.graph.devices.slots) |slot| {
         if (!slot.in_use) continue;
@@ -246,7 +284,7 @@ fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident
 }
 
 fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.network_policies.policies.slots) |slot| {
         if (!slot.in_use) continue;
@@ -257,7 +295,7 @@ fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, 
 }
 
 fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.workspace_policies.slots) |slot| {
         if (!slot.in_use) continue;
@@ -268,7 +306,7 @@ fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64
 }
 
 fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.replica_entries.slots) |slot| {
         if (!slot.in_use) continue;
@@ -279,7 +317,7 @@ fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, residen
 }
 
 fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.conflicts.slots) |slot| {
         if (!slot.in_use) continue;
@@ -290,7 +328,7 @@ fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, reside
 }
 
 fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.database_contracts.slots) |slot| {
         if (!slot.in_use) continue;
@@ -301,7 +339,7 @@ fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64
 }
 
 fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.overlays.slots) |slot| {
         if (!slot.in_use) continue;
@@ -312,7 +350,7 @@ fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, residen
 }
 
 fn persistTransportFrames(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    var path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
+    var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
         if (!slot.in_use) continue;
@@ -1060,6 +1098,8 @@ test "persistence path sets retain full capacity with compact metadata" {
     try std.testing.expect(@FieldType(PathSet, "fingerprints") == [workspace.MAX_WORKSPACE_ENTRIES]u32);
     try std.testing.expect(@FieldType(PathSet, "count") == u8);
     try std.testing.expectEqual(@as(usize, PATH_SET_SIZE_CEILING_BYTES), @sizeOf(PathSet));
+    try std.testing.expectEqual(@as(usize, STALE_PATH_LIST_SIZE_CEILING_BYTES), @sizeOf(StalePathList));
+    try std.testing.expectEqual(@as(usize, PERSIST_PATH_STACK_SIZE_CEILING_BYTES), @sizeOf(PathSet) + @sizeOf(StalePathList));
 
     var paths = PathSet{};
     var path = [_]u8{ 'p', 0 };
@@ -1075,11 +1115,29 @@ test "persistence path sets retain full capacity with compact metadata" {
     try std.testing.expectError(error.StateTooLarge, paths.add(&[_]u8{'q'}));
 
     var boundary_paths = PathSet{};
-    const max_path = [_]u8{'x'} ** workspace.MAX_ENTRY_PATH_BYTES;
+    const max_path = [_]u8{'x'} ** MAX_RECORD_PATH_BYTES;
     try boundary_paths.add(&max_path);
     try std.testing.expect(boundary_paths.contains(&max_path));
-    const overlong_path = [_]u8{'x'} ** (workspace.MAX_ENTRY_PATH_BYTES + 1);
+    const overlong_path = [_]u8{'x'} ** (MAX_RECORD_PATH_BYTES + 1);
     try std.testing.expectError(error.PathTooLong, boundary_paths.add(&overlong_path));
+    try std.testing.expect(!boundary_paths.contains(&overlong_path));
+
+    var stale_paths = StalePathList{};
+    const max_stale_path = [_]u8{'s'} ** workspace.MAX_ENTRY_PATH_BYTES;
+    try stale_paths.add(&max_stale_path);
+    try std.testing.expectEqual(@as(u8, 1), stale_paths.count);
+    try std.testing.expectEqualSlices(u8, &max_stale_path, stale_paths.paths[0][0..stale_paths.lens[0]]);
+}
+
+test "sync record path capacity covers the longest schema key" {
+    var buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
+    const longest = try replicaPath(
+        &buffer,
+        std.math.maxInt(u64),
+        .{ .kind = .policy_authority, .serial = std.math.maxInt(u64) },
+        std.math.maxInt(u64),
+    );
+    try std.testing.expectEqual(MAX_RECORD_PATH_BYTES, longest.len);
 }
 
 test "transport frame cursor persists without retained frames and preserves exhaustion" {
