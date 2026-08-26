@@ -11,8 +11,9 @@ const units = @import("../core/units.zig");
 pub const MAX_DRIVER_SERVICES: usize = 8;
 pub const MAX_SIGNER_BYTES: usize = 32;
 pub const COMPACT_DRIVER_RECORD_METADATA = true;
-pub const DRIVER_RECORD_SIZE_CEILING_BYTES: usize = 152;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 2_328;
+pub const DERIVES_DMA_WINDOWS_FROM_DEVICE_POLICY = true;
+pub const DRIVER_RECORD_SIZE_CEILING_BYTES: usize = 80;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 1_752;
 const DRIVER_INDEX_CAPACITY: usize = MAX_DRIVER_SERVICES * 2;
 
 pub const DeviceClass = enum(u8) {
@@ -35,7 +36,7 @@ pub const KernelDriverRole = enum(u8) {
     bootstrap_broker_only,
 };
 
-pub const MAX_DMA_RANGES: usize = 4;
+pub const MAX_DMA_RANGES: usize = 2;
 const DEFAULT_NETWORK_DMA_WINDOW_BYTES: u64 = units.kibibytes(64);
 const DEFAULT_STORAGE_DMA_WINDOW_BYTES: u64 = units.kibibytes(128);
 const DEFAULT_USB_DMA_WINDOW_BYTES: u64 = units.mebibytes(2);
@@ -80,8 +81,6 @@ pub const DriverRecord = struct {
     bootstrap_transport: BootstrapTransport,
     dma_domain_id: u64,
     dma_protection: DmaProtection,
-    dma_range_count: u8,
-    dma_ranges: [MAX_DMA_RANGES]DmaRange,
     signer_len: u8,
     signer: [MAX_SIGNER_BYTES]u8,
 
@@ -91,10 +90,25 @@ pub const DriverRecord = struct {
 
     pub fn allowsDma(self: *const DriverRecord, address: u64, length: u64) bool {
         var index: usize = 0;
-        while (index < @as(usize, self.dma_range_count)) : (index += 1) {
-            if (self.dma_ranges[index].contains(address, length)) return true;
+        while (index < self.dmaRangeCount()) : (index += 1) {
+            if (self.dmaRange(index).?.contains(address, length)) return true;
         }
         return false;
+    }
+
+    pub fn dmaRangeCount(self: *const DriverRecord) usize {
+        return switch (self.device_class) {
+            .network_adapter, .storage_controller => 2,
+            .usb_controller, .graphics_adapter, .audio_print_io, .input_device, .compositor_policy => 1,
+        };
+    }
+
+    pub fn dmaRange(self: *const DriverRecord, index: usize) ?DmaRange {
+        if (index >= self.dmaRangeCount()) return null;
+        const window_length = dmaWindowLength(self.device_class);
+        const offset = std.math.mul(u64, @intCast(index), window_length) catch return null;
+        const base = std.math.add(u64, dmaWindowBase(self.device_id), offset) catch return null;
+        return .{ .base = base, .length = window_length };
     }
 
     comptime {
@@ -315,12 +329,9 @@ pub const Directory = struct {
             .bootstrap_transport = request.bootstrap_transport,
             .dma_domain_id = dma_domain_id,
             .dma_protection = .iommu_enforced,
-            .dma_range_count = 0,
-            .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
             .signer_len = 0,
             .signer = [_]u8{0} ** MAX_SIGNER_BYTES,
         };
-        record.dma_range_count = @intCast(defaultDmaRanges(record.dma_ranges[0..], request.device_class, request.device_id));
         writeSigner(&record, request.signer);
         return record;
     }
@@ -507,36 +518,16 @@ fn writeSigner(record: *DriverRecord, signer: []const u8) void {
     @memcpy(record.signer[0..signer_len], signer[0..signer_len]);
 }
 
-fn zeroDmaRange() DmaRange {
-    return .{
-        .base = 0,
-        .length = 0,
+fn dmaWindowLength(device_class: DeviceClass) u64 {
+    return switch (device_class) {
+        .network_adapter => DEFAULT_NETWORK_DMA_WINDOW_BYTES,
+        .storage_controller => DEFAULT_STORAGE_DMA_WINDOW_BYTES,
+        .usb_controller => DEFAULT_USB_DMA_WINDOW_BYTES,
+        .graphics_adapter => DEFAULT_GRAPHICS_DMA_WINDOW_BYTES,
+        .audio_print_io => DEFAULT_AUDIO_PRINT_DMA_WINDOW_BYTES,
+        .input_device => DEFAULT_INPUT_DMA_WINDOW_BYTES,
+        .compositor_policy => DEFAULT_COMPOSITOR_DMA_WINDOW_BYTES,
     };
-}
-
-fn defaultDmaRanges(dest: []DmaRange, device_class: DeviceClass, device_id: u64) usize {
-    if (dest.len == 0) return 0;
-    const base = dmaWindowBase(device_id);
-    dest[0] = .{
-        .base = base,
-        .length = switch (device_class) {
-            .network_adapter => DEFAULT_NETWORK_DMA_WINDOW_BYTES,
-            .storage_controller => DEFAULT_STORAGE_DMA_WINDOW_BYTES,
-            .usb_controller => DEFAULT_USB_DMA_WINDOW_BYTES,
-            .graphics_adapter => DEFAULT_GRAPHICS_DMA_WINDOW_BYTES,
-            .audio_print_io => DEFAULT_AUDIO_PRINT_DMA_WINDOW_BYTES,
-            .input_device => DEFAULT_INPUT_DMA_WINDOW_BYTES,
-            .compositor_policy => DEFAULT_COMPOSITOR_DMA_WINDOW_BYTES,
-        },
-    };
-    if (dest.len > 1 and (device_class == .network_adapter or device_class == .storage_controller)) {
-        dest[1] = .{
-            .base = base + dest[0].length,
-            .length = dest[0].length,
-        };
-        return 2;
-    }
-    return 1;
 }
 
 fn dmaWindowBase(device_id: u64) u64 {
@@ -554,8 +545,6 @@ fn zeroDriver() DriverRecord {
         .bootstrap_transport = .none,
         .dma_domain_id = 0,
         .dma_protection = .iommu_enforced,
-        .dma_range_count = 0,
-        .dma_ranges = [_]DmaRange{zeroDmaRange()} ** MAX_DMA_RANGES,
         .signer_len = 0,
         .signer = [_]u8{0} ** MAX_SIGNER_BYTES,
     };
@@ -592,7 +581,7 @@ fn registerDriverForTest(
 
 test "driver directory uses compact bounded record metadata" {
     try std.testing.expect(COMPACT_DRIVER_RECORD_METADATA);
-    try std.testing.expectEqual(u8, @FieldType(DriverRecord, "dma_range_count"));
+    try std.testing.expect(DERIVES_DMA_WINDOWS_FROM_DEVICE_POLICY);
     try std.testing.expectEqual(u8, @FieldType(DriverRecord, "signer_len"));
     try std.testing.expectEqual(@as(usize, DRIVER_RECORD_SIZE_CEILING_BYTES), @sizeOf(DriverRecord));
     try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
@@ -633,8 +622,12 @@ test "driver services require signed least-privilege device authority" {
     try std.testing.expectEqualStrings("zigos-driver-key", driver.signerSlice());
     try std.testing.expect(driver.dma_domain_id != 0);
     try std.testing.expectEqual(DmaProtection.iommu_enforced, driver.dma_protection);
-    try std.testing.expect(driver.dma_range_count >= 1);
-    try std.testing.expect(driver.allowsDma(driver.dma_ranges[0].base, DMA_TEST_PAGE_BYTES));
+    try std.testing.expectEqual(@as(usize, 2), driver.dmaRangeCount());
+    const first_dma_range = driver.dmaRange(0).?;
+    const second_dma_range = driver.dmaRange(1).?;
+    try std.testing.expectEqual(first_dma_range.base + first_dma_range.length, second_dma_range.base);
+    try std.testing.expect(driver.dmaRange(2) == null);
+    try std.testing.expect(driver.allowsDma(first_dma_range.base, DMA_TEST_PAGE_BYTES));
     try std.testing.expectEqual(BootstrapTransport.none, driver.bootstrap_transport);
     try std.testing.expect(directory.markRestarted(driver));
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);

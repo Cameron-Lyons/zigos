@@ -911,8 +911,9 @@ pub fn driverBoundaryAuditGate() !void {
         .now_ticks = 1,
         .bundle = bundle,
     });
-    try std.testing.expect(driver.allowsDma(driver.dma_ranges[0].base, 64));
-    try std.testing.expect(!driver.allowsDma(driver.dma_ranges[0].base - 64, 128));
+    const dma_range = driver.dmaRange(0).?;
+    try std.testing.expect(driver.allowsDma(dma_range.base, 64));
+    try std.testing.expect(!driver.allowsDma(dma_range.base - 64, 128));
 
     var rejected_directory = driver_service.Directory.init();
     try std.testing.expectError(error.InvalidBootstrapTransport, rejected_directory.register(.{
