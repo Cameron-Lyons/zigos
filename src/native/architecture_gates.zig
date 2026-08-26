@@ -1356,9 +1356,12 @@ pub const indexed_hot_path_tables = .{
         .uses_object_type_index = @hasField(object_store.Store, "object_type_index"),
         .tracks_max_blob_payload_bytes = @hasField(object_store.Store, "max_blob_payload_bytes"),
         .exposes_max_blob_payload_bytes = @hasDecl(object_store.Store, "maxBlobPayloadBytes"),
-        .bounds_inline_payload_materialization = object_store.MAX_INLINE_PAYLOAD_BYTES == 2 * object_store.MAX_CHUNK_BYTES and
+        .bounds_direct_payload_views_to_single_chunks = object_store.RETURNS_SINGLE_CHUNK_PAYLOADS_WITHOUT_COPIES and
+            object_store.MAX_INLINE_PAYLOAD_CHUNKS == 1 and
+            object_store.MAX_INLINE_PAYLOAD_BYTES == object_store.MAX_CHUNK_BYTES and
             object_store.MAX_INLINE_PAYLOAD_BYTES < object_store.MAX_PAYLOAD_BYTES and
-            @sizeOf(@FieldType(object_store.Store, "inline_payload_read_buffer")) == object_store.MAX_INLINE_PAYLOAD_BYTES,
+            !@hasField(object_store.Store, "inline_payload_read_buffer") and
+            @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
     },
     .service_catalog = .{
         .uses_bootstrap_owner_keys = @hasField(service_catalog.ServiceCatalogEntry, "owner_key"),

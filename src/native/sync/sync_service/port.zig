@@ -506,12 +506,18 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
             frame: TransportFrame,
         ) PeerReplicationError!PeerFrameDelivery {
             const source_version = request.source_storage.version(frame.version_id) orelse return error.VersionNotFound;
-            const payload = try request.source_storage.versionPayload(source_version);
+            const payload = request.source_storage.versionPayload(source_version) catch |err| switch (err) {
+                error.PayloadRequiresStreaming => try request.source_storage.versionPayloadInto(
+                    source_version,
+                    request.payload_buffer orelse return error.PayloadRequiresStreaming,
+                ),
+                else => return err,
+            };
             var used_booted_relay_service = false;
             var relay_delivery_count: usize = 0;
 
             if (request.transport == .relay_assisted) {
-                relay_delivery_count = try self.relayPayloadToPeer(request, payload);
+                relay_delivery_count = try self.relayVersionPayloadToPeer(request, source_version);
                 used_booted_relay_service = true;
             }
 
@@ -559,6 +565,22 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
                 .relay_delivery_count = relay_delivery_count,
                 .used_booted_relay_service = used_booted_relay_service,
             };
+        }
+
+        fn relayVersionPayloadToPeer(
+            self: *Self,
+            request: PeerReplicationRequest,
+            source_version: *const object_store.VersionRecord,
+        ) PeerReplicationError!usize {
+            var cursor = try request.source_storage.versionChunkCursor(source_version);
+            var delivery_count: usize = 0;
+            var chunk_count: usize = 0;
+            while (try cursor.next()) |chunk| {
+                delivery_count += try self.relayPayloadToPeer(request, chunk.bytes);
+                chunk_count += 1;
+            }
+            if (chunk_count == 0) delivery_count += try self.relayPayloadToPeer(request, "");
+            return delivery_count;
         }
 
         fn relayPayloadToPeer(
