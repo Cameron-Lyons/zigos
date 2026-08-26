@@ -33,6 +33,7 @@ pub const BootedOverlayRelayService = harness.BootedOverlayRelayService;
 pub const TransportSession = harness.TransportSession;
 pub const VerifiedServiceIdentityOpenRequest = harness.VerifiedServiceIdentityOpenRequest;
 pub const Harness = harness.Harness;
+pub const TelemetryCount = harness.TelemetryCount;
 pub const EmulatedNativeTransport = harness.EmulatedNativeTransport;
 pub const signPacket = harness.signPacket;
 pub const verifySignedFrame = harness.verifySignedFrame;
@@ -63,8 +64,8 @@ pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_840;
-pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_048;
-pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 176;
+pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_000;
+pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 128;
 pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES
 else
@@ -404,16 +405,16 @@ pub const NativeTransportService = struct {
     endpoints: EndpointTableBacking = if (heap_backed_endpoint_table) null else endpoint.Table.init(),
     capture: TransportPacketCapture = .{},
     peer_links: network_driver_task.PeerLinkDirectory = .{},
-    opened_connections: usize = 0,
-    disconnected_connections: usize = 0,
-    reconnect_count: usize = 0,
-    endpoint_frame_count: usize = 0,
-    network_frame_count: usize = 0,
-    relay_fallback_count: usize = 0,
-    congestion_drop_count: usize = 0,
-    replay_rejection_count: usize = 0,
-    revoked_device_rejection_count: usize = 0,
-    peer_address_miss_count: usize = 0,
+    opened_connections: TelemetryCount = 0,
+    disconnected_connections: TelemetryCount = 0,
+    reconnect_count: TelemetryCount = 0,
+    endpoint_frame_count: TelemetryCount = 0,
+    network_frame_count: TelemetryCount = 0,
+    relay_fallback_count: TelemetryCount = 0,
+    congestion_drop_count: TelemetryCount = 0,
+    replay_rejection_count: TelemetryCount = 0,
+    revoked_device_rejection_count: TelemetryCount = 0,
+    peer_address_miss_count: TelemetryCount = 0,
     production_attested_sessions_required: bool = false,
     i225_proof_required: bool = false,
     i225_proof_attached: bool = false,
@@ -595,13 +596,13 @@ pub const NativeTransportService = struct {
     pub fn disconnect(self: *NativeTransportService, connection: *NativeConnection) void {
         if (!connection.connected) return;
         connection.connected = false;
-        self.disconnected_connections += 1;
+        self.disconnected_connections +|= 1;
     }
 
     pub fn reconnect(self: *NativeTransportService, connection: *NativeConnection) void {
         if (connection.connected) return;
         connection.connected = true;
-        self.reconnect_count += 1;
+        self.reconnect_count +|= 1;
     }
 
     pub fn acknowledge(self: *NativeTransportService, connection: *NativeConnection, sequence: u64) void {
@@ -629,7 +630,7 @@ pub const NativeTransportService = struct {
         try self.ensureHardwareBackedNetworkReady();
         if (plaintext.len > MAX_NATIVE_PAYLOAD_BYTES) return error.PacketTooLarge;
         if (connection.in_flight_frames >= MAX_NATIVE_IN_FLIGHT_FRAMES) {
-            self.congestion_drop_count += 1;
+            self.congestion_drop_count +|= 1;
             return error.NativeTransportCongested;
         }
         const sequence = try self.pendingSequence(connection);
@@ -656,13 +657,13 @@ pub const NativeTransportService = struct {
         const network_delivered = if (connection.target_mac) |target_mac|
             network_driver_task.sendActiveFrame(target_mac, encoded)
         else blk: {
-            self.peer_address_miss_count += 1;
+            self.peer_address_miss_count +|= 1;
             break :blk false;
         };
-        self.endpoint_frame_count += 1;
+        self.endpoint_frame_count +|= 1;
         connection.in_flight_frames += 1;
         markSequenceSent(connection, sequence);
-        if (network_delivered) self.network_frame_count += 1;
+        if (network_delivered) self.network_frame_count +|= 1;
 
         return .{
             .signed_frame = signed_frame,
@@ -699,7 +700,7 @@ pub const NativeTransportService = struct {
                 const signed_frame = try self.harness.encryptSignedFrame(&connection.session, plaintext, signer);
                 try relay_service.submitSignedFrame(connection.session.task_id, &connection.session, signed_frame);
                 markSequenceSent(connection, sequence);
-                self.relay_fallback_count += 1;
+                self.relay_fallback_count +|= 1;
                 return .{
                     .signed_frame = signed_frame,
                     .endpoint_delivered = false,
@@ -715,7 +716,7 @@ pub const NativeTransportService = struct {
         if (!delivery.network_delivered) {
             try self.ensureTrustedTransportDevices(connection.session.source_device, connection.session.target_device);
             try relay_service.submitSignedFrame(connection.session.task_id, &connection.session, delivery.signed_frame);
-            self.relay_fallback_count += 1;
+            self.relay_fallback_count +|= 1;
             return .{
                 .signed_frame = delivery.signed_frame,
                 .endpoint_delivered = delivery.endpoint_delivered,
@@ -783,7 +784,7 @@ pub const NativeTransportService = struct {
             .service_port = true,
         });
         try endpoints.connect(source_endpoint.id, target_endpoint.id);
-        self.opened_connections += 1;
+        self.opened_connections +|= 1;
         return .{
             .session = session,
             .source_endpoint_id = source_endpoint.id,
@@ -802,7 +803,7 @@ pub const NativeTransportService = struct {
     ) Error!void {
         const graph = self.trust_graph orelse return;
         if (!graph.isTrusted(source_device) or !graph.isTrusted(target_device)) {
-            self.revoked_device_rejection_count += 1;
+            self.revoked_device_rejection_count +|= 1;
             return error.NativeTransportDeviceRevoked;
         }
     }
@@ -826,7 +827,7 @@ pub const NativeTransportService = struct {
             (sequence <= connection.highest_delivered_sequence and
                 connection.highest_delivered_sequence - sequence >= sync_state.TRANSPORT_REPLAY_WINDOW))
         {
-            self.replay_rejection_count += 1;
+            self.replay_rejection_count +|= 1;
             return error.NativeTransportReplayRejected;
         }
         return sequence;
@@ -1828,6 +1829,10 @@ test "native sync transport falls back through booted relay and encrypts object 
 }
 
 test "compact capture metadata preserves maximum native frames" {
+    try std.testing.expect(harness.COMPACT_TRANSPORT_TELEMETRY);
+    try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "opened_connections"));
+    try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "relay_fallback_count"));
+    try std.testing.expectEqual(TelemetryCount, @FieldType(NativeTransportService, "replay_rejection_count"));
     try std.testing.expect(DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE);
     try std.testing.expect(!@hasField(PacketCapture, "last_packet_id"));
     try std.testing.expect(!@hasField(PacketCapture, "captured_count"));
