@@ -3523,7 +3523,8 @@ fn validateNativeOnlyLaunchTrack(
         "const archive_index = @import(\"userspace_archive_index.zig\")",
         "for (active_boot_image_specs, 0..) |spec, artifact_index|",
         "const artifact = archive_index.artifacts[artifact_index]",
-        "validateGeneratedArtifactMatchesSpec(&spec, artifact)",
+        "validateGeneratedArtifact(artifact)",
+        "bundle.signature = try userspace_manifest_signing.signBundle(bundle)",
         "catalog.registerBuildValidatedArtifact",
         "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session-manager\").?.embedsElf())",
     };
@@ -3531,6 +3532,9 @@ fn validateNativeOnlyLaunchTrack(
         if (std.mem.indexOf(u8, boot_registry_source, snippet) == null) {
             try common.addError(errors, allocator, "Native-only launch track must keep archive-backed boot registry snippet: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, boot_registry_source, "spec.signed") != null) {
+        try common.addError(errors, allocator, "Native-only boot userspace must not retain an unsigned registry policy path", .{});
     }
     const required_archive_index_snippets = [_][]const u8{
         "const archive = @import(\"userspace_archive\")",

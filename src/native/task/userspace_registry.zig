@@ -52,7 +52,6 @@ pub const ImageSpec = struct {
     contract_flags: u32 = 0,
     service_class: ?contract.ServiceClass = null,
     service_kind: userspace_mailbox.ServiceKind = .generic,
-    signed: bool = true,
 };
 
 pub const StandaloneImageSpec = struct {
@@ -71,7 +70,6 @@ pub const StandaloneImageSpec = struct {
     role_tag: u32,
     heartbeat_increment: u32,
     contract_flags: u32 = 0,
-    signed: bool = true,
 };
 
 fn serviceImageSpec(class: contract.ServiceClass, component_class: ComponentClass) ImageSpec {
@@ -114,7 +112,6 @@ pub fn standaloneImageSpec(spec: StandaloneImageSpec) ImageSpec {
         .role_tag = spec.role_tag,
         .heartbeat_increment = spec.heartbeat_increment,
         .contract_flags = spec.contract_flags,
-        .signed = spec.signed,
     };
 }
 

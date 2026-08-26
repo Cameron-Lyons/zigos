@@ -37,7 +37,6 @@ pub fn Main(comptime mode: EntryMode) type {
         pub fn initDescriptor() Descriptor {
             return userspace_descriptor.initComptime(.{
                 .component_class = build_options.component_class,
-                .signed = build_options.signed,
                 .role_tag = build_options.role_tag,
                 .heartbeat_increment = build_options.heartbeat_increment,
                 .contract_flags = build_options.contract_flags,

@@ -33,7 +33,6 @@ const Artifact = struct {
     role_tag: u32,
     heartbeat_increment: u32,
     contract_flags: u32,
-    signed: bool,
     embedded_info: EmbeddedInfo,
 };
 
@@ -177,7 +176,6 @@ fn parseArtifact(
         .role_tag = descriptor.role_tag,
         .heartbeat_increment = descriptor.heartbeat_increment,
         .contract_flags = descriptor.contract_flags,
-        .signed = descriptor.signed != 0,
         .embedded_info = try elf_image_inspector.inspect(bytes),
     };
 }
@@ -424,7 +422,6 @@ fn writeArchive(
         \\};
         \\
         \\pub const Artifact = struct {
-        \\    signed: bool,
         \\    entry_point: u64,
         \\    stack_top: u64,
         \\    stack_size_bytes: usize,
@@ -459,7 +456,6 @@ fn writeArchive(
 
     for (artifacts, 0..) |artifact, index| {
         try writer.writeAll("    .{\n");
-        try writer.print("        .signed = {},\n", .{artifact.signed});
         try writer.print("        .entry_point = 0x{x},\n", .{artifact.embedded_info.entry_point});
         try writer.print("        .stack_top = 0x{x},\n", .{artifact.embedded_info.executable_image.stack_top});
         try writer.print("        .stack_size_bytes = {d},\n", .{artifact.embedded_info.executable_image.stack_size_bytes});

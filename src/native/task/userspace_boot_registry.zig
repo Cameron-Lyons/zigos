@@ -24,7 +24,6 @@ const SigningError = @typeInfo(SignBundleReturn).error_union.error_set;
 
 pub const Error = userspace_loader.Error || SigningError || error{
     GeneratedArtifactSegmentCountInvalid,
-    GeneratedArtifactSignatureMismatch,
     UnsupportedServiceClass,
     UnknownBundleId,
 };
@@ -63,7 +62,7 @@ pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
 pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     for (active_boot_image_specs, 0..) |spec, artifact_index| {
         const artifact = archive_index.artifacts[artifact_index];
-        try validateGeneratedArtifactMatchesSpec(&spec, artifact);
+        try validateGeneratedArtifact(artifact);
         const bundle = try bundleForSpec(&spec);
         const executable_image = try executableImageFromArtifact(artifact);
         _ = catalog.registerBuildValidatedArtifact(.{
@@ -83,8 +82,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     }
 }
 
-pub fn validateGeneratedArtifactMatchesSpec(spec: *const role_registry.ImageSpec, artifact: anytype) Error!void {
-    if (artifact.signed != spec.signed) return error.GeneratedArtifactSignatureMismatch;
+pub fn validateGeneratedArtifact(artifact: anytype) Error!void {
     if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
         return error.GeneratedArtifactSegmentCountInvalid;
     }
@@ -92,11 +90,6 @@ pub fn validateGeneratedArtifactMatchesSpec(spec: *const role_registry.ImageSpec
 
 pub fn bundleIdForServiceClass(class: contract.ServiceClass) Error![]const u8 {
     return service_catalog.bundleIdForServiceClass(class) orelse error.UnsupportedServiceClass;
-}
-
-fn signatureFor(bundle: manifest.BundleManifest, signed: bool) SigningError!manifest.Signature {
-    if (!signed) return .{};
-    return userspace_manifest_signing.signBundle(bundle);
 }
 
 fn bundleForSpec(spec: *const role_registry.ImageSpec) Error!manifest.BundleManifest {
@@ -110,7 +103,7 @@ fn bundleForSpec(spec: *const role_registry.ImageSpec) Error!manifest.BundleMani
         .assets = spec.assets,
         .update_channel = spec.update_channel,
     };
-    bundle.signature = try signatureFor(bundle, spec.signed);
+    bundle.signature = try userspace_manifest_signing.signBundle(bundle);
     return bundle;
 }
 
@@ -181,7 +174,9 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     try std.testing.expect(catalog.findByBundleId("app.capture").?.embedsElf());
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("app.capture").?.hasTypedContract());
-    try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.bundle_signed);
+    for (active_boot_image_specs) |spec| {
+        try std.testing.expect(catalog.findByBundleId(spec.bundle_id).?.bundle_signed);
+    }
     if (archive_index.includes_verification_images) {
         try std.testing.expect(find("zigos.proof.mmu-isolation") != null);
     } else {
@@ -189,25 +184,17 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     }
 }
 
-test "boot registry rejects generated archive records that diverge from registry specs" {
+test "boot registry rejects invalid generated executable metadata" {
     try std.testing.expect(archive_index.artifacts.len > 0);
-    const spec = specAt(0) orelse return error.UnknownBundleId;
 
-    try validateGeneratedArtifactMatchesSpec(spec, archive_index.artifacts[0]);
+    try validateGeneratedArtifact(archive_index.artifacts[0]);
     _ = try executableImageFromArtifact(archive_index.artifacts[0]);
-
-    var unsigned = archive_index.artifacts[0];
-    unsigned.signed = !spec.signed;
-    try std.testing.expectError(
-        error.GeneratedArtifactSignatureMismatch,
-        validateGeneratedArtifactMatchesSpec(spec, unsigned),
-    );
 
     var too_many_segments = archive_index.artifacts[0];
     too_many_segments.segment_count = task_runtime.MAX_EXECUTABLE_SEGMENTS + 1;
     try std.testing.expectError(
         error.GeneratedArtifactSegmentCountInvalid,
-        validateGeneratedArtifactMatchesSpec(spec, too_many_segments),
+        validateGeneratedArtifact(too_many_segments),
     );
     try std.testing.expectError(
         error.GeneratedArtifactSegmentCountInvalid,
