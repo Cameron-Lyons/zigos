@@ -106,6 +106,14 @@ test "resident object metadata uses capacity-sized length fields" {
     try std.testing.expectEqual(@as(usize, object_store.BLOB_SLOT_SIZE_CEILING_BYTES), @sizeOf(BlobSlot));
 }
 
+test "object store paged arenas elide unused generations" {
+    try std.testing.expect(object_store.ELIDES_UNUSED_OBJECT_STORE_SLOT_GENERATIONS);
+    const BlobArena = @FieldType(Store, "blobs");
+    const ChunkArena = @FieldType(Store, "chunks");
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(BlobArena, "slot_generations")));
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(ChunkArena, "slot_generations")));
+}
+
 test "object query and history outputs use compact bounded metadata" {
     try std.testing.expect(object_store.COMPACT_OBJECT_RESULT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(object_store.ObjectQueryResult, "label_len"));

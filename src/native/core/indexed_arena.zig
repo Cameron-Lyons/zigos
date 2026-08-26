@@ -1072,7 +1072,17 @@ pub fn PagedIndexedArena(
     comptime index_capacity: usize,
     comptime keyOf: anytype,
 ) type {
-    return PagedIndexedArenaWithKey(u64, Slot, page_size, page_count, index_capacity, keyOf);
+    return PagedIndexedArenaWithKeyOptions(u64, Slot, page_size, page_count, index_capacity, keyOf, .{});
+}
+
+pub fn PagedIndexedArenaWithoutHandles(
+    comptime Slot: type,
+    comptime page_size: usize,
+    comptime page_count: usize,
+    comptime index_capacity: usize,
+    comptime keyOf: anytype,
+) type {
+    return PagedIndexedArenaWithKeyOptions(u64, Slot, page_size, page_count, index_capacity, keyOf, .{ .track_generations = false });
 }
 
 pub fn PagedIndexedArenaWithKey(
@@ -1083,9 +1093,26 @@ pub fn PagedIndexedArenaWithKey(
     comptime index_capacity: usize,
     comptime keyOf: anytype,
 ) type {
+    return PagedIndexedArenaWithKeyOptions(Key, Slot, page_size, page_count, index_capacity, keyOf, .{});
+}
+
+pub const PagedOptions = struct {
+    track_generations: bool = true,
+};
+
+pub fn PagedIndexedArenaWithKeyOptions(
+    comptime Key: type,
+    comptime Slot: type,
+    comptime page_size: usize,
+    comptime page_count: usize,
+    comptime index_capacity: usize,
+    comptime keyOf: anytype,
+    comptime options: PagedOptions,
+) type {
     if (page_size == 0) @compileError("paged indexed arena requires at least one slot per page");
     if (page_count == 0) @compileError("paged indexed arena requires at least one page");
     const capacity = page_size * page_count;
+    const generation_capacity = if (options.track_generations) capacity else 0;
     if (index_capacity < capacity) @compileError("paged indexed arena primary index capacity must cover all slab slots");
     const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
     if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
@@ -1125,7 +1152,7 @@ pub fn PagedIndexedArenaWithKey(
         pages: [page_count]Page = [_]Page{Page{}} ** page_count,
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
         slot_keys: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
-        slot_generations: [capacity]u32 = [_]u32{0} ** capacity,
+        slot_generations: [generation_capacity]u32 = [_]u32{0} ** generation_capacity,
         free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
         free_head: FreeIndex = free_no_index,
         next_unclaimed_index: Count = 0,
@@ -1141,8 +1168,10 @@ pub fn PagedIndexedArenaWithKey(
             while (slot_index < capacity) : (slot_index += 1) {
                 self.slotAt(slot_index).* = Slot{};
                 self.slot_keys[slot_index] = ids.zero(Key);
-                if (slot_index < claimed_count) {
-                    self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+                if (comptime options.track_generations) {
+                    if (slot_index < claimed_count) {
+                        self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+                    }
                 }
                 self.free_next[slot_index] = free_no_index;
             }
@@ -1158,7 +1187,9 @@ pub fn PagedIndexedArenaWithKey(
             while (slot_index < claimed_count) : (slot_index += 1) {
                 setSlotInUse(self.slotAt(slot_index), false);
                 self.slot_keys[slot_index] = ids.zero(Key);
-                self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+                if (comptime options.track_generations) {
+                    self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+                }
                 self.free_next[slot_index] = free_no_index;
             }
             self.primary_index.reset();
@@ -1186,6 +1217,7 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         pub fn reserveHandle(self: *Self, key: Key) ?Handle {
+            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
             const slot_index = self.reserveIndex(key) orelse return null;
             return self.handleForIndex(slot_index);
         }
@@ -1201,12 +1233,14 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         pub fn getByHandle(self: *Self, handle: Handle) ?*Slot {
+            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
             const slot_index = handle.slotIndex();
             if (!self.handleMatches(slot_index, handle)) return null;
             return self.slotAt(slot_index);
         }
 
         pub fn getConstByHandle(self: *const Self, handle: Handle) ?*const Slot {
+            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
             const slot_index = handle.slotIndex();
             if (!self.handleMatches(slot_index, handle)) return null;
             return self.slotAtConst(slot_index);
@@ -1217,6 +1251,7 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         pub fn handleForIndex(self: *const Self, slot_index: usize) ?Handle {
+            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
             if (slot_index >= capacity) return null;
             const slot = self.slotAtConst(slot_index);
             if (!slotInUse(slot)) return null;
@@ -1226,6 +1261,7 @@ pub fn PagedIndexedArenaWithKey(
         /// The caller must already own a currently claimed slot. Optimized
         /// builds avoid rereading its payload membership flag.
         pub inline fn handleForClaimedIndex(self: *const Self, slot_index: usize) Handle {
+            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
             if (builtin.mode == .Debug) {
                 std.debug.assert(slot_index < capacity);
                 std.debug.assert(slotInUse(self.slotAtConst(slot_index)));
@@ -1249,6 +1285,7 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         pub fn removeHandle(self: *Self, handle: Handle) bool {
+            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
             const slot_index = handle.slotIndex();
             if (!self.handleMatches(slot_index, handle)) return false;
             return self.removeIndex(slot_index);
@@ -1266,7 +1303,9 @@ pub fn PagedIndexedArenaWithKey(
             }
             slot.* = Slot{};
             self.slot_keys[slot_index] = ids.zero(Key);
-            self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+            if (comptime options.track_generations) {
+                self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
+            }
             self.used_count -= 1;
             self.pushFreeIndex(slot_index);
             return true;
@@ -1290,7 +1329,9 @@ pub fn PagedIndexedArenaWithKey(
                         self.slot_keys[slot_index] = key;
                         self.primary_index.insertAbsent(raw_key, slot_index);
                     }
-                    if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
+                    if (comptime options.track_generations) {
+                        if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
+                    }
                     self.used_count += 1;
                 }
             }
@@ -1320,7 +1361,9 @@ pub fn PagedIndexedArenaWithKey(
             const slot = self.slotAt(slot_index);
             slot.* = Slot{};
             setSlotInUse(slot, true);
-            if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
+            if (comptime options.track_generations) {
+                if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
+            }
             self.slot_keys[slot_index] = key;
             self.primary_index.insertAbsent(raw_key, slot_index);
             self.used_count += 1;
@@ -1365,6 +1408,7 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
+            if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
             if (handle.isZero() or slot_index >= capacity) return false;
             const slot = self.slotAtConst(slot_index);
             return slotInUse(slot) and self.slot_generations[slot_index] == handle.generation();
@@ -1482,6 +1526,21 @@ test "paged arenas support slot-owned membership bits" {
     try std.testing.expectEqual(first_index, second_index);
     arena.resetRetainingPayloads();
     try std.testing.expect(!arena.slotAtConst(second_index).arenaInUse());
+}
+
+test "paged arenas can elide unused generations" {
+    const Arena = PagedIndexedArenaWithoutHandles(TestSlot, 2, 2, 8, testSlotId);
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Arena, "slot_generations")));
+
+    var arena = Arena.init();
+    const slot_index = arena.reserveIndex(7).?;
+    arena.slotAt(slot_index).record.id = 7;
+    try std.testing.expect(arena.getConst(7) != null);
+    arena.rebuildPrimaryIndex();
+    try std.testing.expectEqual(slot_index, arena.slotIndexOf(7).?);
+    try std.testing.expect(arena.removeIndex(slot_index));
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+    arena.reset();
 }
 
 test "indexed arenas support slot-owned membership bits" {
