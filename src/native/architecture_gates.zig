@@ -1290,6 +1290,11 @@ pub const indexed_hot_path_tables = .{
             !@hasField(object_store.VersionRecord, "previous_version_id"),
         .derives_version_parent_count_from_canonical_slots = object_store.DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS and
             !@hasField(object_store.VersionRecord, "parent_count"),
+        .derives_version_address_from_canonical_state = object_store.DERIVES_VERSION_ADDRESS_FROM_CANONICAL_STATE and
+            !@hasField(object_store.VersionRecord, "version_address") and
+            @hasDecl(object_store.Store, "versionAddress") and
+            @sizeOf(object_store.VersionRecord) <= object_store.VERSION_RECORD_SIZE_CEILING_BYTES and
+            @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
         .packs_version_type_into_trailing_padding = object_store.PACKS_VERSION_TYPE_INTO_TRAILING_PADDING and
             @sizeOf(object_store.VersionRecord) <= object_store.VERSION_RECORD_SIZE_CEILING_BYTES,
         .packs_object_store_membership_into_record_padding = object_store.PACKS_OBJECT_STORE_MEMBERSHIP_INTO_RECORD_PADDING and

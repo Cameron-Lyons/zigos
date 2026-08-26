@@ -66,19 +66,20 @@ pub const PACKS_CHUNK_SLOT_MEMBERSHIP_INTO_PAYLOAD_STATE = true;
 pub const ELIDES_UNUSED_OBJECT_STORE_SLOT_GENERATIONS = true;
 pub const DERIVES_OBJECT_STORE_ARENA_KEYS_FROM_PAYLOADS = true;
 pub const DERIVES_OBJECT_STORE_RECORD_ARENA_KEYS_FROM_PAYLOADS = true;
+pub const DERIVES_VERSION_ADDRESS_FROM_CANONICAL_STATE = true;
 pub const RETURNS_SINGLE_CHUNK_PAYLOADS_WITHOUT_COPIES = true;
 pub const RIGHT_SIZES_OBJECT_STORE_DIRTY_ID_INDEXES = indexed_arena.RIGHT_SIZES_DIRTY_ID_INDEXES;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
-pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 320;
+pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 288;
 pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 64;
 pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 64;
 pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
-pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 320;
+pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 288;
 pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_281_584;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_257_008;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -352,7 +353,6 @@ pub const VersionRecord = struct {
     id: ids.VersionId,
     object_id: ids.ObjectId,
     parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
-    version_address: VersionAddress,
     metadata: SignedMetadata,
     blob_slot_index: VersionBlobSlotIndex,
     object_type: ObjectType,
@@ -553,7 +553,6 @@ const VersionSlot = struct {
         .object_id = ids.ObjectId.zero,
         .parent_version_ids = [_]ids.VersionId{ids.VersionId.zero} ** MAX_VERSION_PARENTS,
         .object_type = .blob,
-        .version_address = crypto_hash.zero_digest,
         .metadata = .{},
         .blob_slot_index = 0,
     },
@@ -924,7 +923,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 .object_id = target_object.id,
                 .parent_version_ids = parents,
                 .object_type = request.object_type,
-                .version_address = version_address,
                 .metadata = &request.metadata,
                 .blob_slot_index = blob_slot_index,
             });
@@ -1159,6 +1157,13 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return &slot.blob;
         }
 
+        pub fn versionAddress(self: *const Self, version_record: *const VersionRecord) Error!VersionAddress {
+            if (!version_record.hasCanonicalParents()) return error.CorruptBlob;
+            const version_blob = self.versionBlob(version_record) orelse return error.BlobNotFound;
+            const parent_count: usize = @intCast(version_record.parentCount());
+            return computeVersionAddress(version_record.parent_version_ids[0..parent_count], version_record.metadata, version_blob.address);
+        }
+
         pub fn chunk(self: *const Self, address: ChunkAddress) ?*const ChunkRecord {
             const slot_index = self.chunkSlotIndex(address) orelse return null;
             const slot = self.chunkSlotAtConst(slot_index);
@@ -1331,7 +1336,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             object_id: ids.ObjectId,
             parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
             object_type: ObjectType,
-            version_address: VersionAddress,
             metadata: *const SignedMetadata,
             blob_slot_index: usize,
         }) Error!void {
@@ -1340,7 +1344,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.object_id = request.object_id;
             slot.version.parent_version_ids = request.parent_version_ids;
             slot.version.object_type = request.object_type;
-            slot.version.version_address = request.version_address;
             writeMetadata(&slot.version.metadata, request.metadata);
             slot.version.blob_slot_index = @intCast(request.blob_slot_index);
             if (request.id.raw() >= self.next_version_id) {
