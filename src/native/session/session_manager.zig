@@ -82,7 +82,7 @@ pub const testing = struct {
         return default_manager.packageServicePtr();
     }
 
-    pub fn reviewUxControllerPtr() *native_ux.Controller {
+    pub fn reviewUxControllerPtr() error{NoSpaceLeft}!*native_ux.Controller {
         return default_manager.reviewUxControllerPtr();
     }
 

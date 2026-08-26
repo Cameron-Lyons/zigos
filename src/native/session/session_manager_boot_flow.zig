@@ -54,6 +54,9 @@ pub const UI_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
+pub const HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING = session_contexts.HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING;
+pub const REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES = session_contexts.REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES;
+pub const recovery_context_layout = session_contexts.recovery_context_layout;
 const BootstrapError = error{ MissingBootstrapLaunch, MissingBootstrapGrant, MissingUserspaceImage } || session_bootstrap.Error || userspace_launch.Error || capability.Error || task_runtime.Error;
 const NETWORK_RECEIVE_SERVICE_BUDGET: usize = 8;
 
@@ -120,6 +123,7 @@ pub const SessionManager = struct {
         self.kernel_context.shared_memory_table.deinit();
         self.kernel_context.releaseCapabilityTable();
         self.recovery_context.review_compositor_session.deinit();
+        self.recovery_context.releaseReviewUxController();
         self.recovery_context.diagnostic_ledger.deinit();
         self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();
@@ -220,8 +224,8 @@ pub const SessionManager = struct {
             native_util.impossibleByInvariant("package service access requires allocated service-graph state");
     }
 
-    pub fn reviewUxControllerPtr(self: *SessionManager) *native_ux.Controller {
-        return &self.recovery_context.review_ux_controller;
+    pub fn reviewUxControllerPtr(self: *SessionManager) error{NoSpaceLeft}!*native_ux.Controller {
+        return self.recovery_context.ensureReviewUxController();
     }
 
     pub fn compositorSessionPtr(self: *SessionManager) *compositor_session.Session {
