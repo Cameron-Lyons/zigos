@@ -1859,11 +1859,13 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_input_decoder_snippets = [_][]const u8{
         "pub const QUEUE_ONLY_DECODER_STATE = true",
-        "pub const DECODER_SIZE_CEILING_BYTES: usize = 73",
+        "pub const EVENT_QUEUE_CAPACITY: usize = BOOT_KEY_SLOTS",
+        "pub const SINGLE_REPORT_EVENT_QUEUE = EVENT_QUEUE_CAPACITY == BOOT_KEY_SLOTS",
+        "pub const DECODER_SIZE_CEILING_BYTES: usize = 21",
     };
     for (required_input_decoder_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_driver_task_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must retain queue-only resident state: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must retain its bounded queue-only resident state: {s}", .{snippet});
         }
     }
     const retired_input_decoder_snippets = [_][]const u8{

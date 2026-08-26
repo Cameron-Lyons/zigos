@@ -2,12 +2,16 @@ const std = @import("std");
 
 pub const BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const BOOT_KEY_SLOTS: usize = 6;
-pub const EVENT_QUEUE_CAPACITY: usize = 32;
+pub const EVENT_QUEUE_CAPACITY: usize = BOOT_KEY_SLOTS;
 pub const COMPACT_EVENT_QUEUE_METADATA = true;
 pub const QUEUE_ONLY_DECODER_STATE = true;
-pub const DECODER_SIZE_CEILING_BYTES: usize = 73;
+pub const SINGLE_REPORT_EVENT_QUEUE = EVENT_QUEUE_CAPACITY == BOOT_KEY_SLOTS;
+pub const DECODER_SIZE_CEILING_BYTES: usize = 21;
 
 comptime {
+    if (!SINGLE_REPORT_EVENT_QUEUE) {
+        @compileError("input decoder queue must hold exactly one maximal boot-keyboard report");
+    }
     if (EVENT_QUEUE_CAPACITY > std.math.maxInt(u8)) {
         @compileError("input decoder event queue no longer fits compact metadata");
     }
@@ -206,20 +210,25 @@ test "input decoder maps navigation recovery commit and shifted text" {
     _ = try decoder.submit(testReport(0, &.{}));
     _ = try decoder.submit(testReport(CONTROL_MASK, &.{0x28}));
     _ = try decoder.submit(testReport(0, &.{}));
-    _ = try decoder.submit(testReport(SHIFT_MASK, &.{ 0x04, 0x1E, 0x38 }));
 
-    const expected = [_]KeyboardEvent{
+    const navigation_events = [_]KeyboardEvent{
         .{ .kind = .focus_next },
         .{ .kind = .focus_previous },
         .{ .kind = .task_switch_next },
         .{ .kind = .task_switch_previous },
         .{ .kind = .show_recovery },
         .{ .kind = .commit_text },
+    };
+    for (navigation_events) |event| try std.testing.expectEqual(event, decoder.poll().?);
+    try std.testing.expect(decoder.poll() == null);
+
+    _ = try decoder.submit(testReport(SHIFT_MASK, &.{ 0x04, 0x1E, 0x38 }));
+    const text_events = [_]KeyboardEvent{
         .{ .kind = .text, .text = 'A' },
         .{ .kind = .text, .text = '!' },
         .{ .kind = .text, .text = '?' },
     };
-    for (expected) |event| try std.testing.expectEqual(event, decoder.poll().?);
+    for (text_events) |event| try std.testing.expectEqual(event, decoder.poll().?);
     try std.testing.expect(decoder.poll() == null);
 }
 
@@ -245,6 +254,8 @@ test "input decoder rejects malformed reports and applies queue backpressure ato
     try std.testing.expectError(error.EventQueueFull, decoder.submit(testReport(0, &.{0x05})));
     try std.testing.expectEqual(EVENT_QUEUE_CAPACITY, decoder.pendingCount());
     try std.testing.expect(QUEUE_ONLY_DECODER_STATE);
+    try std.testing.expect(SINGLE_REPORT_EVENT_QUEUE);
+    try std.testing.expectEqual(BOOT_KEY_SLOTS, EVENT_QUEUE_CAPACITY);
     try std.testing.expect(@FieldType(Decoder, "head") == u8);
     try std.testing.expect(@FieldType(Decoder, "tail") == u8);
     try std.testing.expect(@FieldType(Decoder, "count") == u8);

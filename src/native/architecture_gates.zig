@@ -934,6 +934,8 @@ pub const indexed_hot_path_tables = .{
             @FieldType(xhci.HidController, "recycled_slot_count") == u8,
         .stores_compact_decoder_metadata = input_driver_task.COMPACT_EVENT_QUEUE_METADATA and
             input_driver_task.QUEUE_ONLY_DECODER_STATE and
+            input_driver_task.SINGLE_REPORT_EVENT_QUEUE and
+            input_driver_task.EVENT_QUEUE_CAPACITY == input_driver_task.BOOT_KEY_SLOTS and
             @FieldType(input_driver_task.Decoder, "head") == u8 and
             @FieldType(input_driver_task.Decoder, "tail") == u8 and
             @FieldType(input_driver_task.Decoder, "count") == u8 and
