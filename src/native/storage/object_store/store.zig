@@ -33,6 +33,7 @@ pub const MAX_METADATA_LABEL_BYTES: usize = 48;
 pub const MAX_CONTENT_TYPE_BYTES: usize = 64;
 pub const COMPACT_OBJECT_RESULT_METADATA = true;
 pub const SKIPS_EMPTY_ARENA_RESET_WORK = true;
+pub const DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
@@ -654,7 +655,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         next_object_id: u64 = 1,
         next_version_id: u64 = 1,
-        latest_inserted_version_id: ids.VersionId = ids.VersionId.zero,
         max_blob_payload_bytes: usize = 0,
         objects: ObjectArena = ObjectArena.init(),
         object_type_index: ObjectTypeIndex = ObjectTypeIndex.init(),
@@ -678,7 +678,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         fn resetState(self: *Self, initialize_indexes: bool) void {
             self.next_object_id = 1;
             self.next_version_id = 1;
-            self.latest_inserted_version_id = ids.VersionId.zero;
             self.max_blob_payload_bytes = 0;
             if (initialize_indexes or self.objects.next_unclaimed_index != 0) {
                 for (self.objects.slots[0..self.objects.next_unclaimed_index]) |*slot| {
@@ -726,16 +725,11 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn rebuildDerivedIndexes(self: *Self) void {
             self.rebuildObjectTypeIndex();
-            self.rebuildLatestInsertedVersionId();
             self.rebuildMaxBlobPayloadBytes();
         }
 
         pub fn indexReplayedObjectSlot(self: *Self, slot_index: usize) void {
             self.indexObjectTypeSlot(slot_index);
-        }
-
-        pub fn recordReplayedVersionId(self: *Self, version_id: ids.VersionId) void {
-            self.recordLatestInsertedVersionId(version_id);
         }
 
         pub fn recordReplayedBlobPayloadBytes(self: *Self, payload_len: usize) void {
@@ -889,8 +883,22 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn latestInsertedVersionConst(self: *const Self) ?*const VersionRecord {
-            if (self.latest_inserted_version_id.isZero()) return null;
-            return self.versionConst(self.latest_inserted_version_id);
+            if (self.versions.countInUse() == 0) return null;
+
+            const latest_issued_id = ids.version(if (self.next_version_id == 0)
+                std.math.maxInt(u64)
+            else
+                self.next_version_id - 1);
+            if (self.versionConst(latest_issued_id)) |version_record| return version_record;
+
+            var latest: ?*const VersionRecord = null;
+            for (self.versions.slots[0..self.versions.claimedCount()]) |*slot| {
+                if (!slot.in_use) continue;
+                if (latest == null or slot.version.id.raw() > latest.?.id.raw()) {
+                    latest = &slot.version;
+                }
+            }
+            return latest;
         }
 
         pub fn latestVersion(self: *Self, object_id: anytype) ?*VersionRecord {
@@ -1241,21 +1249,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             slot.version.blob_slot_index = @intCast(request.blob_slot_index);
             if (request.id.raw() >= self.next_version_id) {
                 self.next_version_id = request.id.raw() +% 1;
-            }
-            self.recordLatestInsertedVersionId(request.id);
-        }
-
-        fn rebuildLatestInsertedVersionId(self: *Self) void {
-            self.latest_inserted_version_id = ids.VersionId.zero;
-            for (&self.versions.slots) |*slot| {
-                if (!slot.in_use) continue;
-                self.recordLatestInsertedVersionId(slot.version.id);
-            }
-        }
-
-        fn recordLatestInsertedVersionId(self: *Self, version_id: ids.VersionId) void {
-            if (version_id.raw() > self.latest_inserted_version_id.raw()) {
-                self.latest_inserted_version_id = version_id;
             }
         }
 

@@ -69,6 +69,8 @@ test "versions retain only compact canonical blob references" {
 
 test "object store keeps immutable signed versions with stable version addresses" {
     var store = Store.init();
+    try std.testing.expect(object_store.DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE);
+    try std.testing.expect(!@hasField(Store, "latest_inserted_version_id"));
     try std.testing.expect(store.latestInsertedVersionConst() == null);
 
     const signer = signing.SignerIdentity{
@@ -93,6 +95,8 @@ test "object store keeps immutable signed versions with stable version addresses
         .metadata = metadata_v2,
         .parent_version_id = first.version_id,
     });
+    try std.testing.expectEqual(second.version_id, store.latestInsertedVersionConst().?.id);
+    store.next_version_id += 4;
     try std.testing.expectEqual(second.version_id, store.latestInsertedVersionConst().?.id);
     store.rebuildIndexes();
     try std.testing.expectEqual(second.version_id, store.latestInsertedVersionConst().?.id);
@@ -601,6 +605,7 @@ test "object store stops version identifiers before publishing a new object" {
     });
     try std.testing.expectEqual(std.math.maxInt(u64), final.version_id.raw());
     try std.testing.expectEqual(@as(u64, 0), store.next_version_id);
+    try std.testing.expectEqual(final.version_id, store.latestInsertedVersionConst().?.id);
 
     const object_count = store.objectCount();
     const blob_count = store.blobCount();
@@ -617,4 +622,5 @@ test "object store stops version identifiers before publishing a new object" {
     try std.testing.expectEqual(blob_count, store.blobCount());
     try std.testing.expectEqual(chunk_count, store.chunkCount());
     try std.testing.expectEqual(next_object_id, store.next_object_id);
+    try std.testing.expectEqual(final.version_id, store.latestInsertedVersionConst().?.id);
 }
