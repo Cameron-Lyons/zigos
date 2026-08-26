@@ -7,13 +7,14 @@ pub const DERIVES_STATIC_CONTRACT_METADATA = true;
 pub const COMPACT_BINDING_METADATA = true;
 pub const DIRECT_INTERFACE_BINDINGS = true;
 pub const DERIVES_BINDING_COUNT_FROM_SLOTS = true;
+pub const DERIVES_OWNER_FROM_ENDPOINT_CAPABILITY = true;
 pub const COMPACT_BOOTSTRAP_VALIDATION_STATE = true;
 pub const TYPED_ID_ONLY_API = true;
 pub const AUTHENTICATED_BINDINGS_ONLY = true;
 pub const REQUIRED_BINDING_FLAGS: u16 = abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
-pub const BINDING_SIZE_CEILING_BYTES: usize = 32;
-pub const REGISTRY_SIZE_CEILING_BYTES: usize = 992;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 1_000;
+pub const BINDING_SIZE_CEILING_BYTES: usize = 24;
+pub const REGISTRY_SIZE_CEILING_BYTES: usize = 744;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 752;
 
 pub const BootstrapEndpoint = struct {
     task_id: u64,
@@ -29,7 +30,6 @@ pub const BootstrapValidationState = enum(u8) {
 
 pub const Binding = struct {
     service_id: u64,
-    owner_task_id: u64,
     endpoint_id: u64,
     endpoint_capability_id: u64,
 
@@ -68,14 +68,13 @@ pub const Service = struct {
     pub fn register(
         self: *Service,
         service_id: u64,
-        owner_task_id: u64,
         endpoint_id: u64,
         endpoint_capability_id: u64,
         interface_id: typed_component_abi.InterfaceId,
         flags: u16,
     ) Error!void {
         try validateBootstrap(self.bootstrap_state);
-        return self.registry.register(service_id, owner_task_id, endpoint_id, endpoint_capability_id, interface_id, flags);
+        return self.registry.register(service_id, endpoint_id, endpoint_capability_id, interface_id, flags);
     }
 
     pub fn connect(self: *const Service, interface_id: typed_component_abi.InterfaceId) Error!abi.ServiceConnectionDescriptor {
@@ -117,13 +116,12 @@ pub const Registry = struct {
     pub fn register(
         self: *Registry,
         service_id: u64,
-        owner_task_id: u64,
         endpoint_id: u64,
         endpoint_capability_id: u64,
         interface_id: typed_component_abi.InterfaceId,
         flags: u16,
     ) Error!void {
-        if (service_id == 0 or owner_task_id == 0 or endpoint_id == 0 or endpoint_capability_id == 0) {
+        if (service_id == 0 or endpoint_id == 0 or endpoint_capability_id == 0) {
             return error.InvalidBindingEndpoint;
         }
         if (flags != REQUIRED_BINDING_FLAGS) return error.InvalidServiceFlags;
@@ -133,7 +131,6 @@ pub const Registry = struct {
 
         binding.* = .{
             .service_id = service_id,
-            .owner_task_id = owner_task_id,
             .endpoint_id = endpoint_id,
             .endpoint_capability_id = endpoint_capability_id,
         };
@@ -174,7 +171,6 @@ pub const Registry = struct {
 fn zeroBinding() Binding {
     return .{
         .service_id = 0,
-        .owner_task_id = 0,
         .endpoint_id = 0,
         .endpoint_capability_id = 0,
     };
@@ -199,7 +195,7 @@ test "service registry service requires bootstrap endpoint before discovery" {
     var service = Service.init();
     try std.testing.expectError(
         error.RegistryNotBootstrapped,
-        service.register(44, 7, 101, 201, .object_workspace, 0),
+        service.register(44, 101, 201, .object_workspace, 0),
     );
 
     service.bindBootstrap(.{
@@ -214,7 +210,7 @@ test "service registry service requires bootstrap endpoint before discovery" {
         .endpoint_id = 99,
         .endpoint_capability_id = 123,
     });
-    try service.register(44, 7, 101, 201, .object_workspace, REQUIRED_BINDING_FLAGS);
+    try service.register(44, 101, 201, .object_workspace, REQUIRED_BINDING_FLAGS);
 
     const connection = try service.connect(.object_workspace);
     try std.testing.expectEqual(@as(u64, 44), connection.service_id);
@@ -224,7 +220,7 @@ test "service registry service requires bootstrap endpoint before discovery" {
 
 test "service registry connects by exact typed interface id" {
     var registry = Registry.init();
-    try registry.register(44, 7, 101, 201, .object_workspace, REQUIRED_BINDING_FLAGS);
+    try registry.register(44, 101, 201, .object_workspace, REQUIRED_BINDING_FLAGS);
 
     const connection = try registry.connect(.object_workspace);
     try std.testing.expectEqual(@as(u64, 44), connection.service_id);
@@ -236,26 +232,27 @@ test "service registry connects by exact typed interface id" {
 
 test "service registry rejects invalid endpoints flags and duplicate typed ids" {
     var registry = Registry.init();
-    try std.testing.expectError(error.InvalidBindingEndpoint, registry.register(0, 7, 101, 201, .object_workspace, 0));
-    try std.testing.expectError(error.InvalidBindingEndpoint, registry.register(44, 0, 101, 201, .object_workspace, 0));
-    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 7, 101, 201, .object_workspace, 0));
-    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 7, 101, 201, .object_workspace, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
-    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 7, 101, 201, .object_workspace, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
-    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 7, 101, 201, .object_workspace, 0x8000));
+    try std.testing.expectError(error.InvalidBindingEndpoint, registry.register(0, 101, 201, .object_workspace, 0));
+    try std.testing.expectError(error.InvalidBindingEndpoint, registry.register(44, 0, 201, .object_workspace, 0));
+    try std.testing.expectError(error.InvalidBindingEndpoint, registry.register(44, 101, 0, .object_workspace, 0));
+    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 101, 201, .object_workspace, 0));
+    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 101, 201, .object_workspace, abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
+    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 101, 201, .object_workspace, abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE));
+    try std.testing.expectError(error.InvalidServiceFlags, registry.register(44, 101, 201, .object_workspace, 0x8000));
     try std.testing.expectEqual(@as(usize, 0), registry.bindingCount());
 
-    try registry.register(44, 7, 101, 201, .object_workspace, REQUIRED_BINDING_FLAGS);
-    try std.testing.expectError(error.DuplicateInterface, registry.register(45, 8, 102, 202, .object_workspace, REQUIRED_BINDING_FLAGS));
+    try registry.register(44, 101, 201, .object_workspace, REQUIRED_BINDING_FLAGS);
+    try std.testing.expectError(error.DuplicateInterface, registry.register(45, 102, 202, .object_workspace, REQUIRED_BINDING_FLAGS));
     try std.testing.expectEqual(@as(usize, 1), registry.bindingCount());
 }
 
 test "service registry binds independent exact interface slots" {
     var registry = Registry.init();
-    try registry.register(91, 8, 191, 291, .ai_inference, REQUIRED_BINDING_FLAGS);
-    try registry.register(92, 9, 192, 292, .privacy_budget, REQUIRED_BINDING_FLAGS);
-    try registry.register(93, 10, 193, 293, .diagnostics_export, REQUIRED_BINDING_FLAGS);
-    try registry.register(94, 11, 194, 294, .consent_receipts, REQUIRED_BINDING_FLAGS);
-    try registry.register(95, 12, 195, 295, .permission_lease, REQUIRED_BINDING_FLAGS);
+    try registry.register(91, 191, 291, .ai_inference, REQUIRED_BINDING_FLAGS);
+    try registry.register(92, 192, 292, .privacy_budget, REQUIRED_BINDING_FLAGS);
+    try registry.register(93, 193, 293, .diagnostics_export, REQUIRED_BINDING_FLAGS);
+    try registry.register(94, 194, 294, .consent_receipts, REQUIRED_BINDING_FLAGS);
+    try registry.register(95, 195, 295, .permission_lease, REQUIRED_BINDING_FLAGS);
 
     try std.testing.expectEqual(@as(u64, 91), (try registry.connect(.ai_inference)).service_id);
     try std.testing.expectEqual(@as(u64, 92), (try registry.connect(.privacy_budget)).service_id);
@@ -293,7 +290,7 @@ test "service registry rejects internal interface names and unversioned API bypa
 
 test "service registry binds known ids to generated typed contracts" {
     var registry = Registry.init();
-    try registry.register(44, 7, 101, 201, .service_registry, REQUIRED_BINDING_FLAGS);
+    try registry.register(44, 101, 201, .service_registry, REQUIRED_BINDING_FLAGS);
 
     const binding = registry.find(.service_registry).?;
     try std.testing.expectEqual(@as(u64, 44), binding.service_id);

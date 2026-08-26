@@ -138,13 +138,15 @@ pub const indexed_hot_path_tables = .{
             service_registry.MAX_BINDINGS == component_abi_schema.INTERFACE_COUNT and
             @FieldType(service_registry.Registry, "bindings") == [component_abi_schema.INTERFACE_COUNT]service_registry.Binding,
         .uses_typed_id_only_api = service_registry.TYPED_ID_ONLY_API and
-            @typeInfo(@TypeOf(service_registry.Registry.register)).@"fn".params[5].type.? == component_abi_schema.InterfaceId and
+            @typeInfo(@TypeOf(service_registry.Registry.register)).@"fn".params[4].type.? == component_abi_schema.InterfaceId and
             @typeInfo(@TypeOf(service_registry.Registry.connect)).@"fn".params[1].type.? == component_abi_schema.InterfaceId and
-            @typeInfo(@TypeOf(service_registry.Service.register)).@"fn".params[5].type.? == component_abi_schema.InterfaceId and
+            @typeInfo(@TypeOf(service_registry.Service.register)).@"fn".params[4].type.? == component_abi_schema.InterfaceId and
             @typeInfo(@TypeOf(service_registry.Service.connect)).@"fn".params[1].type.? == component_abi_schema.InterfaceId,
         .derives_typed_interface_ids_from_slots = !@hasDecl(service_registry.Binding, "interfaceId"),
         .derives_binding_count_from_slots = service_registry.DERIVES_BINDING_COUNT_FROM_SLOTS and
             !@hasField(service_registry.Registry, "binding_count"),
+        .derives_owner_from_endpoint_capability = service_registry.DERIVES_OWNER_FROM_ENDPOINT_CAPABILITY and
+            !@hasField(service_registry.Binding, "owner_task_id"),
         .stores_compact_bootstrap_validation_state = service_registry.COMPACT_BOOTSTRAP_VALIDATION_STATE and
             @FieldType(service_registry.Service, "bootstrap_state") == service_registry.BootstrapValidationState and
             !@hasField(service_registry.Service, "bootstrap") and
@@ -155,16 +157,17 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(service_registry.Binding) == service_registry.BINDING_SIZE_CEILING_BYTES and
             @sizeOf(service_registry.Registry) == service_registry.REGISTRY_SIZE_CEILING_BYTES and
             !@hasField(service_registry.Binding, "interface_id") and
-            !@hasField(service_registry.Binding, "flags"),
+            !@hasField(service_registry.Binding, "flags") and
+            !@hasField(service_registry.Binding, "owner_task_id"),
         .requires_authenticated_bindings = service_registry.AUTHENTICATED_BINDINGS_ONLY and
             service_registry.REQUIRED_BINDING_FLAGS == (abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE),
     },
     .component_abi_schema = .{
         .defines_interface_ids = @hasDecl(component_abi_schema, "InterfaceId"),
         .binds_services_by_interface_id = @hasDecl(component_abi_schema, "interfaceIdForService"),
-        .uses_exact_interface_id_only_service_wires = component_abi_wire.VERSION == 4 and
+        .uses_exact_interface_id_only_service_wires = component_abi_wire.VERSION == 5 and
             @sizeOf(component_abi_wire.WireHeader) == 24 and
-            @sizeOf(component_abi_wire.ServiceRegisterRequestWire) == 56 and
+            @sizeOf(component_abi_wire.ServiceRegisterRequestWire) == 48 and
             @sizeOf(component_abi_wire.ServiceConnectionRequestWire) == 32 and
             @sizeOf(abi.ServiceConnectionDescriptor) == 24 and
             !@hasField(component_abi_wire.WireHeader, "interface_major") and
@@ -175,6 +178,7 @@ pub const indexed_hot_path_tables = .{
             !@hasField(component_abi_wire.ServiceRegisterRequestWire, "interface_name_len") and
             !@hasField(component_abi_wire.ServiceRegisterRequestWire, "version_major") and
             !@hasField(component_abi_wire.ServiceRegisterRequestWire, "version_minor") and
+            !@hasField(component_abi_wire.ServiceRegisterRequestWire, "owner_task_id") and
             !@hasField(component_abi_wire.ServiceConnectionRequestWire, "version_major") and
             !@hasField(component_abi_wire.ServiceConnectionRequestWire, "version_minor") and
             !@hasField(abi.ServiceConnectionDescriptor, "version_major") and

@@ -264,7 +264,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
     try std.testing.expectEqual(@as(u16, 5), abi.ABI_VERSION);
     const storage_interface_id = typed_component_abi.interfaceIdForService(.storage_object);
-    try registry.register(55, 7, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
+    try registry.register(55, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
     const connection = try registry.connect(storage_interface_id);
     try std.testing.expectEqual(@as(u64, 55), connection.service_id);
     try std.testing.expectEqual(@as(u64, 101), connection.endpoint_id);
@@ -691,7 +691,6 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     const launched_record = runtime.find(launched.task_id).?;
     try service_directory.register(
         123,
-        launched.task_id,
         service_endpoint.endpoint.endpoint_id,
         service_endpoint.capability_id,
         typed_component_abi.interfaceIdForService(.storage_object),

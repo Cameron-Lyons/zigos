@@ -1,7 +1,7 @@
 const crypto_hash = @import("../core/crypto_hash.zig");
 
 pub const MAGIC: u32 = 0x54434142;
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 pub const WireHeader = extern struct {
     correlation_id: u64,
@@ -14,7 +14,6 @@ pub const WireHeader = extern struct {
 pub const ServiceRegisterRequestWire = extern struct {
     header: WireHeader,
     service_id: u64,
-    owner_task_id: u64,
     endpoint_id: u64,
     interface_id: u16,
     flags: u16,
