@@ -932,13 +932,12 @@ pub const indexed_hot_path_tables = .{
             @FieldType(xhci.HidController, "tail") == u8 and
             @FieldType(xhci.HidController, "count") == u8 and
             @FieldType(xhci.HidController, "recycled_slot_count") == u8,
-        .stores_compact_decoder_metadata = input_driver_task.COMPACT_EVENT_QUEUE_METADATA and
-            input_driver_task.QUEUE_ONLY_DECODER_STATE and
-            input_driver_task.SINGLE_REPORT_EVENT_QUEUE and
-            input_driver_task.EVENT_QUEUE_CAPACITY == input_driver_task.BOOT_KEY_SLOTS and
-            @FieldType(input_driver_task.Decoder, "head") == u8 and
-            @FieldType(input_driver_task.Decoder, "tail") == u8 and
-            @FieldType(input_driver_task.Decoder, "count") == u8 and
+        .returns_bounded_decoder_batches = input_driver_task.BATCHED_DECODER_OUTPUT and
+            @FieldType(input_driver_task.DecodedEvents, "count") == u8 and
+            !@hasField(input_driver_task.Decoder, "events") and
+            !@hasField(input_driver_task.Decoder, "head") and
+            !@hasField(input_driver_task.Decoder, "tail") and
+            !@hasField(input_driver_task.Decoder, "count") and
             !@hasField(input_driver_task.Decoder, "reports_consumed") and
             !@hasField(input_driver_task.Decoder, "events_emitted"),
         .omits_unobserved_router_telemetry = !@hasDecl(input_router, "ServiceResult") and
@@ -959,6 +958,7 @@ pub const indexed_hot_path_tables = .{
         .keeps_input_state_within_ceilings = @sizeOf(xhci.HidReport) <= xhci.HID_REPORT_SIZE_CEILING_BYTES and
             @sizeOf(xhci.BootKeyboardReportPublisher) <= xhci.BOOT_KEYBOARD_REPORT_PUBLISHER_SIZE_CEILING_BYTES and
             @sizeOf(xhci.HidController) <= xhci.HID_CONTROLLER_SIZE_CEILING_BYTES and
+            @sizeOf(input_driver_task.DecodedEvents) <= input_driver_task.DECODED_EVENTS_SIZE_CEILING_BYTES and
             @sizeOf(input_driver_task.Decoder) <= input_driver_task.DECODER_SIZE_CEILING_BYTES and
             @sizeOf(permission_review_service.CommandInput) <= permission_review_service.COMMAND_INPUT_SIZE_CEILING_BYTES,
     },

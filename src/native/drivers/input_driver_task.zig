@@ -2,18 +2,13 @@ const std = @import("std");
 
 pub const BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const BOOT_KEY_SLOTS: usize = 6;
-pub const EVENT_QUEUE_CAPACITY: usize = BOOT_KEY_SLOTS;
-pub const COMPACT_EVENT_QUEUE_METADATA = true;
-pub const QUEUE_ONLY_DECODER_STATE = true;
-pub const SINGLE_REPORT_EVENT_QUEUE = EVENT_QUEUE_CAPACITY == BOOT_KEY_SLOTS;
-pub const DECODER_SIZE_CEILING_BYTES: usize = 21;
+pub const BATCHED_DECODER_OUTPUT = true;
+pub const DECODED_EVENTS_SIZE_CEILING_BYTES: usize = 13;
+pub const DECODER_SIZE_CEILING_BYTES: usize = 6;
 
 comptime {
-    if (!SINGLE_REPORT_EVENT_QUEUE) {
-        @compileError("input decoder queue must hold exactly one maximal boot-keyboard report");
-    }
-    if (EVENT_QUEUE_CAPACITY > std.math.maxInt(u8)) {
-        @compileError("input decoder event queue no longer fits compact metadata");
+    if (BOOT_KEY_SLOTS > std.math.maxInt(u8)) {
+        @compileError("decoded boot-keyboard events no longer fit compact batch metadata");
     }
 }
 
@@ -44,61 +39,44 @@ pub const KeyboardEvent = struct {
     text: u8 = 0,
 };
 
-pub const Error = error{
-    InvalidBootKeyboardReport,
-    EventQueueFull,
+pub const Error = error{InvalidBootKeyboardReport};
+
+pub const DecodedEvents = struct {
+    events: [BOOT_KEY_SLOTS]KeyboardEvent = [_]KeyboardEvent{.{ .kind = .activate }} ** BOOT_KEY_SLOTS,
+    count: u8 = 0,
+
+    pub fn slice(self: *const DecodedEvents) []const KeyboardEvent {
+        return self.events[0..@as(usize, self.count)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DECODED_EVENTS_SIZE_CEILING_BYTES) {
+            @compileError("decoded input event batch exceeds its compact size ceiling");
+        }
+    }
 };
 
 pub const Decoder = struct {
     previous_keys: [BOOT_KEY_SLOTS]u8 = [_]u8{0} ** BOOT_KEY_SLOTS,
-    events: [EVENT_QUEUE_CAPACITY]KeyboardEvent = [_]KeyboardEvent{.{ .kind = .activate }} ** EVENT_QUEUE_CAPACITY,
-    head: u8 = 0,
-    tail: u8 = 0,
-    count: u8 = 0,
 
-    pub fn submit(
+    pub fn decode(
         self: *Decoder,
         report: [BOOT_KEYBOARD_REPORT_BYTES]u8,
-    ) Error!usize {
+    ) Error!DecodedEvents {
         if (report[1] != 0) return error.InvalidBootKeyboardReport;
         const modifiers = report[0];
         const keys = report[2..BOOT_KEYBOARD_REPORT_BYTES];
         try validateKeys(keys);
 
-        var staged: [BOOT_KEY_SLOTS]KeyboardEvent = undefined;
-        var staged_count: usize = 0;
+        var decoded = DecodedEvents{};
         for (keys) |usage| {
             if (usage == 0 or containsUsage(&self.previous_keys, usage)) continue;
             const event = eventForUsage(usage, modifiers) orelse continue;
-            staged[staged_count] = event;
-            staged_count += 1;
-        }
-        if (staged_count > self.events.len - @as(usize, self.count)) return error.EventQueueFull;
-
-        for (staged[0..staged_count]) |event| {
-            self.events[self.tail] = event;
-            self.tail = @intCast((@as(usize, self.tail) + 1) % self.events.len);
-            self.count += 1;
+            decoded.events[decoded.count] = event;
+            decoded.count += 1;
         }
         @memcpy(self.previous_keys[0..], keys);
-        return staged_count;
-    }
-
-    pub fn poll(self: *Decoder) ?KeyboardEvent {
-        if (self.count == 0) return null;
-        const event = self.events[self.head];
-        self.events[self.head] = .{ .kind = .activate };
-        self.head = @intCast((@as(usize, self.head) + 1) % self.events.len);
-        self.count -= 1;
-        return event;
-    }
-
-    pub fn pendingCount(self: *const Decoder) usize {
-        return @intCast(self.count);
-    }
-
-    pub fn reset(self: *Decoder) void {
-        self.* = .{};
+        return decoded;
     }
 
     comptime {
@@ -185,79 +163,71 @@ fn testReport(modifiers: u8, keys: []const u8) [BOOT_KEYBOARD_REPORT_BYTES]u8 {
     return result;
 }
 
+fn expectDecoded(
+    decoder: *Decoder,
+    report: [BOOT_KEYBOARD_REPORT_BYTES]u8,
+    expected: []const KeyboardEvent,
+) !void {
+    const decoded = try decoder.decode(report);
+    try std.testing.expectEqual(expected.len, decoded.slice().len);
+    try std.testing.expectEqualSlices(KeyboardEvent, expected, decoded.slice());
+}
+
 test "input decoder emits transitions once and accepts a key after release" {
     var decoder = Decoder{};
-    try std.testing.expectEqual(@as(usize, 1), try decoder.submit(testReport(0, &.{0x04})));
-    try std.testing.expectEqual(@as(usize, 0), try decoder.submit(testReport(0, &.{0x04})));
-    try std.testing.expectEqual(@as(usize, 0), try decoder.submit(testReport(0, &.{})));
-    try std.testing.expectEqual(@as(usize, 1), try decoder.submit(testReport(0, &.{0x04})));
-    try std.testing.expectEqual(KeyboardEvent{ .kind = .text, .text = 'a' }, decoder.poll().?);
-    try std.testing.expectEqual(KeyboardEvent{ .kind = .text, .text = 'a' }, decoder.poll().?);
-    try std.testing.expect(decoder.poll() == null);
+    try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{.{ .kind = .text, .text = 'a' }});
+    try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{.{ .kind = .text, .text = 'a' }});
 }
 
 test "input decoder maps navigation recovery commit and shifted text" {
     var decoder = Decoder{};
-    _ = try decoder.submit(testReport(0, &.{0x2B}));
-    _ = try decoder.submit(testReport(0, &.{}));
-    _ = try decoder.submit(testReport(SHIFT_MASK, &.{0x2B}));
-    _ = try decoder.submit(testReport(0, &.{}));
-    _ = try decoder.submit(testReport(ALT_MASK, &.{0x2B}));
-    _ = try decoder.submit(testReport(ALT_MASK | SHIFT_MASK, &.{}));
-    _ = try decoder.submit(testReport(ALT_MASK | SHIFT_MASK, &.{0x2B}));
-    _ = try decoder.submit(testReport(0, &.{}));
-    _ = try decoder.submit(testReport(CONTROL_MASK, &.{0x15}));
-    _ = try decoder.submit(testReport(0, &.{}));
-    _ = try decoder.submit(testReport(CONTROL_MASK, &.{0x28}));
-    _ = try decoder.submit(testReport(0, &.{}));
+    try expectDecoded(&decoder, testReport(0, &.{0x2B}), &.{.{ .kind = .focus_next }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{0x2B}), &.{.{ .kind = .focus_previous }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(ALT_MASK, &.{0x2B}), &.{.{ .kind = .task_switch_next }});
+    try expectDecoded(&decoder, testReport(ALT_MASK | SHIFT_MASK, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(ALT_MASK | SHIFT_MASK, &.{0x2B}), &.{.{ .kind = .task_switch_previous }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{0x15}), &.{.{ .kind = .show_recovery }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{0x28}), &.{.{ .kind = .commit_text }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
 
-    const navigation_events = [_]KeyboardEvent{
-        .{ .kind = .focus_next },
-        .{ .kind = .focus_previous },
-        .{ .kind = .task_switch_next },
-        .{ .kind = .task_switch_previous },
-        .{ .kind = .show_recovery },
-        .{ .kind = .commit_text },
-    };
-    for (navigation_events) |event| try std.testing.expectEqual(event, decoder.poll().?);
-    try std.testing.expect(decoder.poll() == null);
-
-    _ = try decoder.submit(testReport(SHIFT_MASK, &.{ 0x04, 0x1E, 0x38 }));
-    const text_events = [_]KeyboardEvent{
+    const expected = [_]KeyboardEvent{
         .{ .kind = .text, .text = 'A' },
         .{ .kind = .text, .text = '!' },
         .{ .kind = .text, .text = '?' },
     };
-    for (text_events) |event| try std.testing.expectEqual(event, decoder.poll().?);
-    try std.testing.expect(decoder.poll() == null);
+    try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{ 0x04, 0x1E, 0x38 }), &expected);
 }
 
-test "input decoder rejects malformed reports and applies queue backpressure atomically" {
+test "input decoder rejects malformed reports and bounds decoded batches" {
     var decoder = Decoder{};
     var malformed = testReport(0, &.{0x04});
     malformed[1] = 1;
-    try std.testing.expectError(error.InvalidBootKeyboardReport, decoder.submit(malformed));
+    try std.testing.expectError(error.InvalidBootKeyboardReport, decoder.decode(malformed));
     try std.testing.expectError(
         error.InvalidBootKeyboardReport,
-        decoder.submit(testReport(0, &.{ 0x04, 0x04 })),
+        decoder.decode(testReport(0, &.{ 0x04, 0x04 })),
     );
     try std.testing.expectError(
         error.InvalidBootKeyboardReport,
-        decoder.submit(testReport(0, &.{0x01})),
+        decoder.decode(testReport(0, &.{0x01})),
     );
 
-    for (0..EVENT_QUEUE_CAPACITY) |_| {
-        _ = try decoder.submit(testReport(0, &.{0x04}));
-        _ = try decoder.submit(testReport(0, &.{}));
-    }
-    try std.testing.expectEqual(EVENT_QUEUE_CAPACITY, decoder.pendingCount());
-    try std.testing.expectError(error.EventQueueFull, decoder.submit(testReport(0, &.{0x05})));
-    try std.testing.expectEqual(EVENT_QUEUE_CAPACITY, decoder.pendingCount());
-    try std.testing.expect(QUEUE_ONLY_DECODER_STATE);
-    try std.testing.expect(SINGLE_REPORT_EVENT_QUEUE);
-    try std.testing.expectEqual(BOOT_KEY_SLOTS, EVENT_QUEUE_CAPACITY);
-    try std.testing.expect(@FieldType(Decoder, "head") == u8);
-    try std.testing.expect(@FieldType(Decoder, "tail") == u8);
-    try std.testing.expect(@FieldType(Decoder, "count") == u8);
+    const expected = [_]KeyboardEvent{
+        .{ .kind = .text, .text = 'a' },
+        .{ .kind = .text, .text = 'b' },
+        .{ .kind = .text, .text = 'c' },
+        .{ .kind = .text, .text = 'd' },
+        .{ .kind = .text, .text = 'e' },
+        .{ .kind = .text, .text = 'f' },
+    };
+    try expectDecoded(&decoder, testReport(0, &.{ 0x04, 0x05, 0x06, 0x07, 0x08, 0x09 }), &expected);
+    try std.testing.expect(BATCHED_DECODER_OUTPUT);
+    try std.testing.expectEqual(@as(usize, DECODED_EVENTS_SIZE_CEILING_BYTES), @sizeOf(DecodedEvents));
     try std.testing.expectEqual(@as(usize, DECODER_SIZE_CEILING_BYTES), @sizeOf(Decoder));
 }
