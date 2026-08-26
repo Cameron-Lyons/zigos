@@ -1341,6 +1341,12 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(@FieldType(@FieldType(object_store.Store, "objects"), "slot_keys")) == 0 and
             @sizeOf(@FieldType(@FieldType(object_store.Store, "versions"), "slot_keys")) == 0 and
             @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
+        .right_sizes_object_store_dirty_id_indexes = object_store.RIGHT_SIZES_OBJECT_STORE_DIRTY_ID_INDEXES and
+            @FieldType(object_store.Store, "objects").dirty_id_index_capacity >= object_store.MAX_OBJECTS + (object_store.MAX_OBJECTS + 3) / 4 and
+            @FieldType(object_store.Store, "versions").dirty_id_index_capacity >= object_store.MAX_VERSIONS + (object_store.MAX_VERSIONS + 3) / 4 and
+            @FieldType(object_store.Store, "objects").dirty_id_index_capacity < 2 * object_store.MAX_OBJECTS and
+            @FieldType(object_store.Store, "versions").dirty_id_index_capacity < 2 * object_store.MAX_VERSIONS and
+            @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
         .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and
             !@hasField(object_store.VersionRecord, "blob_address") and
             !@hasField(object_store.VersionRecord, "payload_len") and

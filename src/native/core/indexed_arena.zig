@@ -6,6 +6,17 @@ const native_util = @import("util.zig");
 
 pub const no_index = std.math.maxInt(usize);
 pub const COMPACT_ARENA_METADATA = true;
+pub const RIGHT_SIZES_DIRTY_ID_INDEXES = true;
+
+fn sparseIndexCapacity(comptime entry_capacity: usize) usize {
+    const minimum_capacity = entry_capacity + (entry_capacity + 3) / 4;
+    var table_capacity: usize = 1;
+    while (table_capacity < minimum_capacity) {
+        if (table_capacity > std.math.maxInt(usize) / 2) @compileError("indexed arena sparse index capacity overflow");
+        table_capacity *= 2;
+    }
+    return table_capacity;
+}
 
 pub fn ReusableIndex(comptime capacity: usize) type {
     if (capacity == 0) @compileError("reusable indexes require at least one slot");
@@ -399,8 +410,9 @@ pub fn IndexedArenaWithKeyOptions(
     if (capacity == 0) @compileError("indexed arena requires at least one slot");
     if (index_capacity < capacity) @compileError("indexed arena primary index capacity must cover slots");
     const dirty_capacity = if (options.track_dirty) capacity else 0;
+    const dirty_index_capacity = if (options.track_dirty) sparseIndexCapacity(capacity) else 0;
     const key_capacity = if (options.store_keys) capacity else 0;
-    const DirtyIdIndex = if (options.track_dirty) UniqueIndex(index_capacity) else struct {};
+    const DirtyIdIndex = if (options.track_dirty) UniqueIndex(dirty_index_capacity) else struct {};
     const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
     if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
         @compileError("indexed arena custom slot membership requires arenaInUse and setArenaInUse");
@@ -414,6 +426,7 @@ pub fn IndexedArenaWithKeyOptions(
         const FreeIndex = ReusableIndex(capacity);
         const Count = ReusableIndex(capacity);
         const free_no_index = reusableNoIndex(capacity);
+        pub const dirty_id_index_capacity = dirty_index_capacity;
 
         inline fn slotInUse(slot: *const Slot) bool {
             if (comptime custom_membership) return slot.arenaInUse();
@@ -1526,6 +1539,7 @@ test "arena cursors and counts select the narrowest lossless capacity type" {
     try std.testing.expect(@FieldType(Indexed, "next_unclaimed_index") == u8);
     try std.testing.expect(@FieldType(Indexed, "used_count") == u8);
     try std.testing.expect(@FieldType(Dirty, "dirty_count") == u8);
+    try std.testing.expectEqual(@as(usize, 16), Dirty.dirty_id_index_capacity);
     try std.testing.expect(@FieldType(Generational, "next_unclaimed_index") == u8);
     try std.testing.expect(@FieldType(Generational, "used_count") == u8);
     try std.testing.expect(@FieldType(Paged, "next_unclaimed_index") == u8);
