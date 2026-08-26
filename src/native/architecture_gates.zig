@@ -417,6 +417,8 @@ pub const indexed_hot_path_tables = .{
     .userspace_loader = .{
         .uses_image_arena = @hasDecl(@FieldType(userspace_loader.Catalog, "images"), "reserveIndex"),
         .uses_bundle_index = @hasField(userspace_loader.Catalog, "bundle_index"),
+        .derives_image_ids_from_arena_count = userspace_loader.DERIVES_IMAGE_IDS_FROM_ARENA_COUNT and
+            !@hasField(userspace_loader.Catalog, "next_image_id"),
     },
     .task_runtime = .{
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),
