@@ -1318,6 +1318,20 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must use x2APIC timer vectors with both legacy PICs masked: {s}", .{snippet});
         }
     }
+    const required_compact_handler_dispatch_snippets = [_][]const u8{
+        "exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler",
+        "external_handlers: [external_handler_vectors.len]?InterruptHandler",
+        "fn externalHandlerIndex(vector: usize) ?usize",
+        "const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 304",
+    };
+    for (required_compact_handler_dispatch_snippets) |snippet| {
+        if (std.mem.indexOf(u8, isr_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 interrupt dispatch must retain compact handler storage: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, isr_source, "custom_handlers: [idt.IDT_ENTRIES]") != null) {
+        try common.addError(errors, allocator, "NUC11TNKi5 interrupt dispatch must not restore a full-IDT function-pointer table", .{});
+    }
     const retired_pic_surface_snippets = [_][]const u8{
         "PIC_EOI",
         "PIC_ICW",

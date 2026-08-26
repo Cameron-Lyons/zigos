@@ -16,6 +16,7 @@ const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
 const PAGE_FAULT_VECTOR: u32 = 14;
+const USERSPACE_YIELD_VECTOR: u8 = 129;
 const REQUESTED_PRIVILEGE_LEVEL_MASK: usize = 0x3;
 const USER_PRIVILEGE_LEVEL: usize = 0x3;
 
@@ -162,7 +163,7 @@ pub export fn isrHandler(regs: *Registers) void {
     interrupt_context.enter();
     defer interrupt_context.leave();
     const vector = interruptVector(regs);
-    if (custom_handlers[vector]) |handler| {
+    if (handlerForVector(vector)) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
         return;
@@ -181,10 +182,39 @@ pub export fn isrHandler(regs: *Registers) void {
 pub const InterruptFrame = Registers;
 pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
-var custom_handlers: [idt.IDT_ENTRIES]?InterruptHandler = [_]?InterruptHandler{null} ** idt.IDT_ENTRIES;
+const external_handler_vectors = [_]u8{
+    timer.INTERRUPT_VECTOR,
+    intel_i225_hw.INTERRUPT_VECTOR,
+    nvme_hw.INTERRUPT_VECTOR,
+    xhci_hw.INTERRUPT_VECTOR,
+    USERSPACE_YIELD_VECTOR,
+    timer.SPURIOUS_VECTOR,
+};
+const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 304;
+
+var exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler = [_]?InterruptHandler{null} ** EXCEPTION_VECTOR_COUNT;
+var external_handlers: [external_handler_vectors.len]?InterruptHandler = [_]?InterruptHandler{null} ** external_handler_vectors.len;
+
+fn externalHandlerIndex(vector: usize) ?usize {
+    inline for (external_handler_vectors, 0..) |registered_vector, index| {
+        if (vector == registered_vector) return index;
+    }
+    return null;
+}
+
+fn handlerForVector(vector: usize) ?InterruptHandler {
+    if (vector < exception_handlers.len) return exception_handlers[vector];
+    const index = externalHandlerIndex(vector) orelse return null;
+    return external_handlers[index];
+}
 
 pub fn registerHandler(vector: u8, handler: InterruptHandler) void {
-    custom_handlers[vector] = handler;
+    if (vector < exception_handlers.len) {
+        exception_handlers[vector] = handler;
+        return;
+    }
+    const index = externalHandlerIndex(vector) orelse @panic("unsupported interrupt handler vector");
+    external_handlers[index] = handler;
 }
 
 pub fn init() void {
@@ -313,6 +343,17 @@ fn disableLegacyPic() void {
 }
 
 comptime {
+    if (@sizeOf(@TypeOf(exception_handlers)) + @sizeOf(@TypeOf(external_handlers)) > HANDLER_STORAGE_SIZE_CEILING_BYTES) {
+        @compileError("interrupt handler storage exceeds its compact size ceiling");
+    }
+    for (external_handler_vectors, 0..) |vector, index| {
+        if (vector < EXCEPTION_VECTOR_COUNT) {
+            @compileError("external interrupt handler vector overlaps the exception table");
+        }
+        for (external_handler_vectors[0..index]) |prior_vector| {
+            if (vector == prior_vector) @compileError("external interrupt handler vectors must be unique");
+        }
+    }
     if (@offsetOf(Registers, "int_no") != 136) {
         @compileError("x86-64 interrupt frame layout diverged from interrupt64.S");
     }
