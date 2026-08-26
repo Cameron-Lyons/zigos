@@ -941,6 +941,15 @@ pub const indexed_hot_path_tables = .{
             @FieldType(input_driver_task.Decoder, "count") == u8 and
             !@hasField(input_driver_task.Decoder, "reports_consumed") and
             !@hasField(input_driver_task.Decoder, "events_emitted"),
+        .omits_unobserved_router_telemetry = !@hasDecl(input_router, "ServiceResult") and
+            !@hasField(input_router.Router, "reports_polled") and
+            !@hasField(input_router.Router, "untracked_keyboard_reports") and
+            !@hasField(input_router.Router, "events_routed") and
+            !@hasField(input_router.Router, "invalid_reports") and
+            !@hasField(input_router.Router, "stale_reports") and
+            !@hasField(input_router.Router, "events_dropped") and
+            !@hasField(input_router.Router, "stale_events_dropped") and
+            !@hasField(input_router.Router, "focus_switches"),
         .stores_compact_command_metadata = permission_review_service.COMPACT_COMMAND_QUEUE_METADATA and
             @FieldType(permission_review_service.CommandInput, "pending_line_len") == u8 and
             @FieldType(permission_review_service.CommandInput, "pending_command_lens") == [permission_review_service.MAX_PHYSICAL_INPUT_COMMANDS]u8 and
