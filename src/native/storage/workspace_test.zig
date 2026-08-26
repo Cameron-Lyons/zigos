@@ -379,7 +379,7 @@ test "replacement-only workspace commits preserve duplicate fallbacks and object
     const leaf_1_before = directory.find(workspace.id).?.path_index.leafHashes()[1];
     const leaf_2_before = directory.find(workspace.id).?.path_index.leafHashes()[2];
     const leaf_3_before = directory.find(workspace.id).?.path_index.leafHashes()[3];
-    const path_slots_before = directory.find(workspace.id).?.path_index.path_slots;
+    const path_slots_before = directory.find(workspace.id).?.path_index.pathSlotsConst().*;
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, "a.md", ids.object(11), ids.version(107), .document);
     try directory.stagePut(workspace.id, "d.md", ids.object(20), ids.version(108), .document);
@@ -393,7 +393,7 @@ test "replacement-only workspace commits preserve duplicate fallbacks and object
     try std.testing.expectEqual(leaf_1_before, path_index_after.leafHashes()[1]);
     try std.testing.expectEqual(leaf_2_before, path_index_after.leafHashes()[2]);
     try std.testing.expect(!std.mem.eql(u8, &leaf_3_before, &path_index_after.leafHashes()[3]));
-    try std.testing.expectEqual(path_slots_before, path_index_after.path_slots);
+    try std.testing.expectEqual(path_slots_before, path_index_after.pathSlotsConst().*);
     try std.testing.expectEqual(ids.version(107), (try directory.resolveObject(workspace.id, ids.object(11))).version_id);
     try std.testing.expectEqual(ids.version(108), (try directory.resolveObject(workspace.id, ids.object(20))).version_id);
 }

@@ -173,16 +173,20 @@ const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
 const RecoverableDeleteEntries = [MAX_RECOVERABLE_DELETES]Entry;
 const WorkspaceEntries = [MAX_WORKSPACE_ENTRIES]Entry;
 const WorkspaceLeafHashes = [MAX_WORKSPACE_ENTRIES]SnapshotRootAddress;
+const WorkspacePathSlots = [ENTRY_INDEX_CAPACITY]EntryIndexSlot;
+const WorkspaceObjectSlots = [ENTRY_OBJECT_INDEX_CAPACITY]EntryObjectIndexSlot;
 const WorkspaceEntryState = struct {
     entries: WorkspaceEntries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
     leaf_hashes: WorkspaceLeafHashes = [_]SnapshotRootAddress{workspace_merkle.zeroRootAddress()} ** MAX_WORKSPACE_ENTRIES,
+    path_slots: WorkspacePathSlots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
+    object_slots: WorkspaceObjectSlots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY),
 };
 pub const HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING = true;
 const heap_backed_recoverable_delete_logs = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
 pub const HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING = true;
 const heap_backed_workspace_entries = HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
-pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 440 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 9_496 else 357_400;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 152 else 43_928;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 7_192 else 357_400;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
 const WorkspaceEntryBacking = if (heap_backed_workspace_entries) ?*WorkspaceEntryState else WorkspaceEntryState;
@@ -196,8 +200,12 @@ pub const workspace_entry_layout = .{
     .freestanding_handle_size_bytes = @sizeOf(?*WorkspaceEntryState),
     .entry_bytes = @sizeOf(WorkspaceEntries),
     .leaf_hash_bytes = @sizeOf(WorkspaceLeafHashes),
+    .path_index_bytes = @sizeOf(WorkspacePathSlots),
+    .object_index_bytes = @sizeOf(WorkspaceObjectSlots),
     .backing_size_bytes = @sizeOf(WorkspaceEntryState),
     .caches_leaf_hashes = @hasField(WorkspaceEntryState, "leaf_hashes"),
+    .caches_path_index = @hasField(WorkspaceEntryState, "path_slots"),
+    .caches_object_index = @hasField(WorkspaceEntryState, "object_slots"),
 };
 
 pub const CreateRequest = struct {
@@ -340,8 +348,6 @@ pub const ExportPackage = struct {
 
 pub const WorkspacePathIndex = struct {
     entry_backing: WorkspaceEntryBacking = if (heap_backed_workspace_entries) null else .{},
-    path_slots: [ENTRY_INDEX_CAPACITY]EntryIndexSlot = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
-    object_slots: [ENTRY_OBJECT_INDEX_CAPACITY]EntryObjectIndexSlot = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY),
     root_address: SnapshotRootAddress = workspace_merkle.zeroRootAddress(),
 
     pub fn ensureEntryBacking(self: *WorkspacePathIndex) error{NoSpaceLeft}!void {
@@ -349,37 +355,56 @@ pub const WorkspacePathIndex = struct {
             if (self.entry_backing != null) return;
             const allocation = kernel_memory.kmalloc(@sizeOf(WorkspaceEntryState)) orelse return error.NoSpaceLeft;
             const backing: *WorkspaceEntryState = @ptrCast(@alignCast(allocation));
-            backing.* = .{};
+            @memset(std.mem.asBytes(backing), 0);
+            @memset(&backing.path_slots, workspace_index.no_entry_slot);
+            @memset(&backing.object_slots, workspace_index.no_entry_slot);
             self.entry_backing = backing;
         }
     }
 
-    pub fn entries(self: *WorkspacePathIndex) *WorkspaceEntries {
+    fn entryState(self: *WorkspacePathIndex) *WorkspaceEntryState {
         if (comptime heap_backed_workspace_entries) {
-            const backing = self.entry_backing orelse
-                native_util.impossibleByInvariant("non-empty workspace entries retain backing");
-            return &backing.entries;
+            return self.entry_backing orelse
+                native_util.impossibleByInvariant("non-empty workspace content retains backing");
         }
-        return &self.entry_backing.entries;
+        return &self.entry_backing;
+    }
+
+    fn entryStateConst(self: *const WorkspacePathIndex) *const WorkspaceEntryState {
+        if (comptime heap_backed_workspace_entries) {
+            return self.entry_backing orelse
+                native_util.impossibleByInvariant("non-empty workspace content retains backing");
+        }
+        return &self.entry_backing;
+    }
+
+    pub fn entries(self: *WorkspacePathIndex) *WorkspaceEntries {
+        return &self.entryState().entries;
     }
 
     pub fn entriesConst(self: *const WorkspacePathIndex, count: usize) []const Entry {
         if (count == 0) return &.{};
-        if (comptime heap_backed_workspace_entries) {
-            const backing = self.entry_backing orelse
-                native_util.impossibleByInvariant("non-empty workspace entries retain backing");
-            return backing.entries[0..count];
-        }
-        return self.entry_backing.entries[0..count];
+        return self.entryStateConst().entries[0..count];
     }
 
     pub fn leafHashes(self: *WorkspacePathIndex) *WorkspaceLeafHashes {
-        if (comptime heap_backed_workspace_entries) {
-            const backing = self.entry_backing orelse
-                native_util.impossibleByInvariant("non-empty workspace Merkle leaves retain backing");
-            return &backing.leaf_hashes;
-        }
-        return &self.entry_backing.leaf_hashes;
+        return &self.entryState().leaf_hashes;
+    }
+
+    pub fn pathSlots(self: *WorkspacePathIndex) *WorkspacePathSlots {
+        return &self.entryState().path_slots;
+    }
+
+    pub fn pathSlotsConst(self: *const WorkspacePathIndex) *const WorkspacePathSlots {
+        return &self.entryStateConst().path_slots;
+    }
+
+    pub fn objectSlots(self: *WorkspacePathIndex) *WorkspaceObjectSlots {
+        return &self.entryState().object_slots;
+    }
+
+    pub fn objectSlotsConst(self: *const WorkspacePathIndex) *const WorkspaceObjectSlots {
+        return &self.entryStateConst().object_slots;
     }
 
     pub fn releaseEntryBacking(self: *WorkspacePathIndex) void {
@@ -673,7 +698,7 @@ comptime {
     if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceSlot) > 448) {
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceSlot) > 160) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -1602,22 +1627,22 @@ fn debugAssertShareGrantIndexMissAbsent(workspace: *const WorkspaceRecord, princ
 fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
     const entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
     debugAssertEntriesSorted(entries);
+    if (workspace.counts.entry_count == 0) {
+        workspace.path_index.root_address = workspace_merkle.rootAddress(entries);
+        workspace.path_index.releaseEntryBacking();
+        return;
+    }
     workspace_index.rebuildPathSlots(
         ENTRY_INDEX_CAPACITY,
-        &workspace.path_index.path_slots,
+        workspace.path_index.pathSlots(),
         entries,
     );
     workspace_index.rebuildObjectSlots(
         ENTRY_OBJECT_INDEX_CAPACITY,
-        &workspace.path_index.object_slots,
+        workspace.path_index.objectSlots(),
         entries,
     );
-    if (workspace.counts.entry_count == 0) {
-        workspace.path_index.root_address = workspace_merkle.rootAddress(entries);
-        workspace.path_index.releaseEntryBacking();
-    } else {
-        workspace_merkle.rebuildPathMerkle(&workspace.path_index.root_address, workspace.path_index.leafHashes(), entries);
-    }
+    workspace_merkle.rebuildPathMerkle(&workspace.path_index.root_address, workspace.path_index.leafHashes(), entries);
 }
 
 fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
@@ -1625,15 +1650,17 @@ fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) 
 }
 
 fn findWorkspaceEntryIndexWithPathHash(workspace: *const WorkspaceRecord, path: []const u8, path_hash: u64) ?usize {
+    if (workspace.counts.entry_count == 0) return null;
     const entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
-    if (workspace_index.findIndexedEntryPathWithHash(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, path, path_hash)) |index| return index;
+    if (workspace_index.findIndexedEntryPathWithHash(ENTRY_INDEX_CAPACITY, workspace.path_index.pathSlotsConst(), entries, path, path_hash)) |index| return index;
     debugAssertPathIndexMissAbsent(entries, path);
     return null;
 }
 
 fn findWorkspaceEntryObjectIndex(workspace: *const WorkspaceRecord, object_id: ids.ObjectId) ?usize {
+    if (workspace.counts.entry_count == 0) return null;
     const entries = workspace.path_index.entriesConst(workspace.counts.entry_count);
-    if (workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, object_id)) |index| return index;
+    if (workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, workspace.path_index.objectSlotsConst(), entries, object_id)) |index| return index;
     debugAssertObjectIndexMissAbsent(entries, object_id);
     return null;
 }
@@ -1825,8 +1852,6 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
     if (had_entries or source_entries.len != 0) clearEntries(workspace.path_index.entries());
     workspace.counts.entry_count = 0;
     workspace.counts.entry_mutation_count = 0;
-    workspace.path_index.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
-    workspace.path_index.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
     for (workspace.mutation_log.entries()) |*mutation| {
         mutation.* = EntryMutation{};
     }
@@ -2016,7 +2041,7 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
         if (object_index_dirty) {
             workspace_index.rebuildObjectSlots(
                 ENTRY_OBJECT_INDEX_CAPACITY,
-                &workspace.path_index.object_slots,
+                workspace.path_index.objectSlots(),
                 entries.?[0..workspace.counts.entry_count],
             );
         }
@@ -2079,12 +2104,14 @@ test "workspace recoverable deletion history uses on-demand freestanding backing
     try std.testing.expectEqual(@as(usize, 2_880), recoverable_delete_layout.backing_size_bytes);
 }
 
-test "workspace entries and Merkle leaves share on-demand freestanding backing" {
+test "workspace entries and derived indexes share on-demand freestanding backing" {
     try std.testing.expect(workspace_entry_layout.heap_backs_entries_on_freestanding);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), workspace_entry_layout.freestanding_handle_size_bytes);
     try std.testing.expectEqual(@as(usize, 11_520), workspace_entry_layout.entry_bytes);
     try std.testing.expectEqual(@as(usize, 3_072), workspace_entry_layout.leaf_hash_bytes);
-    try std.testing.expectEqual(@as(usize, 14_592), workspace_entry_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 192), workspace_entry_layout.path_index_bytes);
+    try std.testing.expectEqual(@as(usize, 96), workspace_entry_layout.object_index_bytes);
+    try std.testing.expectEqual(@as(usize, 14_880), workspace_entry_layout.backing_size_bytes);
 }
 
 fn debugIndexChecksEnabled() bool {
@@ -2140,8 +2167,8 @@ test "workspace commits preserve path order and index rebuilds normalize loaded 
     try std.testing.expectEqualStrings("z-last", entries[2].pathSlice());
 
     std.mem.swap(Entry, &workspace.path_index.entries()[0], &workspace.path_index.entries()[2]);
-    workspace.path_index.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
-    workspace.path_index.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
+    workspace.path_index.pathSlots().* = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
+    workspace.path_index.objectSlots().* = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
     const zero_root = workspace_merkle.zeroRootAddress();
     for (workspace.path_index.leafHashes()[0..workspace.counts.entry_count]) |*leaf_hash| {
         leaf_hash.* = zero_root;
@@ -2155,27 +2182,27 @@ test "workspace commits preserve path order and index rebuilds normalize loaded 
     try std.testing.expectEqualStrings("z-last", entries[2].pathSlice());
     try std.testing.expectEqual(
         @as(?usize, 0),
-        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, "a-first"),
+        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, workspace.path_index.pathSlotsConst(), entries, "a-first"),
     );
     try std.testing.expectEqual(
         @as(?usize, 1),
-        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, "m-middle"),
+        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, workspace.path_index.pathSlotsConst(), entries, "m-middle"),
     );
     try std.testing.expectEqual(
         @as(?usize, 2),
-        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, &workspace.path_index.path_slots, entries, "z-last"),
+        workspace_index.findIndexedEntryPath(ENTRY_INDEX_CAPACITY, workspace.path_index.pathSlotsConst(), entries, "z-last"),
     );
     try std.testing.expectEqual(
         @as(?usize, 0),
-        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, ids.object(2)),
+        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, workspace.path_index.objectSlotsConst(), entries, ids.object(2)),
     );
     try std.testing.expectEqual(
         @as(?usize, 1),
-        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, ids.object(3)),
+        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, workspace.path_index.objectSlotsConst(), entries, ids.object(3)),
     );
     try std.testing.expectEqual(
         @as(?usize, 2),
-        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, &workspace.path_index.object_slots, entries, ids.object(1)),
+        workspace_index.findIndexedEntryObject(ENTRY_OBJECT_INDEX_CAPACITY, workspace.path_index.objectSlotsConst(), entries, ids.object(1)),
     );
     try std.testing.expectEqual(ids.object(2), (try directory.resolve(workspace.id, "a-first")).object_id);
     try std.testing.expectEqual(ids.object(1), (try directory.resolve(workspace.id, "z-last")).object_id);

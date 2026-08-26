@@ -1258,16 +1258,19 @@ pub const indexed_hot_path_tables = .{
             workspace.workspace_entry_layout.heap_backs_entries_on_freestanding and
             workspace.workspace_entry_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
             workspace.workspace_entry_layout.entry_bytes == @sizeOf(workspace.Entry) * workspace.MAX_WORKSPACE_ENTRIES and
-            workspace.workspace_entry_layout.backing_size_bytes == workspace.workspace_entry_layout.entry_bytes + workspace.workspace_entry_layout.leaf_hash_bytes,
+            workspace.workspace_entry_layout.backing_size_bytes == workspace.workspace_entry_layout.entry_bytes +
+                workspace.workspace_entry_layout.leaf_hash_bytes +
+                workspace.workspace_entry_layout.path_index_bytes +
+                workspace.workspace_entry_layout.object_index_bytes,
         .uses_compact_path_lengths = @sizeOf(workspace.WorkspacePathLength) == 1,
         .caches_leaf_hashes = workspace.workspace_entry_layout.caches_leaf_hashes,
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),
-        .supports_indexed_path_lookup = @hasField(workspace.WorkspacePathIndex, "path_slots"),
+        .supports_indexed_path_lookup = workspace.workspace_entry_layout.caches_path_index,
         .uses_compact_entry_slot_indexes = @sizeOf(workspace.WorkspaceEntrySlotIndex) == 1,
         .supports_borrowed_path_lookup = @hasDecl(workspace.Directory, "resolveBorrowed"),
         .resolves_shared_paths_from_one_workspace_record = @hasDecl(workspace.WorkspaceRecord, "resolveBorrowedWithPathHash") and
             @hasDecl(workspace.WorkspaceRecord, "hasAccess"),
-        .supports_indexed_object_lookup = @hasField(workspace.WorkspacePathIndex, "object_slots"),
+        .supports_indexed_object_lookup = workspace.workspace_entry_layout.caches_object_index,
         .supports_indexed_snapshot_lookup = @hasDecl(workspace.Directory, "findSnapshotConst"),
         .tracks_workspace_count = @hasDecl(workspace.Directory, "workspaceCount"),
         .tracks_snapshot_count = @hasDecl(workspace.Directory, "snapshotCount"),
