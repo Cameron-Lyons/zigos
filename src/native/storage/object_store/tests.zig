@@ -22,6 +22,7 @@ const Store = object_store.Store;
 const StoreWith = object_store.StoreWith;
 const computeBlobAddress = object_store.computeBlobAddress;
 const computeBlobManifestAddress = object_store.computeBlobManifestAddress;
+const computeChunkAddress = object_store.computeChunkAddress;
 const ids = object_store.ids;
 const signMetadata = object_store.signMetadata;
 
@@ -71,6 +72,27 @@ test "blob state packs bounded values without overlap" {
     try std.testing.expectEqual(MAX_PAYLOAD_BYTES, slot.blob.payloadLen());
     try std.testing.expectEqual(@as(u16, object_store.MAX_VERSIONS), slot.blob.refCount());
     try std.testing.expect(slot.blob.manifestVerified());
+}
+
+test "chunk slots pack membership without changing payload length" {
+    try std.testing.expect(object_store.PACKS_CHUNK_SLOT_MEMBERSHIP_INTO_PAYLOAD_STATE);
+    try std.testing.expect(!@hasField(object_store.ChunkRecord, "payload_len"));
+    try std.testing.expect(!@hasField(object_store.ChunkSlot, "in_use"));
+    try std.testing.expectEqual(object_store.CHUNK_RECORD_SIZE_CEILING_BYTES, @sizeOf(object_store.ChunkRecord));
+    try std.testing.expectEqual(object_store.CHUNK_SLOT_SIZE_CEILING_BYTES, @sizeOf(object_store.ChunkSlot));
+
+    var store = Store.init();
+    const payload = "chunk membership";
+    const address = computeChunkAddress(payload);
+    const slot_index = try store.putChunk(address, payload);
+    const slot = store.chunkSlotAt(slot_index);
+    try std.testing.expect(slot.arenaInUse());
+    try std.testing.expectEqual(payload.len, slot.chunk.payloadLen());
+
+    slot.setArenaInUse(false);
+    try std.testing.expect(!slot.arenaInUse());
+    try std.testing.expectEqual(payload.len, slot.chunk.payloadLen());
+    slot.setArenaInUse(true);
 }
 
 test "resident object metadata uses capacity-sized length fields" {
@@ -309,8 +331,8 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     const blob = store.versionBlob(version_record).?;
     try std.testing.expectEqual(payload.len, blob.payloadLen());
     try std.testing.expectEqual(@as(usize, 4), blob.chunkCount());
-    try std.testing.expectEqual(@as(u16, PAGE_SIZE_BYTES), store.blobChunk(blob, 0).?.payload_len);
-    try std.testing.expectEqual(@as(u16, 17), store.blobChunk(blob, 3).?.payload_len);
+    try std.testing.expectEqual(PAGE_SIZE_BYTES, store.blobChunk(blob, 0).?.payloadLen());
+    try std.testing.expectEqual(@as(usize, 17), store.blobChunk(blob, 3).?.payloadLen());
     var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
     const live_chunk_refs = try store.copyBlobChunkRefs(blob, &chunk_refs);
     const chunk_count = live_chunk_refs.len;

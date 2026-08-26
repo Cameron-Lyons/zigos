@@ -1061,7 +1061,7 @@ fn encodeBlobBody(writer: *CursorWriter, store: *const object_store.Store, recor
 
 fn encodeChunkBody(writer: *CursorWriter, record: *const object_store.ChunkRecord) Error!void {
     try writer.writeBytes(&record.address);
-    try writer.writeU16(record.payload_len);
+    try writer.writeU16(@intCast(record.payloadLen()));
     try writer.writeBytes(record.chunkSlice());
 }
 
@@ -1163,7 +1163,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
         chunk_refs[chunk_index].payload_len = try reader.readU16();
         const chunk_slot_index = store.chunkSlotIndex(chunk_refs[chunk_index].address) orelse return error.CorruptImage;
         const chunk_slot = store.chunkSlotAtConst(chunk_slot_index);
-        if (!chunk_slot.in_use or chunk_slot.chunk.payload_len != chunk_refs[chunk_index].payload_len) return error.CorruptImage;
+        if (!chunk_slot.arenaInUse() or chunk_slot.chunk.payloadLen() != chunk_refs[chunk_index].payload_len) return error.CorruptImage;
         chunk_slot_indexes[chunk_index] = @intCast(chunk_slot_index);
     }
     if (!object_store.chunkRefsMatchPayloadLen(payload_len, chunk_refs[0..chunk_count])) return error.CorruptImage;
@@ -1311,7 +1311,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     var chunk_slot_index: usize = 0;
     while (chunk_slot_index < store.chunkSlotCapacity()) : (chunk_slot_index += 1) {
         const slot = store.chunkSlotAtConst(chunk_slot_index);
-        if (!slot.in_use) continue;
+        if (!slot.arenaInUse()) continue;
         try encodeChunkBody(&writer, &slot.chunk);
     }
 
