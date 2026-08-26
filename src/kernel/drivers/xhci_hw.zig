@@ -1849,10 +1849,6 @@ fn testDevice(bar0: u32, bar1: u32) pci.PCIDevice {
         .prog_if = pci.PCI_PROG_IF_XHCI,
         .bar0 = bar0,
         .bar1 = bar1,
-        .bar2 = 0,
-        .bar3 = 0,
-        .bar4 = 0,
-        .bar5 = 0,
     };
 }
 

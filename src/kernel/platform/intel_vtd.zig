@@ -910,10 +910,6 @@ fn syntheticNvme() pci.PCIDevice {
         .prog_if = pci.PCI_PROG_IF_NVME,
         .bar0 = 0,
         .bar1 = 0,
-        .bar2 = 0,
-        .bar3 = 0,
-        .bar4 = 0,
-        .bar5 = 0,
     };
 }
 

@@ -374,10 +374,6 @@ pub fn firstHardwareTargetGate() !void {
         .prog_if = 0,
         .bar0 = 0,
         .bar1 = 0,
-        .bar2 = 0,
-        .bar3 = 0,
-        .bar4 = 0,
-        .bar5 = 0,
     }));
     try std.testing.expect(kernel_pci.isXhciController(.{
         .bus = 0,
@@ -390,10 +386,6 @@ pub fn firstHardwareTargetGate() !void {
         .prog_if = kernel_pci.PCI_PROG_IF_XHCI,
         .bar0 = 0,
         .bar1 = 0,
-        .bar2 = 0,
-        .bar3 = 0,
-        .bar4 = 0,
-        .bar5 = 0,
     }));
     var mmap = [_]u8{0} ** XHCI_CAPABILITY_MMAP_BYTES;
     mmap[2] = 0x10;
