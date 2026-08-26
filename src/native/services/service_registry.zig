@@ -7,16 +7,24 @@ pub const DERIVES_STATIC_CONTRACT_METADATA = true;
 pub const COMPACT_BINDING_METADATA = true;
 pub const DIRECT_INTERFACE_BINDINGS = true;
 pub const DERIVES_BINDING_COUNT_FROM_SLOTS = true;
+pub const COMPACT_BOOTSTRAP_VALIDATION_STATE = true;
 pub const TYPED_ID_ONLY_API = true;
 pub const AUTHENTICATED_BINDINGS_ONLY = true;
 pub const REQUIRED_BINDING_FLAGS: u16 = abi.SERVICE_CONNECTION_FLAG_USERSPACE_OWNER | abi.SERVICE_CONNECTION_FLAG_SIGNED_IMAGE;
 pub const BINDING_SIZE_CEILING_BYTES: usize = 32;
 pub const REGISTRY_SIZE_CEILING_BYTES: usize = 992;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 1_000;
 
 pub const BootstrapEndpoint = struct {
     task_id: u64,
     endpoint_id: u64,
     endpoint_capability_id: u64,
+};
+
+pub const BootstrapValidationState = enum(u8) {
+    unbound,
+    invalid,
+    ready,
 };
 
 pub const Binding = struct {
@@ -42,7 +50,7 @@ pub const Error = error{
 };
 
 pub const Service = struct {
-    bootstrap: ?BootstrapEndpoint = null,
+    bootstrap_state: BootstrapValidationState = .unbound,
     registry: Registry = Registry.init(),
 
     pub fn init() Service {
@@ -50,11 +58,11 @@ pub const Service = struct {
     }
 
     pub fn initWithBootstrap(bootstrap: BootstrapEndpoint) Service {
-        return .{ .bootstrap = bootstrap };
+        return .{ .bootstrap_state = bootstrapValidationState(bootstrap) };
     }
 
     pub fn bindBootstrap(self: *Service, bootstrap: BootstrapEndpoint) void {
-        self.bootstrap = bootstrap;
+        self.bootstrap_state = bootstrapValidationState(bootstrap);
     }
 
     pub fn register(
@@ -66,12 +74,12 @@ pub const Service = struct {
         interface_id: typed_component_abi.InterfaceId,
         flags: u16,
     ) Error!void {
-        try validateBootstrap(self.bootstrap);
+        try validateBootstrap(self.bootstrap_state);
         return self.registry.register(service_id, owner_task_id, endpoint_id, endpoint_capability_id, interface_id, flags);
     }
 
     pub fn connect(self: *const Service, interface_id: typed_component_abi.InterfaceId) Error!abi.ServiceConnectionDescriptor {
-        try validateBootstrap(self.bootstrap);
+        try validateBootstrap(self.bootstrap_state);
         return self.registry.connect(interface_id);
     }
 
@@ -80,17 +88,23 @@ pub const Service = struct {
     }
 
     comptime {
-        if (@sizeOf(@This()) > 3 * 1024) {
+        if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
             @compileError("typed service registry exceeds its compact resident layout");
         }
     }
 };
 
-fn validateBootstrap(bootstrap: ?BootstrapEndpoint) Error!void {
-    const endpoint = bootstrap orelse return error.RegistryNotBootstrapped;
-    if (endpoint.task_id == 0 or endpoint.endpoint_id == 0 or endpoint.endpoint_capability_id == 0) {
-        return error.InvalidBootstrapEndpoint;
-    }
+fn bootstrapValidationState(bootstrap: BootstrapEndpoint) BootstrapValidationState {
+    if (bootstrap.task_id == 0 or bootstrap.endpoint_id == 0 or bootstrap.endpoint_capability_id == 0) return .invalid;
+    return .ready;
+}
+
+fn validateBootstrap(state: BootstrapValidationState) Error!void {
+    return switch (state) {
+        .unbound => error.RegistryNotBootstrapped,
+        .invalid => error.InvalidBootstrapEndpoint,
+        .ready => {},
+    };
 }
 
 pub const Registry = struct {
@@ -170,6 +184,7 @@ test "service registry stores one direct slot per typed interface" {
     try std.testing.expect(DIRECT_INTERFACE_BINDINGS);
     try std.testing.expectEqual(typed_component_abi.INTERFACE_COUNT, MAX_BINDINGS);
     try std.testing.expectEqual(REGISTRY_SIZE_CEILING_BYTES, @sizeOf(Registry));
+    try std.testing.expectEqual(SERVICE_SIZE_CEILING_BYTES, @sizeOf(Service));
     try std.testing.expectEqual(
         @as(usize, 0),
         typed_component_abi.interfaceIndexForId(.task_runtime),
