@@ -2427,8 +2427,11 @@ const DriverRecoveryRuntime = struct {
     const ActivationRecord = struct {
         activation_generation: u32,
         dma_domain_id: u64,
-        exclusive_claim: bool,
         mode: ActivationMode,
+
+        pub fn hasExclusiveClaim(_: *const @This()) bool {
+            return true;
+        }
     };
 
     deactivation_count: usize = 0,
@@ -2444,7 +2447,6 @@ const DriverRecoveryRuntime = struct {
         return .{
             .dma_domain_id = driver.dma_domain_id,
             .activation_generation = @intCast(self.activation_count),
-            .exclusive_claim = true,
             .mode = .userspace_brokered_data_plane,
         };
     }

@@ -17,8 +17,9 @@ const units = @import("../core/units.zig");
 pub const MAX_ACTIVATIONS: usize = 8;
 pub const COMPACT_ACTIVATION_METADATA = true;
 pub const DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION = true;
-pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 40;
-pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_120;
+pub const DERIVES_ACTIVATION_STATE_FLAGS = true;
+pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 32;
+pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_056;
 const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
 
 pub const ActivationMode = enum(u8) {
@@ -32,11 +33,8 @@ pub const ActivationRecord = struct {
     device_id: u64,
     device_class: driver_service.DeviceClass,
     dma_domain_id: u64,
-    iommu_enforced: bool,
     mode: ActivationMode,
-    exclusive_claim: bool,
     activation_generation: u32,
-    kernel_bootstrap: bool,
 
     pub fn publisherSlice(self: *const ActivationRecord) []const u8 {
         if (self.mode == .control_only) return "";
@@ -45,6 +43,18 @@ pub const ActivationRecord = struct {
             self.device_id,
             self.service_id,
         ) orelse "";
+    }
+
+    pub fn iommuEnforced(self: *const ActivationRecord) bool {
+        return self.dma_domain_id != 0;
+    }
+
+    pub fn hasExclusiveClaim(self: *const ActivationRecord) bool {
+        return self.mode != .control_only;
+    }
+
+    pub fn kernelBootstrap(self: *const ActivationRecord) bool {
+        return bootstrap_driver_port.publicationUsesKernelBootstrap(self.device_class, self.device_id);
     }
 
     comptime {
@@ -106,18 +116,15 @@ pub const Runtime = struct {
         driver: *const driver_service.DriverRecord,
         now_ticks: u64,
     ) Error!ActivationRecord {
+        if (driver.dma_domain_id == 0 or driver.dma_protection != .iommu_enforced) return error.MissingDmaDomain;
         var record = ActivationRecord{
             .service_id = driver.service_id,
             .device_id = driver.device_id,
             .device_class = driver.device_class,
             .dma_domain_id = driver.dma_domain_id,
-            .iommu_enforced = driver.dma_protection == .iommu_enforced,
             .mode = .control_only,
-            .exclusive_claim = false,
             .activation_generation = 0,
-            .kernel_bootstrap = false,
         };
-        if (record.dma_domain_id == 0 or !record.iommu_enforced) return error.MissingDmaDomain;
 
         switch (driver.device_class) {
             .network_adapter => {
@@ -131,7 +138,7 @@ pub const Runtime = struct {
                             driver.service_id,
                             driver.owner_task_id,
                         )) {
-                            recordPublishedActivation(&record, .published_data_plane, publication);
+                            recordPublishedActivation(&record, .published_data_plane);
                         }
                     }
                 }
@@ -152,7 +159,7 @@ pub const Runtime = struct {
                             self.kernel_port,
                         )) {
                             record.mode = .published_data_plane;
-                            recordPublishedActivation(&record, record.mode, publication);
+                            recordPublishedActivation(&record, record.mode);
                         }
                     }
                 }
@@ -162,7 +169,7 @@ pub const Runtime = struct {
                     if (publication.device_id == driver.device_id) {
                         if (publication.kernel_bootstrap) return error.KernelBootstrapNotAuthorized;
                         if (bootstrap_driver_port.activateDeviceDataPlane(driver.device_class, driver.device_id, driver.service_id)) {
-                            recordPublishedActivation(&record, .published_data_plane, publication);
+                            recordPublishedActivation(&record, .published_data_plane);
                         }
                     }
                 }
@@ -206,7 +213,7 @@ pub const Runtime = struct {
 
     fn deactivateSlot(self: *Runtime, slot: *ActivationSlot) bool {
         _ = self;
-        if (slot.activation.mode != .control_only and slot.activation.exclusive_claim) {
+        if (slot.activation.hasExclusiveClaim()) {
             const released = switch (slot.activation.device_class) {
                 .network_adapter => bootstrap_driver_port.deactivateNetworkDevice(slot.activation.service_id),
                 .storage_controller => bootstrap_driver_port.deactivateStorageBackend(slot.activation.service_id),
@@ -215,7 +222,6 @@ pub const Runtime = struct {
             if (!released) return false;
         }
         slot.activation.mode = .control_only;
-        slot.activation.exclusive_claim = false;
         return true;
     }
 
@@ -267,10 +273,8 @@ fn serviceKey(service_id: u64) u64 {
     return indexed_arena.nonZeroKey(service_id);
 }
 
-fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode, publication: anytype) void {
+fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode) void {
     record.mode = mode;
-    record.exclusive_claim = true;
-    record.kernel_bootstrap = publication.kernel_bootstrap;
 }
 
 fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
@@ -283,11 +287,8 @@ fn zeroActivation() ActivationRecord {
         .device_id = 0,
         .device_class = .network_adapter,
         .dma_domain_id = 0,
-        .iommu_enforced = false,
         .mode = .control_only,
-        .exclusive_claim = false,
         .activation_generation = 0,
-        .kernel_bootstrap = false,
     };
 }
 
@@ -362,7 +363,7 @@ test "kernel bootstrap cannot publish network data-plane transports" {
     var runtime = Runtime.init();
     const activation = try runtime.activateAt(driver, 1);
     try std.testing.expectEqual(ActivationMode.control_only, activation.mode);
-    try std.testing.expect(!activation.exclusive_claim);
+    try std.testing.expect(!activation.hasExclusiveClaim());
 }
 
 test "runtime uses the activation tick when claiming storage authority" {
@@ -671,7 +672,7 @@ test "runtime deactivates only the requested driver class for shared services" {
     try std.testing.expectEqual(ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
     try std.testing.expectEqualStrings("", runtime.findByClass(.graphics_adapter).?.publisherSlice());
     try std.testing.expectEqual(ActivationMode.published_data_plane, runtime.findByClass(.input_device).?.mode);
-    try std.testing.expect(runtime.findByClass(.input_device).?.exclusive_claim);
+    try std.testing.expect(runtime.findByClass(.input_device).?.hasExclusiveClaim());
     try std.testing.expectEqual(@as(usize, 2), runtime.service_index.count(serviceKey(service_id)));
 
     try std.testing.expect(!runtime.deactivate(0xFFFF));

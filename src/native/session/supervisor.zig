@@ -608,7 +608,7 @@ fn activateRuntimeDriver(
     return .{
         .activation_generation = result.activation_generation,
         .dma_domain_id = result.dma_domain_id,
-        .exclusive_claim = result.exclusive_claim,
+        .exclusive_claim = result.hasExclusiveClaim(),
         .userspace_brokered_data_plane = result.mode == .userspace_brokered_data_plane,
     };
 }
@@ -778,8 +778,11 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
         const ActivationRecord = struct {
             activation_generation: u32,
             dma_domain_id: u64,
-            exclusive_claim: bool,
             mode: ActivationMode,
+
+            pub fn hasExclusiveClaim(_: *const @This()) bool {
+                return true;
+            }
         };
 
         deactivation_count: usize = 0,
@@ -797,7 +800,6 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
             return .{
                 .activation_generation = @intCast(self.activation_count),
                 .dma_domain_id = driver.dma_domain_id,
-                .exclusive_claim = true,
                 .mode = .userspace_brokered_data_plane,
             };
         }
@@ -911,8 +913,11 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
         const ActivationRecord = struct {
             activation_generation: u32,
             dma_domain_id: u64,
-            exclusive_claim: bool,
             mode: ActivationMode,
+
+            pub fn hasExclusiveClaim(self: *const @This()) bool {
+                return self.mode != .control_only;
+            }
         };
 
         deactivation_count: usize = 0,
@@ -936,7 +941,6 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
             return .{
                 .activation_generation = @intCast(self.activation_count),
                 .dma_domain_id = driver.dma_domain_id,
-                .exclusive_claim = true,
                 .mode = .userspace_brokered_data_plane,
             };
         }
