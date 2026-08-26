@@ -244,6 +244,30 @@ pub fn deviceDataPlanePublication(device_class: driver_service.DeviceClass) ?Dev
     return published_device_planes[deviceClassIndex(device_class)];
 }
 
+pub fn activePublicationPublisher(
+    device_class: driver_service.DeviceClass,
+    device_id: u64,
+    service_id: u64,
+) ?[]const u8 {
+    return switch (device_class) {
+        .network_adapter => if (published_network) |*publication|
+            activePublisherFor(publication, device_id, service_id)
+        else
+            null,
+        .storage_controller => if (published_storage) |*publication|
+            activePublisherFor(publication, device_id, service_id)
+        else
+            null,
+        .usb_controller, .graphics_adapter, .audio_print_io, .input_device, .compositor_policy => blk: {
+            if (published_device_planes[deviceClassIndex(device_class)]) |*publication| {
+                if (publication.device_class != device_class) break :blk null;
+                break :blk activePublisherFor(publication, device_id, service_id);
+            }
+            break :blk null;
+        },
+    };
+}
+
 pub fn hasActiveNetworkDevice() bool {
     return network_driver_task.hasActiveDevice();
 }
@@ -426,6 +450,11 @@ fn canPublishPublication(comptime T: type, publication: ?T, device_id: u64) bool
         return existing.device_id == device_id;
     }
     return true;
+}
+
+fn activePublisherFor(publication: anytype, device_id: u64, service_id: u64) ?[]const u8 {
+    if (service_id == 0 or publication.device_id != device_id or publication.active_service_id != service_id) return null;
+    return publication.publisherSlice();
 }
 
 fn publicationForActivation(comptime T: type, publication: *?T, device_id: u64, service_id: u64) ?*T {
