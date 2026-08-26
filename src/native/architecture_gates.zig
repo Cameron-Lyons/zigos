@@ -1329,6 +1329,10 @@ pub const indexed_hot_path_tables = .{
             @hasDecl(object_store.ChunkSlot, "arenaInUse") and
             @sizeOf(object_store.ChunkRecord) <= object_store.CHUNK_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(object_store.ChunkSlot) <= object_store.CHUNK_SLOT_SIZE_CEILING_BYTES,
+        .elides_unused_object_store_slot_generations = object_store.ELIDES_UNUSED_OBJECT_STORE_SLOT_GENERATIONS and
+            @sizeOf(@FieldType(@FieldType(object_store.Store, "blobs"), "slot_generations")) == 0 and
+            @sizeOf(@FieldType(@FieldType(object_store.Store, "chunks"), "slot_generations")) == 0 and
+            @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
         .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and
             !@hasField(object_store.VersionRecord, "blob_address") and
             !@hasField(object_store.VersionRecord, "payload_len") and
