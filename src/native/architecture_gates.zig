@@ -797,6 +797,9 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(network_policy.Directory) <= network_policy.DIRECTORY_SIZE_CEILING_BYTES,
         .uses_dense_policy_ids = network_policy.DENSE_POLICY_IDS and
             @hasDecl(@FieldType(network_policy.Directory, "policies"), "reserveIndex"),
+        .derives_policy_ids_from_dense_slots = network_policy.DERIVES_POLICY_IDS_FROM_DENSE_SLOTS and
+            @hasDecl(@FieldType(network_policy.Directory, "policies"), "nextPolicyId") and
+            !@hasField(network_policy.Directory, "next_policy_id"),
     },
     .policy_object = .{
         .stores_compact_policy_metadata = policy_object.COMPACT_POLICY_METADATA and

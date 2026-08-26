@@ -14,8 +14,9 @@ pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_TARGET_BYTES: usize = 64;
 pub const COMPACT_POLICY_METADATA = true;
 pub const DENSE_POLICY_IDS = true;
+pub const DERIVES_POLICY_IDS_FROM_DENSE_SLOTS = true;
 pub const POLICY_RECORD_SIZE_CEILING_BYTES: usize = 224;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_352;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_344;
 const POLICY_REQUEST_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
 
 comptime {
@@ -243,6 +244,17 @@ const DensePolicyTable = struct {
         return slot_index;
     }
 
+    pub fn nextPolicyId(self: *const DensePolicyTable) ?u64 {
+        var slot_index = self.slots.len;
+        while (slot_index > 0) {
+            slot_index -= 1;
+            if (!self.slots[slot_index].in_use) continue;
+            if (slot_index + 1 == MAX_POLICIES) return null;
+            return @intCast(slot_index + 2);
+        }
+        return 1;
+    }
+
     pub fn get(self: *DensePolicyTable, policy_id: u64) ?*PolicySlot {
         const slot_index = densePolicySlotIndex(policy_id) orelse return null;
         const slot = &self.slots[slot_index];
@@ -254,7 +266,6 @@ const DensePolicyTable = struct {
 const PolicyRequestIndex = indexed_arena.MultimapIndex(MAX_POLICIES, MAX_POLICIES, POLICY_REQUEST_INDEX_CAPACITY);
 
 pub const Directory = struct {
-    next_policy_id: u64 = 1,
     policies: DensePolicyTable = DensePolicyTable.init(),
     request_index: PolicyRequestIndex = PolicyRequestIndex.init(),
 
@@ -272,8 +283,7 @@ pub const Directory = struct {
         const request_key = policyRequestKey(request);
         if (self.findByRequestKey(request_key, request)) |policy| return policy;
 
-        if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
-        const policy_id = self.next_policy_id;
+        const policy_id = self.policies.nextPolicyId() orelse return error.PolicyTableFull;
         var policy = zeroPolicy();
         policy.id = policy_id;
         policy.owner = request.owner;
@@ -295,7 +305,6 @@ pub const Directory = struct {
         const slot_index = self.policies.reserveIndex(policy_id) orelse return error.PolicyTableFull;
         const slot = &self.policies.slots[slot_index];
         slot.policy = policy;
-        self.next_policy_id += 1;
         self.indexPolicy(slot_index);
         return &slot.policy;
     }
@@ -1028,7 +1037,6 @@ test "network policy request index rebuilds after dense persisted slots are load
             .pinned_attestation_verifier_metadata_digest = metadata_digest,
         },
     };
-    directory.next_policy_id = 5;
     directory.rebuildIndexes();
 
     const found = directory.find(4).?;
@@ -1046,6 +1054,14 @@ test "network policy request index rebuilds after dense persisted slots are load
         .pinned_attestation_verifier_metadata_digest = metadata_digest,
     });
     try std.testing.expectEqual(@as(u64, 4), duplicate.id);
+
+    const next = try directory.create(.{
+        .owner = owner,
+        .workspace_id = 92,
+        .label = "local",
+        .mode = .local_network,
+    });
+    try std.testing.expectEqual(@as(u64, 5), next.id);
 }
 
 test "network policy ids address their dense slots directly" {
@@ -1069,6 +1085,8 @@ test "network policy ids address their dense slots directly" {
         .label = "full",
         .mode = .local_network,
     }));
+    try std.testing.expect(DERIVES_POLICY_IDS_FROM_DENSE_SLOTS);
+    try std.testing.expect(!@hasField(Directory, "next_policy_id"));
     try std.testing.expectEqual(@as(usize, DIRECTORY_SIZE_CEILING_BYTES), @sizeOf(Directory));
 }
 

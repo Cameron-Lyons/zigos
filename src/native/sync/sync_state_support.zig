@@ -643,15 +643,6 @@ pub const ResidentState = struct {
         return count;
     }
 
-    pub fn nextPersistedPolicyId(self: *const ResidentState) u64 {
-        var next_id: u64 = 1;
-        for (self.persisted_state.network_policies.policies.slots) |slot| {
-            if (!slot.in_use) continue;
-            next_id = @max(next_id, slot.policy.id + 1);
-        }
-        return next_id;
-    }
-
     pub fn nextPersistTick(self: *ResidentState) u64 {
         defer self.next_state_tick += 1;
         return self.next_state_tick;
