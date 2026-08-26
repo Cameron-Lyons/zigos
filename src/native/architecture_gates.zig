@@ -180,12 +180,10 @@ pub const indexed_hot_path_tables = .{
         .direct_indexes_operation_metadata = component_abi_schema.DIRECT_OPERATION_INDEX,
         .validates_typed_messages_by_exact_interface_id = component_abi_schema.TYPED_ID_ONLY_MESSAGE_VALIDATION and
             @typeInfo(@TypeOf(component_abi_schema.validateMessage)).@"fn".params[0].type.? == component_abi_schema.InterfaceId,
-        .omits_tooling_strings_from_runtime_contracts =
-            !@hasField(component_abi_schema.OperationDecl, "name") and
+        .omits_tooling_strings_from_runtime_contracts = !@hasField(component_abi_schema.OperationDecl, "name") and
             !@hasField(component_abi_schema.OperationDecl, "coverage_requirement_id") and
             !@hasField(component_abi_schema.InterfaceContract, "coverage_requirement_id"),
-        .keeps_contracts_within_ceiling =
-            @sizeOf(component_abi_schema.OperationDecl) == component_abi_schema.OPERATION_DECL_SIZE_CEILING_BYTES and
+        .keeps_contracts_within_ceiling = @sizeOf(component_abi_schema.OperationDecl) == component_abi_schema.OPERATION_DECL_SIZE_CEILING_BYTES and
             @sizeOf(component_abi_schema.InterfaceContract) == component_abi_schema.INTERFACE_CONTRACT_SIZE_CEILING_BYTES,
     },
     .sdk_component_abi = .{
@@ -1197,11 +1195,14 @@ pub const indexed_hot_path_tables = .{
         .builds_object_store_derived_indexes_during_replay = storage_volume.BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY,
         .skips_empty_object_store_arena_reset_work = object_store.SKIPS_EMPTY_ARENA_RESET_WORK,
         .scrubs_only_used_signer_text = storage_volume.SCRUBS_ONLY_USED_SIGNER_TEXT,
+        .heap_backs_signer_text_on_freestanding = storage_volume.HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING and
+            storage_volume.signer_text_layout.heap_backs_pool_on_freestanding and
+            storage_volume.signer_text_layout.freestanding_handle_size_bytes <= storage_volume.SIGNER_TEXT_POOL_HANDLE_SIZE_CEILING_BYTES,
         .interns_replayed_signer_text = @hasField(storage_volume.Volume, "signer_text_pool") and
             !@hasField(storage_volume.Volume, "version_signers") and
             !@hasField(storage_volume.Volume, "object_signers") and
             !@hasField(storage_volume.Volume, "snapshot_signers") and
-            @sizeOf(@FieldType(storage_volume.Volume, "signer_text_pool")) == storage_volume.SIGNER_TEXT_POOL_BYTES,
+            storage_volume.signer_text_layout.pool_size_bytes == storage_volume.SIGNER_TEXT_POOL_BYTES,
         .tracks_latest_inserted_version = @hasField(object_store.Store, "latest_inserted_version_id"),
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
