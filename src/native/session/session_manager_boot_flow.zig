@@ -118,6 +118,7 @@ pub const SessionManager = struct {
 
     pub fn reset(self: *SessionManager) void {
         permission_review_service.clearSystemInputRouter();
+        self.input_router.deinit();
         self.runtime_context.releaseUserspaceScheduler();
         self.runtime_context.runtime_checkpoint_store.reset();
         self.runtime_context.releaseTaskRuntime();

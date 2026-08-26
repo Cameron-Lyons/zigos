@@ -904,6 +904,9 @@ pub const indexed_hot_path_tables = .{
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
         .tracks_active_inbox_chain = @hasField(input_router.Router, "active_inbox_head"),
+        .heap_backs_event_slots_on_freestanding = input_router.HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING and
+            input_router.event_slot_layout.heap_backs_slots_on_freestanding and
+            input_router.event_slot_layout.freestanding_handle_size_bytes <= input_router.EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES,
     },
     .input_queues = .{
         .stores_compact_xhci_metadata = xhci.COMPACT_INPUT_QUEUE_METADATA and
