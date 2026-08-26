@@ -1812,7 +1812,7 @@ fn validateNuc11tnki5KernelProofSources(
         "const input_driver_task = @import",
         "const input_router = @import",
         "input_driver_task.Decoder",
-        "self.decoder.submit",
+        "self.decoder.decode",
         "ModeledInputSource",
         "controller: xhci.HidController",
         "focused_input",
@@ -1885,23 +1885,31 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_input_decoder_snippets = [_][]const u8{
-        "pub const QUEUE_ONLY_DECODER_STATE = true",
-        "pub const EVENT_QUEUE_CAPACITY: usize = BOOT_KEY_SLOTS",
-        "pub const SINGLE_REPORT_EVENT_QUEUE = EVENT_QUEUE_CAPACITY == BOOT_KEY_SLOTS",
-        "pub const DECODER_SIZE_CEILING_BYTES: usize = 21",
+        "pub const BATCHED_DECODER_OUTPUT = true",
+        "pub const DECODED_EVENTS_SIZE_CEILING_BYTES: usize = 13",
+        "pub const DECODER_SIZE_CEILING_BYTES: usize = 6",
+        "pub const DecodedEvents = struct",
+        "pub fn decode(",
     };
     for (required_input_decoder_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_driver_task_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must retain its bounded queue-only resident state: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must return bounded event batches: {s}", .{snippet});
         }
     }
     const retired_input_decoder_snippets = [_][]const u8{
+        "EVENT_QUEUE_CAPACITY",
+        "COMPACT_EVENT_QUEUE_METADATA",
+        "QUEUE_ONLY_DECODER_STATE",
+        "SINGLE_REPORT_EVENT_QUEUE",
+        "EventQueueFull",
+        "pub fn poll(",
+        "pub fn pendingCount(",
         "reports_consumed: usize",
         "events_emitted: usize",
     };
     for (retired_input_decoder_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_driver_task_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must not duplicate router telemetry: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must not restore queued state or duplicate telemetry: {s}", .{snippet});
         }
     }
     const required_userspace_input_snippets = [_]struct {

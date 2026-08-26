@@ -217,10 +217,10 @@ pub const Router = struct {
             self.last_sequence = report.sequence;
 
             const keyboard = self.keyboardFor(report) orelse continue;
-            _ = keyboard.decoder.submit(report.bytes) catch continue;
+            const decoded = keyboard.decoder.decode(report.bytes) catch continue;
             self.reports_accepted += 1;
 
-            while (keyboard.decoder.poll()) |event| {
+            for (decoded.slice()) |event| {
                 if (self.routeEvent(compositor, report, event, now_ticks)) {
                     events_routed += 1;
                 }

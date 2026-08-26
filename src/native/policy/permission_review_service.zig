@@ -259,12 +259,14 @@ pub const ModeledInputSource = struct {
 
     fn drainReports(self: *ModeledInputSource) InputError!void {
         while (true) {
-            while (self.decoder.poll()) |event| {
-                if (try self.commands.submit(event)) return;
-            }
             const report = try self.pollReport() orelse return;
             self.reports_consumed += 1;
-            _ = try self.decoder.submit(report.report);
+            const decoded = try self.decoder.decode(report.report);
+            var command_completed = false;
+            for (decoded.slice()) |event| {
+                command_completed = (try self.commands.submit(event)) or command_completed;
+            }
+            if (command_completed) return;
         }
     }
 
