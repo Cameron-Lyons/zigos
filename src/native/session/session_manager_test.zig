@@ -44,7 +44,7 @@ test "boot assembles core services without running explicit scenarios" {
     const supervisor = session_manager.testing.supervisorPtr();
     const storage_service_instance = session_manager.testing.storageServicePtr();
     const compositor = session_manager.testing.compositorSessionPtr();
-    const dispatcher = session_manager.testing.backgroundDispatchPtr();
+    const dispatcher = try session_manager.testing.backgroundDispatchPtr();
 
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(contract.default_services.len, session_manager.testing.countServices());
@@ -197,7 +197,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     const supervisor = session_manager.testing.supervisorPtr();
     const storage_service_instance = session_manager.testing.storageServicePtr();
     const compositor = session_manager.testing.compositorSessionPtr();
-    const dispatcher = session_manager.testing.backgroundDispatchPtr();
+    const dispatcher = try session_manager.testing.backgroundDispatchPtr();
 
     try std.testing.expect(session_manager.testing.isInitialized());
     try std.testing.expectEqual(contract.default_services.len, session_manager.testing.countServices());

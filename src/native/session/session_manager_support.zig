@@ -82,7 +82,7 @@ pub const Environment = struct {
     driver_directory: *driver_service.Directory,
     driver_runtime: *driver_runtime_mod.Runtime,
     diagnostic_ledger: *event_ledger.Ledger,
-    background_dispatcher: *background_dispatch.Controller,
+    background_dispatcher: ?*background_dispatch.Controller,
 };
 
 pub fn hasGrantForKind(grants: []const policy_mediation.UserGrant, kind: manifest.PermissionKind) bool {

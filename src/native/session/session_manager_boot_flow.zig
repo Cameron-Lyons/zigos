@@ -54,6 +54,9 @@ pub const UI_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
+pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING;
+pub const BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES = service_graph_builder.BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES;
+pub const background_dispatch_layout = service_graph_builder.background_dispatch_layout;
 pub const HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING = session_contexts.HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING;
 pub const REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES = session_contexts.REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES;
 pub const recovery_context_layout = session_contexts.recovery_context_layout;
@@ -125,6 +128,7 @@ pub const SessionManager = struct {
         self.recovery_context.review_compositor_session.deinit();
         self.recovery_context.releaseReviewUxController();
         self.recovery_context.diagnostic_ledger.deinit();
+        self.service_graph_builder.releaseBackgroundDispatch();
         self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();
         self.* = SessionManager.init();
@@ -236,8 +240,8 @@ pub const SessionManager = struct {
         return &self.input_router;
     }
 
-    pub fn backgroundDispatchPtr(self: *SessionManager) *background_dispatch.Controller {
-        return &self.service_graph_builder.background_dispatcher;
+    pub fn backgroundDispatchPtr(self: *SessionManager) error{NoSpaceLeft}!*background_dispatch.Controller {
+        return self.service_graph_builder.ensureBackgroundDispatch();
     }
 
     pub fn updateLedgerPtr(self: *SessionManager) *event_ledger.Ledger {

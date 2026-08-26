@@ -3174,12 +3174,24 @@ fn validateResourceSchedulerTelemetryTrack(
 ) !void {
     const accelerator_path = "src/native/task/accelerator_scheduler.zig";
     const userspace_path = "src/native/task/userspace_scheduler.zig";
+    const background_dispatch_path = "src/native/task/background_dispatch.zig";
     const platform_policy_signals_path = "src/native/platform/platform_policy_signals.zig";
     const benchmark_path = "src/kernel/boot/benchmark/suite.zig";
+    const service_graph_builder_path = "src/native/session/service_graph_builder.zig";
+    const session_manager_support_path = "src/native/session/session_manager_support.zig";
+    const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
+    const session_demo_boot_path = "src/native/demo/session_demo_boot.zig";
+    const booted_evidence_path = "src/native/session/booted_evidence.zig";
     const accelerator_source = try readRequiredSource(allocator, io, errors, accelerator_path) orelse return;
     const userspace_source = try readRequiredSource(allocator, io, errors, userspace_path) orelse return;
+    const background_dispatch_source = try readRequiredSource(allocator, io, errors, background_dispatch_path) orelse return;
     const platform_policy_signals_source = try readRequiredSource(allocator, io, errors, platform_policy_signals_path) orelse return;
     const benchmark_source = try readRequiredSource(allocator, io, errors, benchmark_path) orelse return;
+    const service_graph_builder_source = try readRequiredSource(allocator, io, errors, service_graph_builder_path) orelse return;
+    const session_manager_support_source = try readRequiredSource(allocator, io, errors, session_manager_support_path) orelse return;
+    const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
+    const session_demo_boot_source = try readRequiredSource(allocator, io, errors, session_demo_boot_path) orelse return;
+    const booted_evidence_source = try readRequiredSource(allocator, io, errors, booted_evidence_path) orelse return;
 
     const accelerator_snippets = [_][]const u8{
         "production_hardware_telemetry_required: bool = false",
@@ -3234,6 +3246,30 @@ fn validateResourceSchedulerTelemetryTrack(
     }
     if (std.mem.indexOf(u8, benchmark_source, "syntheticUserspaceImage(") != null) {
         try common.addError(errors, allocator, "Resource scheduler telemetry track must not benchmark scheduler load tasks with synthetic executable descriptors", .{});
+    }
+
+    const background_dispatch_storage_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = background_dispatch_path, .source = background_dispatch_source, .snippet = "pub fn initializeAllocated(self: *Controller) void" },
+        .{ .path = service_graph_builder_path, .source = service_graph_builder_source, .snippet = "pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = true" },
+        .{ .path = service_graph_builder_path, .source = service_graph_builder_source, .snippet = "const BackgroundDispatchBacking = if (heap_backed_background_dispatch) ?*background_dispatch.Controller else background_dispatch.Controller" },
+        .{ .path = service_graph_builder_path, .source = service_graph_builder_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(background_dispatch.Controller)) orelse return error.NoSpaceLeft" },
+        .{ .path = service_graph_builder_path, .source = service_graph_builder_source, .snippet = "kernel_memory.kfree(@ptrCast(controller))" },
+        .{ .path = session_manager_support_path, .source = session_manager_support_source, .snippet = "background_dispatcher: ?*background_dispatch.Controller" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.service_graph_builder.releaseBackgroundDispatch()" },
+        .{ .path = session_demo_boot_path, .source = session_demo_boot_source, .snippet = "graph.env.background_dispatcher = manager.backgroundDispatchPtr() catch" },
+        .{ .path = booted_evidence_path, .source = booted_evidence_source, .snippet = "evidence_env.background_dispatcher = manager.backgroundDispatchPtr() catch" },
+    };
+    for (background_dispatch_storage_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Background dispatch must retain on-demand freestanding storage in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    if (std.mem.indexOf(u8, service_graph_builder_source, "background_dispatcher: background_dispatch.Controller =") != null) {
+        try common.addError(errors, allocator, "Background dispatch must not return to inline freestanding service-graph storage", .{});
     }
 }
 

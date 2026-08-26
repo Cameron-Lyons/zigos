@@ -136,6 +136,18 @@ pub const Controller = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *Controller) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.policy = .{};
+        self.policy_subjects = .{};
+        self.next_record_id = 1;
+        for (&self.records) |*record| {
+            record.network = .none;
+            record.visibility = .status_only;
+            record.state = .completed;
+        }
+    }
+
     comptime {
         if (@sizeOf(@This()) > CONTROLLER_SIZE_CEILING_BYTES) {
             @compileError("background dispatch controller exceeds its compact bounded-log layout");
@@ -511,6 +523,20 @@ fn zeroRecord() DispatchRecord {
         .reason = .allowed,
         .tick = 0,
     };
+}
+
+test "allocated background dispatch controller initializes reusable log state" {
+    const controller = try std.testing.allocator.create(Controller);
+    defer std.testing.allocator.destroy(controller);
+    controller.initializeAllocated();
+
+    const record_id = try controller.appendRecordId(42, "allocated", .push_event, null, .task_not_found, 7);
+    try std.testing.expectEqual(@as(u64, 1), record_id);
+    try std.testing.expectEqual(@as(usize, 1), controller.recordCount());
+    const record = controller.latestRecord().?;
+    try std.testing.expectEqual(@as(u64, 42), record.task_id);
+    try std.testing.expectEqual(DecisionReason.task_not_found, record.reason);
+    try std.testing.expectEqualStrings("allocated", record.backgroundTaskIdSlice());
 }
 
 fn makeRecord(

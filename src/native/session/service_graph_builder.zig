@@ -14,8 +14,12 @@ const background_dispatch = @import("../task/background_dispatch.zig");
 const root = @import("root");
 
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = true;
+pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = true;
+pub const BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 const heap_backed_package_service = builtin.target.os.tag == .freestanding and HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
+const heap_backed_background_dispatch = builtin.target.os.tag == .freestanding and HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING;
 const PackageServiceBacking = if (heap_backed_package_service) ?*package_service.Service else package_service.Service;
+const BackgroundDispatchBacking = if (heap_backed_background_dispatch) ?*background_dispatch.Controller else background_dispatch.Controller;
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
 else
@@ -38,12 +42,15 @@ pub const Builder = struct {
     driver_directory: driver_service.Directory = driver_service.Directory.init(),
     driver_runtime: driver_runtime_mod.Runtime = driver_runtime_mod.Runtime.init(),
     supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
-    background_dispatcher: background_dispatch.Controller = background_dispatch.Controller.init(),
+    background_dispatcher: BackgroundDispatchBacking = if (heap_backed_background_dispatch) null else background_dispatch.Controller.init(),
     service_bindings: ServiceBindings = ServiceBindings.init(),
 
     comptime {
         if (heap_backed_package_service and @sizeOf(@This()) > 22 * 1024) {
             @compileError("heap-backed service graph builders exceed their compact resident layout");
+        }
+        if (heap_backed_background_dispatch and @sizeOf(BackgroundDispatchBacking) > BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES) {
+            @compileError("heap-backed background dispatch exceeds its handle size ceiling");
         }
     }
 
@@ -82,6 +89,35 @@ pub const Builder = struct {
         }
     }
 
+    pub fn backgroundDispatch(self: *Builder) ?*background_dispatch.Controller {
+        if (comptime heap_backed_background_dispatch) return self.background_dispatcher;
+        return &self.background_dispatcher;
+    }
+
+    pub fn ensureBackgroundDispatch(self: *Builder) error{NoSpaceLeft}!*background_dispatch.Controller {
+        if (self.backgroundDispatch()) |controller| return controller;
+        if (comptime heap_backed_background_dispatch) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(background_dispatch.Controller)) orelse return error.NoSpaceLeft;
+            const controller: *background_dispatch.Controller = @ptrCast(@alignCast(allocation));
+            controller.initializeAllocated();
+            self.background_dispatcher = controller;
+            return controller;
+        }
+        return &self.background_dispatcher;
+    }
+
+    pub fn releaseBackgroundDispatch(self: *Builder) void {
+        if (comptime heap_backed_background_dispatch) {
+            if (self.background_dispatcher) |controller| {
+                @memset(std.mem.asBytes(controller), 0);
+                kernel_memory.kfree(@ptrCast(controller));
+                self.background_dispatcher = null;
+            }
+        } else {
+            self.background_dispatcher = background_dispatch.Controller.init();
+        }
+    }
+
     pub fn environment(
         self: *Builder,
         runtime_context: *session_contexts.RuntimeContext,
@@ -109,7 +145,7 @@ pub const Builder = struct {
             .driver_directory = &self.driver_directory,
             .driver_runtime = &self.driver_runtime,
             .diagnostic_ledger = &recovery_context.diagnostic_ledger,
-            .background_dispatcher = &self.background_dispatcher,
+            .background_dispatcher = self.backgroundDispatch(),
         };
     }
 
@@ -152,4 +188,10 @@ pub const Builder = struct {
         graph.service_bindings = self.service_bindings;
         return true;
     }
+};
+
+pub const background_dispatch_layout = .{
+    .heap_backs_log_on_freestanding = HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING,
+    .controller_size_bytes = background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
+    .freestanding_handle_size_bytes = if (HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING) @sizeOf(?*background_dispatch.Controller) else background_dispatch.CONTROLLER_SIZE_CEILING_BYTES,
 };
