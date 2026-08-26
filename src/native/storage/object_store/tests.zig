@@ -32,6 +32,12 @@ test "blob manifests store compact chunk slot edges" {
     try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "chunk_count"));
+    try std.testing.expect(object_store.PACKS_BLOB_STATE_INTO_BOUNDED_METADATA);
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(@FieldType(object_store.BlobRecord, "state")));
+    try std.testing.expectEqual(@as(usize, 32), @bitSizeOf(@FieldType(object_store.BlobRecord, "state")));
+    try std.testing.expect(!@hasField(object_store.BlobRecord, "payload_len"));
+    try std.testing.expect(!@hasField(object_store.BlobRecord, "ref_count"));
+    try std.testing.expect(!@hasField(object_store.BlobRecord, "manifest_verified"));
 }
 
 test "blob chunk counts derive from payload lengths" {
@@ -41,6 +47,19 @@ test "blob chunk counts derive from payload lengths" {
     try std.testing.expectEqual(@as(usize, 1), object_store.chunkCountForPayloadLen(MAX_CHUNK_BYTES));
     try std.testing.expectEqual(@as(usize, 2), object_store.chunkCountForPayloadLen(MAX_CHUNK_BYTES + 1));
     try std.testing.expectEqual(MAX_BLOB_CHUNKS, object_store.chunkCountForPayloadLen(MAX_PAYLOAD_BYTES));
+}
+
+test "blob state packs bounded values without overlap" {
+    var slot = BlobSlot{};
+    slot.blob.setPayloadState(MAX_PAYLOAD_BYTES, object_store.MAX_VERSIONS);
+    try std.testing.expectEqual(MAX_PAYLOAD_BYTES, slot.blob.payloadLen());
+    try std.testing.expectEqual(@as(u16, object_store.MAX_VERSIONS), slot.blob.refCount());
+    try std.testing.expect(!slot.blob.manifestVerified());
+
+    slot.blob.markManifestVerified();
+    try std.testing.expectEqual(MAX_PAYLOAD_BYTES, slot.blob.payloadLen());
+    try std.testing.expectEqual(@as(u16, object_store.MAX_VERSIONS), slot.blob.refCount());
+    try std.testing.expect(slot.blob.manifestVerified());
 }
 
 test "resident object metadata uses capacity-sized length fields" {
@@ -242,8 +261,8 @@ test "object store indexes full blob addresses authoritatively" {
     try std.testing.expectEqual(@as(usize, "second".len), store.maxBlobPayloadBytes());
     try std.testing.expectEqual(@as(usize, 2), store.blobCount());
     try std.testing.expectEqual(@as(usize, 2), store.chunkCount());
-    try std.testing.expectEqual(@as(u16, 2), store.blobSlotAtConst(first_slot).blob.ref_count);
-    try std.testing.expectEqual(@as(u16, 1), store.blobSlotAtConst(second_slot).blob.ref_count);
+    try std.testing.expectEqual(@as(u16, 2), store.blobSlotAtConst(first_slot).blob.refCount());
+    try std.testing.expectEqual(@as(u16, 1), store.blobSlotAtConst(second_slot).blob.refCount());
     const first_blob = store.blob(first_address).?;
     const second_blob = store.blob(second_address).?;
     try std.testing.expectEqual(@as(usize, 1), first_blob.chunkCount());

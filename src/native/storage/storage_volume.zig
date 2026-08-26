@@ -1030,7 +1030,7 @@ fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, re
     try writer.writeBytes(&blob.address);
     try writer.writeBytes(&record.version_address);
     try writeMetadata(writer, record.metadata);
-    try writer.writeU32(blob.payload_len);
+    try writer.writeU32(@intCast(blob.payloadLen()));
 }
 
 fn appendBlobRecord(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
@@ -1049,8 +1049,8 @@ fn appendPayloadChunkRecord(writer: *CursorWriter, chunk: object_store.PayloadCh
 
 fn encodeBlobBody(writer: *CursorWriter, store: *const object_store.Store, record: *const object_store.BlobRecord) Error!void {
     try writer.writeBytes(&record.address);
-    try writer.writeU32(record.payload_len);
-    try writer.writeU16(record.ref_count);
+    try writer.writeU32(@intCast(record.payloadLen()));
+    try writer.writeU16(record.refCount());
     const chunk_count = record.chunkCount();
     for (0..chunk_count) |chunk_index| {
         const chunk_ref = store.blobChunkRef(record, chunk_index) catch return error.CorruptImage;
@@ -1152,7 +1152,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     try reader.readBytes(&address);
     const payload_len: usize = @intCast(try reader.readU32());
     const ref_count = try reader.readU16();
-    if (payload_len > object_store.MAX_PAYLOAD_BYTES) return error.CorruptImage;
+    if (payload_len > object_store.MAX_PAYLOAD_BYTES or ref_count > object_store.MAX_VERSIONS) return error.CorruptImage;
     const chunk_count = object_store.chunkCountForPayloadLen(payload_len);
     var chunk_refs = [_]object_store.ChunkRef{object_store.ChunkRef{}} ** object_store.MAX_BLOB_CHUNKS;
     var chunk_slot_indexes = [_]object_store.BlobChunkSlotIndex{0} ** object_store.MAX_BLOB_CHUNKS;
@@ -1173,10 +1173,8 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
         store.reserveBlobSlot(address) orelse return error.CorruptImage;
     const slot = store.blobSlotAt(slot_index);
     slot.blob.address = address;
-    slot.blob.payload_len = @intCast(payload_len);
-    slot.blob.ref_count = ref_count;
     slot.blob.chunk_slot_indexes = chunk_slot_indexes;
-    slot.blob.manifest_verified = false;
+    slot.blob.setPayloadState(payload_len, ref_count);
     store.recordReplayedBlobPayloadBytes(payload_len);
 }
 
