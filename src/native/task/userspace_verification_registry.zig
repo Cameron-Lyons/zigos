@@ -12,7 +12,7 @@ pub const verification_only_build_image_specs = [_]production_registry.BuildImag
         .bundle_id = "app.notes.daily",
         .artifact_name = "userspace-notes-daily.elf",
         .display_name = "Notes Daily",
-        .publisher = "zigos.dev",
+        .publisher = .development,
         .label = "notes-daily",
         .entry = "app.notes",
         .provided_interfaces = &.{.{ .name = "zigos.workspace.document" }},

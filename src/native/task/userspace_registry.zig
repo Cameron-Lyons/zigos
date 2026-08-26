@@ -28,10 +28,11 @@ pub const RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA = true;
 pub const SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA = true;
 pub const COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA = true;
+pub const RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS = true;
 pub const RuntimeRoleTag = u16;
 pub const RuntimeHeartbeatIncrement = u8;
 pub const RuntimeContractFlags = u16;
-pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 136;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 120;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -48,6 +49,24 @@ pub const ComponentClass = enum(u8) {
     service_component,
 };
 
+pub const Publisher = enum(u8) {
+    system,
+    development,
+
+    pub fn fromName(publisher_name: []const u8) ?Publisher {
+        if (std.mem.eql(u8, publisher_name, "zigos.system")) return .system;
+        if (std.mem.eql(u8, publisher_name, "zigos.dev")) return .development;
+        return null;
+    }
+
+    pub fn name(self: Publisher) []const u8 {
+        return switch (self) {
+            .system => "zigos.system",
+            .development => "zigos.dev",
+        };
+    }
+};
+
 pub const ContractSpec = struct {
     bundle_id: []const u8,
     role_tag: u32,
@@ -58,7 +77,7 @@ pub const ContractSpec = struct {
 pub const ImageSpec = struct {
     bundle_id: []const u8,
     display_name: []const u8,
-    publisher: []const u8,
+    publisher: Publisher,
     label: []const u8,
     entry: []const u8,
     provided_interfaces: []const manifest.InterfaceDecl = &.{},
@@ -84,7 +103,7 @@ pub const StandaloneImageSpec = struct {
     artifact_name: []const u8,
     source_path: []const u8 = "src/userspace/component_main.zig",
     display_name: []const u8,
-    publisher: []const u8 = "zigos.system",
+    publisher: Publisher = .system,
     label: []const u8,
     entry: []const u8,
     provided_interfaces: []const manifest.InterfaceDecl = &.{},
@@ -104,7 +123,8 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
         .image = .{
             .bundle_id = catalog_image.bundle_id,
             .display_name = catalog_image.display_name,
-            .publisher = catalog_image.publisher,
+            .publisher = Publisher.fromName(catalog_image.publisher) orelse
+                @compileError("userspace service publisher is not represented by the runtime catalog"),
             .label = catalog_image.label,
             .entry = catalog_image.entry,
             .provided_interfaces = &.{entry.interface},
@@ -161,7 +181,7 @@ pub const production_build_image_specs = [_]BuildImageSpec{
         .bundle_id = "app.viewer",
         .artifact_name = "userspace-viewer.elf",
         .display_name = "Viewer",
-        .publisher = "zigos.dev",
+        .publisher = .development,
         .label = "viewer",
         .entry = "app.viewer",
         .provided_interfaces = &.{.{ .name = "zigos.viewer.document" }},
@@ -175,7 +195,7 @@ pub const production_build_image_specs = [_]BuildImageSpec{
         .bundle_id = "app.notes",
         .artifact_name = "userspace-notes.elf",
         .display_name = "Notes",
-        .publisher = "zigos.dev",
+        .publisher = .development,
         .label = "notes",
         .entry = "app.notes",
         .provided_interfaces = &.{.{ .name = "zigos.workspace.document" }},
@@ -190,7 +210,7 @@ pub const production_build_image_specs = [_]BuildImageSpec{
         .bundle_id = "app.sync",
         .artifact_name = "userspace-sync.elf",
         .display_name = "Sync",
-        .publisher = "zigos.dev",
+        .publisher = .development,
         .label = "sync",
         .entry = "app.sync",
         .provided_interfaces = &.{component_abi_schema.interfaceDecl(.sync_replication)},
@@ -204,7 +224,7 @@ pub const production_build_image_specs = [_]BuildImageSpec{
         .bundle_id = "app.capture",
         .artifact_name = "userspace-capture.elf",
         .display_name = "Capture",
-        .publisher = "zigos.dev",
+        .publisher = .development,
         .label = "capture",
         .entry = "app.capture",
         .provided_interfaces = &.{.{ .name = "zigos.capture.session" }},
@@ -418,6 +438,13 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expectEqual(RuntimeRoleTag, @FieldType(ImageSpec, "role_tag"));
     try std.testing.expectEqual(RuntimeHeartbeatIncrement, @FieldType(ImageSpec, "heartbeat_increment"));
     try std.testing.expectEqual(RuntimeContractFlags, @FieldType(ImageSpec, "contract_flags"));
+    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS);
+    try std.testing.expectEqual(Publisher, @FieldType(ImageSpec, "publisher"));
+    try std.testing.expectEqual(Publisher.system, Publisher.fromName("zigos.system").?);
+    try std.testing.expectEqual(Publisher.development, Publisher.fromName("zigos.dev").?);
+    try std.testing.expect(Publisher.fromName("zigos.unknown") == null);
+    try std.testing.expectEqualStrings("zigos.system", Publisher.system.name());
+    try std.testing.expectEqualStrings("zigos.dev", Publisher.development.name());
     try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
     for (production_build_image_specs, 0..) |build_spec, index| {
         const spec = build_spec.image;

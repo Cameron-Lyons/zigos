@@ -51,7 +51,7 @@ pub fn specAt(index: usize) ?*const role_registry.ImageSpec {
 
 pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
     const spec = find(bundle_id) orelse return error.UnknownBundleId;
-    return (try userspace_manifest_signing.identityForPublisher(spec.publisher)).label;
+    return (try userspace_manifest_signing.identityForPublisher(spec.publisher.name())).label;
 }
 
 pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
@@ -95,7 +95,7 @@ fn bundleForSpec(
     var bundle = manifest.BundleManifest{
         .bundle_id = spec.bundle_id,
         .display_name = spec.display_name,
-        .publisher = spec.publisher,
+        .publisher = spec.publisher.name(),
         .provided_interfaces = spec.provided_interfaces,
         .consumed_interfaces = spec.consumed_interfaces,
         .components = components,

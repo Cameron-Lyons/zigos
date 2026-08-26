@@ -443,6 +443,9 @@ pub const indexed_hot_path_tables = .{
             @FieldType(userspace_registry.ImageSpec, "heartbeat_increment") == userspace_registry.RuntimeHeartbeatIncrement and
             @FieldType(userspace_registry.ImageSpec, "contract_flags") == userspace_registry.RuntimeContractFlags and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
+        .uses_compact_runtime_publishers = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS and
+            @FieldType(userspace_registry.ImageSpec, "publisher") == userspace_registry.Publisher and
+            @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
     },
     .userspace_launch = .{
         .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,
