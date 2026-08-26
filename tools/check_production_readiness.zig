@@ -848,6 +848,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_runtime_path = "src/userspace/runtime.zig";
     const userspace_ui_state_path = "src/userspace/ui_surface_state.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
+    const input_driver_task_path = "src/native/drivers/input_driver_task.zig";
     const input_router_path = "src/native/platform/input_router.zig";
     const console_path = "src/kernel/utils/console.zig";
     const legacy_vga_path = "src/kernel/drivers/vga.zig";
@@ -1097,6 +1098,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_runtime_source = try common.readFileAlloc(allocator, io, userspace_runtime_path, common.source_file_max_bytes);
     const userspace_ui_state_source = try common.readFileAlloc(allocator, io, userspace_ui_state_path, common.source_file_max_bytes);
     const permission_review_source = try common.readFileAlloc(allocator, io, permission_review_path, common.source_file_max_bytes);
+    const input_driver_task_source = try common.readFileAlloc(allocator, io, input_driver_task_path, common.source_file_max_bytes);
     const input_router_source = try common.readFileAlloc(allocator, io, input_router_path, common.source_file_max_bytes);
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
@@ -1854,6 +1856,24 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (std.mem.indexOf(u8, input_router_source, "event_slots: [MAX_QUEUED_EVENTS]EventSlot =") != null) {
         try common.addError(errors, allocator, "NUC11TNKi5 input event slots must not return to inline freestanding router storage", .{});
+    }
+    const required_input_decoder_snippets = [_][]const u8{
+        "pub const QUEUE_ONLY_DECODER_STATE = true",
+        "pub const DECODER_SIZE_CEILING_BYTES: usize = 73",
+    };
+    for (required_input_decoder_snippets) |snippet| {
+        if (std.mem.indexOf(u8, input_driver_task_source, snippet) == null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must retain queue-only resident state: {s}", .{snippet});
+        }
+    }
+    const retired_input_decoder_snippets = [_][]const u8{
+        "reports_consumed: usize",
+        "events_emitted: usize",
+    };
+    for (retired_input_decoder_snippets) |snippet| {
+        if (std.mem.indexOf(u8, input_driver_task_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must not duplicate router telemetry: {s}", .{snippet});
+        }
     }
     const required_userspace_input_snippets = [_]struct {
         label: []const u8,
