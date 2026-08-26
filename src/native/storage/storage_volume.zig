@@ -1072,7 +1072,7 @@ fn encodeWorkspaceBody(writer: *CursorWriter, record: *const workspace.Workspace
     try writeText(writer, record.labelSlice());
     try writer.writeU32(record.generation);
     try writer.writeU16(@intCast(record.counts.entry_count));
-    for (record.path_index.entries[0..record.counts.entry_count]) |entry| {
+    for (record.path_index.entriesConst(record.counts.entry_count)) |entry| {
         try writeEntry(writer, entry);
     }
     try writer.writeU16(@intCast(record.counts.entry_mutation_count));
@@ -1222,13 +1222,25 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
     slot.workspace.generation = try reader.readU32();
     slot.workspace.counts.entry_count = try readBoundedCount(workspace.WorkspaceEntryCount, &reader, workspace.MAX_WORKSPACE_ENTRIES);
-    for (0..slot.workspace.counts.entry_count) |entry_index| {
-        slot.workspace.path_index.entries[entry_index] = try readEntry(&reader);
-    }
-    if (slot.workspace.counts.entry_count < previous_entry_count) {
-        for (slot.workspace.path_index.entries[slot.workspace.counts.entry_count..previous_entry_count]) |*entry| {
-            entry.* = .{};
+    if (slot.workspace.counts.entry_count != 0) {
+        slot.workspace.path_index.ensureEntryBacking() catch {
+            if (existing_slot == null) {
+                slot.workspace.mutation_log.releaseBacking();
+                std.debug.assert(workspaces.workspaces.remove(workspace_id));
+            }
+            return error.NoSpaceLeft;
+        };
+        const entries = slot.workspace.path_index.entries();
+        for (0..slot.workspace.counts.entry_count) |entry_index| {
+            entries[entry_index] = try readEntry(&reader);
         }
+        if (slot.workspace.counts.entry_count < previous_entry_count) {
+            for (entries[slot.workspace.counts.entry_count..previous_entry_count]) |*entry| {
+                entry.* = .{};
+            }
+        }
+    } else if (previous_entry_count != 0) {
+        slot.workspace.path_index.releaseEntryBacking();
     }
     slot.workspace.counts.entry_mutation_count = try readBoundedCount(workspace.WorkspaceMutationCount, &reader, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
     const mutations = slot.workspace.mutation_log.entries();
@@ -1248,6 +1260,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
         slot.workspace.share_table.ensureBacking() catch {
             if (existing_slot == null) {
                 slot.workspace.mutation_log.releaseBacking();
+                slot.workspace.path_index.releaseEntryBacking();
                 std.debug.assert(workspaces.workspaces.remove(workspace_id));
             }
             return error.NoSpaceLeft;
@@ -1269,6 +1282,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
         slot.workspace.recoverable_deletes.ensureBacking() catch {
             if (existing_slot == null) {
                 slot.workspace.mutation_log.releaseBacking();
+                slot.workspace.path_index.releaseEntryBacking();
                 slot.workspace.share_table.releaseBacking();
                 std.debug.assert(workspaces.workspaces.remove(workspace_id));
             }
@@ -1485,8 +1499,16 @@ fn deserializeState(
         readTextInto(&reader, &slot.workspace.label, &slot.workspace.label_len) catch return error.CorruptImage;
         slot.workspace.generation = try reader.readU32();
         slot.workspace.counts.entry_count = try readBoundedCount(workspace.WorkspaceEntryCount, &reader, workspace.MAX_WORKSPACE_ENTRIES);
-        for (0..slot.workspace.counts.entry_count) |entry_index| {
-            slot.workspace.path_index.entries[entry_index] = try readEntry(&reader);
+        if (slot.workspace.counts.entry_count != 0) {
+            slot.workspace.path_index.ensureEntryBacking() catch {
+                slot.workspace.mutation_log.releaseBacking();
+                std.debug.assert(workspaces.workspaces.remove(workspace_id));
+                return error.NoSpaceLeft;
+            };
+            const entries = slot.workspace.path_index.entries();
+            for (0..slot.workspace.counts.entry_count) |entry_index| {
+                entries[entry_index] = try readEntry(&reader);
+            }
         }
         slot.workspace.counts.entry_mutation_count = try readBoundedCount(workspace.WorkspaceMutationCount, &reader, workspace.MAX_WORKSPACE_ENTRY_MUTATIONS);
         const mutations = slot.workspace.mutation_log.entries();
@@ -1500,6 +1522,7 @@ fn deserializeState(
         if (slot.workspace.counts.share_grant_count != 0) {
             slot.workspace.share_table.ensureBacking() catch {
                 slot.workspace.mutation_log.releaseBacking();
+                slot.workspace.path_index.releaseEntryBacking();
                 std.debug.assert(workspaces.workspaces.remove(workspace_id));
                 return error.NoSpaceLeft;
             };
@@ -1512,6 +1535,7 @@ fn deserializeState(
         if (slot.workspace.counts.deleted_count != 0) {
             slot.workspace.recoverable_deletes.ensureBacking() catch {
                 slot.workspace.mutation_log.releaseBacking();
+                slot.workspace.path_index.releaseEntryBacking();
                 slot.workspace.share_table.releaseBacking();
                 std.debug.assert(workspaces.workspaces.remove(workspace_id));
                 return error.NoSpaceLeft;
@@ -1863,17 +1887,17 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
         .label = "live-workspace",
     });
     live.counts.entry_count = 2;
-    live.path_index.entries[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
-    live.path_index.entries[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
+    live.path_index.entries()[0] = try workspace.Entry.init("documents/keep.md", ids.object(1), ids.version(1), .document);
+    live.path_index.entries()[1] = try workspace.Entry.init("documents/retired.md", ids.object(2), ids.version(2), .document);
     live.counts.entry_mutation_count = 2;
-    live.mutation_log.entries()[0] = .{ .generation = 1, .entry = live.path_index.entries[0] };
-    live.mutation_log.entries()[1] = .{ .generation = 2, .entry = live.path_index.entries[1] };
+    live.mutation_log.entries()[0] = .{ .generation = 1, .entry = live.path_index.entries()[0] };
+    live.mutation_log.entries()[1] = .{ .generation = 2, .entry = live.path_index.entries()[1] };
     live.counts.share_grant_count = 2;
     live.share_table.data().share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 42 } };
     live.share_table.data().share_grants[1] = .{ .principal_id = .{ .kind = .user, .serial = 43 } };
     live.counts.deleted_count = 2;
-    live.recoverable_deletes.entries()[0] = live.path_index.entries[0];
-    live.recoverable_deletes.entries()[1] = live.path_index.entries[1];
+    live.recoverable_deletes.entries()[0] = live.path_index.entries()[0];
+    live.recoverable_deletes.entries()[1] = live.path_index.entries()[1];
     live.staging.transaction_open = true;
     live.staging.staged_entry_count = 1;
     live.staging.staged_effective_entry_count = 2;
@@ -1890,13 +1914,13 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     });
     replacement.generation = 7;
     replacement.counts.entry_count = 1;
-    replacement.path_index.entries[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);
+    replacement.path_index.entries()[0] = try workspace.Entry.init("documents/current.md", ids.object(4), ids.version(4), .document);
     replacement.counts.entry_mutation_count = 1;
-    replacement.mutation_log.entries()[0] = .{ .generation = 7, .entry = replacement.path_index.entries[0] };
+    replacement.mutation_log.entries()[0] = .{ .generation = 7, .entry = replacement.path_index.entries()[0] };
     replacement.counts.share_grant_count = 1;
     replacement.share_table.data().share_grants[0] = .{ .principal_id = .{ .kind = .user, .serial = 44 } };
     replacement.counts.deleted_count = 1;
-    replacement.recoverable_deletes.entries()[0] = replacement.path_index.entries[0];
+    replacement.recoverable_deletes.entries()[0] = replacement.path_index.entries()[0];
 
     const payload = try allocator.alloc(u8, max_payload_bytes);
     defer allocator.free(payload);
@@ -1907,8 +1931,8 @@ test "workspace delta replay overwrites live prefixes and scrubs retired data" {
     try std.testing.expectEqualStrings("replacement-workspace", live.labelSlice());
     try std.testing.expectEqual(@as(u32, 7), live.generation);
     try std.testing.expectEqual(@as(usize, 1), live.counts.entry_count);
-    try std.testing.expectEqualStrings("documents/current.md", live.path_index.entries[0].pathSlice());
-    try std.testing.expectEqualDeep(workspace.Entry{}, live.path_index.entries[1]);
+    try std.testing.expectEqualStrings("documents/current.md", live.path_index.entries()[0].pathSlice());
+    try std.testing.expectEqualDeep(workspace.Entry{}, live.path_index.entries()[1]);
     try std.testing.expectEqualDeep(workspace.EntryMutation{}, live.mutation_log.entriesConst()[1]);
     try std.testing.expectEqual(principal.PrincipalKind.service, live.share_table.data().share_grants[1].principal_id.kind);
     try std.testing.expectEqual(@as(u64, 0), live.share_table.data().share_grants[1].principal_id.serial);
