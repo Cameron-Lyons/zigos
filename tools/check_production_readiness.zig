@@ -3187,6 +3187,7 @@ fn validateResourceSchedulerTelemetryTrack(
     const benchmark_path = "src/kernel/boot/benchmark/suite.zig";
     const service_graph_builder_path = "src/native/session/service_graph_builder.zig";
     const supervisor_path = "src/native/session/supervisor.zig";
+    const trust_boot_path = "src/native/session/trust_boot.zig";
     const session_manager_support_path = "src/native/session/session_manager_support.zig";
     const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
     const session_demo_boot_path = "src/native/demo/session_demo_boot.zig";
@@ -3198,6 +3199,7 @@ fn validateResourceSchedulerTelemetryTrack(
     const benchmark_source = try readRequiredSource(allocator, io, errors, benchmark_path) orelse return;
     const service_graph_builder_source = try readRequiredSource(allocator, io, errors, service_graph_builder_path) orelse return;
     const supervisor_source = try readRequiredSource(allocator, io, errors, supervisor_path) orelse return;
+    const trust_boot_source = try readRequiredSource(allocator, io, errors, trust_boot_path) orelse return;
     const session_manager_support_source = try readRequiredSource(allocator, io, errors, session_manager_support_path) orelse return;
     const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
     const session_demo_boot_source = try readRequiredSource(allocator, io, errors, session_demo_boot_path) orelse return;
@@ -3302,6 +3304,39 @@ fn validateResourceSchedulerTelemetryTrack(
     }
     if (std.mem.indexOf(u8, supervisor_source, "diagnostics: [MAX_DIAGNOSTICS]DiagnosticEvent") != null) {
         try common.addError(errors, allocator, "Supervisor diagnostics must not return to inline freestanding ring storage", .{});
+    }
+
+    const supervisor_service_schema_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "pub const SCHEMA_DERIVED_SERVICE_METADATA = true" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "pub const SERVICE_ID_IS_ISOLATION_DOMAIN = true" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "pub fn descriptor(self: *const ServiceRecord) contract.ServiceDescriptor" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "pub fn isolationDomainId(self: *const ServiceRecord) u64" },
+        .{ .path = supervisor_path, .source = supervisor_source, .snippet = "if (!service.descriptor().restartable)" },
+        .{ .path = trust_boot_path, .source = trust_boot_source, .snippet = "const descriptor = service.descriptor()" },
+        .{ .path = trust_boot_path, .source = trust_boot_source, .snippet = "service.isolationDomainId()" },
+    };
+    for (supervisor_service_schema_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Supervisor service state must retain schema-derived metadata in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    const retired_supervisor_service_fields = [_][]const u8{
+        "isolation_domain_id: u64",
+        "boundary: contract.ServiceBoundary",
+        "restartable: bool",
+        "network_privilege: contract.NetworkPrivilege",
+        "storage_privilege: contract.StoragePrivilege",
+        "ui_privilege: contract.UiPrivilege",
+        "driver_class: ?driver_service.DeviceClass",
+    };
+    for (retired_supervisor_service_fields) |field| {
+        if (std.mem.indexOf(u8, supervisor_source, field) != null) {
+            try common.addError(errors, allocator, "Supervisor service records must not duplicate schema metadata: {s}", .{field});
+        }
     }
 }
 
