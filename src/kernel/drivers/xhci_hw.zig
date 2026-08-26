@@ -18,6 +18,8 @@ const OS_OWNED_BYTE_OFFSET: usize = 3;
 const PORT_RESET_COMPLETION_CHANGE_MASK: u7 = (1 << 2) | (1 << 4);
 
 pub const INTERRUPT_VECTOR: u8 = 67;
+pub const PORT_RUNTIME_STATE_SIZE_CEILING_BYTES: usize = 104;
+pub const PORT_RUNTIME_STATE_MAX_FRAME_COUNT: usize = 7;
 
 comptime {
     if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
@@ -37,6 +39,7 @@ pub const Error = xhci.Error || error{
     AlreadyPrepared,
     BusMasteringNotRevoked,
     DmaAllocationFailed,
+    PortRuntimeStateAllocationFailed,
     DmaIsolationPlanInvalid,
     DmaIsolationBypassed,
     DmaFaultMonitoringUnavailable,
@@ -119,6 +122,24 @@ const PortRuntimeState = struct {
     action: PortAction = .none,
 };
 
+const PortRuntimeStateAllocation = struct {
+    base: u32,
+    frame_count: u32,
+    states: []PortRuntimeState,
+};
+
+comptime {
+    if (@sizeOf(PortRuntimeState) > PORT_RUNTIME_STATE_SIZE_CEILING_BYTES) {
+        @compileError("xHCI port runtime state exceeds its compact size ceiling");
+    }
+    const maximum_state_count = @as(usize, std.math.maxInt(u8)) + 1;
+    const maximum_state_bytes = maximum_state_count * @sizeOf(PortRuntimeState);
+    const maximum_frame_count = (maximum_state_bytes + PAGE_BYTES - 1) / PAGE_BYTES;
+    if (maximum_frame_count > PORT_RUNTIME_STATE_MAX_FRAME_COUNT) {
+        @compileError("xHCI port runtime state exceeds its bounded frame ceiling");
+    }
+}
+
 const OutstandingCommand = struct {
     kind: xhci.CommandKind,
     trb_address: u64,
@@ -144,10 +165,37 @@ const OutstandingTransfer = struct {
     deadline: tsc_clock.Deadline,
 };
 
-var ports: [256]PortRuntimeState = [_]PortRuntimeState{.{}} ** 256;
+var empty_port_runtime_states: [0]PortRuntimeState = .{};
+var ports: []PortRuntimeState = empty_port_runtime_states[0..];
+var active_port_runtime_state_base: u32 = 0;
+var active_port_runtime_state_frame_count: u32 = 0;
 var outstanding_command: ?OutstandingCommand = null;
 var outstanding_transfer: ?OutstandingTransfer = null;
 var next_port_scan: u16 = 1;
+
+fn portRuntimeStateFrameCountFor(max_ports: u8) u32 {
+    const state_count = @as(usize, max_ports) + 1;
+    const state_bytes = state_count * @sizeOf(PortRuntimeState);
+    return @intCast((state_bytes + PAGE_BYTES - 1) / PAGE_BYTES);
+}
+
+fn allocatePortRuntimeStates(max_ports: u8) Error!PortRuntimeStateAllocation {
+    const state_count = @as(usize, max_ports) + 1;
+    const frame_count = portRuntimeStateFrameCountFor(max_ports);
+    const base = paging.alloc_frames(frame_count) orelse
+        return error.PortRuntimeStateAllocationFailed;
+    const allocation_bytes = @as(usize, frame_count) * PAGE_BYTES;
+    const bytes: [*]u8 = @ptrFromInt(base);
+    @memset(bytes[0..allocation_bytes], 0);
+    const state_pointer: [*]PortRuntimeState = @ptrFromInt(base);
+    const states = state_pointer[0..state_count];
+    for (states) |*state| state.* = .{};
+    return .{ .base = base, .frame_count = frame_count, .states = states };
+}
+
+fn resetPortRuntimeStates() void {
+    for (ports) |*state| state.* = .{};
+}
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     if (active_dma_plan != null) return error.AlreadyPrepared;
@@ -166,7 +214,9 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
     keyboard_reports = .{};
     outstanding_interrupt_reports = 0;
-    ports = [_]PortRuntimeState{.{}} ** 256;
+    ports = empty_port_runtime_states[0..];
+    active_port_runtime_state_base = 0;
+    active_port_runtime_state_frame_count = 0;
     outstanding_command = null;
     outstanding_transfer = null;
     next_port_scan = 1;
@@ -213,6 +263,12 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     try xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{});
     const enabled_slots = try xhci.configureDeviceSlots(capabilities, &reader);
 
+    const port_runtime_states = try allocatePortRuntimeStates(capabilities.max_ports);
+    var retain_port_runtime_states = false;
+    errdefer if (!retain_port_runtime_states) paging.release_frames(
+        port_runtime_states.base,
+        port_runtime_states.frame_count,
+    ) catch {};
     const dma_frame_count = try xhci.controllerDmaFrameCount(capabilities, enabled_slots);
     const dma_base = paging.alloc_frames(dma_frame_count) orelse return error.DmaAllocationFailed;
     var retain_dma_frames = false;
@@ -238,17 +294,24 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_legacy_ownership = legacy_ownership;
     active_controller_reset = true;
     active_enabled_slots = enabled_slots;
+    ports = port_runtime_states.states;
+    active_port_runtime_state_base = port_runtime_states.base;
+    active_port_runtime_state_frame_count = port_runtime_states.frame_count;
+    retain_port_runtime_states = true;
     retain_dma_frames = true;
     return capabilities;
 }
 
 pub fn validated() bool {
+    const capabilities = active_capabilities orelse return false;
     const ownership = active_legacy_ownership orelse return false;
-    return active_capabilities != null and
-        active_protocols != null and
+    return active_protocols != null and
         ownership != .firmware_released and
         active_controller_reset and
         active_enabled_slots != 0 and
+        active_port_runtime_state_base != 0 and
+        active_port_runtime_state_frame_count == portRuntimeStateFrameCountFor(capabilities.max_ports) and
+        ports.len == @as(usize, capabilities.max_ports) + 1 and
         active_dma_plan != null and
         active_dma_window_count != 0;
 }
@@ -340,7 +403,7 @@ pub fn activate() Error!void {
     slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
     keyboard_reports = .{};
     outstanding_interrupt_reports = 0;
-    ports = [_]PortRuntimeState{.{}} ** 256;
+    resetPortRuntimeStates();
     outstanding_command = null;
     outstanding_transfer = null;
     next_port_scan = 1;
@@ -1673,7 +1736,7 @@ fn containFailure(marker: []const u8) void {
     outstanding_transfer = null;
     command_producer = .{};
     control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    ports = [_]PortRuntimeState{.{}} ** 256;
+    resetPortRuntimeStates();
     if (active_capabilities) |capabilities| {
         if (active_bar_address != 0) {
             var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
@@ -1876,6 +1939,15 @@ test "xHCI hardware capability snapshot uses the shared modern parser" {
     try std.testing.expectEqual(@as(u16, 33), capabilities.max_scratchpad_buffers);
     try std.testing.expect(!capabilities.scratchpad_restore);
     try std.testing.expectEqual(@as(u32, 0x8000), capabilities.extended_capability_offset);
+}
+
+test "xHCI port runtime state allocation follows reported hardware capacity" {
+    try std.testing.expectEqual(@as(usize, 104), @sizeOf(PortRuntimeState));
+    try std.testing.expectEqual(@as(u32, 1), portRuntimeStateFrameCountFor(12));
+    try std.testing.expectEqual(
+        @as(u32, PORT_RUNTIME_STATE_MAX_FRAME_COUNT),
+        portRuntimeStateFrameCountFor(std.math.maxInt(u8)),
+    );
 }
 
 test "xHCI hardware probe bounds extended capability BAR arithmetic" {

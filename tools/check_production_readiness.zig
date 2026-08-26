@@ -2291,6 +2291,12 @@ fn validateNuc11tnki5KernelProofSources(
         "isolationDomain",
         "requesterIsolated",
         "pub const INTERRUPT_VECTOR: u8 = 67",
+        "PORT_RUNTIME_STATE_SIZE_CEILING_BYTES: usize = 104",
+        "PORT_RUNTIME_STATE_MAX_FRAME_COUNT: usize = 7",
+        "allocatePortRuntimeStates(capabilities.max_ports)",
+        "portRuntimeStateFrameCountFor",
+        "ports.len == @as(usize, capabilities.max_ports) + 1",
+        "resetPortRuntimeStates",
         "intel_vtd.routeInterrupt",
         "pci.enableSingleMsi",
         "pci.enableMemoryBusMastering",
@@ -2342,6 +2348,9 @@ fn validateNuc11tnki5KernelProofSources(
         if (std.mem.indexOf(u8, xhci_hw_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 xHCI hardware probe must retain read-only capability validation snippet: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, xhci_hw_source, "var ports: [256]PortRuntimeState") != null) {
+        try common.addError(errors, allocator, "xHCI port runtime state must remain sized to reported hardware capacity", .{});
     }
     const required_nvme_snippets = [_][]const u8{
         "CompletionEvidenceSource",
