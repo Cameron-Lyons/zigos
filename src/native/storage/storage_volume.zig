@@ -1317,7 +1317,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     var blob_slot_index: usize = 0;
     while (blob_slot_index < store.blobSlotCapacity()) : (blob_slot_index += 1) {
         const slot = store.blobSlotAtConst(blob_slot_index);
-        if (!slot.in_use) continue;
+        if (!slot.arenaInUse()) continue;
         try encodeBlobBody(&writer, store, &slot.blob);
     }
 

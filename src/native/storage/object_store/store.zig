@@ -37,7 +37,8 @@ const BlobState = packed struct(u32) {
     payload_len: BlobPayloadLength = 0,
     ref_count: BlobRefCount = 0,
     manifest_verified: bool = false,
-    reserved: u4 = 0,
+    arena_in_use: bool = false,
+    reserved: u3 = 0,
 };
 pub const COMPACT_OBJECT_RESULT_METADATA = true;
 pub const SKIPS_EMPTY_ARENA_RESET_WORK = true;
@@ -53,13 +54,14 @@ pub const DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS = true;
 pub const DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH = true;
 pub const CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES = true;
 pub const PACKS_BLOB_STATE_INTO_BOUNDED_METADATA = true;
+pub const PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 320;
 pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 64;
-pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 68;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_325_808;
+pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 64;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_323_248;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -383,9 +385,11 @@ pub const BlobRecord = struct {
         if (payload_len > std.math.maxInt(BlobPayloadLength) or ref_count > std.math.maxInt(BlobRefCount)) {
             native_util.impossibleByInvariant("blob state fits packed metadata");
         }
+        const arena_in_use = self.state.arena_in_use;
         self.state = .{
             .payload_len = @intCast(payload_len),
             .ref_count = @intCast(ref_count),
+            .arena_in_use = arena_in_use,
         };
     }
 
@@ -518,12 +522,19 @@ const VersionSlot = struct {
 };
 
 pub const BlobSlot = struct {
-    in_use: bool = false,
     blob: BlobRecord = .{
         .address = crypto_hash.zero_digest,
         .chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS,
         .state = .{},
     },
+
+    pub fn arenaInUse(self: *const BlobSlot) bool {
+        return self.blob.state.arena_in_use;
+    }
+
+    pub fn setArenaInUse(self: *BlobSlot, in_use: bool) void {
+        self.blob.state.arena_in_use = in_use;
+    }
 
     comptime {
         if (@sizeOf(@This()) > BLOB_SLOT_SIZE_CEILING_BYTES) {
@@ -724,7 +735,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 var slot_index: usize = 0;
                 while (slot_index < self.blobs.next_unclaimed_index) : (slot_index += 1) {
                     const slot = self.blobs.slotAt(slot_index);
-                    if (slot.in_use) slot.* = BlobSlot{};
+                    if (slot.arenaInUse()) slot.* = BlobSlot{};
                 }
                 self.blobs.resetRetainingPayloads();
             }
@@ -1082,7 +1093,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index: usize = version_record.blob_slot_index;
             if (slot_index >= self.blobSlotCapacity()) return null;
             const slot = self.blobSlotAtConst(slot_index);
-            if (!slot.in_use) return null;
+            if (!slot.arenaInUse()) return null;
             return &slot.blob;
         }
 
@@ -1279,7 +1290,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             var blob_slot_index: usize = 0;
             while (blob_slot_index < self.blobSlotCapacity()) : (blob_slot_index += 1) {
                 const slot = self.blobSlotAtConst(blob_slot_index);
-                if (!slot.in_use) continue;
+                if (!slot.arenaInUse()) continue;
                 self.recordBlobPayloadBytes(slot.blob.payloadLen());
             }
         }
@@ -1357,7 +1368,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             var slot_index: usize = 0;
             while (slot_index < self.blobSlotCapacity()) : (slot_index += 1) {
                 const slot = self.blobSlotAtConst(slot_index);
-                if (slot.in_use and slot.blob.manifestVerified()) count += 1;
+                if (slot.arenaInUse() and slot.blob.manifestVerified()) count += 1;
             }
             return count;
         }
@@ -1366,7 +1377,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index: usize = version_record.blob_slot_index;
             if (slot_index >= self.blobSlotCapacity()) return error.CorruptBlob;
             const slot = self.blobSlotAt(slot_index);
-            if (!slot.in_use) return error.BlobNotFound;
+            if (!slot.arenaInUse()) return error.BlobNotFound;
 
             if (slot.blob.manifestVerified()) return &slot.blob;
 
@@ -1390,7 +1401,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index: usize = version_record.blob_slot_index;
             if (slot_index >= self.blobSlotCapacity()) return error.CorruptBlob;
             const slot = self.blobSlotAtConst(slot_index);
-            if (!slot.in_use) return error.BlobNotFound;
+            if (!slot.arenaInUse()) return error.BlobNotFound;
             return &slot.blob;
         }
 

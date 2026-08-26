@@ -1311,6 +1311,11 @@ pub const indexed_hot_path_tables = .{
             !@hasField(object_store.BlobRecord, "payload_len") and
             !@hasField(object_store.BlobRecord, "ref_count") and
             !@hasField(object_store.BlobRecord, "manifest_verified"),
+        .packs_blob_slot_membership_into_state = object_store.PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE and
+            !@hasField(object_store.BlobSlot, "in_use") and
+            @hasDecl(object_store.BlobSlot, "arenaInUse") and
+            @hasDecl(object_store.BlobSlot, "setArenaInUse") and
+            @sizeOf(object_store.BlobSlot) <= object_store.BLOB_SLOT_SIZE_CEILING_BYTES,
         .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and
             !@hasField(object_store.VersionRecord, "blob_address") and
             !@hasField(object_store.VersionRecord, "payload_len") and
