@@ -121,8 +121,6 @@ pub fn installNewValidated(
     permission_digest: crypto_hash.Digest,
 ) Error!void {
     bundle.bundle_id_len = copyValidatedText(&bundle.bundle_id, source.bundle_id);
-    bundle.revision_count = 1;
-    bundle.next_revision_id = 2;
     bundle.active_revision_slot = 0;
     bundle.rollback_revision_slot = null;
     try writeRevision(&bundle.revisions[0], source, source_identity, data_schema_version, permission_digest, 1);
@@ -147,17 +145,11 @@ pub fn installRevisionValidated(
     data_schema_version: u32,
     permission_digest: crypto_hash.Digest,
 ) Error!void {
-    const revision_id = bundle.next_revision_id;
+    const revision_id = bundle.nextRevisionId();
     if (revision_id == 0) return error.RevisionIdExhausted;
 
     const target_slot = bundle.inactiveRevisionSlot();
     try writeRevision(&bundle.revisions[target_slot], source, source_identity, data_schema_version, permission_digest, revision_id);
-    bundle.next_revision_id = if (revision_id == std.math.maxInt(@TypeOf(revision_id))) 0 else revision_id + 1;
-    if (bundle.revision_count == 0) {
-        bundle.revision_count = 1;
-    } else if (bundle.revision_count < bundle.revisions.len) {
-        bundle.revision_count += 1;
-    }
     bundle.rollback_revision_slot = bundle.active_revision_slot;
     bundle.active_revision_slot = target_slot;
 }
