@@ -114,6 +114,14 @@ test "object store paged arenas elide unused generations" {
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(ChunkArena, "slot_generations")));
 }
 
+test "object store paged arenas derive keys from payloads" {
+    try std.testing.expect(object_store.DERIVES_OBJECT_STORE_ARENA_KEYS_FROM_PAYLOADS);
+    const BlobArena = @FieldType(Store, "blobs");
+    const ChunkArena = @FieldType(Store, "chunks");
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(BlobArena, "slot_keys")));
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(ChunkArena, "slot_keys")));
+}
+
 test "object query and history outputs use compact bounded metadata" {
     try std.testing.expect(object_store.COMPACT_OBJECT_RESULT_METADATA);
     try std.testing.expectEqual(u8, @FieldType(object_store.ObjectQueryResult, "label_len"));

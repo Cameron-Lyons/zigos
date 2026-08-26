@@ -1098,7 +1098,21 @@ pub fn PagedIndexedArenaWithKey(
 
 pub const PagedOptions = struct {
     track_generations: bool = true,
+    /// When false, callers must initialize the payload key before removing or
+    /// rebuilding a live slot so the primary index can be updated safely.
+    store_keys: bool = true,
 };
+
+pub fn PagedIndexedArenaWithOptions(
+    comptime Slot: type,
+    comptime page_size: usize,
+    comptime page_count: usize,
+    comptime index_capacity: usize,
+    comptime keyOf: anytype,
+    comptime options: PagedOptions,
+) type {
+    return PagedIndexedArenaWithKeyOptions(u64, Slot, page_size, page_count, index_capacity, keyOf, options);
+}
 
 pub fn PagedIndexedArenaWithKeyOptions(
     comptime Key: type,
@@ -1113,6 +1127,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
     if (page_count == 0) @compileError("paged indexed arena requires at least one page");
     const capacity = page_size * page_count;
     const generation_capacity = if (options.track_generations) capacity else 0;
+    const key_capacity = if (options.store_keys) capacity else 0;
     if (index_capacity < capacity) @compileError("paged indexed arena primary index capacity must cover all slab slots");
     const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
     if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
@@ -1151,7 +1166,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
 
         pages: [page_count]Page = [_]Page{Page{}} ** page_count,
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
-        slot_keys: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
+        slot_keys: [key_capacity]Key = [_]Key{ids.zero(Key)} ** key_capacity,
         slot_generations: [generation_capacity]u32 = [_]u32{0} ** generation_capacity,
         free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
         free_head: FreeIndex = free_no_index,
@@ -1167,7 +1182,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
             var slot_index: usize = 0;
             while (slot_index < capacity) : (slot_index += 1) {
                 self.slotAt(slot_index).* = Slot{};
-                self.slot_keys[slot_index] = ids.zero(Key);
+                if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
                 if (comptime options.track_generations) {
                     if (slot_index < claimed_count) {
                         self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
@@ -1186,7 +1201,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
             var slot_index: usize = 0;
             while (slot_index < claimed_count) : (slot_index += 1) {
                 setSlotInUse(self.slotAt(slot_index), false);
-                self.slot_keys[slot_index] = ids.zero(Key);
+                if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
                 if (comptime options.track_generations) {
                     self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
                 }
@@ -1296,13 +1311,16 @@ pub fn PagedIndexedArenaWithKeyOptions(
             const slot = self.slotAt(slot_index);
             if (!slotInUse(slot)) return false;
 
-            const key = self.slot_keys[slot_index];
+            const key = if (comptime options.store_keys) self.slot_keys[slot_index] else keyOf(slot);
             const raw_key = ids.raw(key);
+            if (comptime !options.store_keys) {
+                if (raw_key == 0) native_util.impossibleByInvariant("paged indexed arena live slot requires a payload key before removal");
+            }
             if (raw_key != 0) {
                 self.primary_index.remove(raw_key);
             }
             slot.* = Slot{};
-            self.slot_keys[slot_index] = ids.zero(Key);
+            if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
             if (comptime options.track_generations) {
                 self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
             }
@@ -1313,7 +1331,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
 
         pub fn rebuildPrimaryIndex(self: *Self) void {
             self.primary_index.reset();
-            self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
+            if (comptime options.store_keys) self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
             self.free_next = [_]FreeIndex{free_no_index} ** capacity;
             self.free_head = free_no_index;
             self.next_unclaimed_index = @intCast(capacity);
@@ -1325,8 +1343,11 @@ pub fn PagedIndexedArenaWithKeyOptions(
                 if (slotInUse(slot)) {
                     const key = keyOf(slot);
                     const raw_key = ids.raw(key);
+                    if (comptime !options.store_keys) {
+                        if (raw_key == 0) native_util.impossibleByInvariant("paged indexed arena live slot requires a payload key before index rebuild");
+                    }
                     if (raw_key != 0) {
-                        self.slot_keys[slot_index] = key;
+                        if (comptime options.store_keys) self.slot_keys[slot_index] = key;
                         self.primary_index.insertAbsent(raw_key, slot_index);
                     }
                     if (comptime options.track_generations) {
@@ -1364,7 +1385,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
             if (comptime options.track_generations) {
                 if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
             }
-            self.slot_keys[slot_index] = key;
+            if (comptime options.store_keys) self.slot_keys[slot_index] = key;
             self.primary_index.insertAbsent(raw_key, slot_index);
             self.used_count += 1;
             return slot_index;
@@ -1377,7 +1398,9 @@ pub fn PagedIndexedArenaWithKeyOptions(
                 if (slot_index >= capacity) native_util.impossibleByInvariant("paged indexed arena primary index points outside slabs");
                 const slot = self.slotAtConst(slot_index);
                 if (!slotInUse(slot)) native_util.impossibleByInvariant("paged indexed arena primary index points at a free slot");
-                if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("paged indexed arena primary index points at the wrong key");
+                if (comptime options.store_keys) {
+                    if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("paged indexed arena primary index points at the wrong key");
+                }
                 const payload_key = keyOf(slot);
                 const raw_payload_key = ids.raw(payload_key);
                 if (raw_payload_key != 0 and raw_payload_key != raw_key) native_util.impossibleByInvariant("paged indexed arena slot payload key diverged from its primary index");
@@ -1541,6 +1564,21 @@ test "paged arenas can elide unused generations" {
     try std.testing.expect(arena.removeIndex(slot_index));
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
     arena.reset();
+}
+
+test "paged arenas can derive keys from live slots" {
+    const Arena = PagedIndexedArenaWithOptions(TestSlot, 2, 2, 8, testSlotId, .{ .store_keys = false });
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Arena, "slot_keys")));
+
+    var arena = Arena.init();
+    const slot_index = arena.reserveIndex(7).?;
+    arena.slotAt(slot_index).record.id = 7;
+    try std.testing.expect(arena.getConst(7) != null);
+    const handle = arena.handleForIndex(slot_index).?;
+    arena.rebuildPrimaryIndex();
+    try std.testing.expectEqual(slot_index, arena.slotIndexOf(7).?);
+    try std.testing.expect(arena.removeHandle(handle));
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
 }
 
 test "indexed arenas support slot-owned membership bits" {
