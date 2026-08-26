@@ -1257,9 +1257,10 @@ pub const indexed_hot_path_tables = .{
         .heap_backs_workspace_entries_on_freestanding = workspace.HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING and
             workspace.workspace_entry_layout.heap_backs_entries_on_freestanding and
             workspace.workspace_entry_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
-            workspace.workspace_entry_layout.backing_size_bytes == @sizeOf(workspace.Entry) * workspace.MAX_WORKSPACE_ENTRIES,
+            workspace.workspace_entry_layout.entry_bytes == @sizeOf(workspace.Entry) * workspace.MAX_WORKSPACE_ENTRIES and
+            workspace.workspace_entry_layout.backing_size_bytes == workspace.workspace_entry_layout.entry_bytes + workspace.workspace_entry_layout.leaf_hash_bytes,
         .uses_compact_path_lengths = @sizeOf(workspace.WorkspacePathLength) == 1,
-        .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
+        .caches_leaf_hashes = workspace.workspace_entry_layout.caches_leaf_hashes,
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),
         .supports_indexed_path_lookup = @hasField(workspace.WorkspacePathIndex, "path_slots"),
         .uses_compact_entry_slot_indexes = @sizeOf(workspace.WorkspaceEntrySlotIndex) == 1,

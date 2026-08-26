@@ -17,21 +17,21 @@ pub fn rootAddress(entries: anytype) RootAddress {
     return crypto_hash.finalize(&hasher);
 }
 
-pub fn rebuildPathMerkle(index: anytype, entries: anytype) void {
-    for (entries, 0..) |entry, entry_index| updatePathLeaf(index, entry_index, entry);
+pub fn rebuildPathMerkle(root_address: *RootAddress, leaf_hashes: anytype, entries: anytype) void {
+    for (entries, 0..) |entry, entry_index| updatePathLeaf(leaf_hashes, entry_index, entry);
 
-    for (index.leaf_hashes[entries.len..]) |*leaf_hash| {
+    for (leaf_hashes[entries.len..]) |*leaf_hash| {
         leaf_hash.* = zeroRootAddress();
     }
-    refreshPathRoot(index, entries.len);
+    refreshPathRoot(root_address, leaf_hashes[0..entries.len]);
 }
 
-pub fn updatePathLeaf(index: anytype, entry_index: usize, entry: anytype) void {
-    index.leaf_hashes[entry_index] = entryLeafAddress(entry);
+pub fn updatePathLeaf(leaf_hashes: anytype, entry_index: usize, entry: anytype) void {
+    leaf_hashes[entry_index] = entryLeafAddress(entry);
 }
 
-pub fn refreshPathRoot(index: anytype, entry_count: usize) void {
-    index.root_address = rootFromLeaves(index.leaf_hashes[0..entry_count]);
+pub fn refreshPathRoot(root_address: *RootAddress, leaf_hashes: []const RootAddress) void {
+    root_address.* = rootFromLeaves(leaf_hashes);
 }
 
 fn rootFromLeaves(leaf_hashes: []const RootAddress) RootAddress {
