@@ -373,6 +373,7 @@ pub fn proveBootedSyncServicePath(
         overlay_relay_task.task_id,
         "relay.service-path.zigos",
     );
+    defer booted_relay_service.deinit();
     const relay_capability = try capability_table.mintBootRoot(.{
         .holder = sync_owner,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },

@@ -1471,6 +1471,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     try std.testing.expectError(error.NativeTransportDeviceRevoked, native_transport.sendSigned(&connection, "blocked after revoke", frame_signer));
     native_transport.disconnect(&connection);
     var relay_service = try BootedOverlayRelayService.init(178, 176, "relay.revoked.sync");
+    defer relay_service.deinit();
     try std.testing.expectError(error.NativeTransportDeviceRevoked, native_transport.sendWithRelayFallback(&connection, &relay_service, "blocked fallback after revoke", frame_signer));
     try std.testing.expectEqual(@as(usize, 0), relay_service.accepted_packets);
     try std.testing.expectError(error.NativeTransportDeviceRevoked, native_transport.openRelay(&broker, .{
@@ -1610,6 +1611,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     try std.testing.expectError(error.ProductionAttestationRequired, production_transport.encryptObjectShare(&production_connection, 1, 2, 3, "blocked lab object share"));
     production_transport.disconnect(&production_connection);
     var production_relay_service = try BootedOverlayRelayService.init(179, 176, "relay.revoked.sync");
+    defer production_relay_service.deinit();
     try std.testing.expectError(error.ProductionAttestationRequired, production_transport.sendWithRelayFallback(&production_connection, &production_relay_service, "blocked lab relay fallback", frame_signer));
     try std.testing.expectEqual(@as(usize, 0), production_relay_service.accepted_packets);
     try std.testing.expectEqual(@as(usize, 0), production_transport.endpoint_frame_count);
@@ -1782,6 +1784,7 @@ test "native sync transport falls back through booted relay and encrypts object 
     try std.testing.expect(!std.mem.eql(u8, share.payloadSlice(), "enc:per-object-secret"));
 
     var relay_service = try BootedOverlayRelayService.init(107, 105, "relay.fallback.sync");
+    defer relay_service.deinit();
     native_transport.disconnect(&connection);
     try std.testing.expectError(error.PacketEmpty, native_transport.sendWithRelayFallback(&connection, &relay_service, "", signer));
     try std.testing.expectEqual(@as(u64, 1), connection.next_sequence);

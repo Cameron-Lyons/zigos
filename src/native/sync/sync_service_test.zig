@@ -1040,6 +1040,7 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     try std.testing.expect(!std.mem.eql(u8, signed_frame.packet.ciphertextSlice(), plaintext));
 
     var relay_queue = sync_transport.Relay.init();
+    defer relay_queue.deinit();
     try relay_queue.submit(signed_frame.packet);
     var delivered_buffer: [sync_transport.MAX_PACKET_BYTES]u8 = undefined;
     const delivered = (try relay_queue.deliverNext(&relay_session, delivered_buffer[0..])) orelse return error.MissingRelayFrame;
@@ -1396,6 +1397,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
         .audit = .{},
     });
     var relay_service = try sync_transport.BootedOverlayRelayService.init(9_600, 9_601, relay_domain);
+    defer relay_service.deinit();
     var replication_payload_buffer: [PEER_SYNC_MEDIA_PAYLOAD_BYTES]u8 = undefined;
 
     _ = try source_port.registerDatabaseContract(source_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
@@ -1918,6 +1920,7 @@ test "overlay sessions cover sync remote access private service publishing and e
         .audit = .{},
     });
     var relay_service = try sync_transport.BootedOverlayRelayService.init(9_700, 9_701, "relay.zigos.dev");
+    defer relay_service.deinit();
     try std.testing.expectError(error.EgressDenied, service_port.sendOverlayRelayFrameViaService(
         service_authority,
         &network_capabilities,

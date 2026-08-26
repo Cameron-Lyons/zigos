@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
@@ -11,15 +12,30 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const network_policy = @import("network_policy.zig");
 const sync_state = @import("sync_state_support.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const MAX_PACKET_BYTES: usize = 256;
 pub const MAX_RELAY_PACKETS: usize = 16;
 pub const COMPACT_RELAY_METADATA = true;
+pub const HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING = true;
 pub const ENCRYPTED_PACKET_SIZE_CEILING_BYTES: usize = 352;
 pub const SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES: usize = 504;
 pub const RELAY_PACKET_SLOT_SIZE_CEILING_BYTES: usize = 368;
-pub const RELAY_SIZE_CEILING_BYTES: usize = 7_040;
-pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 7_152;
+pub const HOST_RELAY_SIZE_CEILING_BYTES: usize = 7_016;
+pub const FREESTANDING_RELAY_SIZE_CEILING_BYTES: usize = 24;
+pub const RELAY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
+    FREESTANDING_RELAY_SIZE_CEILING_BYTES
+else
+    HOST_RELAY_SIZE_CEILING_BYTES;
+pub const HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 7_128;
+pub const FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 136;
+pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
+    FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES
+else
+    HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES;
 pub const TRANSPORT_SESSION_SIZE_CEILING_BYTES: usize = 288;
 
 comptime {
@@ -40,6 +56,7 @@ pub const Error = error{
     RelayPacketIdExhausted,
     RelayQueueFull,
     TransportSessionIdExhausted,
+    NoSpaceLeft,
 };
 
 pub const EncryptedPacket = struct {
@@ -111,10 +128,45 @@ const RelayPacketSlot = struct {
 const RelayPacketArena = indexed_arena.IndexedArenaWithKey(u64, RelayPacketSlot, MAX_RELAY_PACKETS, MAX_RELAY_PACKETS * 2, relayPacketSlotId);
 const RelaySessionIndex = indexed_arena.MultimapIndex(MAX_RELAY_PACKETS, MAX_RELAY_PACKETS, MAX_RELAY_PACKETS * 2);
 
-pub const Relay = struct {
+const RelayQueueState = struct {
     next_packet_id: u64 = 1,
     packets: RelayPacketArena = RelayPacketArena.init(),
     session_index: RelaySessionIndex = RelaySessionIndex.init(),
+
+    fn initializeAllocated(self: *RelayQueueState) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.next_packet_id = 1;
+        const no_packet_index = indexed_arena.reusableNoIndex(MAX_RELAY_PACKETS);
+        @memset(self.packets.free_next[0..], no_packet_index);
+        self.packets.free_head = no_packet_index;
+
+        const SessionIndex = @FieldType(RelayQueueState, "session_index");
+        const CompactIndex = @FieldType(SessionIndex, "free_bucket_head");
+        const no_session_bucket: CompactIndex = @intCast(@max(self.session_index.links.len, self.session_index.buckets.len));
+        for (&self.session_index.links) |*link| link.bucket = no_session_bucket;
+        self.session_index.free_bucket_head = no_session_bucket;
+    }
+
+    fn pendingPacketId(self: *const RelayQueueState) Error!u64 {
+        if (self.next_packet_id == 0) return error.RelayPacketIdExhausted;
+        return self.next_packet_id;
+    }
+};
+
+const heap_backed_relay_queue = HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const RelayQueueBacking = if (heap_backed_relay_queue) ?*RelayQueueState else RelayQueueState;
+
+pub const relay_queue_layout = .{
+    .heap_backs_queue_on_freestanding = HEAP_BACKED_RELAY_QUEUE_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*RelayQueueState),
+    .backing_size_bytes = @sizeOf(RelayQueueState),
+    .freestanding_resident_savings_bytes = @sizeOf(RelayQueueState) - @sizeOf(?*RelayQueueState),
+    .uses_packet_arena = @hasField(RelayQueueState, "packets"),
+    .uses_session_index = @hasField(RelayQueueState, "session_index"),
+};
+
+pub const Relay = struct {
+    queue: RelayQueueBacking = if (heap_backed_relay_queue) null else .{},
     accepted_packets: usize = 0,
     delivered_packets: usize = 0,
 
@@ -126,16 +178,17 @@ pub const Relay = struct {
         if (!packet.encrypted or !packet.egress_allowed) return error.EgressDenied;
         if (packet.ciphertext_len == 0) return error.PacketEmpty;
         if (packet.ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
-        const packet_id = try self.pendingPacketId();
-        const slot_index = self.packets.reserveIndex(packet_id) orelse return error.RelayQueueFull;
-        const slot = &self.packets.slots[slot_index];
+        const queue = try self.ensureQueue();
+        const packet_id = try queue.pendingPacketId();
+        const slot_index = queue.packets.reserveIndex(packet_id) orelse return error.RelayQueueFull;
+        const slot = &queue.packets.slots[slot_index];
         slot.packet_id = packet_id;
         slot.packet = packet;
-        if (!self.session_index.append(relayPacketSessionKey(packet), slot_index)) {
-            _ = self.packets.removeIndex(slot_index);
+        if (!queue.session_index.append(relayPacketSessionKey(packet), slot_index)) {
+            _ = queue.packets.removeIndex(slot_index);
             native_util.impossibleByInvariant("relay session index capacity covers relay packet slots");
         }
-        self.next_packet_id = nextMonotonicId(packet_id);
+        queue.next_packet_id = nextMonotonicId(packet_id);
         self.accepted_packets += 1;
     }
 
@@ -144,11 +197,12 @@ pub const Relay = struct {
         session: *const TransportSession,
         plaintext_out: []u8,
     ) Error!?[]const u8 {
+        const queue = self.queueState() orelse return null;
         const key = relaySessionKey(session.id, session.source_device, session.target_device);
-        const slot_index = self.session_index.head(key);
+        const slot_index = queue.session_index.head(key);
         if (slot_index == indexed_arena.no_index) return null;
         if (slot_index >= MAX_RELAY_PACKETS) native_util.impossibleByInvariant("relay session index points outside packet slots");
-        const slot = &self.packets.slots[slot_index];
+        const slot = &queue.packets.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("relay session index points at a free packet");
         if (slot.packet.session_id != session.id or
             !slot.packet.target_device.eql(session.target_device) or
@@ -157,15 +211,66 @@ pub const Relay = struct {
             native_util.impossibleByInvariant("relay session index points at the wrong packet");
         }
         const plaintext = try decryptPacket(session, slot.packet, plaintext_out);
-        _ = self.session_index.remove(key, slot_index);
-        _ = self.packets.removeIndex(slot_index);
+        _ = queue.session_index.remove(key, slot_index);
+        _ = queue.packets.removeIndex(slot_index);
         self.delivered_packets += 1;
         return plaintext;
     }
 
-    fn pendingPacketId(self: *const Relay) Error!u64 {
-        if (self.next_packet_id == 0) return error.RelayPacketIdExhausted;
-        return self.next_packet_id;
+    pub fn queuedCount(self: *const Relay) usize {
+        const queue = self.queueStateConst() orelse return 0;
+        return queue.packets.countInUse();
+    }
+
+    pub fn nextPacketId(self: *const Relay) u64 {
+        const queue = self.queueStateConst() orelse return 1;
+        return queue.next_packet_id;
+    }
+
+    fn containsPacketId(self: *const Relay, packet_id: u64) bool {
+        const queue = self.queueStateConst() orelse return false;
+        return queue.packets.getConst(packet_id) != null;
+    }
+
+    fn setNextPacketIdForTest(self: *Relay, packet_id: u64) Error!void {
+        const queue = try self.ensureQueue();
+        queue.next_packet_id = packet_id;
+    }
+
+    fn ensureQueue(self: *Relay) error{NoSpaceLeft}!*RelayQueueState {
+        if (comptime heap_backed_relay_queue) {
+            if (self.queue) |queue| return queue;
+            const allocation = kernel_memory.kmalloc(@sizeOf(RelayQueueState)) orelse return error.NoSpaceLeft;
+            const queue: *RelayQueueState = @ptrCast(@alignCast(allocation));
+            queue.initializeAllocated();
+            self.queue = queue;
+            return queue;
+        }
+        return &self.queue;
+    }
+
+    fn queueState(self: *Relay) ?*RelayQueueState {
+        if (comptime heap_backed_relay_queue) return self.queue;
+        return &self.queue;
+    }
+
+    fn queueStateConst(self: *const Relay) ?*const RelayQueueState {
+        if (comptime heap_backed_relay_queue) return self.queue;
+        return &self.queue;
+    }
+
+    pub fn deinit(self: *Relay) void {
+        if (comptime heap_backed_relay_queue) {
+            if (self.queue) |queue| {
+                @memset(std.mem.asBytes(queue), 0);
+                kernel_memory.kfree(@ptrCast(queue));
+                self.queue = null;
+            }
+        } else {
+            self.queue = .{};
+        }
+        self.accepted_packets = 0;
+        self.delivered_packets = 0;
     }
 
     comptime {
@@ -200,6 +305,10 @@ pub const BootedOverlayRelayService = struct {
 
     pub fn relayDomainSlice(self: *const BootedOverlayRelayService) []const u8 {
         return self.relay_domain[0..@as(usize, self.relay_domain_len)];
+    }
+
+    pub fn deinit(self: *BootedOverlayRelayService) void {
+        self.relay.deinit();
     }
 
     pub fn submitSignedFrame(
@@ -832,12 +941,13 @@ test "encrypted transport harness only creates sessions after egress approval" {
     try std.testing.expectError(error.EgressDenied, harness.encryptPacket(&invalid_source_session, "bad session"));
 
     var relay_queue = Relay.init();
+    defer relay_queue.deinit();
     _ = try harness.sendRelayPacket(&relay_queue, &session, "relay op log");
-    try std.testing.expectEqual(@as(usize, 1), relay_queue.packets.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), relay_queue.queuedCount());
     var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
     const delivered = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
     try std.testing.expectEqualStrings("relay op log", delivered);
-    try std.testing.expectEqual(@as(usize, 0), relay_queue.packets.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), relay_queue.queuedCount());
     try std.testing.expectEqual(@as(usize, 1), relay_queue.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1), relay_queue.delivered_packets);
 
@@ -847,31 +957,33 @@ test "encrypted transport harness only creates sessions after egress approval" {
         _ = try harness.sendRelayPacket(&relay_queue, &session, "x");
         const next = (try relay_queue.deliverNext(&session, plaintext_buffer[0..])).?;
         try std.testing.expectEqualStrings("x", next);
-        try std.testing.expectEqual(@as(usize, 0), relay_queue.packets.countInUse());
+        try std.testing.expectEqual(@as(usize, 0), relay_queue.queuedCount());
     }
     try std.testing.expectEqual(@as(usize, 1 + extra_packets), relay_queue.accepted_packets);
     try std.testing.expectEqual(@as(usize, 1 + extra_packets), relay_queue.delivered_packets);
 
     var exhausted_relay = Relay.init();
-    exhausted_relay.next_packet_id = std.math.maxInt(u64);
+    defer exhausted_relay.deinit();
+    try exhausted_relay.setNextPacketIdForTest(std.math.maxInt(u64));
     try exhausted_relay.submit(packet);
-    try std.testing.expect(exhausted_relay.packets.getConst(std.math.maxInt(u64)) != null);
-    try std.testing.expectEqual(@as(u64, 0), exhausted_relay.next_packet_id);
+    try std.testing.expect(exhausted_relay.containsPacketId(std.math.maxInt(u64)));
+    try std.testing.expectEqual(@as(u64, 0), exhausted_relay.nextPacketId());
     try std.testing.expectEqual(@as(usize, 1), exhausted_relay.accepted_packets);
     try std.testing.expectError(error.RelayPacketIdExhausted, exhausted_relay.submit(packet));
-    try std.testing.expectEqual(@as(u64, 0), exhausted_relay.next_packet_id);
-    try std.testing.expectEqual(@as(usize, 1), exhausted_relay.packets.countInUse());
+    try std.testing.expectEqual(@as(u64, 0), exhausted_relay.nextPacketId());
+    try std.testing.expectEqual(@as(usize, 1), exhausted_relay.queuedCount());
     try std.testing.expectEqual(@as(usize, 1), exhausted_relay.accepted_packets);
 
     var full_relay = Relay.init();
+    defer full_relay.deinit();
     var full_index: usize = 0;
     while (full_index < MAX_RELAY_PACKETS) : (full_index += 1) {
         try full_relay.submit(packet);
     }
-    const packet_id_before_full = full_relay.next_packet_id;
+    const packet_id_before_full = full_relay.nextPacketId();
     try std.testing.expectError(error.RelayQueueFull, full_relay.submit(packet));
-    try std.testing.expectEqual(packet_id_before_full, full_relay.next_packet_id);
-    try std.testing.expectEqual(MAX_RELAY_PACKETS, full_relay.packets.countInUse());
+    try std.testing.expectEqual(packet_id_before_full, full_relay.nextPacketId());
+    try std.testing.expectEqual(MAX_RELAY_PACKETS, full_relay.queuedCount());
     try std.testing.expectEqual(MAX_RELAY_PACKETS, full_relay.accepted_packets);
 
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, .{
@@ -955,6 +1067,7 @@ test "booted overlay relay service rejects unauthorized relay and target changes
     }, source, target, "relay.sync.example");
 
     var relay_service = try BootedOverlayRelayService.init(50, 51, "relay.sync.example");
+    defer relay_service.deinit();
     const signed_frame = try harness.encryptSignedFrame(&session, "relay service frame", signer_identity);
     try relay_service.submitSignedFrame(77, &session, signed_frame);
     var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
@@ -968,6 +1081,7 @@ test "booted overlay relay service rejects unauthorized relay and target changes
     try std.testing.expectEqual(@as(usize, 1), relay_service.relay.delivered_packets);
 
     var wrong_domain_service = try BootedOverlayRelayService.init(52, 53, "other.sync.example");
+    defer wrong_domain_service.deinit();
     const blocked_frame = try harness.encryptSignedFrame(&session, "blocked relay", signer_identity);
     try std.testing.expectError(error.EgressDenied, wrong_domain_service.submitSignedFrame(77, &session, blocked_frame));
     try std.testing.expectEqual(@as(usize, 0), wrong_domain_service.accepted_packets);
@@ -1308,6 +1422,15 @@ test "emulated native transport denies service identity before packet transmissi
 }
 
 test "compact relay metadata preserves exact packet and domain capacities" {
+    try std.testing.expect(relay_queue_layout.heap_backs_queue_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), relay_queue_layout.freestanding_handle_size_bytes);
+    try std.testing.expectEqual(@as(usize, 7_000), relay_queue_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 6_992), relay_queue_layout.freestanding_resident_savings_bytes);
+    try std.testing.expect(relay_queue_layout.uses_packet_arena);
+    try std.testing.expect(relay_queue_layout.uses_session_index);
+    try std.testing.expectEqual(@as(usize, RELAY_SIZE_CEILING_BYTES), @sizeOf(Relay));
+    try std.testing.expectEqual(@as(usize, BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES), @sizeOf(BootedOverlayRelayService));
+
     const packet_bytes = [_]u8{0xA5} ** MAX_PACKET_BYTES;
     var packet = std.mem.zeroes(EncryptedPacket);
     packet.ciphertext_len = @intCast(packet_bytes.len);

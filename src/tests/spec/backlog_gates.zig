@@ -167,6 +167,7 @@ pub fn networkTransportHardeningGate() !void {
     try std.testing.expectEqualStrings("backlog transport frame", (try native_transport.receive(&connection)).payload());
 
     var booted_relay = try sync_transport.BootedOverlayRelayService.init(812, 81, "relay.backlog.example");
+    defer booted_relay.deinit();
     native_transport.disconnect(&connection);
     const fallback = try native_transport.sendWithRelayFallback(&connection, &booted_relay, "booted relay frame", spec_support.signer("backlog.relay", 0x81));
     try std.testing.expect(fallback.relay_fallback);
