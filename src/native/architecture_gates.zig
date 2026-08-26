@@ -933,9 +933,12 @@ pub const indexed_hot_path_tables = .{
             @FieldType(xhci.HidController, "count") == u8 and
             @FieldType(xhci.HidController, "recycled_slot_count") == u8,
         .stores_compact_decoder_metadata = input_driver_task.COMPACT_EVENT_QUEUE_METADATA and
+            input_driver_task.QUEUE_ONLY_DECODER_STATE and
             @FieldType(input_driver_task.Decoder, "head") == u8 and
             @FieldType(input_driver_task.Decoder, "tail") == u8 and
-            @FieldType(input_driver_task.Decoder, "count") == u8,
+            @FieldType(input_driver_task.Decoder, "count") == u8 and
+            !@hasField(input_driver_task.Decoder, "reports_consumed") and
+            !@hasField(input_driver_task.Decoder, "events_emitted"),
         .stores_compact_command_metadata = permission_review_service.COMPACT_COMMAND_QUEUE_METADATA and
             @FieldType(permission_review_service.CommandInput, "pending_line_len") == u8 and
             @FieldType(permission_review_service.CommandInput, "pending_command_lens") == [permission_review_service.MAX_PHYSICAL_INPUT_COMMANDS]u8 and

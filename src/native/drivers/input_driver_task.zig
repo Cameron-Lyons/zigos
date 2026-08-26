@@ -4,7 +4,8 @@ pub const BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const BOOT_KEY_SLOTS: usize = 6;
 pub const EVENT_QUEUE_CAPACITY: usize = 32;
 pub const COMPACT_EVENT_QUEUE_METADATA = true;
-pub const DECODER_SIZE_CEILING_BYTES: usize = 96;
+pub const QUEUE_ONLY_DECODER_STATE = true;
+pub const DECODER_SIZE_CEILING_BYTES: usize = 73;
 
 comptime {
     if (EVENT_QUEUE_CAPACITY > std.math.maxInt(u8)) {
@@ -50,8 +51,6 @@ pub const Decoder = struct {
     head: u8 = 0,
     tail: u8 = 0,
     count: u8 = 0,
-    reports_consumed: usize = 0,
-    events_emitted: usize = 0,
 
     pub fn submit(
         self: *Decoder,
@@ -78,8 +77,6 @@ pub const Decoder = struct {
             self.count += 1;
         }
         @memcpy(self.previous_keys[0..], keys);
-        self.reports_consumed += 1;
-        self.events_emitted += staged_count;
         return staged_count;
     }
 
@@ -193,7 +190,6 @@ test "input decoder emits transitions once and accepts a key after release" {
     try std.testing.expectEqual(KeyboardEvent{ .kind = .text, .text = 'a' }, decoder.poll().?);
     try std.testing.expectEqual(KeyboardEvent{ .kind = .text, .text = 'a' }, decoder.poll().?);
     try std.testing.expect(decoder.poll() == null);
-    try std.testing.expectEqual(@as(usize, 4), decoder.reports_consumed);
 }
 
 test "input decoder maps navigation recovery commit and shifted text" {
@@ -248,7 +244,7 @@ test "input decoder rejects malformed reports and applies queue backpressure ato
     try std.testing.expectEqual(EVENT_QUEUE_CAPACITY, decoder.pendingCount());
     try std.testing.expectError(error.EventQueueFull, decoder.submit(testReport(0, &.{0x05})));
     try std.testing.expectEqual(EVENT_QUEUE_CAPACITY, decoder.pendingCount());
-    try std.testing.expectEqual(@as(usize, EVENT_QUEUE_CAPACITY * 2), decoder.reports_consumed);
+    try std.testing.expect(QUEUE_ONLY_DECODER_STATE);
     try std.testing.expect(@FieldType(Decoder, "head") == u8);
     try std.testing.expect(@FieldType(Decoder, "tail") == u8);
     try std.testing.expect(@FieldType(Decoder, "count") == u8);
