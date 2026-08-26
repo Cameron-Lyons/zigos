@@ -56,15 +56,10 @@ const verification_only_signatures = [_][]const u8{
     "ZIGOS:NOTES_DAILY:COMPLETE",
     "ZIGOS:SERVICE_BOOT:IPC_CONNECT:ALL_OK",
     "app.notes.daily",
-    "userspace-notes-daily.elf",
     "zigos.system.transport-probe",
-    "userspace-transport-probe.elf",
     "zigos.system.termination-probe",
-    "userspace-termination-probe.elf",
     "zigos.system.service-client",
-    "userspace-service-client.elf",
     "zigos.proof.mmu-isolation",
-    "userspace-mmu-isolation-proof.elf",
 };
 
 const production_userspace_count: usize = 24;

@@ -7,8 +7,8 @@ const userspace_mailbox = @import("userspace_bootstrap_mailbox.zig");
 
 pub const ImageSpec = production_registry.ImageSpec;
 
-pub const verification_only_boot_image_specs = [_]ImageSpec{
-    production_registry.standaloneImageSpec(.{
+pub const verification_only_build_image_specs = [_]production_registry.BuildImageSpec{
+    production_registry.standaloneBuildImageSpec(.{
         .bundle_id = "app.notes.daily",
         .artifact_name = "userspace-notes-daily.elf",
         .display_name = "Notes Daily",
@@ -23,7 +23,7 @@ pub const verification_only_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 27,
         .contract_flags = production_registry.FLAG_OWNS_UI_SURFACE,
     }),
-    production_registry.standaloneImageSpec(.{
+    production_registry.standaloneBuildImageSpec(.{
         .bundle_id = "zigos.system.transport-probe",
         .artifact_name = "userspace-transport-probe.elf",
         .display_name = "Transport Probe",
@@ -33,7 +33,7 @@ pub const verification_only_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 4,
         .contract_flags = production_registry.FLAG_OWNS_UI_SURFACE,
     }),
-    production_registry.standaloneImageSpec(.{
+    production_registry.standaloneBuildImageSpec(.{
         .bundle_id = "zigos.system.termination-probe",
         .artifact_name = "userspace-termination-probe.elf",
         .display_name = "Termination Probe",
@@ -43,7 +43,7 @@ pub const verification_only_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 5,
         .contract_flags = production_registry.FLAG_GP_PROOF_PROBE,
     }),
-    production_registry.standaloneImageSpec(.{
+    production_registry.standaloneBuildImageSpec(.{
         .bundle_id = "zigos.system.service-client",
         .artifact_name = "userspace-service-client.elf",
         .display_name = "Service Client",
@@ -53,7 +53,7 @@ pub const verification_only_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 20,
         .contract_flags = production_registry.FLAG_OWNS_UI_SURFACE,
     }),
-    production_registry.standaloneImageSpec(.{
+    production_registry.standaloneBuildImageSpec(.{
         .bundle_id = "zigos.proof.mmu-isolation",
         .artifact_name = "userspace-mmu-isolation-proof.elf",
         .display_name = "MMU Isolation Proof",
@@ -65,6 +65,7 @@ pub const verification_only_boot_image_specs = [_]ImageSpec{
     }),
 };
 
+pub const verification_only_boot_image_specs = production_registry.runtimeImageSpecs(verification_only_build_image_specs);
 pub const verification_boot_image_specs = production_registry.production_boot_image_specs ++ verification_only_boot_image_specs;
 pub const role_boot_image_specs = verification_boot_image_specs;
 
@@ -147,13 +148,21 @@ test "verification userspace registry extends production with proof and journey 
 
 test "verification registry keeps the freestanding MMU isolation proof" {
     const proof = findVerification("zigos.proof.mmu-isolation") orelse return error.MissingMmuIsolationProof;
+    const build_spec = verificationOnlyBuildImage("zigos.proof.mmu-isolation") orelse return error.MissingMmuIsolationBuildSpec;
 
     try std.testing.expectEqual(userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG, proof.role_tag);
     try std.testing.expect((proof.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
     try std.testing.expect((proof.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
     try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.component_class);
-    try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", proof.artifact_name);
+    try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", build_spec.artifact_name);
     try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entry);
+}
+
+fn verificationOnlyBuildImage(bundle_id: []const u8) ?*const production_registry.BuildImageSpec {
+    for (&verification_only_build_image_specs) |*spec| {
+        if (std.mem.eql(u8, spec.image.bundle_id, bundle_id)) return spec;
+    }
+    return null;
 }
 
 test "verification registry keeps the ring-three exception containment proof" {

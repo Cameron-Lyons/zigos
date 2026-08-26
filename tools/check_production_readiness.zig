@@ -3996,8 +3996,8 @@ fn validateNativeOnlyLaunchTrack(
         }
     }
     const required_userspace_build_snippets = [_][]const u8{
-        "production_archive_run.addArg(spec.bundle_id)",
-        "verification_archive_run.addArg(spec.bundle_id)",
+        "production_archive_run.addArg(spec.image.bundle_id)",
+        "verification_archive_run.addArg(spec.image.bundle_id)",
     };
     for (required_userspace_build_snippets) |snippet| {
         if (std.mem.indexOf(u8, userspace_build_source, snippet) == null) {

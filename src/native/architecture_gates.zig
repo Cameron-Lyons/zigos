@@ -427,6 +427,10 @@ pub const indexed_hot_path_tables = .{
             userspace_registry.userspace_registry_indexing.uses_service_class_slots and
             userspace_registry.userspace_registry_indexing.service_class_hash_probes_per_query == 0 and
             userspace_registry.userspace_registry_indexing.service_class_slot_bytes == userspace_registry.SERVICE_CLASS_COUNT,
+        .omits_build_only_image_metadata = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA and
+            !@hasField(userspace_registry.ImageSpec, "artifact_name") and
+            !@hasField(userspace_registry.ImageSpec, "source_path") and
+            @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
     },
     .task_runtime = .{
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),
