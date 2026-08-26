@@ -57,13 +57,14 @@ pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 3;
 pub const COMPACT_CAPTURE_METADATA = true;
 pub const DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE = true;
 pub const HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING = true;
+pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true;
 pub const COMPACT_NATIVE_RESULT_METADATA = true;
 pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_840;
 pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_048;
-pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 9_144;
+pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 176;
 pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES
 else
@@ -326,6 +327,16 @@ pub const transport_packet_capture_layout = .{
     .freestanding_resident_savings_bytes = @sizeOf(PacketCapture) - @sizeOf(?*PacketCapture),
 };
 
+const heap_backed_endpoint_table = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint.Table else endpoint.Table;
+
+pub const transport_endpoint_table_layout = .{
+    .heap_backs_table_on_freestanding = HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*endpoint.Table),
+    .freestanding_backing_size_bytes = endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES,
+    .freestanding_resident_savings_bytes = endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES - @sizeOf(?*endpoint.Table),
+};
+
 fn packetIdAfter(packet_id: u64) u64 {
     const next = packet_id +% 1;
     return if (next == 0) 1 else next;
@@ -390,7 +401,7 @@ pub const ObjectShareEnvelope = struct {
 
 pub const NativeTransportService = struct {
     harness: Harness = Harness.init(),
-    endpoints: endpoint.Table = endpoint.Table.init(),
+    endpoints: EndpointTableBacking = if (heap_backed_endpoint_table) null else endpoint.Table.init(),
     capture: TransportPacketCapture = .{},
     peer_links: network_driver_task.PeerLinkDirectory = .{},
     opened_connections: usize = 0,
@@ -419,9 +430,39 @@ pub const NativeTransportService = struct {
     }
 
     pub fn deinit(self: *NativeTransportService) void {
-        self.endpoints.deinit();
+        self.releaseEndpointTable();
         self.capture.deinit();
         self.peer_links.deinit();
+    }
+
+    fn ensureEndpointTable(self: *NativeTransportService) error{NoSpaceLeft}!*endpoint.Table {
+        if (comptime heap_backed_endpoint_table) {
+            if (self.endpoints) |table| return table;
+            const allocation = kernel_memory.kmalloc(@sizeOf(endpoint.Table)) orelse return error.NoSpaceLeft;
+            const table: *endpoint.Table = @ptrCast(@alignCast(allocation));
+            table.initializeAllocated();
+            self.endpoints = table;
+            return table;
+        }
+        return &self.endpoints;
+    }
+
+    fn endpointTable(self: *NativeTransportService) error{EndpointNotFound}!*endpoint.Table {
+        if (comptime heap_backed_endpoint_table) return self.endpoints orelse error.EndpointNotFound;
+        return &self.endpoints;
+    }
+
+    fn releaseEndpointTable(self: *NativeTransportService) void {
+        if (comptime heap_backed_endpoint_table) {
+            if (self.endpoints) |table| {
+                table.deinit();
+                @memset(std.mem.asBytes(table), 0);
+                kernel_memory.kfree(@ptrCast(table));
+                self.endpoints = null;
+            }
+        } else {
+            self.endpoints.deinit();
+        }
     }
 
     comptime {
@@ -603,7 +644,7 @@ pub const NativeTransportService = struct {
             sequence,
             &signed_frame,
         );
-        try self.endpoints.send(
+        try (try self.endpointTable()).send(
             connection.source_endpoint_id,
             ids.task(connection.source_task_id),
             signed_frame.packet.session_id,
@@ -712,7 +753,7 @@ pub const NativeTransportService = struct {
 
     pub fn receive(self: *NativeTransportService, connection: *const NativeConnection) Error!endpoint.Message {
         var message: endpoint.Message = undefined;
-        const received = (try self.endpoints.recvInto(connection.target_endpoint_id, &message.bytes)) orelse
+        const received = (try (try self.endpointTable()).recvInto(connection.target_endpoint_id, &message.bytes)) orelse
             return error.NativeTransportFrameMissing;
         message.sender_task_id = received.sender_task_id;
         message.correlation_id = received.correlation_id;
@@ -733,14 +774,15 @@ pub const NativeTransportService = struct {
         if (source_task_id == 0 or target_task_id == 0 or source_task_id == target_task_id) {
             return error.NativeTransportMalformedFrame;
         }
-        const source_endpoint = try self.endpoints.create(ids.task(source_task_id), "sync-out", .{
+        const endpoints = try self.ensureEndpointTable();
+        const source_endpoint = try endpoints.create(ids.task(source_task_id), "sync-out", .{
             .local_only = local_only,
         });
-        const target_endpoint = try self.endpoints.create(ids.task(target_task_id), "sync-in", .{
+        const target_endpoint = try endpoints.create(ids.task(target_task_id), "sync-in", .{
             .local_only = local_only,
             .service_port = true,
         });
-        try self.endpoints.connect(source_endpoint.id, target_endpoint.id);
+        try endpoints.connect(source_endpoint.id, target_endpoint.id);
         self.opened_connections += 1;
         return .{
             .session = session,
@@ -1792,6 +1834,10 @@ test "compact capture metadata preserves maximum native frames" {
     try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_packet_capture_layout.freestanding_handle_size_bytes);
     try std.testing.expectEqual(@as(usize, 4_840), transport_packet_capture_layout.backing_size_bytes);
     try std.testing.expectEqual(@as(usize, 4_832), transport_packet_capture_layout.freestanding_resident_savings_bytes);
+    try std.testing.expect(transport_endpoint_table_layout.heap_backs_table_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_endpoint_table_layout.freestanding_handle_size_bytes);
+    try std.testing.expectEqual(@as(usize, 8_976), transport_endpoint_table_layout.freestanding_backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 8_968), transport_endpoint_table_layout.freestanding_resident_savings_bytes);
 
     var transport_capture = TransportPacketCapture{};
     defer transport_capture.deinit();

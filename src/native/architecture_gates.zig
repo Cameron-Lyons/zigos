@@ -1064,6 +1064,12 @@ pub const indexed_hot_path_tables = .{
             sync_transport.transport_packet_capture_layout.backing_size_bytes == @sizeOf(sync_transport.PacketCapture) and
             sync_transport.transport_packet_capture_layout.freestanding_resident_savings_bytes ==
                 @sizeOf(sync_transport.PacketCapture) - @sizeOf(?*sync_transport.PacketCapture),
+        .heap_backs_endpoint_table_on_freestanding = sync_transport.HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING and
+            sync_transport.transport_endpoint_table_layout.heap_backs_table_on_freestanding and
+            sync_transport.transport_endpoint_table_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
+            sync_transport.transport_endpoint_table_layout.freestanding_backing_size_bytes == endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES and
+            sync_transport.transport_endpoint_table_layout.freestanding_resident_savings_bytes ==
+                endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES - @sizeOf(?*endpoint.Table),
         .keeps_native_results_within_ceilings = @sizeOf(sync_transport.NativeDelivery) <= sync_transport.NATIVE_DELIVERY_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport.ObjectShareEnvelope) <= sync_transport.OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES,
         .uses_packet_capture_arena = @hasDecl(@FieldType(sync_transport.PacketCapture, "packets"), "reserveIndex"),
