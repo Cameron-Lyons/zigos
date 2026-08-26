@@ -1396,6 +1396,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
         .audit = .{},
     });
     var relay_service = try sync_transport.BootedOverlayRelayService.init(9_600, 9_601, relay_domain);
+    var replication_payload_buffer: [PEER_SYNC_MEDIA_PAYLOAD_BYTES]u8 = undefined;
 
     _ = try source_port.registerDatabaseContract(source_authority, workspace_id, "app.notes.db", "notes-db", contract_signer);
     try std.testing.expectEqual(@as(usize, 0), target_resident.databaseContractCount());
@@ -1410,6 +1411,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
         .network_capabilities = &network_capabilities,
         .relay_service = &relay_service,
         .relay_capability_id = relay_capability.id + 1,
+        .payload_buffer = &replication_payload_buffer,
         .signer = laptop_signer,
         .tick = 50,
     };
@@ -1470,7 +1472,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
 
     const replicated_media_entry = try target_storage.resolve(target_workspace.id, media_path);
     const replicated_media_version = target_storage.version(replicated_media_entry.version_id) orelse return error.VersionNotFound;
-    const replicated_media_payload = try target_storage.versionPayload(replicated_media_version);
+    const replicated_media_payload = try target_storage.versionPayloadInto(replicated_media_version, &replication_payload_buffer);
     try std.testing.expectEqualSlices(u8, media_payload[0..], replicated_media_payload);
     try std.testing.expectEqual(replicated_media_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, media_path).?);
     try std.testing.expect(source_sync.latestTransportFrameForPath(workspace_id, tablet, media_path) == null);

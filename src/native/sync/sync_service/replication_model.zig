@@ -34,6 +34,7 @@ pub const PeerReplicationRequest = struct {
     network_capabilities: ?*const capability.CapabilityTable = null,
     relay_service: ?*sync_transport.BootedOverlayRelayService = null,
     relay_capability_id: u64 = 0,
+    payload_buffer: ?[]u8 = null,
     signer: signing.SignerIdentity,
     tick: u64,
 };

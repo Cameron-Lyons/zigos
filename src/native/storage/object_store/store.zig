@@ -23,7 +23,7 @@ pub const BlobChunkSlotIndex = u8;
 pub const VersionBlobSlotIndex = u16;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
-pub const MAX_INLINE_PAYLOAD_CHUNKS: usize = 2;
+pub const MAX_INLINE_PAYLOAD_CHUNKS: usize = 1;
 pub const MAX_INLINE_PAYLOAD_BYTES: usize = MAX_CHUNK_BYTES * MAX_INLINE_PAYLOAD_CHUNKS;
 pub const MAX_VERSION_PARENTS: usize = 2;
 pub const MAX_OBJECT_QUERY_RESULTS: usize = 16;
@@ -66,6 +66,7 @@ pub const PACKS_CHUNK_SLOT_MEMBERSHIP_INTO_PAYLOAD_STATE = true;
 pub const ELIDES_UNUSED_OBJECT_STORE_SLOT_GENERATIONS = true;
 pub const DERIVES_OBJECT_STORE_ARENA_KEYS_FROM_PAYLOADS = true;
 pub const DERIVES_OBJECT_STORE_RECORD_ARENA_KEYS_FROM_PAYLOADS = true;
+pub const RETURNS_SINGLE_CHUNK_PAYLOADS_WITHOUT_COPIES = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
@@ -76,7 +77,7 @@ pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 320;
 pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_297_072;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_288_880;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -756,7 +757,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         versions: VersionArena = VersionArena.init(),
         blobs: BlobArena = BlobArena.init(),
         chunks: ChunkArena = ChunkArena.init(),
-        inline_payload_read_buffer: [MAX_INLINE_PAYLOAD_BYTES]u8 = undefined,
 
         pub fn init() Self {
             return .{};
@@ -1088,13 +1088,17 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             };
         }
 
-        /// Materializes small objects into store-owned scratch memory. Larger objects remain
-        /// available through versionChunkCursor, versionPayloadInto, or shared-memory transfer.
+        /// Returns a verified zero-copy view for single-chunk objects. Larger
+        /// objects remain available through versionChunkCursor,
+        /// versionPayloadInto, or shared-memory transfer.
         pub fn versionPayload(self: *Self, version_record: *const VersionRecord) Error![]const u8 {
-            const blob_record = try self.checkedVersionBlob(version_record);
+            const blob_record = try self.verifiedBlobManifest(version_record);
             const payload_len = blob_record.payloadLen();
-            if (payload_len > self.inline_payload_read_buffer.len) return error.PayloadRequiresStreaming;
-            return self.versionPayloadInto(version_record, self.inline_payload_read_buffer[0..payload_len]);
+            if (payload_len == 0) return "";
+            if (blob_record.chunkCount() != 1 or payload_len > MAX_INLINE_PAYLOAD_BYTES) return error.PayloadRequiresStreaming;
+            const chunk_record = try self.checkedBlobChunk(blob_record, 0);
+            if (chunk_record.payloadLen() != payload_len) return error.CorruptBlob;
+            return chunk_record.chunkSlice();
         }
 
         pub fn versionChunkCursor(self: *Self, version_record: *const VersionRecord) Error!VersionChunkCursor {
@@ -1452,14 +1456,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             }
 
             slot.blob.markManifestVerified();
-            return &slot.blob;
-        }
-
-        fn checkedVersionBlob(self: *const Self, version_record: *const VersionRecord) Error!*const BlobRecord {
-            const slot_index: usize = version_record.blob_slot_index;
-            if (slot_index >= self.blobSlotCapacity()) return error.CorruptBlob;
-            const slot = self.blobSlotAtConst(slot_index);
-            if (!slot.arenaInUse()) return error.BlobNotFound;
             return &slot.blob;
         }
 

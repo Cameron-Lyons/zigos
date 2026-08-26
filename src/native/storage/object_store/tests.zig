@@ -431,11 +431,12 @@ test "inline payload reads are bounded independently from object capacity" {
         .payload = &inline_payload,
         .metadata = try signMetadata(signer, "inline", "application/octet-stream", .document, &inline_payload, 15),
     });
-    try std.testing.expectEqualSlices(
-        u8,
-        &inline_payload,
-        try store.versionPayload(store.version(inline_result.version_id).?),
-    );
+    const inline_version = store.version(inline_result.version_id).?;
+    const inline_read = try store.versionPayload(inline_version);
+    try std.testing.expectEqualSlices(u8, &inline_payload, inline_read);
+    const inline_blob = store.versionBlob(inline_version).?;
+    const inline_chunk = store.blobChunk(inline_blob, 0).?;
+    try std.testing.expect(inline_chunk.chunkSlice().ptr == inline_read.ptr);
 
     const streamed_payload = [_]u8{0x32} ** (MAX_INLINE_PAYLOAD_BYTES + 1);
     const streamed_result = try store.putVersion(.{
