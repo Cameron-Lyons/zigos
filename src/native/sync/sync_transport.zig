@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
@@ -16,6 +17,10 @@ const network_policy = @import("network_policy.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const sync_state = @import("sync_state_support.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const harness = @import("sync_transport_harness.zig");
 
@@ -51,6 +56,7 @@ pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
 pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 3;
 pub const COMPACT_CAPTURE_METADATA = true;
 pub const DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE = true;
+pub const HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING = true;
 pub const COMPACT_NATIVE_RESULT_METADATA = true;
 pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
@@ -215,11 +221,104 @@ pub const PacketCapture = struct {
         return self.packets.getConst(packetIdBefore(self.next_packet_id));
     }
 
+    fn initializeAllocated(self: *PacketCapture) void {
+        @memset(std.mem.asBytes(self), 0);
+        const no_packet_index = indexed_arena.reusableNoIndex(MAX_CAPTURED_PACKETS);
+        @memset(self.packets.free_next[0..], no_packet_index);
+        self.packets.free_head = no_packet_index;
+        self.next_packet_id = 1;
+    }
+
     comptime {
         if (@sizeOf(@This()) > PACKET_CAPTURE_SIZE_CEILING_BYTES) {
             @compileError("packet capture exceeds its compact size ceiling");
         }
     }
+};
+
+const heap_backed_packet_capture = HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const PacketCaptureBacking = if (heap_backed_packet_capture) ?*PacketCapture else PacketCapture;
+
+pub const TransportPacketCapture = struct {
+    backing: PacketCaptureBacking = if (heap_backed_packet_capture) null else .{},
+
+    fn ensureBacking(self: *TransportPacketCapture) error{NoSpaceLeft}!void {
+        if (comptime heap_backed_packet_capture) {
+            if (self.backing != null) return;
+            const allocation = kernel_memory.kmalloc(@sizeOf(PacketCapture)) orelse return error.NoSpaceLeft;
+            const backing: *PacketCapture = @ptrCast(@alignCast(allocation));
+            backing.initializeAllocated();
+            self.backing = backing;
+        }
+    }
+
+    fn state(self: *TransportPacketCapture) *PacketCapture {
+        if (comptime heap_backed_packet_capture) return self.backing orelse unreachable;
+        return &self.backing;
+    }
+
+    fn stateConst(self: *const TransportPacketCapture) ?*const PacketCapture {
+        if (comptime heap_backed_packet_capture) return self.backing;
+        return &self.backing;
+    }
+
+    pub fn ensureCapacity(self: *TransportPacketCapture) Error!void {
+        try self.ensureBacking();
+        try self.state().ensureCapacity();
+    }
+
+    pub fn record(self: *TransportPacketCapture, frame: []const u8) Error!void {
+        try self.ensureBacking();
+        try self.state().record(frame);
+    }
+
+    pub fn capturedCount(self: *const TransportPacketCapture) usize {
+        const capture = self.stateConst() orelse return 0;
+        return capture.capturedCount();
+    }
+
+    pub fn last(self: *const TransportPacketCapture) ?CapturedPacket {
+        const capture = self.stateConst() orelse return null;
+        return capture.last();
+    }
+
+    pub fn lastPtr(self: *const TransportPacketCapture) ?*const CapturedPacket {
+        const capture = self.stateConst() orelse return null;
+        return capture.lastPtr();
+    }
+
+    pub fn droppedCount(self: *const TransportPacketCapture) usize {
+        const capture = self.stateConst() orelse return 0;
+        return capture.dropped_count;
+    }
+
+    pub fn nextPacketId(self: *const TransportPacketCapture) u64 {
+        const capture = self.stateConst() orelse return 1;
+        return capture.next_packet_id;
+    }
+
+    pub fn reset(self: *TransportPacketCapture) void {
+        if (comptime heap_backed_packet_capture) {
+            if (self.backing) |backing| {
+                @memset(std.mem.asBytes(backing), 0);
+                kernel_memory.kfree(@ptrCast(backing));
+                self.backing = null;
+            }
+        } else {
+            self.backing = .{};
+        }
+    }
+
+    pub fn deinit(self: *TransportPacketCapture) void {
+        self.reset();
+    }
+};
+
+pub const transport_packet_capture_layout = .{
+    .heap_backs_capture_on_freestanding = HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*PacketCapture),
+    .backing_size_bytes = @sizeOf(PacketCapture),
+    .freestanding_resident_savings_bytes = @sizeOf(PacketCapture) - @sizeOf(?*PacketCapture),
 };
 
 fn packetIdAfter(packet_id: u64) u64 {
@@ -287,7 +386,7 @@ pub const ObjectShareEnvelope = struct {
 pub const NativeTransportService = struct {
     harness: Harness = Harness.init(),
     endpoints: endpoint.Table = endpoint.Table.init(),
-    capture: PacketCapture = .{},
+    capture: TransportPacketCapture = .{},
     peer_links: network_driver_task.PeerLinkDirectory = .{},
     opened_connections: usize = 0,
     disconnected_connections: usize = 0,
@@ -316,6 +415,7 @@ pub const NativeTransportService = struct {
 
     pub fn deinit(self: *NativeTransportService) void {
         self.endpoints.deinit();
+        self.capture.deinit();
     }
 
     comptime {
@@ -532,7 +632,8 @@ pub const NativeTransportService = struct {
         self: *const NativeTransportService,
         expectation: CapturedFrameExpectation,
     ) Error!NativeSyncFrameView {
-        return assertLastCapturedNativeSyncFrame(&self.capture, expectation);
+        const capture = self.capture.stateConst() orelse return error.NativeTransportFrameMissing;
+        return assertLastCapturedNativeSyncFrame(capture, expectation);
     }
 
     pub fn sendWithRelayFallback(
@@ -1207,7 +1308,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     native_transport.acknowledge(&connection, 4);
     try std.testing.expectEqual(@as(usize, 0), connection.in_flight_frames);
 
-    while (native_transport.capture.packets.countInUse() < MAX_CAPTURED_PACKETS) {
+    while (native_transport.capture.capturedCount() < MAX_CAPTURED_PACKETS) {
         try native_transport.capture.record("capacity-fill");
     }
     const endpoint_frames_before_capture_full = native_transport.endpoint_frame_count;
@@ -1217,12 +1318,12 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expectEqual(endpoint_frames_before_capture_full, native_transport.endpoint_frame_count);
     try std.testing.expectEqual(network_frames_before_capture_full, native_transport.network_frame_count);
     try std.testing.expectEqual(next_sequence_before_capture_full, connection.next_sequence);
-    try std.testing.expectEqual(@as(usize, 1), native_transport.capture.dropped_count);
-    const next_packet_id_before_direct_full = native_transport.capture.next_packet_id;
+    try std.testing.expectEqual(@as(usize, 1), native_transport.capture.droppedCount());
+    const next_packet_id_before_direct_full = native_transport.capture.nextPacketId();
     try std.testing.expectError(error.PacketCaptureFull, native_transport.capture.record("direct-full"));
-    try std.testing.expectEqual(next_packet_id_before_direct_full, native_transport.capture.next_packet_id);
-    try std.testing.expectEqual(@as(usize, 2), native_transport.capture.dropped_count);
-    native_transport.capture = .{};
+    try std.testing.expectEqual(next_packet_id_before_direct_full, native_transport.capture.nextPacketId());
+    try std.testing.expectEqual(@as(usize, 2), native_transport.capture.droppedCount());
+    native_transport.capture.reset();
 
     connection.next_sequence = 3;
     try std.testing.expectError(error.NativeTransportReplayRejected, native_transport.sendSigned(&connection, "replay", signer));
@@ -1681,6 +1782,22 @@ test "compact capture metadata preserves maximum native frames" {
     try std.testing.expect(!@hasField(PacketCapture, "captured_count"));
     try std.testing.expectEqual(@as(usize, PACKET_CAPTURE_SIZE_CEILING_BYTES), @sizeOf(PacketCapture));
     try std.testing.expectEqual(@as(usize, NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES), @sizeOf(NativeTransportService));
+    try std.testing.expect(transport_packet_capture_layout.heap_backs_capture_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_packet_capture_layout.freestanding_handle_size_bytes);
+    try std.testing.expectEqual(@as(usize, 4_840), transport_packet_capture_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 4_832), transport_packet_capture_layout.freestanding_resident_savings_bytes);
+
+    var transport_capture = TransportPacketCapture{};
+    defer transport_capture.deinit();
+    try std.testing.expectEqual(@as(usize, 0), transport_capture.capturedCount());
+    try std.testing.expect(transport_capture.lastPtr() == null);
+    try std.testing.expectEqual(@as(usize, 0), transport_capture.droppedCount());
+    try std.testing.expectEqual(@as(u64, 1), transport_capture.nextPacketId());
+    try transport_capture.record("on-demand");
+    try std.testing.expectEqual(@as(usize, 1), transport_capture.capturedCount());
+    transport_capture.reset();
+    try std.testing.expectEqual(@as(usize, 0), transport_capture.capturedCount());
+    try std.testing.expect(transport_capture.lastPtr() == null);
 
     const frame = [_]u8{0xA5} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
     var capture = PacketCapture{};
