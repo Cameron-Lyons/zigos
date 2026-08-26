@@ -40,9 +40,11 @@ pub const DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA = true;
 pub const DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS = true;
 pub const DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS = true;
 pub const DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS = true;
+pub const PACKS_VERSION_TYPE_INTO_TRAILING_PADDING = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
+pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 320;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -306,10 +308,10 @@ pub const VersionRecord = struct {
     id: ids.VersionId,
     object_id: ids.ObjectId,
     parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
-    object_type: ObjectType,
     version_address: VersionAddress,
     metadata: SignedMetadata,
     blob_slot_index: VersionBlobSlotIndex,
+    object_type: ObjectType,
 
     pub fn previousVersionId(self: *const VersionRecord) ids.VersionId {
         return self.parent_version_ids[0];
@@ -321,6 +323,12 @@ pub const VersionRecord = struct {
 
     pub fn hasCanonicalParents(self: *const VersionRecord) bool {
         return versionParentsAreCanonical(self.parent_version_ids);
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > VERSION_RECORD_SIZE_CEILING_BYTES) {
+            @compileError("version record exceeds its compact size ceiling");
+        }
     }
 };
 

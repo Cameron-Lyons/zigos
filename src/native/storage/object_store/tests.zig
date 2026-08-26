@@ -153,7 +153,9 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(!@hasField(object_store.VersionRecord, "previous_version_id"));
     try std.testing.expect(object_store.DERIVES_VERSION_PARENT_COUNT_FROM_CANONICAL_SLOTS);
     try std.testing.expect(!@hasField(object_store.VersionRecord, "parent_count"));
+    try std.testing.expect(object_store.PACKS_VERSION_TYPE_INTO_TRAILING_PADDING);
     try std.testing.expectEqual(@as(usize, object_store.OBJECT_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectRecord));
+    try std.testing.expectEqual(@as(usize, object_store.VERSION_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.VersionRecord));
 }
 
 test "signed metadata rejects overlong labels instead of truncating" {
