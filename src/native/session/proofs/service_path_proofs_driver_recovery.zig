@@ -261,7 +261,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(!hot_swap.userspace_brokered_data_plane);
     try std.testing.expectEqual(next_authority.id, swapped_driver.authority_capability_id);
     try std.testing.expect(swapped_driver.authority_capability_id != recovered_authority_id);
-    try std.testing.expectEqualStrings("zigos-storage-driver-v2", swapped_driver.signerSlice());
+    try std.testing.expect(swapped_driver.signerMatches("zigos-storage-driver-v2"));
     try std.testing.expect(runtime.hasCapability(swapped_driver.owner_task_id, next_authority.id));
     try std.testing.expectEqual(hot_swap_process_generation_before + 1, swapped_task.process_generation);
     try std.testing.expect(runtime.findAddressSpaceConst(hot_swap_address_space_before) == null);
@@ -368,7 +368,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(graphics_hot_swap.runtime_exclusive_claim);
     try std.testing.expect(!graphics_hot_swap.userspace_brokered_data_plane);
     try std.testing.expectEqual(graphics_authority.id, swapped_graphics.authority_capability_id);
-    try std.testing.expectEqualStrings("zigos-graphics-driver-v2", swapped_graphics.signerSlice());
+    try std.testing.expect(swapped_graphics.signerMatches("zigos-graphics-driver-v2"));
     try std.testing.expect(runtime.hasCapability(swapped_graphics.owner_task_id, graphics_authority.id));
     try std.testing.expectEqual(graphics_process_generation_before + 1, swapped_graphics_task.process_generation);
     try std.testing.expect(runtime.findAddressSpaceConst(graphics_address_space_before) == null);

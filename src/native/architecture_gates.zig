@@ -716,7 +716,10 @@ pub const indexed_hot_path_tables = .{
     .driver_service = .{
         .uses_driver_arena = @hasDecl(@FieldType(driver_service.Directory, "slots"), "reserve"),
         .stores_compact_record_metadata = driver_service.COMPACT_DRIVER_RECORD_METADATA and
-            @FieldType(driver_service.DriverRecord, "signer_len") == u8,
+            driver_service.COMPACT_DRIVER_SIGNER_FINGERPRINTS and
+            @FieldType(driver_service.DriverRecord, "signer_fingerprint") == driver_service.SignerFingerprint and
+            !@hasField(driver_service.DriverRecord, "signer_len") and
+            !@hasField(driver_service.DriverRecord, "signer"),
         .derives_dma_windows_from_device_policy = driver_service.DERIVES_DMA_WINDOWS_FROM_DEVICE_POLICY and
             @hasDecl(driver_service.DriverRecord, "dmaRangeCount") and
             @hasDecl(driver_service.DriverRecord, "dmaRange") and
