@@ -1296,7 +1296,9 @@ pub const indexed_hot_path_tables = .{
         .uses_service_ids_as_isolation_domains = supervisor.SERVICE_ID_IS_ISOLATION_DOMAIN and
             !@hasField(supervisor.ServiceRecord, "isolation_domain_id") and
             !@hasField(supervisor.Supervisor, "next_isolation_domain_id"),
-        .stores_compact_service_records = @sizeOf(supervisor.ServiceRecord) <= supervisor.SERVICE_RECORD_SIZE_CEILING_BYTES,
+        .stores_compact_service_records = @sizeOf(supervisor.ServiceRecord) <= supervisor.SERVICE_RECORD_SIZE_CEILING_BYTES and
+            supervisor.OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS and
+            !@hasField(supervisor.ServiceRecord, "last_transition_tick"),
         .scans_bounded_diagnostic_ring = supervisor.supervisor_indexing.scans_bounded_diagnostic_ring,
         .scans_diagnostics_newest_first = supervisor.supervisor_indexing.scans_diagnostics_newest_first,
         .uses_diagnostic_ring_cursor = @hasField(supervisor.Supervisor, "next_diagnostic_slot"),

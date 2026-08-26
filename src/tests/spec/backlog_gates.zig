@@ -1340,7 +1340,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
 
     var session_supervisor = supervisor.Supervisor.init();
     const storage_service = try session_supervisor.register(.storage_object, spec_support.service(822));
-    try std.testing.expect(session_supervisor.markHealthy(storage_service.id, 2));
+    try std.testing.expect(session_supervisor.markHealthy(storage_service.id));
 
     const control_image = try generated_image_fixtures.serviceClientImage();
     const control_task = try kernel.taskCreate(kernelContext(bootstrap_task.id, .task_create, bootstrap_authority.id, .{ .task = 0 }), .{

@@ -26,7 +26,6 @@ const PendingActivationFailureCase = struct {
     crash_service_id: ?u64 = null,
     crash_tick: u64 = 0,
     crash_reason: u32 = 0,
-    mark_healthy_tick: ?u64 = null,
 };
 
 fn expectPendingActivationFailure(
@@ -65,7 +64,7 @@ fn expectPendingActivationFailure(
     try std.testing.expectEqual(case.expected_failure, failure.activation.failure);
 
     if (case.crash_service_id) |service_id| {
-        try std.testing.expect(supervisor_instance.markHealthy(service_id, case.mark_healthy_tick.?));
+        try std.testing.expect(supervisor_instance.markHealthy(service_id));
     }
 }
 
@@ -343,11 +342,11 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     try std.testing.expect(supervisor_instance.noteContractBound(sync_service_record.id, 5003));
     try std.testing.expect(supervisor_instance.noteContractBound(network_service.id, 5004));
     try std.testing.expect(supervisor_instance.noteContractBound(compositor_service.id, 5005));
-    try std.testing.expect(supervisor_instance.markHealthy(policy_service.id, 12));
-    try std.testing.expect(supervisor_instance.markHealthy(package_service.id, 12));
-    try std.testing.expect(supervisor_instance.markHealthy(sync_service_record.id, 12));
-    try std.testing.expect(supervisor_instance.markHealthy(network_service.id, 12));
-    try std.testing.expect(supervisor_instance.markHealthy(compositor_service.id, 12));
+    try std.testing.expect(supervisor_instance.markHealthy(policy_service.id));
+    try std.testing.expect(supervisor_instance.markHealthy(package_service.id));
+    try std.testing.expect(supervisor_instance.markHealthy(sync_service_record.id));
+    try std.testing.expect(supervisor_instance.markHealthy(network_service.id));
+    try std.testing.expect(supervisor_instance.markHealthy(compositor_service.id));
 
     const core_service_ids = [_]u64{
         policy_service.id,
@@ -395,7 +394,6 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
             .crash_tick = 22,
             .crash_reason = 0xCA11,
             .validation_tick = 23,
-            .mark_healthy_tick = 24,
         },
         .{
             .expected_failure = .storage,
@@ -412,7 +410,6 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
             .crash_tick = 30,
             .crash_reason = 0xCA12,
             .validation_tick = 31,
-            .mark_healthy_tick = 32,
         },
         .{
             .expected_failure = .ui,
@@ -422,7 +419,6 @@ pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
             .crash_tick = 35,
             .crash_reason = 0xCA13,
             .validation_tick = 36,
-            .mark_healthy_tick = 37,
         },
     };
     for (failure_cases) |case| {
