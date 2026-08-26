@@ -173,8 +173,8 @@ const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
 const RecoverableDeleteEntries = [MAX_RECOVERABLE_DELETES]Entry;
 pub const HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING = true;
 const heap_backed_recoverable_delete_logs = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
-pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs) 16_488 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs) 137_880 else 357_400;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables) 15_024 else 43_928;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables) 126_168 else 357_400;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
 pub const recoverable_delete_layout = .{
@@ -372,11 +372,62 @@ pub const WorkspaceMutationLog = struct {
     }
 };
 
-pub const WorkspaceShareTable = struct {
+const WorkspaceShareTableData = struct {
     share_grants: [MAX_SHARE_GRANTS]ShareGrant = [_]ShareGrant{ShareGrant{
         .principal_id = .{ .kind = .service, .serial = 0 },
     }} ** MAX_SHARE_GRANTS,
     share_grant_principal_index: ShareGrantPrincipalIndex = ShareGrantPrincipalIndex.init(),
+};
+pub const HEAP_BACKED_WORKSPACE_SHARE_TABLES_ON_FREESTANDING = true;
+const heap_backed_workspace_share_tables = HEAP_BACKED_WORKSPACE_SHARE_TABLES_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const WorkspaceShareTableBacking = if (heap_backed_workspace_share_tables) ?*WorkspaceShareTableData else WorkspaceShareTableData;
+pub const workspace_share_table_layout = .{
+    .heap_backs_table_on_freestanding = HEAP_BACKED_WORKSPACE_SHARE_TABLES_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*WorkspaceShareTableData),
+    .backing_size_bytes = @sizeOf(WorkspaceShareTableData),
+    .uses_principal_index = @hasField(WorkspaceShareTableData, "share_grant_principal_index"),
+};
+
+pub const WorkspaceShareTable = struct {
+    backing: WorkspaceShareTableBacking = if (heap_backed_workspace_share_tables) null else .{},
+
+    pub fn ensureBacking(self: *WorkspaceShareTable) error{NoSpaceLeft}!void {
+        if (comptime heap_backed_workspace_share_tables) {
+            if (self.backing != null) return;
+            const allocation = kernel_memory.kmalloc(@sizeOf(WorkspaceShareTableData)) orelse return error.NoSpaceLeft;
+            const backing: *WorkspaceShareTableData = @ptrCast(@alignCast(allocation));
+            backing.* = .{};
+            self.backing = backing;
+        }
+    }
+
+    pub fn data(self: *WorkspaceShareTable) *WorkspaceShareTableData {
+        if (comptime heap_backed_workspace_share_tables) {
+            return self.backing orelse
+                native_util.impossibleByInvariant("live workspace sharing state retains backing");
+        }
+        return &self.backing;
+    }
+
+    pub fn dataConst(self: *const WorkspaceShareTable) *const WorkspaceShareTableData {
+        if (comptime heap_backed_workspace_share_tables) {
+            return self.backing orelse
+                native_util.impossibleByInvariant("live workspace sharing state retains backing");
+        }
+        return &self.backing;
+    }
+
+    pub fn releaseBacking(self: *WorkspaceShareTable) void {
+        if (comptime heap_backed_workspace_share_tables) {
+            if (self.backing) |backing| {
+                @memset(std.mem.asBytes(backing), 0);
+                kernel_memory.kfree(@ptrCast(backing));
+                self.backing = null;
+            }
+        } else {
+            @memset(std.mem.asBytes(&self.backing), 0);
+        }
+    }
 };
 
 pub const WorkspaceStagingState = struct {
@@ -479,7 +530,8 @@ pub const WorkspaceRecord = struct {
 
     pub fn findShareGrant(self: *const WorkspaceRecord, principal_id: principal.PrincipalId) ?ShareGrant {
         const grant_index = findShareGrantIndex(self, principal_id) orelse return null;
-        return self.share_table.share_grants[grant_index];
+        const share_table = self.share_table.dataConst();
+        return share_table.share_grants[grant_index];
     }
 
     pub fn hasAccess(self: *const WorkspaceRecord, request: AccessRequest) bool {
@@ -547,10 +599,13 @@ comptime {
     if (heap_backed_mutation_logs and @sizeOf(WorkspaceMutationLog) > 16) {
         @compileError("heap-backed workspace mutation logs exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
+    if (heap_backed_workspace_share_tables and @sizeOf(WorkspaceShareTable) > @sizeOf(?*anyopaque)) {
+        @compileError("heap-backed workspace sharing state exceeds its compact handle");
+    }
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and @sizeOf(WorkspaceSlot) > 16_496) {
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and @sizeOf(WorkspaceSlot) > 15_032) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -658,6 +713,7 @@ pub const Directory = struct {
             if (slot.in_use) {
                 slot.workspace.mutation_log.releaseBacking();
                 slot.workspace.recoverable_deletes.releaseBacking();
+                slot.workspace.share_table.releaseBacking();
                 slot.* = WorkspaceSlot{};
             }
         }
@@ -870,13 +926,14 @@ pub const Directory = struct {
     pub fn share(self: *Directory, workspace_id: ids.WorkspaceId, request: ShareRequest) Error!void {
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (findShareGrantIndex(workspace, request.principal_id)) |grant_index| {
-            workspace.share_table.share_grants[grant_index] = request;
+            workspace.share_table.data().share_grants[grant_index] = request;
             self.markWorkspaceDirty(workspace_id);
             return;
         }
         if (workspace.counts.share_grant_count >= MAX_SHARE_GRANTS) return error.ShareTableFull;
+        try workspace.share_table.ensureBacking();
         const grant_index = workspace.counts.share_grant_count;
-        workspace.share_table.share_grants[grant_index] = request;
+        workspace.share_table.data().share_grants[grant_index] = request;
         workspace.counts.share_grant_count += 1;
         indexShareGrant(workspace, grant_index);
         self.markWorkspaceDirty(workspace_id);
@@ -1426,7 +1483,8 @@ fn recordSnapshotGeneration(workspace: *WorkspaceRecord, generation: u32) void {
 }
 
 fn rebuildShareGrantIndex(workspace: *WorkspaceRecord) void {
-    workspace.share_table.share_grant_principal_index.reset();
+    if (workspace.counts.share_grant_count == 0) return;
+    workspace.share_table.data().share_grant_principal_index.reset();
     var grant_index: usize = 0;
     while (grant_index < workspace.counts.share_grant_count) : (grant_index += 1) {
         indexShareGrant(workspace, grant_index);
@@ -1437,17 +1495,20 @@ fn indexShareGrant(workspace: *WorkspaceRecord, grant_index: usize) void {
     if (grant_index >= workspace.counts.share_grant_count) {
         native_util.impossibleByInvariant("share grant index points outside active grants");
     }
-    const grant = workspace.share_table.share_grants[grant_index];
-    if (!workspace.share_table.share_grant_principal_index.insert(grant.principal_id, grant_index)) {
+    const share_table = workspace.share_table.data();
+    const grant = share_table.share_grants[grant_index];
+    if (!share_table.share_grant_principal_index.insert(grant.principal_id, grant_index)) {
         native_util.impossibleByInvariant("share grant index capacity covers share grant table");
     }
 }
 
 fn findShareGrantIndex(workspace: *const WorkspaceRecord, principal_id: principal.PrincipalId) ?usize {
-    if (workspace.share_table.share_grant_principal_index.lookup(principal_id)) |grant_index| {
+    if (workspace.counts.share_grant_count == 0) return null;
+    const share_table = workspace.share_table.dataConst();
+    if (share_table.share_grant_principal_index.lookup(principal_id)) |grant_index| {
         if (grant_index >= MAX_SHARE_GRANTS) native_util.impossibleByInvariant("share grant index points outside grant slots");
         if (grant_index >= workspace.counts.share_grant_count) native_util.impossibleByInvariant("share grant index points outside active grants");
-        const grant = workspace.share_table.share_grants[grant_index];
+        const grant = share_table.share_grants[grant_index];
         if (!grant.principal_id.eql(principal_id)) native_util.impossibleByInvariant("share grant index points at the wrong grant");
         return grant_index;
     }
@@ -1457,7 +1518,9 @@ fn findShareGrantIndex(workspace: *const WorkspaceRecord, principal_id: principa
 
 fn debugAssertShareGrantIndexMissAbsent(workspace: *const WorkspaceRecord, principal_id: principal.PrincipalId) void {
     if (!debugIndexChecksEnabled()) return;
-    for (workspace.share_table.share_grants[0..workspace.counts.share_grant_count]) |grant| {
+    if (workspace.counts.share_grant_count == 0) return;
+    const share_table = workspace.share_table.dataConst();
+    for (share_table.share_grants[0..workspace.counts.share_grant_count]) |grant| {
         if (grant.principal_id.eql(principal_id)) {
             native_util.impossibleByInvariant("share grant index missed a live grant");
         }
@@ -1929,7 +1992,10 @@ fn debugIndexChecksEnabled() bool {
     return builtin.mode == .Debug;
 }
 
-test "workspace sharing uses capacity-sized resident indexes" {
+test "workspace sharing uses capacity-sized indexed backing" {
+    try std.testing.expect(workspace_share_table_layout.heap_backs_table_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), workspace_share_table_layout.freestanding_handle_size_bytes);
+    try std.testing.expectEqual(@as(usize, 1_472), workspace_share_table_layout.backing_size_bytes);
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(ShareGrantPrincipalIndexSlot));
     try std.testing.expectEqual(@as(usize, 384), @sizeOf(ShareGrantPrincipalIndex));
     try std.testing.expectEqual(@as(usize, 1_472), @sizeOf(WorkspaceShareTable));

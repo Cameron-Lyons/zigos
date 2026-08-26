@@ -772,7 +772,8 @@ test "storage service retains authoritative object and workspace state across re
     try std.testing.expectEqualStrings("documents/notes.md", resolved_by_object.pathSlice());
     try std.testing.expectEqual(object.version_id, resolved_by_object.version_id);
     try std.testing.expectEqual(@as(usize, 1), entries.len);
-    try std.testing.expectEqual(@as(usize, 1), restarted_notes.share_table.share_grant_principal_index.count(grant_key));
+    const restarted_share_table = restarted_notes.share_table.dataConst();
+    try std.testing.expectEqual(@as(usize, 1), restarted_share_table.share_grant_principal_index.count(grant_key));
     try std.testing.expectEqual(@as(?*object_store.Store, &checkpoint_store.store), restarted.store);
     try std.testing.expectEqual(@as(?*workspace.Directory, &checkpoint_store.workspaces), restarted.workspaces);
     try std.testing.expectEqual(workspace.ShareNetworkScope.trusted_overlay, grant.network_scope);
