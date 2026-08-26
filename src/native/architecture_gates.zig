@@ -1275,7 +1275,8 @@ pub const indexed_hot_path_tables = .{
             !@hasField(storage_volume.Volume, "object_signers") and
             !@hasField(storage_volume.Volume, "snapshot_signers") and
             storage_volume.signer_text_layout.pool_size_bytes == storage_volume.SIGNER_TEXT_POOL_BYTES,
-        .tracks_latest_inserted_version = @hasField(object_store.Store, "latest_inserted_version_id"),
+        .derives_latest_inserted_version_from_arena_state = object_store.DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE and
+            !@hasField(object_store.Store, "latest_inserted_version_id"),
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
         .uses_compact_version_blob_references = @sizeOf(object_store.VersionBlobSlotIndex) == 2 and

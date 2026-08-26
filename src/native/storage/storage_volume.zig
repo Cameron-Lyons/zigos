@@ -1168,7 +1168,6 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     const blob = &store.blobSlotAtConst(blob_slot_index).blob;
     if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
     store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
-    store.recordReplayedVersionId(version_id);
     return version_id.raw();
 }
 
@@ -1471,7 +1470,6 @@ fn deserializeState(
         const blob = &store.blobSlotAtConst(blob_slot_index).blob;
         if (blob.payloadLen() != payload_len or blob.chunk_count != chunk_count_value) return error.CorruptImage;
         store.versions.slots[slot_index].version.blob_slot_index = @intCast(blob_slot_index);
-        store.recordReplayedVersionId(version_id);
     }
 
     for (0..@as(usize, workspace_count_value)) |_| {
