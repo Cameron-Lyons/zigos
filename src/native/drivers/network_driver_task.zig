@@ -45,6 +45,8 @@ pub const NetworkDevice = struct {
 pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
 pub const MAX_PEER_LINKS: usize = 32;
 pub const COMPACT_BOUNDED_METADATA = true;
+pub const DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT = true;
+pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = 2_096;
 const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
 const PeerLinkIndex = indexed_arena.UniqueIndex(PEER_LINK_INDEX_CAPACITY);
 
@@ -272,7 +274,6 @@ comptime {
 
 pub const NativeNetworkStack = struct {
     peer_links: PeerLinkDirectory = .{},
-    next_connection_id: u64 = 1,
     attempted_connections: usize = 0,
     denied_before_transmit: usize = 0,
     opened_connections: usize = 0,
@@ -542,9 +543,8 @@ pub const NativeNetworkStack = struct {
         return error.EgressDenied;
     }
 
-    fn nextConnectionId(self: *NativeNetworkStack) u64 {
-        defer self.next_connection_id += 1;
-        return self.next_connection_id;
+    fn nextConnectionId(self: *const NativeNetworkStack) u64 {
+        return @intCast(self.opened_connections + 1);
     }
 };
 
@@ -1060,6 +1060,9 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expect(bounded_metadata_layout.heap_backs_receive_queue_on_freestanding);
     try std.testing.expect(bounded_metadata_layout.uses_compact_active_frame_lengths);
     try std.testing.expect(bounded_metadata_layout.uses_compact_receive_queue_indices);
+    try std.testing.expect(DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT);
+    try std.testing.expect(!@hasField(NativeNetworkStack, "next_connection_id"));
+    try std.testing.expectEqual(@as(usize, NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES), @sizeOf(NativeNetworkStack));
 }
 
 test "peer link directory has a fixed fail-closed capacity" {
@@ -1529,6 +1532,7 @@ test "native network stack gates service identity packets on attested policy cap
         .trusted_root = peer_attestation_identity,
         .now_ticks = 10,
     }, source, target);
+    try std.testing.expectEqual(@as(u64, 1), connection.id);
     try std.testing.expect(connection.attestation_required);
     try std.testing.expect(connection.identity_pinned);
     try std.testing.expectEqualSlices(u8, &target_mac, &connection.target_mac);
@@ -1664,6 +1668,7 @@ test "native network stack requires scoped local discovery before discovery broa
         .evidence = .{ .destination = .{ .discovery_class = "printer" } },
         .now_ticks = 10,
     }, source);
+    try std.testing.expectEqual(@as(u64, 1), connection.id);
     try std.testing.expect(connection.scoped_discovery);
     try std.testing.expectEqualStrings("printer", connection.discoveryClassSlice());
 
