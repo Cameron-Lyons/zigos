@@ -38,6 +38,8 @@ test "blob manifests store compact chunk slot edges" {
     try std.testing.expect(!@hasField(object_store.BlobRecord, "payload_len"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "ref_count"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "manifest_verified"));
+    try std.testing.expect(object_store.PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE);
+    try std.testing.expect(!@hasField(object_store.BlobSlot, "in_use"));
 }
 
 test "blob chunk counts derive from payload lengths" {
@@ -51,12 +53,21 @@ test "blob chunk counts derive from payload lengths" {
 
 test "blob state packs bounded values without overlap" {
     var slot = BlobSlot{};
+    try std.testing.expect(!slot.arenaInUse());
+    slot.setArenaInUse(true);
     slot.blob.setPayloadState(MAX_PAYLOAD_BYTES, object_store.MAX_VERSIONS);
+    try std.testing.expect(slot.arenaInUse());
     try std.testing.expectEqual(MAX_PAYLOAD_BYTES, slot.blob.payloadLen());
     try std.testing.expectEqual(@as(u16, object_store.MAX_VERSIONS), slot.blob.refCount());
     try std.testing.expect(!slot.blob.manifestVerified());
 
     slot.blob.markManifestVerified();
+    try std.testing.expectEqual(MAX_PAYLOAD_BYTES, slot.blob.payloadLen());
+    try std.testing.expectEqual(@as(u16, object_store.MAX_VERSIONS), slot.blob.refCount());
+    try std.testing.expect(slot.blob.manifestVerified());
+
+    slot.setArenaInUse(false);
+    try std.testing.expect(!slot.arenaInUse());
     try std.testing.expectEqual(MAX_PAYLOAD_BYTES, slot.blob.payloadLen());
     try std.testing.expectEqual(@as(u16, object_store.MAX_VERSIONS), slot.blob.refCount());
     try std.testing.expect(slot.blob.manifestVerified());

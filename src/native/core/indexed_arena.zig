@@ -1067,6 +1067,13 @@ pub fn PagedIndexedArenaWithKey(
     if (page_count == 0) @compileError("paged indexed arena requires at least one page");
     const capacity = page_size * page_count;
     if (index_capacity < capacity) @compileError("paged indexed arena primary index capacity must cover all slab slots");
+    const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
+    if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
+        @compileError("paged indexed arena custom slot membership requires arenaInUse and setArenaInUse");
+    }
+    if (!custom_membership and !@hasField(Slot, "in_use")) {
+        @compileError("paged indexed arena slots require an in_use field or custom membership accessors");
+    }
 
     return struct {
         const Self = @This();
@@ -1077,6 +1084,19 @@ pub fn PagedIndexedArenaWithKey(
         pub const slot_capacity = capacity;
         pub const slots_per_page = page_size;
         pub const slab_page_count = page_count;
+
+        inline fn slotInUse(slot: *const Slot) bool {
+            if (comptime custom_membership) return slot.arenaInUse();
+            return slot.in_use;
+        }
+
+        inline fn setSlotInUse(slot: *Slot, in_use: bool) void {
+            if (comptime custom_membership) {
+                slot.setArenaInUse(in_use);
+            } else {
+                slot.in_use = in_use;
+            }
+        }
 
         const Page = struct {
             slots: [page_size]Slot = [_]Slot{Slot{}} ** page_size,
@@ -1116,7 +1136,7 @@ pub fn PagedIndexedArenaWithKey(
             const claimed_count = self.claimedCount();
             var slot_index: usize = 0;
             while (slot_index < claimed_count) : (slot_index += 1) {
-                self.slotAt(slot_index).in_use = false;
+                setSlotInUse(self.slotAt(slot_index), false);
                 self.slot_keys[slot_index] = ids.zero(Key);
                 self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
                 self.free_next[slot_index] = free_no_index;
@@ -1179,7 +1199,7 @@ pub fn PagedIndexedArenaWithKey(
         pub fn handleForIndex(self: *const Self, slot_index: usize) ?Handle {
             if (slot_index >= capacity) return null;
             const slot = self.slotAtConst(slot_index);
-            if (!slot.in_use) return null;
+            if (!slotInUse(slot)) return null;
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
 
@@ -1188,7 +1208,7 @@ pub fn PagedIndexedArenaWithKey(
         pub inline fn handleForClaimedIndex(self: *const Self, slot_index: usize) Handle {
             if (builtin.mode == .Debug) {
                 std.debug.assert(slot_index < capacity);
-                std.debug.assert(self.slotAtConst(slot_index).in_use);
+                std.debug.assert(slotInUse(self.slotAtConst(slot_index)));
             }
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
@@ -1217,7 +1237,7 @@ pub fn PagedIndexedArenaWithKey(
         pub fn removeIndex(self: *Self, slot_index: usize) bool {
             if (slot_index >= capacity) return false;
             const slot = self.slotAt(slot_index);
-            if (!slot.in_use) return false;
+            if (!slotInUse(slot)) return false;
 
             const key = self.slot_keys[slot_index];
             const raw_key = ids.raw(key);
@@ -1243,7 +1263,7 @@ pub fn PagedIndexedArenaWithKey(
             var slot_index: usize = 0;
             while (slot_index < capacity) : (slot_index += 1) {
                 const slot = self.slotAt(slot_index);
-                if (slot.in_use) {
+                if (slotInUse(slot)) {
                     const key = keyOf(slot);
                     const raw_key = ids.raw(key);
                     if (raw_key != 0) {
@@ -1258,7 +1278,7 @@ pub fn PagedIndexedArenaWithKey(
             slot_index = capacity;
             while (slot_index > 0) {
                 slot_index -= 1;
-                if (!self.slotAtConst(slot_index).in_use) self.pushFreeIndex(slot_index);
+                if (!slotInUse(self.slotAtConst(slot_index))) self.pushFreeIndex(slot_index);
             }
         }
 
@@ -1272,14 +1292,14 @@ pub fn PagedIndexedArenaWithKey(
             if (self.primary_index.lookup(raw_key) != null) return null;
 
             const slot_index = if (requested_slot_index) |explicit_index| blk: {
-                if (explicit_index >= capacity or self.slotAtConst(explicit_index).in_use) return null;
+                if (explicit_index >= capacity or slotInUse(self.slotAtConst(explicit_index))) return null;
                 if (!self.claimFreeIndex(explicit_index)) return null;
                 break :blk explicit_index;
             } else self.popFreeIndex() orelse return null;
 
             const slot = self.slotAt(slot_index);
             slot.* = Slot{};
-            slot.in_use = true;
+            setSlotInUse(slot, true);
             if (self.slot_generations[slot_index] == 0) self.slot_generations[slot_index] = 1;
             self.slot_keys[slot_index] = key;
             self.primary_index.insertAbsent(raw_key, slot_index);
@@ -1293,7 +1313,7 @@ pub fn PagedIndexedArenaWithKey(
             if (self.primary_index.lookup(raw_key)) |slot_index| {
                 if (slot_index >= capacity) native_util.impossibleByInvariant("paged indexed arena primary index points outside slabs");
                 const slot = self.slotAtConst(slot_index);
-                if (!slot.in_use) native_util.impossibleByInvariant("paged indexed arena primary index points at a free slot");
+                if (!slotInUse(slot)) native_util.impossibleByInvariant("paged indexed arena primary index points at a free slot");
                 if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("paged indexed arena primary index points at the wrong key");
                 const payload_key = keyOf(slot);
                 const raw_payload_key = ids.raw(payload_key);
@@ -1312,7 +1332,7 @@ pub fn PagedIndexedArenaWithKey(
             var slot_index: usize = 0;
             while (slot_index < claimed_count) : (slot_index += 1) {
                 const slot = self.slotAtConst(slot_index);
-                if (slot.in_use and ids.raw(keyOf(slot)) == raw_key) return slot_index;
+                if (slotInUse(slot) and ids.raw(keyOf(slot)) == raw_key) return slot_index;
             }
             return null;
         }
@@ -1327,7 +1347,7 @@ pub fn PagedIndexedArenaWithKey(
         fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
             if (handle.isZero() or slot_index >= capacity) return false;
             const slot = self.slotAtConst(slot_index);
-            return slot.in_use and self.slot_generations[slot_index] == handle.generation();
+            return slotInUse(slot) and self.slot_generations[slot_index] == handle.generation();
         }
 
         inline fn popFreeIndex(self: *Self) ?usize {
@@ -1339,7 +1359,7 @@ pub fn PagedIndexedArenaWithKey(
         }
 
         inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
-            if (slot_index >= capacity or self.slotAtConst(slot_index).in_use) return false;
+            if (slot_index >= capacity or slotInUse(self.slotAtConst(slot_index))) return false;
             return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
         }
     };
@@ -1358,6 +1378,22 @@ const TestRecord = struct {
 const TestSlot = struct {
     in_use: bool = false,
     record: TestRecord = .{},
+};
+
+const PackedMembershipTestSlot = struct {
+    state: packed struct(u8) {
+        arena_in_use: bool = false,
+        reserved: u7 = 0,
+    } = .{},
+    record: TestRecord = .{},
+
+    pub fn arenaInUse(self: *const PackedMembershipTestSlot) bool {
+        return self.state.arena_in_use;
+    }
+
+    pub fn setArenaInUse(self: *PackedMembershipTestSlot, in_use: bool) void {
+        self.state.arena_in_use = in_use;
+    }
 };
 
 test "arena free lists select the narrowest lossless reusable index" {
@@ -1408,6 +1444,26 @@ test "compact arena counts retain the full byte-width capacity" {
     try std.testing.expectEqual(@as(?usize, null), arena.reserveIndex(256));
 }
 
+test "paged arenas support slot-owned membership bits" {
+    const Arena = PagedIndexedArena(PackedMembershipTestSlot, 2, 2, 8, packedMembershipTestSlotId);
+    var arena = Arena.init();
+
+    const first_index = arena.reserveIndex(7).?;
+    const first = arena.slotAt(first_index);
+    try std.testing.expect(first.arenaInUse());
+    first.record.id = 7;
+    try std.testing.expect(arena.getConst(7) == first);
+
+    try std.testing.expect(arena.removeIndex(first_index));
+    try std.testing.expect(!first.arenaInUse());
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+
+    const second_index = arena.reserveIndex(8).?;
+    try std.testing.expectEqual(first_index, second_index);
+    arena.resetRetainingPayloads();
+    try std.testing.expect(!arena.slotAtConst(second_index).arenaInUse());
+}
+
 test "arena free lists retain the highest reusable index at width boundaries" {
     {
         const Arena = IndexedArena(TestSlot, 255, 510, testSlotId);
@@ -1428,6 +1484,10 @@ test "arena free lists retain the highest reusable index at width boundaries" {
 }
 
 fn testSlotId(slot: *const TestSlot) u64 {
+    return slot.record.id;
+}
+
+fn packedMembershipTestSlotId(slot: *const PackedMembershipTestSlot) u64 {
     return slot.record.id;
 }
 
