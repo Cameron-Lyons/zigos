@@ -31,6 +31,14 @@ pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
 const MAX_METADATA_MESSAGE_BYTES: usize = 256;
 pub const MAX_METADATA_LABEL_BYTES: usize = 48;
 pub const MAX_CONTENT_TYPE_BYTES: usize = 64;
+const BlobPayloadLength = u17;
+const BlobRefCount = u10;
+const BlobState = packed struct(u32) {
+    payload_len: BlobPayloadLength = 0,
+    ref_count: BlobRefCount = 0,
+    manifest_verified: bool = false,
+    reserved: u4 = 0,
+};
 pub const COMPACT_OBJECT_RESULT_METADATA = true;
 pub const SKIPS_EMPTY_ARENA_RESET_WORK = true;
 pub const DERIVES_LATEST_INSERTED_VERSION_FROM_ARENA_STATE = true;
@@ -44,13 +52,14 @@ pub const PACKS_VERSION_TYPE_INTO_TRAILING_PADDING = true;
 pub const DERIVES_BLOB_MERKLE_ROOT_FROM_CANONICAL_CHUNKS = true;
 pub const DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH = true;
 pub const CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES = true;
+pub const PACKS_BLOB_STATE_INTO_BOUNDED_METADATA = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 320;
-pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 68;
-pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 72;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_328_368;
+pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 64;
+pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 68;
+pub const STORE_SIZE_CEILING_BYTES: usize = 1_325_808;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -68,6 +77,12 @@ comptime {
     }
     if (MAX_PAYLOAD_BYTES > std.math.maxInt(u32)) {
         @compileError("object payload capacity exceeds its compact length field");
+    }
+    if (MAX_PAYLOAD_BYTES > std.math.maxInt(BlobPayloadLength)) {
+        @compileError("object payload capacity exceeds packed blob metadata");
+    }
+    if (MAX_VERSIONS > std.math.maxInt(BlobRefCount)) {
+        @compileError("object version capacity exceeds packed blob reference counts");
     }
 }
 
@@ -345,17 +360,42 @@ pub const ChunkRef = struct {
 
 pub const BlobRecord = struct {
     address: BlobAddress,
-    payload_len: u32,
     chunk_slot_indexes: [MAX_BLOB_CHUNKS]BlobChunkSlotIndex,
-    ref_count: u16,
-    manifest_verified: bool = false,
+    state: BlobState = .{},
 
     pub fn payloadLen(self: *const BlobRecord) usize {
-        return @intCast(self.payload_len);
+        return @intCast(self.state.payload_len);
     }
 
     pub fn chunkCount(self: *const BlobRecord) usize {
         return chunkCountForPayloadLen(self.payloadLen());
+    }
+
+    pub fn refCount(self: *const BlobRecord) u16 {
+        return @intCast(self.state.ref_count);
+    }
+
+    pub fn manifestVerified(self: *const BlobRecord) bool {
+        return self.state.manifest_verified;
+    }
+
+    pub fn setPayloadState(self: *BlobRecord, payload_len: usize, ref_count: usize) void {
+        if (payload_len > std.math.maxInt(BlobPayloadLength) or ref_count > std.math.maxInt(BlobRefCount)) {
+            native_util.impossibleByInvariant("blob state fits packed metadata");
+        }
+        self.state = .{
+            .payload_len = @intCast(payload_len),
+            .ref_count = @intCast(ref_count),
+        };
+    }
+
+    pub fn incrementRefCount(self: *BlobRecord) void {
+        if (self.state.ref_count == std.math.maxInt(BlobRefCount)) return;
+        self.state.ref_count += 1;
+    }
+
+    pub fn markManifestVerified(self: *BlobRecord) void {
+        self.state.manifest_verified = true;
     }
 
     comptime {
@@ -481,10 +521,8 @@ pub const BlobSlot = struct {
     in_use: bool = false,
     blob: BlobRecord = .{
         .address = crypto_hash.zero_digest,
-        .payload_len = 0,
         .chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS,
-        .ref_count = 0,
-        .manifest_verified = false,
+        .state = .{},
     },
 
     comptime {
@@ -1278,17 +1316,15 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             if (self.blobSlotIndex(address)) |slot_index| {
                 const slot = self.blobSlotAt(slot_index);
                 if (!blobManifestMatches(self, slot.blob, payload.len, chunk_refs[0..chunk_count])) return error.CorruptBlob;
-                slot.blob.ref_count +|= 1;
+                slot.blob.incrementRefCount();
                 self.recordBlobPayloadBytes(payload.len);
                 return slot_index;
             }
             const slot_index = self.blobs.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
             const slot = self.blobSlotAt(slot_index);
             slot.blob.address = address;
-            slot.blob.payload_len = @intCast(payload.len);
             slot.blob.chunk_slot_indexes = chunk_slot_indexes;
-            slot.blob.ref_count = 1;
-            slot.blob.manifest_verified = false;
+            slot.blob.setPayloadState(payload.len, 1);
             self.recordBlobPayloadBytes(payload.len);
             return slot_index;
         }
@@ -1321,7 +1357,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             var slot_index: usize = 0;
             while (slot_index < self.blobSlotCapacity()) : (slot_index += 1) {
                 const slot = self.blobSlotAtConst(slot_index);
-                if (slot.in_use and slot.blob.manifest_verified) count += 1;
+                if (slot.in_use and slot.blob.manifestVerified()) count += 1;
             }
             return count;
         }
@@ -1332,7 +1368,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot = self.blobSlotAt(slot_index);
             if (!slot.in_use) return error.BlobNotFound;
 
-            if (slot.blob.manifest_verified) return &slot.blob;
+            if (slot.blob.manifestVerified()) return &slot.blob;
 
             var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
             const live_chunk_refs = try self.copyBlobChunkRefs(&slot.blob, &chunk_refs);
@@ -1346,7 +1382,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 if (!std.mem.eql(u8, &computeChunkAddress(chunk_record.chunkSlice()), &chunk_ref.address)) return error.CorruptBlob;
             }
 
-            slot.blob.manifest_verified = true;
+            slot.blob.markManifestVerified();
             return &slot.blob;
         }
 
@@ -1692,7 +1728,7 @@ test "store reset scrubs live records before retaining arena capacity" {
 
     const blob_index = store.blobs.reserveIndex(9).?;
     const blob_slot = store.blobs.slotAt(blob_index);
-    blob_slot.blob.ref_count = 4;
+    blob_slot.blob.setPayloadState(0, 4);
 
     const chunk_index = store.chunks.reserveIndex(10).?;
     const chunk_slot = store.chunks.slotAt(chunk_index);
@@ -1707,6 +1743,6 @@ test "store reset scrubs live records before retaining arena capacity" {
     try std.testing.expectEqual(@as(usize, 0), store.chunks.countInUse());
     try std.testing.expect(object_slot.object.id.isZero());
     try std.testing.expectEqual(@as(u8, 0), version_slot.version.metadata.label_len);
-    try std.testing.expectEqual(@as(u16, 0), blob_slot.blob.ref_count);
+    try std.testing.expectEqual(@as(u16, 0), blob_slot.blob.refCount());
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 6), chunk_slot.chunk.payload[0..6]);
 }
