@@ -105,8 +105,6 @@ pub const SessionManager = struct {
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
     input_router: input_router_mod.Router = .{},
     compositor_broker_service_id: u64 = 0,
-    input_authority_failures: usize = 0,
-    surface_authority_failures: usize = 0,
     surface_authority_scanned_lifecycle_generation: u64 = 0,
 
     pub fn init() SessionManager {
@@ -297,7 +295,6 @@ pub const SessionManager = struct {
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
         while (self.input_router.pollWakeTarget()) |task_id| {
             if (self.ensureFocusedInputCapability(task_id, now_ticks) == null) {
-                self.input_authority_failures += 1;
                 _ = self.input_router.dropForTask(task_id);
                 continue;
             }
@@ -419,7 +416,6 @@ pub const SessionManager = struct {
             const slot = runtime.taskSlotAt(slot_index);
             if (!slot.in_use or !self.taskOwnsUiSurface(&slot.task)) continue;
             if (self.ensureSurfacePresentationCapabilityForResolvedTask(&slot.task, now_ticks) != null) continue;
-            self.surface_authority_failures += 1;
             complete = false;
         }
         if (complete) self.surface_authority_scanned_lifecycle_generation = runtime.taskLifecycleGeneration();
