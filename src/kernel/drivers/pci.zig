@@ -21,10 +21,6 @@ const PCI_HEADER_TYPE_OFFSET: u16 = 0x0E;
 const PCI_SECONDARY_BUS_OFFSET: u16 = 0x19;
 const PCI_BAR0_OFFSET: u16 = 0x10;
 const PCI_BAR1_OFFSET: u16 = 0x14;
-const PCI_BAR2_OFFSET: u16 = 0x18;
-const PCI_BAR3_OFFSET: u16 = 0x1C;
-const PCI_BAR4_OFFSET: u16 = 0x20;
-const PCI_BAR5_OFFSET: u16 = 0x24;
 const PCI_COMMAND_OFFSET: u16 = 0x04;
 const PCI_STATUS_OFFSET: u16 = 0x06;
 const PCI_COMMAND_MEMORY_SPACE: u16 = 1 << 1;
@@ -86,11 +82,10 @@ pub const PCIDevice = struct {
     prog_if: u8,
     bar0: u32,
     bar1: u32,
-    bar2: u32,
-    bar3: u32,
-    bar4: u32,
-    bar5: u32,
 };
+
+pub const PCI_DEVICE_SIZE_CEILING_BYTES: usize = 20;
+const PCI_INVENTORY_SIZE_CEILING_BYTES: usize = 5_120;
 
 pub const MemoryBarWidth = enum {
     bits32,
@@ -119,6 +114,15 @@ var boot_inventory_valid = false;
 var ecam_allocation: ?mcfg.Allocation = null;
 var mapped_configuration_page: ?usize = null;
 var configuration_lock: bool = false;
+
+comptime {
+    if (@sizeOf(PCIDevice) > PCI_DEVICE_SIZE_CEILING_BYTES) {
+        @compileError("cached PCI device record exceeds its compact size ceiling");
+    }
+    if (@sizeOf(@TypeOf(boot_inventory)) > PCI_INVENTORY_SIZE_CEILING_BYTES) {
+        @compileError("cached PCI inventory exceeds its compact size ceiling");
+    }
+}
 
 pub const InitError = error{InvalidEcamAllocation};
 pub const QuiesceError = error{
@@ -255,10 +259,6 @@ pub fn checkDevice(bus: u8, device: u8, func: u8) ?PCIDevice {
         .prog_if = @intCast((class_info >> PCI_PROG_IF_SHIFT) & PCI_U8_MASK),
         .bar0 = readConfig(bus, device, func, PCI_BAR0_OFFSET),
         .bar1 = readConfig(bus, device, func, PCI_BAR1_OFFSET),
-        .bar2 = readConfig(bus, device, func, PCI_BAR2_OFFSET),
-        .bar3 = readConfig(bus, device, func, PCI_BAR3_OFFSET),
-        .bar4 = readConfig(bus, device, func, PCI_BAR4_OFFSET),
-        .bar5 = readConfig(bus, device, func, PCI_BAR5_OFFSET),
     };
 
     return pci_device;
@@ -928,10 +928,6 @@ fn syntheticPciDevice(vendor_id: u16, device_id: u16, class_code: u8, subclass: 
         .prog_if = prog_if,
         .bar0 = 0,
         .bar1 = 0,
-        .bar2 = 0,
-        .bar3 = 0,
-        .bar4 = 0,
-        .bar5 = 0,
     };
 }
 

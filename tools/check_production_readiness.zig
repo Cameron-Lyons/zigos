@@ -1197,6 +1197,8 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_pci_inventory_snippets = [_][]const u8{
         "mcfg.Allocation",
+        "pub const PCI_DEVICE_SIZE_CEILING_BYTES: usize = 20",
+        "const PCI_INVENTORY_SIZE_CEILING_BYTES: usize = 5_120",
         "mmio_windows.pci_ecam.base",
         "paging.mapKernelBorrowedPage",
         "mapped_configuration_page",
@@ -1213,6 +1215,21 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (std.mem.indexOf(u8, pci_source, "while (bus < PCI_MAX_BUS_COUNT)") != null) {
         try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore repeated exhaustive 256-bus scans", .{});
+    }
+    const retired_cached_pci_bar_snippets = [_][]const u8{
+        "PCI_BAR2_OFFSET",
+        "PCI_BAR3_OFFSET",
+        "PCI_BAR4_OFFSET",
+        "PCI_BAR5_OFFSET",
+        "bar2: u32",
+        "bar3: u32",
+        "bar4: u32",
+        "bar5: u32",
+    };
+    for (retired_cached_pci_bar_snippets) |snippet| {
+        if (std.mem.indexOf(u8, pci_source, snippet) != null) {
+            try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not recache unused BAR words: {s}", .{snippet});
+        }
     }
     const required_mmio_layout_snippets = [_][]const u8{
         "pub const nvme = Region",
