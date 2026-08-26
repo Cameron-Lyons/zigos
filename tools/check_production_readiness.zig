@@ -1199,11 +1199,14 @@ fn validateNuc11tnki5KernelProofSources(
         "mcfg.Allocation",
         "pub const PCI_DEVICE_SIZE_CEILING_BYTES: usize = 20",
         "const PCI_INVENTORY_SIZE_CEILING_BYTES: usize = 5_120",
+        "pub const HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING = true",
+        "pub const PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES: usize = 8",
         "mmio_windows.pci_ecam.base",
         "paging.mapKernelBorrowedPage",
         "mapped_configuration_page",
         "configuration_lock",
         "boot_inventory_initialized",
+        "ensureBootInventory",
         "PCI_SECONDARY_BUS_OFFSET",
         "enqueueSecondaryBus",
         "return firstMatchingIn(Query, bootDevices(), query, matches)",
@@ -1212,6 +1215,9 @@ fn validateNuc11tnki5KernelProofSources(
         if (std.mem.indexOf(u8, pci_source, snippet) == null) {
             try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must retain its cached topology-aware inventory: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, pci_source, "var boot_inventory: [PCI_INVENTORY_CAPACITY]PCIDevice") != null) {
+        try common.addError(errors, allocator, "PCI inventory must remain heap-backed on freestanding kernels", .{});
     }
     if (std.mem.indexOf(u8, pci_source, "while (bus < PCI_MAX_BUS_COUNT)") != null) {
         try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore repeated exhaustive 256-bus scans", .{});
