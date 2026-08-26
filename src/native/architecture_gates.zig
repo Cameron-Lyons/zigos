@@ -1297,6 +1297,9 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(object_store.BlobRecord) <= object_store.BLOB_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(object_store.BlobSlot) <= object_store.BLOB_SLOT_SIZE_CEILING_BYTES and
             @sizeOf(object_store.Store) <= object_store.STORE_SIZE_CEILING_BYTES,
+        .derives_blob_chunk_count_from_payload_length = object_store.DERIVES_BLOB_CHUNK_COUNT_FROM_PAYLOAD_LENGTH and
+            !@hasField(object_store.BlobRecord, "chunk_count") and
+            @hasDecl(object_store.BlobRecord, "chunkCount"),
         .keeps_object_model_state_within_ceiling = @sizeOf(object_store.ObjectRecord) <= object_store.OBJECT_RECORD_SIZE_CEILING_BYTES,
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
