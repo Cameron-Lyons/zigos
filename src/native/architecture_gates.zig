@@ -1246,6 +1246,10 @@ pub const indexed_hot_path_tables = .{
         .keeps_workspace_state_within_ceilings = @sizeOf(workspace.WorkspaceRecord) <= workspace.WORKSPACE_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(workspace.Directory) <= workspace.DIRECTORY_SIZE_CEILING_BYTES,
         .tracks_recoverable_deletes = @hasField(workspace.WorkspaceRecord, "recoverable_deletes"),
+        .heap_backs_recoverable_deletes_on_freestanding = workspace.HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING and
+            workspace.recoverable_delete_layout.heap_backs_log_on_freestanding and
+            workspace.recoverable_delete_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
+            workspace.recoverable_delete_layout.backing_size_bytes == @sizeOf(workspace.Entry) * workspace.MAX_RECOVERABLE_DELETES,
         .uses_compact_path_lengths = @sizeOf(workspace.WorkspacePathLength) == 1,
         .caches_leaf_hashes = @hasField(workspace.WorkspacePathIndex, "leaf_hashes"),
         .uses_index_root_address = @hasField(workspace.WorkspacePathIndex, "root_address"),

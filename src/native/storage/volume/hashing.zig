@@ -25,7 +25,7 @@ pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_error
     }
 
     hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intCast(record.counts.deleted_count));
-    for (record.recoverable_deletes.deleted_entries[0..record.counts.deleted_count]) |entry| {
+    for (record.recoverable_deletes.entriesConst(record.counts.deleted_count)) |entry| {
         hash = hashEntry(hash, entry);
     }
     return hash;

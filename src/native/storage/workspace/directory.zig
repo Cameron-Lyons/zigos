@@ -170,9 +170,18 @@ pub const EntryMutation = struct {
 };
 const MutationEntries = [MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation;
 const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
-pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 19_360 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs) 160_856 else 357_400;
+const RecoverableDeleteEntries = [MAX_RECOVERABLE_DELETES]Entry;
+pub const HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING = true;
+const heap_backed_recoverable_delete_logs = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs) 16_488 else 43_928;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs) 137_880 else 357_400;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
+const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
+pub const recoverable_delete_layout = .{
+    .heap_backs_log_on_freestanding = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*RecoverableDeleteEntries),
+    .backing_size_bytes = @sizeOf(RecoverableDeleteEntries),
+};
 
 pub const CreateRequest = struct {
     owner: principal.PrincipalId,
@@ -350,7 +359,7 @@ pub const WorkspaceMutationLog = struct {
         return &self.backing;
     }
 
-    fn releaseBacking(self: *WorkspaceMutationLog) void {
+    pub fn releaseBacking(self: *WorkspaceMutationLog) void {
         if (comptime heap_backed_mutation_logs) {
             if (self.backing) |backing| {
                 @memset(std.mem.asBytes(backing), 0);
@@ -383,7 +392,47 @@ pub const WorkspaceStagingState = struct {
 };
 
 pub const RecoverableDeleteLog = struct {
-    deleted_entries: [MAX_RECOVERABLE_DELETES]Entry = [_]Entry{Entry{}} ** MAX_RECOVERABLE_DELETES,
+    backing: RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) null else [_]Entry{Entry{}} ** MAX_RECOVERABLE_DELETES,
+
+    pub fn ensureBacking(self: *RecoverableDeleteLog) error{NoSpaceLeft}!void {
+        if (comptime heap_backed_recoverable_delete_logs) {
+            if (self.backing != null) return;
+            const allocation = kernel_memory.kmalloc(@sizeOf(RecoverableDeleteEntries)) orelse return error.NoSpaceLeft;
+            const backing: *RecoverableDeleteEntries = @ptrCast(@alignCast(allocation));
+            backing.* = [_]Entry{Entry{}} ** MAX_RECOVERABLE_DELETES;
+            self.backing = backing;
+        }
+    }
+
+    pub fn entries(self: *RecoverableDeleteLog) *RecoverableDeleteEntries {
+        if (comptime heap_backed_recoverable_delete_logs) {
+            return self.backing orelse
+                native_util.impossibleByInvariant("live recoverable deletes retain backing");
+        }
+        return &self.backing;
+    }
+
+    pub fn entriesConst(self: *const RecoverableDeleteLog, count: usize) []const Entry {
+        if (count == 0) return &.{};
+        if (comptime heap_backed_recoverable_delete_logs) {
+            const backing = self.backing orelse
+                native_util.impossibleByInvariant("non-empty recoverable deletes retain backing");
+            return backing[0..count];
+        }
+        return self.backing[0..count];
+    }
+
+    pub fn releaseBacking(self: *RecoverableDeleteLog) void {
+        if (comptime heap_backed_recoverable_delete_logs) {
+            if (self.backing) |backing| {
+                @memset(std.mem.asBytes(backing), 0);
+                kernel_memory.kfree(@ptrCast(backing));
+                self.backing = null;
+            }
+        } else {
+            @memset(std.mem.asBytes(&self.backing), 0);
+        }
+    }
 };
 
 pub const WorkspaceTableCounts = struct {
@@ -498,10 +547,10 @@ comptime {
     if (heap_backed_mutation_logs and @sizeOf(WorkspaceMutationLog) > 16) {
         @compileError("heap-backed workspace mutation logs exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and @sizeOf(WorkspaceSlot) > 19_368) {
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and @sizeOf(WorkspaceSlot) > 16_496) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -608,6 +657,7 @@ pub const Directory = struct {
         for (self.workspaces.slots[0..self.workspaces.next_unclaimed_index]) |*slot| {
             if (slot.in_use) {
                 slot.workspace.mutation_log.releaseBacking();
+                slot.workspace.recoverable_deletes.releaseBacking();
                 slot.* = WorkspaceSlot{};
             }
         }
@@ -956,10 +1006,11 @@ pub const Directory = struct {
         if (workspace.staging.transaction_open) return error.TransactionAlreadyOpen;
         if (findWorkspaceEntryIndex(workspace, path) != null) return false;
 
+        const deleted_entries = workspace.recoverable_deletes.entriesConst(workspace.counts.deleted_count);
         var index = workspace.counts.deleted_count;
         while (index > 0) {
             index -= 1;
-            const entry = workspace.recoverable_deletes.deleted_entries[index];
+            const entry = deleted_entries[index];
             if (!std.mem.eql(u8, entry.pathSlice(), path)) continue;
             if (workspace.counts.entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
             if (workspace.counts.entry_mutation_count >= MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
@@ -1604,17 +1655,18 @@ fn entryContentEql(left: Entry, right: Entry) bool {
 }
 
 fn appendDeleted(workspace: *WorkspaceRecord, entry: Entry) void {
+    const deleted_entries = workspace.recoverable_deletes.entries();
     if (workspace.counts.deleted_count < MAX_RECOVERABLE_DELETES) {
-        workspace.recoverable_deletes.deleted_entries[workspace.counts.deleted_count] = entry;
+        deleted_entries[workspace.counts.deleted_count] = entry;
         workspace.counts.deleted_count += 1;
         return;
     }
 
     var index: usize = 1;
     while (index < MAX_RECOVERABLE_DELETES) : (index += 1) {
-        workspace.recoverable_deletes.deleted_entries[index - 1] = workspace.recoverable_deletes.deleted_entries[index];
+        deleted_entries[index - 1] = deleted_entries[index];
     }
-    workspace.recoverable_deletes.deleted_entries[MAX_RECOVERABLE_DELETES - 1] = entry;
+    deleted_entries[MAX_RECOVERABLE_DELETES - 1] = entry;
 }
 
 fn appendEntryMutation(workspace: *WorkspaceRecord, generation: u32, entry: Entry) Error!void {
@@ -1684,6 +1736,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
     }
 
     var mutation_count_needed: usize = 0;
+    var deletion_needed = false;
     var current_index: usize = 0;
     var target_index: usize = 0;
     while (current_index < workspace.counts.entry_count or target_index < target_count) {
@@ -1694,6 +1747,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
         }
         if (target_index >= target_count) {
             mutation_count_needed += 1;
+            deletion_needed = true;
             current_index += 1;
             continue;
         }
@@ -1701,6 +1755,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
         switch (compareEntryPath(workspace.path_index.entries[current_index].pathSlice(), target_entries[target_index].pathSlice())) {
             .lt => {
                 mutation_count_needed += 1;
+                deletion_needed = true;
                 current_index += 1;
             },
             .gt => {
@@ -1717,6 +1772,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
         }
     }
     if (workspace.counts.entry_mutation_count + mutation_count_needed > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
+    if (deletion_needed) try workspace.recoverable_deletes.ensureBacking();
 
     const next_generation = workspace.generation + 1;
     current_index = 0;
@@ -1773,6 +1829,11 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
     const staged_entry_start = workspace.counts.entry_mutation_count;
     const staged_entry_count: usize = workspace.staging.staged_entry_count;
     const mutations = workspace.mutation_log.entries();
+    for (mutations[staged_entry_start .. staged_entry_start + staged_entry_count]) |mutation| {
+        if (!isDeleteTombstone(mutation.entry)) continue;
+        try workspace.recoverable_deletes.ensureBacking();
+        break;
+    }
     var structural_change = false;
     var object_index_dirty = false;
     for (0..staged_entry_count) |staged_index| {
@@ -1856,6 +1917,12 @@ test "workspace table counts share compact resident metadata" {
     try std.testing.expectEqual(WorkspaceShareGrantCount, @FieldType(WorkspaceTableCounts, "share_grant_count"));
     try std.testing.expectEqual(RecoverableDeleteCount, @FieldType(WorkspaceTableCounts, "deleted_count"));
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(WorkspaceTableCounts));
+}
+
+test "workspace recoverable deletion history uses on-demand freestanding backing" {
+    try std.testing.expect(recoverable_delete_layout.heap_backs_log_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), recoverable_delete_layout.freestanding_handle_size_bytes);
+    try std.testing.expectEqual(@as(usize, 2_880), recoverable_delete_layout.backing_size_bytes);
 }
 
 fn debugIndexChecksEnabled() bool {
