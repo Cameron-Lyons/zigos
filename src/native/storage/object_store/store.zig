@@ -38,6 +38,7 @@ pub const DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD = true;
 pub const DERIVES_OBJECT_MODEL_COUNTERS_FROM_VERSION_COUNT = true;
 pub const DERIVES_OBJECT_POLICY_AND_RECOVERY_FROM_CANONICAL_DATA = true;
 pub const DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS = true;
+pub const DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS = true;
 pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
@@ -303,13 +304,16 @@ pub const ObjectRecord = struct {
 pub const VersionRecord = struct {
     id: ids.VersionId,
     object_id: ids.ObjectId,
-    previous_version_id: ids.VersionId,
     parent_count: u8,
     parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
     object_type: ObjectType,
     version_address: VersionAddress,
     metadata: SignedMetadata,
     blob_slot_index: VersionBlobSlotIndex,
+
+    pub fn previousVersionId(self: *const VersionRecord) ids.VersionId {
+        return if (self.parent_count == 0) ids.VersionId.zero else self.parent_version_ids[0];
+    }
 };
 
 pub const ChunkRef = struct {
@@ -435,7 +439,6 @@ const VersionSlot = struct {
     version: VersionRecord = .{
         .id = ids.VersionId.zero,
         .object_id = ids.ObjectId.zero,
-        .previous_version_id = ids.VersionId.zero,
         .parent_count = 0,
         .parent_version_ids = [_]ids.VersionId{ids.VersionId.zero} ** MAX_VERSION_PARENTS,
         .object_type = .blob,
@@ -779,7 +782,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             try self.insertVersion(.{
                 .id = version_id,
                 .object_id = target_object.id,
-                .previous_version_id = previous_version_id,
                 .parent_count = parent_count,
                 .parent_version_ids = parents,
                 .object_type = request.object_type,
@@ -922,7 +924,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 const blob_record = self.versionBlob(version_record) orelse return error.BlobNotFound;
                 output[count] = historyEntryFor(version_record, blob_record.payloadLen());
                 count += 1;
-                current_version_id = version_record.previous_version_id;
+                current_version_id = version_record.previousVersionId();
             }
             return output[0..count];
         }
@@ -1183,7 +1185,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         fn insertVersion(self: *Self, request: struct {
             id: ids.VersionId,
             object_id: ids.ObjectId,
-            previous_version_id: ids.VersionId,
             parent_count: u8,
             parent_version_ids: [MAX_VERSION_PARENTS]ids.VersionId,
             object_type: ObjectType,
@@ -1194,7 +1195,6 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot = self.versions.reserve(request.id) orelse return error.VersionTableFull;
             slot.version.id = request.id;
             slot.version.object_id = request.object_id;
-            slot.version.previous_version_id = request.previous_version_id;
             slot.version.parent_count = request.parent_count;
             slot.version.parent_version_ids = request.parent_version_ids;
             slot.version.object_type = request.object_type;
@@ -1378,7 +1378,7 @@ fn historyEntryFor(version_record: *const VersionRecord, payload_len: usize) Obj
     var entry = ObjectHistoryEntry{
         .object_id = version_record.object_id,
         .version_id = version_record.id,
-        .previous_version_id = version_record.previous_version_id,
+        .previous_version_id = version_record.previousVersionId(),
         .parent_count = version_record.parent_count,
         .object_type = version_record.object_type,
         .payload_len = @intCast(payload_len),

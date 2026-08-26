@@ -1464,7 +1464,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
     const replicated_version = target_storage.version(replicated_entry.version_id) orelse return error.VersionNotFound;
     const replicated_payload = try target_storage.versionPayload(replicated_version);
     try std.testing.expectEqualStrings("source edit", replicated_payload);
-    try std.testing.expectEqual(target_conflict.version_id, replicated_version.previous_version_id);
+    try std.testing.expectEqual(target_conflict.version_id, replicated_version.previousVersionId());
     try std.testing.expectEqual(replicated_version.id.raw(), target_sync.replicaVersion(workspace_id, tablet, document_path).?);
     try std.testing.expect(source_sync.latestTransportFrameForPath(workspace_id, tablet, document_path) == null);
 

@@ -108,7 +108,8 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(!std.mem.eql(u8, &first.version_address, &second.version_address));
     try std.testing.expectEqualStrings("hello", try store.versionPayload(store.version(first.version_id).?));
     try std.testing.expectEqualStrings("hello, world", try store.versionPayload(store.latestVersion(first.object_id).?));
-    try std.testing.expectEqual(first.version_id, store.version(second.version_id).?.previous_version_id);
+    try std.testing.expect(store.version(first.version_id).?.previousVersionId().isZero());
+    try std.testing.expectEqual(first.version_id, store.version(second.version_id).?.previousVersionId());
     try std.testing.expectEqual(@as(u8, 1), store.version(second.version_id).?.parent_count);
     try std.testing.expectEqual(first.version_id, store.version(second.version_id).?.parent_version_ids[0]);
     try std.testing.expectEqualStrings("zigos-storage-key", store.latestVersion(first.object_id).?.metadata.signature.signer);
@@ -140,6 +141,8 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "recovery_history"));
     try std.testing.expect(object_store.DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS);
     try std.testing.expect(!@hasField(object_store.ObjectRecord, "provenance"));
+    try std.testing.expect(object_store.DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS);
+    try std.testing.expect(!@hasField(object_store.VersionRecord, "previous_version_id"));
     try std.testing.expectEqual(@as(usize, object_store.OBJECT_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectRecord));
 }
 

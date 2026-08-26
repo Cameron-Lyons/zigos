@@ -526,7 +526,7 @@ pub const DefaultMergeableDocumentAdapter = struct {
         if (request.remote_version_id == 0 or request.remote_version_id == request.entry.version_id.raw()) {
             return .{ .merged = true, .conflict = false };
         }
-        if (local_version.previous_version_id.raw() == request.remote_version_id) {
+        if (local_version.previousVersionId().raw() == request.remote_version_id) {
             return .{ .merged = true, .conflict = false };
         }
         return .{ .merged = true, .conflict = true };

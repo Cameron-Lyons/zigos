@@ -32,4 +32,4 @@ pub const log_record_checksum_offset: usize = log_record_payload_len_offset + lo
 pub const log_record_header_len: usize = log_record_checksum_offset + log_record_checksum_bytes;
 
 pub const payload_magic = "ZG4STATE";
-pub const format_version: u16 = 13;
+pub const format_version: u16 = 14;

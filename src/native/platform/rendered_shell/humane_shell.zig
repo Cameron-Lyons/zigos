@@ -1098,7 +1098,7 @@ pub const HumaneShell = struct {
         const payload = try self.storage.versionPayload(version);
         self.copyDocumentText(payload);
         self.state.document_version_id = version.id.raw();
-        self.state.document_previous_version_id = version.previous_version_id.raw();
+        self.state.document_previous_version_id = version.previousVersionId().raw();
     }
 
     fn copyDocumentText(self: *HumaneShell, text: []const u8) void {
