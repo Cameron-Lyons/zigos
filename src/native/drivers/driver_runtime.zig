@@ -15,17 +15,11 @@ const native_util = @import("../core/util.zig");
 const units = @import("../core/units.zig");
 
 pub const MAX_ACTIVATIONS: usize = 8;
-pub const MAX_ACTIVATION_PUBLISHER_BYTES: usize = bootstrap_driver_port.MAX_PUBLISHER_BYTES;
 pub const COMPACT_ACTIVATION_METADATA = true;
-pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 72;
-pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_376;
+pub const DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION = true;
+pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 40;
+pub const RUNTIME_SIZE_CEILING_BYTES: usize = 1_120;
 const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
-
-comptime {
-    if (MAX_ACTIVATION_PUBLISHER_BYTES > std.math.maxInt(u8)) {
-        @compileError("driver activation publisher text no longer fits compact metadata");
-    }
-}
 
 pub const ActivationMode = enum(u8) {
     control_only,
@@ -43,11 +37,14 @@ pub const ActivationRecord = struct {
     exclusive_claim: bool,
     activation_generation: u32,
     kernel_bootstrap: bool,
-    publisher_len: u8,
-    publisher: [MAX_ACTIVATION_PUBLISHER_BYTES]u8,
 
     pub fn publisherSlice(self: *const ActivationRecord) []const u8 {
-        return self.publisher[0..@as(usize, self.publisher_len)];
+        if (self.mode == .control_only) return "";
+        return bootstrap_driver_port.activePublicationPublisher(
+            self.device_class,
+            self.device_id,
+            self.service_id,
+        ) orelse "";
     }
 
     comptime {
@@ -61,7 +58,6 @@ pub const Error = error{
     ActivationTableFull,
     KernelBootstrapNotAuthorized,
     MissingDmaDomain,
-    PublisherTooLong,
 };
 
 const ActivationSlot = struct {
@@ -120,8 +116,6 @@ pub const Runtime = struct {
             .exclusive_claim = false,
             .activation_generation = 0,
             .kernel_bootstrap = false,
-            .publisher_len = 0,
-            .publisher = [_]u8{0} ** MAX_ACTIVATION_PUBLISHER_BYTES,
         };
         if (record.dma_domain_id == 0 or !record.iommu_enforced) return error.MissingDmaDomain;
 
@@ -137,7 +131,7 @@ pub const Runtime = struct {
                             driver.service_id,
                             driver.owner_task_id,
                         )) {
-                            try recordPublishedActivation(&record, .published_data_plane, publication);
+                            recordPublishedActivation(&record, .published_data_plane, publication);
                         }
                     }
                 }
@@ -158,7 +152,7 @@ pub const Runtime = struct {
                             self.kernel_port,
                         )) {
                             record.mode = .published_data_plane;
-                            try recordPublishedActivation(&record, record.mode, publication);
+                            recordPublishedActivation(&record, record.mode, publication);
                         }
                     }
                 }
@@ -168,7 +162,7 @@ pub const Runtime = struct {
                     if (publication.device_id == driver.device_id) {
                         if (publication.kernel_bootstrap) return error.KernelBootstrapNotAuthorized;
                         if (bootstrap_driver_port.activateDeviceDataPlane(driver.device_class, driver.device_id, driver.service_id)) {
-                            try recordPublishedActivation(&record, .published_data_plane, publication);
+                            recordPublishedActivation(&record, .published_data_plane, publication);
                         }
                     }
                 }
@@ -273,11 +267,10 @@ fn serviceKey(service_id: u64) u64 {
     return indexed_arena.nonZeroKey(service_id);
 }
 
-fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode, publication: anytype) Error!void {
+fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode, publication: anytype) void {
     record.mode = mode;
     record.exclusive_claim = true;
     record.kernel_bootstrap = publication.kernel_bootstrap;
-    record.publisher_len = @intCast(native_util.copyTextExact(record.publisher[0..], publication.publisherSlice()) catch return error.PublisherTooLong);
 }
 
 fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
@@ -295,14 +288,12 @@ fn zeroActivation() ActivationRecord {
         .exclusive_claim = false,
         .activation_generation = 0,
         .kernel_bootstrap = false,
-        .publisher_len = 0,
-        .publisher = [_]u8{0} ** MAX_ACTIVATION_PUBLISHER_BYTES,
     };
 }
 
 test "driver runtime uses compact bounded activation metadata" {
     try std.testing.expect(COMPACT_ACTIVATION_METADATA);
-    try std.testing.expectEqual(u8, @FieldType(ActivationRecord, "publisher_len"));
+    try std.testing.expect(DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION);
     try std.testing.expectEqual(@as(usize, ACTIVATION_RECORD_SIZE_CEILING_BYTES), @sizeOf(ActivationRecord));
     try std.testing.expectEqual(@as(usize, RUNTIME_SIZE_CEILING_BYTES), @sizeOf(Runtime));
 }
@@ -630,6 +621,11 @@ test "runtime deactivates only the requested driver class for shared services" {
         "zigos.system.compositor",
         false,
     ));
+    try std.testing.expect(bootstrap_driver_port.activePublicationPublisher(
+        .graphics_adapter,
+        graphics_device_id,
+        0,
+    ) == null);
 
     const graphics_driver = driver_service.DriverRecord{
         .service_id = service_id,
@@ -663,6 +659,8 @@ test "runtime deactivates only the requested driver class for shared services" {
     const input_activation = try runtime.activateAt(&input_driver, 11);
     try std.testing.expectEqual(ActivationMode.published_data_plane, graphics_activation.mode);
     try std.testing.expectEqual(ActivationMode.published_data_plane, input_activation.mode);
+    try std.testing.expectEqualStrings("zigos.system.compositor", graphics_activation.publisherSlice());
+    try std.testing.expectEqualStrings("zigos.system.compositor", input_activation.publisherSlice());
     try std.testing.expectEqual(@as(usize, 2), runtime.service_index.count(serviceKey(service_id)));
     try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
     try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
@@ -671,6 +669,7 @@ test "runtime deactivates only the requested driver class for shared services" {
     try std.testing.expectEqual(@as(u64, 0), bootstrap_driver_port.deviceDataPlanePublication(.graphics_adapter).?.active_service_id);
     try std.testing.expectEqual(service_id, bootstrap_driver_port.deviceDataPlanePublication(.input_device).?.active_service_id);
     try std.testing.expectEqual(ActivationMode.control_only, runtime.findByClass(.graphics_adapter).?.mode);
+    try std.testing.expectEqualStrings("", runtime.findByClass(.graphics_adapter).?.publisherSlice());
     try std.testing.expectEqual(ActivationMode.published_data_plane, runtime.findByClass(.input_device).?.mode);
     try std.testing.expect(runtime.findByClass(.input_device).?.exclusive_claim);
     try std.testing.expectEqual(@as(usize, 2), runtime.service_index.count(serviceKey(service_id)));

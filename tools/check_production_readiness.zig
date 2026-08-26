@@ -3643,6 +3643,31 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
 
+    const derived_activation_publisher_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = driver_runtime_path, .source = driver_runtime_source, .snippet = "pub const DERIVES_ACTIVATION_PUBLISHER_FROM_PUBLICATION = true" },
+        .{ .path = driver_runtime_path, .source = driver_runtime_source, .snippet = "bootstrap_driver_port.activePublicationPublisher(" },
+        .{ .path = bootstrap_driver_port_path, .source = bootstrap_driver_port_source, .snippet = "pub fn activePublicationPublisher(" },
+        .{ .path = bootstrap_driver_port_path, .source = bootstrap_driver_port_source, .snippet = "publication.active_service_id != service_id" },
+    };
+    for (derived_activation_publisher_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Driver activation metadata must derive publishers from active publications in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    const retired_activation_publisher_snippets = [_][]const u8{
+        "publisher_len: u8",
+        "publisher: [MAX_ACTIVATION_PUBLISHER_BYTES]u8",
+    };
+    for (retired_activation_publisher_snippets) |snippet| {
+        if (std.mem.indexOf(u8, driver_runtime_source, snippet) != null) {
+            try common.addError(errors, allocator, "Driver activation metadata must not restore duplicate publisher storage: {s}", .{snippet});
+        }
+    }
+
     const network_activation_snippets = [_][]const u8{
         "networkPublicationMatchesTargetI225",
         "device_inventory.requireProductionDriverDeviceId(.network_adapter)",
