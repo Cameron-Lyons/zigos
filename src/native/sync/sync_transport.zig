@@ -62,7 +62,12 @@ pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_840;
-pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_048;
+pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_048;
+pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 9_144;
+pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
+    FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES
+else
+    HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES;
 pub const NATIVE_DELIVERY_SIZE_CEILING_BYTES: usize = 520;
 pub const OBJECT_SHARE_ENVELOPE_SIZE_CEILING_BYTES: usize = 288;
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PacketTooLarge);
@@ -416,6 +421,7 @@ pub const NativeTransportService = struct {
     pub fn deinit(self: *NativeTransportService) void {
         self.endpoints.deinit();
         self.capture.deinit();
+        self.peer_links.deinit();
     }
 
     comptime {

@@ -46,7 +46,8 @@ pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
 pub const MAX_PEER_LINKS: usize = 32;
 pub const COMPACT_BOUNDED_METADATA = true;
 pub const DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT = true;
-pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = 2_096;
+pub const HEAP_BACKED_PEER_LINK_DIRECTORY_ON_FREESTANDING = true;
+pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 48 else 2_096;
 const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
 const PeerLinkIndex = indexed_arena.UniqueIndex(PEER_LINK_INDEX_CAPACITY);
 
@@ -60,18 +61,16 @@ pub const PeerLinkError = error{
     InvalidPeerAddress,
     PeerAddressConflict,
     PeerLinkDirectoryFull,
+    NoSpaceLeft,
 };
 
-pub const PeerLinkDirectory = struct {
+const PeerLinkDirectoryState = struct {
     links: [MAX_PEER_LINKS]PeerLink = [_]PeerLink{.{}} ** MAX_PEER_LINKS,
     link_count: usize = 0,
     device_index: PeerLinkIndex = PeerLinkIndex.init(),
     mac_index: PeerLinkIndex = PeerLinkIndex.init(),
 
-    pub fn bind(self: *PeerLinkDirectory, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
-        if (device.kind != .device or device.serial == 0) return error.InvalidPeerDevice;
-        if (!validUnicastMac(mac)) return error.InvalidPeerAddress;
-
+    fn bindValidated(self: *PeerLinkDirectoryState, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
         if (self.device_index.lookup(device.serial)) |index| {
             if (index >= self.link_count) native_util.impossibleByInvariant("peer device index points outside live links");
             const link = &self.links[index];
@@ -89,7 +88,7 @@ pub const PeerLinkDirectory = struct {
         self.link_count += 1;
     }
 
-    pub fn resolve(self: *const PeerLinkDirectory, device: principal.PrincipalId) ?[6]u8 {
+    pub fn resolve(self: *const PeerLinkDirectoryState, device: principal.PrincipalId) ?[6]u8 {
         if (device.kind != .device or device.serial == 0) return null;
         const index = self.device_index.lookup(device.serial) orelse return null;
         if (index >= self.link_count) native_util.impossibleByInvariant("peer device index points outside live links");
@@ -97,6 +96,79 @@ pub const PeerLinkDirectory = struct {
         if (!link.device.eql(device)) native_util.impossibleByInvariant("peer device index points at the wrong link");
         return link.mac;
     }
+
+    fn initializeAllocated(self: *PeerLinkDirectoryState) void {
+        @memset(std.mem.asBytes(self), 0);
+    }
+};
+
+const heap_backed_peer_link_directory = HEAP_BACKED_PEER_LINK_DIRECTORY_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
+const PeerLinkDirectoryBacking = if (heap_backed_peer_link_directory) ?*PeerLinkDirectoryState else PeerLinkDirectoryState;
+
+pub const PeerLinkDirectory = struct {
+    backing: PeerLinkDirectoryBacking = if (heap_backed_peer_link_directory) null else .{},
+
+    fn ensureBacking(self: *PeerLinkDirectory) error{NoSpaceLeft}!void {
+        if (comptime heap_backed_peer_link_directory) {
+            if (self.backing != null) return;
+            const allocation = kernel_memory.kmalloc(@sizeOf(PeerLinkDirectoryState)) orelse return error.NoSpaceLeft;
+            const backing: *PeerLinkDirectoryState = @ptrCast(@alignCast(allocation));
+            backing.initializeAllocated();
+            self.backing = backing;
+        }
+    }
+
+    fn state(self: *PeerLinkDirectory) *PeerLinkDirectoryState {
+        if (comptime heap_backed_peer_link_directory) return self.backing orelse unreachable;
+        return &self.backing;
+    }
+
+    fn stateConst(self: *const PeerLinkDirectory) ?*const PeerLinkDirectoryState {
+        if (comptime heap_backed_peer_link_directory) return self.backing;
+        return &self.backing;
+    }
+
+    pub fn bind(self: *PeerLinkDirectory, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
+        if (device.kind != .device or device.serial == 0) return error.InvalidPeerDevice;
+        if (!validUnicastMac(mac)) return error.InvalidPeerAddress;
+        try self.ensureBacking();
+        try self.state().bindValidated(device, mac);
+    }
+
+    pub fn resolve(self: *const PeerLinkDirectory, device: principal.PrincipalId) ?[6]u8 {
+        const directory = self.stateConst() orelse return null;
+        return directory.resolve(device);
+    }
+
+    pub fn count(self: *const PeerLinkDirectory) usize {
+        const directory = self.stateConst() orelse return 0;
+        return directory.link_count;
+    }
+
+    pub fn reset(self: *PeerLinkDirectory) void {
+        if (comptime heap_backed_peer_link_directory) {
+            if (self.backing) |backing| {
+                @memset(std.mem.asBytes(backing), 0);
+                kernel_memory.kfree(@ptrCast(backing));
+                self.backing = null;
+            }
+        } else {
+            self.backing = .{};
+        }
+    }
+
+    pub fn deinit(self: *PeerLinkDirectory) void {
+        self.reset();
+    }
+};
+
+pub const peer_link_directory_layout = .{
+    .heap_backs_directory_on_freestanding = HEAP_BACKED_PEER_LINK_DIRECTORY_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*PeerLinkDirectoryState),
+    .backing_size_bytes = @sizeOf(PeerLinkDirectoryState),
+    .freestanding_resident_savings_bytes = @sizeOf(PeerLinkDirectoryState) - @sizeOf(?*PeerLinkDirectoryState),
+    .uses_device_index = @hasField(PeerLinkDirectoryState, "device_index"),
+    .uses_mac_index = @hasField(PeerLinkDirectoryState, "mac_index"),
 };
 
 fn macIndexKey(mac: [6]u8) u64 {
@@ -282,6 +354,10 @@ pub const NativeNetworkStack = struct {
 
     pub fn init() NativeNetworkStack {
         return .{};
+    }
+
+    pub fn deinit(self: *NativeNetworkStack) void {
+        self.peer_links.deinit();
     }
 
     pub fn bindPeerLink(self: *NativeNetworkStack, device: principal.PrincipalId, mac: [6]u8) PeerLinkError!void {
@@ -1021,6 +1097,7 @@ fn verifiedDriverPeerBoot(generation: u64) !measured_boot.BootRecord {
 
 test "peer link directory binds stable unicast routes and rejects ambiguity" {
     var directory = PeerLinkDirectory{};
+    defer directory.deinit();
     const first_device = principal.PrincipalId{ .kind = .device, .serial = 1 };
     const second_device = principal.PrincipalId{ .kind = .device, .serial = 2 };
     const first_mac = [_]u8{ 0x02, 0x5A, 0x47, 0, 0, 1 };
@@ -1028,9 +1105,7 @@ test "peer link directory binds stable unicast routes and rejects ambiguity" {
 
     try directory.bind(first_device, first_mac);
     try directory.bind(first_device, first_mac);
-    try std.testing.expectEqual(@as(usize, 1), directory.link_count);
-    try std.testing.expectEqual(@as(?usize, 0), directory.device_index.lookup(first_device.serial));
-    try std.testing.expectEqual(@as(?usize, 0), directory.mac_index.lookup(macIndexKey(first_mac)));
+    try std.testing.expectEqual(@as(usize, 1), directory.count());
     const resolved = directory.resolve(first_device).?;
     try std.testing.expectEqualSlices(u8, &first_mac, &resolved);
     try std.testing.expect(directory.resolve(second_device) == null);
@@ -1041,7 +1116,7 @@ test "peer link directory binds stable unicast routes and rejects ambiguity" {
     try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, .{ 0x01, 0, 0, 0, 0, 2 }));
     try std.testing.expectError(error.PeerAddressConflict, directory.bind(first_device, second_mac));
     try std.testing.expectError(error.PeerAddressConflict, directory.bind(second_device, first_mac));
-    try std.testing.expectEqual(@as(usize, 1), directory.link_count);
+    try std.testing.expectEqual(@as(usize, 1), directory.count());
 }
 
 test "network driver keeps bounded frame metadata compact" {
@@ -1060,6 +1135,12 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expect(bounded_metadata_layout.heap_backs_receive_queue_on_freestanding);
     try std.testing.expect(bounded_metadata_layout.uses_compact_active_frame_lengths);
     try std.testing.expect(bounded_metadata_layout.uses_compact_receive_queue_indices);
+    try std.testing.expect(peer_link_directory_layout.heap_backs_directory_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), peer_link_directory_layout.freestanding_handle_size_bytes);
+    try std.testing.expectEqual(@as(usize, 2_056), peer_link_directory_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 2_048), peer_link_directory_layout.freestanding_resident_savings_bytes);
+    try std.testing.expect(peer_link_directory_layout.uses_device_index);
+    try std.testing.expect(peer_link_directory_layout.uses_mac_index);
     try std.testing.expect(DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT);
     try std.testing.expect(!@hasField(NativeNetworkStack, "next_connection_id"));
     try std.testing.expectEqual(@as(usize, NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES), @sizeOf(NativeNetworkStack));
@@ -1067,6 +1148,7 @@ test "network driver keeps bounded frame metadata compact" {
 
 test "peer link directory has a fixed fail-closed capacity" {
     var directory = PeerLinkDirectory{};
+    defer directory.deinit();
     for (0..MAX_PEER_LINKS) |index| {
         try directory.bind(
             .{ .kind = .device, .serial = @as(u64, @intCast(index + 1)) },
@@ -1077,7 +1159,7 @@ test "peer link directory has a fixed fail-closed capacity" {
         .{ .kind = .device, .serial = MAX_PEER_LINKS + 1 },
         .{ 0x02, 0x5A, 0x47, 0, 1, 1 },
     ));
-    try std.testing.expectEqual(MAX_PEER_LINKS, directory.link_count);
+    try std.testing.expectEqual(MAX_PEER_LINKS, directory.count());
     const last_device = principal.PrincipalId{ .kind = .device, .serial = MAX_PEER_LINKS };
     const last_mac = [_]u8{ 0x02, 0x5A, 0x47, 0, 0, MAX_PEER_LINKS };
     try std.testing.expectEqualSlices(u8, &last_mac, &directory.resolve(last_device).?);
@@ -1437,6 +1519,7 @@ test "native network stack gates service identity packets on attested policy cap
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
     var stack = NativeNetworkStack.init();
+    defer stack.deinit();
 
     try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
         .task_id = 70,
@@ -1628,6 +1711,7 @@ test "native network stack requires scoped local discovery before discovery broa
 
     var broker = network_policy.EgressBroker.init(&policies, &capabilities);
     var stack = NativeNetworkStack.init();
+    defer stack.deinit();
 
     try std.testing.expectError(error.EgressDenied, stack.openLocalDiscovery(&broker, .{
         .task_id = 80,

@@ -773,6 +773,13 @@ pub const indexed_hot_path_tables = .{
         .heap_backs_receive_queue_on_freestanding = network_driver_task.HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING and
             network_driver_task.bounded_metadata_layout.heap_backs_receive_queue_on_freestanding and
             network_driver_task.bounded_metadata_layout.freestanding_receive_queue_handle_size_bytes <= network_driver_task.RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES,
+        .heap_backs_peer_links_on_freestanding = network_driver_task.HEAP_BACKED_PEER_LINK_DIRECTORY_ON_FREESTANDING and
+            network_driver_task.peer_link_directory_layout.heap_backs_directory_on_freestanding and
+            network_driver_task.peer_link_directory_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
+            network_driver_task.peer_link_directory_layout.backing_size_bytes == 2_056 and
+            network_driver_task.peer_link_directory_layout.freestanding_resident_savings_bytes == 2_048 and
+            network_driver_task.peer_link_directory_layout.uses_device_index and
+            network_driver_task.peer_link_directory_layout.uses_mac_index,
         .stores_compact_bounded_metadata = network_driver_task.COMPACT_BOUNDED_METADATA and
             @FieldType(network_driver_task.ReceiveResult, "length") == u16 and
             @FieldType(network_driver_task.NativeServiceIdentityConnection, "service_identity_len") == u8 and

@@ -668,6 +668,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
 
     var broker = sync.egressBroker(capability_table);
     var stack = network_driver_task.NativeNetworkStack.init();
+    defer stack.deinit();
     try std.testing.expectError(error.EgressDenied, stack.openServiceIdentity(&broker, .{
         .task_id = network_service_task.id,
         .principal_id = network_service_task.owner,
@@ -781,6 +782,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     try runtime.grantCapability(network_service_task.id, discovery_capability.id);
 
     var discovery_stack = network_driver_task.NativeNetworkStack.init();
+    defer discovery_stack.deinit();
     try std.testing.expectError(error.EgressDenied, discovery_stack.openLocalDiscovery(&broker, .{
         .task_id = network_service_task.id,
         .principal_id = network_service_task.owner,
