@@ -39,6 +39,7 @@ const input_driver_task = @import("drivers/input_driver_task.zig");
 const permission_review = @import("policy/permission_review.zig");
 const permission_review_service = @import("policy/permission_review_service.zig");
 const policy_mediation = @import("policy/policy_mediation.zig");
+const pci = @import("../kernel/drivers/pci.zig");
 const xhci = @import("../kernel/drivers/xhci.zig");
 const native_ux = @import("platform/native_ux.zig");
 const sync_transport_harness = @import("sync/sync_transport_harness.zig");
@@ -706,6 +707,11 @@ pub const indexed_hot_path_tables = .{
             @FieldType(driver_service.DriverRecord, "signer_len") == u8,
         .keeps_driver_state_within_ceilings = @sizeOf(driver_service.DriverRecord) <= driver_service.DRIVER_RECORD_SIZE_CEILING_BYTES and
             @sizeOf(driver_service.Directory) <= driver_service.DIRECTORY_SIZE_CEILING_BYTES,
+    },
+    .pci = .{
+        .heap_backs_inventory_on_freestanding = pci.HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING and
+            pci.inventory_layout.heap_backs_inventory_on_freestanding and
+            pci.inventory_layout.freestanding_handle_size_bytes <= pci.PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES,
     },
     .driver_publication = .{
         .stores_compact_publisher_lengths = bootstrap_driver_port.COMPACT_PUBLICATION_METADATA and

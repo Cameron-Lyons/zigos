@@ -1,5 +1,10 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const console = @import("../utils/console.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../memory/memory.zig")
+else
+    struct {};
 const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
@@ -86,6 +91,8 @@ pub const PCIDevice = struct {
 
 pub const PCI_DEVICE_SIZE_CEILING_BYTES: usize = 20;
 const PCI_INVENTORY_SIZE_CEILING_BYTES: usize = 5_120;
+pub const HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING = true;
+pub const PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 pub const MemoryBarWidth = enum {
     bits32,
@@ -107,7 +114,11 @@ pub const PCI_PROG_IF_XHCI: u8 = 0x30;
 pub const PCI_VENDOR_INTEL: u16 = 0x8086;
 pub const PCI_DEVICE_INTEL_I225_LM: u16 = 0x15F2;
 
-var boot_inventory: [PCI_INVENTORY_CAPACITY]PCIDevice = undefined;
+const PciInventory = [PCI_INVENTORY_CAPACITY]PCIDevice;
+const heap_backed_pci_inventory = builtin.target.os.tag == .freestanding and HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING;
+const PciInventoryBacking = if (heap_backed_pci_inventory) ?*PciInventory else PciInventory;
+
+var boot_inventory: PciInventoryBacking = if (heap_backed_pci_inventory) null else undefined;
 var boot_inventory_count: usize = 0;
 var boot_inventory_initialized = false;
 var boot_inventory_valid = false;
@@ -119,10 +130,19 @@ comptime {
     if (@sizeOf(PCIDevice) > PCI_DEVICE_SIZE_CEILING_BYTES) {
         @compileError("cached PCI device record exceeds its compact size ceiling");
     }
-    if (@sizeOf(@TypeOf(boot_inventory)) > PCI_INVENTORY_SIZE_CEILING_BYTES) {
+    if (@sizeOf(PciInventory) > PCI_INVENTORY_SIZE_CEILING_BYTES) {
         @compileError("cached PCI inventory exceeds its compact size ceiling");
     }
+    if (heap_backed_pci_inventory and @sizeOf(PciInventoryBacking) > PCI_INVENTORY_HANDLE_SIZE_CEILING_BYTES) {
+        @compileError("heap-backed PCI inventory exceeds its handle size ceiling");
+    }
 }
+
+pub const inventory_layout = .{
+    .inventory_size_bytes = @sizeOf(PciInventory),
+    .freestanding_handle_size_bytes = @sizeOf(?*PciInventory),
+    .heap_backs_inventory_on_freestanding = HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING,
+};
 
 pub const InitError = error{InvalidEcamAllocation};
 pub const QuiesceError = error{
@@ -155,6 +175,7 @@ pub fn init(allocation: mcfg.Allocation) InitError!void {
         return error.InvalidEcamAllocation;
     _ = std.math.cast(usize, last_address) orelse return error.InvalidEcamAllocation;
 
+    releaseBootInventory();
     ecam_allocation = allocation;
     mapped_configuration_page = null;
     boot_inventory_count = 0;
@@ -308,9 +329,35 @@ fn isPciBridge(device_info: PCIDevice) bool {
         device_info.subclass == PCI_SUBCLASS_PCI_TO_PCI;
 }
 
-fn appendBootDevice(device_info: PCIDevice) bool {
-    if (boot_inventory_count == boot_inventory.len) return false;
-    boot_inventory[boot_inventory_count] = device_info;
+fn bootInventory() ?*PciInventory {
+    if (comptime heap_backed_pci_inventory) return boot_inventory;
+    return &boot_inventory;
+}
+
+fn ensureBootInventory() ?*PciInventory {
+    if (bootInventory()) |inventory| return inventory;
+    if (comptime heap_backed_pci_inventory) {
+        const allocation = kernel_memory.kmalloc(@sizeOf(PciInventory)) orelse return null;
+        const inventory: *PciInventory = @ptrCast(@alignCast(allocation));
+        boot_inventory = inventory;
+        return inventory;
+    }
+    return &boot_inventory;
+}
+
+fn releaseBootInventory() void {
+    if (comptime heap_backed_pci_inventory) {
+        if (boot_inventory) |inventory| {
+            @memset(std.mem.asBytes(inventory), 0);
+            kernel_memory.kfree(@ptrCast(inventory));
+            boot_inventory = null;
+        }
+    }
+}
+
+fn appendBootDevice(inventory: *PciInventory, device_info: PCIDevice) bool {
+    if (boot_inventory_count == inventory.len) return false;
+    inventory[boot_inventory_count] = device_info;
     boot_inventory_count += 1;
     return true;
 }
@@ -341,6 +388,7 @@ fn buildBootInventory() void {
     boot_inventory_initialized = true;
     boot_inventory_count = 0;
     boot_inventory_valid = false;
+    const inventory = ensureBootInventory() orelse return;
 
     var visited = [_]bool{false} ** PCI_MAX_BUS_COUNT;
     var queue = [_]u8{0} ** PCI_MAX_BUS_COUNT;
@@ -353,7 +401,7 @@ fn buildBootInventory() void {
         var device: u8 = 0;
         while (device < PCI_MAX_DEVICE_COUNT) : (device += 1) {
             const function_zero = checkDevice(bus, device, 0) orelse continue;
-            if (!appendBootDevice(function_zero) or
+            if (!appendBootDevice(inventory, function_zero) or
                 !enqueueSecondaryBus(function_zero, &visited, &queue, &queue_tail))
             {
                 boot_inventory_count = 0;
@@ -364,7 +412,7 @@ fn buildBootInventory() void {
             var function: u8 = 1;
             while (function < PCI_MAX_FUNCTION_COUNT) : (function += 1) {
                 const device_info = checkDevice(bus, device, function) orelse continue;
-                if (!appendBootDevice(device_info) or
+                if (!appendBootDevice(inventory, device_info) or
                     !enqueueSecondaryBus(device_info, &visited, &queue, &queue_tail))
                 {
                     boot_inventory_count = 0;
@@ -379,7 +427,8 @@ fn buildBootInventory() void {
 fn bootDevices() []const PCIDevice {
     buildBootInventory();
     if (!boot_inventory_valid) return &.{};
-    return boot_inventory[0..boot_inventory_count];
+    const inventory = bootInventory() orelse return &.{};
+    return inventory[0..boot_inventory_count];
 }
 
 pub fn disableBusMastering(device_info: PCIDevice) void {
@@ -1036,6 +1085,12 @@ test "PCI inventory queries reuse one discovered device set" {
         matchesClassSubclassProgIfQuery,
     ) orelse return error.MissingDevice;
     try std.testing.expectEqual(@as(u16, 0xA80A), nvme.device_id);
+}
+
+test "PCI inventory retains its capacity with a bounded freestanding handle" {
+    try std.testing.expectEqual(@as(usize, 5_120), inventory_layout.inventory_size_bytes);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), inventory_layout.freestanding_handle_size_bytes);
+    try std.testing.expect(inventory_layout.heap_backs_inventory_on_freestanding);
 }
 
 test "PCI interrupt quiesce disables MSI and masks MSI-X" {
