@@ -8,7 +8,8 @@ const workspace = @import("../workspace.zig");
 
 pub const Error = volume_errors.Error;
 pub const COMPACT_ROOT_SUMMARY_METADATA = true;
-pub const ROOT_STATE_SIZE_CEILING_BYTES: usize = 272;
+pub const DERIVES_DELTA_WATERMARKS_FROM_ALLOCATION_CURSORS = true;
+pub const ROOT_STATE_SIZE_CEILING_BYTES: usize = 256;
 
 const CursorWriter = binary_cursor.Writer(Error, error.NoSpaceLeft);
 const CursorReader = binary_cursor.Reader(Error, error.CorruptImage);
@@ -34,8 +35,6 @@ pub const RootState = struct {
     next_version_id: u64 = 1,
     next_workspace_id: u64 = 1,
     next_snapshot_id: u64 = 1,
-    last_version_id: u64 = 0,
-    last_snapshot_id: u64 = 0,
     log_record_count: u16 = 0,
     log_segment_count: u16 = 0,
     compacted_generation: u64 = 0,
@@ -59,9 +58,12 @@ pub fn lastIssuedId(next_id: u64) u64 {
     return if (next_id == 0) std.math.maxInt(u64) else next_id - 1;
 }
 
-pub fn hasCanonicalDeltaWatermarks(root: RootState) bool {
-    return root.last_version_id == lastIssuedId(root.next_version_id) and
-        root.last_snapshot_id == lastIssuedId(root.next_snapshot_id);
+pub fn versionWatermark(root: RootState) u64 {
+    return lastIssuedId(root.next_version_id);
+}
+
+pub fn snapshotWatermark(root: RootState) u64 {
+    return lastIssuedId(root.next_snapshot_id);
 }
 
 pub fn hasRootMagic(buffer: []const u8) bool {
@@ -69,18 +71,18 @@ pub fn hasRootMagic(buffer: []const u8) bool {
         std.mem.eql(u8, buffer[0..volume_layout.root_magic.len], volume_layout.root_magic);
 }
 
-test "delta watermarks accept initial normal and exhausted states" {
-    try std.testing.expect(hasCanonicalDeltaWatermarks(.{}));
-    try std.testing.expect(hasCanonicalDeltaWatermarks(.{
+test "delta watermarks derive from allocation cursors" {
+    try std.testing.expect(DERIVES_DELTA_WATERMARKS_FROM_ALLOCATION_CURSORS);
+    try std.testing.expect(!@hasField(RootState, "last_version_id"));
+    try std.testing.expect(!@hasField(RootState, "last_snapshot_id"));
+    try std.testing.expectEqual(@as(u64, 0), versionWatermark(.{}));
+    try std.testing.expectEqual(@as(u64, 0), snapshotWatermark(.{}));
+    const exhausted = RootState{
         .next_version_id = 42,
-        .last_version_id = 41,
         .next_snapshot_id = 0,
-        .last_snapshot_id = std.math.maxInt(u64),
-    }));
-    try std.testing.expect(!hasCanonicalDeltaWatermarks(.{
-        .next_version_id = 42,
-        .last_version_id = 42,
-    }));
+    };
+    try std.testing.expectEqual(@as(u64, 41), versionWatermark(exhausted));
+    try std.testing.expectEqual(std.math.maxInt(u64), snapshotWatermark(exhausted));
 }
 
 pub fn nextRootSector(current: ?LoadedRoot) u32 {
@@ -155,8 +157,6 @@ pub fn encodeRoot(buffer: []u8, root: RootState) Error!void {
     try writer.writeU64(root.next_version_id);
     try writer.writeU64(root.next_workspace_id);
     try writer.writeU64(root.next_snapshot_id);
-    try writer.writeU64(root.last_version_id);
-    try writer.writeU64(root.last_snapshot_id);
     try writer.writeU16(root.log_record_count);
     try writer.writeU16(root.log_segment_count);
     try writer.writeU64(root.compacted_generation);
@@ -185,8 +185,6 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
         .next_version_id = try reader.readU64(),
         .next_workspace_id = try reader.readU64(),
         .next_snapshot_id = try reader.readU64(),
-        .last_version_id = try reader.readU64(),
-        .last_snapshot_id = try reader.readU64(),
     };
     root.log_record_count = try reader.readU16();
     root.log_segment_count = try reader.readU16();
@@ -209,12 +207,11 @@ pub fn parseRoot(buffer: []const u8) Error!RootState {
     const checksum_offset = reader.offset;
     const checksum = try reader.readU64();
     if (checksum != volume_hashing.checksumBytes(buffer[0..checksum_offset])) return error.ChecksumMismatch;
-    if (!hasCanonicalDeltaWatermarks(root)) return error.CorruptImage;
     return root;
 }
 
 test "storage root summary metadata stays compact" {
     try std.testing.expectEqual(u8, @FieldType(RootState, "workspace_summary_count"));
-    try std.testing.expectEqual(@as(usize, 272), @sizeOf(RootState));
-    try std.testing.expectEqual(@as(usize, 280), @sizeOf(LoadedRoot));
+    try std.testing.expectEqual(@as(usize, 256), @sizeOf(RootState));
+    try std.testing.expectEqual(@as(usize, 264), @sizeOf(LoadedRoot));
 }

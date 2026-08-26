@@ -233,8 +233,8 @@ test "storage volume preserves exhausted identifier watermarks" {
     _ = try volume.saveToImage(image, &store, &workspaces);
 
     const loaded_root = (try volume_root_slot.findLatestImageRoot(image)).?;
-    try std.testing.expectEqual(std.math.maxInt(u64), loaded_root.root.last_version_id);
-    try std.testing.expectEqual(std.math.maxInt(u64), loaded_root.root.last_snapshot_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), volume_root_slot.versionWatermark(loaded_root.root));
+    try std.testing.expectEqual(std.math.maxInt(u64), volume_root_slot.snapshotWatermark(loaded_root.root));
 
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();
@@ -272,9 +272,7 @@ test "storage volume compacts instead of trusting ahead delta watermarks" {
 
     var loaded_root = (try volume_root_slot.findLatestImageRoot(image)).?;
     loaded_root.root.next_version_id += 4;
-    loaded_root.root.last_version_id = volume_root_slot.lastIssuedId(loaded_root.root.next_version_id);
     loaded_root.root.next_snapshot_id += 4;
-    loaded_root.root.last_snapshot_id = volume_root_slot.lastIssuedId(loaded_root.root.next_snapshot_id);
     try volume_root_slot.writeImageRoot(image, loaded_root.sector_index, loaded_root.root);
 
     const second = try store.putVersion(.{
@@ -295,59 +293,6 @@ test "storage volume compacts instead of trusting ahead delta watermarks" {
     try std.testing.expectEqual(second.version_id, loaded_store.object(first.object_id).?.latest_version_id);
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 941 }, "watermark-notes").?;
     try std.testing.expect(loaded_workspaces.findSnapshotByLabel(loaded_notes.id, "after-watermark") != null);
-}
-
-test "storage volume compacts around a noncanonical newer root" {
-    const allocator = std.testing.allocator;
-    const image = try allocator.alloc(u8, image_bytes);
-    defer allocator.free(image);
-    @memset(image, 0);
-    const volume = try allocator.create(Volume);
-    defer allocator.destroy(volume);
-    volume.reset();
-
-    const signer = signing.SignerIdentity{
-        .label = "zigos-storage-root-selection",
-        .seed = signing.seedFromByte(0x52),
-    };
-    var store = object_store.Store.init();
-    var workspaces = workspace.Directory.init();
-    const first = try store.putVersion(.{
-        .preferred_object_id = object_store.ids.object(942),
-        .object_type = .document,
-        .payload = "first",
-        .metadata = try object_store.signMetadata(signer, "root-selection", "text/plain", .document, "first", 1),
-    });
-    _ = try volume.saveToImage(image, &store, &workspaces);
-    const second = try store.putVersion(.{
-        .preferred_object_id = first.object_id,
-        .object_type = .document,
-        .payload = "second",
-        .metadata = try object_store.signMetadata(signer, "root-selection", "text/plain", .document, "second", 2),
-        .parent_version_id = first.version_id,
-    });
-    _ = try volume.saveToImage(image, &store, &workspaces);
-
-    var newest = (try volume_root_slot.findLatestImageRoot(image)).?;
-    newest.root.last_version_id = newest.root.next_version_id;
-    try volume_root_slot.writeImageRoot(image, newest.sector_index, newest.root);
-
-    const third = try store.putVersion(.{
-        .preferred_object_id = first.object_id,
-        .object_type = .document,
-        .payload = "third",
-        .metadata = try object_store.signMetadata(signer, "root-selection", "text/plain", .document, "third", 3),
-        .parent_version_id = second.version_id,
-    });
-    const saved = try volume.saveToImage(image, &store, &workspaces);
-    try std.testing.expectEqual(@as(u64, 2), saved.generation);
-
-    var loaded_store = object_store.Store.init();
-    var loaded_workspaces = workspace.Directory.init();
-    _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
-    try std.testing.expectEqual(@as(usize, 3), loaded_store.versionCount());
-    try std.testing.expect(loaded_store.version(second.version_id) != null);
-    try std.testing.expectEqual(third.version_id, loaded_store.object(first.object_id).?.latest_version_id);
 }
 
 test "storage volume rejects replayed identifiers beyond root watermarks" {
@@ -374,7 +319,6 @@ test "storage volume rejects replayed identifiers beyond root watermarks" {
 
     var root = (try volume_root_slot.findLatestImageRoot(image)).?;
     root.root.next_version_id = 1;
-    root.root.last_version_id = 0;
     try volume_root_slot.writeImageRoot(image, root.sector_index, root.root);
 
     var loaded_store = object_store.Store.init();
