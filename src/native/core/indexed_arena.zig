@@ -354,6 +354,9 @@ pub fn MultimapIndex(
 
 pub const Options = struct {
     track_dirty: bool = false,
+    /// When false, callers must initialize the payload key before removing or
+    /// rebuilding a live slot so the primary index can be updated safely.
+    store_keys: bool = true,
 };
 
 pub fn IndexedArena(
@@ -396,6 +399,7 @@ pub fn IndexedArenaWithKeyOptions(
     if (capacity == 0) @compileError("indexed arena requires at least one slot");
     if (index_capacity < capacity) @compileError("indexed arena primary index capacity must cover slots");
     const dirty_capacity = if (options.track_dirty) capacity else 0;
+    const key_capacity = if (options.store_keys) capacity else 0;
     const DirtyIdIndex = if (options.track_dirty) UniqueIndex(index_capacity) else struct {};
     const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
     if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
@@ -426,7 +430,7 @@ pub fn IndexedArenaWithKeyOptions(
 
         slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
-        slot_keys: [capacity]Key = [_]Key{ids.zero(Key)} ** capacity,
+        slot_keys: [key_capacity]Key = [_]Key{ids.zero(Key)} ** key_capacity,
         free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
         free_head: FreeIndex = free_no_index,
         next_unclaimed_index: Count = 0,
@@ -453,7 +457,7 @@ pub fn IndexedArenaWithKeyOptions(
                 setSlotInUse(slot, false);
             }
             self.primary_index.reset();
-            @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
+            if (comptime options.store_keys) @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
             @memset(self.free_next[0..claimed_count], free_no_index);
             self.free_head = free_no_index;
             self.next_unclaimed_index = 0;
@@ -547,14 +551,19 @@ pub fn IndexedArenaWithKeyOptions(
                 if (existing_index != slot_index) return null;
             }
 
-            const previous_key = self.slot_keys[slot_index];
+            const previous_key = if (comptime options.store_keys) self.slot_keys[slot_index] else keyOf(slot);
             const previous_raw_key = ids.raw(previous_key);
+            if (comptime !options.store_keys) {
+                if (previous_raw_key == 0) native_util.impossibleByInvariant("indexed arena live slot requires a payload key before replacement");
+                const indexed_slot = self.primary_index.lookup(previous_raw_key) orelse native_util.impossibleByInvariant("indexed arena live payload key must exist in its primary index");
+                if (indexed_slot != slot_index) native_util.impossibleByInvariant("indexed arena live payload key must identify its slot");
+            }
             if (previous_raw_key != raw_key) {
                 if (previous_raw_key != 0) {
                     self.primary_index.remove(previous_raw_key);
                     self.noteDirty(previous_key);
                 }
-                self.slot_keys[slot_index] = key;
+                if (comptime options.store_keys) self.slot_keys[slot_index] = key;
                 self.primary_index.insertAbsent(raw_key, slot_index);
             }
             self.noteDirty(key);
@@ -580,7 +589,7 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn claimSlotMetadata(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
             setSlotInUse(&self.slots[slot_index], true);
-            self.slot_keys[slot_index] = key;
+            if (comptime options.store_keys) self.slot_keys[slot_index] = key;
             self.primary_index.insertAbsent(raw_key, slot_index);
             self.used_count += 1;
             if (mark_dirty) self.noteDirty(key);
@@ -633,14 +642,19 @@ pub fn IndexedArenaWithKeyOptions(
             const slot = &self.slots[slot_index];
             if (!slotInUse(slot)) return false;
 
-            const key = self.slot_keys[slot_index];
+            const key = if (comptime options.store_keys) self.slot_keys[slot_index] else keyOf(slot);
             const raw_key = ids.raw(key);
+            if (comptime !options.store_keys) {
+                if (raw_key == 0) native_util.impossibleByInvariant("indexed arena live slot requires a payload key before removal");
+                const indexed_slot = self.primary_index.lookup(raw_key) orelse native_util.impossibleByInvariant("indexed arena live payload key must exist in its primary index");
+                if (indexed_slot != slot_index) native_util.impossibleByInvariant("indexed arena live payload key must identify its slot");
+            }
             if (raw_key != 0) {
                 self.primary_index.remove(raw_key);
                 self.noteDirty(key);
             }
             slot.* = Slot{};
-            self.slot_keys[slot_index] = ids.zero(Key);
+            if (comptime options.store_keys) self.slot_keys[slot_index] = ids.zero(Key);
             self.used_count -= 1;
             self.pushFreeIndex(slot_index);
             return true;
@@ -648,7 +662,7 @@ pub fn IndexedArenaWithKeyOptions(
 
         pub fn rebuildPrimaryIndex(self: *Self) void {
             self.primary_index.reset();
-            self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
+            if (comptime options.store_keys) self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
             self.free_next = [_]FreeIndex{free_no_index} ** capacity;
             self.free_head = free_no_index;
             self.next_unclaimed_index = @intCast(capacity);
@@ -658,8 +672,11 @@ pub fn IndexedArenaWithKeyOptions(
                 if (slotInUse(slot)) {
                     const key = keyOf(slot);
                     const raw_key = ids.raw(key);
+                    if (comptime !options.store_keys) {
+                        if (raw_key == 0) native_util.impossibleByInvariant("indexed arena live slot requires a payload key before index rebuild");
+                    }
                     if (raw_key != 0) {
-                        self.slot_keys[slot_index] = key;
+                        if (comptime options.store_keys) self.slot_keys[slot_index] = key;
                         self.primary_index.insertAbsent(raw_key, slot_index);
                     }
                     self.used_count += 1;
@@ -781,7 +798,9 @@ pub fn IndexedArenaWithKeyOptions(
                 if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena primary index points outside slots");
                 const slot = &self.slots[slot_index];
                 if (!slotInUse(slot)) native_util.impossibleByInvariant("indexed arena primary index points at a free slot");
-                if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("indexed arena primary index points at the wrong key");
+                if (comptime options.store_keys) {
+                    if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("indexed arena primary index points at the wrong key");
+                }
                 const payload_key = keyOf(slot);
                 const raw_payload_key = ids.raw(payload_key);
                 if (raw_payload_key != 0 and raw_payload_key != raw_key) native_util.impossibleByInvariant("indexed arena slot payload key diverged from its primary index");
@@ -1779,6 +1798,34 @@ test "indexed arena supports explicit whole-slot overwrite and rekey" {
     try std.testing.expectEqual(first_index, arena.slotIndexOf(42).?);
     try std.testing.expectEqualStrings("replacement", arena.get(42).?.record.label);
     try std.testing.expectEqual(@as(?*TestSlot, null), arena.reserveForOverwrite(42));
+}
+
+test "indexed arenas can derive keys from live slots" {
+    const Arena = IndexedArenaWithKeyOptions(u64, TestSlot, 4, 8, testSlotId, .{ .track_dirty = true, .store_keys = false });
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(Arena, "slot_keys")));
+
+    var arena = Arena.init();
+    const first = arena.reserveForOverwrite(41).?;
+    first.* = .{
+        .in_use = true,
+        .record = .{ .id = 41, .owner = 7, .label = "first" },
+    };
+    const first_index = arena.slotIndexOf(41).?;
+    arena.clearDirty();
+
+    const replacement = arena.replaceAtIndexForOverwrite(42, first_index).?;
+    replacement.* = .{
+        .in_use = true,
+        .record = .{ .id = 42, .owner = 8, .label = "replacement" },
+    };
+    try std.testing.expectEqualSlices(u64, &.{ 41, 42 }, arena.dirtyIds());
+    arena.rebuildPrimaryIndex();
+    try std.testing.expect(arena.get(41) == null);
+    try std.testing.expectEqualStrings("replacement", arena.get(42).?.record.label);
+
+    arena.clearDirty();
+    try std.testing.expect(arena.removeIndex(first_index));
+    try std.testing.expectEqualSlices(u64, &.{42}, arena.dirtyIds());
 }
 
 test "indexed arena can reset membership while retaining unreachable payloads" {
