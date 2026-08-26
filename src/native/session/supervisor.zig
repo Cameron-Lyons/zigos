@@ -20,10 +20,11 @@ pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 24;
 pub const DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const SCHEMA_DERIVED_SERVICE_METADATA = true;
 pub const SERVICE_ID_IS_ISOLATION_DOMAIN = true;
+pub const DERIVES_SERVICE_IDS_FROM_ARENA_COUNT = true;
 pub const OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS = true;
 pub const OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES = true;
 pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_888;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_880;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
 
 comptime {
@@ -141,7 +142,6 @@ pub const supervisor_indexing = .{
 };
 
 pub const Supervisor = struct {
-    next_service_id: u64 = 1,
     service_arena: ServiceArena = ServiceArena.init(),
     service_class_index: ServiceClassIndex = ServiceClassIndex.init(),
     diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
@@ -194,7 +194,6 @@ pub const Supervisor = struct {
             .restart_count = 0,
         };
         self.service_class_index.insert(serviceClassKey(class), slot_index);
-        self.advanceNextServiceIdFrom(service_id);
         return &slot.service;
     }
 
@@ -416,11 +415,13 @@ pub const Supervisor = struct {
     }
 
     fn nextReservableServiceId(self: *const Supervisor) ?u64 {
-        if (self.serviceCount() >= MAX_SERVICES or self.next_service_id == 0) return null;
-        if (self.findConst(self.next_service_id) != null) {
+        const service_count = self.serviceCount();
+        if (service_count >= MAX_SERVICES) return null;
+        const service_id: u64 = @intCast(service_count + 1);
+        if (self.findConst(service_id) != null) {
             native_util.impossibleByInvariant("monotonic supervisor service ids are never reused");
         }
-        return self.next_service_id;
+        return service_id;
     }
 
     fn recordCrashForService(self: *Supervisor, service: *ServiceRecord, tick: u64, code: u32) void {
@@ -439,10 +440,6 @@ pub const Supervisor = struct {
     fn completeRestartForService(self: *Supervisor, service: *ServiceRecord, tick: u64) void {
         service.state = .healthy;
         self.record(service.id, .restart_completed, tick, service.restart_count);
-    }
-
-    fn advanceNextServiceIdFrom(self: *Supervisor, service_id: u64) void {
-        self.next_service_id = service_id +% 1;
     }
 
     fn record(
@@ -606,27 +603,28 @@ test "supervisor registers services using the contract boundary map" {
     try std.testing.expectEqual(ServiceState.healthy, service.state);
 }
 
-test "supervisor service identifiers stop at exhaustion" {
+test "supervisor derives contiguous service identifiers from arena count" {
     var supervisor = Supervisor.init();
 
-    supervisor.next_service_id = std.math.maxInt(u64);
-    const max_service = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 10 });
-    try std.testing.expectEqual(std.math.maxInt(u64), max_service.id);
-    try std.testing.expectEqual(std.math.maxInt(u64), max_service.isolationDomainId());
-    try std.testing.expectEqual(@as(u64, 0), supervisor.next_service_id);
-    try std.testing.expect(supervisor.find(0) == null);
-    try std.testing.expectError(error.ServiceTableFull, supervisor.register(.task_runtime, .{ .kind = .service, .serial = 11 }));
+    const first = try supervisor.register(.session_manager, .{ .kind = .service, .serial = 10 });
+    const second = try supervisor.register(.task_runtime, .{ .kind = .service, .serial = 11 });
+    const third = try supervisor.register(.network_stack, .{ .kind = .service, .serial = 12 });
+
+    try std.testing.expect(DERIVES_SERVICE_IDS_FROM_ARENA_COUNT);
+    try std.testing.expect(!@hasField(Supervisor, "next_service_id"));
+    try std.testing.expectEqual(@as(u64, 1), first.id);
+    try std.testing.expectEqual(@as(u64, 2), second.id);
+    try std.testing.expectEqual(@as(u64, 3), third.id);
+    try std.testing.expectEqual(@as(usize, 3), supervisor.serviceCount());
 }
 
-test "supervisor service ids do not advance when the table is full" {
+test "supervisor rejects registration when the service arena is full" {
     var supervisor = Supervisor.init();
     for (0..MAX_SERVICES) |index| {
         _ = try supervisor.register(.task_runtime, .{ .kind = .service, .serial = @intCast(index + 100) });
     }
 
-    const next_service_before = supervisor.next_service_id;
     try std.testing.expectError(error.ServiceTableFull, supervisor.register(.session_manager, .{ .kind = .service, .serial = 200 }));
-    try std.testing.expectEqual(next_service_before, supervisor.next_service_id);
     try std.testing.expectEqual(MAX_SERVICES, supervisor.serviceCount());
 }
 
@@ -689,7 +687,7 @@ test "supervisor keeps bounded diagnostic metadata compact" {
     try std.testing.expect(OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS);
     try std.testing.expect(!@hasField(ServiceRecord, "last_transition_tick"));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceRecord));
-    try std.testing.expectEqual(@as(usize, 3_888), @sizeOf(Supervisor));
+    try std.testing.expectEqual(@as(usize, 3_880), @sizeOf(Supervisor));
 }
 
 test "supervisor deinit clears retained diagnostic state" {
