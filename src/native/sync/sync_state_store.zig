@@ -24,7 +24,8 @@ const record_content_type = "application/zigos-sync-record";
 const record_metadata_label = "sync-state-record";
 const max_record_bytes: usize = 2048;
 pub const COMPACT_PATH_SET_METADATA = true;
-pub const PATH_SET_SIZE_CEILING_BYTES: usize = 10_088;
+pub const COMPACT_PATH_SET_FINGERPRINTS = true;
+pub const PATH_SET_SIZE_CEILING_BYTES: usize = 9_700;
 
 comptime {
     if (workspace.MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8) or
@@ -55,7 +56,7 @@ pub const PathSet = struct {
     paths: [workspace.MAX_WORKSPACE_ENTRIES][workspace.MAX_ENTRY_PATH_BYTES]u8 =
         [_][workspace.MAX_ENTRY_PATH_BYTES]u8{[_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
     lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = [_]u8{0} ** workspace.MAX_WORKSPACE_ENTRIES,
-    hashes: [workspace.MAX_WORKSPACE_ENTRIES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACE_ENTRIES,
+    fingerprints: [workspace.MAX_WORKSPACE_ENTRIES]u32 = [_]u32{0} ** workspace.MAX_WORKSPACE_ENTRIES,
     count: u8 = 0,
 
     fn add(self: *PathSet, path: []const u8) Error!void {
@@ -66,16 +67,16 @@ pub const PathSet = struct {
         @memset(self.paths[index][0..], 0);
         @memcpy(self.paths[index][0..path.len], path);
         self.lens[index] = @intCast(path.len);
-        self.hashes[index] = workspace.pathHash(path);
+        self.fingerprints[index] = pathFingerprint(path);
         self.count += 1;
     }
 
     fn contains(self: *const PathSet, path: []const u8) bool {
-        const hash = workspace.pathHash(path);
+        const fingerprint = pathFingerprint(path);
         var index: usize = 0;
         while (index < @as(usize, self.count)) : (index += 1) {
             const path_len: usize = self.lens[index];
-            if (self.hashes[index] != hash or path_len != path.len) continue;
+            if (self.fingerprints[index] != fingerprint or path_len != path.len) continue;
             if (std.mem.eql(u8, self.paths[index][0..path_len], path)) return true;
         }
         return false;
@@ -87,6 +88,11 @@ pub const PathSet = struct {
         }
     }
 };
+
+fn pathFingerprint(path: []const u8) u32 {
+    const hash = workspace.pathHash(path);
+    return @truncate(hash ^ (hash >> 32));
+}
 
 pub fn ensureWorkspace(storage: *storage_service.Service, owner: principal.PrincipalId) Error!u64 {
     const existing = storage.findWorkspace(owner, state_support.state_workspace_label) orelse try storage.createWorkspace(.{
@@ -1051,6 +1057,7 @@ fn parseTransportQueueKind(raw: u8) Error!state_support.TransportQueueKind {
 
 test "persistence path sets retain full capacity with compact metadata" {
     try std.testing.expect(@FieldType(PathSet, "lens") == [workspace.MAX_WORKSPACE_ENTRIES]u8);
+    try std.testing.expect(@FieldType(PathSet, "fingerprints") == [workspace.MAX_WORKSPACE_ENTRIES]u32);
     try std.testing.expect(@FieldType(PathSet, "count") == u8);
     try std.testing.expectEqual(@as(usize, PATH_SET_SIZE_CEILING_BYTES), @sizeOf(PathSet));
 

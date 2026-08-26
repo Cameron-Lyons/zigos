@@ -1194,6 +1194,9 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_path_set_metadata = sync_state_store.COMPACT_PATH_SET_METADATA and
             @FieldType(sync_state_store.PathSet, "lens") == [workspace.MAX_WORKSPACE_ENTRIES]u8 and
             @FieldType(sync_state_store.PathSet, "count") == u8,
+        .stores_compact_path_set_fingerprints = sync_state_store.COMPACT_PATH_SET_FINGERPRINTS and
+            @FieldType(sync_state_store.PathSet, "fingerprints") == [workspace.MAX_WORKSPACE_ENTRIES]u32 and
+            !@hasField(sync_state_store.PathSet, "hashes"),
         .keeps_path_set_within_ceiling = @sizeOf(sync_state_store.PathSet) <= sync_state_store.PATH_SET_SIZE_CEILING_BYTES,
         .uses_workspace_policy_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "workspace_policies"), "reserveIndex"),
         .uses_replica_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "replica_entries"), "reserveIndex"),
