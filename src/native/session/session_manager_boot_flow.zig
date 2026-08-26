@@ -56,6 +56,7 @@ pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKE
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
 pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING;
 pub const STACK_LOCAL_BOOT_SERVICE_BINDINGS = service_graph_builder.STACK_LOCAL_BOOT_SERVICE_BINDINGS;
+pub const WAITS_FOR_CURRENT_USERSPACE_SURFACE_PRESENTATION = true;
 pub const BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES = service_graph_builder.BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES;
 pub const boot_service_bindings_layout = service_graph_builder.boot_service_bindings_layout;
 pub const background_dispatch_layout = service_graph_builder.background_dispatch_layout;
@@ -643,7 +644,7 @@ pub const SessionManager = struct {
             var attempts: usize = 0;
             const dispatch_budget = runtime.taskSlotCapacity() * 8;
             while (attempts < dispatch_budget and
-                self.recovery_context.review_compositor_session.surfacePresentation(compositor_task.ui_surface_id.?) == null) : (attempts += 1)
+                !self.currentUserspaceSurfacePresentationReady(compositor_task)) : (attempts += 1)
             {
                 if (!self.userspaceSchedulerPtr().hasReadyTasks()) break;
                 _ = self.runUserspaceScheduler(@intCast(attempts + 1));
@@ -658,24 +659,9 @@ pub const SessionManager = struct {
     }
 
     fn proveUserspaceSurfacePresentation(self: *SessionManager, compositor_task: *const task_runtime.TaskRecord) bool {
+        if (!self.currentUserspaceSurfacePresentationReady(compositor_task)) return false;
         const surface_id = compositor_task.ui_surface_id orelse return false;
         const surface = self.recovery_context.review_compositor_session.surfacePresentation(surface_id) orelse return false;
-        if (surface.task_id != compositor_task.id or surface.presentation.revision == 0) return false;
-        const model = abi.surfaceModelKind(surface.presentation.model_kind) orelse return false;
-        if (model != .compositor) return false;
-        const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(compositor_task.id) orelse return false;
-        if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
-        const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
-            self.userspaceCatalogPtr(),
-            self.runtimePtr(),
-            compositor_task.id,
-        ) orelse return false;
-        if (mailbox.surface_presentation_capability_id == 0 or
-            mailbox.ui_surface_id != surface_id or
-            mailbox.ui_state_revision != surface.presentation.revision or
-            mailbox.ui_presented_revision != surface.presentation.revision or
-            mailbox.ui_presentation_failures != 0 or
-            mailbox.ui_last_presentation_status != @intFromEnum(abi.SyscallStatus.success)) return false;
 
         var storage: [compositor_display.MIN_WIDTH * compositor_display.MIN_HEIGHT]u8 = undefined;
         var framebuffer = compositor_display.Framebuffer.init(&storage, compositor_display.MIN_WIDTH, compositor_display.MIN_HEIGHT) catch return false;
@@ -688,6 +674,27 @@ pub const SessionManager = struct {
             self.recovery_context.review_compositor_session.active_window_id,
         ) catch return false;
         return true;
+    }
+
+    fn currentUserspaceSurfacePresentationReady(self: *SessionManager, compositor_task: *const task_runtime.TaskRecord) bool {
+        const surface_id = compositor_task.ui_surface_id orelse return false;
+        const surface = self.recovery_context.review_compositor_session.surfacePresentation(surface_id) orelse return false;
+        if (surface.task_id != compositor_task.id or surface.presentation.revision == 0) return false;
+        const model = abi.surfaceModelKind(surface.presentation.model_kind) orelse return false;
+        if (model != .compositor) return false;
+        const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(compositor_task.id) orelse return false;
+        if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
+        const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
+            self.userspaceCatalogPtr(),
+            self.runtimePtr(),
+            compositor_task.id,
+        ) orelse return false;
+        return mailbox.surface_presentation_capability_id != 0 and
+            mailbox.ui_surface_id == surface_id and
+            mailbox.ui_state_revision == surface.presentation.revision and
+            mailbox.ui_presented_revision == surface.presentation.revision and
+            mailbox.ui_presentation_failures == 0 and
+            mailbox.ui_last_presentation_status == @intFromEnum(abi.SyscallStatus.success);
     }
 
     fn printSurfacePresentationTelemetry(self: *SessionManager, task_id: u64) void {
