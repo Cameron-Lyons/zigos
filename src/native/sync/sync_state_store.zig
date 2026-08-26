@@ -932,7 +932,6 @@ fn repairNextIds(resident: *state_support.ResidentState) Error!void {
     }
     resident.persisted_state.next_contract_id = next_contract_id;
     resident.persisted_state.graph.rebuildIndexes();
-    resident.persisted_state.network_policies.next_policy_id = resident.nextPersistedPolicyId();
     resident.persisted_state.network_policies.rebuildIndexes();
     for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
         if (slot.in_use) try validateTransportFrameCursor(resident.persisted_state.next_transport_frame_id, slot.frame.id);
