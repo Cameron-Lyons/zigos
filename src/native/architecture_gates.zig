@@ -1306,7 +1306,10 @@ pub const indexed_hot_path_tables = .{
             @FieldType(supervisor.Supervisor, "diagnostic_count") == u8 and
             @FieldType(supervisor.Supervisor, "next_diagnostic_slot") == u8,
         .retains_only_actionable_diagnostics = supervisor.ACTIONABLE_DIAGNOSTICS_ONLY,
-        .stores_compact_diagnostic_events = @sizeOf(supervisor.DiagnosticEvent) <= supervisor.DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES,
+        .stores_compact_diagnostic_events = @sizeOf(supervisor.DiagnosticEvent) <= supervisor.DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES and
+            supervisor.OMITS_UNOBSERVED_DIAGNOSTIC_SEQUENCES and
+            !@hasField(supervisor.DiagnosticEvent, "sequence") and
+            !@hasField(supervisor.Supervisor, "next_diagnostic_sequence"),
         .heap_backs_actionable_diagnostics_on_freestanding = supervisor.HEAP_BACKED_ACTIONABLE_DIAGNOSTICS_ON_FREESTANDING,
         .keeps_supervisor_within_ceiling = @sizeOf(supervisor.Supervisor) <= supervisor.SUPERVISOR_SIZE_CEILING_BYTES,
     },
