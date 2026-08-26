@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
@@ -9,6 +10,10 @@ const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const network_policy = @import("../sync/network_policy.zig");
 const signing = @import("../core/signing.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/memory/memory.zig")
+else
+    struct {};
 
 pub const ReceiveStatus = enum(u8) {
     empty = 0,
@@ -127,6 +132,8 @@ pub const MAX_NATIVE_PAYLOAD_BYTES: usize = 160;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
 pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
 pub const RECEIVE_QUEUE_CAPACITY: usize = 32;
+pub const HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING = true;
+pub const RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const RECEIVE_RESULT_SIZE_CEILING_BYTES: usize = 4;
 pub const SERVICE_IDENTITY_CONNECTION_SIZE_CEILING_BYTES: usize = 320;
 pub const LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES: usize = 192;
@@ -559,12 +566,18 @@ const QueuedReceiveFrame = struct {
     length: u16 = 0,
     bytes: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES,
 };
+const ReceiveQueue = [RECEIVE_QUEUE_CAPACITY]QueuedReceiveFrame;
+const heap_backed_receive_queue = builtin.target.os.tag == .freestanding and HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING;
+const ReceiveQueueBacking = if (heap_backed_receive_queue) ?*ReceiveQueue else ReceiveQueue;
 comptime {
     if (@sizeOf(QueuedReceiveFrame) > QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES) {
         @compileError("network driver receive queue frame exceeds its compact layout ceiling");
     }
+    if (heap_backed_receive_queue and @sizeOf(ReceiveQueueBacking) > RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES) {
+        @compileError("heap-backed network receive queue exceeds its handle size ceiling");
+    }
 }
-var receive_queue: [RECEIVE_QUEUE_CAPACITY]QueuedReceiveFrame = [_]QueuedReceiveFrame{.{}} ** RECEIVE_QUEUE_CAPACITY;
+var receive_queue: ReceiveQueueBacking = if (heap_backed_receive_queue) null else [_]QueuedReceiveFrame{.{}} ** RECEIVE_QUEUE_CAPACITY;
 var receive_queue_head: u8 = 0;
 var receive_queue_tail: u8 = 0;
 var receive_queue_count: u8 = 0;
@@ -572,6 +585,9 @@ var receive_overflow_scratch: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECE
 
 pub const bounded_metadata_layout = .{
     .queued_receive_frame_size_bytes = @sizeOf(QueuedReceiveFrame),
+    .receive_queue_size_bytes = @sizeOf(ReceiveQueue),
+    .freestanding_receive_queue_handle_size_bytes = @sizeOf(?*ReceiveQueue),
+    .heap_backs_receive_queue_on_freestanding = HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING,
     .uses_compact_active_frame_lengths = @TypeOf(last_active_driver_frame_len) == u16 and
         @TypeOf(last_active_driver_rx_frame_len) == u16,
     .uses_compact_receive_queue_indices = @TypeOf(receive_queue_head) == u8 and
@@ -595,7 +611,7 @@ pub fn reset() void {
     active_network_policy_id = 0;
     clearTransmitTelemetry();
     clearReceiveTelemetry();
-    clearReceiveQueue();
+    releaseReceiveQueue();
 }
 
 pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
@@ -604,10 +620,11 @@ pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
 
 pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task_id: u64) bool {
     if (service_id == 0) return false;
+    const queue = ensureReceiveQueue() orelse return false;
+    resetReceiveQueue(queue);
     active_device = device;
     active_service_id = service_id;
     active_task_id = task_id;
-    clearReceiveQueue();
     return true;
 }
 
@@ -616,7 +633,7 @@ pub fn deactivateDevice(service_id: u64) bool {
     active_device = null;
     active_service_id = 0;
     active_task_id = 0;
-    clearReceiveQueue();
+    releaseReceiveQueue();
     clearEgressCapability();
     return true;
 }
@@ -662,11 +679,43 @@ pub fn clearReceiveTelemetry() void {
     @memset(last_active_driver_rx_frame[0..], 0);
 }
 
-fn clearReceiveQueue() void {
+fn receiveQueue() ?*ReceiveQueue {
+    if (comptime heap_backed_receive_queue) return receive_queue;
+    return &receive_queue;
+}
+
+fn ensureReceiveQueue() ?*ReceiveQueue {
+    if (receiveQueue()) |queue| return queue;
+    if (comptime heap_backed_receive_queue) {
+        const allocation = kernel_memory.kmalloc(@sizeOf(ReceiveQueue)) orelse return null;
+        const queue: *ReceiveQueue = @ptrCast(@alignCast(allocation));
+        @memset(std.mem.asBytes(queue), 0);
+        receive_queue = queue;
+        return queue;
+    }
+    return &receive_queue;
+}
+
+fn resetReceiveQueue(queue: *ReceiveQueue) void {
     receive_queue_head = 0;
     receive_queue_tail = 0;
     receive_queue_count = 0;
-    for (&receive_queue) |*frame| frame.length = 0;
+    for (queue) |*frame| frame.length = 0;
+}
+
+fn releaseReceiveQueue() void {
+    receive_queue_head = 0;
+    receive_queue_tail = 0;
+    receive_queue_count = 0;
+    if (comptime heap_backed_receive_queue) {
+        if (receive_queue) |queue| {
+            @memset(std.mem.asBytes(queue), 0);
+            kernel_memory.kfree(@ptrCast(queue));
+            receive_queue = null;
+        }
+    } else {
+        for (&receive_queue) |*frame| frame.length = 0;
+    }
 }
 
 pub fn activeDriverTransmitCount() usize {
@@ -727,8 +776,12 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         active_driver_rx_failure_count += 1;
         return .{ .status = .failed };
     };
+    const queue = receiveQueue() orelse {
+        active_driver_rx_failure_count += 1;
+        return .{ .status = .failed };
+    };
     if (receive_queue_count == 0) {
-        const service = serviceReceiveFrames(device, 1);
+        const service = serviceReceiveFrames(device, queue, 1);
         if (receive_queue_count == 0) {
             if (service.failed) return .{ .status = .failed };
             if (service.dropped != 0) return .{ .status = .dropped };
@@ -737,7 +790,7 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
     }
 
     const queue_head: usize = receive_queue_head;
-    const frame = &receive_queue[queue_head];
+    const frame = &queue[queue_head];
     defer {
         frame.length = 0;
         receive_queue_head = @intCast((queue_head + 1) % RECEIVE_QUEUE_CAPACITY);
@@ -754,16 +807,20 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
 pub fn servicePendingReceiveFrames(budget: usize) ReceiveServiceResult {
     const device = active_device orelse return .{};
     if (budget == 0 or !device.workPending()) return .{};
-    return serviceReceiveFrames(device, budget);
+    const queue = receiveQueue() orelse {
+        active_driver_rx_failure_count += 1;
+        return .{ .failed = true };
+    };
+    return serviceReceiveFrames(device, queue, budget);
 }
 
-fn serviceReceiveFrames(device: *const NetworkDevice, budget: usize) ReceiveServiceResult {
+fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budget: usize) ReceiveServiceResult {
     var service = ReceiveServiceResult{};
     while (service.polls < budget) {
         const queue_has_space = receive_queue_count < RECEIVE_QUEUE_CAPACITY;
         const queue_tail: usize = receive_queue_tail;
         const output = if (queue_has_space)
-            receive_queue[queue_tail].bytes[0..]
+            queue[queue_tail].bytes[0..]
         else
             receive_overflow_scratch[0..];
         const result = device.receive(output);
@@ -801,7 +858,7 @@ fn serviceReceiveFrames(device: *const NetworkDevice, budget: usize) ReceiveServ
                     service.dropped += 1;
                     continue;
                 }
-                const frame = &receive_queue[queue_tail];
+                const frame = &queue[queue_tail];
                 frame.length = result.length;
                 receive_queue_tail = @intCast((queue_tail + 1) % RECEIVE_QUEUE_CAPACITY);
                 receive_queue_count += 1;
@@ -998,6 +1055,9 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expectEqual(@as(usize, 192), @sizeOf(NativeLocalDiscoveryConnection));
     try std.testing.expectEqual(@as(usize, 288), @sizeOf(NativeLocalDiscoveryFrame));
     try std.testing.expectEqual(@as(usize, 1_502), bounded_metadata_layout.queued_receive_frame_size_bytes);
+    try std.testing.expectEqual(@as(usize, 48_064), bounded_metadata_layout.receive_queue_size_bytes);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), bounded_metadata_layout.freestanding_receive_queue_handle_size_bytes);
+    try std.testing.expect(bounded_metadata_layout.heap_backs_receive_queue_on_freestanding);
     try std.testing.expect(bounded_metadata_layout.uses_compact_active_frame_lengths);
     try std.testing.expect(bounded_metadata_layout.uses_compact_receive_queue_indices);
 }
