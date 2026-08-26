@@ -1117,6 +1117,7 @@ fn applyObjectRecord(_: *Volume, store: *object_store.Store, payload: []const u8
         .version_count = version_count,
     };
     store.objects.slots[slot_index].object = object_record;
+    store.objects.slots[slot_index].setArenaInUse(true);
     if (existing_slot_index == null) store.indexReplayedObjectSlot(slot_index);
     return object_id.raw();
 }
@@ -1303,7 +1304,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     try writer.writeU16(@intCast(snapshotCount(workspaces)));
 
     for (&store.objects.slots) |*slot| {
-        if (!slot.in_use) continue;
+        if (!slot.arenaInUse()) continue;
         try encodeObjectBody(&writer, &slot.object);
     }
 
@@ -1322,7 +1323,7 @@ fn serializeState(store: *const object_store.Store, workspaces: *const workspace
     }
 
     for (&store.versions.slots) |*slot| {
-        if (!slot.in_use) continue;
+        if (!slot.arenaInUse()) continue;
         try encodeVersionBody(&writer, store, &slot.version);
     }
 

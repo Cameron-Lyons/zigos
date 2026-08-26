@@ -397,12 +397,32 @@ pub fn IndexedArenaWithKeyOptions(
     if (index_capacity < capacity) @compileError("indexed arena primary index capacity must cover slots");
     const dirty_capacity = if (options.track_dirty) capacity else 0;
     const DirtyIdIndex = if (options.track_dirty) UniqueIndex(index_capacity) else struct {};
+    const custom_membership = @hasDecl(Slot, "arenaInUse") or @hasDecl(Slot, "setArenaInUse");
+    if (custom_membership and (!@hasDecl(Slot, "arenaInUse") or !@hasDecl(Slot, "setArenaInUse"))) {
+        @compileError("indexed arena custom slot membership requires arenaInUse and setArenaInUse");
+    }
+    if (!custom_membership and !@hasField(Slot, "in_use")) {
+        @compileError("indexed arena slots require an in_use field or custom membership accessors");
+    }
 
     return struct {
         const Self = @This();
         const FreeIndex = ReusableIndex(capacity);
         const Count = ReusableIndex(capacity);
         const free_no_index = reusableNoIndex(capacity);
+
+        inline fn slotInUse(slot: *const Slot) bool {
+            if (comptime custom_membership) return slot.arenaInUse();
+            return slot.in_use;
+        }
+
+        inline fn setSlotInUse(slot: *Slot, in_use: bool) void {
+            if (comptime custom_membership) {
+                slot.setArenaInUse(in_use);
+            } else {
+                slot.in_use = in_use;
+            }
+        }
 
         slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
@@ -430,7 +450,7 @@ pub fn IndexedArenaWithKeyOptions(
                 native_util.impossibleByInvariant("indexed arena dirty count fits its storage");
             }
             for (self.slots[0..claimed_count]) |*slot| {
-                slot.in_use = false;
+                setSlotInUse(slot, false);
             }
             self.primary_index.reset();
             @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
@@ -509,7 +529,7 @@ pub fn IndexedArenaWithKeyOptions(
             const raw_key = ids.raw(key);
             if (raw_key == 0 or slot_index >= capacity) return null;
             if (self.primary_index.lookup(raw_key) != null) return null;
-            if (self.slots[slot_index].in_use) return null;
+            if (slotInUse(&self.slots[slot_index])) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
 
             self.claimSlot(key, raw_key, slot_index, true);
@@ -522,7 +542,7 @@ pub fn IndexedArenaWithKeyOptions(
             const raw_key = ids.raw(key);
             if (raw_key == 0 or slot_index >= capacity) return null;
             const slot = &self.slots[slot_index];
-            if (!slot.in_use) return null;
+            if (!slotInUse(slot)) return null;
             if (self.primary_index.lookup(raw_key)) |existing_index| {
                 if (existing_index != slot_index) return null;
             }
@@ -545,7 +565,7 @@ pub fn IndexedArenaWithKeyOptions(
             const raw_key = ids.raw(key);
             if (raw_key == 0 or slot_index >= capacity) return null;
             if (self.primary_index.lookup(raw_key) != null) return null;
-            if (self.slots[slot_index].in_use) return null;
+            if (slotInUse(&self.slots[slot_index])) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
 
             self.slots[slot_index] = value;
@@ -559,7 +579,7 @@ pub fn IndexedArenaWithKeyOptions(
         }
 
         fn claimSlotMetadata(self: *Self, key: Key, raw_key: u64, slot_index: usize, mark_dirty: bool) void {
-            self.slots[slot_index].in_use = true;
+            setSlotInUse(&self.slots[slot_index], true);
             self.slot_keys[slot_index] = key;
             self.primary_index.insertAbsent(raw_key, slot_index);
             self.used_count += 1;
@@ -611,7 +631,7 @@ pub fn IndexedArenaWithKeyOptions(
         pub fn removeIndex(self: *Self, slot_index: usize) bool {
             if (slot_index >= capacity) return false;
             const slot = &self.slots[slot_index];
-            if (!slot.in_use) return false;
+            if (!slotInUse(slot)) return false;
 
             const key = self.slot_keys[slot_index];
             const raw_key = ids.raw(key);
@@ -635,7 +655,7 @@ pub fn IndexedArenaWithKeyOptions(
             self.used_count = 0;
 
             for (&self.slots, 0..) |*slot, slot_index| {
-                if (slot.in_use) {
+                if (slotInUse(slot)) {
                     const key = keyOf(slot);
                     const raw_key = ids.raw(key);
                     if (raw_key != 0) {
@@ -649,7 +669,7 @@ pub fn IndexedArenaWithKeyOptions(
             var slot_index = capacity;
             while (slot_index > 0) {
                 slot_index -= 1;
-                if (!self.slots[slot_index].in_use) self.pushFreeIndex(slot_index);
+                if (!slotInUse(&self.slots[slot_index])) self.pushFreeIndex(slot_index);
             }
         }
 
@@ -659,7 +679,7 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn findMatching(self: *Self, context: anytype, comptime matches: anytype) ?*Slot {
             for (self.slots[0..self.claimedCount()]) |*slot| {
-                if (!slot.in_use) continue;
+                if (!slotInUse(slot)) continue;
                 if (matches(context, slot)) return slot;
             }
             return null;
@@ -667,7 +687,7 @@ pub fn IndexedArenaWithKeyOptions(
 
         fn findConstMatching(self: *const Self, context: anytype, comptime matches: anytype) ?*const Slot {
             for (self.slots[0..self.claimedCount()]) |*slot| {
-                if (!slot.in_use) continue;
+                if (!slotInUse(slot)) continue;
                 if (matches(context, slot)) return slot;
             }
             return null;
@@ -683,7 +703,7 @@ pub fn IndexedArenaWithKeyOptions(
             if (secondary_index.lookup(key)) |slot_index| {
                 if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena secondary index points outside slots");
                 const slot = &self.slots[slot_index];
-                if (!slot.in_use) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
+                if (!slotInUse(slot)) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
                 if (!matches(context, slot)) native_util.impossibleByInvariant("indexed arena secondary index points at the wrong slot");
                 return slot;
             }
@@ -703,7 +723,7 @@ pub fn IndexedArenaWithKeyOptions(
             if (secondary_index.lookup(key)) |slot_index| {
                 if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena secondary index points outside slots");
                 const slot = &self.slots[slot_index];
-                if (!slot.in_use) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
+                if (!slotInUse(slot)) native_util.impossibleByInvariant("indexed arena secondary index points at a free slot");
                 if (!matches(context, slot)) native_util.impossibleByInvariant("indexed arena secondary index points at the wrong slot");
                 return slot;
             }
@@ -720,7 +740,7 @@ pub fn IndexedArenaWithKeyOptions(
         ) void {
             secondary_index.reset();
             for (self.slots, 0..) |slot, slot_index| {
-                if (!slot.in_use) continue;
+                if (!slotInUse(&slot)) continue;
                 const key = secondaryKeyOf(&slot);
                 if (key != 0) secondary_index.insert(key, slot_index);
             }
@@ -760,7 +780,7 @@ pub fn IndexedArenaWithKeyOptions(
             if (self.primary_index.lookup(raw_key)) |slot_index| {
                 if (slot_index >= capacity) native_util.impossibleByInvariant("indexed arena primary index points outside slots");
                 const slot = &self.slots[slot_index];
-                if (!slot.in_use) native_util.impossibleByInvariant("indexed arena primary index points at a free slot");
+                if (!slotInUse(slot)) native_util.impossibleByInvariant("indexed arena primary index points at a free slot");
                 if (ids.raw(self.slot_keys[slot_index]) != raw_key) native_util.impossibleByInvariant("indexed arena primary index points at the wrong key");
                 const payload_key = keyOf(slot);
                 const raw_payload_key = ids.raw(payload_key);
@@ -776,7 +796,7 @@ pub fn IndexedArenaWithKeyOptions(
         fn scanForKey(self: *const Self, key: Key) ?usize {
             const raw_key = ids.raw(key);
             for (self.slots[0..self.claimedCount()], 0..) |slot, slot_index| {
-                if (slot.in_use and ids.raw(keyOf(&slot)) == raw_key) return slot_index;
+                if (slotInUse(&slot) and ids.raw(keyOf(&slot)) == raw_key) return slot_index;
             }
             return null;
         }
@@ -797,7 +817,7 @@ pub fn IndexedArenaWithKeyOptions(
         }
 
         inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
-            if (slot_index >= capacity or self.slots[slot_index].in_use) return false;
+            if (slot_index >= capacity or slotInUse(&self.slots[slot_index])) return false;
             return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
         }
     };
@@ -1462,6 +1482,27 @@ test "paged arenas support slot-owned membership bits" {
     try std.testing.expectEqual(first_index, second_index);
     arena.resetRetainingPayloads();
     try std.testing.expect(!arena.slotAtConst(second_index).arenaInUse());
+}
+
+test "indexed arenas support slot-owned membership bits" {
+    const Arena = DirtyTrackedIndexedArenaWithKey(u64, PackedMembershipTestSlot, 4, 8, packedMembershipTestSlotId);
+    var arena = Arena.init();
+
+    const first_index = arena.reserveIndex(7).?;
+    const first = &arena.slots[first_index];
+    try std.testing.expect(first.arenaInUse());
+    first.record.id = 7;
+    try std.testing.expect(arena.getConst(7) == first);
+    try std.testing.expectEqual(@as(usize, 1), arena.dirtyIds().len);
+
+    try std.testing.expect(arena.removeIndex(first_index));
+    try std.testing.expect(!first.arenaInUse());
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+
+    const second_index = arena.reserveIndex(8).?;
+    try std.testing.expectEqual(first_index, second_index);
+    arena.resetRetainingPayloads();
+    try std.testing.expect(!arena.slots[second_index].arenaInUse());
 }
 
 test "arena free lists retain the highest reusable index at width boundaries" {

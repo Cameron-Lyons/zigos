@@ -75,6 +75,11 @@ test "blob state packs bounded values without overlap" {
 
 test "resident object metadata uses capacity-sized length fields" {
     try std.testing.expectEqual(@as(usize, 248), @sizeOf(SignedMetadata));
+    try std.testing.expect(object_store.PACKS_OBJECT_STORE_MEMBERSHIP_INTO_RECORD_PADDING);
+    try std.testing.expect(@hasField(object_store.ObjectRecord, "arena_in_use"));
+    try std.testing.expect(@hasField(object_store.VersionRecord, "arena_in_use"));
+    try std.testing.expectEqual(@as(usize, 24), object_store.OBJECT_SLOT_SIZE_CEILING_BYTES);
+    try std.testing.expectEqual(@as(usize, 320), object_store.VERSION_SLOT_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(usize, object_store.BLOB_RECORD_SIZE_CEILING_BYTES), @sizeOf(BlobRecord));
     try std.testing.expectEqual(@as(usize, object_store.BLOB_SLOT_SIZE_CEILING_BYTES), @sizeOf(BlobSlot));
 }
