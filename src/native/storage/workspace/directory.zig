@@ -172,15 +172,20 @@ const MutationEntries = [MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation;
 const heap_backed_mutation_logs = builtin.target.os.tag == .freestanding;
 const RecoverableDeleteEntries = [MAX_RECOVERABLE_DELETES]Entry;
 const WorkspaceEntries = [MAX_WORKSPACE_ENTRIES]Entry;
+const WorkspaceLeafHashes = [MAX_WORKSPACE_ENTRIES]SnapshotRootAddress;
+const WorkspaceEntryState = struct {
+    entries: WorkspaceEntries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+    leaf_hashes: WorkspaceLeafHashes = [_]SnapshotRootAddress{workspace_merkle.zeroRootAddress()} ** MAX_WORKSPACE_ENTRIES,
+};
 pub const HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING = true;
 const heap_backed_recoverable_delete_logs = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
 pub const HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING = true;
 const heap_backed_workspace_entries = HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
-pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 3_512 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 34_072 else 357_400;
+pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 440 else 43_928;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 9_496 else 357_400;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
-const WorkspaceEntryBacking = if (heap_backed_workspace_entries) ?*WorkspaceEntries else WorkspaceEntries;
+const WorkspaceEntryBacking = if (heap_backed_workspace_entries) ?*WorkspaceEntryState else WorkspaceEntryState;
 pub const recoverable_delete_layout = .{
     .heap_backs_log_on_freestanding = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_ON_FREESTANDING,
     .freestanding_handle_size_bytes = @sizeOf(?*RecoverableDeleteEntries),
@@ -188,8 +193,11 @@ pub const recoverable_delete_layout = .{
 };
 pub const workspace_entry_layout = .{
     .heap_backs_entries_on_freestanding = HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING,
-    .freestanding_handle_size_bytes = @sizeOf(?*WorkspaceEntries),
-    .backing_size_bytes = @sizeOf(WorkspaceEntries),
+    .freestanding_handle_size_bytes = @sizeOf(?*WorkspaceEntryState),
+    .entry_bytes = @sizeOf(WorkspaceEntries),
+    .leaf_hash_bytes = @sizeOf(WorkspaceLeafHashes),
+    .backing_size_bytes = @sizeOf(WorkspaceEntryState),
+    .caches_leaf_hashes = @hasField(WorkspaceEntryState, "leaf_hashes"),
 };
 
 pub const CreateRequest = struct {
@@ -331,29 +339,28 @@ pub const ExportPackage = struct {
 };
 
 pub const WorkspacePathIndex = struct {
-    entry_backing: WorkspaceEntryBacking = if (heap_backed_workspace_entries) null else [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+    entry_backing: WorkspaceEntryBacking = if (heap_backed_workspace_entries) null else .{},
     path_slots: [ENTRY_INDEX_CAPACITY]EntryIndexSlot = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
     object_slots: [ENTRY_OBJECT_INDEX_CAPACITY]EntryObjectIndexSlot = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY),
-    leaf_hashes: [MAX_WORKSPACE_ENTRIES]SnapshotRootAddress =
-        [_]SnapshotRootAddress{workspace_merkle.zeroRootAddress()} ** MAX_WORKSPACE_ENTRIES,
     root_address: SnapshotRootAddress = workspace_merkle.zeroRootAddress(),
 
     pub fn ensureEntryBacking(self: *WorkspacePathIndex) error{NoSpaceLeft}!void {
         if (comptime heap_backed_workspace_entries) {
             if (self.entry_backing != null) return;
-            const allocation = kernel_memory.kmalloc(@sizeOf(WorkspaceEntries)) orelse return error.NoSpaceLeft;
-            const backing: *WorkspaceEntries = @ptrCast(@alignCast(allocation));
-            backing.* = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+            const allocation = kernel_memory.kmalloc(@sizeOf(WorkspaceEntryState)) orelse return error.NoSpaceLeft;
+            const backing: *WorkspaceEntryState = @ptrCast(@alignCast(allocation));
+            backing.* = .{};
             self.entry_backing = backing;
         }
     }
 
     pub fn entries(self: *WorkspacePathIndex) *WorkspaceEntries {
         if (comptime heap_backed_workspace_entries) {
-            return self.entry_backing orelse
+            const backing = self.entry_backing orelse
                 native_util.impossibleByInvariant("non-empty workspace entries retain backing");
+            return &backing.entries;
         }
-        return &self.entry_backing;
+        return &self.entry_backing.entries;
     }
 
     pub fn entriesConst(self: *const WorkspacePathIndex, count: usize) []const Entry {
@@ -361,9 +368,18 @@ pub const WorkspacePathIndex = struct {
         if (comptime heap_backed_workspace_entries) {
             const backing = self.entry_backing orelse
                 native_util.impossibleByInvariant("non-empty workspace entries retain backing");
-            return backing[0..count];
+            return backing.entries[0..count];
         }
-        return self.entry_backing[0..count];
+        return self.entry_backing.entries[0..count];
+    }
+
+    pub fn leafHashes(self: *WorkspacePathIndex) *WorkspaceLeafHashes {
+        if (comptime heap_backed_workspace_entries) {
+            const backing = self.entry_backing orelse
+                native_util.impossibleByInvariant("non-empty workspace Merkle leaves retain backing");
+            return &backing.leaf_hashes;
+        }
+        return &self.entry_backing.leaf_hashes;
     }
 
     pub fn releaseEntryBacking(self: *WorkspacePathIndex) void {
@@ -657,7 +673,7 @@ comptime {
     if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceRecord) > WORKSPACE_RECORD_SIZE_CEILING_BYTES) {
         @compileError("heap-backed workspace records exceed their compact layout");
     }
-    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceSlot) > 3_520) {
+    if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries and @sizeOf(WorkspaceSlot) > 448) {
         @compileError("heap-backed workspace slots exceed their compact layout");
     }
 }
@@ -1596,8 +1612,12 @@ fn rebuildWorkspaceEntryIndex(workspace: *WorkspaceRecord) void {
         &workspace.path_index.object_slots,
         entries,
     );
-    workspace_merkle.rebuildPathMerkle(&workspace.path_index, entries);
-    if (workspace.counts.entry_count == 0) workspace.path_index.releaseEntryBacking();
+    if (workspace.counts.entry_count == 0) {
+        workspace.path_index.root_address = workspace_merkle.rootAddress(entries);
+        workspace.path_index.releaseEntryBacking();
+    } else {
+        workspace_merkle.rebuildPathMerkle(&workspace.path_index.root_address, workspace.path_index.leafHashes(), entries);
+    }
 }
 
 fn findWorkspaceEntryIndex(workspace: *const WorkspaceRecord, path: []const u8) ?usize {
@@ -1982,7 +2002,7 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
             object_index_dirty = object_index_dirty or
                 !entries.?[existing_index].object_id.eql(staged_entry.object_id);
             entries.?[existing_index] = staged_entry;
-            workspace_merkle.updatePathLeaf(&workspace.path_index, existing_index, staged_entry);
+            workspace_merkle.updatePathLeaf(workspace.path_index.leafHashes(), existing_index, staged_entry);
         } else {
             try insertSortedEntry(entries.?, &workspace.counts.entry_count, staged_entry);
             structural_change = true;
@@ -2000,7 +2020,10 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
                 entries.?[0..workspace.counts.entry_count],
             );
         }
-        workspace_merkle.refreshPathRoot(&workspace.path_index, workspace.counts.entry_count);
+        workspace_merkle.refreshPathRoot(
+            &workspace.path_index.root_address,
+            workspace.path_index.leafHashes()[0..workspace.counts.entry_count],
+        );
     }
 }
 
@@ -2056,10 +2079,12 @@ test "workspace recoverable deletion history uses on-demand freestanding backing
     try std.testing.expectEqual(@as(usize, 2_880), recoverable_delete_layout.backing_size_bytes);
 }
 
-test "workspace current entries use on-demand freestanding backing" {
+test "workspace entries and Merkle leaves share on-demand freestanding backing" {
     try std.testing.expect(workspace_entry_layout.heap_backs_entries_on_freestanding);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), workspace_entry_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 11_520), workspace_entry_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 11_520), workspace_entry_layout.entry_bytes);
+    try std.testing.expectEqual(@as(usize, 3_072), workspace_entry_layout.leaf_hash_bytes);
+    try std.testing.expectEqual(@as(usize, 14_592), workspace_entry_layout.backing_size_bytes);
 }
 
 fn debugIndexChecksEnabled() bool {
@@ -2118,7 +2143,7 @@ test "workspace commits preserve path order and index rebuilds normalize loaded 
     workspace.path_index.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
     workspace.path_index.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
     const zero_root = workspace_merkle.zeroRootAddress();
-    for (workspace.path_index.leaf_hashes[0..workspace.counts.entry_count]) |*leaf_hash| {
+    for (workspace.path_index.leafHashes()[0..workspace.counts.entry_count]) |*leaf_hash| {
         leaf_hash.* = zero_root;
     }
     workspace.path_index.root_address = zero_root;
