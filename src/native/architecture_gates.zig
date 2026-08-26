@@ -1328,6 +1328,8 @@ pub const indexed_hot_path_tables = .{
         .reuses_bootstrap_task_records = session_manager_boot_flow.BOOTSTRAP_TASK_INDEX_RELOOKUPS == 0,
         .reuses_ui_authority_task_records = session_manager_boot_flow.UI_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,
         .waits_for_current_userspace_surface_presentation = session_manager_boot_flow.WAITS_FOR_CURRENT_USERSPACE_SURFACE_PRESENTATION,
+        .derives_compositor_broker_service_id = session_manager_boot_flow.DERIVES_COMPOSITOR_BROKER_SERVICE_ID and
+            !@hasField(session_manager_boot_flow.SessionManager, "compositor_broker_service_id"),
         .caches_surface_authority_lifecycle_generation = @hasField(session_manager_boot_flow.SessionManager, "surface_authority_scanned_lifecycle_generation"),
         .omits_unobserved_authority_failure_counters = !@hasField(session_manager_boot_flow.SessionManager, "input_authority_failures") and
             !@hasField(session_manager_boot_flow.SessionManager, "surface_authority_failures"),
