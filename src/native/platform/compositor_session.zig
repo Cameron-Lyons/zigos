@@ -30,6 +30,7 @@ pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 pub const COMPACT_RECORD_METADATA = true;
 pub const COMPACT_SESSION_COUNT_METADATA = true;
+pub const HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING = true;
 pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
 pub const STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS: u8 = 1;
@@ -43,12 +44,13 @@ pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 520;
 pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_552;
 pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_560;
 pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_560;
-pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 4_128;
+pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 216;
 pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_SESSION_SIZE_CEILING_BYTES
 else
     HOST_SESSION_SIZE_CEILING_BYTES;
 const LEASE_SUMMARY_BUFFER_BYTES: usize = 96;
+const heap_backed_window_state = builtin.target.os.tag == .freestanding and HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING;
 const heap_backed_review_items = builtin.target.os.tag == .freestanding;
 pub const HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING = true;
 const heap_backed_surface_arena = builtin.target.os.tag == .freestanding and HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING;
@@ -259,6 +261,38 @@ const TaskWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WI
 const ReviewerWindowIndex = indexed_arena.MultimapIndex(MAX_WINDOWS, MAX_WINDOWS, WINDOW_INDEX_CAPACITY);
 pub const WindowReviewItemIndex = indexed_arena.MultimapIndex(MAX_REVIEW_ITEMS, MAX_REVIEW_ITEMS, REVIEW_ITEM_INDEX_CAPACITY);
 
+pub const WindowState = struct {
+    windows: WindowArena = WindowArena.init(),
+    window_order: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS,
+    task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
+    task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
+    reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
+
+    fn init() WindowState {
+        return .{};
+    }
+
+    fn initializeAllocated(self: *WindowState) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.windows.free_head = indexed_arena.reusableNoIndex(MAX_WINDOWS);
+        self.task_bundle_index.reset();
+        for (&self.task_window_index.buckets) |*bucket| bucket.* = .{};
+        for (&self.task_window_index.links) |*link| link.* = .{};
+        self.task_window_index.free_bucket_head = indexed_arena.reusableNoIndex(MAX_WINDOWS);
+        for (&self.reviewer_window_index.buckets) |*bucket| bucket.* = .{};
+        for (&self.reviewer_window_index.links) |*link| link.* = .{};
+        self.reviewer_window_index.free_bucket_head = indexed_arena.reusableNoIndex(MAX_WINDOWS);
+    }
+};
+
+const WindowStateStorage = if (heap_backed_window_state) ?*WindowState else WindowState;
+
+pub const window_state_layout = .{
+    .heap_backs_state_on_freestanding = HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*WindowState),
+    .backing_size_bytes = @sizeOf(WindowState),
+};
+
 fn initializeSurfaceArena(surfaces: *SurfaceArena) void {
     @memset(std.mem.asBytes(surfaces), 0);
     surfaces.free_head = indexed_arena.reusableNoIndex(MAX_PRESENTED_SURFACES);
@@ -379,15 +413,11 @@ pub const CheckpointStore = struct {
 pub const Session = struct {
     next_window_id: u64 = 1,
     active_window_id: u64 = 0,
-    windows: WindowArena = WindowArena.init(),
-    window_order: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS,
+    window_state: WindowStateStorage = if (heap_backed_window_state) null else WindowState.init(),
     window_count: SessionCount = 0,
     visible_window_count: SessionCount = 0,
     review_items: ReviewItemBackingStorage = if (heap_backed_review_items) null else ReviewItemBacking.init(),
     item_count: SessionCount = 0,
-    task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
-    task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
-    reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
     surfaces: SurfaceArenaBacking = if (heap_backed_surface_arena) null else SurfaceArena.init(),
     surface_task_index: SurfaceTaskIndex = SurfaceTaskIndex.init(),
     active_surface_head: u16 = NO_SURFACE_SLOT_INDEX,
@@ -400,19 +430,60 @@ pub const Session = struct {
 
     comptime {
         if (@sizeOf(@This()) > SESSION_SIZE_CEILING_BYTES) {
-            @compileError("compositor session exceeded its target-specific compact size ceiling");
+            @compileError(std.fmt.comptimePrint(
+                "compositor session size {d} exceeds its target-specific compact size ceiling",
+                .{@sizeOf(@This())},
+            ));
         }
     }
 
     pub fn deinit(self: *Session) void {
+        self.releaseWindowState();
         self.releaseReviewItems();
         self.releaseSurfaceArena();
+        self.active_window_id = 0;
+        self.window_count = 0;
+        self.visible_window_count = 0;
         self.item_count = 0;
     }
 
     pub fn reset(self: *Session) void {
         self.deinit();
         self.* = init();
+    }
+
+    fn windowState(self: *Session) ?*WindowState {
+        if (comptime heap_backed_window_state) return self.window_state;
+        return &self.window_state;
+    }
+
+    fn windowStateConst(self: *const Session) ?*const WindowState {
+        if (comptime heap_backed_window_state) return self.window_state;
+        return &self.window_state;
+    }
+
+    fn ensureWindowState(self: *Session) error{OutOfMemory}!*WindowState {
+        if (self.windowState()) |window_state| return window_state;
+        if (comptime heap_backed_window_state) {
+            const allocation = kernel_memory.kmalloc(@sizeOf(WindowState)) orelse return error.OutOfMemory;
+            const window_state: *WindowState = @ptrCast(@alignCast(allocation));
+            window_state.initializeAllocated();
+            self.window_state = window_state;
+            return window_state;
+        }
+        return &self.window_state;
+    }
+
+    fn releaseWindowState(self: *Session) void {
+        if (comptime heap_backed_window_state) {
+            if (self.window_state) |window_state| {
+                @memset(std.mem.asBytes(window_state), 0);
+                kernel_memory.kfree(@ptrCast(window_state));
+                self.window_state = null;
+            }
+        } else {
+            self.window_state = WindowState.init();
+        }
     }
 
     fn reviewItemsPtr(self: *Session) ?*ReviewItemBacking {
@@ -682,18 +753,21 @@ pub const Session = struct {
     }
 
     pub fn findWindow(self: *Session, window_id: u64) ?*WindowRecord {
-        const slot = self.windows.get(window_id) orelse return null;
+        const window_state = self.windowState() orelse return null;
+        const slot = window_state.windows.get(window_id) orelse return null;
         return &slot.window;
     }
 
     pub fn findWindowConst(self: *const Session, window_id: u64) ?*const WindowRecord {
-        const slot = self.windows.getConst(window_id) orelse return null;
+        const window_state = self.windowStateConst() orelse return null;
+        const slot = window_state.windows.getConst(window_id) orelse return null;
         return &slot.window;
     }
 
     pub fn findWindowForTaskBundle(self: *Session, task_id: u64, bundle_id: []const u8) ?*WindowRecord {
+        const window_state = self.windowState() orelse return null;
         const key = taskBundleKey(task_id, bundle_id);
-        const slot = self.windows.findByUniqueIndex(&self.task_bundle_index, key, .{
+        const slot = window_state.windows.findByUniqueIndex(&window_state.task_bundle_index, key, .{
             .task_id = task_id,
             .bundle_id = bundle_id,
         }, taskBundleMatches) orelse return null;
@@ -701,8 +775,9 @@ pub const Session = struct {
     }
 
     pub fn findWindowForTaskBundleConst(self: *const Session, task_id: u64, bundle_id: []const u8) ?*const WindowRecord {
+        const window_state = self.windowStateConst() orelse return null;
         const key = taskBundleKey(task_id, bundle_id);
-        const slot = self.windows.findConstByUniqueIndex(&self.task_bundle_index, key, .{
+        const slot = window_state.windows.findConstByUniqueIndex(&window_state.task_bundle_index, key, .{
             .task_id = task_id,
             .bundle_id = bundle_id,
         }, taskBundleMatches) orelse return null;
@@ -711,8 +786,9 @@ pub const Session = struct {
 
     pub fn setModalReviewer(self: *Session, window_id: u64, reviewer_task_id: u64) Error!*WindowRecord {
         if (reviewer_task_id == 0) return error.MalformedRequest;
-        const slot_index = self.windows.slotIndexOf(window_id) orelse return error.WindowNotFound;
-        const window = &self.windows.slots[slot_index].window;
+        const window_state = self.windowState() orelse return error.WindowNotFound;
+        const slot_index = window_state.windows.slotIndexOf(window_id) orelse return error.WindowNotFound;
+        const window = &window_state.windows.slots[slot_index].window;
         if (window.modal and window.reviewer_task_id == reviewer_task_id) return window;
         self.removeWindowFromReviewerIndex(slot_index, window);
         window.modal = true;
@@ -722,7 +798,8 @@ pub const Session = struct {
     }
 
     pub fn probeVisibleWindow(self: *const Session, buffer: []u8) bool {
-        for (self.window_order[0..@as(usize, self.window_count)]) |window_id| {
+        const window_state = self.windowStateConst() orelse return false;
+        for (window_state.window_order[0..@as(usize, self.window_count)]) |window_id| {
             const window = self.findWindowConst(window_id) orelse continue;
             if (!window.visible) continue;
             _ = renderWindowToBuffer(buffer, window) catch return false;
@@ -759,8 +836,10 @@ pub const Session = struct {
 
     pub fn windowAtOrder(self: *const Session, index: usize) ?*const WindowRecord {
         if (index >= @as(usize, self.window_count)) return null;
-        const window_id = self.window_order[index];
-        const slot = self.windows.getConst(window_id) orelse
+        const window_state = self.windowStateConst() orelse
+            native_util.impossibleByInvariant("non-empty compositor order retains window state");
+        const window_id = window_state.window_order[index];
+        const slot = window_state.windows.getConst(window_id) orelse
             native_util.impossibleByInvariant("window order points at a missing window");
         if (@as(usize, slot.order_index) != index) native_util.impossibleByInvariant("window order index matches its array position");
         return &slot.window;
@@ -780,8 +859,9 @@ pub const Session = struct {
 
     pub fn taskOwnsVisibleWindow(self: *const Session, task_id: u64) bool {
         if (task_id == 0) return false;
-        return self.indexHasVisibleWindow(&self.task_window_index, taskWindowKey(task_id), task_id, false) or
-            self.indexHasVisibleWindow(&self.reviewer_window_index, taskWindowKey(task_id), task_id, true);
+        const window_state = self.windowStateConst() orelse return false;
+        return self.indexHasVisibleWindow(&window_state.task_window_index, taskWindowKey(task_id), task_id, false) or
+            self.indexHasVisibleWindow(&window_state.reviewer_window_index, taskWindowKey(task_id), task_id, true);
     }
 
     pub fn activeWindow(self: *const Session) ?*const WindowRecord {
@@ -790,9 +870,10 @@ pub const Session = struct {
 
     pub fn activeWindowOrderIndex(self: *const Session) ?usize {
         if (self.active_window_id == 0) return null;
-        const slot = self.windows.getConst(self.active_window_id) orelse return null;
+        const window_state = self.windowStateConst() orelse return null;
+        const slot = window_state.windows.getConst(self.active_window_id) orelse return null;
         if (slot.order_index >= self.window_count) native_util.impossibleByInvariant("active window order index fits the live order");
-        if (self.window_order[@as(usize, slot.order_index)] != self.active_window_id) {
+        if (window_state.window_order[@as(usize, slot.order_index)] != self.active_window_id) {
             native_util.impossibleByInvariant("active window order index points at the active window");
         }
         return @intCast(slot.order_index);
@@ -800,6 +881,8 @@ pub const Session = struct {
 
     pub fn switchVisible(self: *Session, direction: SwitchDirection) Error!SwitchResult {
         if (self.visible_window_count == 0) return error.NoVisibleWindows;
+        const window_state = self.windowState() orelse
+            native_util.impossibleByInvariant("visible compositor windows retain window state");
         if (self.visible_window_count != self.window_count) {
             native_util.impossibleByInvariant("every live compositor window participates in visible order");
         }
@@ -814,8 +897,8 @@ pub const Session = struct {
             .next => 0,
             .previous => visible_window_count - 1,
         };
-        const window_id = self.window_order[target_index];
-        const slot = self.windows.get(window_id) orelse
+        const window_id = window_state.window_order[target_index];
+        const slot = window_state.windows.get(window_id) orelse
             native_util.impossibleByInvariant("visible window order points at a live window");
         if (@as(usize, slot.order_index) != target_index or !slot.window.visible) {
             native_util.impossibleByInvariant("visible window order index points at the expected window");
@@ -827,12 +910,17 @@ pub const Session = struct {
     pub fn closeWindowsForTask(self: *Session, task_id: u64) usize {
         if (task_id == 0) return 0;
 
+        const window_state = self.windowState() orelse {
+            self.removeSurfacesForTask(task_id);
+            return 0;
+        };
+
         var closed: usize = 0;
-        var slot_index = self.task_window_index.head(taskWindowKey(task_id));
+        var slot_index = window_state.task_window_index.head(taskWindowKey(task_id));
         while (slot_index != indexed_arena.no_index) {
-            const next_slot_index = self.task_window_index.next(slot_index);
+            const next_slot_index = window_state.task_window_index.next(slot_index);
             if (slot_index >= MAX_WINDOWS) native_util.impossibleByInvariant("task window index points outside window slots");
-            const slot = &self.windows.slots[slot_index];
+            const slot = &window_state.windows.slots[slot_index];
             if (!slot.in_use) native_util.impossibleByInvariant("task window index points at a free window slot");
             if (slot.window.subject_task_id != task_id) native_util.impossibleByInvariant("task window index points at the wrong task");
             if (self.closeWindowSlot(slot_index)) closed += 1;
@@ -855,19 +943,20 @@ pub const Session = struct {
     }
 
     pub fn snapshotInto(self: *const Session, stored: *SessionSnapshot) void {
+        const window_state = self.windowStateConst();
         stored.* = .{
             .next_window_id = self.next_window_id,
             .active_window_id = self.active_window_id,
-            .windows = self.windows,
-            .window_order = self.window_order,
+            .windows = if (window_state) |state| state.windows else WindowArena.init(),
+            .window_order = if (window_state) |state| state.window_order else [_]u64{0} ** MAX_WINDOWS,
             .window_count = self.window_count,
             .visible_window_count = self.visible_window_count,
             .items = undefined,
             .item_order = undefined,
             .item_count = self.item_count,
-            .task_bundle_index = self.task_bundle_index,
-            .task_window_index = self.task_window_index,
-            .reviewer_window_index = self.reviewer_window_index,
+            .task_bundle_index = if (window_state) |state| state.task_bundle_index else TaskBundleIndex.init(),
+            .task_window_index = if (window_state) |state| state.task_window_index else TaskWindowIndex.init(),
+            .reviewer_window_index = if (window_state) |state| state.reviewer_window_index else ReviewerWindowIndex.init(),
             .window_review_item_index = undefined,
             .surfaces = if (self.surfaceArenaConst()) |surfaces| surfaces.* else SurfaceArena.init(),
             .surface_task_index = self.surface_task_index,
@@ -884,9 +973,15 @@ pub const Session = struct {
         } else if (self.item_count != 0) {
             native_util.impossibleByInvariant("non-empty compositor review state retains backing");
         }
+        if (window_state == null and self.window_count != 0) {
+            native_util.impossibleByInvariant("non-empty compositor window state retains backing");
+        }
     }
 
     pub fn restoreFromSnapshot(self: *Session, stored: *const SessionSnapshot) Error!void {
+        const retained_window_state = self.windowState() != null;
+        const window_state = if (stored.window_count == 0) null else try self.ensureWindowState();
+        errdefer if (!retained_window_state and window_state != null) self.releaseWindowState();
         const retained_review_items = self.reviewItemsPtr() != null;
         const review_items = if (stored.item_count == 0) null else try self.ensureReviewItems();
         errdefer if (!retained_review_items and review_items != null) self.releaseReviewItems();
@@ -895,18 +990,22 @@ pub const Session = struct {
         errdefer if (!retained_surfaces and surfaces != null) self.releaseSurfaceArena();
         self.next_window_id = stored.next_window_id;
         self.active_window_id = stored.active_window_id;
-        self.windows = stored.windows;
-        self.window_order = stored.window_order;
         self.window_count = stored.window_count;
         self.visible_window_count = stored.visible_window_count;
         self.item_count = stored.item_count;
-        self.task_bundle_index = stored.task_bundle_index;
-        self.task_window_index = stored.task_window_index;
-        self.reviewer_window_index = stored.reviewer_window_index;
         self.surface_task_index = stored.surface_task_index;
         self.active_surface_head = stored.active_surface_head;
         self.active_surface_tail = stored.active_surface_tail;
         self.last_surface_prune_generation = 0;
+        if (window_state) |state| {
+            state.windows = stored.windows;
+            state.window_order = stored.window_order;
+            state.task_bundle_index = stored.task_bundle_index;
+            state.task_window_index = stored.task_window_index;
+            state.reviewer_window_index = stored.reviewer_window_index;
+        } else {
+            self.releaseWindowState();
+        }
         if (review_items) |items| {
             items.items = stored.items;
             items.item_order = stored.item_order;
@@ -951,17 +1050,18 @@ pub const Session = struct {
     }
 
     fn allocateWindow(self: *Session) Error!WindowAllocation {
-        if (self.windows.countInUse() >= MAX_WINDOWS) return error.WindowTableFull;
         const window_id = self.next_window_id;
         if (window_id == 0) return error.WindowIdExhausted;
-        const slot_index = self.windows.reserveIndex(window_id) orelse return error.WindowTableFull;
+        const window_state = try self.ensureWindowState();
+        if (window_state.windows.countInUse() >= MAX_WINDOWS) return error.WindowTableFull;
+        const slot_index = window_state.windows.reserveIndex(window_id) orelse return error.WindowTableFull;
         self.next_window_id +%= 1;
-        const slot = &self.windows.slots[slot_index];
+        const slot = &window_state.windows.slots[slot_index];
         slot.window = zeroWindow();
         slot.window.id = window_id;
         const order_index: usize = self.window_count;
         slot.order_index = @intCast(order_index);
-        self.window_order[order_index] = window_id;
+        window_state.window_order[order_index] = window_id;
         self.window_count += 1;
         if (slot.window.visible) self.visible_window_count += 1;
         return .{ .slot_index = slot_index, .window = &slot.window };
@@ -969,33 +1069,43 @@ pub const Session = struct {
 
     fn indexWindowForTaskBundle(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (window.subject_task_id == 0 or window.bundle_id_len == 0) return;
-        self.task_bundle_index.insert(taskBundleKey(window.subject_task_id, window.bundleIdSlice()), slot_index);
+        const window_state = self.windowState() orelse
+            native_util.impossibleByInvariant("indexed compositor windows retain window state");
+        window_state.task_bundle_index.insert(taskBundleKey(window.subject_task_id, window.bundleIdSlice()), slot_index);
     }
 
     fn indexWindowForTask(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (window.subject_task_id == 0) return;
-        if (!self.task_window_index.append(taskWindowKey(window.subject_task_id), slot_index)) {
+        const window_state = self.windowState() orelse
+            native_util.impossibleByInvariant("indexed compositor windows retain window state");
+        if (!window_state.task_window_index.append(taskWindowKey(window.subject_task_id), slot_index)) {
             native_util.impossibleByInvariant("task window index capacity covers window slots");
         }
     }
 
     fn indexWindowForReviewer(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (!window.modal or window.reviewer_task_id == 0) return;
-        if (!self.reviewer_window_index.append(taskWindowKey(window.reviewer_task_id), slot_index)) {
+        const window_state = self.windowState() orelse
+            native_util.impossibleByInvariant("indexed compositor windows retain window state");
+        if (!window_state.reviewer_window_index.append(taskWindowKey(window.reviewer_task_id), slot_index)) {
             native_util.impossibleByInvariant("reviewer window index capacity covers window slots");
         }
     }
 
     fn removeWindowFromTaskIndex(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (window.subject_task_id == 0) return;
-        if (!self.task_window_index.remove(taskWindowKey(window.subject_task_id), slot_index)) {
+        const window_state = self.windowState() orelse
+            native_util.impossibleByInvariant("indexed compositor windows retain window state");
+        if (!window_state.task_window_index.remove(taskWindowKey(window.subject_task_id), slot_index)) {
             native_util.impossibleByInvariant("task window index missing live window");
         }
     }
 
     fn removeWindowFromReviewerIndex(self: *Session, slot_index: usize, window: *const WindowRecord) void {
         if (!window.modal or window.reviewer_task_id == 0) return;
-        if (!self.reviewer_window_index.remove(taskWindowKey(window.reviewer_task_id), slot_index)) {
+        const window_state = self.windowState() orelse
+            native_util.impossibleByInvariant("indexed compositor windows retain window state");
+        if (!window_state.reviewer_window_index.remove(taskWindowKey(window.reviewer_task_id), slot_index)) {
             native_util.impossibleByInvariant("reviewer window index missing live review window");
         }
     }
@@ -1007,10 +1117,12 @@ pub const Session = struct {
         task_id: u64,
         reviewer: bool,
     ) bool {
+        const window_state = self.windowStateConst() orelse
+            native_util.impossibleByInvariant("indexed compositor windows retain window state");
         const slot_index = index.head(key);
         if (slot_index == indexed_arena.no_index) return false;
         if (slot_index >= MAX_WINDOWS) native_util.impossibleByInvariant("task ownership index points outside window slots");
-        const slot = &self.windows.slots[slot_index];
+        const slot = &window_state.windows.slots[slot_index];
         if (!slot.in_use or !slot.window.visible) native_util.impossibleByInvariant("task ownership index points at an inactive window");
         const indexed_task_id = if (reviewer) slot.window.reviewer_task_id else slot.window.subject_task_id;
         if (indexed_task_id != task_id) native_util.impossibleByInvariant("task ownership index points at the wrong task");
@@ -1083,20 +1195,22 @@ pub const Session = struct {
 
     fn closeWindowSlot(self: *Session, slot_index: usize) bool {
         if (slot_index >= MAX_WINDOWS) return false;
-        const slot = &self.windows.slots[slot_index];
+        const window_state = self.windowState() orelse return false;
+        const slot = &window_state.windows.slots[slot_index];
         if (!slot.in_use) return false;
         const window = &slot.window;
         const window_id = window.id;
 
         self.removeReviewItemsForWindow(window_id);
         if (window.bundle_id_len != 0) {
-            self.task_bundle_index.remove(taskBundleKey(window.subject_task_id, window.bundleIdSlice()));
+            window_state.task_bundle_index.remove(taskBundleKey(window.subject_task_id, window.bundleIdSlice()));
         }
         self.removeWindowFromTaskIndex(slot_index, window);
         self.removeWindowFromReviewerIndex(slot_index, window);
         if (window.visible and self.visible_window_count != 0) self.visible_window_count -= 1;
         self.removeWindowOrderAt(@intCast(slot.order_index), window_id);
-        _ = self.windows.removeIndex(slot_index);
+        _ = window_state.windows.removeIndex(slot_index);
+        if (self.window_count == 0) self.releaseWindowState();
         return true;
     }
 
@@ -1139,21 +1253,23 @@ pub const Session = struct {
     }
 
     fn removeWindowOrderAt(self: *Session, order_index: usize, window_id: u64) void {
+        const window_state = self.windowState() orelse
+            native_util.impossibleByInvariant("non-empty compositor order retains window state");
         const window_count: usize = self.window_count;
-        if (order_index >= window_count or self.window_order[order_index] != window_id) {
+        if (order_index >= window_count or window_state.window_order[order_index] != window_id) {
             native_util.impossibleByInvariant("removed window order index points at the removed window");
         }
         var index = order_index;
         while (index + 1 < window_count) : (index += 1) {
-            const shifted_window_id = self.window_order[index + 1];
-            const shifted_slot = self.windows.get(shifted_window_id) orelse
+            const shifted_window_id = window_state.window_order[index + 1];
+            const shifted_slot = window_state.windows.get(shifted_window_id) orelse
                 native_util.impossibleByInvariant("shifted window order points at a live window");
             shifted_slot.order_index = @intCast(index);
-            self.window_order[index] = shifted_window_id;
+            window_state.window_order[index] = shifted_window_id;
         }
         self.window_count -= 1;
-        self.window_order[@as(usize, self.window_count)] = 0;
-        const removed_slot = self.windows.get(window_id) orelse
+        window_state.window_order[@as(usize, self.window_count)] = 0;
+        const removed_slot = window_state.windows.get(window_id) orelse
             native_util.impossibleByInvariant("removed window remains live while order compacts");
         removed_slot.order_index = NO_WINDOW_ORDER_INDEX;
     }
@@ -1750,6 +1866,10 @@ const TEST_REVIEW_DECISION_BUFFER_BYTES: usize = 256;
 const TEST_COMPACT_RENDER_BUFFER_BYTES: usize = 320;
 
 test "compositor compact record metadata preserves exact text capacities" {
+    try std.testing.expect(HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING);
+    try std.testing.expect(window_state_layout.heap_backs_state_on_freestanding);
+    try std.testing.expectEqual(@sizeOf(?*anyopaque), window_state_layout.freestanding_handle_size_bytes);
+    try std.testing.expect(window_state_layout.backing_size_bytes > window_state_layout.freestanding_handle_size_bytes);
     try std.testing.expect(@FieldType(WindowSlot, "order_index") == WindowOrderIndex);
     try std.testing.expect(@FieldType(Session, "window_count") == SessionCount);
     try std.testing.expect(@FieldType(Session, "visible_window_count") == SessionCount);
@@ -2048,7 +2168,7 @@ test "compositor window order indexes saturated switching removal and restore" {
         const owner = if (order_index % 2 == 0) first_task else second_task;
         const window = try session.openTaskView(owner, "Saturated order");
         window_id.* = window.id;
-        try std.testing.expectEqual(order_index, session.windows.getConst(window.id).?.order_index);
+        try std.testing.expectEqual(order_index, session.windowStateConst().?.windows.getConst(window.id).?.order_index);
         try std.testing.expectEqual(window.id, session.windowAtOrder(order_index).?.id);
     }
     try std.testing.expectError(error.WindowTableFull, session.openTaskView(first_task, "Overflow"));
@@ -2076,7 +2196,7 @@ test "compositor window order indexes saturated switching removal and restore" {
     for (0..MAX_WINDOWS / 2) |order_index| {
         const expected_window_id = window_ids[order_index * 2 + 1];
         try std.testing.expectEqual(expected_window_id, restored.windowAtOrder(order_index).?.id);
-        try std.testing.expectEqual(order_index, restored.windows.getConst(expected_window_id).?.order_index);
+        try std.testing.expectEqual(order_index, restored.windowStateConst().?.windows.getConst(expected_window_id).?.order_index);
     }
 
     const compact_wrapped_first = try restored.switchVisible(.next);

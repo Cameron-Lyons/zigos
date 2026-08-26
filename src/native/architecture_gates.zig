@@ -936,11 +936,15 @@ pub const indexed_hot_path_tables = .{
         .keeps_snapshot_state_within_ceilings = @sizeOf(compositor_session.SessionSnapshot) <= compositor_session.SESSION_SNAPSHOT_SIZE_CEILING_BYTES and
             @sizeOf(compositor_session.CheckpointStore) <= compositor_session.CHECKPOINT_STORE_SIZE_CEILING_BYTES,
         .keeps_session_within_target_ceiling = @sizeOf(compositor_session.Session) <= compositor_session.SESSION_SIZE_CEILING_BYTES,
-        .uses_window_arena = @hasField(compositor_session.Session, "windows"),
+        .uses_window_arena = @hasField(compositor_session.WindowState, "windows") and
+            @hasField(compositor_session.SessionSnapshot, "windows"),
         .uses_review_item_arena = @hasDecl(compositor_session.ReviewItemArena, "reserveIndex"),
-        .uses_task_bundle_index = @hasField(compositor_session.Session, "task_bundle_index"),
-        .uses_task_window_index = @hasField(compositor_session.Session, "task_window_index"),
-        .uses_reviewer_window_index = @hasField(compositor_session.Session, "reviewer_window_index"),
+        .uses_task_bundle_index = @hasField(compositor_session.WindowState, "task_bundle_index") and
+            @hasField(compositor_session.SessionSnapshot, "task_bundle_index"),
+        .uses_task_window_index = @hasField(compositor_session.WindowState, "task_window_index") and
+            @hasField(compositor_session.SessionSnapshot, "task_window_index"),
+        .uses_reviewer_window_index = @hasField(compositor_session.WindowState, "reviewer_window_index") and
+            @hasField(compositor_session.SessionSnapshot, "reviewer_window_index"),
         .indexes_windows_from_reserved_slots = compositor_session.WINDOW_ALLOCATION_INDEX_RELOOKUPS == 0 and
             compositor_session.MODAL_REVIEWER_INDEX_RELOOKUPS == 0,
         .resolves_existing_surfaces_once = compositor_session.STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS == 1 and
@@ -955,6 +959,10 @@ pub const indexed_hot_path_tables = .{
         .tracks_active_surface_chain = @hasField(compositor_session.Session, "active_surface_head"),
         .caches_surface_prune_generation = @hasField(compositor_session.Session, "last_surface_prune_generation"),
         .heap_backs_surface_arena_on_freestanding = compositor_session.HEAP_BACKED_SURFACE_ARENA_ON_FREESTANDING,
+        .heap_backs_window_state_on_freestanding = compositor_session.HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING and
+            compositor_session.window_state_layout.heap_backs_state_on_freestanding and
+            compositor_session.window_state_layout.freestanding_handle_size_bytes <= @sizeOf(?*anyopaque) and
+            compositor_session.window_state_layout.backing_size_bytes > compositor_session.window_state_layout.freestanding_handle_size_bytes,
     },
     .input_router = .{
         .uses_inbox_arena = @hasDecl(@FieldType(input_router.Router, "inboxes"), "reserveIndex"),
