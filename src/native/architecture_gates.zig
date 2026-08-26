@@ -1324,6 +1324,7 @@ pub const indexed_hot_path_tables = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
         .reuses_bootstrap_task_records = session_manager_boot_flow.BOOTSTRAP_TASK_INDEX_RELOOKUPS == 0,
         .reuses_ui_authority_task_records = session_manager_boot_flow.UI_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,
+        .waits_for_current_userspace_surface_presentation = session_manager_boot_flow.WAITS_FOR_CURRENT_USERSPACE_SURFACE_PRESENTATION,
         .caches_surface_authority_lifecycle_generation = @hasField(session_manager_boot_flow.SessionManager, "surface_authority_scanned_lifecycle_generation"),
         .omits_unobserved_authority_failure_counters = !@hasField(session_manager_boot_flow.SessionManager, "input_authority_failures") and
             !@hasField(session_manager_boot_flow.SessionManager, "surface_authority_failures"),
