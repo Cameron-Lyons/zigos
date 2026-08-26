@@ -1041,6 +1041,11 @@ pub const indexed_hot_path_tables = .{
             @FieldType(sync_transport_harness.EncryptedPacket, "ciphertext_len") == u16 and
             @FieldType(sync_transport_harness.BootedOverlayRelayService, "relay_domain_len") == u8 and
             @FieldType(sync_transport_harness.TransportSession, "relay_domain_len") == u8,
+        .stores_compact_telemetry = sync_transport_harness.COMPACT_TRANSPORT_TELEMETRY and
+            @FieldType(sync_transport_harness.Relay, "accepted_packets") == sync_transport_harness.TelemetryCount and
+            @FieldType(sync_transport_harness.BootedOverlayRelayService, "rejected_packets") == sync_transport_harness.TelemetryCount and
+            @FieldType(sync_transport_harness.Harness, "created_sessions") == sync_transport_harness.TelemetryCount and
+            @FieldType(sync_transport_harness.EmulatedNativeTransport, "attempted_connections") == sync_transport_harness.TelemetryCount,
         .keeps_relay_state_within_ceilings = @sizeOf(sync_transport_harness.EncryptedPacket) <= sync_transport_harness.ENCRYPTED_PACKET_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport_harness.SignedEncryptedFrame) <= sync_transport_harness.SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport_harness.Relay) <= sync_transport_harness.RELAY_SIZE_CEILING_BYTES and
@@ -1060,6 +1065,10 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_native_result_metadata = sync_transport.COMPACT_NATIVE_RESULT_METADATA and
             @FieldType(sync_transport.NativeDelivery, "payload_len") == sync_transport.NativePayloadLength and
             @FieldType(sync_transport.ObjectShareEnvelope, "payload_len") == sync_transport.ObjectSharePayloadLength,
+        .stores_compact_telemetry = sync_transport_harness.COMPACT_TRANSPORT_TELEMETRY and
+            @FieldType(sync_transport.NativeTransportService, "opened_connections") == sync_transport.TelemetryCount and
+            @FieldType(sync_transport.NativeTransportService, "relay_fallback_count") == sync_transport.TelemetryCount and
+            @FieldType(sync_transport.NativeTransportService, "replay_rejection_count") == sync_transport.TelemetryCount,
         .keeps_capture_state_within_ceilings = @sizeOf(sync_transport.CapturedPacket) <= sync_transport.CAPTURED_PACKET_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport.PacketCapture) <= sync_transport.PACKET_CAPTURE_SIZE_CEILING_BYTES and
             @sizeOf(sync_transport.NativeTransportService) <= sync_transport.NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES,
