@@ -771,7 +771,7 @@ fn prepareSupervisorReadyFixture() void {
     if (!supervisor_ready_context.supervisor.noteContractBound(service_record.id, 194)) {
         benchmark_reporting.benchStepFailure("benchmark supervisor contract binding", error.ContractBindingFailed);
     }
-    if (!supervisor_ready_context.supervisor.markHealthy(service_record.id, 2)) {
+    if (!supervisor_ready_context.supervisor.markHealthy(service_record.id)) {
         benchmark_reporting.benchStepFailure("benchmark supervisor health", error.HealthTransitionFailed);
     }
 }
@@ -1799,7 +1799,7 @@ fn benchmarkUpdateHealthValidation(iteration: u32) u64 {
 fn benchmarkDriverRecoveryRestart(iteration: u32) u64 {
     var supervisor = supervisor_mod.Supervisor.init();
     const compositor = supervisor.register(.compositor_ui_session, service(50 + iteration)) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    if (!supervisor.markHealthy(compositor.id, 1 + iteration)) unreachable;
+    if (!supervisor.markHealthy(compositor.id)) unreachable;
 
     var directory = driver_service.Directory.init();
     var capabilities = capability.CapabilityTable.init();
@@ -2620,31 +2620,26 @@ fn prepareUpdateHealthFixture(iteration: u32) void {
         &update_health_context.supervisor,
         .policy_mediation,
         owner,
-        12 + iteration,
     );
     update_health_context.core_service_ids[1] = registerHealthyServiceForBenchmark(
         &update_health_context.supervisor,
         .package_install_update,
         owner,
-        12 + iteration,
     );
     update_health_context.core_service_ids[2] = registerHealthyServiceForBenchmark(
         &update_health_context.supervisor,
         .sync_replication,
         owner,
-        12 + iteration,
     );
     const network_service_id = registerHealthyServiceForBenchmark(
         &update_health_context.supervisor,
         .network_stack,
         owner,
-        12 + iteration,
     );
     const ui_service_id = registerHealthyServiceForBenchmark(
         &update_health_context.supervisor,
         .compositor_ui_session,
         owner,
-        12 + iteration,
     );
 
     update_health_context.request = .{
@@ -2662,11 +2657,10 @@ fn registerHealthyServiceForBenchmark(
     supervisor: *supervisor_mod.Supervisor,
     class: contract.ServiceClass,
     owner: principal.PrincipalId,
-    tick: u64,
 ) u64 {
     const service_record = supervisor.register(class, owner) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     if (!supervisor.noteContractBound(service_record.id, 100 + service_record.id)) unreachable;
-    if (!supervisor.markHealthy(service_record.id, tick)) unreachable;
+    if (!supervisor.markHealthy(service_record.id)) unreachable;
     return service_record.id;
 }
 

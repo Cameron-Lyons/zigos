@@ -65,8 +65,6 @@ pub const CoreServices = struct {
 
 pub const Error = userspace_boot_registry.Error || supervisor_mod.Error;
 
-const boot_health_tick: u64 = 0;
-
 pub fn principals() Principals {
     return .{
         .policy_authority = .{ .kind = .policy_authority, .serial = 1 },
@@ -138,7 +136,7 @@ pub fn registerCoreServices(
     for (service_catalog.catalog) |entry| {
         const service = serviceRecordForClass(services, entry.class) orelse
             native_util.impossibleByInvariant("the service catalog registers a record for every class");
-        _ = supervisor.markHealthy(service.id, boot_health_tick);
+        _ = supervisor.markHealthy(service.id);
     }
 
     common.printBootMarker(boot_markers.supervisor_ready);

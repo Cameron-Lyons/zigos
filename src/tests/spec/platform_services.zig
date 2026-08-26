@@ -351,7 +351,7 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
 
     var supervisor_instance = supervisor.Supervisor.init();
     const storage_record = try supervisor_instance.register(.storage_object, spec_support.service(140));
-    try std.testing.expect(supervisor_instance.markHealthy(storage_record.id, 1));
+    try std.testing.expect(supervisor_instance.markHealthy(storage_record.id));
 
     var directory = driver_service.Directory.init();
     var capabilities = capability.CapabilityTable.init();

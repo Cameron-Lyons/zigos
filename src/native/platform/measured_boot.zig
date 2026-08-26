@@ -1030,7 +1030,7 @@ test "critical service measurements bind launched userspace image artifacts" {
 
     var supervisor = supervisor_mod.Supervisor.init();
     const service = try supervisor.register(.storage_object, principal.PrincipalId{ .kind = .service, .serial = 40 });
-    try std.testing.expect(supervisor.markHealthy(service.id, 3));
+    try std.testing.expect(supervisor.markHealthy(service.id));
 
     var recorder = Recorder.init();
     recorder.begin(8);

@@ -20,8 +20,9 @@ pub const DIAGNOSTIC_EVENT_SIZE_CEILING_BYTES: usize = 32;
 pub const DIAGNOSTIC_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const SCHEMA_DERIVED_SERVICE_METADATA = true;
 pub const SERVICE_ID_IS_ISOLATION_DOMAIN = true;
-pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 48;
-pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 4_600;
+pub const OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS = true;
+pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
+pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 4_408;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
 
 comptime {
@@ -44,7 +45,6 @@ pub const ServiceRecord = struct {
     contract_endpoint_id: u64,
     state: ServiceState,
     restart_count: u16,
-    last_transition_tick: u64,
 
     pub fn isolationDomainId(self: *const ServiceRecord) u64 {
         return self.id;
@@ -194,7 +194,6 @@ pub const Supervisor = struct {
             .contract_endpoint_id = 0,
             .state = .registered,
             .restart_count = 0,
-            .last_transition_tick = 0,
         };
         self.service_class_index.insert(serviceClassKey(class), slot_index);
         self.advanceNextServiceIdFrom(service_id);
@@ -227,10 +226,9 @@ pub const Supervisor = struct {
         return left.isolationDomainId() != right.isolationDomainId();
     }
 
-    pub fn markHealthy(self: *Supervisor, service_id: u64, tick: u64) bool {
+    pub fn markHealthy(self: *Supervisor, service_id: u64) bool {
         const service = self.find(service_id) orelse return false;
         service.state = .healthy;
-        service.last_transition_tick = tick;
         return true;
     }
 
@@ -429,7 +427,6 @@ pub const Supervisor = struct {
 
     fn recordCrashForService(self: *Supervisor, service: *ServiceRecord, tick: u64, code: u32) void {
         service.state = .failed;
-        service.last_transition_tick = tick;
         self.record(service.id, .crash, tick, code);
     }
 
@@ -437,14 +434,12 @@ pub const Supervisor = struct {
         if (!service.descriptor().restartable) return false;
         service.state = .restarting;
         service.restart_count += 1;
-        service.last_transition_tick = tick;
         self.record(service.id, .restart_requested, tick, service.restart_count);
         return true;
     }
 
     fn completeRestartForService(self: *Supervisor, service: *ServiceRecord, tick: u64) void {
         service.state = .healthy;
-        service.last_transition_tick = tick;
         self.record(service.id, .restart_completed, tick, service.restart_count);
     }
 
@@ -540,7 +535,6 @@ fn zeroService() ServiceRecord {
         .contract_endpoint_id = 0,
         .state = .registered,
         .restart_count = 0,
-        .last_transition_tick = 0,
     };
 }
 
@@ -621,7 +615,7 @@ test "supervisor registers services using the contract boundary map" {
     try std.testing.expectEqual(contract.UiPrivilege.session_surface, service.descriptor().isolation.ui);
     try std.testing.expectEqual(@as(u64, 1), service.isolationDomainId());
     try std.testing.expect(service.descriptor().restartable);
-    try std.testing.expect(supervisor.markHealthy(service.id, 10));
+    try std.testing.expect(supervisor.markHealthy(service.id));
     try std.testing.expectEqual(ServiceState.healthy, service.state);
 }
 
@@ -712,8 +706,10 @@ test "supervisor keeps bounded diagnostic metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(Supervisor, "next_diagnostic_slot"));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DiagnosticEvent));
     try std.testing.expectEqual(@as(usize, 2_048), actionable_diagnostic_layout.ring_bytes);
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ServiceRecord));
-    try std.testing.expectEqual(@as(usize, 4_600), @sizeOf(Supervisor));
+    try std.testing.expect(OMITS_UNOBSERVED_SERVICE_TRANSITION_TIMESTAMPS);
+    try std.testing.expect(!@hasField(ServiceRecord, "last_transition_tick"));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(ServiceRecord));
+    try std.testing.expectEqual(@as(usize, 4_408), @sizeOf(Supervisor));
 }
 
 test "supervisor deinit clears retained diagnostics and sequence state" {
@@ -750,7 +746,7 @@ test "service readiness is live state independent of diagnostic retention" {
     try std.testing.expect(!supervisor.noteContractBound(network.id, 0));
     try std.testing.expect(supervisor.noteContractBound(network.id, 101));
     try std.testing.expect(!supervisor.isReady(network.id));
-    try std.testing.expect(supervisor.markHealthy(network.id, 3));
+    try std.testing.expect(supervisor.markHealthy(network.id));
     try std.testing.expect(supervisor.isReady(network.id));
     try std.testing.expectEqual(@as(u8, 0), supervisor.diagnostic_count);
     try std.testing.expect(supervisor.isReady(network.id));
@@ -808,8 +804,8 @@ test "driver recovery restarts the failed driver and emits visible diagnostics o
     var supervisor = Supervisor.init();
     const compositor = try supervisor.register(.compositor_ui_session, .{ .kind = .service, .serial = 11 });
     const storage = try supervisor.register(.storage_object, .{ .kind = .service, .serial = 12 });
-    try std.testing.expect(supervisor.markHealthy(compositor.id, 1));
-    try std.testing.expect(supervisor.markHealthy(storage.id, 1));
+    try std.testing.expect(supervisor.markHealthy(compositor.id));
+    try std.testing.expect(supervisor.markHealthy(storage.id));
 
     var directory = driver_service.Directory.init();
     var capabilities = capability.CapabilityTable.init();
@@ -955,8 +951,8 @@ test "driver hot-swap rebinds authority and restarts only the owning service" {
     var supervisor = Supervisor.init();
     const compositor = try supervisor.register(.compositor_ui_session, .{ .kind = .service, .serial = 21 });
     const storage = try supervisor.register(.storage_object, .{ .kind = .service, .serial = 22 });
-    try std.testing.expect(supervisor.markHealthy(compositor.id, 1));
-    try std.testing.expect(supervisor.markHealthy(storage.id, 1));
+    try std.testing.expect(supervisor.markHealthy(compositor.id));
+    try std.testing.expect(supervisor.markHealthy(storage.id));
 
     var directory = driver_service.Directory.init();
     var capabilities = capability.CapabilityTable.init();

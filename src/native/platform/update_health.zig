@@ -278,11 +278,10 @@ fn registerHealthyService(
     supervisor: *supervisor_mod.Supervisor,
     class: contract.ServiceClass,
     owner: principal.PrincipalId,
-    tick: u64,
 ) !u64 {
     const service = try supervisor.register(class, owner);
     try std.testing.expect(supervisor.noteContractBound(service.id, 100 + service.id));
-    try std.testing.expect(supervisor.markHealthy(service.id, tick));
+    try std.testing.expect(supervisor.markHealthy(service.id));
     return service.id;
 }
 
@@ -423,11 +422,11 @@ test "update health validates boot core storage network and ui checks and record
     _ = try manager.stageImage(0, "stable-a", "kernel=v1", image_signer, 11);
 
     var supervisor = supervisor_mod.Supervisor.init();
-    const policy_service_id = try registerHealthyService(&supervisor, .policy_mediation, owner, 12);
-    const package_service_id = try registerHealthyService(&supervisor, .package_install_update, owner, 12);
-    const sync_service_id = try registerHealthyService(&supervisor, .sync_replication, owner, 12);
-    const network_service_id = try registerHealthyService(&supervisor, .network_stack, owner, 12);
-    const ui_service_id = try registerHealthyService(&supervisor, .compositor_ui_session, owner, 12);
+    const policy_service_id = try registerHealthyService(&supervisor, .policy_mediation, owner);
+    const package_service_id = try registerHealthyService(&supervisor, .package_install_update, owner);
+    const sync_service_id = try registerHealthyService(&supervisor, .sync_replication, owner);
+    const network_service_id = try registerHealthyService(&supervisor, .network_stack, owner);
+    const ui_service_id = try registerHealthyService(&supervisor, .compositor_ui_session, owner);
     const core_service_ids = [_]u64{ policy_service_id, package_service_id, sync_service_id };
 
     const request = CheckRequest{
@@ -525,11 +524,11 @@ test "update health failures trigger rollback for each required post-activation 
     const ui_probe = try seedUiProbe(&compositor);
 
     var supervisor = supervisor_mod.Supervisor.init();
-    const policy_service_id = try registerHealthyService(&supervisor, .policy_mediation, owner, 20);
-    const package_service_id = try registerHealthyService(&supervisor, .package_install_update, owner, 20);
-    const sync_service_id = try registerHealthyService(&supervisor, .sync_replication, owner, 20);
-    const network_service_id = try registerHealthyService(&supervisor, .network_stack, owner, 20);
-    const ui_service_id = try registerHealthyService(&supervisor, .compositor_ui_session, owner, 20);
+    const policy_service_id = try registerHealthyService(&supervisor, .policy_mediation, owner);
+    const package_service_id = try registerHealthyService(&supervisor, .package_install_update, owner);
+    const sync_service_id = try registerHealthyService(&supervisor, .sync_replication, owner);
+    const network_service_id = try registerHealthyService(&supervisor, .network_stack, owner);
+    const ui_service_id = try registerHealthyService(&supervisor, .compositor_ui_session, owner);
     const core_service_ids = [_]u64{ policy_service_id, package_service_id, sync_service_id };
     const healthy_request = CheckRequest{
         .core_service_ids = core_service_ids[0..],
@@ -563,7 +562,7 @@ test "update health failures trigger rollback for each required post-activation 
     const core_failure = try validatePendingActivation(&manager, &supervisor, &storage, healthy_request, &ledger, 31);
     try std.testing.expect(core_failure.activation.rolled_back);
     try std.testing.expectEqual(immutable_base.HealthFailure.core_service, core_failure.activation.failure);
-    try std.testing.expect(supervisor.markHealthy(sync_service_id, 32));
+    try std.testing.expect(supervisor.markHealthy(sync_service_id));
 
     try manager.beginActivation(1, 33);
     try recordBootSuccess(&manager, 34);
@@ -585,7 +584,7 @@ test "update health failures trigger rollback for each required post-activation 
     const network_failure = try validatePendingActivation(&manager, &supervisor, &storage, healthy_request, &ledger, 39);
     try std.testing.expect(network_failure.activation.rolled_back);
     try std.testing.expectEqual(immutable_base.HealthFailure.network, network_failure.activation.failure);
-    try std.testing.expect(supervisor.markHealthy(network_service_id, 40));
+    try std.testing.expect(supervisor.markHealthy(network_service_id));
 
     try manager.beginActivation(1, 41);
     try recordBootSuccess(&manager, 42);
@@ -593,7 +592,7 @@ test "update health failures trigger rollback for each required post-activation 
     const ui_failure = try validatePendingActivation(&manager, &supervisor, &storage, healthy_request, &ledger, 44);
     try std.testing.expect(ui_failure.activation.rolled_back);
     try std.testing.expectEqual(immutable_base.HealthFailure.ui, ui_failure.activation.failure);
-    try std.testing.expect(supervisor.markHealthy(ui_service_id, 45));
+    try std.testing.expect(supervisor.markHealthy(ui_service_id));
 
     try manager.beginActivation(1, 46);
     try recordBootSuccess(&manager, 47);

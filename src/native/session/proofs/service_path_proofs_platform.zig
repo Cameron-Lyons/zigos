@@ -248,7 +248,7 @@ pub fn proveBootedPostActivationHealthChecks(
         try std.testing.expectEqual(case.expected, result.activation.failure);
         try std.testing.expectEqual(@as(?usize, 0), result.activation.active_slot);
         if (case.crash_service_id) |service_id| {
-            try std.testing.expect(supervisor.markHealthy(service_id, tick_base + 4));
+            try std.testing.expect(supervisor.markHealthy(service_id));
         }
     }
 

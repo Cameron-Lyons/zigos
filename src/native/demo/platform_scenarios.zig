@@ -143,7 +143,7 @@ pub fn run(
             117,
             118,
         );
-        _ = context.supervisor.markHealthy(context.sync_service_id, 119);
+        _ = context.supervisor.markHealthy(context.sync_service_id);
         emitRollbackMarker(
             core_failure,
             .core_service,
@@ -160,7 +160,7 @@ pub fn run(
             122,
             123,
         );
-        _ = context.supervisor.markHealthy(context.compositor_service_id, 124);
+        _ = context.supervisor.markHealthy(context.compositor_service_id);
         emitRollbackMarker(
             ui_failure,
             .ui,
@@ -192,7 +192,7 @@ pub fn run(
             130,
             131,
         );
-        _ = context.supervisor.markHealthy(context.network_service_id, 132);
+        _ = context.supervisor.markHealthy(context.network_service_id);
         emitRollbackMarker(
             network_failure,
             .network,

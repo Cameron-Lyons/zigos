@@ -346,7 +346,7 @@ pub const TrustBoot = struct {
             if (result.activation.failure != case.expected) return false;
             if (result.activation.active_slot == null or result.activation.active_slot.? != 0) return false;
             if (case.crash_service_id) |service_id| {
-                if (!self.supervisor.markHealthy(service_id, tick_base + 4)) return false;
+                if (!self.supervisor.markHealthy(service_id)) return false;
             }
             common.printBootMarker(case.marker);
         }
