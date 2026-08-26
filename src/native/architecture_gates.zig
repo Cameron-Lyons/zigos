@@ -1320,6 +1320,10 @@ pub const indexed_hot_path_tables = .{
         .heap_backs_userspace_scheduler_on_freestanding = session_manager_boot_flow.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING,
         .heap_backs_task_runtime_on_freestanding = session_manager_boot_flow.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING,
         .heap_backs_package_service_on_freestanding = session_manager_boot_flow.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING,
+        .uses_stack_local_boot_service_bindings = session_manager_boot_flow.STACK_LOCAL_BOOT_SERVICE_BINDINGS and
+            session_manager_boot_flow.boot_service_bindings_layout.uses_stack_workspace and
+            session_manager_boot_flow.boot_service_bindings_layout.workspace_size_bytes ==
+                @sizeOf(session_manager_boot_flow.ServiceBindings),
         .heap_backs_background_dispatch_on_freestanding = session_manager_boot_flow.HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING and
             session_manager_boot_flow.background_dispatch_layout.heap_backs_log_on_freestanding and
             session_manager_boot_flow.background_dispatch_layout.freestanding_handle_size_bytes <=

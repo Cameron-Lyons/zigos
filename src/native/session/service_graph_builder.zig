@@ -15,6 +15,7 @@ const root = @import("root");
 
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = true;
 pub const HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING = true;
+pub const STACK_LOCAL_BOOT_SERVICE_BINDINGS = true;
 pub const BACKGROUND_DISPATCH_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 const heap_backed_package_service = builtin.target.os.tag == .freestanding and HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
 const heap_backed_background_dispatch = builtin.target.os.tag == .freestanding and HEAP_BACKED_BACKGROUND_DISPATCH_ON_FREESTANDING;
@@ -43,7 +44,6 @@ pub const Builder = struct {
     driver_runtime: driver_runtime_mod.Runtime = driver_runtime_mod.Runtime.init(),
     supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
     background_dispatcher: BackgroundDispatchBacking = if (heap_backed_background_dispatch) null else background_dispatch.Controller.init(),
-    service_bindings: ServiceBindings = ServiceBindings.init(),
 
     comptime {
         if (heap_backed_package_service and @sizeOf(@This()) > 22 * 1024) {
@@ -150,18 +150,18 @@ pub const Builder = struct {
     }
 
     pub fn bootProduction(
-        self: *Builder,
+        _: *Builder,
         graph: *ServiceGraph,
         comptime include_verification_evidence: bool,
     ) bool {
         const env_snapshot = graph.env;
         const state_snapshot = graph.state;
-        self.service_bindings = ServiceBindings.init();
+        var service_bindings = ServiceBindings.init();
         if (!session_service_bootstrap.bootServices(
             &env_snapshot,
             &state_snapshot,
             graph.kernel_port,
-            &self.service_bindings,
+            &service_bindings,
         )) {
             return false;
         }
@@ -170,7 +170,7 @@ pub const Builder = struct {
                 &env_snapshot,
                 &state_snapshot,
                 graph.kernel_port,
-                &self.service_bindings,
+                &service_bindings,
             )) {
                 return false;
             }
@@ -178,16 +178,21 @@ pub const Builder = struct {
                 &env_snapshot,
                 &state_snapshot,
                 graph.kernel_port,
-                &self.service_bindings,
+                &service_bindings,
             )) {
                 return false;
             }
         }
         graph.env = env_snapshot;
         graph.state = state_snapshot;
-        graph.service_bindings = self.service_bindings;
+        graph.service_bindings = service_bindings;
         return true;
     }
+};
+
+pub const boot_service_bindings_layout = .{
+    .uses_stack_workspace = STACK_LOCAL_BOOT_SERVICE_BINDINGS and !@hasField(Builder, "service_bindings"),
+    .workspace_size_bytes = @sizeOf(ServiceBindings),
 };
 
 pub const background_dispatch_layout = .{
