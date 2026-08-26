@@ -45,6 +45,9 @@ pub const BootstrapState = session_support.BootstrapState;
 pub const ServiceBindings = session_support.ServiceBindings;
 pub const Environment = session_support.Environment;
 pub const HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_CAPABILITY_TABLE_ON_FREESTANDING;
+pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = session_contexts.HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING;
+pub const ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES = session_contexts.ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES;
+pub const kernel_context_layout = session_contexts.kernel_context_layout;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 pub const BOOTSTRAP_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const UI_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
@@ -113,7 +116,7 @@ pub const SessionManager = struct {
         self.runtime_context.runtime_checkpoint_store.reset();
         self.runtime_context.releaseTaskRuntime();
         self.runtime_context.releaseUserspaceCatalog();
-        self.kernel_context.endpoint_table.deinit();
+        self.kernel_context.releaseEndpointTable();
         self.kernel_context.shared_memory_table.deinit();
         self.kernel_context.releaseCapabilityTable();
         self.recovery_context.review_compositor_session.deinit();
@@ -523,6 +526,10 @@ pub const SessionManager = struct {
         self.initialized = true;
         self.kernel_context.resetPort();
         _ = self.kernel_context.ensureCapabilityTable() catch {
+            self.failBoot();
+            return null;
+        };
+        _ = self.kernel_context.ensureEndpointTable() catch {
             self.failBoot();
             return null;
         };

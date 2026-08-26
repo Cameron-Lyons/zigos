@@ -19,6 +19,7 @@ const ENDPOINT_INDEX_CAPACITY: usize = MAX_ENDPOINTS * 2;
 const MAX_ENDPOINT_LABEL_PAYLOAD_BYTES: usize = MAX_ENDPOINT_LABEL_BYTES - 1;
 pub const ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const ENDPOINT_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
+pub const FREESTANDING_TABLE_SIZE_CEILING_BYTES: usize = 8_976;
 
 comptime {
     const byte_capacities = [_]usize{
@@ -127,8 +128,27 @@ pub const Table = struct {
     arena: EndpointArena = EndpointArena.init(),
     owner_index: EndpointOwnerIndex = EndpointOwnerIndex.init(),
 
+    comptime {
+        if (builtin.target.os.tag == .freestanding and @sizeOf(@This()) > FREESTANDING_TABLE_SIZE_CEILING_BYTES) {
+            @compileError("freestanding endpoint table exceeds its compact layout ceiling");
+        }
+    }
+
     pub fn init() Table {
         return .{};
+    }
+
+    pub fn initializeAllocated(self: *Table) void {
+        @memset(std.mem.asBytes(self), 0);
+        const no_endpoint_index = indexed_arena.reusableNoIndex(MAX_ENDPOINTS);
+        @memset(self.arena.free_next[0..], no_endpoint_index);
+        self.arena.free_head = no_endpoint_index;
+
+        const OwnerIndex = @FieldType(Table, "owner_index");
+        const CompactIndex = @FieldType(OwnerIndex, "free_bucket_head");
+        const no_owner_bucket: CompactIndex = @intCast(@max(self.owner_index.links.len, self.owner_index.buckets.len));
+        for (&self.owner_index.links) |*link| link.bucket = no_owner_bucket;
+        self.owner_index.free_bucket_head = no_owner_bucket;
     }
 
     pub fn reset(self: *Table) void {
@@ -388,6 +408,17 @@ test "endpoint queues use capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 1_112), @sizeOf(EndpointSlot));
     try std.testing.expectEqual(@as(usize, 74_000), @sizeOf(Table));
 }
+
+test "allocated endpoint table initializes reusable metadata" {
+    const table = try std.testing.allocator.create(Table);
+    defer std.testing.allocator.destroy(table);
+    table.initializeAllocated();
+
+    const created = try table.create(ids.task(1), "allocated", .{});
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expectEqual(created.id.raw(), (try table.descriptor(created.id)).endpoint_id);
+}
+
 test "endpoints connect and exchange queued messages" {
     var table = Table.init();
     const left = try table.create(ids.task(10), "left", .{ .local_only = true });

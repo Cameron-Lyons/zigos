@@ -3248,10 +3248,12 @@ fn validateUserspaceDriverDataPathTrack(
     const native_kernel_path = "src/native/kernel_api/native_kernel.zig";
     const device_syscalls_path = "src/native/kernel_api/device_syscalls.zig";
     const endpoint_syscalls_path = "src/native/kernel_api/endpoint_syscalls.zig";
+    const endpoint_path = "src/native/kernel_api/endpoint.zig";
     const syscall_dispatch_path = "src/native/kernel_api/syscall_dispatch.zig";
     const syscall_surface_path = "src/native/kernel_api/syscall_surface.zig";
     const compositor_session_path = "src/native/platform/compositor_session.zig";
     const session_manager_boot_flow_path = "src/native/session/session_manager_boot_flow.zig";
+    const session_manager_contexts_path = "src/native/session/session_manager_contexts.zig";
     const userspace_mailbox_path = "src/native/task/userspace_bootstrap_mailbox.zig";
     const userspace_executor_path = "src/native/task/userspace_executor.zig";
     const userspace_runtime_path = "src/userspace/runtime.zig";
@@ -3268,10 +3270,12 @@ fn validateUserspaceDriverDataPathTrack(
     const native_kernel_source = try readRequiredSource(allocator, io, errors, native_kernel_path) orelse return;
     const device_syscalls_source = try readRequiredSource(allocator, io, errors, device_syscalls_path) orelse return;
     const endpoint_syscalls_source = try readRequiredSource(allocator, io, errors, endpoint_syscalls_path) orelse return;
+    const endpoint_source = try readRequiredSource(allocator, io, errors, endpoint_path) orelse return;
     const syscall_dispatch_source = try readRequiredSource(allocator, io, errors, syscall_dispatch_path) orelse return;
     const syscall_surface_source = try readRequiredSource(allocator, io, errors, syscall_surface_path) orelse return;
     const compositor_session_source = try readRequiredSource(allocator, io, errors, compositor_session_path) orelse return;
     const session_manager_boot_flow_source = try readRequiredSource(allocator, io, errors, session_manager_boot_flow_path) orelse return;
+    const session_manager_contexts_source = try readRequiredSource(allocator, io, errors, session_manager_contexts_path) orelse return;
     const userspace_mailbox_source = try readRequiredSource(allocator, io, errors, userspace_mailbox_path) orelse return;
     const userspace_executor_source = try readRequiredSource(allocator, io, errors, userspace_executor_path) orelse return;
     const userspace_runtime_source = try readRequiredSource(allocator, io, errors, userspace_runtime_path) orelse return;
@@ -3354,6 +3358,26 @@ fn validateUserspaceDriverDataPathTrack(
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
             try common.addError(errors, allocator, "Compact endpoint receive ABI must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
+    }
+    const endpoint_table_storage_snippets = [_]struct {
+        path: []const u8,
+        source: []const u8,
+        snippet: []const u8,
+    }{
+        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "pub fn initializeAllocated(self: *Table) void" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint_mod.Table else endpoint_mod.Table" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(endpoint_mod.Table)) orelse return error.NoSpaceLeft" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "kernel_memory.kfree(@ptrCast(table))" },
+        .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.kernel_context.ensureEndpointTable() catch" },
+    };
+    for (endpoint_table_storage_snippets) |required| {
+        if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
+            try common.addError(errors, allocator, "Endpoint table must retain on-demand freestanding storage in {s}: {s}", .{ required.path, required.snippet });
+        }
+    }
+    if (std.mem.indexOf(u8, session_manager_contexts_source, "endpoint_table: endpoint_mod.Table =") != null) {
+        try common.addError(errors, allocator, "Endpoint table must not return to inline freestanding session storage", .{});
     }
     const protected_endpoint_send_snippets = [_]struct {
         path: []const u8,

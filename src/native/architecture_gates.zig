@@ -324,6 +324,10 @@ pub const indexed_hot_path_tables = .{
         .retires_dead_target_authority = @hasDecl(capability.CapabilityTable, "retireTargetAuthority"),
     },
     .endpoint_table = .{
+        .heap_backs_table_on_freestanding = session_manager_boot_flow.HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING and
+            session_manager_boot_flow.kernel_context_layout.heap_backs_endpoint_table_on_freestanding and
+            session_manager_boot_flow.kernel_context_layout.freestanding_endpoint_table_size_ceiling_bytes == endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES and
+            session_manager_boot_flow.kernel_context_layout.freestanding_endpoint_table_handle_size_bytes <= session_manager_boot_flow.ENDPOINT_TABLE_HANDLE_SIZE_CEILING_BYTES,
         .uses_generational_endpoint_ids = @hasDecl(@FieldType(endpoint.Table, "arena"), "getByHandle"),
         .avoids_endpoint_primary_index_lookups = endpoint.ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
         .avoids_endpoint_id_collision_probes = endpoint.ENDPOINT_ID_COLLISION_PROBES_PER_INSERT == 0,
