@@ -3341,6 +3341,21 @@ fn validateResourceSchedulerTelemetryTrack(
         try common.addError(errors, allocator, "Background dispatch must not return to inline freestanding service-graph storage", .{});
     }
 
+    const boot_service_binding_snippets = [_][]const u8{
+        "pub const STACK_LOCAL_BOOT_SERVICE_BINDINGS = true",
+        "var service_bindings = ServiceBindings.init()",
+        "graph.service_bindings = service_bindings",
+        ".uses_stack_workspace = STACK_LOCAL_BOOT_SERVICE_BINDINGS and !@hasField(Builder, \"service_bindings\")",
+    };
+    for (boot_service_binding_snippets) |snippet| {
+        if (std.mem.indexOf(u8, service_graph_builder_source, snippet) == null) {
+            try common.addError(errors, allocator, "Service graph boot must retain stack-local binding workspace: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, service_graph_builder_source, "    service_bindings: ServiceBindings = ServiceBindings.init(),") != null) {
+        try common.addError(errors, allocator, "Service graph builders must not retain boot-only service-binding workspace", .{});
+    }
+
     const supervisor_diagnostic_storage_snippets = [_]struct {
         path: []const u8,
         source: []const u8,
