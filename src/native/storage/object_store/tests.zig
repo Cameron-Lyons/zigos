@@ -134,8 +134,12 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expectEqual(@as(u64, 10), object.provenance.created_at_ticks);
     try std.testing.expectEqual(@as(u64, 11), object.provenance.updated_at_ticks);
     try std.testing.expectEqual(@as(u16, 2), object.snapshot_state.snapshot_count);
-    try std.testing.expectEqual(second.version_id, object.snapshot_state.latest_snapshot_version_id);
-    try std.testing.expectEqual(second.version_id, object.sync_state.last_synced_version_id);
+    try std.testing.expect(object_store.DERIVES_OBJECT_MODEL_VERSION_IDS_FROM_CANONICAL_HEAD);
+    try std.testing.expect(!@hasField(object_store.ObjectSnapshotState, "latest_snapshot_version_id"));
+    try std.testing.expect(!@hasField(object_store.ObjectSyncState, "last_synced_version_id"));
+    try std.testing.expectEqual(@as(usize, object_store.OBJECT_RECORD_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectRecord));
+    try std.testing.expectEqual(@as(usize, object_store.OBJECT_SNAPSHOT_STATE_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectSnapshotState));
+    try std.testing.expectEqual(@as(usize, object_store.OBJECT_SYNC_STATE_SIZE_CEILING_BYTES), @sizeOf(object_store.ObjectSyncState));
     try std.testing.expect(object.sharing_policy.requires_explicit_file_bridge_grant);
     try std.testing.expect(object.sharing_policy.export_only_file_bridge);
     try std.testing.expectEqual(first.version_id, object.recovery_history.latest_recoverable_version_id);
