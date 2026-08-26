@@ -1022,7 +1022,6 @@ fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, re
     const blob = store.versionBlob(record) orelse return error.CorruptImage;
     try writer.writeU64(record.id.raw());
     try writer.writeU64(record.object_id.raw());
-    try writer.writeU64(record.previous_version_id.raw());
     try writer.writeByte(record.parent_count);
     var parent_index: usize = 0;
     while (parent_index < object_store.MAX_VERSION_PARENTS) : (parent_index += 1) {
@@ -1132,7 +1131,6 @@ fn applyVersionRecord(self: *Volume, store: *object_store.Store, payload: []cons
     const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
     store.versions.slots[slot_index].version.id = version_id;
     store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
-    store.versions.slots[slot_index].version.previous_version_id = ids.version(try reader.readU64());
     store.versions.slots[slot_index].version.parent_count = try reader.readByte();
     if (store.versions.slots[slot_index].version.parent_count > object_store.MAX_VERSION_PARENTS) return error.CorruptImage;
     var parent_index: usize = 0;
@@ -1433,7 +1431,6 @@ fn deserializeState(
         const slot_index = store.versions.reserveIndexClean(version_id) orelse return error.CorruptImage;
         store.versions.slots[slot_index].version.id = version_id;
         store.versions.slots[slot_index].version.object_id = ids.object(try reader.readU64());
-        store.versions.slots[slot_index].version.previous_version_id = ids.version(try reader.readU64());
         store.versions.slots[slot_index].version.parent_count = try reader.readByte();
         if (store.versions.slots[slot_index].version.parent_count > object_store.MAX_VERSION_PARENTS) return error.CorruptImage;
         var parent_index: usize = 0;

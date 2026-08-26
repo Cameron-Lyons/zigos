@@ -1286,6 +1286,8 @@ pub const indexed_hot_path_tables = .{
             !@hasField(object_store.ObjectRecord, "recovery_history"),
         .derives_object_provenance_from_canonical_versions = object_store.DERIVES_OBJECT_PROVENANCE_FROM_CANONICAL_VERSIONS and
             !@hasField(object_store.ObjectRecord, "provenance"),
+        .derives_previous_version_id_from_canonical_parents = object_store.DERIVES_PREVIOUS_VERSION_ID_FROM_CANONICAL_PARENTS and
+            !@hasField(object_store.VersionRecord, "previous_version_id"),
         .keeps_object_model_state_within_ceiling = @sizeOf(object_store.ObjectRecord) <= object_store.OBJECT_RECORD_SIZE_CEILING_BYTES,
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = @sizeOf(object_store.BlobChunkSlotIndex) == 2 and @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
