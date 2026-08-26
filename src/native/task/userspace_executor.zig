@@ -167,13 +167,13 @@ const USERSPACE_TRAP_VECTOR: u8 = 129;
 const GENERAL_PROTECTION_FAULT_VECTOR: u8 = 13;
 const PAGE_FAULT_VECTOR: u8 = 14;
 const CONTAINABLE_USER_EXCEPTION_VECTORS = [_]u8{
-    0,  // Divide error.
-    1,  // Debug exception.
-    3,  // Breakpoint.
-    4,  // Overflow.
-    5,  // Bound-range exceeded.
-    6,  // Invalid opcode.
-    7,  // Device not available.
+    0, // Divide error.
+    1, // Debug exception.
+    3, // Breakpoint.
+    4, // Overflow.
+    5, // Bound-range exceeded.
+    6, // Invalid opcode.
+    7, // Device not available.
     10, // Invalid TSS.
     11, // Segment not present.
     12, // Stack-segment fault.
@@ -206,6 +206,7 @@ const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || 
     AddressSpaceImageMismatch,
     AddressSpaceRetiring,
     InitialContextInvalid,
+    LaunchPolicyInvalid,
 };
 
 var trap_stack: [TRAP_STACK_TOTAL_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_TOTAL_BYTES;
@@ -310,15 +311,31 @@ const MappingState = enum(u8) {
     retire_pending,
 };
 
+const MappingLaunchPolicy = packed struct(u32) {
+    contract_flags: u16 = 0,
+    heartbeat_increment: u16 = 1,
+};
+
 const MappingDispatchMetadata = struct {
     owner_task_id: u64 = 0,
     image_id: u64 = 0,
     initial_instruction_pointer: u32 = 0,
     initial_stack_pointer: u32 = 0,
     bootstrap_mailbox_address: u32 = 0,
-    contract_flags: u32 = 0,
-    heartbeat_increment: u32 = 1,
+    launch_policy: MappingLaunchPolicy = .{},
+
+    fn contractFlags(self: MappingDispatchMetadata) u32 {
+        return self.launch_policy.contract_flags;
+    }
+
+    fn heartbeatIncrement(self: MappingDispatchMetadata) u32 {
+        return self.launch_policy.heartbeat_increment;
+    }
 };
+
+const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 32;
+const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 376 else 368;
+const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 53_384 else 52_360;
 
 const MappingEntry = struct {
     state: MappingState = .building,
@@ -358,6 +375,17 @@ pub const MappingArena = indexed_arena.PagedIndexedArena(
     MAPPING_INDEX_CAPACITY,
     mappingSlotAddressSpaceId,
 );
+comptime {
+    if (@sizeOf(MappingDispatchMetadata) > MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES) {
+        @compileError("userspace mapping dispatch metadata exceeds its compact size ceiling");
+    }
+    if (@sizeOf(MappingEntry) > MAPPING_ENTRY_SIZE_CEILING_BYTES) {
+        @compileError("userspace mapping entry exceeds its compact size ceiling");
+    }
+    if (@sizeOf(MappingArena) > MAPPING_ARENA_SIZE_CEILING_BYTES) {
+        @compileError("userspace mapping arena exceeds its compact size ceiling");
+    }
+}
 const heap_backed_mappings = builtin.target.os.tag == .freestanding;
 const MappingArenaBacking = if (heap_backed_mappings) ?*MappingArena else MappingArena;
 
@@ -686,7 +714,7 @@ pub const Executor = struct {
             };
 
         const nx_probe_target = if (include_verification_evidence and
-            (mapping.dispatch_metadata.contract_flags & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
+            (mapping.dispatch_metadata.contractFlags() & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
             mapping.dispatch_metadata.bootstrap_mailbox_address
         else
             0;
@@ -823,8 +851,8 @@ pub const Executor = struct {
             mapping.dispatch_metadata.bootstrap_mailbox_address,
             mapping.resume_valid,
             task.component_class,
-            mapping.dispatch_metadata.contract_flags,
-            mapping.dispatch_metadata.heartbeat_increment,
+            mapping.dispatch_metadata.contractFlags(),
+            mapping.dispatch_metadata.heartbeatIncrement(),
             task.id,
             task.ui_surface_id orelse 0,
             authorities,
@@ -1012,14 +1040,19 @@ fn prepareMappingDispatchMetadata(
     if (owner_task_id == 0) return error.AddressSpaceOwnerInvalid;
     if (image_id == 0 or address_space_image_id != image_id) return error.AddressSpaceImageMismatch;
     const initial_stack_pointer = std.math.sub(u64, stack_pointer, 16) catch return error.InitialContextInvalid;
+    const compact_contract_flags = std.math.cast(u16, contract_flags) orelse return error.LaunchPolicyInvalid;
+    const compact_heartbeat_increment = std.math.cast(u16, heartbeat_increment) orelse return error.LaunchPolicyInvalid;
+    if (compact_heartbeat_increment == 0) return error.LaunchPolicyInvalid;
     return .{
         .owner_task_id = owner_task_id,
         .image_id = image_id,
         .initial_instruction_pointer = std.math.cast(u32, entry_point) orelse return error.InitialContextInvalid,
         .initial_stack_pointer = std.math.cast(u32, initial_stack_pointer) orelse return error.InitialContextInvalid,
         .bootstrap_mailbox_address = std.math.cast(u32, bootstrap_mailbox_address) orelse return error.InitialContextInvalid,
-        .contract_flags = contract_flags,
-        .heartbeat_increment = heartbeat_increment,
+        .launch_policy = .{
+            .contract_flags = compact_contract_flags,
+            .heartbeat_increment = compact_heartbeat_increment,
+        },
     };
 }
 
@@ -1619,8 +1652,11 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
     try std.testing.expectEqual(@as(u32, 0x4000_1000), metadata.initial_instruction_pointer);
     try std.testing.expectEqual(@as(u32, 0x7FFF_EFF0), metadata.initial_stack_pointer);
     try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
-    try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contract_flags);
-    try std.testing.expectEqual(@as(u32, 9), metadata.heartbeat_increment);
+    try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contractFlags());
+    try std.testing.expectEqual(@as(u32, 9), metadata.heartbeatIncrement());
+    try std.testing.expectEqual(MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES, @sizeOf(MappingDispatchMetadata));
+    try std.testing.expectEqual(MAPPING_ENTRY_SIZE_CEILING_BYTES, @sizeOf(MappingEntry));
+    try std.testing.expectEqual(MAPPING_ARENA_SIZE_CEILING_BYTES, @sizeOf(MappingArena));
     try std.testing.expectEqual(@as(u8, 0), STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS);
 
     try std.testing.expectError(
@@ -1642,6 +1678,18 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
     try std.testing.expectError(
         error.InitialContextInvalid,
         prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1),
+    );
+    try std.testing.expectError(
+        error.LaunchPolicyInvalid,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, @as(u32, std.math.maxInt(u16)) + 1, 1),
+    );
+    try std.testing.expectError(
+        error.LaunchPolicyInvalid,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 0),
+    );
+    try std.testing.expectError(
+        error.LaunchPolicyInvalid,
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, @as(u32, std.math.maxInt(u16)) + 1),
     );
 }
 
@@ -2008,7 +2056,7 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
             .initial_instruction_pointer = 0x4000_1000,
             .initial_stack_pointer = 0x7FFF_EFF0,
             .bootstrap_mailbox_address = 0x4000_3000,
-            .contract_flags = userspace_flags.FLAG_NX_PROOF_PROBE,
+            .launch_policy = .{ .contract_flags = userspace_flags.FLAG_NX_PROOF_PROBE },
         },
         .mailbox_authority_cache = .{ .initialized = true, .refresh_count = 7, .authority_generation = 7 },
         .mailbox_publication_cache = .{ .initialized = true, .published_authority_generation = 7 },
