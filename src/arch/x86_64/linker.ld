@@ -30,6 +30,7 @@ SECTIONS
         *(.rodata)
         *(.rodata.cst*)
         *(.rodata.str*)
+        *(.rodata.*)
         *(.eh_frame)
         *(.eh_frame.*)
         *(.gcc_except_table)
@@ -42,7 +43,7 @@ SECTIONS
     .zigos_userspace_archive : ALIGN(4K)
     {
         __kernel_archive_start = .;
-        *(.rodata.zigos_userspace_archive)
+        *(.zigos_userspace_archive)
         . = ALIGN(4K);
         __kernel_archive_end = .;
     } :kernel

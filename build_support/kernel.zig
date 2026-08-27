@@ -73,6 +73,8 @@ pub fn addX86_64KernelBootCheck(
         .root_module = kernel_module,
     });
     kernel_object.bundle_compiler_rt = true;
+    kernel_object.link_function_sections = true;
+    kernel_object.link_data_sections = true;
 
     const link = b.addSystemCommand(&.{
         b.graph.zig_exe,
@@ -477,6 +479,8 @@ pub fn addKernelArtifact(
         .root_module = kernel_module,
     });
     kernel_object.bundle_compiler_rt = true;
+    kernel_object.link_function_sections = true;
+    kernel_object.link_data_sections = true;
 
     const link = b.addSystemCommand(&.{
         b.graph.zig_exe,
