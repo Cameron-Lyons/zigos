@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const block_alignment: usize = 16;
+pub const free_list_class_count: usize = 2;
 
 pub const BlockHeader = struct {
     size: usize,
@@ -15,6 +16,10 @@ pub const FreeLinks = struct {
 };
 
 pub const minimum_free_data_size: usize = @sizeOf(FreeLinks);
+
+pub fn freeListIndex(size: usize, large_block_threshold: usize) usize {
+    return @intFromBool(size >= large_block_threshold);
+}
 
 pub fn alignSize(size: usize, alignment: usize) ?usize {
     if (alignment == 0 or (alignment & (alignment - 1)) != 0) return null;
@@ -70,4 +75,13 @@ test "heap metadata preserves aligned payloads and holds free-list links" {
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(BlockHeader) % block_alignment);
     try std.testing.expect(minimum_free_data_size >= @sizeOf(FreeLinks));
     try std.testing.expect(block_alignment >= @alignOf(FreeLinks));
+}
+
+test "heap free-list classes separate sub-page and page-sized blocks" {
+    const page_size: usize = 4096;
+
+    try std.testing.expectEqual(@as(usize, 0), freeListIndex(page_size - 1, page_size));
+    try std.testing.expectEqual(@as(usize, 1), freeListIndex(page_size, page_size));
+    try std.testing.expectEqual(@as(usize, 1), freeListIndex(page_size * 4, page_size));
+    try std.testing.expectEqual(@as(usize, 2), free_list_class_count);
 }

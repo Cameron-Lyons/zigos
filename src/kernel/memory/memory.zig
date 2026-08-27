@@ -25,7 +25,7 @@ const FreeLinks = heap_geometry.FreeLinks;
 var heap_start: [*]u8 = undefined;
 
 var heap_end: [*]u8 = undefined;
-var free_list: ?*BlockHeader = null;
+var free_lists: [heap_geometry.free_list_class_count]?*BlockHeader = .{null} ** heap_geometry.free_list_class_count;
 var is_initialized = false;
 var allocator_lock = spin.Lock.init();
 
@@ -47,9 +47,8 @@ pub fn init() void {
     initial_block.is_free = true;
     initial_block.next = null;
     initial_block.prev = null;
-    freeLinks(initial_block).* = .{ .next = null, .prev = null };
-
-    free_list = initial_block;
+    free_lists = .{null} ** heap_geometry.free_list_class_count;
+    freeListPush(initial_block);
     is_initialized = true;
 
     console.print("Memory allocator initialized!\n");
@@ -65,21 +64,23 @@ pub fn getReservedMemoryEnd() usize {
 }
 
 fn freeListPush(block: *BlockHeader) void {
+    const index = freeListIndex(block.size);
     const links = freeLinks(block);
     links.prev = null;
-    links.next = free_list;
-    if (free_list) |head| {
+    links.next = free_lists[index];
+    if (free_lists[index]) |head| {
         freeLinks(head).prev = block;
     }
-    free_list = block;
+    free_lists[index] = block;
 }
 
 fn freeListRemove(block: *BlockHeader) void {
+    const index = freeListIndex(block.size);
     const links = freeLinks(block);
     if (links.prev) |prev| {
         freeLinks(prev).next = links.next;
     } else {
-        free_list = links.next;
+        free_lists[index] = links.next;
     }
     if (links.next) |next| {
         freeLinks(next).prev = links.prev;
@@ -90,6 +91,10 @@ fn freeListRemove(block: *BlockHeader) void {
 fn freeLinks(block: *BlockHeader) *FreeLinks {
     const block_bytes: [*]u8 = @ptrCast(block);
     return @ptrCast(@alignCast(block_bytes + @sizeOf(BlockHeader)));
+}
+
+fn freeListIndex(size: usize) usize {
+    return heap_geometry.freeListIndex(size, PAGE_SIZE);
 }
 
 fn splitBlock(block: *BlockHeader, size: usize) void {
@@ -120,18 +125,21 @@ fn splitBlock(block: *BlockHeader, size: usize) void {
 }
 
 fn takeFreeBlock(aligned_size: usize) ?*anyopaque {
-    var current = free_list;
-    while (current) |block| {
-        const next_free = freeLinks(block).next;
-        if (block.size >= aligned_size) {
-            splitBlock(block, aligned_size);
-            freeListRemove(block);
-            block.is_free = false;
+    var index = freeListIndex(aligned_size);
+    while (index < free_lists.len) : (index += 1) {
+        var current = free_lists[index];
+        while (current) |block| {
+            const next_free = freeLinks(block).next;
+            if (block.size >= aligned_size) {
+                freeListRemove(block);
+                splitBlock(block, aligned_size);
+                block.is_free = false;
 
-            const data_ptr: [*]u8 = @ptrCast(block);
-            return @ptrCast(data_ptr + @sizeOf(BlockHeader));
+                const data_ptr: [*]u8 = @ptrCast(block);
+                return @ptrCast(data_ptr + @sizeOf(BlockHeader));
+            }
+            current = next_free;
         }
-        current = next_free;
     }
     return null;
 }
@@ -177,11 +185,13 @@ pub fn kfree(ptr: ?*anyopaque) void {
 
     if (block.prev) |prev| {
         if (prev.is_free) {
+            freeListRemove(prev);
             prev.size += @sizeOf(BlockHeader) + block.size;
             prev.next = block.next;
             if (block.next) |next| {
                 next.prev = prev;
             }
+            freeListPush(prev);
             return;
         }
     }
