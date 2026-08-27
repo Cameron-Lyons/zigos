@@ -12,6 +12,7 @@ pub const WRITABLE: u64 = 1 << 1;
 pub const USER: u64 = 1 << 2;
 pub const WRITE_THROUGH: u64 = 1 << 3;
 pub const CACHE_DISABLE: u64 = 1 << 4;
+pub const LARGE_PAGE: u64 = 1 << 7;
 pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;
 
@@ -39,6 +40,10 @@ pub fn physicalAddressFits(address_value: usize) bool {
 
 pub fn isPresent(entry: Entry) bool {
     return (entry & PRESENT) != 0;
+}
+
+pub fn isLargePage(entry: Entry) bool {
+    return isPresent(entry) and (entry & LARGE_PAGE) != 0;
 }
 
 pub fn owner(entry: Entry) u3 {
@@ -78,6 +83,13 @@ test "execute permission is the inverse of the hardware NX bit" {
     try std.testing.expect(isExecutable(withExecutePermission(leaf, true)));
     try std.testing.expect(!isExecutable(withExecutePermission(leaf, false)));
     try std.testing.expect(!isExecutable(0));
+}
+
+test "large page flag distinguishes directory leaves" {
+    const leaf = make(0x20_0000, PRESENT | WRITABLE | LARGE_PAGE | NO_EXECUTE, 0);
+    try std.testing.expect(isLargePage(leaf));
+    try std.testing.expect(!isLargePage(make(0x20_0000, PRESENT | WRITABLE, 0)));
+    try std.testing.expect(!isLargePage(0));
 }
 
 test "each four-level index consumes exactly nine address bits" {

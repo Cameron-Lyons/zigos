@@ -94,4 +94,6 @@ SECTIONS
            "unexpected loadable section between kernel data and bss")
     ASSERT(__kernel_bss_end == __kernel_end,
            "unexpected loadable section after kernel bss")
+    ASSERT(__kernel_end <= 10M,
+           "kernel exceeds the precise identity-mapping region")
 }
