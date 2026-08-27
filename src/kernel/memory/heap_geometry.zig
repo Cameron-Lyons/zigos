@@ -5,7 +5,7 @@ pub const free_list_class_count: usize = 2;
 
 pub const BlockHeader = struct {
     size: usize,
-    is_free: bool,
+    state: u64,
     next: ?*@This(),
     prev: ?*@This(),
 };
@@ -16,9 +16,24 @@ pub const FreeLinks = struct {
 };
 
 pub const minimum_free_data_size: usize = @sizeOf(FreeLinks);
+pub const block_state_allocated: u64 = 0x4c49_5645_424c_4f43;
+pub const block_state_free: u64 = 0x4652_4545_424c_4f43;
 
 pub fn freeListIndex(size: usize, large_block_threshold: usize) usize {
     return @intFromBool(size >= large_block_threshold);
+}
+
+pub fn allocationMarkerIndex(
+    payload_address: usize,
+    arena_start_address: usize,
+    arena_size: usize,
+    alignment: usize,
+) ?usize {
+    if (alignment == 0 or (alignment & (alignment - 1)) != 0) return null;
+    if (payload_address < arena_start_address) return null;
+    const offset = payload_address - arena_start_address;
+    if (offset >= arena_size or offset % alignment != 0) return null;
+    return offset / alignment;
 }
 
 pub fn alignSize(size: usize, alignment: usize) ?usize {
@@ -75,6 +90,15 @@ test "heap metadata preserves aligned payloads and holds free-list links" {
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(BlockHeader) % block_alignment);
     try std.testing.expect(minimum_free_data_size >= @sizeOf(FreeLinks));
     try std.testing.expect(block_alignment >= @alignOf(FreeLinks));
+}
+
+test "heap allocation markers accept only aligned arena addresses" {
+    try std.testing.expectEqual(@as(?usize, 0), allocationMarkerIndex(0x2000, 0x2000, 4096, 16));
+    try std.testing.expectEqual(@as(?usize, 2), allocationMarkerIndex(0x2020, 0x2000, 4096, 16));
+    try std.testing.expectEqual(@as(?usize, null), allocationMarkerIndex(0x1ff0, 0x2000, 4096, 16));
+    try std.testing.expectEqual(@as(?usize, null), allocationMarkerIndex(0x2001, 0x2000, 4096, 16));
+    try std.testing.expectEqual(@as(?usize, null), allocationMarkerIndex(0x3000, 0x2000, 4096, 16));
+    try std.testing.expectEqual(@as(?usize, null), allocationMarkerIndex(0x2000, 0x2000, 4096, 0));
 }
 
 test "heap free-list classes separate sub-page and page-sized blocks" {
