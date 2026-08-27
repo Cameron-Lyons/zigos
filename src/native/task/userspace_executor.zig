@@ -184,7 +184,8 @@ const CONTAINABLE_USER_EXCEPTION_VECTORS = [_]u8{
     21, // Control-protection exception.
 };
 const TRAP_STACK_GUARD_BYTES: usize = PAGE_SIZE;
-pub const TRAP_STACK_TOTAL_BYTES: usize = units.kibibytes(32);
+// Native smoke requires at least 25% unused watermark headroom.
+pub const TRAP_STACK_TOTAL_BYTES: usize = units.kibibytes(24);
 pub const TRAP_STACK_USABLE_BYTES: usize = TRAP_STACK_TOTAL_BYTES - TRAP_STACK_GUARD_BYTES;
 
 const TRAP_STACK_PAINT_PATTERN: u32 = 0x57ACC0DE;
