@@ -20,6 +20,20 @@ pub const FLAG_MMU_PROOF_PROBE = userspace_flags.FLAG_MMU_PROOF_PROBE;
 pub const FLAG_NX_PROOF_PROBE = userspace_flags.FLAG_NX_PROOF_PROBE;
 pub const FLAG_GP_PROOF_PROBE = userspace_flags.FLAG_GP_PROOF_PROBE;
 
+pub const DIRECT_SERVICE_CLASS_SLOTS = true;
+pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
+pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(contract.ServiceClass).len;
+pub const ServiceClassSlotIndex = u8;
+const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
+
+comptime {
+    for (std.meta.fields(contract.ServiceClass), 0..) |field, class_index| {
+        if (field.value != class_index) {
+            @compileError("service classes must remain dense for direct userspace registry lookup");
+        }
+    }
+}
+
 pub const ComponentClass = enum(u8) {
     session_manager,
     app_component,
@@ -233,8 +247,15 @@ const production_bundle_index = buildBundleIndex(
     PRODUCTION_BUNDLE_INDEX_CAPACITY,
     &production_boot_image_specs,
 );
-const SERVICE_CLASS_INDEX_CAPACITY: usize = production_boot_image_specs.len * 2;
-const service_class_index = buildServiceClassIndex();
+const ServiceClassSlots = [SERVICE_CLASS_COUNT]ServiceClassSlotIndex;
+const service_class_slots = buildServiceClassSlots();
+
+pub const userspace_registry_indexing = .{
+    .uses_bundle_id_index = @TypeOf(production_bundle_index) == id_index.Table(PRODUCTION_BUNDLE_INDEX_CAPACITY),
+    .uses_service_class_slots = @TypeOf(service_class_slots) == ServiceClassSlots,
+    .service_class_hash_probes_per_query = SERVICE_CLASS_HASH_PROBES_PER_QUERY,
+    .service_class_slot_bytes = @sizeOf(ServiceClassSlots),
+};
 
 pub fn findProduction(bundle_id: []const u8) ?*const ImageSpec {
     const spec_index = indexInCatalog(
@@ -285,8 +306,7 @@ pub fn productionContractFor(bundle_id: []const u8) ?ContractSpec {
 }
 
 pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
-    const key = serviceClassIndexKey(class);
-    const spec_index = id_index.lookup(SERVICE_CLASS_INDEX_CAPACITY, &service_class_index, key) orelse {
+    const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse {
         debugAssertServiceClassIndexMissAbsent(class);
         return null;
     };
@@ -318,10 +338,6 @@ pub fn bundleIndexKey(bundle_id: []const u8) u64 {
     return if (hash == 0) 1 else hash;
 }
 
-pub fn serviceClassIndexKey(class: contract.ServiceClass) u64 {
-    return @as(u64, @intFromEnum(class)) + 1;
-}
-
 fn buildBundleIndex(
     comptime capacity: usize,
     comptime specs: []const ImageSpec,
@@ -343,14 +359,32 @@ fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const
     }
 }
 
-fn buildServiceClassIndex() id_index.Table(SERVICE_CLASS_INDEX_CAPACITY) {
-    @setEvalBranchQuota(10_000);
-    var index = id_index.emptyTable(SERVICE_CLASS_INDEX_CAPACITY);
+fn buildServiceClassSlots() ServiceClassSlots {
+    var slots = emptyServiceClassSlots();
     for (production_boot_image_specs, 0..) |spec, spec_index| {
         const class = spec.service_class orelse continue;
-        id_index.insert(SERVICE_CLASS_INDEX_CAPACITY, &index, serviceClassIndexKey(class), spec_index, "boot service class index covers userspace registry");
+        setServiceClassSlot(&slots, class, spec_index);
     }
-    return index;
+    return slots;
+}
+
+fn emptyServiceClassSlots() ServiceClassSlots {
+    return [_]ServiceClassSlotIndex{NO_SERVICE_CLASS_SLOT} ** SERVICE_CLASS_COUNT;
+}
+
+fn setServiceClassSlot(slots: *ServiceClassSlots, class: contract.ServiceClass, spec_index: usize) void {
+    if (spec_index >= NO_SERVICE_CLASS_SLOT) @compileError("userspace service class slot exceeds compact range");
+    const class_index = serviceClassIndex(class);
+    if (slots[class_index] != NO_SERVICE_CLASS_SLOT) @compileError("userspace registry contains duplicate service classes");
+    slots[class_index] = @intCast(spec_index);
+}
+
+fn serviceClassIndex(class: contract.ServiceClass) usize {
+    return @intFromEnum(class);
+}
+
+fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
+    return if (slot == NO_SERVICE_CLASS_SLOT) null else slot;
 }
 
 fn debugAssertServiceClassIndexMissAbsent(class: contract.ServiceClass) void {
@@ -365,6 +399,9 @@ fn debugAssertServiceClassIndexMissAbsent(class: contract.ServiceClass) void {
 }
 
 test "userspace registry definitions stay unique and keep typed contract metadata attached" {
+    try std.testing.expect(DIRECT_SERVICE_CLASS_SLOTS);
+    try std.testing.expectEqual(@as(u8, 0), SERVICE_CLASS_HASH_PROBES_PER_QUERY);
+    try std.testing.expectEqual(@as(usize, SERVICE_CLASS_COUNT), userspace_registry_indexing.service_class_slot_bytes);
     for (production_boot_image_specs, 0..) |spec, index| {
         try std.testing.expect(spec.role_tag != 0);
         try std.testing.expect(spec.heartbeat_increment != 0);
@@ -387,6 +424,7 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     }
 
     try std.testing.expect(findByServiceClass(.storage_object) != null);
+    try std.testing.expect(findByServiceClass(.task_runtime) == null);
 }
 
 test "core platform services use the parameterized userspace service entrypoint" {

@@ -18,6 +18,7 @@ const component_abi_wire = @import("services/component_abi_wire.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
 const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
+const userspace_registry = @import("task/userspace_registry.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const process_isolation = @import("task/process_isolation.zig");
 const syscall_dispatch = @import("kernel_api/syscall_dispatch.zig");
@@ -419,6 +420,13 @@ pub const indexed_hot_path_tables = .{
         .uses_bundle_index = @hasField(userspace_loader.Catalog, "bundle_index"),
         .derives_image_ids_from_arena_count = userspace_loader.DERIVES_IMAGE_IDS_FROM_ARENA_COUNT and
             !@hasField(userspace_loader.Catalog, "next_image_id"),
+    },
+    .userspace_registry = .{
+        .uses_bundle_id_index = userspace_registry.userspace_registry_indexing.uses_bundle_id_index,
+        .uses_direct_service_class_slots = userspace_registry.DIRECT_SERVICE_CLASS_SLOTS and
+            userspace_registry.userspace_registry_indexing.uses_service_class_slots and
+            userspace_registry.userspace_registry_indexing.service_class_hash_probes_per_query == 0 and
+            userspace_registry.userspace_registry_indexing.service_class_slot_bytes == userspace_registry.SERVICE_CLASS_COUNT,
     },
     .task_runtime = .{
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),
