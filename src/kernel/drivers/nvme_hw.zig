@@ -18,6 +18,7 @@ const pci = @import("pci.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 pub const INTERRUPT_VECTOR = nvme_interrupt.INTERRUPT_VECTOR;
+pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
 const PAGE_SIZE: u32 = 4096;
 
 const IO_PIPELINE_DEPTH: usize = nvme_pipeline.DEPTH;
@@ -310,7 +311,7 @@ fn waitForAnyCompletion(
     const cqe: [*]volatile u32 = @ptrFromInt(queue.cq_phys + queue.cq_head * CQ_ENTRY_BYTES);
     const wait_with_interrupt = nvme_interrupt.mayIdleWait(
         queue.qid,
-        @atomicLoad(bool, &io_interrupts_active, .seq_cst),
+        interruptsActive(),
         interrupt_context.active(),
     );
     const restore_interrupt_mask = wait_with_interrupt and !x86.interruptsEnabled();
@@ -491,13 +492,25 @@ var bounce_phys: [IO_PIPELINE_DEPTH]u32 = [_]u32{0} ** IO_PIPELINE_DEPTH;
 var io_interrupts_active: bool = false;
 var completion_interrupt_count: u64 = 0;
 
+fn interruptsActive() bool {
+    return @atomicLoad(bool, &io_interrupts_active, .acquire);
+}
+
+fn publishInterruptsActive(value: bool) void {
+    @atomicStore(bool, &io_interrupts_active, value, .release);
+}
+
+fn resetCompletionInterruptCount() void {
+    @atomicStore(u64, &completion_interrupt_count, 0, .monotonic);
+}
+
 pub fn attached() bool {
     return active_present;
 }
 
 pub fn activateInterrupts() Error!void {
     if (!active_present) return error.NamespaceMissing;
-    if (@atomicLoad(bool, &io_interrupts_active, .seq_cst)) return;
+    if (interruptsActive()) return;
     if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
     const remapped = intel_vtd.routeInterrupt(
         active_device,
@@ -508,19 +521,19 @@ pub fn activateInterrupts() Error!void {
         .address = remapped.address,
         .data = remapped.data,
     }) catch return error.MsiEnableFailed;
-    @atomicStore(u64, &completion_interrupt_count, 0, .seq_cst);
-    @atomicStore(bool, &io_interrupts_active, true, .seq_cst);
+    resetCompletionInterruptCount();
+    publishInterruptsActive(true);
 }
 
 pub fn handleInterrupt() void {
-    if (@atomicLoad(bool, &io_interrupts_active, .seq_cst)) {
-        _ = @atomicRmw(u64, &completion_interrupt_count, .Add, 1, .seq_cst);
+    if (interruptsActive()) {
+        _ = @atomicRmw(u64, &completion_interrupt_count, .Add, 1, .monotonic);
     }
     x2apic.acknowledge();
 }
 
 pub fn completionInterruptCount() u64 {
-    return @atomicLoad(u64, &completion_interrupt_count, .seq_cst);
+    return @atomicLoad(u64, &completion_interrupt_count, .monotonic);
 }
 
 fn identifyNamespace(self: *Controller, buffer: u32) Error!void {
@@ -597,8 +610,8 @@ pub fn attachAsBackend(
     if (additional_domains.len > MAX_ADDITIONAL_DMA_DOMAINS) {
         return error.TooManyDmaDomains;
     }
-    @atomicStore(bool, &io_interrupts_active, false, .seq_cst);
-    @atomicStore(u64, &completion_interrupt_count, 0, .seq_cst);
+    publishInterruptsActive(false);
+    resetCompletionInterruptCount();
     const dma_base = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
     const frames = DmaFrames{ .base = dma_base };
     var retain_dma_frames = vtd_summary != null;
@@ -768,7 +781,7 @@ fn handleBackendError(err: anyerror) void {
     if (!backendErrorRequiresContainment(err) or !active_present) return;
     active_present = false;
     bounce_phys = [_]u32{0} ** IO_PIPELINE_DEPTH;
-    @atomicStore(bool, &io_interrupts_active, false, .seq_cst);
+    publishInterruptsActive(false);
     pci.disableMsi(active_device) catch {};
     active_controller.writeReg32(REG_CC, active_controller.reg32(REG_CC) & ~CC_EN);
     pci.disableBusMastering(active_device);

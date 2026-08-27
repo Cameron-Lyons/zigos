@@ -22,6 +22,7 @@ pub const PORT_RUNTIME_STATE_SIZE_CEILING_BYTES: usize = 104;
 pub const CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT: usize = 7;
 pub const COLOCATED_BOOT_KEYBOARD_REPORT_STATE = true;
 pub const COLOCATED_SUPPORTED_PROTOCOL_STATE = true;
+pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
 
 comptime {
     if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
@@ -86,6 +87,19 @@ var set_boot_protocol_count: u64 = 0;
 var configure_endpoint_count: u64 = 0;
 var interrupt_report_submission_count: u64 = 0;
 var keyboard_report_count: u64 = 0;
+
+fn controllerActive() bool {
+    return @atomicLoad(bool, &active, .acquire);
+}
+
+fn publishControllerActive(value: bool) void {
+    @atomicStore(bool, &active, value, .release);
+}
+
+fn resetInterruptAccounting() void {
+    @atomicStore(u32, &pending_interrupts, 0, .monotonic);
+    @atomicStore(u64, &interrupt_count, 0, .monotonic);
+}
 
 const PortAction = enum(u8) {
     none,
@@ -262,7 +276,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_controller_reset = false;
     active_enabled_slots = 0;
     active_bar_address = 0;
-    active = false;
+    publishControllerActive(false);
     event_consumer = .{};
     command_producer = .{};
     control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
@@ -276,8 +290,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     outstanding_command = null;
     outstanding_transfer = null;
     next_port_scan = 1;
-    @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
-    @atomicStore(u64, &interrupt_count, 0, .seq_cst);
+    resetInterruptAccounting();
     event_count = 0;
     port_status_change_count = 0;
     command_completion_count = 0;
@@ -418,12 +431,12 @@ pub fn requesterIsolated() bool {
 }
 
 pub fn controllerDeviceId() ?u64 {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    if (!controllerActive()) return null;
     return pci.stableDeviceId(active_device);
 }
 
 pub fn activate() Error!void {
-    if (@atomicLoad(bool, &active, .seq_cst)) return;
+    if (controllerActive()) return;
     if (!validated() or !intel_vtd.requesterProtected(active_device)) {
         return error.DmaIsolationBypassed;
     }
@@ -444,7 +457,7 @@ pub fn activate() Error!void {
     var msi_enabled = true;
     var bus_master_enabled = false;
     errdefer {
-        @atomicStore(bool, &active, false, .seq_cst);
+        publishControllerActive(false);
         xhci.quiesceOwnedController(capabilities, &reader);
         if (msi_enabled) pci.disableMsi(active_device) catch {};
         if (bus_master_enabled) pci.disableBusMastering(active_device);
@@ -467,8 +480,7 @@ pub fn activate() Error!void {
     outstanding_command = null;
     outstanding_transfer = null;
     next_port_scan = 1;
-    @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
-    @atomicStore(u64, &interrupt_count, 0, .seq_cst);
+    resetInterruptAccounting();
     event_count = 0;
     port_status_change_count = 0;
     command_completion_count = 0;
@@ -482,32 +494,32 @@ pub fn activate() Error!void {
     configure_endpoint_count = 0;
     interrupt_report_submission_count = 0;
     keyboard_report_count = 0;
-    @atomicStore(bool, &active, true, .seq_cst);
+    publishControllerActive(true);
     try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
     msi_enabled = false;
     bus_master_enabled = false;
 }
 
 pub fn attached() bool {
-    return @atomicLoad(bool, &active, .seq_cst);
+    return controllerActive();
 }
 
 pub fn handleInterrupt() void {
-    if (@atomicLoad(bool, &active, .seq_cst)) {
-        _ = @atomicRmw(u32, &pending_interrupts, .Add, 1, .seq_cst);
-        _ = @atomicRmw(u64, &interrupt_count, .Add, 1, .seq_cst);
+    if (controllerActive()) {
+        _ = @atomicRmw(u32, &pending_interrupts, .Add, 1, .monotonic);
+        _ = @atomicRmw(u64, &interrupt_count, .Add, 1, .monotonic);
     }
     x2apic.acknowledge();
 }
 
 pub fn eventWorkPending() bool {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return false;
-    if (@atomicLoad(u32, &pending_interrupts, .seq_cst) != 0) return true;
+    if (!controllerActive()) return false;
+    if (@atomicLoad(u32, &pending_interrupts, .monotonic) != 0) return true;
     return currentEventReady();
 }
 
 pub fn lifecyclePending() bool {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return false;
+    if (!controllerActive()) return false;
     if (outstanding_command != null or outstanding_transfer != null) return true;
     const capabilities = active_capabilities orelse return false;
     var port_id: u16 = 1;
@@ -518,13 +530,13 @@ pub fn lifecyclePending() bool {
 }
 
 pub fn servicePendingEvents() usize {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return 0;
+    if (!controllerActive()) return 0;
     const interrupt_wakes = @atomicRmw(
         u32,
         &pending_interrupts,
         .Xchg,
         0,
-        .seq_cst,
+        .monotonic,
     );
     const event_ready = currentEventReady();
     if (interrupt_wakes == 0 and !event_ready and !lifecyclePending()) return 0;
@@ -666,19 +678,19 @@ pub fn keyboardReportCount() u64 {
 }
 
 pub fn keyboardReportAfter(observed_sequence: u64) ?xhci.HardwareBootKeyboardReport {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    if (!controllerActive()) return null;
     return keyboardReports().latestAfter(observed_sequence);
 }
 
 pub fn pollKeyboardReport() ?xhci.HardwareBootKeyboardReport {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    if (!controllerActive()) return null;
     const report = keyboardReports().poll() orelse return null;
     scheduleUnarmedInterruptReports();
     return report;
 }
 
 pub fn inputProof() ?xhci.InputProof {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    if (!controllerActive()) return null;
     const report = keyboardReports().latestAfter(0) orelse return null;
     const state = &ports[report.port_id];
     _ = state.device_descriptor orelse return null;
@@ -742,7 +754,7 @@ pub fn inputProof() ?xhci.InputProof {
                 .event_ring_dma_writes = delivered_events_u32,
                 .device_context_reads_by_controller = 1,
                 .endpoint_context_reads_by_controller = 1,
-                .interrupt_assertions = saturatingU32(@atomicLoad(u64, &interrupt_count, .seq_cst)),
+                .interrupt_assertions = saturatingU32(@atomicLoad(u64, &interrupt_count, .monotonic)),
                 .port_status_change_events = saturatingU32(port_status_change_count),
                 .input_report_dma_bytes = input_report_dma_bytes,
             },
@@ -755,35 +767,35 @@ fn saturatingU32(value: u64) u32 {
 }
 
 pub fn deviceDescriptorForPort(port_id: u8) ?xhci.UsbDeviceDescriptor {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    if (!controllerActive()) return null;
     const capabilities = active_capabilities orelse return null;
     if (port_id == 0 or port_id > capabilities.max_ports) return null;
     return ports[port_id].device_descriptor;
 }
 
 pub fn configurationDescriptorForPort(port_id: u8) ?xhci.UsbConfigurationDescriptor {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    if (!controllerActive()) return null;
     const capabilities = active_capabilities orelse return null;
     if (port_id == 0 or port_id > capabilities.max_ports) return null;
     return ports[port_id].configuration_descriptor;
 }
 
 pub fn bootKeyboardConfigurationForPort(port_id: u8) ?xhci.UsbBootKeyboardConfiguration {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return null;
+    if (!controllerActive()) return null;
     const capabilities = active_capabilities orelse return null;
     if (port_id == 0 or port_id > capabilities.max_ports) return null;
     return ports[port_id].boot_keyboard;
 }
 
 pub fn portConfigured(port_id: u8) bool {
-    if (!@atomicLoad(bool, &active, .seq_cst)) return false;
+    if (!controllerActive()) return false;
     const capabilities = active_capabilities orelse return false;
     if (port_id == 0 or port_id > capabilities.max_ports) return false;
     return ports[port_id].endpoint_configured;
 }
 
 pub fn handledInterruptCount() u64 {
-    return @atomicLoad(u64, &interrupt_count, .seq_cst);
+    return @atomicLoad(u64, &interrupt_count, .monotonic);
 }
 
 fn clearPortDescriptorState(state: *PortRuntimeState) void {
@@ -1790,8 +1802,8 @@ fn pollDmaFault() bool {
 }
 
 fn containFailure(marker: []const u8) void {
-    @atomicStore(bool, &active, false, .seq_cst);
-    @atomicStore(u32, &pending_interrupts, 0, .seq_cst);
+    publishControllerActive(false);
+    @atomicStore(u32, &pending_interrupts, 0, .monotonic);
     outstanding_command = null;
     outstanding_transfer = null;
     command_producer = .{};
@@ -2002,6 +2014,7 @@ test "xHCI hardware capability snapshot uses the shared modern parser" {
 }
 
 test "xHCI controller runtime state allocation follows reported hardware capacity" {
+    try std.testing.expect(INTERRUPT_STATE_USES_PROTOCOL_ORDERING);
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(PortRuntimeState));
     try std.testing.expectEqual(@as(usize, 1_352), keyboardReportPublisherOffsetFor(12));
     try std.testing.expectEqual(@as(usize, 2_936), supportedProtocolsOffsetFor(12));
