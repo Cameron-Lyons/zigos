@@ -521,7 +521,7 @@ fn generatedArtifactMatchesManifest(manifest: *const BuildArtifactManifest, spec
 
     const digest = file.sha256() orelse return false;
     if (!std.mem.eql(u8, &digest, &artifact.file_sha256)) return false;
-    if (!buildArtifactDigestMatches(manifest, .userspace_image, spec.bundle_id, &digest)) return false;
+    if (!buildArtifactDigestMatches(manifest, .userspace_image, spec.bundleId(), &digest)) return false;
 
     const inspection = elf_image_inspector.inspectFile(file) catch return false;
     if (artifact.entry_point != inspection.entry_point) return false;

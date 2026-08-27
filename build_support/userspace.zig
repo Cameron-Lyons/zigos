@@ -70,9 +70,9 @@ pub fn addUserspaceArtifacts(
         const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
         production_compile_steps[artifact_index] = artifact.compile_step;
         production_install_steps[artifact_index] = artifact.install_step;
-        production_archive_run.addArg(spec.image.bundle_id);
+        production_archive_run.addArg(spec.image.bundleId());
         production_archive_run.addArtifactArg(artifact.compile_step);
-        verification_archive_run.addArg(spec.image.bundle_id);
+        verification_archive_run.addArg(spec.image.bundleId());
         verification_archive_run.addArtifactArg(artifact.compile_step);
         production_step.dependOn(artifact.install_step);
         verification_step.dependOn(artifact.install_step);
@@ -81,7 +81,7 @@ pub fn addUserspaceArtifacts(
         const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
         verification_only_compile_steps[artifact_index] = artifact.compile_step;
         verification_only_install_steps[artifact_index] = artifact.install_step;
-        verification_archive_run.addArg(spec.image.bundle_id);
+        verification_archive_run.addArg(spec.image.bundleId());
         verification_archive_run.addArtifactArg(artifact.compile_step);
         verification_step.dependOn(artifact.install_step);
     }
@@ -177,12 +177,13 @@ fn addUserspaceCompile(
     artifact_name: []const u8,
 ) *std.Build.Step.Compile {
     const options = b.addOptions();
-    options.addOption([]const u8, "bundle_id", spec.bundle_id);
-    options.addOption(u32, "role_tag", spec.role_tag);
-    options.addOption(u32, "contract_flags", spec.contract_flags);
-    options.addOption(bool, "run_mmu_isolation_probe", (spec.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
-    options.addOption(bool, "run_nx_isolation_probe", (spec.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
-    options.addOption(bool, "run_gp_isolation_probe", (spec.contract_flags & production_registry.FLAG_GP_PROOF_PROBE) != 0);
+    const contract_flags = spec.contractFlags();
+    options.addOption([]const u8, "bundle_id", spec.bundleId());
+    options.addOption(u32, "role_tag", spec.roleTag());
+    options.addOption(u32, "contract_flags", contract_flags);
+    options.addOption(bool, "run_mmu_isolation_probe", (contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
+    options.addOption(bool, "run_nx_isolation_probe", (contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
+    options.addOption(bool, "run_gp_isolation_probe", (contract_flags & production_registry.FLAG_GP_PROOF_PROBE) != 0);
     options.addOption(u8, "service_kind", service_kind);
 
     const module = b.createModule(.{
