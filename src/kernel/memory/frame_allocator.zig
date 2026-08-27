@@ -21,6 +21,8 @@ pub const Error = error{
     NotAllocated,
 };
 
+pub const MUTATES_RANGES_BY_BITMAP_WORD = true;
+
 pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
         @compileError("page_size must be a power of two");
@@ -44,6 +46,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
 
         pub const total_frames = frame_count;
         pub const bytes_per_frame = page_size;
+        pub const max_range_word_probes = bitmap_word_count;
 
         pub fn init() Self {
             return .{};
@@ -56,20 +59,16 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
         pub fn reserve(self: *Self, run: FrameRun) Error!void {
             const start = try validateRun(run);
 
-            var frame = start;
-            while (frame < start + run.count) : (frame += 1) {
-                if (self.bitIsSet(&self.allocated_bitmap, frame)) {
-                    return error.FrameAllocated;
-                }
+            if (self.rangeHasAny(&self.allocated_bitmap, start, run.count)) {
+                return error.FrameAllocated;
             }
-
-            frame = start;
-            while (frame < start + run.count) : (frame += 1) {
-                if (!self.bitIsSet(&self.reserved_bitmap, frame)) {
-                    self.setBit(&self.reserved_bitmap, frame);
-                    self.reserved_count += 1;
-                }
-            }
+            self.reserved_count += self.mutateRange(
+                &self.reserved_bitmap,
+                start,
+                run.count,
+                true,
+                true,
+            );
 
             if (start <= self.search_frame_hint and self.search_frame_hint < start + run.count) {
                 self.search_frame_hint = if (start + run.count == frame_count) 0 else start + run.count;
@@ -79,20 +78,16 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
         pub fn makeAvailable(self: *Self, run: FrameRun) Error!void {
             const start = try validateRun(run);
 
-            var frame = start;
-            while (frame < start + run.count) : (frame += 1) {
-                if (self.bitIsSet(&self.allocated_bitmap, frame)) {
-                    return error.FrameAllocated;
-                }
+            if (self.rangeHasAny(&self.allocated_bitmap, start, run.count)) {
+                return error.FrameAllocated;
             }
-
-            frame = start;
-            while (frame < start + run.count) : (frame += 1) {
-                if (self.bitIsSet(&self.reserved_bitmap, frame)) {
-                    self.clearBit(&self.reserved_bitmap, frame);
-                    self.reserved_count -= 1;
-                }
-            }
+            self.reserved_count -= self.mutateRange(
+                &self.reserved_bitmap,
+                start,
+                run.count,
+                false,
+                true,
+            );
             self.search_frame_hint = @min(self.search_frame_hint, start);
         }
 
@@ -102,7 +97,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             const start = self.findRun(self.search_frame_hint, frame_count, count) orelse
                 self.findRun(0, frame_count, count) orelse return null;
 
-            self.setRange(&self.allocated_bitmap, start, count);
+            _ = self.mutateRange(&self.allocated_bitmap, start, count, true, false);
             self.allocated_count += count;
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
 
@@ -115,20 +110,8 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
         pub fn release(self: *Self, run: FrameRun) Error!void {
             const start = try validateRun(run);
 
-            var frame = start;
-            while (frame < start + run.count) : (frame += 1) {
-                if (self.bitIsSet(&self.reserved_bitmap, frame)) {
-                    return error.FrameReserved;
-                }
-                if (!self.bitIsSet(&self.allocated_bitmap, frame)) {
-                    return error.NotAllocated;
-                }
-            }
-
-            frame = start;
-            while (frame < start + run.count) : (frame += 1) {
-                self.clearBit(&self.allocated_bitmap, frame);
-            }
+            try self.validateReleasableRange(start, run.count);
+            _ = self.mutateRange(&self.allocated_bitmap, start, run.count, false, false);
             self.allocated_count -= run.count;
             self.search_frame_hint = start;
         }
@@ -224,7 +207,12 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             return null;
         }
 
-        fn setRange(_: *Self, bitmap: *[bitmap_word_count]u32, start: u32, count: u32) void {
+        fn rangeHasAny(
+            _: *const Self,
+            bitmap: *const [bitmap_word_count]u32,
+            start: u32,
+            count: u32,
+        ) bool {
             const end = start + count;
             var word_index = start / bitmap_word_bits;
             const last_word_index = (end - 1) / bitmap_word_bits;
@@ -232,7 +220,57 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
                 const word_start = word_index * bitmap_word_bits;
                 const range_start = @max(start, word_start);
                 const range_end = word_start + @min(bitmap_word_bits, end - word_start);
-                bitmap[word_index] |= wordRangeMask(range_start - word_start, range_end - word_start);
+                const mask = wordRangeMask(range_start - word_start, range_end - word_start);
+                if ((bitmap[word_index] & mask) != 0) return true;
+            }
+            return false;
+        }
+
+        fn mutateRange(
+            _: *Self,
+            bitmap: *[bitmap_word_count]u32,
+            start: u32,
+            count: u32,
+            comptime set_bits: bool,
+            comptime count_changes: bool,
+        ) u32 {
+            const end = start + count;
+            var changed: u32 = 0;
+            var word_index = start / bitmap_word_bits;
+            const last_word_index = (end - 1) / bitmap_word_bits;
+            while (word_index <= last_word_index) : (word_index += 1) {
+                const word_start = word_index * bitmap_word_bits;
+                const range_start = @max(start, word_start);
+                const range_end = word_start + @min(bitmap_word_bits, end - word_start);
+                const mask = wordRangeMask(range_start - word_start, range_end - word_start);
+                if (count_changes) {
+                    const affected = if (set_bits) mask & ~bitmap[word_index] else mask & bitmap[word_index];
+                    changed += @popCount(affected);
+                }
+                if (set_bits) {
+                    bitmap[word_index] |= mask;
+                } else {
+                    bitmap[word_index] &= ~mask;
+                }
+            }
+            return changed;
+        }
+
+        fn validateReleasableRange(self: *const Self, start: u32, count: u32) Error!void {
+            const end = start + count;
+            var word_index = start / bitmap_word_bits;
+            const last_word_index = (end - 1) / bitmap_word_bits;
+            while (word_index <= last_word_index) : (word_index += 1) {
+                const word_start = word_index * bitmap_word_bits;
+                const range_start = @max(start, word_start);
+                const range_end = word_start + @min(bitmap_word_bits, end - word_start);
+                const mask = wordRangeMask(range_start - word_start, range_end - word_start);
+                const reserved = self.reserved_bitmap[word_index] & mask;
+                const missing = ~self.allocated_bitmap[word_index] & mask;
+                if (reserved == 0 and missing == 0) continue;
+                if (reserved == 0) return error.NotAllocated;
+                if (missing == 0 or @ctz(reserved) <= @ctz(missing)) return error.FrameReserved;
+                return error.NotAllocated;
             }
         }
 
@@ -240,18 +278,6 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             const word: usize = @intCast(frame / bitmap_word_bits);
             const bit: u5 = @truncate(frame % bitmap_word_bits);
             return (bitmap[word] & (@as(u32, 1) << bit)) != 0;
-        }
-
-        fn setBit(_: *Self, bitmap: *[bitmap_word_count]u32, frame: u32) void {
-            const word: usize = @intCast(frame / bitmap_word_bits);
-            const bit: u5 = @truncate(frame % bitmap_word_bits);
-            bitmap[word] |= @as(u32, 1) << bit;
-        }
-
-        fn clearBit(_: *Self, bitmap: *[bitmap_word_count]u32, frame: u32) void {
-            const word: usize = @intCast(frame / bitmap_word_bits);
-            const bit: u5 = @truncate(frame % bitmap_word_bits);
-            bitmap[word] &= ~(@as(u32, 1) << bit);
         }
 
         fn wordRangeMask(start_bit: u32, end_bit: u32) u32 {
@@ -383,6 +409,10 @@ test "contiguous allocation consumes complete free bitmap words" {
     try std.testing.expectEqual(@as(u32, 64), run.count);
     try std.testing.expect(allocator.isAllocated(32 * page_size));
     try std.testing.expect(allocator.isAllocated(95 * page_size));
+
+    try allocator.release(run);
+    try std.testing.expectEqual(@as(u32, 0), allocator.stats().allocated);
+    try std.testing.expectEqual(run, allocator.allocate(64).?);
 }
 
 test "fragmented bitmap rejects unavailable contiguous runs" {
@@ -501,23 +531,25 @@ test "allocator reports exhaustion without changing statistics" {
 }
 
 test "fail-closed availability opens only declared firmware runs" {
-    const Allocator = Fixed(8 * 4096, 4096);
+    const Allocator = Fixed(96 * 4096, 4096);
     var allocator = Allocator.init();
 
-    try allocator.reserve(.{ .base = 0, .count = 8 });
-    try allocator.makeAvailable(.{ .base = 2 * 4096, .count = 3 });
-    try allocator.makeAvailable(.{ .base = 3 * 4096, .count = 2 });
+    try allocator.reserve(.{ .base = 0, .count = 96 });
+    try allocator.makeAvailable(.{ .base = 16 * 4096, .count = 64 });
+    try allocator.makeAvailable(.{ .base = 32 * 4096, .count = 32 });
 
     try std.testing.expectEqual(Stats{
-        .total = 8,
-        .reserved = 5,
+        .total = 96,
+        .reserved = 32,
         .allocated = 0,
-        .free = 3,
+        .free = 64,
     }, allocator.stats());
-    try std.testing.expectEqual(@as(u32, 2 * 4096), allocator.allocate(3).?.base);
+    try std.testing.expectEqual(@as(u32, 16 * 4096), allocator.allocate(64).?.base);
     try std.testing.expect(allocator.allocate(1) == null);
     try std.testing.expectError(error.FrameAllocated, allocator.makeAvailable(.{
-        .base = 2 * 4096,
+        .base = 16 * 4096,
         .count = 1,
     }));
+    try std.testing.expect(MUTATES_RANGES_BY_BITMAP_WORD);
+    try std.testing.expectEqual(@as(usize, 3), Allocator.max_range_word_probes);
 }
