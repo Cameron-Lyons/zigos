@@ -53,6 +53,32 @@ pub const Error = xhci.Error || error{
     BusMasterEnableFailed,
 };
 
+const ControllerDmaMemory = struct {
+    physical_base: u32 = 0,
+    alias_base: usize = 0,
+    byte_len: usize = 0,
+
+    fn bytes(self: ControllerDmaMemory) []u8 {
+        return @as([*]u8, @ptrFromInt(self.alias_base))[0..self.byte_len];
+    }
+
+    fn aliasFor(
+        self: ControllerDmaMemory,
+        physical_address: u64,
+        byte_len: usize,
+    ) Error!usize {
+        const base = @as(u64, self.physical_base);
+        if (physical_address < base) return error.DmaAddressOutsidePlan;
+        const offset = std.math.cast(usize, physical_address - base) orelse
+            return error.DmaAddressOutsidePlan;
+        if (offset > self.byte_len or byte_len > self.byte_len - offset) {
+            return error.DmaAddressOutsidePlan;
+        }
+        return std.math.add(usize, self.alias_base, offset) catch
+            return error.DmaAddressOutsidePlan;
+    }
+};
+
 var active_capabilities: ?xhci.CapabilityRegisters = null;
 var active_protocols: ?*const xhci.SupportedProtocols = null;
 var active_legacy_ownership: ?xhci.LegacyOwnership = null;
@@ -60,7 +86,7 @@ var active_controller_reset = false;
 var active_enabled_slots: u8 = 0;
 var active_device: pci.PCIDevice = undefined;
 var active_dma_plan: ?xhci.ControllerDmaPlan = null;
-var active_dma_base: u32 = 0;
+var active_dma_memory = ControllerDmaMemory{};
 var active_dma_frame_count: u32 = 0;
 var active_dma_windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
 var active_dma_window_count: usize = 0;
@@ -276,6 +302,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_legacy_ownership = null;
     active_controller_reset = false;
     active_enabled_slots = 0;
+    active_dma_memory = .{};
     active_bar_address = 0;
     publishControllerActive(false);
     event_consumer = .{};
@@ -348,15 +375,19 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     if (try dma_plan.frameCount() > dma_frame_count) return error.DmaIsolationPlanInvalid;
     const dma_bytes = std.math.cast(usize, dma_plan.total_bytes) orelse
         return error.DmaIsolationPlanInvalid;
-    const dma_memory: [*]u8 = @ptrFromInt(dma_base);
-    try xhci.initializeControllerDma(dma_plan, dma_memory[0..dma_bytes]);
+    const dma_memory = ControllerDmaMemory{
+        .physical_base = dma_base,
+        .alias_base = paging.directMapAddress(dma_base) orelse return error.DmaAllocationFailed,
+        .byte_len = dma_bytes,
+    };
+    try xhci.initializeControllerDma(dma_plan, dma_memory.bytes());
     publishDmaStructures();
     try xhci.programControllerDmaRegisters(capabilities, dma_plan, &reader);
     const dma_window_count = try buildDmaWindows(dma_plan, &active_dma_windows);
 
     active_device = device_info;
     active_dma_plan = dma_plan;
-    active_dma_base = dma_base;
+    active_dma_memory = dma_memory;
     active_dma_frame_count = dma_frame_count;
     active_dma_window_count = dma_window_count;
     active_bar_address = bar.address;
@@ -385,6 +416,7 @@ pub fn validated() bool {
         active_keyboard_reports != null and
         ports.len == @as(usize, capabilities.max_ports) + 1 and
         active_dma_plan != null and
+        active_dma_memory.byte_len != 0 and
         active_dma_window_count != 0;
 }
 
@@ -413,7 +445,7 @@ pub fn dmaFrameCount() u32 {
 }
 
 pub fn dmaBaseAddress() u32 {
-    return active_dma_base;
+    return active_dma_memory.physical_base;
 }
 
 pub fn isolationDomain() ?intel_vtd.DmaDomain {
@@ -1033,12 +1065,12 @@ fn handleControlTransferCompletion(event: xhci.Event) Error!void {
     {
         return error.InvalidDeviceSlot;
     }
-    const source: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
+    const source_alias = try active_dma_memory.aliasFor(
         plan.arena.enumeration_buffer_address,
-    )));
-    const first_byte: *const u8 = @ptrFromInt(@as(usize, @intCast(
-        plan.arena.enumeration_buffer_address,
-    )));
+        @intCast(plan.arena.enumeration_buffer_bytes),
+    );
+    const source: [*]volatile u8 = @ptrFromInt(source_alias);
+    const first_byte: *const u8 = @ptrFromInt(source_alias);
     _ = @atomicLoad(u8, first_byte, .acquire);
     const protocol = protocols.forPort(transfer.port_id) orelse
         return error.MissingPortProtocol;
@@ -1180,8 +1212,12 @@ fn handleInterruptTransferCompletion(event: xhci.Event) Error!void {
     if (outstanding_interrupt_reports == 0) return error.TrbRingStateInvalid;
     outstanding_interrupt_reports -= 1;
     const buffer_address = try plan.arena.interruptReportBufferAddress(state.slot_id);
-    const source: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(buffer_address)));
-    const first_byte: *const u8 = @ptrFromInt(@as(usize, @intCast(buffer_address)));
+    const buffer_alias = try active_dma_memory.aliasFor(
+        buffer_address,
+        xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
+    );
+    const source: [*]volatile u8 = @ptrFromInt(buffer_alias);
+    const first_byte: *const u8 = @ptrFromInt(buffer_alias);
     _ = @atomicLoad(u8, first_byte, .acquire);
     var report: [xhci.HID_BOOT_KEYBOARD_REPORT_BYTES]u8 = undefined;
     for (&report, 0..) |*byte, index| byte.* = source[index];
@@ -1397,14 +1433,20 @@ fn writeRingTrb(
 ) Error!u64 {
     const trb_address = try producer.trbAddress(ring_address, ring_trbs);
     const cycle_state = producer.cycle_state;
-    const trb: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(trb_address)));
+    const trb: [*]volatile u32 = @ptrFromInt(try active_dma_memory.aliasFor(
+        trb_address,
+        @intCast(xhci.TRB_BYTES),
+    ));
     trb[0] = words[0];
     trb[1] = words[1];
     trb[2] = words[2];
     trb[3] = words[3];
     if (try producer.advance(ring_trbs)) {
         const link_address = try producer.linkAddress(ring_address, ring_trbs);
-        const link: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(link_address)));
+        const link: [*]volatile u32 = @ptrFromInt(try active_dma_memory.aliasFor(
+            link_address,
+            @intCast(xhci.TRB_BYTES),
+        ));
         link[3] = xhci.ringLinkControl(cycle_state);
     }
     return trb_address;
@@ -1432,7 +1474,10 @@ fn submitInterruptReportTransfer(
     }
 
     const buffer_address = try plan.arena.interruptReportBufferAddress(state.slot_id);
-    const buffer: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(buffer_address)));
+    const buffer: [*]volatile u8 = @ptrFromInt(try active_dma_memory.aliasFor(
+        buffer_address,
+        xhci.HID_BOOT_KEYBOARD_REPORT_BYTES,
+    ));
     for (0..xhci.HID_BOOT_KEYBOARD_REPORT_BYTES) |index| buffer[index] = 0;
 
     const ring_address = try plan.arena.interruptTransferRingAddress(state.slot_id);
@@ -1523,9 +1568,10 @@ fn submitDescriptorTransfer(
         .set_configuration => unreachable,
         .set_boot_protocol => unreachable,
     };
-    const buffer: [*]volatile u8 = @ptrFromInt(@as(usize, @intCast(
+    const buffer: [*]volatile u8 = @ptrFromInt(try active_dma_memory.aliasFor(
         plan.arena.enumeration_buffer_address,
-    )));
+        @intCast(transfer_bytes),
+    ));
     for (0..transfer_bytes) |index| buffer[index] = 0;
 
     const ring_address = try plan.arena.controlTransferRingAddress(state.slot_id);
@@ -1658,9 +1704,10 @@ fn prepareAddressDeviceInputContext(port_id: u8, state: *PortRuntimeState) Error
     }
     const protocol = protocols.forPort(port_id) orelse return error.MissingPortProtocol;
     const max_packet_size = try xhci.endpointZeroMaxPacketSize(protocol, state.speed_id);
-    const input_context: [*]u8 = @ptrFromInt(@as(usize, @intCast(
+    const input_context: [*]u8 = @ptrFromInt(try active_dma_memory.aliasFor(
         plan.arena.input_context_address,
-    )));
+        @intCast(plan.arena.input_context_bytes),
+    ));
     try xhci.initializeAddressDeviceInputContext(
         capabilities.context_size,
         port_id,
@@ -1685,9 +1732,10 @@ fn prepareConfigureBootKeyboardInputContext(state: *const PortRuntimeState) Erro
     {
         return error.InvalidDeviceSlot;
     }
-    const input_context: [*]u8 = @ptrFromInt(@as(usize, @intCast(
+    const input_context: [*]u8 = @ptrFromInt(try active_dma_memory.aliasFor(
         plan.arena.input_context_address,
-    )));
+        @intCast(plan.arena.input_context_bytes),
+    ));
     try xhci.initializeConfigureInterruptInEndpointInputContext(
         capabilities.context_size,
         keyboard,
@@ -1705,9 +1753,10 @@ fn prepareEvaluateEndpointZeroInputContext(state: *const PortRuntimeState) Error
     {
         return error.InvalidDeviceSlot;
     }
-    const input_context: [*]u8 = @ptrFromInt(@as(usize, @intCast(
+    const input_context: [*]u8 = @ptrFromInt(try active_dma_memory.aliasFor(
         plan.arena.input_context_address,
-    )));
+        @intCast(plan.arena.input_context_bytes),
+    ));
     try xhci.initializeEvaluateEndpointZeroInputContext(
         capabilities.context_size,
         state.pending_endpoint_zero_max_packet_size,
@@ -1717,18 +1766,15 @@ fn prepareEvaluateEndpointZeroInputContext(state: *const PortRuntimeState) Error
 
 fn resetSlotTransferRings(slot_id: u8) Error!void {
     const plan = active_dma_plan orelse return error.TrbRingStateInvalid;
-    const dma_bytes = std.math.cast(usize, plan.total_bytes) orelse
-        return error.DmaBufferTooSmall;
-    const memory: [*]u8 = @ptrFromInt(@as(usize, @intCast(plan.base_address)));
     try xhci.resetTransferRing(
         plan,
-        memory[0..dma_bytes],
+        active_dma_memory.bytes(),
         try plan.arena.controlTransferRingAddress(slot_id),
         plan.arena.control_transfer_ring_trbs,
     );
     try xhci.resetTransferRing(
         plan,
-        memory[0..dma_bytes],
+        active_dma_memory.bytes(),
         try plan.arena.interruptTransferRingAddress(slot_id),
         plan.arena.interrupt_transfer_ring_trbs,
     );
@@ -1747,7 +1793,10 @@ fn writeDcbaaSlot(slot_id: u8, address: u64) Error!void {
         plan.arena.dcbaa_address,
         @as(u64, slot_id) * xhci.DCBAA_ENTRY_BYTES,
     ) catch return error.DmaAddressOutsidePlan;
-    @as(*volatile u64, @ptrFromInt(@as(usize, @intCast(entry_address)))).* = address;
+    @as(*volatile u64, @ptrFromInt(try active_dma_memory.aliasFor(
+        entry_address,
+        @sizeOf(u64),
+    ))).* = address;
     publishDmaStructures();
 }
 
@@ -1755,7 +1804,7 @@ fn clearDeviceContext(slot_id: u8) Error!void {
     const plan = active_dma_plan orelse return error.CommandRingStateInvalid;
     const address = try plan.arena.deviceContextAddress(slot_id);
     const bytes: usize = @intCast(plan.arena.device_context_stride);
-    const context: [*]u8 = @ptrFromInt(@as(usize, @intCast(address)));
+    const context: [*]u8 = @ptrFromInt(try active_dma_memory.aliasFor(address, bytes));
     @memset(context[0..bytes], 0);
     publishDmaStructures();
 }
@@ -1765,7 +1814,9 @@ fn currentEventReady() bool {
     const control_address = plan.ring_plan.event_ring_address +
         @as(u64, event_consumer.dequeue_index) * xhci.TRB_BYTES +
         3 * @sizeOf(u32);
-    const control = @as(*volatile u32, @ptrFromInt(@as(usize, @intCast(control_address)))).*;
+    const control_alias = active_dma_memory.aliasFor(control_address, @sizeOf(u32)) catch
+        return false;
+    const control = @as(*volatile u32, @ptrFromInt(control_alias)).*;
     return event_consumer.ready(control);
 }
 
@@ -1773,7 +1824,11 @@ fn readCurrentEvent() ?[4]u32 {
     const plan = active_dma_plan orelse return null;
     const trb_address = plan.ring_plan.event_ring_address +
         @as(u64, event_consumer.dequeue_index) * xhci.TRB_BYTES;
-    const trb: [*]volatile u32 = @ptrFromInt(@as(usize, @intCast(trb_address)));
+    const trb_alias = active_dma_memory.aliasFor(
+        trb_address,
+        @intCast(xhci.TRB_BYTES),
+    ) catch return null;
+    const trb: [*]volatile u32 = @ptrFromInt(trb_alias);
     const control = trb[3];
     if (!event_consumer.ready(control)) return null;
     acquireEvent();
