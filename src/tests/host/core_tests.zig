@@ -5,6 +5,7 @@ const firmware_memory_map = @import("../../kernel/memory/firmware_memory_map.zig
 const frame_allocator = @import("../../kernel/memory/frame_allocator.zig");
 const heap_geometry = @import("../../kernel/memory/heap_geometry.zig");
 const page_table64 = @import("../../kernel/memory/page_table64.zig");
+const virtual_layout = @import("../../kernel/memory/virtual_layout.zig");
 const tsc_deadline = @import("../../kernel/timer/tsc_deadline.zig");
 const abi = @import("../../native/core/abi.zig");
 const crypto_hash = @import("../../native/core/crypto_hash.zig");
@@ -22,6 +23,7 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(frame_allocator);
     std.testing.refAllDecls(heap_geometry);
     std.testing.refAllDecls(page_table64);
+    std.testing.refAllDecls(virtual_layout);
     std.testing.refAllDecls(tsc_deadline);
     std.testing.refAllDecls(abi);
     std.testing.refAllDecls(crypto_hash);

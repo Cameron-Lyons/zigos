@@ -28,6 +28,7 @@ const kernel_intel_vtd = @import("../../kernel/platform/intel_vtd.zig");
 const kernel_ethernet = @import("../../kernel/net/ethernet.zig");
 const kernel_link_port = @import("../../kernel/net/link_port.zig");
 const kernel_mmio_windows = @import("../../kernel/memory/mmio_windows.zig");
+const kernel_virtual_layout = @import("../../kernel/memory/virtual_layout.zig");
 const kernel_nvme = @import("../../kernel/drivers/nvme.zig");
 const kernel_pci = @import("../../kernel/drivers/pci.zig");
 const kernel_smbios = @import("../../kernel/platform/smbios.zig");
@@ -1014,6 +1015,10 @@ fn networkDriverBrokerRevocationGate() !void {
 }
 
 pub fn kernelBootstrapShimBoundaryGate() !void {
+    try std.testing.expect(kernel_virtual_layout.regionsDisjoint(
+        kernel_virtual_layout.physical_memory,
+        kernel_virtual_layout.device_memory,
+    ));
     try std.testing.expect(kernel_mmio_windows.validLayout(&kernel_mmio_windows.all));
     try std.testing.expect(
         kernel_mmio_windows.pci_ecam.endExclusive().? <= kernel_mmio_windows.intel_i225.base,
