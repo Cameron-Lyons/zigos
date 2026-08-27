@@ -1349,9 +1349,9 @@ fn benchmarkHeapAllocateFree(iteration: u32) u64 {
 }
 
 fn benchmarkFrameAllocateRelease(iteration: u32) u64 {
-    const base = paging.alloc_frames(1) orelse
+    const base = paging.allocLowIdentityFrames(1) orelse
         benchmark_reporting.benchStepFailure("frame allocation", error.OutOfMemory);
-    paging.release_frames(base, 1) catch |err|
+    paging.releaseLowIdentityFrames(base, 1) catch |err|
         benchmark_reporting.benchStepFailure("frame release", err);
     return @as(u64, base) ^ iteration;
 }

@@ -27,6 +27,7 @@ pub const MUTATES_RANGES_BY_BITMAP_WORD = true;
 pub const RESERVATION_PREFLIGHT_USES_BITMAP_WORDS = true;
 pub const CONTIGUOUS_SEARCH_USES_BITMAP_WORDS = true;
 pub const SINGLE_FRAME_MUTATIONS_ARE_DIRECT = true;
+pub const SUPPORTS_BOUNDED_PHYSICAL_ALLOCATION = true;
 
 pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
@@ -117,14 +118,40 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
         }
 
         pub fn allocate(self: *Self, count: u32) ?FrameRun {
-            if (count == 0 or count > frame_count) return null;
+            return self.allocateBetween(count, 0, memory_bytes);
+        }
+
+        pub fn allocateBelow(self: *Self, count: u32, exclusive_end: PhysicalAddress) ?FrameRun {
+            return self.allocateBetween(count, 0, exclusive_end);
+        }
+
+        pub fn allocateBetween(
+            self: *Self,
+            count: u32,
+            inclusive_start: PhysicalAddress,
+            exclusive_end: PhysicalAddress,
+        ) ?FrameRun {
+            const lower_bytes = @min(inclusive_start, memory_bytes);
+            const upper_bytes = @min(exclusive_end, memory_bytes);
+            const lower_frame_value = lower_bytes / page_size + @intFromBool(lower_bytes % page_size != 0);
+            const upper_frame_value = upper_bytes / page_size;
+            if (lower_frame_value >= upper_frame_value) return null;
+
+            const lower_frame: u32 = @intCast(lower_frame_value);
+            const upper_frame: u32 = @intCast(upper_frame_value);
+            if (count == 0 or count > upper_frame - lower_frame) return null;
+
+            const search_start = if (self.search_frame_hint >= lower_frame and self.search_frame_hint < upper_frame)
+                self.search_frame_hint
+            else
+                lower_frame;
 
             const start = if (count == 1)
-                self.findFreeFrame(self.search_frame_hint, frame_count) orelse
-                    self.findFreeFrame(0, frame_count) orelse return null
+                self.findFreeFrame(search_start, upper_frame) orelse
+                    (if (search_start == lower_frame) null else self.findFreeFrame(lower_frame, upper_frame)) orelse return null
             else
-                self.findRun(self.search_frame_hint, frame_count, count) orelse
-                    self.findRun(0, frame_count, count) orelse return null;
+                self.findRun(search_start, upper_frame, count) orelse
+                    (if (search_start == lower_frame) null else self.findRun(lower_frame, upper_frame, count)) orelse return null;
 
             if (count == 1) {
                 const word: usize = @intCast(start / bitmap_word_bits);
@@ -457,6 +484,47 @@ test "physical frame addresses remain exact above 4 GiB" {
     try std.testing.expect(allocator.isAllocated(high_frame_base));
     try allocator.release(run);
     try std.testing.expect(!allocator.isAllocated(high_frame_base));
+}
+
+test "bounded allocation never crosses its physical ceiling" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(16 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 7 });
+    const final_low = allocator.allocateBelow(1, 8 * page_size).?;
+    try std.testing.expectEqual(@as(PhysicalAddress, 7 * page_size), final_low.base);
+    try std.testing.expect(allocator.allocateBelow(1, 8 * page_size) == null);
+
+    const first_high = allocator.allocate(1).?;
+    try std.testing.expectEqual(@as(PhysicalAddress, 8 * page_size), first_high.base);
+    try std.testing.expectEqual(@as(u32, 2), allocator.stats().allocated);
+}
+
+test "bounded allocation floors unaligned physical ceilings" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(4 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 1 });
+    try std.testing.expect(allocator.allocateBelow(1, 2 * page_size - 1) == null);
+    try std.testing.expectEqual(
+        @as(PhysicalAddress, page_size),
+        allocator.allocateBelow(1, 2 * page_size).?.base,
+    );
+}
+
+test "range allocation honors both physical boundaries" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(16 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    const first_high = allocator.allocateBetween(2, 8 * page_size, 12 * page_size).?;
+    try std.testing.expectEqual(@as(PhysicalAddress, 8 * page_size), first_high.base);
+    const second_high = allocator.allocateBetween(2, 8 * page_size + 1, 12 * page_size).?;
+    try std.testing.expectEqual(@as(PhysicalAddress, 10 * page_size), second_high.base);
+    try std.testing.expect(allocator.allocateBetween(1, 8 * page_size, 12 * page_size) == null);
+    try std.testing.expectEqual(@as(PhysicalAddress, 0), allocator.allocateBelow(1, 8 * page_size).?.base);
 }
 
 test "single-frame allocation wraps from a non-word-aligned hint" {

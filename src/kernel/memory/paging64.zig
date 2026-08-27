@@ -34,6 +34,9 @@ pub const CACHES_PROCESS_CONTEXT_MODE = true;
 pub const PRECOMPUTES_ADDRESS_SPACE_CR3 = true;
 pub const PAGE_TABLE_ACCESS_USES_DIRECT_MAP = true;
 pub const OWNED_USER_FRAME_ACCESS_USES_DIRECT_MAP = true;
+pub const LOW_IDENTITY_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 1024 * 1024;
+pub const LOW_IDENTITY_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT = true;
+pub const GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY = true;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -244,7 +247,7 @@ fn haltWithMessage(message: []const u8) noreturn {
 }
 
 inline fn lowIdentityFrameAddress(address: frame_allocator.PhysicalAddress) u32 {
-    if (address >= MANAGED_PHYSICAL_BYTES) {
+    if (address >= LOW_IDENTITY_PHYSICAL_LIMIT) {
         haltWithMessage("Allocated frame lies outside the low identity aperture!\n");
     }
     return @intCast(address);
@@ -257,18 +260,23 @@ pub fn directMapAddress(address: frame_allocator.PhysicalAddress) ?usize {
 fn tryAllocFrame() ?u32 {
     acquireFrameLock();
     defer releaseFrameLock();
-    const run = physical_frames.allocate(1) orelse return null;
+    const run = physical_frames.allocateBetween(1, LOW_IDENTITY_PHYSICAL_LIMIT, MANAGED_PHYSICAL_BYTES) orelse
+        physical_frames.allocate(1) orelse return null;
     return lowIdentityFrameAddress(run.base);
 }
 
-pub fn alloc_frames(count: u32) ?u32 {
+pub fn allocLowIdentityFrames(count: u32) ?u32 {
     acquireFrameLock();
     defer releaseFrameLock();
-    const run = physical_frames.allocate(count) orelse return null;
+    const run = physical_frames.allocateBelow(count, LOW_IDENTITY_PHYSICAL_LIMIT) orelse return null;
     return lowIdentityFrameAddress(run.base);
 }
 
-pub fn release_frames(base: u32, count: u32) FrameReleaseError!void {
+pub fn releaseLowIdentityFrames(base: u32, count: u32) FrameReleaseError!void {
+    return releasePhysicalFrames(base, count);
+}
+
+fn releasePhysicalFrames(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
     acquireFrameLock();
     defer releaseFrameLock();
     try physical_frames.release(.{ .base = base, .count = count });
@@ -421,7 +429,7 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
     zeroTable(pml4);
 
     const pdpt_phys = tryAllocFrame() orelse {
-        release_frames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
+        releasePhysicalFrames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
         return error.OutOfMemory;
     };
     const pdpt = tableAtPhysical(pdpt_phys);
@@ -436,8 +444,8 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
 
     pml4[0] = tableEntry(pdpt_phys, ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER, TABLE_OWNER_USER_PRIVATE);
     const pcid = tryAllocProcessContext() orelse {
-        release_frames(pdpt_phys, 1) catch haltWithMessage("Corrupt user PDPT allocation accounting!\n");
-        release_frames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
+        releasePhysicalFrames(pdpt_phys, 1) catch haltWithMessage("Corrupt user PDPT accounting!\n");
+        releasePhysicalFrames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
         return error.ProcessContextExhausted;
     };
     return .{

@@ -2360,7 +2360,7 @@ fn validateNuc11tnki5KernelProofSources(
         "InvariantClock",
         "BusMasteringNotRevoked",
         "controllerDmaFrameCount",
-        "paging.alloc_frames(dma_frame_count)",
+        "paging.allocLowIdentityFrames(dma_frame_count)",
         "dma_plan.frameCount() > dma_frame_count",
         "initializeControllerDma",
         "publishDmaStructures",

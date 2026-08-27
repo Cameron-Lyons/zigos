@@ -612,10 +612,10 @@ pub fn attachAsBackend(
     }
     publishInterruptsActive(false);
     resetCompletionInterruptCount();
-    const dma_base = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
+    const dma_base = paging.allocLowIdentityFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
     const frames = DmaFrames{ .base = dma_base };
     var retain_dma_frames = vtd_summary != null;
-    errdefer if (!retain_dma_frames) paging.release_frames(dma_base, DMA_FRAME_COUNT) catch {};
+    errdefer if (!retain_dma_frames) paging.releaseLowIdentityFrames(dma_base, DMA_FRAME_COUNT) catch {};
     for (0..DMA_FRAME_COUNT) |index| zeroFrame(frames.frame(@intCast(index)));
 
     var controller = try prepare(dev, frames);
@@ -642,9 +642,9 @@ pub fn attachAsBackend(
 
     var fault_proof: ?intel_vtd.FaultRecord = null;
     if (vtd_summary != null) {
-        const guard_phys = paging.alloc_frames(1) orelse return error.QueueAllocationFailed;
+        const guard_phys = paging.allocLowIdentityFrames(1) orelse return error.QueueAllocationFailed;
         var guard_releasable = false;
-        defer if (guard_releasable) paging.release_frames(guard_phys, 1) catch {};
+        defer if (guard_releasable) paging.releaseLowIdentityFrames(guard_phys, 1) catch {};
         fillGuardPage(guard_phys);
         issueFaultProbe(&controller, guard_phys);
         fault_proof = try intel_vtd.waitForBlockedWrite(guard_phys);
@@ -888,7 +888,7 @@ fn roundtripSelfTest(dev: pci.PCIDevice) void {
     };
     console.print("ZIGOS:NVME:HW:IOQ_OK\n");
 
-    const scratch_phys = paging.alloc_frames(1) orelse {
+    const scratch_phys = paging.allocLowIdentityFrames(1) orelse {
         console.print("ZIGOS:NVME:HW:RW_FAIL QueueAllocationFailed\n");
         return;
     };
