@@ -11,6 +11,7 @@ const leaf7_ebx_smap: u32 = 1 << 20;
 const leaf7_ecx_umip: u32 = 1 << 2;
 const extended1_edx_syscall: u32 = 1 << 11;
 const extended1_edx_nx: u32 = 1 << 20;
+const extended1_edx_pages_1g: u32 = 1 << 26;
 const extended1_edx_long_mode: u32 = 1 << 29;
 const extended7_edx_invariant_tsc: u32 = 1 << 8;
 const hertz_per_megahertz: u64 = 1_000_000;
@@ -44,6 +45,7 @@ pub const Features = struct {
     pcid: bool = false,
     invpcid: bool = false,
     x2apic: bool = false,
+    pages_1g: bool = false,
     tsc_deadline: bool = false,
     invariant_tsc: bool = false,
     tsc_frequency_hz: u64 = 0,
@@ -62,6 +64,7 @@ pub const MissingFeature = enum {
     pcid,
     invpcid,
     x2apic,
+    pages_1g,
     tsc,
 };
 
@@ -85,6 +88,7 @@ pub fn decode(registers: Registers) Features {
     if (registers.max_extended_leaf >= 0x8000_0001) {
         features.syscall = (registers.extended1_edx & extended1_edx_syscall) != 0;
         features.nx = (registers.extended1_edx & extended1_edx_nx) != 0;
+        features.pages_1g = (registers.extended1_edx & extended1_edx_pages_1g) != 0;
         features.long_mode = (registers.extended1_edx & extended1_edx_long_mode) != 0;
     }
     if (registers.max_extended_leaf >= 0x8000_0007) {
@@ -122,6 +126,7 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.pcid) return .pcid;
     if (!features.invpcid) return .invpcid;
     if (!features.x2apic) return .x2apic;
+    if (!features.pages_1g) return .pages_1g;
     if (!features.tsc_deadline or !features.invariant_tsc or features.tsc_frequency_hz == 0) return .tsc;
     return null;
 }
@@ -142,7 +147,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
         .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_invpcid | leaf7_ebx_smap,
         .leaf7_ecx = leaf7_ecx_umip,
         .max_extended_leaf = 0x8000_0007,
-        .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_long_mode,
+        .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_pages_1g | extended1_edx_long_mode,
         .extended7_edx = extended7_edx_invariant_tsc,
     });
 
@@ -151,6 +156,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
     try std.testing.expect(features.invpcid);
     try std.testing.expect(features.pge);
     try std.testing.expect(features.syscall);
+    try std.testing.expect(features.pages_1g);
     try std.testing.expectEqual(@as(?MissingFeature, null), firstMissing(features));
 }
 
@@ -175,6 +181,7 @@ test "decode ignores registers outside advertised CPUID ranges" {
     try std.testing.expect(!features.pcid);
     try std.testing.expect(!features.invpcid);
     try std.testing.expect(!features.x2apic);
+    try std.testing.expect(!features.pages_1g);
     try std.testing.expect(!features.tsc_deadline);
     try std.testing.expect(!features.invariant_tsc);
     try std.testing.expectEqual(@as(u64, 0), features.tsc_frequency_hz);
@@ -194,6 +201,7 @@ test "baseline rejects every missing required feature" {
         .pcid = true,
         .invpcid = true,
         .x2apic = true,
+        .pages_1g = true,
         .tsc_deadline = true,
         .invariant_tsc = true,
         .tsc_frequency_hz = 2_400_000_000,
@@ -261,6 +269,9 @@ test "baseline rejects every missing required feature" {
         .pcid = true,
         .invpcid = true,
     }).?);
+    var missing_pages_1g = complete;
+    missing_pages_1g.pages_1g = false;
+    try std.testing.expectEqual(MissingFeature.pages_1g, firstMissing(missing_pages_1g).?);
     var missing_tsc_deadline = complete;
     missing_tsc_deadline.tsc_deadline = false;
     try std.testing.expectEqual(MissingFeature.tsc, firstMissing(missing_tsc_deadline).?);
@@ -280,6 +291,7 @@ test "baseline rejects every missing required feature" {
         .pcid = true,
         .invpcid = true,
         .x2apic = true,
+        .pages_1g = true,
         .tsc_deadline = true,
         .invariant_tsc = true,
     }).?);
@@ -297,6 +309,7 @@ test "baseline rejects every missing required feature" {
         .pcid = true,
         .invpcid = true,
         .x2apic = true,
+        .pages_1g = true,
         .tsc_deadline = true,
         .invariant_tsc = true,
         .tsc_frequency_hz = 2_400_000_000,

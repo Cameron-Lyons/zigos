@@ -38,6 +38,7 @@ pub const LOW_IDENTITY_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 
 pub const LOW_IDENTITY_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT = true;
 pub const GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY = true;
 pub const GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY = true;
+pub const DIRECT_MAP_USES_1G_PAGES = true;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -93,10 +94,13 @@ pub const UserAddressSpaceCreateError = error{
 };
 
 pub const MANAGED_PHYSICAL_BYTES: frame_allocator.PhysicalAddress = 64 * 1024 * 1024 * 1024;
-const LARGE_PAGE_SIZE: frame_allocator.PhysicalAddress = 2 * 1024 * 1024;
-const PAGE_DIRECTORY_COVERAGE_BYTES = table64.TABLE_ENTRIES * LARGE_PAGE_SIZE;
-const IDENTITY_DIRECTORY_ENTRIES: usize = @intCast(LOW_IDENTITY_PHYSICAL_LIMIT / LARGE_PAGE_SIZE);
+const LARGE_2M_PAGE_SIZE: frame_allocator.PhysicalAddress = 1 << PAGE_DIRECTORY_SHIFT;
+const LARGE_1G_PAGE_SIZE: frame_allocator.PhysicalAddress = 1 << PDPT_SHIFT;
+const PAGE_DIRECTORY_COVERAGE_BYTES = LARGE_1G_PAGE_SIZE;
+const IDENTITY_DIRECTORY_ENTRIES: usize = @intCast(LOW_IDENTITY_PHYSICAL_LIMIT / LARGE_2M_PAGE_SIZE);
 pub const DIRECT_MAP_PDPT_ENTRIES: usize = @intCast(MANAGED_PHYSICAL_BYTES / PAGE_DIRECTORY_COVERAGE_BYTES);
+pub const DIRECT_MAP_1G_LEAF_COUNT: usize = DIRECT_MAP_PDPT_ENTRIES - 1;
+pub const DIRECT_MAP_PAGE_DIRECTORY_COUNT: usize = 1;
 const PRECISE_IDENTITY_PAGE_TABLES = 5;
 const PRECISE_IDENTITY_BYTES: u32 = PRECISE_IDENTITY_PAGE_TABLES * 2 * 1024 * 1024;
 
@@ -116,7 +120,7 @@ var kernel_pdpt: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_directory: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 var kernel_direct_pdpt: PageTable align(PAGE_SIZE) = undefined;
-var kernel_direct_page_directories: [DIRECT_MAP_PDPT_ENTRIES]PageTable align(PAGE_SIZE) = undefined;
+var kernel_direct_page_directory: PageTable align(PAGE_SIZE) = undefined;
 var kernel_direct_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 
 const PhysicalFrameAllocator = frame_allocator.Fixed(MANAGED_PHYSICAL_BYTES, PAGE_SIZE);
@@ -391,9 +395,10 @@ fn lookupLeaf(pml4: *PageDirectory, virt_addr: usize) ?*PageTableEntry {
     const pml4_entry = pml4[tableIndex(virt_addr, PML4_SHIFT)];
     if (!entryPresent(pml4_entry)) return null;
     const pdpt = tableFromEntry(pml4_entry);
-    const pdpt_entry = pdpt[tableIndex(virt_addr, PDPT_SHIFT)];
-    if (!entryPresent(pdpt_entry)) return null;
-    const page_directory = tableFromEntry(pdpt_entry);
+    const pdpt_entry = &pdpt[tableIndex(virt_addr, PDPT_SHIFT)];
+    if (!entryPresent(pdpt_entry.*)) return null;
+    if (table64.isLargePage(pdpt_entry.*)) return pdpt_entry;
+    const page_directory = tableFromEntry(pdpt_entry.*);
     const directory_entry = &page_directory[tableIndex(virt_addr, PAGE_DIRECTORY_SHIFT)];
     if (!entryPresent(directory_entry.*)) return null;
     if (table64.isLargePage(directory_entry.*)) return directory_entry;
@@ -628,7 +633,7 @@ fn initializeKernelHierarchy() void {
     zeroTable(&kernel_pdpt);
     zeroTable(&kernel_page_directory);
     zeroTable(&kernel_direct_pdpt);
-    for (&kernel_direct_page_directories) |*page_directory| zeroTable(page_directory);
+    zeroTable(&kernel_direct_page_directory);
 
     kernel_pml4[0] = tableEntry(@intFromPtr(&kernel_pdpt), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
     kernel_pdpt[0] = tableEntry(@intFromPtr(&kernel_page_directory), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
@@ -637,13 +642,11 @@ fn initializeKernelHierarchy() void {
         ENTRY_PRESENT | ENTRY_WRITABLE,
         TABLE_OWNER_INHERITED,
     );
-    for (&kernel_direct_page_directories, 0..) |*page_directory, pdpt_index| {
-        kernel_direct_pdpt[pdpt_index] = tableEntry(
-            @intFromPtr(page_directory),
-            ENTRY_PRESENT | ENTRY_WRITABLE,
-            TABLE_OWNER_INHERITED,
-        );
-    }
+    kernel_direct_pdpt[0] = tableEntry(
+        @intFromPtr(&kernel_direct_page_directory),
+        ENTRY_PRESENT | ENTRY_WRITABLE,
+        TABLE_OWNER_INHERITED,
+    );
 
     const image = kernelImageExtents();
     var identity_physical_address: u32 = 0;
@@ -666,8 +669,8 @@ fn initializeKernelHierarchy() void {
 
     var directory_index: usize = kernel_page_tables.len;
     while (directory_index < IDENTITY_DIRECTORY_ENTRIES) : (directory_index += 1) {
-        kernel_page_directory[directory_index] = largePhysicalEntry(identity_physical_address);
-        identity_physical_address += @intCast(LARGE_PAGE_SIZE);
+        kernel_page_directory[directory_index] = large2MiBPhysicalEntry(identity_physical_address);
+        identity_physical_address += @intCast(LARGE_2M_PAGE_SIZE);
     }
 
     var direct_physical_address: frame_allocator.PhysicalAddress = 0;
@@ -681,20 +684,30 @@ fn initializeKernelHierarchy() void {
             );
             direct_physical_address += PAGE_SIZE;
         }
-        kernel_direct_page_directories[0][table_index] = tableEntry(
+        kernel_direct_page_directory[table_index] = tableEntry(
             @intFromPtr(page_table),
             ENTRY_PRESENT | ENTRY_WRITABLE,
             TABLE_OWNER_INHERITED,
         );
     }
 
-    for (&kernel_direct_page_directories, 0..) |*page_directory, pdpt_index| {
-        directory_index = if (pdpt_index == 0) kernel_direct_page_tables.len else 0;
-        while (directory_index < table64.TABLE_ENTRIES) : (directory_index += 1) {
-            page_directory[directory_index] = largePhysicalEntry(direct_physical_address);
-            direct_physical_address += LARGE_PAGE_SIZE;
-        }
+    directory_index = kernel_direct_page_tables.len;
+    while (directory_index < table64.TABLE_ENTRIES) : (directory_index += 1) {
+        kernel_direct_page_directory[directory_index] = large2MiBPhysicalEntry(direct_physical_address);
+        direct_physical_address += LARGE_2M_PAGE_SIZE;
     }
+    for (kernel_direct_pdpt[1..DIRECT_MAP_PDPT_ENTRIES]) |*entry| {
+        entry.* = large1GiBPhysicalEntry(direct_physical_address);
+        direct_physical_address += LARGE_1G_PAGE_SIZE;
+    }
+}
+
+fn large2MiBPhysicalEntry(physical_address: frame_allocator.PhysicalAddress) PageTableEntry {
+    return largePhysicalEntry(physical_address);
+}
+
+fn large1GiBPhysicalEntry(physical_address: frame_allocator.PhysicalAddress) PageTableEntry {
+    return largePhysicalEntry(physical_address);
 }
 
 fn largePhysicalEntry(physical_address: frame_allocator.PhysicalAddress) PageTableEntry {
@@ -715,8 +728,14 @@ fn validateHighMemoryDirectMap() bool {
     defer releasePhysicalFrames(run.base, 1) catch
         haltWithMessage("Corrupt high-memory probe accounting!\n");
 
-    const probe: *volatile u8 = @ptrFromInt(directMapAddress(run.base) orelse
-        haltWithMessage("High-memory probe lies outside the direct-map aperture!\n"));
+    const direct_alias = directMapAddress(run.base) orelse
+        haltWithMessage("High-memory probe lies outside the direct-map aperture!\n");
+    const permissions = currentPagePermissions(direct_alias) orelse
+        haltWithMessage("High-memory direct-map leaf is missing!\n");
+    if (!permissions.writable or permissions.executable or permissions.user) {
+        haltWithMessage("High-memory direct-map permissions are invalid!\n");
+    }
+    const probe: *volatile u8 = @ptrFromInt(direct_alias);
     const previous = probe.*;
     const pattern = previous ^ 0xA5;
     probe.* = pattern;
@@ -849,7 +868,7 @@ fn invalidate_page(virt_addr: usize) void {
 }
 
 comptime {
-    if (MANAGED_PHYSICAL_BYTES % PAGE_DIRECTORY_COVERAGE_BYTES != 0) {
+    if (MANAGED_PHYSICAL_BYTES % LARGE_1G_PAGE_SIZE != 0) {
         @compileError("the managed physical aperture must be page-directory aligned");
     }
     if (IDENTITY_DIRECTORY_ENTRIES != table64.TABLE_ENTRIES) {
@@ -857,6 +876,9 @@ comptime {
     }
     if (DIRECT_MAP_PDPT_ENTRIES == 0 or DIRECT_MAP_PDPT_ENTRIES > table64.TABLE_ENTRIES) {
         @compileError("the direct-map aperture must fit one page-directory-pointer table");
+    }
+    if (LOW_IDENTITY_PHYSICAL_LIMIT != LARGE_1G_PAGE_SIZE) {
+        @compileError("the low identity aperture must occupy exactly one page directory");
     }
     if (PRECISE_IDENTITY_BYTES != 10 * 1024 * 1024) {
         @compileError("the precise identity region must cover the first 10 MiB");
@@ -871,12 +893,21 @@ comptime {
     }
 }
 
-test "large identity leaves are writable global and non-executable" {
+test "large physical leaves are writable global and non-executable" {
     const physical_address: frame_allocator.PhysicalAddress = 8 * 1024 * 1024;
-    const entry = largePhysicalEntry(physical_address);
+    const entry = large2MiBPhysicalEntry(physical_address);
     try std.testing.expectEqual(@as(usize, physical_address), entryAddress(entry));
     try std.testing.expect(table64.isLargePage(entry));
     try std.testing.expect((entry & ENTRY_WRITABLE) != 0);
+    try std.testing.expect((entry & ENTRY_GLOBAL) != 0);
+    try std.testing.expect(!table64.isExecutable(entry));
+}
+
+test "one GiB direct leaves preserve aligned high physical addresses" {
+    const physical_address: frame_allocator.PhysicalAddress = 4 * 1024 * 1024 * 1024;
+    const entry = large1GiBPhysicalEntry(physical_address);
+    try std.testing.expectEqual(@as(usize, physical_address), entryAddress(entry));
+    try std.testing.expect(table64.isLargePage(entry));
     try std.testing.expect((entry & ENTRY_GLOBAL) != 0);
     try std.testing.expect(!table64.isExecutable(entry));
 }
@@ -938,6 +969,8 @@ test "direct physical aliases cover only the managed aperture" {
 test "direct hierarchy covers the full 64 GiB physical aperture" {
     try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 64 * 1024 * 1024 * 1024), MANAGED_PHYSICAL_BYTES);
     try std.testing.expectEqual(@as(usize, 64), DIRECT_MAP_PDPT_ENTRIES);
+    try std.testing.expectEqual(@as(usize, 63), DIRECT_MAP_1G_LEAF_COUNT);
+    try std.testing.expectEqual(@as(usize, 1), DIRECT_MAP_PAGE_DIRECTORY_COUNT);
     try std.testing.expectEqual(@as(usize, table64.TABLE_ENTRIES), IDENTITY_DIRECTORY_ENTRIES);
 }
 

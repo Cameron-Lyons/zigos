@@ -1466,7 +1466,7 @@ fn validateNuc11tnki5KernelProofSources(
         "-c /dev/kvm",
         "QEMU_HARNESS_COMMAND+=(-accel",
         "printf '%s\\n' \"host\"",
-        "max,+x2apic,tsc-frequency=2400000000",
+        "max,+x2apic,+pdpe1gb,tsc-frequency=2400000000",
     };
     for (required_accelerated_qemu_snippets) |snippet| {
         if (std.mem.indexOf(u8, qemu_harness_source, snippet) == null) {
@@ -1519,6 +1519,7 @@ fn validateNuc11tnki5KernelProofSources(
         "pcid",
         "invpcid",
         "pge",
+        "pages_1g",
         "syscall",
         "smep",
         "smap",
