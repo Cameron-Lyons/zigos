@@ -48,6 +48,7 @@ pub const COMPACT_BOUNDED_METADATA = true;
 pub const COMPACT_NETWORK_TELEMETRY = true;
 pub const DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT = true;
 pub const HEAP_BACKED_PEER_LINK_DIRECTORY_ON_FREESTANDING = true;
+pub const DRAINS_FULL_RECEIVE_QUEUE_WITHOUT_COPY = true;
 pub const NetworkTelemetryCount = u32;
 pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 32 else 2_080;
 const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
@@ -659,7 +660,6 @@ var receive_queue: ReceiveQueueBacking = if (heap_backed_receive_queue) null els
 var receive_queue_head: u8 = 0;
 var receive_queue_tail: u8 = 0;
 var receive_queue_count: u8 = 0;
-var receive_overflow_scratch: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES;
 
 pub const bounded_metadata_layout = .{
     .queued_receive_frame_size_bytes = @sizeOf(QueuedReceiveFrame),
@@ -671,6 +671,7 @@ pub const bounded_metadata_layout = .{
     .uses_compact_receive_queue_indices = @TypeOf(receive_queue_head) == u8 and
         @TypeOf(receive_queue_tail) == u8 and
         @TypeOf(receive_queue_count) == u8,
+    .receive_overflow_scratch_bytes = 0,
 };
 
 pub const ReceiveServiceResult = struct {
@@ -900,7 +901,7 @@ fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budg
         const output = if (queue_has_space)
             queue[queue_tail].bytes[0..]
         else
-            receive_overflow_scratch[0..];
+            queue[queue_tail].bytes[0..0];
         const result = device.receive(output);
         service.polls += 1;
         switch (result.status) {
@@ -1142,6 +1143,8 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expect(bounded_metadata_layout.heap_backs_receive_queue_on_freestanding);
     try std.testing.expect(bounded_metadata_layout.uses_compact_active_frame_lengths);
     try std.testing.expect(bounded_metadata_layout.uses_compact_receive_queue_indices);
+    try std.testing.expect(DRAINS_FULL_RECEIVE_QUEUE_WITHOUT_COPY);
+    try std.testing.expectEqual(@as(usize, 0), bounded_metadata_layout.receive_overflow_scratch_bytes);
     try std.testing.expect(peer_link_directory_layout.heap_backs_directory_on_freestanding);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), peer_link_directory_layout.freestanding_handle_size_bytes);
     try std.testing.expectEqual(@as(usize, 2_056), peer_link_directory_layout.backing_size_bytes);
@@ -1370,6 +1373,7 @@ test "pending network work is budgeted into the deferred receive queue" {
 test "deferred receive service drains hardware when the software queue is full" {
     const Harness = struct {
         var remaining: usize = 0;
+        var empty_output_drains: usize = 0;
 
         fn send(_: [6]u8, _: []const u8) bool {
             return true;
@@ -1377,6 +1381,11 @@ test "deferred receive service drains hardware when the software queue is full" 
 
         fn receive(output: []u8) ReceiveResult {
             if (remaining == 0) return .{ .status = .empty };
+            if (output.len == 0) {
+                remaining -= 1;
+                empty_output_drains += 1;
+                return .{ .status = .dropped };
+            }
             @memcpy(output[0..6], "packet");
             remaining -= 1;
             return .{ .status = .frame, .length = 6 };
@@ -1394,6 +1403,7 @@ test "deferred receive service drains hardware when the software queue is full" 
     reset();
     defer reset();
     Harness.remaining = RECEIVE_QUEUE_CAPACITY + 1;
+    Harness.empty_output_drains = 0;
     const device = NetworkDevice{
         .send = Harness.send,
         .receive = Harness.receive,
@@ -1406,6 +1416,7 @@ test "deferred receive service drains hardware when the software queue is full" 
     try std.testing.expectEqual(@as(usize, 1), service.dropped);
     try std.testing.expectEqual(RECEIVE_QUEUE_CAPACITY, queuedReceiveFrameCount());
     try std.testing.expectEqual(@as(usize, 1), activeDriverReceiveDropCount());
+    try std.testing.expectEqual(@as(usize, 1), Harness.empty_output_drains);
     try std.testing.expect(!networkWorkPending());
 }
 
