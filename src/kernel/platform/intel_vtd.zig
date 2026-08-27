@@ -162,6 +162,33 @@ const UnitRegisters = struct {
     enhanced_sirtp: bool,
 };
 
+const ActiveUnit = struct {
+    base: usize,
+    fault_records: usize,
+    fault_record_count: u16,
+    index: u8,
+
+    fn fromRegisters(registers: UnitRegisters) ActiveUnit {
+        return .{
+            .base = registers.base,
+            .fault_records = registers.fault_records,
+            .fault_record_count = registers.fault_record_count,
+            .index = registers.index,
+        };
+    }
+};
+
+pub const COMPACT_ACTIVE_UNIT_STATE = true;
+pub const ACTIVE_UNIT_SIZE_CEILING_BYTES: usize = 24;
+pub const DERIVES_ACTIVE_REMAP_ADDRESSES_FROM_TABLE_BASE = true;
+pub const FULL_INVALIDATION_QUEUE_SCRUBS_PER_COMMAND: usize = 0;
+
+comptime {
+    if (@sizeOf(ActiveUnit) > ACTIVE_UNIT_SIZE_CEILING_BYTES) {
+        @compileError("VT-d active unit state exceeds its compact size ceiling");
+    }
+}
+
 pub const RequestType = enum(u2) {
     write = 0,
     page_request = 1,
@@ -189,10 +216,9 @@ var interrupt_remapping_enabled = false;
 var fault_monitoring_enabled = false;
 var protected_requester_ids: [MAX_DMA_DOMAINS]u16 = [_]u16{0} ** MAX_DMA_DOMAINS;
 var protected_requester_count: usize = 0;
-var active_units: [dmar.MAX_REMAPPING_UNITS]UnitRegisters = undefined;
-var active_invalidation_queues: [dmar.MAX_REMAPPING_UNITS]u64 = undefined;
-var active_unit_count: usize = 0;
-var active_interrupt_table: ?*InterruptTable = null;
+var active_units: [dmar.MAX_REMAPPING_UNITS]ActiveUnit = undefined;
+var active_table_base: u32 = 0;
+var active_unit_count: u8 = 0;
 var blocked_dma_proof: ?FaultRecord = null;
 var deferred_faults: [MAX_DMA_DOMAINS]?FaultRecord = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
 
@@ -297,16 +323,15 @@ pub fn enforceDevices(
             interrupt_table_base,
             queue_base,
         );
-        active_units[index] = unit;
-        active_invalidation_queues[index] = queue_base;
+        active_units[index] = ActiveUnit.fromRegisters(unit);
     }
 
     protected_requester_count = domains.len;
     for (domains, 0..) |domain, index| {
         protected_requester_ids[index] = requesterId(domain.device);
     }
-    active_unit_count = remapping_unit_count;
-    active_interrupt_table = interrupt_table;
+    active_table_base = table_base;
+    active_unit_count = @intCast(remapping_unit_count);
     interrupt_remapping_enabled = true;
     fault_monitoring_enabled = true;
     blocked_dma_proof = null;
@@ -632,7 +657,7 @@ fn programInterruptRemapping(
     }
 
     if (!unit.enhanced_sirtp) {
-        try globallyInvalidateInterruptEntries(unit, invalidation_queue_base);
+        try globallyInvalidateInterruptEntries(unit.base, invalidation_queue_base);
     }
 
     writeGlobalCommand(
@@ -657,7 +682,7 @@ pub fn routeInterrupt(
     const source_id = requesterId(device_info);
     const index = protectedRequesterIndex(source_id) orelse
         return error.InterruptRouteUnavailable;
-    const table = active_interrupt_table orelse return error.InterruptRouteUnavailable;
+    const table = activeInterruptTable() orelse return error.InterruptRouteUnavailable;
     const entry = &table[index];
     if ((entry[0] & PRESENT) != 0) return error.InterruptRouteAlreadyPresent;
 
@@ -670,15 +695,15 @@ pub fn routeInterrupt(
         entry[0] = 0;
         entry[1] = 0;
         publishTables();
-        for (active_units[0..active_unit_count], 0..) |unit, unit_index| {
+        for (activeUnits(), 0..) |unit, unit_index| {
             globallyInvalidateInterruptEntries(
-                unit,
-                active_invalidation_queues[unit_index],
+                unit.base,
+                activeInvalidationQueueBase(unit_index),
             ) catch {};
         }
     }
-    for (active_units[0..active_unit_count], 0..) |unit, unit_index| {
-        try globallyInvalidateInterruptEntries(unit, active_invalidation_queues[unit_index]);
+    for (activeUnits(), 0..) |unit, unit_index| {
+        try globallyInvalidateInterruptEntries(unit.base, activeInvalidationQueueBase(unit_index));
     }
     return remappableMessage(index);
 }
@@ -701,17 +726,16 @@ fn remappableMessage(index: usize) RemappedMessage {
     };
 }
 
-fn globallyInvalidateInterruptEntries(unit: UnitRegisters, queue_base: u64) Error!void {
+fn globallyInvalidateInterruptEntries(unit_base: usize, queue_base: u64) Error!void {
     const queue: [*]u64 = @ptrFromInt(queue_base);
     const status_address = queue_base + INVALIDATION_STATUS_OFFSET;
     const completion: *volatile u32 = @ptrFromInt(status_address);
 
-    @memset(@as([*]u8, @ptrFromInt(queue_base))[0..PAGE_SIZE], 0);
     completion.* = 0;
-    write64(unit.base + REG_INVALIDATION_QUEUE_TAIL, 0);
-    write64(unit.base + REG_INVALIDATION_QUEUE_ADDRESS, queue_base);
-    writeGlobalCommand(unit.base, GLOBAL_QUEUED_INVALIDATION_ENABLE, 0);
-    try waitForStatus(unit.base, GLOBAL_QUEUED_INVALIDATION_ENABLE, true);
+    write64(unit_base + REG_INVALIDATION_QUEUE_TAIL, 0);
+    write64(unit_base + REG_INVALIDATION_QUEUE_ADDRESS, queue_base);
+    writeGlobalCommand(unit_base, GLOBAL_QUEUED_INVALIDATION_ENABLE, 0);
+    try waitForStatus(unit_base, GLOBAL_QUEUED_INVALIDATION_ENABLE, true);
 
     const descriptors = invalidationDescriptors(status_address);
     queue[0] = descriptors[0][0];
@@ -719,16 +743,16 @@ fn globallyInvalidateInterruptEntries(unit: UnitRegisters, queue_base: u64) Erro
     queue[2] = descriptors[1][0];
     queue[3] = descriptors[1][1];
     publishTables();
-    write64(unit.base + REG_INVALIDATION_QUEUE_TAIL, INVALIDATION_QUEUE_TAIL);
+    write64(unit_base + REG_INVALIDATION_QUEUE_TAIL, INVALIDATION_QUEUE_TAIL);
 
     const deadline = tsc_clock.afterMilliseconds(COMMAND_TIMEOUT_MILLISECONDS);
     var completed = false;
     while (!deadline.expired()) {
-        if ((read32(unit.base + REG_FAULT_STATUS) & FAULT_STATUS_INVALIDATION_ERRORS) != 0) {
+        if ((read32(unit_base + REG_FAULT_STATUS) & FAULT_STATUS_INVALIDATION_ERRORS) != 0) {
             return error.InvalidationQueueError;
         }
         if (completion.* == INVALIDATION_STATUS_VALUE and
-            read64(unit.base + REG_INVALIDATION_QUEUE_HEAD) == INVALIDATION_QUEUE_TAIL)
+            read64(unit_base + REG_INVALIDATION_QUEUE_HEAD) == INVALIDATION_QUEUE_TAIL)
         {
             completed = true;
             break;
@@ -737,8 +761,8 @@ fn globallyInvalidateInterruptEntries(unit: UnitRegisters, queue_base: u64) Erro
     }
     if (!completed) return error.CommandTimeout;
 
-    writeGlobalCommand(unit.base, 0, GLOBAL_QUEUED_INVALIDATION_ENABLE);
-    try waitForStatus(unit.base, GLOBAL_QUEUED_INVALIDATION_ENABLE, false);
+    writeGlobalCommand(unit_base, 0, GLOBAL_QUEUED_INVALIDATION_ENABLE);
+    try waitForStatus(unit_base, GLOBAL_QUEUED_INVALIDATION_ENABLE, false);
 }
 
 fn invalidationDescriptors(status_address: u64) [2][2]u64 {
@@ -770,7 +794,7 @@ pub fn waitForBlockedWrite(expected_address: u32) Error!FaultRecord {
 }
 
 fn takeFault() Error!?FaultRecord {
-    for (active_units[0..active_unit_count]) |unit| {
+    for (activeUnits()) |unit| {
         const status = read32(unit.base + REG_FAULT_STATUS);
         if ((status & FAULT_STATUS_PRIMARY_PENDING) == 0) continue;
         const first: u16 = @intCast((status >> FAULT_STATUS_INDEX_SHIFT) & FAULT_STATUS_INDEX_MASK);
@@ -782,7 +806,7 @@ fn takeFault() Error!?FaultRecord {
             const low = read64(address);
             const record = parseFaultRecord(unit.index, low, high);
             write64(address + 8, FAULT_RECORD_PRESENT);
-            clearFaultOverflowIfDrained(unit);
+            clearFaultOverflowIfDrained(unit.base);
             return record;
         }
         return error.CommandRejected;
@@ -790,12 +814,12 @@ fn takeFault() Error!?FaultRecord {
     return null;
 }
 
-fn clearFaultOverflowIfDrained(unit: UnitRegisters) void {
-    const status = read32(unit.base + REG_FAULT_STATUS);
+fn clearFaultOverflowIfDrained(unit_base: usize) void {
+    const status = read32(unit_base + REG_FAULT_STATUS);
     if ((status & FAULT_STATUS_PRIMARY_PENDING) == 0 and
         (status & FAULT_STATUS_PRIMARY_OVERFLOW) != 0)
     {
-        write32(unit.base + REG_FAULT_STATUS, FAULT_STATUS_PRIMARY_OVERFLOW);
+        write32(unit_base + REG_FAULT_STATUS, FAULT_STATUS_PRIMARY_OVERFLOW);
     }
 }
 
@@ -868,6 +892,29 @@ fn routeObservedFault(source_id: u16, fault: FaultRecord) Error!?FaultRecord {
     if (deferred_faults[fault_index] != null) return error.UnexpectedDmaFault;
     deferred_faults[fault_index] = fault;
     return null;
+}
+
+fn activeUnits() []const ActiveUnit {
+    return active_units[0..active_unit_count];
+}
+
+fn activeInterruptTable() ?*InterruptTable {
+    if (active_table_base == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(tablePagePhysical(
+        active_table_base,
+        INTERRUPT_TABLE_PAGE,
+    ))));
+}
+
+fn activeInvalidationQueueBase(index: usize) u64 {
+    return invalidationQueueBase(active_table_base, index);
+}
+
+fn invalidationQueueBase(table_base: u32, index: usize) u64 {
+    return tablePagePhysical(
+        table_base,
+        FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
+    );
 }
 
 fn tablePagePhysical(table_base: u32, page: u32) u64 {
@@ -1169,6 +1216,22 @@ test "VT-d interrupt table denies every interrupt and invalidation is completion
         descriptors[1][0],
     );
     try std.testing.expectEqual(status_address, descriptors[1][1]);
+}
+
+test "VT-d active units stay compact and derive remapping addresses" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(UnitRegisters));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(ActiveUnit));
+    try std.testing.expect(COMPACT_ACTIVE_UNIT_STATE);
+    try std.testing.expect(DERIVES_ACTIVE_REMAP_ADDRESSES_FROM_TABLE_BASE);
+    try std.testing.expectEqual(@as(usize, 0), FULL_INVALIDATION_QUEUE_SCRUBS_PER_COMMAND);
+    try std.testing.expectEqual(
+        @as(u64, 0x0021_9000),
+        invalidationQueueBase(0x0020_0000, 0),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0x0021_A000),
+        invalidationQueueBase(0x0020_0000, 1),
+    );
 }
 
 test "VT-d remapped MSI binds vector destination and exact requester" {
