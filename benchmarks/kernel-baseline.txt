@@ -10,6 +10,7 @@ service_supervisor.ready_lookup 14.83 50
 task_runtime.checkpoint.write_restore 12265.83 50
 task_runtime.checkpoint.write_low_occupancy 934.32 50
 paging.address_space_roundtrip 25786.03 50
+memory.heap_allocate_free 51.30 50
 syscall.fast_entry_roundtrip 800.10 50
 accelerator_scheduler.claim_release 4138.79 50
 storage.file_bridge.resolve_shared_view 281.54 50

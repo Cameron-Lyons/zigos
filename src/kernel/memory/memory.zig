@@ -5,8 +5,8 @@ const spin = @import("../utils/spin.zig");
 
 const BYTES_PER_MIB: usize = 1024 * 1024;
 const HEAP_SIZE: usize = 16 * BYTES_PER_MIB;
-const MIN_BLOCK_SIZE: usize = 16;
-const BLOCK_ALIGNMENT: usize = 16;
+const MIN_BLOCK_SIZE = heap_geometry.minimum_free_data_size;
+const BLOCK_ALIGNMENT = heap_geometry.block_alignment;
 
 const PAGE_SIZE: usize = 4096;
 extern var __kernel_end: u8;
@@ -19,16 +19,8 @@ fn heapStartAddress() usize {
     return alignUp(@intFromPtr(&__kernel_end), PAGE_SIZE);
 }
 
-const BlockHeader = struct {
-    size: usize,
-    is_free: bool,
-
-    next: ?*BlockHeader,
-    prev: ?*BlockHeader,
-
-    next_free: ?*BlockHeader,
-    prev_free: ?*BlockHeader,
-};
+const BlockHeader = heap_geometry.BlockHeader;
+const FreeLinks = heap_geometry.FreeLinks;
 
 var heap_start: [*]u8 = undefined;
 
@@ -55,8 +47,7 @@ pub fn init() void {
     initial_block.is_free = true;
     initial_block.next = null;
     initial_block.prev = null;
-    initial_block.next_free = null;
-    initial_block.prev_free = null;
+    freeLinks(initial_block).* = .{ .next = null, .prev = null };
 
     free_list = initial_block;
     is_initialized = true;
@@ -74,25 +65,31 @@ pub fn getReservedMemoryEnd() usize {
 }
 
 fn freeListPush(block: *BlockHeader) void {
-    block.prev_free = null;
-    block.next_free = free_list;
+    const links = freeLinks(block);
+    links.prev = null;
+    links.next = free_list;
     if (free_list) |head| {
-        head.prev_free = block;
+        freeLinks(head).prev = block;
     }
     free_list = block;
 }
 
 fn freeListRemove(block: *BlockHeader) void {
-    if (block.prev_free) |prev| {
-        prev.next_free = block.next_free;
+    const links = freeLinks(block);
+    if (links.prev) |prev| {
+        freeLinks(prev).next = links.next;
     } else {
-        free_list = block.next_free;
+        free_list = links.next;
     }
-    if (block.next_free) |next| {
-        next.prev_free = block.prev_free;
+    if (links.next) |next| {
+        freeLinks(next).prev = links.prev;
     }
-    block.next_free = null;
-    block.prev_free = null;
+    links.* = .{ .next = null, .prev = null };
+}
+
+fn freeLinks(block: *BlockHeader) *FreeLinks {
+    const block_bytes: [*]u8 = @ptrCast(block);
+    return @ptrCast(@alignCast(block_bytes + @sizeOf(BlockHeader)));
 }
 
 fn splitBlock(block: *BlockHeader, size: usize) void {
@@ -125,7 +122,7 @@ fn splitBlock(block: *BlockHeader, size: usize) void {
 fn takeFreeBlock(aligned_size: usize) ?*anyopaque {
     var current = free_list;
     while (current) |block| {
-        const next_free = block.next_free;
+        const next_free = freeLinks(block).next;
         if (block.size >= aligned_size) {
             splitBlock(block, aligned_size);
             freeListRemove(block);
