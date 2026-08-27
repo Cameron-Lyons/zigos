@@ -104,6 +104,22 @@ const PageTable = [TABLE_ENTRY_COUNT]u64;
 const Tables = [TABLE_PAGE_COUNT]PageTable;
 const InterruptTable = [INTERRUPT_REMAP_ENTRY_COUNT][2]u64;
 
+const DmaAddress = struct {
+    physical: u64 = 0,
+    alias: usize = 0,
+
+    fn offset(self: DmaAddress, byte_offset: u64) DmaAddress {
+        return .{
+            .physical = self.physical + byte_offset,
+            .alias = self.alias + @as(usize, @intCast(byte_offset)),
+        };
+    }
+
+    fn page(self: DmaAddress, page_index: u32) DmaAddress {
+        return self.offset(@as(u64, page_index) * PAGE_SIZE);
+    }
+};
+
 pub const DmaWindow = struct {
     base: u32,
     length: u32 = PAGE_SIZE,
@@ -217,7 +233,7 @@ var fault_monitoring_enabled = false;
 var protected_requester_ids: [MAX_DMA_DOMAINS]u16 = [_]u16{0} ** MAX_DMA_DOMAINS;
 var protected_requester_count: usize = 0;
 var active_units: [dmar.MAX_REMAPPING_UNITS]ActiveUnit = undefined;
-var active_table_base: u32 = 0;
+var active_table_memory = DmaAddress{};
 var active_unit_count: u8 = 0;
 var blocked_dma_proof: ?FaultRecord = null;
 var deferred_faults: [MAX_DMA_DOMAINS]?FaultRecord = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
@@ -296,32 +312,34 @@ pub fn enforceDevices(
         return error.TableAllocationFailed;
     var may_release_tables = true;
     errdefer if (may_release_tables) paging.releaseIdentityDmaFrames(table_base, retained_page_count) catch {};
-    const tables: *Tables = @ptrFromInt(table_base);
+    const table_memory = DmaAddress{
+        .physical = table_base,
+        .alias = paging.directMapAddress(table_base) orelse return error.TableAllocationFailed,
+    };
+    const tables: *Tables = @ptrFromInt(table_memory.alias);
     try populateTables(tables, table_base, domains, address_width);
-    const interrupt_table_base = tablePagePhysical(table_base, INTERRUPT_TABLE_PAGE);
-    const interrupt_table: *InterruptTable = @ptrFromInt(interrupt_table_base);
+    const interrupt_table_address = table_memory.page(INTERRUPT_TABLE_PAGE);
+    const interrupt_table: *InterruptTable = @ptrFromInt(interrupt_table_address.alias);
     @memset(std.mem.asBytes(interrupt_table), 0);
     for (0..remapping_unit_count) |index| {
-        const queue_base = tablePagePhysical(
-            table_base,
+        const queue_address = table_memory.page(
             FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
         );
-        @memset(@as([*]u8, @ptrFromInt(queue_base))[0..PAGE_SIZE], 0);
+        @memset(@as([*]u8, @ptrFromInt(queue_address.alias))[0..PAGE_SIZE], 0);
     }
     publishTables();
 
     may_release_tables = false;
     for (units[0..remapping_unit_count], 0..) |unit, index| {
-        const queue_base = tablePagePhysical(
-            table_base,
+        const queue_address = table_memory.page(
             FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
         );
         try programUnit(unit, table_base);
         try armFaultMonitoring(unit);
         try programInterruptRemapping(
             unit,
-            interrupt_table_base,
-            queue_base,
+            interrupt_table_address.physical,
+            queue_address,
         );
         active_units[index] = ActiveUnit.fromRegisters(unit);
     }
@@ -330,7 +348,7 @@ pub fn enforceDevices(
     for (domains, 0..) |domain, index| {
         protected_requester_ids[index] = requesterId(domain.device);
     }
-    active_table_base = table_base;
+    active_table_memory = table_memory;
     active_unit_count = @intCast(remapping_unit_count);
     interrupt_remapping_enabled = true;
     fault_monitoring_enabled = true;
@@ -642,7 +660,7 @@ fn armFaultMonitoring(unit: UnitRegisters) Error!void {
 fn programInterruptRemapping(
     unit: UnitRegisters,
     interrupt_table_base: u64,
-    invalidation_queue_base: u64,
+    invalidation_queue: DmaAddress,
 ) Error!void {
     const interrupt_table_address = interruptTableAddress(interrupt_table_base);
     write64(unit.base + REG_INTERRUPT_REMAP_TABLE_ADDRESS, interrupt_table_address);
@@ -657,7 +675,7 @@ fn programInterruptRemapping(
     }
 
     if (!unit.enhanced_sirtp) {
-        try globallyInvalidateInterruptEntries(unit.base, invalidation_queue_base);
+        try globallyInvalidateInterruptEntries(unit.base, invalidation_queue);
     }
 
     writeGlobalCommand(
@@ -698,12 +716,15 @@ pub fn routeInterrupt(
         for (activeUnits(), 0..) |unit, unit_index| {
             globallyInvalidateInterruptEntries(
                 unit.base,
-                activeInvalidationQueueBase(unit_index),
+                activeInvalidationQueueAddress(unit_index),
             ) catch {};
         }
     }
     for (activeUnits(), 0..) |unit, unit_index| {
-        try globallyInvalidateInterruptEntries(unit.base, activeInvalidationQueueBase(unit_index));
+        try globallyInvalidateInterruptEntries(
+            unit.base,
+            activeInvalidationQueueAddress(unit_index),
+        );
     }
     return remappableMessage(index);
 }
@@ -726,18 +747,18 @@ fn remappableMessage(index: usize) RemappedMessage {
     };
 }
 
-fn globallyInvalidateInterruptEntries(unit_base: usize, queue_base: u64) Error!void {
-    const queue: [*]u64 = @ptrFromInt(queue_base);
-    const status_address = queue_base + INVALIDATION_STATUS_OFFSET;
-    const completion: *volatile u32 = @ptrFromInt(status_address);
+fn globallyInvalidateInterruptEntries(unit_base: usize, queue_address: DmaAddress) Error!void {
+    const queue: [*]u64 = @ptrFromInt(queue_address.alias);
+    const status_address = queue_address.offset(INVALIDATION_STATUS_OFFSET);
+    const completion: *volatile u32 = @ptrFromInt(status_address.alias);
 
     completion.* = 0;
     write64(unit_base + REG_INVALIDATION_QUEUE_TAIL, 0);
-    write64(unit_base + REG_INVALIDATION_QUEUE_ADDRESS, queue_base);
+    write64(unit_base + REG_INVALIDATION_QUEUE_ADDRESS, queue_address.physical);
     writeGlobalCommand(unit_base, GLOBAL_QUEUED_INVALIDATION_ENABLE, 0);
     try waitForStatus(unit_base, GLOBAL_QUEUED_INVALIDATION_ENABLE, true);
 
-    const descriptors = invalidationDescriptors(status_address);
+    const descriptors = invalidationDescriptors(status_address.physical);
     queue[0] = descriptors[0][0];
     queue[1] = descriptors[0][1];
     queue[2] = descriptors[1][0];
@@ -899,15 +920,14 @@ fn activeUnits() []const ActiveUnit {
 }
 
 fn activeInterruptTable() ?*InterruptTable {
-    if (active_table_base == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(tablePagePhysical(
-        active_table_base,
-        INTERRUPT_TABLE_PAGE,
-    ))));
+    if (active_table_memory.physical == 0) return null;
+    return @ptrFromInt(active_table_memory.page(INTERRUPT_TABLE_PAGE).alias);
 }
 
-fn activeInvalidationQueueBase(index: usize) u64 {
-    return invalidationQueueBase(active_table_base, index);
+fn activeInvalidationQueueAddress(index: usize) DmaAddress {
+    return active_table_memory.page(
+        FIRST_INVALIDATION_QUEUE_PAGE + @as(u32, @intCast(index)),
+    );
 }
 
 fn invalidationQueueBase(table_base: u32, index: usize) u64 {
