@@ -32,6 +32,8 @@ pub const PAGE_DIRTY: u32 = 0x40;
 pub const PAGE_EXECUTABLE: u32 = 0x200;
 pub const CACHES_PROCESS_CONTEXT_MODE = true;
 pub const PRECOMPUTES_ADDRESS_SPACE_CR3 = true;
+pub const PAGE_TABLE_ACCESS_USES_DIRECT_MAP = true;
+pub const OWNED_USER_FRAME_ACCESS_USES_DIRECT_MAP = true;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -51,6 +53,7 @@ pub const FrameReleaseError = frame_allocator.Error;
 
 pub const UserAddressSpace = struct {
     directory: *PageDirectory,
+    directory_physical: u32,
     pcid: pcid_allocator.Identifier,
     switch_cr3: usize,
 };
@@ -184,7 +187,21 @@ fn kernelImageExtents() KernelImageExtents {
 }
 
 fn tableFromEntry(entry: PageTableEntry) *PageTable {
-    return @ptrFromInt(entryAddress(entry));
+    return tableAtPhysical(@intCast(entryAddress(entry)));
+}
+
+fn tableAtPhysical(physical_address: frame_allocator.PhysicalAddress) *PageTable {
+    return @ptrFromInt(directMapAddress(physical_address) orelse
+        haltWithMessage("Page-table frame lies outside the direct-map aperture!\n"));
+}
+
+fn bytesAtPhysical(physical_address: frame_allocator.PhysicalAddress) [*]u8 {
+    return @ptrFromInt(directMapAddress(physical_address) orelse
+        haltWithMessage("Data frame lies outside the direct-map aperture!\n"));
+}
+
+fn kernelPageDirectory() *PageDirectory {
+    return tableAtPhysical(@intFromPtr(&kernel_pml4));
 }
 
 fn zeroTable(table: *PageTable) void {
@@ -274,7 +291,7 @@ fn ensureChildTable(
         const table_phys = tryAllocFrame() orelse return error.OutOfMemory;
         const flags = ENTRY_PRESENT | ENTRY_WRITABLE | (if (user) ENTRY_USER else 0);
         entry.* = tableEntry(table_phys, flags, owner);
-        const table: *PageTable = @ptrFromInt(table_phys);
+        const table = tableAtPhysical(table_phys);
         zeroTable(table);
         return table;
     }
@@ -335,7 +352,7 @@ pub fn mapKernelBorrowedPage(virt_addr: usize, phys_addr: usize, flags: u32) voi
     if (!table64.physicalAddressFits(phys_addr))
         haltWithMessage("Kernel physical mapping exceeds the x86-64 address width!\n");
     mapBorrowedPageIn(
-        &kernel_pml4,
+        kernelPageDirectory(),
         virt_addr,
         phys_addr,
         flags & ~PAGE_USER,
@@ -400,20 +417,20 @@ pub fn unmapBorrowedCurrentPage(virt_addr: usize) bool {
 
 pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
     const pml4_phys = tryAllocFrame() orelse return error.OutOfMemory;
-    const pml4: *PageDirectory = @ptrFromInt(pml4_phys);
+    const pml4 = tableAtPhysical(pml4_phys);
     zeroTable(pml4);
 
     const pdpt_phys = tryAllocFrame() orelse {
         release_frames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
         return error.OutOfMemory;
     };
-    const pdpt: *PageTable = @ptrFromInt(pdpt_phys);
+    const pdpt = tableAtPhysical(pdpt_phys);
     zeroTable(pdpt);
-    for (&kernel_pdpt, pdpt) |kernel_entry, *user_entry| {
+    for (tableAtPhysical(@intFromPtr(&kernel_pdpt)), pdpt) |kernel_entry, *user_entry| {
         if (entryPresent(kernel_entry)) user_entry.* = kernel_entry;
     }
 
-    for (kernel_pml4[1..], pml4[1..]) |kernel_entry, *user_entry| {
+    for (kernelPageDirectory()[1..], pml4[1..]) |kernel_entry, *user_entry| {
         if (entryPresent(kernel_entry)) user_entry.* = kernel_entry;
     }
 
@@ -425,8 +442,9 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
     };
     return .{
         .directory = pml4,
+        .directory_physical = pml4_phys,
         .pcid = pcid,
-        .switch_cr3 = addressSpaceCr3(pml4, pcid),
+        .switch_cr3 = addressSpaceCr3(pml4_phys, pcid),
     };
 }
 
@@ -483,7 +501,7 @@ pub fn mapOwnedUserRange(
         if (entryPresent(page_entry.*)) return error.AlreadyMapped;
 
         const page_phys = tryAllocFrame() orelse return error.OutOfMemory;
-        const kernel_alias: [*]u8 = @ptrFromInt(page_phys);
+        const kernel_alias = bytesAtPhysical(page_phys);
         @memset(kernel_alias[0..PAGE_SIZE], 0);
         var flags: u32 = PAGE_PRESENT | PAGE_USER;
         if (permissions.writable) flags |= PAGE_WRITABLE;
@@ -520,7 +538,7 @@ pub fn writeOwnedUserRange(
 
         const offset_in_page: usize = virtual_address & PAGE_OFFSET_MASK;
         const copy_len = @min(source.len - copied, PAGE_SIZE - offset_in_page);
-        const destination: [*]u8 = @ptrFromInt(entryAddress(entry.*) + offset_in_page);
+        const destination = bytesAtPhysical(@intCast(entryAddress(entry.*))) + offset_in_page;
         @memcpy(destination[0..copy_len], source[copied..][0..copy_len]);
         copied += copy_len;
     }
@@ -565,7 +583,7 @@ pub fn destroyUserAddressSpace(space: *UserAddressSpace) UserAddressSpaceDestroy
 
     acquireFrameLock();
     releaseOwnedHierarchy(space.directory);
-    physical_frames.release(.{ .base = @intCast(@intFromPtr(space.directory)), .count = 1 }) catch
+    physical_frames.release(.{ .base = space.directory_physical, .count = 1 }) catch
         haltWithMessage("Corrupt user PML4 accounting!\n");
     releaseFrameLock();
     releaseProcessContext(space.pcid);
@@ -577,7 +595,7 @@ pub fn switchToUserAddressSpace(space: *const UserAddressSpace) void {
 }
 
 pub fn switchToKernelAddressSpace() void {
-    switchAddressSpace(&kernel_pml4, kernel_switch_cr3);
+    switchAddressSpace(kernelPageDirectory(), kernel_switch_cr3);
 }
 
 fn initializeKernelHierarchy() void {
@@ -692,9 +710,10 @@ pub fn init() void {
 
     enableWriteProtect();
     process_context_identifiers_enabled = x86.processContextIdentifiersEnabled();
-    current_page_directory = &kernel_pml4;
-    x86.writeCr3(@intFromPtr(&kernel_pml4));
-    kernel_switch_cr3 = addressSpaceCr3(&kernel_pml4, pcid_allocator.KERNEL_IDENTIFIER);
+    const kernel_pml4_physical = @intFromPtr(&kernel_pml4);
+    x86.writeCr3(kernel_pml4_physical);
+    current_page_directory = kernelPageDirectory();
+    kernel_switch_cr3 = addressSpaceCr3(kernel_pml4_physical, pcid_allocator.KERNEL_IDENTIFIER);
     unmapBootStackGuardPage();
     early_console.print("Four-level paging enabled!\n");
     const stats = frameStats();
@@ -758,9 +777,9 @@ pub fn getCurrentPageDirectory() *PageDirectory {
     return current_page_directory;
 }
 
-fn addressSpaceCr3(directory: *PageDirectory, pcid: pcid_allocator.Identifier) usize {
-    if (!process_context_identifiers_enabled) return @intFromPtr(directory);
-    return x86.pcidCr3Value(@intFromPtr(directory), pcid, true) orelse
+fn addressSpaceCr3(directory_physical: usize, pcid: pcid_allocator.Identifier) usize {
+    if (!process_context_identifiers_enabled) return directory_physical;
+    return x86.pcidCr3Value(directory_physical, pcid, true) orelse
         haltWithMessage("Invalid address-space CR3 value!\n");
 }
 
