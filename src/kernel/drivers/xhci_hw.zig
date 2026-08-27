@@ -21,6 +21,7 @@ pub const INTERRUPT_VECTOR: u8 = 67;
 pub const PORT_RUNTIME_STATE_SIZE_CEILING_BYTES: usize = 104;
 pub const CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT: usize = 7;
 pub const COLOCATED_BOOT_KEYBOARD_REPORT_STATE = true;
+pub const COLOCATED_SUPPORTED_PROTOCOL_STATE = true;
 
 comptime {
     if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
@@ -51,7 +52,7 @@ pub const Error = xhci.Error || error{
 };
 
 var active_capabilities: ?xhci.CapabilityRegisters = null;
-var active_protocols: ?xhci.SupportedProtocols = null;
+var active_protocols: ?*const xhci.SupportedProtocols = null;
 var active_legacy_ownership: ?xhci.LegacyOwnership = null;
 var active_controller_reset = false;
 var active_enabled_slots: u8 = 0;
@@ -128,6 +129,7 @@ const ControllerRuntimeStateAllocation = struct {
     frame_count: u32,
     states: []PortRuntimeState,
     keyboard_reports: *xhci.BootKeyboardReportPublisher,
+    protocols: *const xhci.SupportedProtocols,
 };
 
 comptime {
@@ -141,7 +143,12 @@ comptime {
         maximum_state_bytes,
         @alignOf(xhci.BootKeyboardReportPublisher),
     );
-    const maximum_runtime_bytes = publisher_offset + @sizeOf(xhci.BootKeyboardReportPublisher);
+    const protocols_offset = std.mem.alignForward(
+        usize,
+        publisher_offset + @sizeOf(xhci.BootKeyboardReportPublisher),
+        @alignOf(xhci.SupportedProtocols),
+    );
+    const maximum_runtime_bytes = protocols_offset + @sizeOf(xhci.SupportedProtocols);
     const maximum_frame_count = (maximum_runtime_bytes + PAGE_BYTES - 1) / PAGE_BYTES;
     if (maximum_frame_count > CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT) {
         @compileError("xHCI controller runtime state exceeds its bounded frame ceiling");
@@ -192,14 +199,27 @@ fn keyboardReportPublisherOffsetFor(max_ports: u8) usize {
 }
 
 fn controllerRuntimeStateFrameCountFor(max_ports: u8) u32 {
-    const runtime_bytes = keyboardReportPublisherOffsetFor(max_ports) +
-        @sizeOf(xhci.BootKeyboardReportPublisher);
+    const runtime_bytes = supportedProtocolsOffsetFor(max_ports) +
+        @sizeOf(xhci.SupportedProtocols);
     return @intCast((runtime_bytes + PAGE_BYTES - 1) / PAGE_BYTES);
 }
 
-fn allocateControllerRuntimeState(max_ports: u8) Error!ControllerRuntimeStateAllocation {
+fn supportedProtocolsOffsetFor(max_ports: u8) usize {
+    return std.mem.alignForward(
+        usize,
+        keyboardReportPublisherOffsetFor(max_ports) +
+            @sizeOf(xhci.BootKeyboardReportPublisher),
+        @alignOf(xhci.SupportedProtocols),
+    );
+}
+
+fn allocateControllerRuntimeState(
+    max_ports: u8,
+    protocols: xhci.SupportedProtocols,
+) Error!ControllerRuntimeStateAllocation {
     const state_count = @as(usize, max_ports) + 1;
     const publisher_offset = keyboardReportPublisherOffsetFor(max_ports);
+    const protocols_offset = supportedProtocolsOffsetFor(max_ports);
     const frame_count = controllerRuntimeStateFrameCountFor(max_ports);
     const base = paging.alloc_frames(frame_count) orelse
         return error.ControllerRuntimeStateAllocationFailed;
@@ -212,11 +232,15 @@ fn allocateControllerRuntimeState(max_ports: u8) Error!ControllerRuntimeStateAll
     const keyboard_reports: *xhci.BootKeyboardReportPublisher =
         @ptrFromInt(@as(usize, base) + publisher_offset);
     keyboard_reports.* = .{};
+    const protocol_state: *xhci.SupportedProtocols =
+        @ptrFromInt(@as(usize, base) + protocols_offset);
+    protocol_state.* = protocols;
     return .{
         .base = base,
         .frame_count = frame_count,
         .states = states,
         .keyboard_reports = keyboard_reports,
+        .protocols = protocol_state,
     };
 }
 
@@ -295,7 +319,10 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     try xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{});
     const enabled_slots = try xhci.configureDeviceSlots(capabilities, &reader);
 
-    const controller_runtime_state = try allocateControllerRuntimeState(capabilities.max_ports);
+    const controller_runtime_state = try allocateControllerRuntimeState(
+        capabilities.max_ports,
+        protocols,
+    );
     var retain_controller_runtime_state = false;
     errdefer if (!retain_controller_runtime_state) paging.release_frames(
         controller_runtime_state.base,
@@ -322,7 +349,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_dma_window_count = dma_window_count;
     active_bar_address = bar.address;
     active_capabilities = capabilities;
-    active_protocols = protocols;
+    active_protocols = controller_runtime_state.protocols;
     active_legacy_ownership = legacy_ownership;
     active_controller_reset = true;
     active_enabled_slots = enabled_slots;
@@ -1977,6 +2004,7 @@ test "xHCI hardware capability snapshot uses the shared modern parser" {
 test "xHCI controller runtime state allocation follows reported hardware capacity" {
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(PortRuntimeState));
     try std.testing.expectEqual(@as(usize, 1_352), keyboardReportPublisherOffsetFor(12));
+    try std.testing.expectEqual(@as(usize, 2_936), supportedProtocolsOffsetFor(12));
     try std.testing.expectEqual(@as(u32, 1), controllerRuntimeStateFrameCountFor(12));
     try std.testing.expectEqual(
         @as(u32, CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT),
