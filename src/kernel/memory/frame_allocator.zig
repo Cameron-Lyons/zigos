@@ -23,6 +23,7 @@ pub const Error = error{
 
 pub const MUTATES_RANGES_BY_BITMAP_WORD = true;
 pub const RESERVATION_PREFLIGHT_USES_BITMAP_WORDS = true;
+pub const CONTIGUOUS_SEARCH_USES_BITMAP_WORDS = true;
 
 pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
@@ -48,6 +49,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
         pub const total_frames = frame_count;
         pub const bytes_per_frame = page_size;
         pub const max_range_word_probes = bitmap_word_count;
+        pub const max_contiguous_search_word_probes = bitmap_word_count;
 
         pub fn init() Self {
             return .{};
@@ -187,20 +189,43 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
                     continue;
                 }
 
-                var frame = range_start;
-                while (frame < range_end) : (frame += 1) {
-                    const bit: u5 = @intCast(frame - word_start);
-                    if ((available & (@as(u32, 1) << bit)) == 0) {
-                        contiguous = 0;
-                        continue;
-                    }
+                const range_width = range_end - range_start;
+                const first_bit: u5 = @intCast(range_start - word_start);
+                const normalized = available >> first_bit;
+                const valid_mask = lowBitsMask(range_width);
+                const unavailable = ~normalized & valid_mask;
+                const prefix_free: u32 = @intCast(@ctz(unavailable));
 
-                    if (contiguous == 0) candidate = frame;
-                    contiguous += 1;
-                    if (contiguous == count) return candidate;
+                if (prefix_free != 0) {
+                    if (contiguous == 0) candidate = range_start;
+                    if (contiguous + prefix_free >= count) return candidate;
                 }
+
+                if (count <= range_width) {
+                    const starts = consecutiveRunStarts(normalized, count) &
+                        lowBitsMask(range_width - count + 1);
+                    if (starts != 0) {
+                        return range_start + @as(u32, @intCast(@ctz(starts)));
+                    }
+                }
+
+                const leading_zeroes: u32 = @intCast(@clz(unavailable));
+                contiguous = range_width - (bitmap_word_bits - leading_zeroes);
+                if (contiguous != 0) candidate = range_end - contiguous;
             }
             return null;
+        }
+
+        fn consecutiveRunStarts(bits: u32, count: u32) u32 {
+            var starts = bits;
+            var width: u32 = 1;
+            while (width < count) {
+                const step = @min(width, count - width);
+                const shift: u5 = @intCast(step);
+                starts &= starts >> shift;
+                width += step;
+            }
+            return starts;
         }
 
         fn findFreeFrame(self: *const Self, start: u32, end: u32) ?u32 {
@@ -440,6 +465,67 @@ test "fragmented bitmap rejects unavailable contiguous runs" {
 
     try std.testing.expectEqual(@as(u32, page_size), allocator.allocate(1).?.base);
     try std.testing.expect(allocator.allocate(2) == null);
+}
+
+test "bitmap-word contiguous search matches exhaustive first-fit results" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(8 * page_size, page_size);
+    const Reference = struct {
+        fn find(allocator: *const Allocator, start: u32, end: u32, count: u32) ?u32 {
+            if (start >= end or count > end - start) return null;
+
+            var candidate = start;
+            while (candidate + count <= end) : (candidate += 1) {
+                var frame = candidate;
+                while (frame < candidate + count) : (frame += 1) {
+                    if (allocator.isReserved(frame * page_size)) break;
+                }
+                if (frame == candidate + count) return candidate;
+            }
+            return null;
+        }
+    };
+
+    var reserved_pattern: u32 = 0;
+    while (reserved_pattern < 1 << Allocator.total_frames) : (reserved_pattern += 1) {
+        var allocator = Allocator.init();
+        var frame: u32 = 0;
+        while (frame < Allocator.total_frames) : (frame += 1) {
+            const bit: u5 = @intCast(frame);
+            if ((reserved_pattern & (@as(u32, 1) << bit)) != 0) {
+                try allocator.reserve(.{ .base = frame * page_size, .count = 1 });
+            }
+        }
+
+        var start: u32 = 0;
+        while (start < Allocator.total_frames) : (start += 1) {
+            var end = start + 1;
+            while (end <= Allocator.total_frames) : (end += 1) {
+                var count: u32 = 1;
+                while (count <= end - start) : (count += 1) {
+                    try std.testing.expectEqual(
+                        Reference.find(&allocator, start, end, count),
+                        allocator.findRun(start, end, count),
+                    );
+                }
+            }
+        }
+    }
+}
+
+test "fragmented full-space contiguous search is bounded by bitmap words" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(128 * 1024 * 1024, page_size);
+    var allocator = Allocator.init();
+
+    var frame: u32 = 0;
+    while (frame < Allocator.total_frames) : (frame += 2) {
+        try allocator.reserve(.{ .base = frame * page_size, .count = 1 });
+    }
+
+    try std.testing.expect(allocator.findRun(0, Allocator.total_frames, 2) == null);
+    try std.testing.expect(CONTIGUOUS_SEARCH_USES_BITMAP_WORDS);
+    try std.testing.expectEqual(@as(usize, 1024), Allocator.max_contiguous_search_word_probes);
 }
 
 test "partial final bitmap word never exposes out-of-range frames" {
