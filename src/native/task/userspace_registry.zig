@@ -31,10 +31,15 @@ pub const COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_USE_SENTINEL_BOOT_STRINGS = true;
+pub const RUNTIME_IMAGE_DESCRIPTORS_USE_PACKED_METADATA = true;
+pub const RuntimeBundleIdLength = u6;
 pub const RuntimeRoleTag = u16;
-pub const RuntimeHeartbeatIncrement = u8;
-pub const RuntimeContractFlags = u16;
-pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 72;
+pub const RuntimeHeartbeatIncrement = u5;
+pub const RuntimeContractFlags = u12;
+pub const RuntimeUpdateChannel = u2;
+pub const RuntimeComponentClass = u2;
+pub const RuntimePublisher = u1;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 64;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -76,20 +81,54 @@ pub const ContractSpec = struct {
     contract_flags: u32,
 };
 
+pub const RuntimeImageMetadata = packed struct(u64) {
+    bundle_id_len: RuntimeBundleIdLength,
+    role_tag: RuntimeRoleTag,
+    heartbeat_increment: RuntimeHeartbeatIncrement,
+    contract_flags: RuntimeContractFlags,
+    update_channel: RuntimeUpdateChannel,
+    component_class: RuntimeComponentClass,
+    publisher: RuntimePublisher,
+    reserved: u20 = 0,
+};
+
 pub const ImageSpec = struct {
-    bundle_id: []const u8,
+    bundle_id: [*]const u8,
     display_name: [*:0]const u8,
-    publisher: Publisher,
     label: [*:0]const u8,
     entry: [*:0]const u8,
     provided_interface: ?*const [1]manifest.InterfaceDecl = null,
     consumed_interface: ?*const [1]manifest.InterfaceDecl = null,
     asset: ?*const [1]manifest.AssetDecl = null,
-    update_channel: manifest.UpdateChannel = .stable,
-    component_class: ComponentClass,
-    role_tag: RuntimeRoleTag,
-    heartbeat_increment: RuntimeHeartbeatIncrement,
-    contract_flags: RuntimeContractFlags = 0,
+    metadata: RuntimeImageMetadata,
+
+    pub fn bundleId(self: *const ImageSpec) []const u8 {
+        return self.bundle_id[0..self.metadata.bundle_id_len];
+    }
+
+    pub fn publisher(self: *const ImageSpec) Publisher {
+        return @enumFromInt(self.metadata.publisher);
+    }
+
+    pub fn updateChannel(self: *const ImageSpec) manifest.UpdateChannel {
+        return @enumFromInt(self.metadata.update_channel);
+    }
+
+    pub fn componentClass(self: *const ImageSpec) ComponentClass {
+        return @enumFromInt(self.metadata.component_class);
+    }
+
+    pub fn roleTag(self: *const ImageSpec) u32 {
+        return self.metadata.role_tag;
+    }
+
+    pub fn heartbeatIncrement(self: *const ImageSpec) u32 {
+        return self.metadata.heartbeat_increment;
+    }
+
+    pub fn contractFlags(self: *const ImageSpec) u32 {
+        return self.metadata.contract_flags;
+    }
 
     pub fn providedInterfaces(self: *const ImageSpec) []const manifest.InterfaceDecl {
         return optionalManifestDecls(manifest.InterfaceDecl, self.provided_interface);
@@ -142,22 +181,27 @@ pub const StandaloneImageSpec = struct {
     contract_flags: u32 = 0,
 };
 
-fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: ComponentClass) BuildImageSpec {
+fn serviceBuildImageSpec(comptime class: contract.ServiceClass, comptime component_class: ComponentClass) BuildImageSpec {
     const entry = service_catalog.entryForClass(class).?;
     const catalog_image = entry.userspace_image.?;
+    const publisher = Publisher.fromName(catalog_image.publisher) orelse
+        @compileError("userspace service publisher is not represented by the runtime catalog");
     return .{
         .image = .{
-            .bundle_id = catalog_image.bundle_id,
+            .bundle_id = catalog_image.bundle_id.ptr,
             .display_name = catalog_image.display_name.ptr,
-            .publisher = Publisher.fromName(catalog_image.publisher) orelse
-                @compileError("userspace service publisher is not represented by the runtime catalog"),
             .label = catalog_image.label.ptr,
             .entry = catalog_image.entry.ptr,
             .provided_interface = optionalManifestDecl(manifest.InterfaceDecl, &.{entry.interface}, "provided interfaces"),
-            .component_class = component_class,
-            .role_tag = @intCast(catalog_image.role_tag),
-            .heartbeat_increment = @intCast(catalog_image.heartbeat_increment),
-            .contract_flags = @intCast(catalog_image.contract_flags),
+            .metadata = runtimeImageMetadata(
+                catalog_image.bundle_id,
+                publisher,
+                .stable,
+                component_class,
+                catalog_image.role_tag,
+                catalog_image.heartbeat_increment,
+                catalog_image.contract_flags,
+            ),
         },
         .artifact_name = catalog_image.artifact_name,
         .source_path = catalog_image.source_path,
@@ -169,19 +213,22 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
 pub fn standaloneBuildImageSpec(comptime spec: StandaloneImageSpec) BuildImageSpec {
     return .{
         .image = .{
-            .bundle_id = spec.bundle_id,
+            .bundle_id = spec.bundle_id.ptr,
             .display_name = spec.display_name.ptr,
-            .publisher = spec.publisher,
             .label = spec.label.ptr,
             .entry = spec.entry.ptr,
             .provided_interface = optionalManifestDecl(manifest.InterfaceDecl, spec.provided_interfaces, "provided interfaces"),
             .consumed_interface = optionalManifestDecl(manifest.InterfaceDecl, spec.consumed_interfaces, "consumed interfaces"),
             .asset = optionalManifestDecl(manifest.AssetDecl, spec.assets, "assets"),
-            .update_channel = spec.update_channel,
-            .component_class = spec.component_class,
-            .role_tag = @intCast(spec.role_tag),
-            .heartbeat_increment = @intCast(spec.heartbeat_increment),
-            .contract_flags = @intCast(spec.contract_flags),
+            .metadata = runtimeImageMetadata(
+                spec.bundle_id,
+                spec.publisher,
+                spec.update_channel,
+                spec.component_class,
+                spec.role_tag,
+                spec.heartbeat_increment,
+                spec.contract_flags,
+            ),
         },
         .artifact_name = spec.artifact_name,
         .source_path = spec.source_path,
@@ -296,6 +343,26 @@ pub fn runtimeImageSpecs(comptime build_specs: anytype) [build_specs.len]ImageSp
     return runtime_specs;
 }
 
+fn runtimeImageMetadata(
+    comptime bundle_id: []const u8,
+    comptime publisher: Publisher,
+    comptime update_channel: manifest.UpdateChannel,
+    comptime component_class: ComponentClass,
+    comptime role_tag: u32,
+    comptime heartbeat_increment: u32,
+    comptime contract_flags: u32,
+) RuntimeImageMetadata {
+    return .{
+        .bundle_id_len = @intCast(bundle_id.len),
+        .role_tag = @intCast(role_tag),
+        .heartbeat_increment = @intCast(heartbeat_increment),
+        .contract_flags = @intCast(contract_flags),
+        .update_channel = @intCast(@intFromEnum(update_channel)),
+        .component_class = @intCast(@intFromEnum(component_class)),
+        .publisher = @intCast(@intFromEnum(publisher)),
+    };
+}
+
 fn optionalManifestDecl(
     comptime Decl: type,
     comptime decls: []const Decl,
@@ -318,7 +385,7 @@ comptime {
         @compileError("production userspace catalog must contain exactly 24 images");
     }
     for (production_boot_image_specs) |spec| {
-        if ((spec.contract_flags & (FLAG_MMU_PROOF_PROBE | FLAG_NX_PROOF_PROBE)) != 0) {
+        if ((spec.contractFlags() & (FLAG_MMU_PROOF_PROBE | FLAG_NX_PROOF_PROBE)) != 0) {
             @compileError("production userspace catalog cannot enable MMU verification probes");
         }
     }
@@ -376,7 +443,7 @@ fn indexInCatalog(
     if (spec_index >= specs.len) {
         native_util.impossibleByInvariant("boot bundle id index points outside registry specs");
     }
-    if (!std.mem.eql(u8, specs[spec_index].bundle_id, bundle_id)) {
+    if (!std.mem.eql(u8, specs[spec_index].bundleId(), bundle_id)) {
         native_util.impossibleByInvariant("boot bundle id index points at the wrong registry spec");
     }
     return spec_index;
@@ -397,10 +464,10 @@ pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
 
 pub fn contractForSpec(spec: *const ImageSpec) ContractSpec {
     return .{
-        .bundle_id = spec.bundle_id,
-        .role_tag = spec.role_tag,
-        .heartbeat_increment = spec.heartbeat_increment,
-        .contract_flags = spec.contract_flags,
+        .bundle_id = spec.bundleId(),
+        .role_tag = spec.roleTag(),
+        .heartbeat_increment = spec.heartbeatIncrement(),
+        .contract_flags = spec.contractFlags(),
     };
 }
 
@@ -416,7 +483,7 @@ fn buildBundleIndex(
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(capacity);
     for (specs, 0..) |spec, spec_index| {
-        id_index.insert(capacity, &index, bundleIndexKey(spec.bundle_id), spec_index, "boot bundle id index covers userspace registry");
+        id_index.insert(capacity, &index, bundleIndexKey(spec.bundleId()), spec_index, "boot bundle id index covers userspace registry");
     }
     return index;
 }
@@ -424,7 +491,7 @@ fn buildBundleIndex(
 fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const u8) void {
     if (@import("builtin").mode != .Debug) return;
     for (specs) |spec| {
-        if (std.mem.eql(u8, spec.bundle_id, bundle_id)) {
+        if (std.mem.eql(u8, spec.bundleId(), bundle_id)) {
             native_util.impossibleByInvariant("boot bundle id index missed a registry spec");
         }
     }
@@ -476,11 +543,11 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(!@hasField(ImageSpec, "service_class"));
     try std.testing.expect(!@hasField(ImageSpec, "service_kind"));
     try std.testing.expect(COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA);
-    try std.testing.expectEqual(RuntimeRoleTag, @FieldType(ImageSpec, "role_tag"));
-    try std.testing.expectEqual(RuntimeHeartbeatIncrement, @FieldType(ImageSpec, "heartbeat_increment"));
-    try std.testing.expectEqual(RuntimeContractFlags, @FieldType(ImageSpec, "contract_flags"));
+    try std.testing.expectEqual(RuntimeRoleTag, @FieldType(RuntimeImageMetadata, "role_tag"));
+    try std.testing.expectEqual(RuntimeHeartbeatIncrement, @FieldType(RuntimeImageMetadata, "heartbeat_increment"));
+    try std.testing.expectEqual(RuntimeContractFlags, @FieldType(RuntimeImageMetadata, "contract_flags"));
     try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS);
-    try std.testing.expectEqual(Publisher, @FieldType(ImageSpec, "publisher"));
+    try std.testing.expectEqual(RuntimePublisher, @FieldType(RuntimeImageMetadata, "publisher"));
     try std.testing.expectEqual(Publisher.system, Publisher.fromName("zigos.system").?);
     try std.testing.expectEqual(Publisher.development, Publisher.fromName("zigos.dev").?);
     try std.testing.expect(Publisher.fromName("zigos.unknown") == null);
@@ -494,21 +561,25 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "display_name"));
     try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "label"));
     try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "entry"));
+    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_PACKED_METADATA);
+    try std.testing.expectEqual(@as(usize, @sizeOf(u64)), @sizeOf(RuntimeImageMetadata));
+    try std.testing.expectEqual([*]const u8, @FieldType(ImageSpec, "bundle_id"));
+    try std.testing.expectEqual(RuntimeImageMetadata, @FieldType(ImageSpec, "metadata"));
     try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
     for (production_build_image_specs, 0..) |build_spec, index| {
         const spec = build_spec.image;
-        try std.testing.expect(spec.role_tag != 0);
-        try std.testing.expect(spec.heartbeat_increment != 0);
-        try std.testing.expectEqual(index, indexForRole(spec.bundle_id).?);
+        try std.testing.expect(spec.roleTag() != 0);
+        try std.testing.expect(spec.heartbeatIncrement() != 0);
+        try std.testing.expectEqual(index, indexForRole(spec.bundleId()).?);
         if (build_spec.service_class) |class| {
             const indexed = findByServiceClass(class) orelse return error.MissingServiceClassIndexEntry;
-            try std.testing.expectEqualStrings(spec.bundle_id, indexed.bundle_id);
+            try std.testing.expectEqualStrings(spec.bundleId(), indexed.bundleId());
         }
 
         var peer_index: usize = 0;
         while (peer_index < index) : (peer_index += 1) {
-            try std.testing.expect(!std.mem.eql(u8, production_boot_image_specs[peer_index].bundle_id, spec.bundle_id));
-            try std.testing.expect(production_boot_image_specs[peer_index].role_tag != spec.role_tag);
+            try std.testing.expect(!std.mem.eql(u8, production_boot_image_specs[peer_index].bundleId(), spec.bundleId()));
+            try std.testing.expect(production_boot_image_specs[peer_index].roleTag() != spec.roleTag());
             if (build_spec.service_class) |class| {
                 if (production_build_image_specs[peer_index].service_class) |peer_class| {
                     try std.testing.expect(peer_class != class);
@@ -543,9 +614,16 @@ test "core platform services use the parameterized userspace service entrypoint"
 
 test "compact runtime manifest declarations preserve populated and empty collections" {
     const viewer = findProduction("app.viewer") orelse return error.MissingViewerImage;
+    try std.testing.expectEqualStrings("app.viewer", viewer.bundleId());
     try std.testing.expectEqualStrings("Viewer", viewer.displayName());
     try std.testing.expectEqualStrings("viewer", viewer.componentLabel());
     try std.testing.expectEqualStrings("app.viewer", viewer.entryName());
+    try std.testing.expectEqual(Publisher.development, viewer.publisher());
+    try std.testing.expectEqual(manifest.UpdateChannel.stable, viewer.updateChannel());
+    try std.testing.expectEqual(ComponentClass.app_component, viewer.componentClass());
+    try std.testing.expectEqual(@as(u32, 0xA106), viewer.roleTag());
+    try std.testing.expectEqual(@as(u32, 6), viewer.heartbeatIncrement());
+    try std.testing.expectEqual(@as(u32, FLAG_OWNS_UI_SURFACE), viewer.contractFlags());
     try std.testing.expectEqual(@as(usize, 1), viewer.providedInterfaces().len);
     try std.testing.expectEqualStrings("zigos.viewer.document", viewer.providedInterfaces()[0].name);
     try std.testing.expectEqual(@as(usize, 1), viewer.consumedInterfaces().len);
@@ -563,9 +641,9 @@ test "production userspace registry contains exactly the production boot catalog
     try std.testing.expectEqual(@as(usize, 24), production_boot_image_specs.len);
 
     for (production_boot_image_specs) |spec| {
-        const production_spec = findProduction(spec.bundle_id) orelse return error.MissingProductionImage;
-        try std.testing.expectEqualStrings(spec.bundle_id, production_spec.bundle_id);
-        try std.testing.expectEqual(@as(u32, 0), spec.contract_flags & FLAG_MMU_PROOF_PROBE);
+        const production_spec = findProduction(spec.bundleId()) orelse return error.MissingProductionImage;
+        try std.testing.expectEqualStrings(spec.bundleId(), production_spec.bundleId());
+        try std.testing.expectEqual(@as(u32, 0), spec.contractFlags() & FLAG_MMU_PROOF_PROBE);
     }
     try std.testing.expect(findProduction("app.notes.daily") == null);
 }

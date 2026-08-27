@@ -95,7 +95,7 @@ pub fn indexForRole(bundle_id: []const u8) ?usize {
     if (spec_index >= verification_boot_image_specs.len) {
         native_util.impossibleByInvariant("verification boot bundle id index points outside registry specs");
     }
-    if (!std.mem.eql(u8, verification_boot_image_specs[spec_index].bundle_id, bundle_id)) {
+    if (!std.mem.eql(u8, verification_boot_image_specs[spec_index].bundleId(), bundle_id)) {
         native_util.impossibleByInvariant("verification boot bundle id index points at the wrong registry spec");
     }
     return spec_index;
@@ -109,7 +109,7 @@ fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
     @setEvalBranchQuota(10_000);
     var index = id_index.emptyTable(BUNDLE_INDEX_CAPACITY);
     for (verification_boot_image_specs, 0..) |spec, spec_index| {
-        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, production_registry.bundleIndexKey(spec.bundle_id), spec_index, "verification boot bundle id index covers userspace registry");
+        id_index.insert(BUNDLE_INDEX_CAPACITY, &index, production_registry.bundleIndexKey(spec.bundleId()), spec_index, "verification boot bundle id index covers userspace registry");
     }
     return index;
 }
@@ -117,7 +117,7 @@ fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
 fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
     if (@import("builtin").mode != .Debug) return;
     for (verification_boot_image_specs) |spec| {
-        if (std.mem.eql(u8, spec.bundle_id, bundle_id)) {
+        if (std.mem.eql(u8, spec.bundleId(), bundle_id)) {
             native_util.impossibleByInvariant("verification boot bundle id index missed a registry spec");
         }
     }
@@ -129,20 +129,20 @@ test "verification userspace registry extends production with proof and journey 
     try std.testing.expectEqual(@as(usize, 29), verification_boot_image_specs.len);
 
     for (verification_only_boot_image_specs) |spec| {
-        try std.testing.expect(production_registry.findProduction(spec.bundle_id) == null);
-        const verification_spec = findVerification(spec.bundle_id) orelse return error.MissingVerificationImage;
-        try std.testing.expectEqualStrings(spec.bundle_id, verification_spec.bundle_id);
+        try std.testing.expect(production_registry.findProduction(spec.bundleId()) == null);
+        const verification_spec = findVerification(spec.bundleId()) orelse return error.MissingVerificationImage;
+        try std.testing.expectEqualStrings(spec.bundleId(), verification_spec.bundleId());
     }
 
     for (verification_boot_image_specs, 0..) |spec, spec_index| {
-        try std.testing.expectEqual(spec_index, indexForRole(spec.bundle_id).?);
+        try std.testing.expectEqual(spec_index, indexForRole(spec.bundleId()).?);
     }
 
     for (production_registry.production_boot_image_specs) |spec| {
-        const production_spec = production_registry.findProduction(spec.bundle_id) orelse return error.MissingProductionImage;
-        const verification_spec = findVerification(spec.bundle_id) orelse return error.MissingVerificationImage;
-        try std.testing.expectEqualStrings(spec.bundle_id, production_spec.bundle_id);
-        try std.testing.expectEqualStrings(spec.bundle_id, verification_spec.bundle_id);
+        const production_spec = production_registry.findProduction(spec.bundleId()) orelse return error.MissingProductionImage;
+        const verification_spec = findVerification(spec.bundleId()) orelse return error.MissingVerificationImage;
+        try std.testing.expectEqualStrings(spec.bundleId(), production_spec.bundleId());
+        try std.testing.expectEqualStrings(spec.bundleId(), verification_spec.bundleId());
     }
 }
 
@@ -150,23 +150,23 @@ test "verification registry keeps the freestanding MMU isolation proof" {
     const proof = findVerification("zigos.proof.mmu-isolation") orelse return error.MissingMmuIsolationProof;
     const build_spec = verificationOnlyBuildImage("zigos.proof.mmu-isolation") orelse return error.MissingMmuIsolationBuildSpec;
 
-    try std.testing.expectEqual(userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG, proof.role_tag);
-    try std.testing.expect((proof.contract_flags & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
-    try std.testing.expect((proof.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
-    try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.component_class);
+    try std.testing.expectEqual(userspace_mailbox.MMU_ISOLATION_PROOF_ROLE_TAG, proof.roleTag());
+    try std.testing.expect((proof.contractFlags() & production_registry.FLAG_MMU_PROOF_PROBE) != 0);
+    try std.testing.expect((proof.contractFlags() & production_registry.FLAG_NX_PROOF_PROBE) != 0);
+    try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.componentClass());
     try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", build_spec.artifact_name);
     try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entryName());
 }
 
 fn verificationOnlyBuildImage(bundle_id: []const u8) ?*const production_registry.BuildImageSpec {
     for (&verification_only_build_image_specs) |*spec| {
-        if (std.mem.eql(u8, spec.image.bundle_id, bundle_id)) return spec;
+        if (std.mem.eql(u8, spec.image.bundleId(), bundle_id)) return spec;
     }
     return null;
 }
 
 test "verification registry keeps the ring-three exception containment proof" {
     const proof = findVerification("zigos.system.termination-probe") orelse return error.MissingTerminationProof;
-    try std.testing.expect((proof.contract_flags & production_registry.FLAG_GP_PROOF_PROBE) != 0);
-    try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.component_class);
+    try std.testing.expect((proof.contractFlags() & production_registry.FLAG_GP_PROOF_PROBE) != 0);
+    try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.componentClass());
 }

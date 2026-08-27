@@ -3007,7 +3007,7 @@ fn serviceBootImageRegistryCheck(
     const catalog_entry = service_catalog.entryForClass(class) orelse return false;
     const build_image = catalog_entry.userspace_image orelse return false;
     const provided_interfaces = image.providedInterfaces();
-    return std.mem.eql(u8, image.bundle_id, bundle_id) and
+    return std.mem.eql(u8, image.bundleId(), bundle_id) and
         std.mem.eql(u8, build_image.artifact_name, artifact_name) and
         std.mem.eql(u8, build_image.source_path, "src/userspace/service_main.zig") and
         provided_interfaces.len == 1 and
@@ -7357,7 +7357,7 @@ fn personalContextCatalogBindingCheck() bool {
         contract.interface_id == .personal_context and
         typed_component_abi.interfaceId(.personal_context) == .personal_context and
         provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.bundle_id, "zigos.system.personal-context") and
+        std.mem.eql(u8, image.bundleId(), "zigos.system.personal-context") and
         std.mem.eql(u8, provided_interfaces[0].name, "zigos.personal.context");
 }
 

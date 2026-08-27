@@ -52,7 +52,7 @@ test "userspace archive index resolves every generated artifact bundle" {
     try std.testing.expect(archive.artifacts.len > 0);
     for (role_registry.role_boot_image_specs, 0..) |spec, artifact_index| {
         const artifact = archive.artifacts[artifact_index];
-        const indexed = artifactFor(spec.bundle_id) orelse return error.MissingGeneratedArtifact;
+        const indexed = artifactFor(spec.bundleId()) orelse return error.MissingGeneratedArtifact;
         try std.testing.expectEqual(artifact.entry_point, indexed.entry_point);
         try std.testing.expectEqual(artifact.data.byte_len, indexed.data.byte_len);
         try std.testing.expectEqualSlices(embedded_file.ChunkIndex, artifact.data.chunk_indices, indexed.data.chunk_indices);

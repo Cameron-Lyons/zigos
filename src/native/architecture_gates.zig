@@ -439,12 +439,12 @@ pub const indexed_hot_path_tables = .{
             !@hasField(userspace_registry.ImageSpec, "service_kind") and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
         .compacts_runtime_contract_metadata = userspace_registry.COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA and
-            @FieldType(userspace_registry.ImageSpec, "role_tag") == userspace_registry.RuntimeRoleTag and
-            @FieldType(userspace_registry.ImageSpec, "heartbeat_increment") == userspace_registry.RuntimeHeartbeatIncrement and
-            @FieldType(userspace_registry.ImageSpec, "contract_flags") == userspace_registry.RuntimeContractFlags and
+            @FieldType(userspace_registry.RuntimeImageMetadata, "role_tag") == userspace_registry.RuntimeRoleTag and
+            @FieldType(userspace_registry.RuntimeImageMetadata, "heartbeat_increment") == userspace_registry.RuntimeHeartbeatIncrement and
+            @FieldType(userspace_registry.RuntimeImageMetadata, "contract_flags") == userspace_registry.RuntimeContractFlags and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
         .uses_compact_runtime_publishers = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS and
-            @FieldType(userspace_registry.ImageSpec, "publisher") == userspace_registry.Publisher and
+            @FieldType(userspace_registry.RuntimeImageMetadata, "publisher") == userspace_registry.RuntimePublisher and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
         .uses_optional_runtime_manifest_declarations = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS and
             @FieldType(userspace_registry.ImageSpec, "provided_interface") == ?*const [1]manifest.InterfaceDecl and
@@ -455,6 +455,11 @@ pub const indexed_hot_path_tables = .{
             @FieldType(userspace_registry.ImageSpec, "display_name") == [*:0]const u8 and
             @FieldType(userspace_registry.ImageSpec, "label") == [*:0]const u8 and
             @FieldType(userspace_registry.ImageSpec, "entry") == [*:0]const u8 and
+            @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
+        .uses_packed_runtime_image_metadata = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_USE_PACKED_METADATA and
+            @sizeOf(userspace_registry.RuntimeImageMetadata) == @sizeOf(u64) and
+            @FieldType(userspace_registry.ImageSpec, "bundle_id") == [*]const u8 and
+            @FieldType(userspace_registry.ImageSpec, "metadata") == userspace_registry.RuntimeImageMetadata and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
     },
     .userspace_launch = .{

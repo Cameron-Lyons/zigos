@@ -51,7 +51,7 @@ pub fn specAt(index: usize) ?*const role_registry.ImageSpec {
 
 pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
     const spec = find(bundle_id) orelse return error.UnknownBundleId;
-    return (try userspace_manifest_signing.identityForPublisher(spec.publisher.name())).label;
+    return (try userspace_manifest_signing.identityForPublisher(spec.publisher().name())).label;
 }
 
 pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
@@ -65,13 +65,13 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
             .bundle = bundle,
             .component_class = componentClassForSpec(&spec),
             .initial_component = initialComponentForSpec(&spec),
-            .role_tag = spec.role_tag,
-            .heartbeat_increment = spec.heartbeat_increment,
-            .contract_flags = spec.contract_flags,
+            .role_tag = spec.roleTag(),
+            .heartbeat_increment = spec.heartbeatIncrement(),
+            .contract_flags = spec.contractFlags(),
             .elf_file = embedded_file.File.fromChunkedArtifact(artifact),
         }, executable_image) catch |err| {
             console.print("ZIGOS:USERSPACE:ARTIFACT:FAIL ");
-            console.print(spec.bundle_id);
+            console.print(spec.bundleId());
             console.print("\n");
             return err;
         };
@@ -93,14 +93,14 @@ fn bundleForSpec(
     components: []const manifest.ExecutionComponentDecl,
 ) Error!manifest.BundleManifest {
     var bundle = manifest.BundleManifest{
-        .bundle_id = spec.bundle_id,
+        .bundle_id = spec.bundleId(),
         .display_name = spec.displayName(),
-        .publisher = spec.publisher.name(),
+        .publisher = spec.publisher().name(),
         .provided_interfaces = spec.providedInterfaces(),
         .consumed_interfaces = spec.consumedInterfaces(),
         .components = components,
         .assets = spec.assets(),
-        .update_channel = spec.update_channel,
+        .update_channel = spec.updateChannel(),
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
     return bundle;
@@ -114,7 +114,7 @@ fn initialComponentForSpec(spec: *const role_registry.ImageSpec) task_runtime.Ex
 }
 
 fn componentClassForSpec(spec: *const role_registry.ImageSpec) task_runtime.ComponentClass {
-    return switch (spec.component_class) {
+    return switch (spec.componentClass()) {
         .session_manager => .session_manager,
         .app_component => .app_component,
         .service_component => .service_component,
@@ -174,7 +174,7 @@ test "boot registry definitions are unique and preload a userspace catalog" {
     try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.hasTypedContract());
     try std.testing.expect(catalog.findByBundleId("app.capture").?.hasTypedContract());
     for (active_boot_image_specs) |spec| {
-        try std.testing.expect(catalog.findByBundleId(spec.bundle_id).?.bundle_signed);
+        try std.testing.expect(catalog.findByBundleId(spec.bundleId()).?.bundle_signed);
     }
     if (archive_index.includes_verification_images) {
         try std.testing.expect(find("zigos.proof.mmu-isolation") != null);
