@@ -9,8 +9,9 @@ const frame_allocator = @import("frame_allocator.zig");
 const firmware_memory_map = @import("firmware_memory_map.zig");
 const pcid_allocator = @import("pcid_allocator.zig");
 const table64 = @import("page_table64.zig");
+const virtual_layout = @import("virtual_layout.zig");
 
-const PAGE_SIZE: u32 = 4096;
+const PAGE_SIZE: u32 = virtual_layout.PAGE_BYTES;
 const PML4_SHIFT = table64.PML4_SHIFT;
 const PDPT_SHIFT = table64.PDPT_SHIFT;
 const PAGE_DIRECTORY_SHIFT = table64.PAGE_DIRECTORY_SHIFT;
@@ -105,6 +106,9 @@ var kernel_pml4: PageDirectory align(PAGE_SIZE) = undefined;
 var kernel_pdpt: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_directory: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
+var kernel_direct_pdpt: PageTable align(PAGE_SIZE) = undefined;
+var kernel_direct_page_directory: PageTable align(PAGE_SIZE) = undefined;
+var kernel_direct_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 
 const PhysicalFrameAllocator = frame_allocator.Fixed(MANAGED_PHYSICAL_BYTES, PAGE_SIZE);
 var physical_frames = PhysicalFrameAllocator.init();
@@ -147,6 +151,13 @@ fn kernelIdentityLeafFlags(page_address: u32, image: KernelImageExtents) u64 {
     var flags: u64 = ENTRY_PRESENT | ENTRY_GLOBAL;
     if (!immutable) flags |= ENTRY_WRITABLE;
     return table64.withExecutePermission(flags, executable);
+}
+
+fn kernelDirectLeafFlags(page_address: u32, image: KernelImageExtents) u64 {
+    const immutable = page_address >= image.text_start and page_address < image.immutable_end;
+    var flags: u64 = ENTRY_PRESENT | ENTRY_GLOBAL | table64.NO_EXECUTE;
+    if (!immutable) flags |= ENTRY_WRITABLE;
+    return flags;
 }
 
 fn kernelImageExtents() KernelImageExtents {
@@ -220,6 +231,10 @@ inline fn lowIdentityFrameAddress(address: frame_allocator.PhysicalAddress) u32 
         haltWithMessage("Allocated frame lies outside the low identity aperture!\n");
     }
     return @intCast(address);
+}
+
+pub fn directMapAddress(address: frame_allocator.PhysicalAddress) ?usize {
+    return virtual_layout.directMappedAddress(address, MANAGED_PHYSICAL_BYTES);
 }
 
 fn tryAllocFrame() ?u32 {
@@ -569,9 +584,21 @@ fn initializeKernelHierarchy() void {
     zeroTable(&kernel_pml4);
     zeroTable(&kernel_pdpt);
     zeroTable(&kernel_page_directory);
+    zeroTable(&kernel_direct_pdpt);
+    zeroTable(&kernel_direct_page_directory);
 
     kernel_pml4[0] = tableEntry(@intFromPtr(&kernel_pdpt), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
     kernel_pdpt[0] = tableEntry(@intFromPtr(&kernel_page_directory), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
+    kernel_pml4[tableIndex(virtual_layout.physical_memory.base, PML4_SHIFT)] = tableEntry(
+        @intFromPtr(&kernel_direct_pdpt),
+        ENTRY_PRESENT | ENTRY_WRITABLE,
+        TABLE_OWNER_INHERITED,
+    );
+    kernel_direct_pdpt[0] = tableEntry(
+        @intFromPtr(&kernel_direct_page_directory),
+        ENTRY_PRESENT | ENTRY_WRITABLE,
+        TABLE_OWNER_INHERITED,
+    );
 
     const image = kernelImageExtents();
     var physical_address: u32 = 0;
@@ -595,6 +622,30 @@ fn initializeKernelHierarchy() void {
     var directory_index: usize = kernel_page_tables.len;
     while (directory_index < IDENTITY_DIRECTORY_ENTRIES) : (directory_index += 1) {
         kernel_page_directory[directory_index] = largeIdentityEntry(physical_address);
+        physical_address += LARGE_PAGE_SIZE;
+    }
+
+    physical_address = 0;
+    for (&kernel_direct_page_tables, 0..) |*page_table, table_index| {
+        zeroTable(page_table);
+        for (page_table) |*entry| {
+            entry.* = tableEntry(
+                physical_address,
+                kernelDirectLeafFlags(physical_address, image),
+                PAGE_OWNER_BORROWED,
+            );
+            physical_address += PAGE_SIZE;
+        }
+        kernel_direct_page_directory[table_index] = tableEntry(
+            @intFromPtr(page_table),
+            ENTRY_PRESENT | ENTRY_WRITABLE,
+            TABLE_OWNER_INHERITED,
+        );
+    }
+
+    directory_index = kernel_direct_page_tables.len;
+    while (directory_index < IDENTITY_DIRECTORY_ENTRIES) : (directory_index += 1) {
+        kernel_direct_page_directory[directory_index] = largeIdentityEntry(physical_address);
         physical_address += LARGE_PAGE_SIZE;
     }
 }
@@ -733,6 +784,14 @@ comptime {
     if (PRECISE_IDENTITY_PAGE_TABLES * LARGE_PAGE_SIZE != 10 * 1024 * 1024) {
         @compileError("the precise identity region must cover the first 10 MiB");
     }
+    if (MANAGED_PHYSICAL_BYTES > virtual_layout.PHYSICAL_WINDOW_CAPACITY_BYTES) {
+        @compileError("the managed physical aperture exceeds the direct-map window");
+    }
+    if (tableIndex(virtual_layout.physical_memory.base, PML4_SHIFT) == 0 or
+        tableIndex(virtual_layout.physical_memory.base, PDPT_SHIFT) != 0)
+    {
+        @compileError("the direct-map window must begin at an isolated PML4 slot");
+    }
 }
 
 test "large identity leaves are writable global and non-executable" {
@@ -768,6 +827,35 @@ test "kernel identity mapping executes only the linker-bounded text pages" {
     const mutable_data = kernelIdentityLeafFlags(image.immutable_end, image);
     try std.testing.expect((mutable_data & ENTRY_WRITABLE) != 0);
     try std.testing.expect(!table64.isExecutable(mutable_data));
+}
+
+test "kernel direct mapping is non-executable and preserves image immutability" {
+    const image = KernelImageExtents{
+        .text_start = 0x10_0000,
+        .text_end = 0x12_0000,
+        .immutable_end = 0x18_0000,
+    };
+
+    const text_alias = kernelDirectLeafFlags(image.text_start, image);
+    try std.testing.expect((text_alias & ENTRY_WRITABLE) == 0);
+    try std.testing.expect(!table64.isExecutable(text_alias));
+
+    const immutable_alias = kernelDirectLeafFlags(image.text_end, image);
+    try std.testing.expect((immutable_alias & ENTRY_WRITABLE) == 0);
+    try std.testing.expect(!table64.isExecutable(immutable_alias));
+
+    const mutable_alias = kernelDirectLeafFlags(image.immutable_end, image);
+    try std.testing.expect((mutable_alias & ENTRY_WRITABLE) != 0);
+    try std.testing.expect(!table64.isExecutable(mutable_alias));
+}
+
+test "direct physical aliases cover only the managed aperture" {
+    try std.testing.expectEqual(virtual_layout.physical_memory.base, directMapAddress(0).?);
+    try std.testing.expectEqual(
+        virtual_layout.physical_memory.base + MANAGED_PHYSICAL_BYTES - 1,
+        directMapAddress(MANAGED_PHYSICAL_BYTES - 1).?,
+    );
+    try std.testing.expect(directMapAddress(MANAGED_PHYSICAL_BYTES) == null);
 }
 
 test "leaf mappings encode global and execute permissions explicitly" {
