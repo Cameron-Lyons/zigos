@@ -24,6 +24,7 @@ pub const Error = error{
 pub const MUTATES_RANGES_BY_BITMAP_WORD = true;
 pub const RESERVATION_PREFLIGHT_USES_BITMAP_WORDS = true;
 pub const CONTIGUOUS_SEARCH_USES_BITMAP_WORDS = true;
+pub const SINGLE_FRAME_MUTATIONS_ARE_DIRECT = true;
 
 pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
@@ -34,20 +35,22 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
     }
 
     const frame_count: u32 = memory_bytes / page_size;
-    const bitmap_word_bits: u32 = @bitSizeOf(u32);
+    const BitmapWord = u64;
+    const bitmap_word_bits: u32 = @bitSizeOf(BitmapWord);
     const bitmap_word_count: usize = @intCast((frame_count + bitmap_word_bits - 1) / bitmap_word_bits);
 
     return struct {
         const Self = @This();
 
-        reserved_bitmap: [bitmap_word_count]u32 = [_]u32{0} ** bitmap_word_count,
-        allocated_bitmap: [bitmap_word_count]u32 = [_]u32{0} ** bitmap_word_count,
+        reserved_bitmap: [bitmap_word_count]BitmapWord = [_]BitmapWord{0} ** bitmap_word_count,
+        allocated_bitmap: [bitmap_word_count]BitmapWord = [_]BitmapWord{0} ** bitmap_word_count,
         reserved_count: u32 = 0,
         allocated_count: u32 = 0,
         search_frame_hint: u32 = 0,
 
         pub const total_frames = frame_count;
         pub const bytes_per_frame = page_size;
+        pub const bits_per_bitmap_word = bitmap_word_bits;
         pub const max_range_word_probes = bitmap_word_count;
         pub const max_contiguous_search_word_probes = bitmap_word_count;
 
@@ -109,10 +112,20 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
         pub fn allocate(self: *Self, count: u32) ?FrameRun {
             if (count == 0 or count > frame_count) return null;
 
-            const start = self.findRun(self.search_frame_hint, frame_count, count) orelse
-                self.findRun(0, frame_count, count) orelse return null;
+            const start = if (count == 1)
+                self.findFreeFrame(self.search_frame_hint, frame_count) orelse
+                    self.findFreeFrame(0, frame_count) orelse return null
+            else
+                self.findRun(self.search_frame_hint, frame_count, count) orelse
+                    self.findRun(0, frame_count, count) orelse return null;
 
-            _ = self.mutateRange(&self.allocated_bitmap, start, count, true, false);
+            if (count == 1) {
+                const word: usize = @intCast(start / bitmap_word_bits);
+                const bit: u6 = @truncate(start % bitmap_word_bits);
+                self.allocated_bitmap[word] |= @as(BitmapWord, 1) << bit;
+            } else {
+                _ = self.mutateRange(&self.allocated_bitmap, start, count, true, false);
+            }
             self.allocated_count += count;
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
 
@@ -124,6 +137,18 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
 
         pub fn release(self: *Self, run: FrameRun) Error!void {
             const start = try validateRun(run);
+
+            if (run.count == 1) {
+                const word: usize = @intCast(start / bitmap_word_bits);
+                const bit: u6 = @truncate(start % bitmap_word_bits);
+                const mask = @as(BitmapWord, 1) << bit;
+                if ((self.reserved_bitmap[word] & mask) != 0) return error.FrameReserved;
+                if ((self.allocated_bitmap[word] & mask) == 0) return error.NotAllocated;
+                self.allocated_bitmap[word] &= ~mask;
+                self.allocated_count -= 1;
+                self.search_frame_hint = start;
+                return;
+            }
 
             try self.validateReleasableRange(start, run.count);
             _ = self.mutateRange(&self.allocated_bitmap, start, run.count, false, false);
@@ -190,7 +215,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
                 }
 
                 const range_width = range_end - range_start;
-                const first_bit: u5 = @intCast(range_start - word_start);
+                const first_bit: u6 = @intCast(range_start - word_start);
                 const normalized = available >> first_bit;
                 const valid_mask = lowBitsMask(range_width);
                 const unavailable = ~normalized & valid_mask;
@@ -216,12 +241,12 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             return null;
         }
 
-        fn consecutiveRunStarts(bits: u32, count: u32) u32 {
+        fn consecutiveRunStarts(bits: BitmapWord, count: u32) BitmapWord {
             var starts = bits;
             var width: u32 = 1;
             while (width < count) {
                 const step = @min(width, count - width);
-                const shift: u5 = @intCast(step);
+                const shift: u6 = @intCast(step);
                 starts &= starts >> shift;
                 width += step;
             }
@@ -247,7 +272,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
 
         fn rangeHasAny(
             _: *const Self,
-            bitmap: *const [bitmap_word_count]u32,
+            bitmap: *const [bitmap_word_count]BitmapWord,
             start: u32,
             count: u32,
         ) bool {
@@ -266,7 +291,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
 
         fn mutateRange(
             _: *Self,
-            bitmap: *[bitmap_word_count]u32,
+            bitmap: *[bitmap_word_count]BitmapWord,
             start: u32,
             count: u32,
             comptime set_bits: bool,
@@ -312,20 +337,20 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             }
         }
 
-        fn bitIsSet(_: *const Self, bitmap: *const [bitmap_word_count]u32, frame: u32) bool {
+        fn bitIsSet(_: *const Self, bitmap: *const [bitmap_word_count]BitmapWord, frame: u32) bool {
             const word: usize = @intCast(frame / bitmap_word_bits);
-            const bit: u5 = @truncate(frame % bitmap_word_bits);
-            return (bitmap[word] & (@as(u32, 1) << bit)) != 0;
+            const bit: u6 = @truncate(frame % bitmap_word_bits);
+            return (bitmap[word] & (@as(BitmapWord, 1) << bit)) != 0;
         }
 
-        fn wordRangeMask(start_bit: u32, end_bit: u32) u32 {
+        fn wordRangeMask(start_bit: u32, end_bit: u32) BitmapWord {
             return lowBitsMask(end_bit) & ~lowBitsMask(start_bit);
         }
 
-        fn lowBitsMask(bit_count: u32) u32 {
-            if (bit_count >= bitmap_word_bits) return std.math.maxInt(u32);
-            const shift: u5 = @intCast(bit_count);
-            return (@as(u32, 1) << shift) - 1;
+        fn lowBitsMask(bit_count: u32) BitmapWord {
+            if (bit_count >= bitmap_word_bits) return std.math.maxInt(BitmapWord);
+            const shift: u6 = @intCast(bit_count);
+            return (@as(BitmapWord, 1) << shift) - 1;
         }
     };
 }
@@ -388,6 +413,22 @@ test "single-frame allocation skips unavailable bitmap words" {
     const run = allocator.allocate(1).?;
     try std.testing.expectEqual(@as(u32, 64 * page_size), run.base);
     try std.testing.expectEqual(@as(u32, 1), run.count);
+}
+
+test "single-frame mutations use native bitmap words and preserve accounting" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(96 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{ .base = 0, .count = 1 });
+    const run = allocator.allocate(1).?;
+    try std.testing.expectEqual(@as(u32, page_size), run.base);
+    try std.testing.expectEqual(@as(u32, 1), allocator.stats().allocated);
+    try allocator.release(run);
+    try std.testing.expectEqual(@as(u32, 0), allocator.stats().allocated);
+    try std.testing.expectError(error.NotAllocated, allocator.release(run));
+    try std.testing.expect(SINGLE_FRAME_MUTATIONS_ARE_DIRECT);
+    try std.testing.expectEqual(@as(u32, 64), Allocator.bits_per_bitmap_word);
 }
 
 test "single-frame allocation wraps from a non-word-aligned hint" {
@@ -525,7 +566,7 @@ test "fragmented full-space contiguous search is bounded by bitmap words" {
 
     try std.testing.expect(allocator.findRun(0, Allocator.total_frames, 2) == null);
     try std.testing.expect(CONTIGUOUS_SEARCH_USES_BITMAP_WORDS);
-    try std.testing.expectEqual(@as(usize, 1024), Allocator.max_contiguous_search_word_probes);
+    try std.testing.expectEqual(@as(usize, 512), Allocator.max_contiguous_search_word_probes);
 }
 
 test "partial final bitmap word never exposes out-of-range frames" {
@@ -650,5 +691,5 @@ test "fail-closed availability opens only declared firmware runs" {
         .count = 1,
     }));
     try std.testing.expect(MUTATES_RANGES_BY_BITMAP_WORD);
-    try std.testing.expectEqual(@as(usize, 3), Allocator.max_range_word_probes);
+    try std.testing.expectEqual(@as(usize, 2), Allocator.max_range_word_probes);
 }

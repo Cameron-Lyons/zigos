@@ -12,7 +12,7 @@ pub const QualityGateCase = struct {
 
 pub const SECRET_STORE_OPERATIONS_PER_ITERATION: u32 = 16;
 
-pub fn benchmarkCases(handlers: anytype) [27]BenchmarkCase {
+pub fn benchmarkCases(handlers: anytype) [28]BenchmarkCase {
     return .{
         .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = handlers.capability_derive },
         .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = handlers.capability_mint_reuse_free_slot },
@@ -25,6 +25,7 @@ pub fn benchmarkCases(handlers: anytype) [27]BenchmarkCase {
         .{ .name = "task_runtime.checkpoint.write_low_occupancy", .iterations = 8_000, .runIteration = handlers.task_checkpoint_write_low_occupancy },
         .{ .name = "paging.address_space_roundtrip", .iterations = 50_000, .runIteration = handlers.address_space_roundtrip },
         .{ .name = "memory.heap_allocate_free", .iterations = 20_000, .operations_per_iteration = 2, .runIteration = handlers.heap_allocate_free },
+        .{ .name = "memory.frame_allocate_release", .iterations = 20_000, .operations_per_iteration = 2, .runIteration = handlers.frame_allocate_release },
         .{ .name = "syscall.fast_entry_roundtrip", .iterations = 64_000, .operations_per_iteration = 64, .runIteration = handlers.syscall_fast_entry_roundtrip },
         .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = handlers.accelerator_claim_release },
         .{ .name = "storage.file_bridge.resolve_shared_view", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
