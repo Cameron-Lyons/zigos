@@ -8,6 +8,10 @@ const IDENTIFIER_COUNT: usize = @as(usize, MAX_IDENTIFIER) + 1;
 const WORD_BITS: usize = @bitSizeOf(u32);
 const WORD_COUNT: usize = IDENTIFIER_COUNT / WORD_BITS;
 
+pub const SCANS_BITMAP_WORDS = true;
+pub const MAX_ALLOCATION_WORD_PROBES: usize = WORD_COUNT + 1;
+pub const ALLOCATOR_SIZE_CEILING_BYTES: usize = 516;
+
 pub const Error = error{
     KernelIdentifier,
     OutOfRange,
@@ -56,11 +60,21 @@ pub const Allocator = struct {
     }
 
     fn findFree(self: *const Allocator, start: usize, end: usize) ?usize {
-        var identifier = start;
-        while (identifier < end) : (identifier += 1) {
-            if (!self.isSet(@intCast(identifier))) return identifier;
+        if (start >= end) return null;
+
+        var word_index = start / WORD_BITS;
+        const first_bit: u5 = @intCast(start % WORD_BITS);
+        var available = ~self.used[word_index] & (~@as(u32, 0) << first_bit);
+        while (true) {
+            if (available != 0) {
+                const identifier = word_index * WORD_BITS + @as(usize, @intCast(@ctz(available)));
+                return if (identifier < end) identifier else null;
+            }
+
+            word_index += 1;
+            if (word_index * WORD_BITS >= end) return null;
+            available = ~self.used[word_index];
         }
-        return null;
     }
 
     fn isSet(self: *const Allocator, identifier: Identifier) bool {
@@ -81,6 +95,15 @@ pub const Allocator = struct {
         self.used[word_index] &= ~(@as(u32, 1) << bit);
     }
 };
+
+comptime {
+    if (@sizeOf(Allocator) > ALLOCATOR_SIZE_CEILING_BYTES) {
+        @compileError("PCID allocator exceeds its compact size ceiling");
+    }
+    if (!SCANS_BITMAP_WORDS or MAX_ALLOCATION_WORD_PROBES != 129) {
+        @compileError("PCID allocator scan bounds changed unexpectedly");
+    }
+}
 
 test "PCID allocator reserves zero and reuses released identifiers" {
     var allocator = Allocator.init();
