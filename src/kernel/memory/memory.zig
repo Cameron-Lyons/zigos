@@ -1,4 +1,5 @@
 const console = @import("../utils/console.zig");
+const heap_geometry = @import("heap_geometry.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const spin = @import("../utils/spin.zig");
 
@@ -96,25 +97,29 @@ fn freeListRemove(block: *BlockHeader) void {
 
 fn splitBlock(block: *BlockHeader, size: usize) void {
     const total_size = block.size;
-    const new_block_offset = @sizeOf(BlockHeader) + alignUp(size, BLOCK_ALIGNMENT);
+    const remainder_size = heap_geometry.splitRemainder(
+        total_size,
+        size,
+        @sizeOf(BlockHeader),
+        MIN_BLOCK_SIZE,
+    ) orelse return;
+    const new_block_offset = @sizeOf(BlockHeader) + size;
 
-    if (total_size > new_block_offset + @sizeOf(BlockHeader) + MIN_BLOCK_SIZE) {
-        const block_bytes: [*]u8 = @ptrCast(block);
-        const new_block: *BlockHeader = @ptrCast(@alignCast(block_bytes + new_block_offset));
+    const block_bytes: [*]u8 = @ptrCast(block);
+    const new_block: *BlockHeader = @ptrCast(@alignCast(block_bytes + new_block_offset));
 
-        new_block.size = total_size - new_block_offset;
-        new_block.is_free = true;
-        new_block.next = block.next;
-        new_block.prev = block;
+    new_block.size = remainder_size;
+    new_block.is_free = true;
+    new_block.next = block.next;
+    new_block.prev = block;
 
-        if (block.next) |next| {
-            next.prev = new_block;
-        }
-
-        block.size = size;
-        block.next = new_block;
-        freeListPush(new_block);
+    if (block.next) |next| {
+        next.prev = new_block;
     }
+
+    block.size = size;
+    block.next = new_block;
+    freeListPush(new_block);
 }
 
 fn takeFreeBlock(aligned_size: usize) ?*anyopaque {
@@ -139,7 +144,7 @@ pub fn kmalloc(size: usize) ?*anyopaque {
     lockAllocator();
     defer unlockAllocator();
 
-    const aligned_size = alignUp(size, BLOCK_ALIGNMENT);
+    const aligned_size = heap_geometry.alignSize(size, BLOCK_ALIGNMENT) orelse return null;
 
     return takeFreeBlock(aligned_size);
 }
