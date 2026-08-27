@@ -341,9 +341,9 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
         controller_runtime_state.frames,
     ) catch {};
     const dma_frame_count = try xhci.controllerDmaFrameCount(capabilities, enabled_slots);
-    const dma_base = paging.allocLowIdentityFrames(dma_frame_count) orelse return error.DmaAllocationFailed;
+    const dma_base = paging.allocIdentityDmaFrames(dma_frame_count) orelse return error.DmaAllocationFailed;
     var retain_dma_frames = false;
-    errdefer if (!retain_dma_frames) paging.releaseLowIdentityFrames(dma_base, dma_frame_count) catch {};
+    errdefer if (!retain_dma_frames) paging.releaseIdentityDmaFrames(dma_base, dma_frame_count) catch {};
     const dma_plan = try xhci.planControllerDma(capabilities, enabled_slots, dma_base);
     if (try dma_plan.frameCount() > dma_frame_count) return error.DmaIsolationPlanInvalid;
     const dma_bytes = std.math.cast(usize, dma_plan.total_bytes) orelse

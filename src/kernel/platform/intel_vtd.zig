@@ -292,10 +292,10 @@ pub fn enforceDevices(
 
     const retained_page_count = FIRST_INVALIDATION_QUEUE_PAGE +
         @as(u32, @intCast(remapping_unit_count));
-    const table_base = paging.allocLowIdentityFrames(retained_page_count) orelse
+    const table_base = paging.allocIdentityDmaFrames(retained_page_count) orelse
         return error.TableAllocationFailed;
     var may_release_tables = true;
-    errdefer if (may_release_tables) paging.releaseLowIdentityFrames(table_base, retained_page_count) catch {};
+    errdefer if (may_release_tables) paging.releaseIdentityDmaFrames(table_base, retained_page_count) catch {};
     const tables: *Tables = @ptrFromInt(table_base);
     try populateTables(tables, table_base, domains, address_width);
     const interrupt_table_base = tablePagePhysical(table_base, INTERRUPT_TABLE_PAGE);
