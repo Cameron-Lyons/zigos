@@ -107,6 +107,22 @@ pub const ReceiveResult = struct {
     length: usize = 0,
 };
 
+const DmaAddress = struct {
+    physical: u32 = 0,
+    alias: usize = 0,
+
+    fn offset(self: DmaAddress, byte_offset: u32) DmaAddress {
+        return .{
+            .physical = self.physical + byte_offset,
+            .alias = self.alias + @as(usize, byte_offset),
+        };
+    }
+
+    fn frame(self: DmaAddress, frame_index: u32) DmaAddress {
+        return self.offset(frame_index * PAGE_SIZE);
+    }
+};
+
 pub const Error = error{
     UnsupportedDevice,
     AlreadyPrepared,
@@ -128,10 +144,10 @@ pub const Error = error{
 
 const Controller = struct {
     bar: usize,
-    tx_descriptor_phys: u32,
-    tx_buffer_phys: u32,
-    rx_descriptor_phys: u32,
-    rx_buffer_phys: u32,
+    tx_descriptor: DmaAddress,
+    tx_buffer: DmaAddress,
+    rx_descriptor: DmaAddress,
+    rx_buffer: DmaAddress,
     mac: [6]u8,
     tx_queue: i225_tx.Queue = .{},
     rx_head: u32 = 0,
@@ -197,10 +213,10 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
     const bar = mapBar(bar_phys);
     var pending = Controller{
         .bar = bar,
-        .tx_descriptor_phys = 0,
-        .tx_buffer_phys = 0,
-        .rx_descriptor_phys = 0,
-        .rx_buffer_phys = 0,
+        .tx_descriptor = .{},
+        .tx_buffer = .{},
+        .rx_descriptor = .{},
+        .rx_buffer = .{},
         .mac = readPermanentMac(bar) orelse return error.PermanentMacMissing,
     };
 
@@ -215,19 +231,23 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
         return error.RxQueueDisableTimeout;
     }
 
-    const frames = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.DmaAllocationFailed;
+    const frames_phys = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.DmaAllocationFailed;
     var committed = false;
     errdefer if (!committed) {
         pending.writeReg32(REG_TXDCTL0, 0);
         pending.writeReg32(REG_RXDCTL0, 0);
         pending.writeReg32(REG_RCTL, pending.reg32(REG_RCTL) & ~RCTL_ENABLE);
-        paging.releaseIdentityDmaFrames(frames, DMA_FRAME_COUNT) catch {};
+        paging.releaseIdentityDmaFrames(frames_phys, DMA_FRAME_COUNT) catch {};
     };
-    zeroFrames(frames, DMA_FRAME_COUNT);
-    pending.tx_descriptor_phys = frameAddress(frames, TX_DESCRIPTOR_FRAME);
-    pending.tx_buffer_phys = frameAddress(frames, TX_BUFFER_FIRST_FRAME);
-    pending.rx_descriptor_phys = frameAddress(frames, RX_DESCRIPTOR_FRAME);
-    pending.rx_buffer_phys = frameAddress(frames, RX_BUFFER_FIRST_FRAME);
+    const frames = DmaAddress{
+        .physical = frames_phys,
+        .alias = paging.directMapAddress(frames_phys) orelse return error.DmaAllocationFailed,
+    };
+    zeroFrames(frames.alias, DMA_FRAME_COUNT);
+    pending.tx_descriptor = frames.frame(TX_DESCRIPTOR_FRAME);
+    pending.tx_buffer = frames.frame(TX_BUFFER_FIRST_FRAME);
+    pending.rx_descriptor = frames.frame(RX_DESCRIPTOR_FRAME);
+    pending.rx_buffer = frames.frame(RX_BUFFER_FIRST_FRAME);
 
     configureTransmitQueue(&pending) catch |err| return err;
     configureReceiveQueue(&pending) catch |err| return err;
@@ -235,23 +255,23 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
 
     dma_windows = .{
         .{
-            .base = pending.tx_descriptor_phys,
+            .base = pending.tx_descriptor.physical,
             .device_readable = true,
             .device_writable = true,
         },
         .{
-            .base = pending.tx_buffer_phys,
+            .base = pending.tx_buffer.physical,
             .length = i225_tx.BUFFER_REGION_BYTES,
             .device_readable = true,
             .device_writable = false,
         },
         .{
-            .base = pending.rx_descriptor_phys,
+            .base = pending.rx_descriptor.physical,
             .device_readable = true,
             .device_writable = true,
         },
         .{
-            .base = pending.rx_buffer_phys,
+            .base = pending.rx_buffer.physical,
             .length = i225_rx.BUFFER_REGION_BYTES,
             .device_readable = false,
             .device_writable = true,
@@ -374,8 +394,8 @@ pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
         failed_transmit_frames +%= 1;
         return false;
     };
-    const buffer_address = i225_tx.bufferAddress(controller.tx_buffer_phys, descriptor_index).?;
-    const buffer: [*]u8 = @ptrFromInt(buffer_address);
+    const buffer_address = txBufferAddress(descriptor_index);
+    const buffer: [*]u8 = @ptrFromInt(buffer_address.alias);
     const frame_len = i225_frame.buildEthernetFrame(
         buffer[0..i225_tx.BUFFER_BYTES],
         destination,
@@ -384,9 +404,9 @@ pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
     ) catch unreachable;
 
     const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
-        controller.tx_descriptor_phys + descriptor_index * i225_tx.DESCRIPTOR_BYTES,
+        controller.tx_descriptor.offset(descriptor_index * i225_tx.DESCRIPTOR_BYTES).alias,
     );
-    descriptor.* = i225_tx.submissionDescriptor(buffer_address, frame_len) catch unreachable;
+    descriptor.* = i225_tx.submissionDescriptor(buffer_address.physical, frame_len) catch unreachable;
     publishDescriptor();
     controller.writeReg32(REG_TDT0, controller.tx_queue.tail);
     return true;
@@ -427,7 +447,7 @@ pub fn pollReceive(output: []u8) ReceiveResult {
     }
 
     const buffer_address = rxBufferAddress(descriptor_index);
-    const frame = @as([*]const u8, @ptrFromInt(buffer_address))[0..frame_len];
+    const frame = @as([*]const u8, @ptrFromInt(buffer_address.alias))[0..frame_len];
     const view = i225_frame.parseEthernetFrame(frame, controller.mac) catch {
         dropped_receive_frames +%= 1;
         return .{ .status = .dropped };
@@ -443,7 +463,7 @@ pub fn pollReceive(output: []u8) ReceiveResult {
 
 fn configureTransmitQueue(pending: *Controller) Error!void {
     pending.writeReg32(REG_TDLEN0, i225_tx.RING_BYTES);
-    pending.writeReg32(REG_TDBAL0, pending.tx_descriptor_phys);
+    pending.writeReg32(REG_TDBAL0, pending.tx_descriptor.physical);
     pending.writeReg32(REG_TDBAH0, 0);
     pending.writeReg32(REG_TDH0, 0);
     pending.writeReg32(REG_TDT0, 0);
@@ -465,7 +485,7 @@ fn reapTransmitCompletions() u32 {
     while (controller.tx_queue.in_flight != 0) {
         const descriptor_index = controller.tx_queue.head;
         const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
-            controller.tx_descriptor_phys + descriptor_index * i225_tx.DESCRIPTOR_BYTES,
+            controller.tx_descriptor.offset(descriptor_index * i225_tx.DESCRIPTOR_BYTES).alias,
         );
         if (!i225_tx.completionDone(descriptor.olinfo_status)) return reaped;
         acquireDescriptor();
@@ -534,13 +554,15 @@ fn configureReceiveQueue(pending: *Controller) Error!void {
     var index: u32 = 0;
     while (index < i225_rx.DESCRIPTOR_COUNT) : (index += 1) {
         const descriptor: *volatile i225_rx.Descriptor = @ptrFromInt(
-            pending.rx_descriptor_phys + index * i225_rx.DESCRIPTOR_BYTES,
+            pending.rx_descriptor.offset(index * i225_rx.DESCRIPTOR_BYTES).alias,
         );
-        descriptor.* = i225_rx.availableDescriptor(i225_rx.bufferAddress(pending.rx_buffer_phys, index).?);
+        descriptor.* = i225_rx.availableDescriptor(
+            pending.rx_buffer.offset(index * i225_rx.BUFFER_BYTES).physical,
+        );
     }
     publishDescriptor();
 
-    pending.writeReg32(REG_RDBAL0, pending.rx_descriptor_phys);
+    pending.writeReg32(REG_RDBAL0, pending.rx_descriptor.physical);
     pending.writeReg32(REG_RDBAH0, 0);
     pending.writeReg32(REG_RDLEN0, i225_rx.RING_BYTES);
     pending.writeReg32(REG_RDH0, 0);
@@ -565,15 +587,19 @@ fn configureReceiveQueue(pending: *Controller) Error!void {
 }
 
 fn rxDescriptor(index: u32) *volatile i225_rx.Descriptor {
-    return @ptrFromInt(controller.rx_descriptor_phys + index * i225_rx.DESCRIPTOR_BYTES);
+    return @ptrFromInt(controller.rx_descriptor.offset(index * i225_rx.DESCRIPTOR_BYTES).alias);
 }
 
-fn rxBufferAddress(index: u32) u32 {
-    return i225_rx.bufferAddress(controller.rx_buffer_phys, index).?;
+fn txBufferAddress(index: u32) DmaAddress {
+    return controller.tx_buffer.offset(index * i225_tx.BUFFER_BYTES);
+}
+
+fn rxBufferAddress(index: u32) DmaAddress {
+    return controller.rx_buffer.offset(index * i225_rx.BUFFER_BYTES);
 }
 
 fn recycleRxDescriptor(index: u32, descriptor: *volatile i225_rx.Descriptor) void {
-    descriptor.* = i225_rx.availableDescriptor(rxBufferAddress(index));
+    descriptor.* = i225_rx.availableDescriptor(rxBufferAddress(index).physical);
     publishDescriptor();
     controller.rx_head = i225_rx.nextIndex(index);
     controller.writeReg32(REG_RDT0, index);
@@ -640,11 +666,7 @@ fn spinQueueState(pending: *const Controller, register: usize, mask: u32, want_e
     return false;
 }
 
-fn frameAddress(base: u32, frame_index: u32) u32 {
-    return base + frame_index * PAGE_SIZE;
-}
-
-fn zeroFrames(base: u32, count: u32) void {
+fn zeroFrames(base: usize, count: u32) void {
     @memset(@as([*]u8, @ptrFromInt(base))[0 .. @as(usize, count) * PAGE_SIZE], 0);
 }
 
