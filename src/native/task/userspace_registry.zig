@@ -30,10 +30,11 @@ pub const RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA = true;
 pub const COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS = true;
+pub const RUNTIME_IMAGE_DESCRIPTORS_USE_SENTINEL_BOOT_STRINGS = true;
 pub const RuntimeRoleTag = u16;
 pub const RuntimeHeartbeatIncrement = u8;
 pub const RuntimeContractFlags = u16;
-pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 96;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 72;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -77,10 +78,10 @@ pub const ContractSpec = struct {
 
 pub const ImageSpec = struct {
     bundle_id: []const u8,
-    display_name: []const u8,
+    display_name: [*:0]const u8,
     publisher: Publisher,
-    label: []const u8,
-    entry: []const u8,
+    label: [*:0]const u8,
+    entry: [*:0]const u8,
     provided_interface: ?*const [1]manifest.InterfaceDecl = null,
     consumed_interface: ?*const [1]manifest.InterfaceDecl = null,
     asset: ?*const [1]manifest.AssetDecl = null,
@@ -101,6 +102,18 @@ pub const ImageSpec = struct {
     pub fn assets(self: *const ImageSpec) []const manifest.AssetDecl {
         return optionalManifestDecls(manifest.AssetDecl, self.asset);
     }
+
+    pub fn displayName(self: *const ImageSpec) []const u8 {
+        return std.mem.span(self.display_name);
+    }
+
+    pub fn componentLabel(self: *const ImageSpec) []const u8 {
+        return std.mem.span(self.label);
+    }
+
+    pub fn entryName(self: *const ImageSpec) []const u8 {
+        return std.mem.span(self.entry);
+    }
 };
 
 pub const BuildImageSpec = struct {
@@ -115,10 +128,10 @@ pub const StandaloneImageSpec = struct {
     bundle_id: []const u8,
     artifact_name: []const u8,
     source_path: []const u8 = "src/userspace/component_main.zig",
-    display_name: []const u8,
+    display_name: [:0]const u8,
     publisher: Publisher = .system,
-    label: []const u8,
-    entry: []const u8,
+    label: [:0]const u8,
+    entry: [:0]const u8,
     provided_interfaces: []const manifest.InterfaceDecl = &.{},
     consumed_interfaces: []const manifest.InterfaceDecl = &.{},
     assets: []const manifest.AssetDecl = &.{},
@@ -135,11 +148,11 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
     return .{
         .image = .{
             .bundle_id = catalog_image.bundle_id,
-            .display_name = catalog_image.display_name,
+            .display_name = catalog_image.display_name.ptr,
             .publisher = Publisher.fromName(catalog_image.publisher) orelse
                 @compileError("userspace service publisher is not represented by the runtime catalog"),
-            .label = catalog_image.label,
-            .entry = catalog_image.entry,
+            .label = catalog_image.label.ptr,
+            .entry = catalog_image.entry.ptr,
             .provided_interface = optionalManifestDecl(manifest.InterfaceDecl, &.{entry.interface}, "provided interfaces"),
             .component_class = component_class,
             .role_tag = @intCast(catalog_image.role_tag),
@@ -157,10 +170,10 @@ pub fn standaloneBuildImageSpec(comptime spec: StandaloneImageSpec) BuildImageSp
     return .{
         .image = .{
             .bundle_id = spec.bundle_id,
-            .display_name = spec.display_name,
+            .display_name = spec.display_name.ptr,
             .publisher = spec.publisher,
-            .label = spec.label,
-            .entry = spec.entry,
+            .label = spec.label.ptr,
+            .entry = spec.entry.ptr,
             .provided_interface = optionalManifestDecl(manifest.InterfaceDecl, spec.provided_interfaces, "provided interfaces"),
             .consumed_interface = optionalManifestDecl(manifest.InterfaceDecl, spec.consumed_interfaces, "consumed interfaces"),
             .asset = optionalManifestDecl(manifest.AssetDecl, spec.assets, "assets"),
@@ -477,6 +490,10 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expectEqual(?*const [1]manifest.InterfaceDecl, @FieldType(ImageSpec, "provided_interface"));
     try std.testing.expectEqual(?*const [1]manifest.InterfaceDecl, @FieldType(ImageSpec, "consumed_interface"));
     try std.testing.expectEqual(?*const [1]manifest.AssetDecl, @FieldType(ImageSpec, "asset"));
+    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_SENTINEL_BOOT_STRINGS);
+    try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "display_name"));
+    try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "label"));
+    try std.testing.expectEqual([*:0]const u8, @FieldType(ImageSpec, "entry"));
     try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
     for (production_build_image_specs, 0..) |build_spec, index| {
         const spec = build_spec.image;
@@ -526,6 +543,9 @@ test "core platform services use the parameterized userspace service entrypoint"
 
 test "compact runtime manifest declarations preserve populated and empty collections" {
     const viewer = findProduction("app.viewer") orelse return error.MissingViewerImage;
+    try std.testing.expectEqualStrings("Viewer", viewer.displayName());
+    try std.testing.expectEqualStrings("viewer", viewer.componentLabel());
+    try std.testing.expectEqualStrings("app.viewer", viewer.entryName());
     try std.testing.expectEqual(@as(usize, 1), viewer.providedInterfaces().len);
     try std.testing.expectEqualStrings("zigos.viewer.document", viewer.providedInterfaces()[0].name);
     try std.testing.expectEqual(@as(usize, 1), viewer.consumedInterfaces().len);

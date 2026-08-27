@@ -155,7 +155,7 @@ test "verification registry keeps the freestanding MMU isolation proof" {
     try std.testing.expect((proof.contract_flags & production_registry.FLAG_NX_PROOF_PROBE) != 0);
     try std.testing.expectEqual(production_registry.ComponentClass.app_component, proof.component_class);
     try std.testing.expectEqualStrings("userspace-mmu-isolation-proof.elf", build_spec.artifact_name);
-    try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entry);
+    try std.testing.expectEqualStrings("zigos.proof.mmu-isolation", proof.entryName());
 }
 
 fn verificationOnlyBuildImage(bundle_id: []const u8) ?*const production_registry.BuildImageSpec {
