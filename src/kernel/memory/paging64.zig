@@ -215,18 +215,25 @@ fn haltWithMessage(message: []const u8) noreturn {
     while (true) x86.hlt();
 }
 
+inline fn lowIdentityFrameAddress(address: frame_allocator.PhysicalAddress) u32 {
+    if (address >= MANAGED_PHYSICAL_BYTES) {
+        haltWithMessage("Allocated frame lies outside the low identity aperture!\n");
+    }
+    return @intCast(address);
+}
+
 fn tryAllocFrame() ?u32 {
     acquireFrameLock();
     defer releaseFrameLock();
     const run = physical_frames.allocate(1) orelse return null;
-    return run.base;
+    return lowIdentityFrameAddress(run.base);
 }
 
 pub fn alloc_frames(count: u32) ?u32 {
     acquireFrameLock();
     defer releaseFrameLock();
     const run = physical_frames.allocate(count) orelse return null;
-    return run.base;
+    return lowIdentityFrameAddress(run.base);
 }
 
 pub fn release_frames(base: u32, count: u32) FrameReleaseError!void {

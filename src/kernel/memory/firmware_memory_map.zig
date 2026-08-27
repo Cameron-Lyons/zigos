@@ -8,7 +8,7 @@ pub const Error = handoff.Error || frame_allocator.Error || error{
 };
 
 pub fn initializeAllocator(
-    comptime memory_bytes: u32,
+    comptime memory_bytes: u64,
     comptime page_size: u32,
     allocator: *frame_allocator.Fixed(memory_bytes, page_size),
     memory_map: handoff.MemoryMap,
@@ -44,7 +44,7 @@ pub fn initializeAllocator(
 }
 
 pub fn reserveLiveHandoffRanges(
-    comptime memory_bytes: u32,
+    comptime memory_bytes: u64,
     comptime page_size: u32,
     allocator: *frame_allocator.Fixed(memory_bytes, page_size),
     info_address: u32,
@@ -89,7 +89,7 @@ pub fn reserveLiveHandoffRanges(
 }
 
 fn fullPageRun(
-    comptime memory_bytes: u32,
+    comptime memory_bytes: u64,
     comptime page_size: u32,
     entry: handoff.MemoryMapEntry,
 ) ?frame_allocator.FrameRun {
@@ -113,7 +113,7 @@ fn fullPageRun(
 }
 
 fn touchedPageRun(
-    comptime memory_bytes: u32,
+    comptime memory_bytes: u64,
     comptime page_size: u32,
     base: u64,
     length: u64,
@@ -139,7 +139,7 @@ fn touchedPageRun(
 }
 
 fn liveRangeRun(
-    comptime memory_bytes: u32,
+    comptime memory_bytes: u64,
     comptime page_size: u32,
     address: u32,
     length: usize,
@@ -198,6 +198,20 @@ test "firmware map opens only complete usable pages" {
     try std.testing.expect(!allocator.isReserved(2 * TEST_PAGE_SIZE));
     try std.testing.expect(allocator.isReserved(3 * TEST_PAGE_SIZE));
     try std.testing.expectEqual(@as(u32, 2), allocator.stats().free);
+}
+
+test "firmware map opens usable frames above 4 GiB" {
+    const high_frame_base: u64 = @as(u64, std.math.maxInt(u32)) + 1;
+    const memory_bytes = high_frame_base + 4 * TEST_PAGE_SIZE;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var allocator = Allocator.init();
+    var bytes = [_]u8{0} ** 24;
+    _ = appendEntry(&bytes, 0, high_frame_base, 2 * TEST_PAGE_SIZE, 1);
+
+    try initializeAllocator(memory_bytes, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24));
+
+    try std.testing.expectEqual(@as(u32, 2), allocator.stats().free);
+    try std.testing.expectEqual(high_frame_base, allocator.allocate(2).?.base);
 }
 
 test "non-usable pages win over usable pages in either descriptor order" {

@@ -1,7 +1,9 @@
 const std = @import("std");
 
+pub const PhysicalAddress = u64;
+
 pub const FrameRun = struct {
-    base: u32,
+    base: PhysicalAddress,
     count: u32,
 };
 
@@ -26,7 +28,7 @@ pub const RESERVATION_PREFLIGHT_USES_BITMAP_WORDS = true;
 pub const CONTIGUOUS_SEARCH_USES_BITMAP_WORDS = true;
 pub const SINGLE_FRAME_MUTATIONS_ARE_DIRECT = true;
 
-pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
+pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
         @compileError("page_size must be a power of two");
     }
@@ -34,10 +36,15 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
         @compileError("memory_bytes must be a non-zero multiple of page_size");
     }
 
-    const frame_count: u32 = memory_bytes / page_size;
+    const frame_count_value = memory_bytes / page_size;
+    if (frame_count_value > std.math.maxInt(u32)) {
+        @compileError("frame count exceeds compact allocator indices");
+    }
+
+    const frame_count: u32 = @intCast(frame_count_value);
     const BitmapWord = u64;
     const bitmap_word_bits: u32 = @bitSizeOf(BitmapWord);
-    const bitmap_word_count: usize = @intCast((frame_count + bitmap_word_bits - 1) / bitmap_word_bits);
+    const bitmap_word_count: usize = @intCast((frame_count_value + bitmap_word_bits - 1) / bitmap_word_bits);
 
     return struct {
         const Self = @This();
@@ -130,7 +137,7 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
 
             return .{
-                .base = start * page_size,
+                .base = @as(PhysicalAddress, start) * page_size,
                 .count = count,
             };
         }
@@ -165,22 +172,25 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
             };
         }
 
-        pub fn isReserved(self: *const Self, frame_address: u32) bool {
+        pub fn isReserved(self: *const Self, frame_address: PhysicalAddress) bool {
             if (frame_address % page_size != 0 or frame_address >= memory_bytes) return false;
-            return self.bitIsSet(&self.reserved_bitmap, frame_address / page_size);
+            return self.bitIsSet(&self.reserved_bitmap, @intCast(frame_address / page_size));
         }
 
-        pub fn isAllocated(self: *const Self, frame_address: u32) bool {
+        pub fn isAllocated(self: *const Self, frame_address: PhysicalAddress) bool {
             if (frame_address % page_size != 0 or frame_address >= memory_bytes) return false;
-            return self.bitIsSet(&self.allocated_bitmap, frame_address / page_size);
+            return self.bitIsSet(&self.allocated_bitmap, @intCast(frame_address / page_size));
         }
 
         fn validateRun(run: FrameRun) Error!u32 {
             if (run.count == 0) return error.InvalidRun;
             if (run.base % page_size != 0) return error.Unaligned;
 
-            const start = run.base / page_size;
-            if (start >= frame_count or run.count > frame_count - start) {
+            const start_value = run.base / page_size;
+            if (start_value >= frame_count) return error.OutOfRange;
+
+            const start: u32 = @intCast(start_value);
+            if (run.count > frame_count - start) {
                 return error.OutOfRange;
             }
             return start;
@@ -429,6 +439,24 @@ test "single-frame mutations use native bitmap words and preserve accounting" {
     try std.testing.expectError(error.NotAllocated, allocator.release(run));
     try std.testing.expect(SINGLE_FRAME_MUTATIONS_ARE_DIRECT);
     try std.testing.expectEqual(@as(u32, 64), Allocator.bits_per_bitmap_word);
+}
+
+test "physical frame addresses remain exact above 4 GiB" {
+    const page_size: u32 = 4096;
+    const high_frame_base: PhysicalAddress = @as(u64, std.math.maxInt(u32)) + 1;
+    const Allocator = Fixed(high_frame_base + page_size, page_size);
+    var allocator = Allocator.init();
+
+    try allocator.reserve(.{
+        .base = 0,
+        .count = Allocator.total_frames - 1,
+    });
+
+    const run = allocator.allocate(1).?;
+    try std.testing.expectEqual(high_frame_base, run.base);
+    try std.testing.expect(allocator.isAllocated(high_frame_base));
+    try allocator.release(run);
+    try std.testing.expect(!allocator.isAllocated(high_frame_base));
 }
 
 test "single-frame allocation wraps from a non-word-aligned hint" {
