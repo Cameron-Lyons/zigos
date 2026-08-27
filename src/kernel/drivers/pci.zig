@@ -124,7 +124,7 @@ var boot_inventory_initialized = false;
 var boot_inventory_valid = false;
 var ecam_allocation: ?mcfg.Allocation = null;
 var mapped_configuration_page: ?usize = null;
-var configuration_lock: bool = false;
+var configuration_lock = spin.Lock.init();
 
 comptime {
     if (@sizeOf(PCIDevice) > PCI_DEVICE_SIZE_CEILING_BYTES) {
@@ -211,13 +211,11 @@ pub fn ecamPhysicalAddress(
 }
 
 fn acquireConfigurationLock() void {
-    while (@atomicRmw(bool, &configuration_lock, .Xchg, true, .seq_cst)) {
-        spin.hint();
-    }
+    configuration_lock.acquire();
 }
 
 fn releaseConfigurationLock() void {
-    @atomicStore(bool, &configuration_lock, false, .seq_cst);
+    configuration_lock.release();
 }
 
 fn mappedRegister(bus: u8, device: u8, function: u8, offset: u16) ?*volatile u32 {
