@@ -4,6 +4,7 @@ const kernel_role_options = @import("kernel_role_options");
 
 const max_elf_bytes: usize = 256 * 1024 * 1024;
 const maximum_production_boot_payload_size = kernel_role_options.maximum_production_boot_payload_size;
+const maximum_production_symbol_count = kernel_role_options.maximum_production_symbol_count;
 
 const elf_header_size: usize = @sizeOf(elf.Elf32_Ehdr);
 const program_header_size: usize = @sizeOf(elf.Elf32_Phdr);
@@ -137,6 +138,7 @@ const ParseError = error{
 
 const RoleError = error{
     ProductionBootPayloadTooLarge,
+    ProductionSymbolCountTooLarge,
     ProductionLoadSegmentCountInvalid,
     ProductionContainsRuntimeProofSymbols,
     ProductionContainsBootedEvidenceSymbols,
@@ -1181,6 +1183,9 @@ fn validateRoles(production: Analysis, verification: Analysis) RoleError!void {
     if (production.boot_payload_size > maximum_production_boot_payload_size) {
         return error.ProductionBootPayloadTooLarge;
     }
+    if (production.symbol_count > maximum_production_symbol_count) {
+        return error.ProductionSymbolCountTooLarge;
+    }
     if (production.runtime_proof_symbols != 0) return error.ProductionContainsRuntimeProofSymbols;
     if (production.booted_evidence_symbols != 0) return error.ProductionContainsBootedEvidenceSymbols;
     if (production.demo_symbols != 0) return error.ProductionContainsDemoSymbols;
@@ -1255,6 +1260,10 @@ fn printRoleFailure(err: RoleError, production: Analysis, verification: Analysis
         error.ProductionBootPayloadTooLarge => std.debug.print(
             "Kernel role check failed: production boot payload is {d} bytes; at most {d} bytes are allowed.\n",
             .{ production.boot_payload_size, maximum_production_boot_payload_size },
+        ),
+        error.ProductionSymbolCountTooLarge => std.debug.print(
+            "Kernel role check failed: production ELF contains {d} symbols; at most {d} are allowed.\n",
+            .{ production.symbol_count, maximum_production_symbol_count },
         ),
         error.ProductionLoadSegmentCountInvalid => std.debug.print(
             "Kernel role check failed: production ELF has {d} load segments; exactly one contiguous boot payload is required.\n",
@@ -1383,6 +1392,15 @@ test "role validation rejects leaked and undersized proof kernels" {
         error.ProductionBootPayloadTooLarge,
         validateRoles(oversized, clean),
     );
+
+    if (maximum_production_symbol_count < std.math.maxInt(usize)) {
+        var symbol_heavy = clean;
+        symbol_heavy.symbol_count = maximum_production_symbol_count + 1;
+        try std.testing.expectError(
+            error.ProductionSymbolCountTooLarge,
+            validateRoles(symbol_heavy, clean),
+        );
+    }
 
     var split_payload = clean;
     split_payload.load_segment_count = 2;

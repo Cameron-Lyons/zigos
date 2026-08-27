@@ -64,6 +64,11 @@ pub fn build(b: *std.Build) void {
         "maximum_production_boot_payload_size",
         if (optimize == .Debug) 24 * 1024 * 1024 else 16 * 1024 * 1024,
     );
+    kernel_role_options.addOption(
+        usize,
+        "maximum_production_symbol_count",
+        if (optimize == .ReleaseFast) 3200 else std.math.maxInt(usize),
+    );
     kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .Debug);
     const kernel_role_check_module = b.createModule(.{
         .root_source_file = b.path("tools/check_kernel_roles.zig"),
