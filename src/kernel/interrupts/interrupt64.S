@@ -8,8 +8,10 @@
 .equ FXSAVE_BYTES, 512
 .equ FXSAVE_ALIGN_SLACK, 16
 .equ KERNEL_CODE_SELECTOR, 0x08
+.equ USER_DATA_SEGMENT, 0x18
 .equ USER_DATA_SELECTOR, 0x1b
 .equ USER_CODE_SELECTOR, 0x23
+.equ SELECTOR_RPL_MASK, 0x3
 .equ FRAME_RIP, 152
 .equ FRAME_CS, 160
 .equ FRAME_RFLAGS, 168
@@ -133,8 +135,12 @@ isr_common_stub:
     je .validate_common_return
     cmpq $USER_CODE_SELECTOR, %rax
     jne .invalid_interrupt_return
-    cmpq $USER_DATA_SELECTOR, FRAME_USER_SS(%r12)
+    # Normalize only the saved RPL after proving the exact user-data GDT slot.
+    movq FRAME_USER_SS(%r12), %rax
+    andq $~SELECTOR_RPL_MASK, %rax
+    cmpq $USER_DATA_SEGMENT, %rax
     jne .invalid_interrupt_return
+    orq $SELECTOR_RPL_MASK, FRAME_USER_SS(%r12)
     movq FRAME_USER_RSP(%r12), %rax
     shrq $32, %rax
     jne .invalid_interrupt_return
