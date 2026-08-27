@@ -2,10 +2,19 @@ const builtin = @import("builtin");
 const std = @import("std");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
+const root = @import("root");
+
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    root.kernel_memory
+else
+    struct {};
 
 pub const MAX_DEVICES: usize = 4;
 pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
+pub const HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING = true;
+pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_504;
+pub const DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 const default_dma_window_bytes: u64 = 128 * 1024;
 const iommu_page_size: u64 = 4096;
 const iommu_root_table_salt = iommu_page_size;
@@ -152,6 +161,7 @@ pub const Error = error{
     InvalidDmaWindow,
     InvalidDevice,
     InvalidIommuProgram,
+    OutOfMemory,
     UnsupportedMmioWindow,
     UnsupportedBusMasterDma,
 };
@@ -400,6 +410,34 @@ comptime {
 
 const DmaProgramArena = indexed_arena.IndexedArenaWithKey(u64, DmaProgramSlot, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2, dmaProgramSlotId);
 const DmaProgramDeviceIndex = indexed_arena.MultimapIndex(MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2);
+const heap_backed_dma_programs = builtin.target.os.tag == .freestanding and HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING;
+
+pub const DmaProgramBacking = struct {
+    programs: DmaProgramArena = DmaProgramArena.init(),
+    device_index: DmaProgramDeviceIndex = DmaProgramDeviceIndex.init(),
+
+    fn init() DmaProgramBacking {
+        return .{};
+    }
+
+    fn initializeAllocated(self: *DmaProgramBacking) void {
+        initializeDmaProgramArena(&self.programs);
+        initializeDmaProgramDeviceIndex(&self.device_index);
+    }
+
+    fn reset(self: *DmaProgramBacking) void {
+        self.programs.reset();
+        self.device_index.reset();
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES) {
+            @compileError("DMA program backing exceeds its resident size ceiling");
+        }
+    }
+};
+
+const DmaProgramBackingStorage = if (heap_backed_dma_programs) ?*DmaProgramBacking else DmaProgramBacking;
 
 pub const dma_program_indexing = .{
     .uses_controller_arena = @hasDecl(ControllerArena, "reserveIndex"),
@@ -410,17 +448,71 @@ pub const dma_program_indexing = .{
     .uses_device_index = @hasDecl(DmaProgramDeviceIndex, "append"),
 };
 
+pub const dma_program_backing_layout = .{
+    .heap_backs_state_on_freestanding = HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING,
+    .freestanding_handle_size_bytes = @sizeOf(?*DmaProgramBacking),
+    .backing_size_bytes = @sizeOf(DmaProgramBacking),
+    .freestanding_resident_savings_bytes = @sizeOf(DmaProgramBacking) - @sizeOf(?*DmaProgramBacking),
+};
+
 var controllers: ControllerArena = ControllerArena.init();
-var dma_programs: DmaProgramArena = DmaProgramArena.init();
-var dma_program_device_index: DmaProgramDeviceIndex = DmaProgramDeviceIndex.init();
+var dma_program_backing: DmaProgramBackingStorage = if (heap_backed_dma_programs) null else DmaProgramBacking.init();
 var next_broker_generation: u64 = 1;
 var next_dma_program_id: u64 = 1;
 var next_dma_program_generation: u64 = 1;
 
+fn initializeDmaProgramArena(arena: *DmaProgramArena) void {
+    @memset(std.mem.asBytes(arena), 0);
+    const FreeIndex = @FieldType(DmaProgramArena, "free_head");
+    const no_free_index: FreeIndex = @intCast(MAX_DMA_PROGRAMS);
+    @memset(arena.free_next[0..], no_free_index);
+    arena.free_head = no_free_index;
+}
+
+fn initializeDmaProgramDeviceIndex(index: *DmaProgramDeviceIndex) void {
+    @memset(std.mem.asBytes(index), 0);
+    const CompactIndex = @FieldType(DmaProgramDeviceIndex, "free_bucket_head");
+    const no_index: CompactIndex = @intCast(MAX_DMA_PROGRAMS);
+    for (&index.buckets) |*bucket| {
+        bucket.head = no_index;
+        bucket.tail = no_index;
+    }
+    for (&index.links) |*link| {
+        link.next = no_index;
+        link.previous = no_index;
+        link.bucket = no_index;
+    }
+    index.free_bucket_head = no_index;
+}
+
+fn dmaProgramState() ?*DmaProgramBacking {
+    if (comptime heap_backed_dma_programs) return dma_program_backing;
+    return &dma_program_backing;
+}
+
+fn ensureDmaProgramState() Error!*DmaProgramBacking {
+    if (dmaProgramState()) |backing| return backing;
+    if (comptime heap_backed_dma_programs) {
+        const allocation = kernel_memory.kmalloc(@sizeOf(DmaProgramBacking)) orelse return error.OutOfMemory;
+        const backing: *DmaProgramBacking = @ptrCast(@alignCast(allocation));
+        backing.initializeAllocated();
+        dma_program_backing = backing;
+        return backing;
+    }
+    return &dma_program_backing;
+}
+
 pub fn reset() void {
     controllers.reset();
-    dma_programs = DmaProgramArena.init();
-    dma_program_device_index = DmaProgramDeviceIndex.init();
+    if (comptime heap_backed_dma_programs) {
+        if (dma_program_backing) |backing| {
+            @memset(std.mem.asBytes(backing), 0);
+            kernel_memory.kfree(@ptrCast(backing));
+            dma_program_backing = null;
+        }
+    } else {
+        dma_program_backing.reset();
+    }
 }
 
 pub fn publishPciController(device_id: u64) bool {
@@ -521,7 +613,11 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
     const iommu_program = try iommuProgramFromRequest(request);
 
     const existing_slot = findDmaProgramSlot(request.device_id, request.dma_domain_id);
-    if (existing_slot == null and dma_programs.countInUse() >= MAX_DMA_PROGRAMS) return error.DmaTableFull;
+    if (existing_slot == null) {
+        if (dmaProgramState()) |backing| {
+            if (backing.programs.countInUse() >= MAX_DMA_PROGRAMS) return error.DmaTableFull;
+        }
+    }
     const program_generation = try pendingDmaProgramGeneration();
     const slot = existing_slot orelse try reserveDmaProgramSlot(request.device_id);
     const program_id = slot.program_id;
@@ -680,12 +776,13 @@ fn controllerKey(device_id: u64) u64 {
 }
 
 fn invalidateDmaForDevice(device_id: u64) void {
+    const backing = dmaProgramState() orelse return;
     const device_key = dmaProgramDeviceKey(device_id);
-    var slot_index = dma_program_device_index.head(device_key);
+    var slot_index = backing.device_index.head(device_key);
     while (slot_index != indexed_arena.no_index) {
         if (slot_index >= MAX_DMA_PROGRAMS) native_util.impossibleByInvariant("DMA program device index points outside slots");
-        const next_slot_index = dma_program_device_index.next(slot_index);
-        const slot = &dma_programs.slots[slot_index];
+        const next_slot_index = backing.device_index.next(slot_index);
+        const slot = &backing.programs.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("DMA program device index points at a free slot");
         if (slot.device_id != device_id) native_util.impossibleByInvariant("DMA program device index points at the wrong device");
         removeDmaProgramSlot(slot_index);
@@ -694,21 +791,28 @@ fn invalidateDmaForDevice(device_id: u64) void {
 }
 
 fn findDmaProgram(device_id: u64, dma_domain_id: u64) ?*const DmaProgramSlot {
-    const slot_index = findDmaProgramSlotIndex(device_id, dma_domain_id) orelse return null;
-    return &dma_programs.slots[slot_index];
+    const backing = dmaProgramState() orelse return null;
+    const slot_index = findDmaProgramSlotIndexIn(backing, device_id, dma_domain_id) orelse return null;
+    return &backing.programs.slots[slot_index];
 }
 
 fn findDmaProgramSlot(device_id: u64, dma_domain_id: u64) ?*DmaProgramSlot {
-    const slot_index = findDmaProgramSlotIndex(device_id, dma_domain_id) orelse return null;
-    return &dma_programs.slots[slot_index];
+    const backing = dmaProgramState() orelse return null;
+    const slot_index = findDmaProgramSlotIndexIn(backing, device_id, dma_domain_id) orelse return null;
+    return &backing.programs.slots[slot_index];
 }
 
 fn findDmaProgramSlotIndex(device_id: u64, dma_domain_id: u64) ?usize {
+    const backing = dmaProgramState() orelse return null;
+    return findDmaProgramSlotIndexIn(backing, device_id, dma_domain_id);
+}
+
+fn findDmaProgramSlotIndexIn(backing: *const DmaProgramBacking, device_id: u64, dma_domain_id: u64) ?usize {
     const device_key = dmaProgramDeviceKey(device_id);
-    var slot_index = dma_program_device_index.head(device_key);
-    while (slot_index != indexed_arena.no_index) : (slot_index = dma_program_device_index.next(slot_index)) {
+    var slot_index = backing.device_index.head(device_key);
+    while (slot_index != indexed_arena.no_index) : (slot_index = backing.device_index.next(slot_index)) {
         if (slot_index >= MAX_DMA_PROGRAMS) native_util.impossibleByInvariant("DMA program device index points outside slots");
-        const slot = &dma_programs.slots[slot_index];
+        const slot = &backing.programs.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("DMA program device index points at a free slot");
         if (slot.device_id != device_id) native_util.impossibleByInvariant("DMA program device index points at the wrong device");
         if (slot.dma_domain_id == dma_domain_id) return slot_index;
@@ -718,23 +822,25 @@ fn findDmaProgramSlotIndex(device_id: u64, dma_domain_id: u64) ?usize {
 
 fn reserveDmaProgramSlot(device_id: u64) Error!*DmaProgramSlot {
     const program_id = try pendingDmaProgramId();
-    const slot_index = dma_programs.reserveIndex(program_id) orelse return error.DmaTableFull;
-    if (!dma_program_device_index.append(dmaProgramDeviceKey(device_id), slot_index)) {
-        _ = dma_programs.removeIndex(slot_index);
+    const backing = try ensureDmaProgramState();
+    const slot_index = backing.programs.reserveIndex(program_id) orelse return error.DmaTableFull;
+    if (!backing.device_index.append(dmaProgramDeviceKey(device_id), slot_index)) {
+        _ = backing.programs.removeIndex(slot_index);
         return error.DmaTableFull;
     }
-    const slot = &dma_programs.slots[slot_index];
+    const slot = &backing.programs.slots[slot_index];
     slot.program_id = program_id;
     next_dma_program_id = nextMonotonicId(program_id);
     return slot;
 }
 
 fn removeDmaProgramSlot(slot_index: usize) void {
+    const backing = dmaProgramState() orelse native_util.impossibleByInvariant("DMA program removal requires allocated state");
     if (slot_index >= MAX_DMA_PROGRAMS) native_util.impossibleByInvariant("DMA program slot index outside table");
-    const slot = &dma_programs.slots[slot_index];
+    const slot = &backing.programs.slots[slot_index];
     if (!slot.in_use) native_util.impossibleByInvariant("removing free DMA program slot");
-    _ = dma_program_device_index.remove(dmaProgramDeviceKey(slot.device_id), slot_index);
-    _ = dma_programs.removeIndex(slot_index);
+    _ = backing.device_index.remove(dmaProgramDeviceKey(slot.device_id), slot_index);
+    _ = backing.programs.removeIndex(slot_index);
 }
 
 fn pendingBrokerGeneration() Error!u64 {
@@ -1032,9 +1138,20 @@ test "device broker exhausts authority epochs without reusing stale generations"
         try std.testing.expect(invalidateDmaIsolation(device_id, 0xD402));
         const generation_before_id_exhaustion = next_dma_program_generation;
         try std.testing.expectError(error.DmaProgramIdExhausted, programBrokeredDmaIsolation(device_id, 0xD403));
-        try std.testing.expectEqual(@as(usize, 0), dma_programs.countInUse());
+        try std.testing.expectEqual(@as(usize, 0), dmaProgramState().?.programs.countInUse());
         try std.testing.expectEqual(generation_before_id_exhaustion, next_dma_program_generation);
     }
+}
+
+test "DMA program state uses on-demand freestanding backing" {
+    try std.testing.expect(HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING);
+    try std.testing.expect(dma_program_backing_layout.heap_backs_state_on_freestanding);
+    try std.testing.expectEqual(@as(usize, 8), dma_program_backing_layout.freestanding_handle_size_bytes);
+    try std.testing.expect(dma_program_backing_layout.backing_size_bytes <= DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES);
+    try std.testing.expectEqual(
+        dma_program_backing_layout.backing_size_bytes - dma_program_backing_layout.freestanding_handle_size_bytes,
+        dma_program_backing_layout.freestanding_resident_savings_bytes,
+    );
 }
 
 test "device broker reset never reuses stale authority epochs" {
