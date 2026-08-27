@@ -857,6 +857,10 @@ pub const indexed_hot_path_tables = .{
         .tracks_controller_used_count = device_broker.dma_program_indexing.tracks_controller_used_count,
         .uses_dma_program_arena = device_broker.dma_program_indexing.uses_arena,
         .uses_dma_program_device_index = device_broker.dma_program_indexing.uses_device_index,
+        .heap_backs_dma_program_state_on_freestanding = device_broker.HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING and
+            device_broker.dma_program_backing_layout.heap_backs_state_on_freestanding and
+            device_broker.dma_program_backing_layout.freestanding_handle_size_bytes <= device_broker.DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES and
+            device_broker.dma_program_backing_layout.backing_size_bytes <= device_broker.DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES,
     },
     .network_policy = .{
         .stores_compact_policy_metadata = network_policy.COMPACT_POLICY_METADATA and
