@@ -1956,6 +1956,7 @@ fn validateNuc11tnki5KernelProofSources(
         "parseMultiboot2Info",
         "multiboot2MemoryMap",
         "capturedAcpi2Rsdp",
+        "efi64SystemTableAddress",
         "zigos_multiboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC",
     };
     for (required_boot_handoff_snippets) |snippet| {
@@ -1964,6 +1965,8 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_bootloader_load_contract_snippets = [_][]const u8{
+        "MULTIBOOT2_HEADER_TAG_INFORMATION_REQUEST",
+        "MULTIBOOT2_INFO_TAG_EFI64_SYSTEM_TABLE",
         "MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS",
         ".long _start",
     };

@@ -405,9 +405,9 @@ pub fn firstHardwareTargetGate() !void {
         0,   0,
     };
     try std.testing.expect(kernel_smbios.REQUIRES_SMBIOS3);
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(kernel_smbios.EntryPoint));
-    try std.testing.expect(!@hasField(kernel_smbios.EntryPoint, "major_version"));
-    try std.testing.expect(!@hasField(kernel_smbios.EntryPoint, "structure_count"));
+    try std.testing.expect(kernel_smbios.USES_EFI64_SYSTEM_TABLE_HANDOFF);
+    try std.testing.expect(!@hasDecl(kernel_smbios, "EntryPoint"));
+    try std.testing.expect(!@hasDecl(kernel_smbios, "scanBiosForEntryPoint"));
     try std.testing.expect(kernel_smbios.tableContainsTargetSku(nuc_smbios_table[0..], kernel_smbios.NUC11TNKI5_SKU));
     try std.testing.expectEqual(@as(u32, 64), (kernel_nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) }).maxQueueEntries());
     try intel_i225.validateRingPlan(.{

@@ -526,7 +526,13 @@ pub fn captureEarlyBootEvidence() void {
 }
 
 pub fn capturePlatformFirmwareEvidence() void {
-    facts.real_target_sku = smbios.scanBiosForNuc11Tnki5();
+    facts.real_target_sku = if (handoff.capturedInfo()) |info|
+        if (handoff.efi64SystemTableAddress(info)) |address|
+            smbios.efiSystemTableContainsTargetSku(address, smbios.NUC11TNKI5_SKU)
+        else
+            false
+    else
+        false;
     captureAcpiEvidence();
     printNewMarkers();
 }

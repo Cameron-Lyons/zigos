@@ -271,10 +271,16 @@ pub fn directMapAddress(address: frame_allocator.PhysicalAddress) ?usize {
     return virtual_layout.directMappedAddress(address, MANAGED_PHYSICAL_BYTES);
 }
 
-fn tryAllocFrame() ?frame_allocator.PhysicalAddress {
+pub fn allocGeneralFrame() ?frame_allocator.PhysicalAddress {
     acquireFrameLock();
     defer releaseFrameLock();
-    return (allocGeneralFramesLocked(1) orelse return null).base;
+    if (high_memory_zone_has_free_frames) {
+        if (physical_frames.allocateFrameBetween(LOW_IDENTITY_PHYSICAL_LIMIT, MANAGED_PHYSICAL_BYTES)) |base| {
+            return base;
+        }
+        high_memory_zone_has_free_frames = false;
+    }
+    return (physical_frames.allocateBelowWithCursor(1, LOW_IDENTITY_PHYSICAL_LIMIT, &low_identity_frame_cursor) orelse return null).base;
 }
 
 pub fn allocGeneralFrames(count: u32) ?FrameRun {
@@ -333,6 +339,13 @@ pub fn releaseGeneralFrames(run: FrameRun) FrameReleaseError!void {
     return releasePhysicalFrames(run.base, run.count);
 }
 
+pub fn releaseGeneralFrame(base: frame_allocator.PhysicalAddress) FrameReleaseError!void {
+    acquireFrameLock();
+    defer releaseFrameLock();
+    try physical_frames.releaseFrame(base);
+    if (base >= LOW_IDENTITY_PHYSICAL_LIMIT) high_memory_zone_has_free_frames = true;
+}
+
 fn releasePhysicalFrames(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
     acquireFrameLock();
     defer releaseFrameLock();
@@ -358,7 +371,7 @@ fn ensureChildTable(
 ) UserMapError!*PageTable {
     const entry = &parent[index];
     if (!entryPresent(entry.*)) {
-        const table_phys = tryAllocFrame() orelse return error.OutOfMemory;
+        const table_phys = allocGeneralFrame() orelse return error.OutOfMemory;
         const flags = ENTRY_PRESENT | ENTRY_WRITABLE | (if (user) ENTRY_USER else 0);
         entry.* = tableEntry(@intCast(table_phys), flags, owner);
         const table = tableAtPhysical(table_phys);
@@ -487,11 +500,11 @@ pub fn unmapBorrowedCurrentPage(virt_addr: usize) bool {
 }
 
 pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
-    const pml4_phys = tryAllocFrame() orelse return error.OutOfMemory;
+    const pml4_phys = allocGeneralFrame() orelse return error.OutOfMemory;
     const pml4 = tableAtPhysical(pml4_phys);
     zeroTable(pml4);
 
-    const pdpt_phys = tryAllocFrame() orelse {
+    const pdpt_phys = allocGeneralFrame() orelse {
         releasePhysicalFrames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
         return error.OutOfMemory;
     };
@@ -570,7 +583,7 @@ pub fn mapOwnedUserRange(
         const page_entry = try ensureOwnedLeaf(space, virtual_address);
         if (entryPresent(page_entry.*)) return error.AlreadyMapped;
 
-        const page_phys = tryAllocFrame() orelse return error.OutOfMemory;
+        const page_phys = allocGeneralFrame() orelse return error.OutOfMemory;
         const kernel_alias = bytesAtPhysical(page_phys);
         @memset(kernel_alias[0..PAGE_SIZE], 0);
         var flags: u32 = PAGE_PRESENT | PAGE_USER;
