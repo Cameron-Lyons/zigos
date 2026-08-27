@@ -26,7 +26,8 @@ pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(contract.ServiceClass).le
 pub const ServiceClassSlotIndex = u8;
 pub const RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA = true;
 pub const SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION = true;
-pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 152;
+pub const RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA = true;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 144;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -64,14 +65,14 @@ pub const ImageSpec = struct {
     role_tag: u32,
     heartbeat_increment: u32,
     contract_flags: u32 = 0,
-    service_class: ?contract.ServiceClass = null,
-    service_kind: userspace_mailbox.ServiceKind = .generic,
 };
 
 pub const BuildImageSpec = struct {
     image: ImageSpec,
     artifact_name: []const u8,
     source_path: []const u8,
+    service_class: ?contract.ServiceClass = null,
+    service_kind: userspace_mailbox.ServiceKind = .generic,
 };
 
 pub const StandaloneImageSpec = struct {
@@ -107,11 +108,11 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
             .role_tag = catalog_image.role_tag,
             .heartbeat_increment = catalog_image.heartbeat_increment,
             .contract_flags = catalog_image.contract_flags,
-            .service_class = class,
-            .service_kind = catalog_image.service_kind,
         },
         .artifact_name = catalog_image.artifact_name,
         .source_path = catalog_image.source_path,
+        .service_class = class,
+        .service_kind = catalog_image.service_kind,
     };
 }
 
@@ -322,22 +323,11 @@ pub fn productionContractFor(bundle_id: []const u8) ?ContractSpec {
 }
 
 pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
-    const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse {
-        debugAssertServiceClassIndexMissAbsent(class);
-        return null;
-    };
+    const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse return null;
     if (spec_index >= production_boot_image_specs.len) {
         native_util.impossibleByInvariant("boot service class index points outside registry specs");
     }
-    const spec = &production_boot_image_specs[spec_index];
-    if (spec.service_class) |spec_class| {
-        if (spec_class != class) {
-            native_util.impossibleByInvariant("boot service class index points at the wrong registry spec");
-        }
-    } else {
-        native_util.impossibleByInvariant("boot service class index points at a non-service registry spec");
-    }
-    return spec;
+    return &production_boot_image_specs[spec_index];
 }
 
 pub fn contractForSpec(spec: *const ImageSpec) ContractSpec {
@@ -377,7 +367,7 @@ fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const
 
 fn buildServiceClassSlots() ServiceClassSlots {
     var slots = emptyServiceClassSlots();
-    for (production_boot_image_specs, 0..) |spec, spec_index| {
+    for (production_build_image_specs, 0..) |spec, spec_index| {
         const class = spec.service_class orelse continue;
         setServiceClassSlot(&slots, class, spec_index);
     }
@@ -403,17 +393,6 @@ fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
     return if (slot == NO_SERVICE_CLASS_SLOT) null else slot;
 }
 
-fn debugAssertServiceClassIndexMissAbsent(class: contract.ServiceClass) void {
-    if (@import("builtin").mode != .Debug) return;
-    for (production_boot_image_specs) |spec| {
-        if (spec.service_class) |spec_class| {
-            if (spec_class == class) {
-                native_util.impossibleByInvariant("boot service class index missed a registry spec");
-            }
-        }
-    }
-}
-
 fn buildImageByServiceClass(class: contract.ServiceClass) ?*const BuildImageSpec {
     const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse return null;
     return &production_build_image_specs[spec_index];
@@ -428,12 +407,16 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(!@hasField(ImageSpec, "source_path"));
     try std.testing.expect(SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION);
     try std.testing.expect(!@hasField(ImageSpec, "components"));
+    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA);
+    try std.testing.expect(!@hasField(ImageSpec, "service_class"));
+    try std.testing.expect(!@hasField(ImageSpec, "service_kind"));
     try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
-    for (production_boot_image_specs, 0..) |spec, index| {
+    for (production_build_image_specs, 0..) |build_spec, index| {
+        const spec = build_spec.image;
         try std.testing.expect(spec.role_tag != 0);
         try std.testing.expect(spec.heartbeat_increment != 0);
         try std.testing.expectEqual(index, indexForRole(spec.bundle_id).?);
-        if (spec.service_class) |class| {
+        if (build_spec.service_class) |class| {
             const indexed = findByServiceClass(class) orelse return error.MissingServiceClassIndexEntry;
             try std.testing.expectEqualStrings(spec.bundle_id, indexed.bundle_id);
         }
@@ -442,8 +425,8 @@ test "userspace registry definitions stay unique and keep typed contract metadat
         while (peer_index < index) : (peer_index += 1) {
             try std.testing.expect(!std.mem.eql(u8, production_boot_image_specs[peer_index].bundle_id, spec.bundle_id));
             try std.testing.expect(production_boot_image_specs[peer_index].role_tag != spec.role_tag);
-            if (spec.service_class) |class| {
-                if (production_boot_image_specs[peer_index].service_class) |peer_class| {
+            if (build_spec.service_class) |class| {
+                if (production_build_image_specs[peer_index].service_class) |peer_class| {
                     try std.testing.expect(peer_class != class);
                 }
             }
@@ -456,15 +439,15 @@ test "userspace registry definitions stay unique and keep typed contract metadat
 
 test "core platform services use the parameterized userspace service entrypoint" {
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.storage_object).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.storage, findByServiceClass(.storage_object).?.service_kind);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.storage, buildImageByServiceClass(.storage_object).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.sync_replication).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.sync, findByServiceClass(.sync_replication).?.service_kind);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.sync, buildImageByServiceClass(.sync_replication).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.network_stack).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.network, findByServiceClass(.network_stack).?.service_kind);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.network, buildImageByServiceClass(.network_stack).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.package_install_update).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.package, findByServiceClass(.package_install_update).?.service_kind);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.package, buildImageByServiceClass(.package_install_update).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.compositor_ui_session).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.compositor, findByServiceClass(.compositor_ui_session).?.service_kind);
+    try std.testing.expectEqual(userspace_mailbox.ServiceKind.compositor, buildImageByServiceClass(.compositor_ui_session).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.attention_broker).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.task_lifecycle).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.sensitive_capture).?.source_path);

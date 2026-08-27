@@ -3009,7 +3009,6 @@ fn serviceBootImageRegistryCheck(
     return std.mem.eql(u8, image.bundle_id, bundle_id) and
         std.mem.eql(u8, build_image.artifact_name, artifact_name) and
         std.mem.eql(u8, build_image.source_path, "src/userspace/service_main.zig") and
-        image.service_class.? == class and
         image.provided_interfaces.len == 1 and
         std.mem.eql(u8, image.provided_interfaces[0].name, interface_name);
 }
@@ -3853,7 +3852,6 @@ fn indexSearchBootstrapContractCheck() bool {
         launch.grants[0] == .service_task_authority and
         contract.interface_id == .index_search and
         std.mem.eql(u8, contract.interface.name, "zigos.index.search") and
-        image.service_class.? == .indexing_search and
         image.provided_interfaces.len == 1 and
         std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.index.search");
 }
@@ -7355,7 +7353,6 @@ fn personalContextCatalogBindingCheck() bool {
         launch.grants[0] == .service_task_authority and
         contract.interface_id == .personal_context and
         typed_component_abi.interfaceId(.personal_context) == .personal_context and
-        image.service_class.? == .personal_context and
         image.provided_interfaces.len == 1 and
         std.mem.eql(u8, image.bundle_id, "zigos.system.personal-context") and
         std.mem.eql(u8, image.provided_interfaces[0].name, "zigos.personal.context");

@@ -434,6 +434,10 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
         .derives_single_component_manifests_on_registration = userspace_registry.SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION and
             !@hasField(userspace_registry.ImageSpec, "components"),
+        .omits_build_lookup_metadata = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA and
+            !@hasField(userspace_registry.ImageSpec, "service_class") and
+            !@hasField(userspace_registry.ImageSpec, "service_kind") and
+            @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
     },
     .userspace_launch = .{
         .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,
