@@ -235,7 +235,7 @@ fn allocateControllerRuntimeState(
     const publisher_offset = keyboardReportPublisherOffsetFor(max_ports);
     const protocols_offset = supportedProtocolsOffsetFor(max_ports);
     const frame_count = controllerRuntimeStateFrameCountFor(max_ports);
-    const base = paging.alloc_frames(frame_count) orelse
+    const base = paging.allocLowIdentityFrames(frame_count) orelse
         return error.ControllerRuntimeStateAllocationFailed;
     const allocation_bytes = @as(usize, frame_count) * PAGE_BYTES;
     const bytes: [*]u8 = @ptrFromInt(base);
@@ -337,14 +337,14 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
         protocols,
     );
     var retain_controller_runtime_state = false;
-    errdefer if (!retain_controller_runtime_state) paging.release_frames(
+    errdefer if (!retain_controller_runtime_state) paging.releaseLowIdentityFrames(
         controller_runtime_state.base,
         controller_runtime_state.frame_count,
     ) catch {};
     const dma_frame_count = try xhci.controllerDmaFrameCount(capabilities, enabled_slots);
-    const dma_base = paging.alloc_frames(dma_frame_count) orelse return error.DmaAllocationFailed;
+    const dma_base = paging.allocLowIdentityFrames(dma_frame_count) orelse return error.DmaAllocationFailed;
     var retain_dma_frames = false;
-    errdefer if (!retain_dma_frames) paging.release_frames(dma_base, dma_frame_count) catch {};
+    errdefer if (!retain_dma_frames) paging.releaseLowIdentityFrames(dma_base, dma_frame_count) catch {};
     const dma_plan = try xhci.planControllerDma(capabilities, enabled_slots, dma_base);
     if (try dma_plan.frameCount() > dma_frame_count) return error.DmaIsolationPlanInvalid;
     const dma_bytes = std.math.cast(usize, dma_plan.total_bytes) orelse

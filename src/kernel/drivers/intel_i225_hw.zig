@@ -215,13 +215,13 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
         return error.RxQueueDisableTimeout;
     }
 
-    const frames = paging.alloc_frames(DMA_FRAME_COUNT) orelse return error.DmaAllocationFailed;
+    const frames = paging.allocLowIdentityFrames(DMA_FRAME_COUNT) orelse return error.DmaAllocationFailed;
     var committed = false;
     errdefer if (!committed) {
         pending.writeReg32(REG_TXDCTL0, 0);
         pending.writeReg32(REG_RXDCTL0, 0);
         pending.writeReg32(REG_RCTL, pending.reg32(REG_RCTL) & ~RCTL_ENABLE);
-        paging.release_frames(frames, DMA_FRAME_COUNT) catch {};
+        paging.releaseLowIdentityFrames(frames, DMA_FRAME_COUNT) catch {};
     };
     zeroFrames(frames, DMA_FRAME_COUNT);
     pending.tx_descriptor_phys = frameAddress(frames, TX_DESCRIPTOR_FRAME);
