@@ -19,7 +19,8 @@ const PORT_RESET_COMPLETION_CHANGE_MASK: u7 = (1 << 2) | (1 << 4);
 
 pub const INTERRUPT_VECTOR: u8 = 67;
 pub const PORT_RUNTIME_STATE_SIZE_CEILING_BYTES: usize = 104;
-pub const PORT_RUNTIME_STATE_MAX_FRAME_COUNT: usize = 7;
+pub const CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT: usize = 7;
+pub const COLOCATED_BOOT_KEYBOARD_REPORT_STATE = true;
 
 comptime {
     if (xhci.CAPABILITY_REGISTERS_BYTES > mmio_windows.xhci.bytes) {
@@ -39,7 +40,7 @@ pub const Error = xhci.Error || error{
     AlreadyPrepared,
     BusMasteringNotRevoked,
     DmaAllocationFailed,
-    PortRuntimeStateAllocationFailed,
+    ControllerRuntimeStateAllocationFailed,
     DmaIsolationPlanInvalid,
     DmaIsolationBypassed,
     DmaFaultMonitoringUnavailable,
@@ -67,7 +68,7 @@ var command_producer = xhci.TrbRingProducer{};
 var control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
 var interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
 var slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
-var keyboard_reports = xhci.BootKeyboardReportPublisher{};
+var active_keyboard_reports: ?*xhci.BootKeyboardReportPublisher = null;
 var outstanding_interrupt_reports: usize = 0;
 var pending_interrupts: u32 = 0;
 var interrupt_count: u64 = 0;
@@ -122,10 +123,11 @@ const PortRuntimeState = struct {
     action: PortAction = .none,
 };
 
-const PortRuntimeStateAllocation = struct {
+const ControllerRuntimeStateAllocation = struct {
     base: u32,
     frame_count: u32,
     states: []PortRuntimeState,
+    keyboard_reports: *xhci.BootKeyboardReportPublisher,
 };
 
 comptime {
@@ -134,9 +136,15 @@ comptime {
     }
     const maximum_state_count = @as(usize, std.math.maxInt(u8)) + 1;
     const maximum_state_bytes = maximum_state_count * @sizeOf(PortRuntimeState);
-    const maximum_frame_count = (maximum_state_bytes + PAGE_BYTES - 1) / PAGE_BYTES;
-    if (maximum_frame_count > PORT_RUNTIME_STATE_MAX_FRAME_COUNT) {
-        @compileError("xHCI port runtime state exceeds its bounded frame ceiling");
+    const publisher_offset = std.mem.alignForward(
+        usize,
+        maximum_state_bytes,
+        @alignOf(xhci.BootKeyboardReportPublisher),
+    );
+    const maximum_runtime_bytes = publisher_offset + @sizeOf(xhci.BootKeyboardReportPublisher);
+    const maximum_frame_count = (maximum_runtime_bytes + PAGE_BYTES - 1) / PAGE_BYTES;
+    if (maximum_frame_count > CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT) {
+        @compileError("xHCI controller runtime state exceeds its bounded frame ceiling");
     }
 }
 
@@ -167,34 +175,58 @@ const OutstandingTransfer = struct {
 
 var empty_port_runtime_states: [0]PortRuntimeState = .{};
 var ports: []PortRuntimeState = empty_port_runtime_states[0..];
-var active_port_runtime_state_base: u32 = 0;
-var active_port_runtime_state_frame_count: u32 = 0;
+var active_controller_runtime_state_base: u32 = 0;
+var active_controller_runtime_state_frame_count: u32 = 0;
 var outstanding_command: ?OutstandingCommand = null;
 var outstanding_transfer: ?OutstandingTransfer = null;
 var next_port_scan: u16 = 1;
 
-fn portRuntimeStateFrameCountFor(max_ports: u8) u32 {
+fn keyboardReportPublisherOffsetFor(max_ports: u8) usize {
     const state_count = @as(usize, max_ports) + 1;
     const state_bytes = state_count * @sizeOf(PortRuntimeState);
-    return @intCast((state_bytes + PAGE_BYTES - 1) / PAGE_BYTES);
+    return std.mem.alignForward(
+        usize,
+        state_bytes,
+        @alignOf(xhci.BootKeyboardReportPublisher),
+    );
 }
 
-fn allocatePortRuntimeStates(max_ports: u8) Error!PortRuntimeStateAllocation {
+fn controllerRuntimeStateFrameCountFor(max_ports: u8) u32 {
+    const runtime_bytes = keyboardReportPublisherOffsetFor(max_ports) +
+        @sizeOf(xhci.BootKeyboardReportPublisher);
+    return @intCast((runtime_bytes + PAGE_BYTES - 1) / PAGE_BYTES);
+}
+
+fn allocateControllerRuntimeState(max_ports: u8) Error!ControllerRuntimeStateAllocation {
     const state_count = @as(usize, max_ports) + 1;
-    const frame_count = portRuntimeStateFrameCountFor(max_ports);
+    const publisher_offset = keyboardReportPublisherOffsetFor(max_ports);
+    const frame_count = controllerRuntimeStateFrameCountFor(max_ports);
     const base = paging.alloc_frames(frame_count) orelse
-        return error.PortRuntimeStateAllocationFailed;
+        return error.ControllerRuntimeStateAllocationFailed;
     const allocation_bytes = @as(usize, frame_count) * PAGE_BYTES;
     const bytes: [*]u8 = @ptrFromInt(base);
     @memset(bytes[0..allocation_bytes], 0);
     const state_pointer: [*]PortRuntimeState = @ptrFromInt(base);
     const states = state_pointer[0..state_count];
     for (states) |*state| state.* = .{};
-    return .{ .base = base, .frame_count = frame_count, .states = states };
+    const keyboard_reports: *xhci.BootKeyboardReportPublisher =
+        @ptrFromInt(@as(usize, base) + publisher_offset);
+    keyboard_reports.* = .{};
+    return .{
+        .base = base,
+        .frame_count = frame_count,
+        .states = states,
+        .keyboard_reports = keyboard_reports,
+    };
 }
 
-fn resetPortRuntimeStates() void {
+fn resetControllerRuntimeState() void {
     for (ports) |*state| state.* = .{};
+    if (active_keyboard_reports) |reports| reports.* = .{};
+}
+
+inline fn keyboardReports() *xhci.BootKeyboardReportPublisher {
+    return active_keyboard_reports orelse unreachable;
 }
 
 pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
@@ -212,11 +244,11 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
     interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
     slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    keyboard_reports = .{};
+    active_keyboard_reports = null;
     outstanding_interrupt_reports = 0;
     ports = empty_port_runtime_states[0..];
-    active_port_runtime_state_base = 0;
-    active_port_runtime_state_frame_count = 0;
+    active_controller_runtime_state_base = 0;
+    active_controller_runtime_state_frame_count = 0;
     outstanding_command = null;
     outstanding_transfer = null;
     next_port_scan = 1;
@@ -263,11 +295,11 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     try xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{});
     const enabled_slots = try xhci.configureDeviceSlots(capabilities, &reader);
 
-    const port_runtime_states = try allocatePortRuntimeStates(capabilities.max_ports);
-    var retain_port_runtime_states = false;
-    errdefer if (!retain_port_runtime_states) paging.release_frames(
-        port_runtime_states.base,
-        port_runtime_states.frame_count,
+    const controller_runtime_state = try allocateControllerRuntimeState(capabilities.max_ports);
+    var retain_controller_runtime_state = false;
+    errdefer if (!retain_controller_runtime_state) paging.release_frames(
+        controller_runtime_state.base,
+        controller_runtime_state.frame_count,
     ) catch {};
     const dma_frame_count = try xhci.controllerDmaFrameCount(capabilities, enabled_slots);
     const dma_base = paging.alloc_frames(dma_frame_count) orelse return error.DmaAllocationFailed;
@@ -294,10 +326,11 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_legacy_ownership = legacy_ownership;
     active_controller_reset = true;
     active_enabled_slots = enabled_slots;
-    ports = port_runtime_states.states;
-    active_port_runtime_state_base = port_runtime_states.base;
-    active_port_runtime_state_frame_count = port_runtime_states.frame_count;
-    retain_port_runtime_states = true;
+    ports = controller_runtime_state.states;
+    active_keyboard_reports = controller_runtime_state.keyboard_reports;
+    active_controller_runtime_state_base = controller_runtime_state.base;
+    active_controller_runtime_state_frame_count = controller_runtime_state.frame_count;
+    retain_controller_runtime_state = true;
     retain_dma_frames = true;
     return capabilities;
 }
@@ -309,8 +342,9 @@ pub fn validated() bool {
         ownership != .firmware_released and
         active_controller_reset and
         active_enabled_slots != 0 and
-        active_port_runtime_state_base != 0 and
-        active_port_runtime_state_frame_count == portRuntimeStateFrameCountFor(capabilities.max_ports) and
+        active_controller_runtime_state_base != 0 and
+        active_controller_runtime_state_frame_count == controllerRuntimeStateFrameCountFor(capabilities.max_ports) and
+        active_keyboard_reports != null and
         ports.len == @as(usize, capabilities.max_ports) + 1 and
         active_dma_plan != null and
         active_dma_window_count != 0;
@@ -401,9 +435,8 @@ pub fn activate() Error!void {
     control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
     interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
     slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    keyboard_reports = .{};
     outstanding_interrupt_reports = 0;
-    resetPortRuntimeStates();
+    resetControllerRuntimeState();
     outstanding_command = null;
     outstanding_transfer = null;
     next_port_scan = 1;
@@ -607,19 +640,19 @@ pub fn keyboardReportCount() u64 {
 
 pub fn keyboardReportAfter(observed_sequence: u64) ?xhci.HardwareBootKeyboardReport {
     if (!@atomicLoad(bool, &active, .seq_cst)) return null;
-    return keyboard_reports.latestAfter(observed_sequence);
+    return keyboardReports().latestAfter(observed_sequence);
 }
 
 pub fn pollKeyboardReport() ?xhci.HardwareBootKeyboardReport {
     if (!@atomicLoad(bool, &active, .seq_cst)) return null;
-    const report = keyboard_reports.poll() orelse return null;
+    const report = keyboardReports().poll() orelse return null;
     scheduleUnarmedInterruptReports();
     return report;
 }
 
 pub fn inputProof() ?xhci.InputProof {
     if (!@atomicLoad(bool, &active, .seq_cst)) return null;
-    const report = keyboard_reports.latestAfter(0) orelse return null;
+    const report = keyboardReports().latestAfter(0) orelse return null;
     const state = &ports[report.port_id];
     _ = state.device_descriptor orelse return null;
     const keyboard = state.boot_keyboard orelse return null;
@@ -757,7 +790,7 @@ fn scheduleUnarmedInterruptReports() void {
         {
             continue;
         }
-        if (!keyboard_reports.hasCapacity(reserved + 1)) return;
+        if (!keyboardReports().hasCapacity(reserved + 1)) return;
         state.action = .post_interrupt_report;
         reserved += 1;
     }
@@ -785,7 +818,7 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
             if (outstanding_interrupt_reports == 0) return error.TrbRingStateInvalid;
             outstanding_interrupt_reports -= 1;
         }
-        keyboard_reports.clearPort(event.port_id);
+        keyboardReports().clearPort(event.port_id);
         clearPortDescriptorState(state);
         scheduleUnarmedInterruptReports();
         state.speed_id = 0;
@@ -1115,10 +1148,10 @@ fn handleInterruptTransferCompletion(event: xhci.Event) Error!void {
     _ = @atomicLoad(u8, first_byte, .acquire);
     var report: [xhci.HID_BOOT_KEYBOARD_REPORT_BYTES]u8 = undefined;
     for (&report, 0..) |*byte, index| byte.* = source[index];
-    _ = try keyboard_reports.publish(port_id, state.slot_id, keyboard, descriptor, &report);
+    _ = try keyboardReports().publish(port_id, state.slot_id, keyboard, descriptor, &report);
 
     state.interrupt_report_trb_address = 0;
-    state.action = if (keyboard_reports.hasCapacity(outstanding_interrupt_reports + 1))
+    state.action = if (keyboardReports().hasCapacity(outstanding_interrupt_reports + 1))
         .post_interrupt_report
     else
         .none;
@@ -1356,7 +1389,7 @@ fn submitInterruptReportTransfer(
     {
         return error.InvalidDeviceSlot;
     }
-    if (!keyboard_reports.hasCapacity(outstanding_interrupt_reports + 1)) {
+    if (!keyboardReports().hasCapacity(outstanding_interrupt_reports + 1)) {
         state.action = .none;
         return;
     }
@@ -1736,7 +1769,7 @@ fn containFailure(marker: []const u8) void {
     outstanding_transfer = null;
     command_producer = .{};
     control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    resetPortRuntimeStates();
+    resetControllerRuntimeState();
     if (active_capabilities) |capabilities| {
         if (active_bar_address != 0) {
             var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
@@ -1941,12 +1974,13 @@ test "xHCI hardware capability snapshot uses the shared modern parser" {
     try std.testing.expectEqual(@as(u32, 0x8000), capabilities.extended_capability_offset);
 }
 
-test "xHCI port runtime state allocation follows reported hardware capacity" {
+test "xHCI controller runtime state allocation follows reported hardware capacity" {
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(PortRuntimeState));
-    try std.testing.expectEqual(@as(u32, 1), portRuntimeStateFrameCountFor(12));
+    try std.testing.expectEqual(@as(usize, 1_352), keyboardReportPublisherOffsetFor(12));
+    try std.testing.expectEqual(@as(u32, 1), controllerRuntimeStateFrameCountFor(12));
     try std.testing.expectEqual(
-        @as(u32, PORT_RUNTIME_STATE_MAX_FRAME_COUNT),
-        portRuntimeStateFrameCountFor(std.math.maxInt(u8)),
+        @as(u32, CONTROLLER_RUNTIME_STATE_MAX_FRAME_COUNT),
+        controllerRuntimeStateFrameCountFor(std.math.maxInt(u8)),
     );
 }
 
