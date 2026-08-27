@@ -1026,6 +1026,11 @@ pub const indexed_hot_path_tables = .{
             input_router.event_slot_layout.freestanding_handle_size_bytes <= input_router.EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES,
     },
     .input_queues = .{
+        .stores_compact_xhci_protocol_metadata = xhci.COMPACT_SUPPORTED_PROTOCOL_METADATA and
+            @FieldType(xhci.SupportedProtocols, "first_ports") == [xhci.MAX_EXTENDED_CAPABILITIES]u8 and
+            @FieldType(xhci.SupportedProtocols, "port_counts") == [xhci.MAX_EXTENDED_CAPABILITIES]u8 and
+            @FieldType(xhci.SupportedProtocols, "protocol_tags") == [xhci.MAX_EXTENDED_CAPABILITIES]u8 and
+            @FieldType(xhci.SupportedProtocols, "speed_classes") == [xhci.MAX_EXTENDED_CAPABILITIES]u32,
         .stores_compact_xhci_metadata = xhci.COMPACT_INPUT_QUEUE_METADATA and
             @FieldType(xhci.HidReport, "report_len") == u8 and
             @FieldType(xhci.BootKeyboardReportPublisher, "head") == u8 and
