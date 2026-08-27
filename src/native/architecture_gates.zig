@@ -438,6 +438,11 @@ pub const indexed_hot_path_tables = .{
             !@hasField(userspace_registry.ImageSpec, "service_class") and
             !@hasField(userspace_registry.ImageSpec, "service_kind") and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
+        .compacts_runtime_contract_metadata = userspace_registry.COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA and
+            @FieldType(userspace_registry.ImageSpec, "role_tag") == userspace_registry.RuntimeRoleTag and
+            @FieldType(userspace_registry.ImageSpec, "heartbeat_increment") == userspace_registry.RuntimeHeartbeatIncrement and
+            @FieldType(userspace_registry.ImageSpec, "contract_flags") == userspace_registry.RuntimeContractFlags and
+            @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
     },
     .userspace_launch = .{
         .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,

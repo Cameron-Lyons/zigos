@@ -27,7 +27,11 @@ pub const ServiceClassSlotIndex = u8;
 pub const RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA = true;
 pub const SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA = true;
-pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 144;
+pub const COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA = true;
+pub const RuntimeRoleTag = u16;
+pub const RuntimeHeartbeatIncrement = u8;
+pub const RuntimeContractFlags = u16;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 136;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -62,9 +66,9 @@ pub const ImageSpec = struct {
     assets: []const manifest.AssetDecl = &.{},
     update_channel: manifest.UpdateChannel = .stable,
     component_class: ComponentClass,
-    role_tag: u32,
-    heartbeat_increment: u32,
-    contract_flags: u32 = 0,
+    role_tag: RuntimeRoleTag,
+    heartbeat_increment: RuntimeHeartbeatIncrement,
+    contract_flags: RuntimeContractFlags = 0,
 };
 
 pub const BuildImageSpec = struct {
@@ -105,9 +109,9 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
             .entry = catalog_image.entry,
             .provided_interfaces = &.{entry.interface},
             .component_class = component_class,
-            .role_tag = catalog_image.role_tag,
-            .heartbeat_increment = catalog_image.heartbeat_increment,
-            .contract_flags = catalog_image.contract_flags,
+            .role_tag = @intCast(catalog_image.role_tag),
+            .heartbeat_increment = @intCast(catalog_image.heartbeat_increment),
+            .contract_flags = @intCast(catalog_image.contract_flags),
         },
         .artifact_name = catalog_image.artifact_name,
         .source_path = catalog_image.source_path,
@@ -129,9 +133,9 @@ pub fn standaloneBuildImageSpec(spec: StandaloneImageSpec) BuildImageSpec {
             .assets = spec.assets,
             .update_channel = spec.update_channel,
             .component_class = spec.component_class,
-            .role_tag = spec.role_tag,
-            .heartbeat_increment = spec.heartbeat_increment,
-            .contract_flags = spec.contract_flags,
+            .role_tag = @intCast(spec.role_tag),
+            .heartbeat_increment = @intCast(spec.heartbeat_increment),
+            .contract_flags = @intCast(spec.contract_flags),
         },
         .artifact_name = spec.artifact_name,
         .source_path = spec.source_path,
@@ -410,6 +414,10 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA);
     try std.testing.expect(!@hasField(ImageSpec, "service_class"));
     try std.testing.expect(!@hasField(ImageSpec, "service_kind"));
+    try std.testing.expect(COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA);
+    try std.testing.expectEqual(RuntimeRoleTag, @FieldType(ImageSpec, "role_tag"));
+    try std.testing.expectEqual(RuntimeHeartbeatIncrement, @FieldType(ImageSpec, "heartbeat_increment"));
+    try std.testing.expectEqual(RuntimeContractFlags, @FieldType(ImageSpec, "contract_flags"));
     try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
     for (production_build_image_specs, 0..) |build_spec, index| {
         const spec = build_spec.image;
