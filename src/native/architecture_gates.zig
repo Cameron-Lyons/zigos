@@ -849,6 +849,8 @@ pub const indexed_hot_path_tables = .{
         .derives_connection_ids_from_open_count = network_driver_task.DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT and
             !@hasField(network_driver_task.NativeNetworkStack, "next_connection_id") and
             @sizeOf(network_driver_task.NativeNetworkStack) <= network_driver_task.NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES,
+        .drains_full_receive_queue_without_copy = network_driver_task.DRAINS_FULL_RECEIVE_QUEUE_WITHOUT_COPY and
+            network_driver_task.bounded_metadata_layout.receive_overflow_scratch_bytes == 0,
     },
     .device_broker = .{
         .uses_controller_arena = device_broker.dma_program_indexing.uses_controller_arena,
