@@ -612,10 +612,10 @@ pub fn attachAsBackend(
     }
     publishInterruptsActive(false);
     resetCompletionInterruptCount();
-    const dma_base = paging.allocLowIdentityFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
+    const dma_base = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
     const frames = DmaFrames{ .base = dma_base };
     var retain_dma_frames = vtd_summary != null;
-    errdefer if (!retain_dma_frames) paging.releaseLowIdentityFrames(dma_base, DMA_FRAME_COUNT) catch {};
+    errdefer if (!retain_dma_frames) paging.releaseIdentityDmaFrames(dma_base, DMA_FRAME_COUNT) catch {};
     for (0..DMA_FRAME_COUNT) |index| zeroFrame(frames.frame(@intCast(index)));
 
     var controller = try prepare(dev, frames);
@@ -642,9 +642,9 @@ pub fn attachAsBackend(
 
     var fault_proof: ?intel_vtd.FaultRecord = null;
     if (vtd_summary != null) {
-        const guard_phys = paging.allocLowIdentityFrames(1) orelse return error.QueueAllocationFailed;
+        const guard_phys = paging.allocIdentityDmaFrames(1) orelse return error.QueueAllocationFailed;
         var guard_releasable = false;
-        defer if (guard_releasable) paging.releaseLowIdentityFrames(guard_phys, 1) catch {};
+        defer if (guard_releasable) paging.releaseIdentityDmaFrames(guard_phys, 1) catch {};
         fillGuardPage(guard_phys);
         issueFaultProbe(&controller, guard_phys);
         fault_proof = try intel_vtd.waitForBlockedWrite(guard_phys);
@@ -870,52 +870,6 @@ pub fn probeAndReport(
     console.print("ZIGOS:NVME:HW:BRINGUP_OK\n");
     console.print("ZIGOS:NVME:HW:IOQ_OK\n");
     return fault_proof;
-}
-
-comptime {
-    _ = &roundtripSelfTest;
-}
-
-const SCRATCH_LBA: u64 = 8;
-const TEST_PATTERN: u8 = 0xA5;
-
-fn roundtripSelfTest(dev: pci.PCIDevice) void {
-    _ = attachAsBackend(dev, null, &.{}) catch |err| {
-        console.print("ZIGOS:NVME:HW:IOQ_FAIL ");
-        console.print(@errorName(err));
-        console.print("\n");
-        return;
-    };
-    console.print("ZIGOS:NVME:HW:IOQ_OK\n");
-
-    const scratch_phys = paging.allocLowIdentityFrames(1) orelse {
-        console.print("ZIGOS:NVME:HW:RW_FAIL QueueAllocationFailed\n");
-        return;
-    };
-    const bytes: [*]u8 = @ptrFromInt(scratch_phys);
-
-    var i: usize = 0;
-    while (i < SECTOR_BYTES) : (i += 1) bytes[i] = TEST_PATTERN;
-    if (!backendWrite(SCRATCH_LBA, bytes, SECTOR_BYTES)) {
-        console.print("ZIGOS:NVME:HW:RW_FAIL write\n");
-        return;
-    }
-
-    i = 0;
-    while (i < SECTOR_BYTES) : (i += 1) bytes[i] = 0;
-    if (!backendRead(SCRATCH_LBA, bytes, SECTOR_BYTES)) {
-        console.print("ZIGOS:NVME:HW:RW_FAIL read\n");
-        return;
-    }
-
-    i = 0;
-    while (i < SECTOR_BYTES) : (i += 1) {
-        if (bytes[i] != TEST_PATTERN) {
-            console.print("ZIGOS:NVME:HW:RW_FAIL verify\n");
-            return;
-        }
-    }
-    console.print("ZIGOS:NVME:HW:RW_ROUNDTRIP_OK\n");
 }
 
 const hex_digits = "0123456789abcdef";

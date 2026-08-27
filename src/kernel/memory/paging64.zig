@@ -35,7 +35,7 @@ pub const PRECOMPUTES_ADDRESS_SPACE_CR3 = true;
 pub const PAGE_TABLE_ACCESS_USES_DIRECT_MAP = true;
 pub const OWNED_USER_FRAME_ACCESS_USES_DIRECT_MAP = true;
 pub const LOW_IDENTITY_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 1024 * 1024;
-pub const LOW_IDENTITY_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT = true;
+pub const IDENTITY_DMA_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT = true;
 pub const GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY = true;
 pub const GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY = true;
 pub const DIRECT_MAP_USES_1G_PAGES = true;
@@ -306,14 +306,14 @@ fn allocGeneralRunFrom(
     return allocator.allocateBelow(count, low_identity_limit);
 }
 
-pub fn allocLowIdentityFrames(count: u32) ?u32 {
+pub fn allocIdentityDmaFrames(count: u32) ?u32 {
     acquireFrameLock();
     defer releaseFrameLock();
     const run = physical_frames.allocateBelow(count, LOW_IDENTITY_PHYSICAL_LIMIT) orelse return null;
     return lowIdentityFrameAddress(run.base);
 }
 
-pub fn releaseLowIdentityFrames(base: u32, count: u32) FrameReleaseError!void {
+pub fn releaseIdentityDmaFrames(base: u32, count: u32) FrameReleaseError!void {
     return releasePhysicalFrames(base, count);
 }
 

@@ -1022,7 +1022,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     ));
     try std.testing.expect(kernel_paging.PAGE_TABLE_ACCESS_USES_DIRECT_MAP);
     try std.testing.expect(kernel_paging.OWNED_USER_FRAME_ACCESS_USES_DIRECT_MAP);
-    try std.testing.expect(kernel_paging.LOW_IDENTITY_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT);
+    try std.testing.expect(kernel_paging.IDENTITY_DMA_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT);
     try std.testing.expect(kernel_paging.GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY);
     try std.testing.expect(kernel_paging.GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY);
     try std.testing.expect(kernel_paging.DIRECT_MAP_USES_1G_PAGES);
