@@ -171,6 +171,8 @@ pub fn build(b: *std.Build) void {
         shared.native_store_smoke_image_path,
         .full,
     );
+    zigos_native_smoke_test_cmd.setEnvironmentVariable("QEMU_NATIVE_SMOKE_MEMORY", "2G");
+    zigos_native_smoke_test_cmd.setEnvironmentVariable("ZIGOS_REQUIRE_HIGH_MEMORY", "1");
 
     const negative_smoke_cmds = [_]*std.Build.Step.Run{
         qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_artifact_manifest, userspace_images, .tampered_artifact_manifest),

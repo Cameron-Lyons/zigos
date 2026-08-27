@@ -1024,7 +1024,10 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expect(kernel_paging.OWNED_USER_FRAME_ACCESS_USES_DIRECT_MAP);
     try std.testing.expect(kernel_paging.LOW_IDENTITY_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT);
     try std.testing.expect(kernel_paging.GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY);
+    try std.testing.expect(kernel_paging.GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY);
     try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), kernel_paging.LOW_IDENTITY_PHYSICAL_LIMIT);
+    try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024 * 1024), kernel_paging.MANAGED_PHYSICAL_BYTES);
+    try std.testing.expectEqual(@as(usize, 64), kernel_paging.DIRECT_MAP_PDPT_ENTRIES);
     try std.testing.expect(kernel_mmio_windows.validLayout(&kernel_mmio_windows.all));
     try std.testing.expect(
         kernel_mmio_windows.pci_ecam.endExclusive().? <= kernel_mmio_windows.intel_i225.base,

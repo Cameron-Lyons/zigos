@@ -37,6 +37,7 @@ pub const OWNED_USER_FRAME_ACCESS_USES_DIRECT_MAP = true;
 pub const LOW_IDENTITY_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 1024 * 1024;
 pub const LOW_IDENTITY_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT = true;
 pub const GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY = true;
+pub const GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY = true;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -56,7 +57,6 @@ pub const FrameReleaseError = frame_allocator.Error;
 
 pub const UserAddressSpace = struct {
     directory: *PageDirectory,
-    directory_physical: u32,
     pcid: pcid_allocator.Identifier,
     switch_cr3: usize,
 };
@@ -92,10 +92,13 @@ pub const UserAddressSpaceCreateError = error{
     ProcessContextExhausted,
 };
 
-const MANAGED_PHYSICAL_BYTES: u32 = 1024 * 1024 * 1024;
-const LARGE_PAGE_SIZE: u32 = 2 * 1024 * 1024;
-const IDENTITY_DIRECTORY_ENTRIES = MANAGED_PHYSICAL_BYTES / LARGE_PAGE_SIZE;
+pub const MANAGED_PHYSICAL_BYTES: frame_allocator.PhysicalAddress = 64 * 1024 * 1024 * 1024;
+const LARGE_PAGE_SIZE: frame_allocator.PhysicalAddress = 2 * 1024 * 1024;
+const PAGE_DIRECTORY_COVERAGE_BYTES = table64.TABLE_ENTRIES * LARGE_PAGE_SIZE;
+const IDENTITY_DIRECTORY_ENTRIES: usize = @intCast(LOW_IDENTITY_PHYSICAL_LIMIT / LARGE_PAGE_SIZE);
+pub const DIRECT_MAP_PDPT_ENTRIES: usize = @intCast(MANAGED_PHYSICAL_BYTES / PAGE_DIRECTORY_COVERAGE_BYTES);
 const PRECISE_IDENTITY_PAGE_TABLES = 5;
+const PRECISE_IDENTITY_BYTES: u32 = PRECISE_IDENTITY_PAGE_TABLES * 2 * 1024 * 1024;
 
 const TABLE_OWNER_INHERITED: u3 = 0;
 const TABLE_OWNER_KERNEL_DYNAMIC: u3 = 1;
@@ -113,12 +116,13 @@ var kernel_pdpt: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_directory: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 var kernel_direct_pdpt: PageTable align(PAGE_SIZE) = undefined;
-var kernel_direct_page_directory: PageTable align(PAGE_SIZE) = undefined;
+var kernel_direct_page_directories: [DIRECT_MAP_PDPT_ENTRIES]PageTable align(PAGE_SIZE) = undefined;
 var kernel_direct_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 
 const PhysicalFrameAllocator = frame_allocator.Fixed(MANAGED_PHYSICAL_BYTES, PAGE_SIZE);
 var physical_frames = PhysicalFrameAllocator.init();
 var frame_lock = spin.Lock.init();
+var high_memory_zone_has_free_frames: bool = false;
 var process_contexts = pcid_allocator.Allocator.init();
 var process_context_lock = spin.Lock.init();
 var process_context_identifiers_enabled: bool = false;
@@ -178,7 +182,7 @@ fn kernelImageExtents() KernelImageExtents {
         immutable_end % PAGE_SIZE != 0 or
         text_start >= text_end or
         text_end >= immutable_end or
-        immutable_end > MANAGED_PHYSICAL_BYTES)
+        immutable_end > PRECISE_IDENTITY_BYTES)
     {
         haltWithMessage("Invalid page-aligned kernel image extents!\n");
     }
@@ -201,6 +205,11 @@ fn tableAtPhysical(physical_address: frame_allocator.PhysicalAddress) *PageTable
 fn bytesAtPhysical(physical_address: frame_allocator.PhysicalAddress) [*]u8 {
     return @ptrFromInt(directMapAddress(physical_address) orelse
         haltWithMessage("Data frame lies outside the direct-map aperture!\n"));
+}
+
+fn tablePhysicalAddress(table: *const PageTable) frame_allocator.PhysicalAddress {
+    return virtual_layout.directMappedPhysicalAddress(@intFromPtr(table), MANAGED_PHYSICAL_BYTES) orelse
+        haltWithMessage("Page-table pointer lies outside the direct-map aperture!\n");
 }
 
 fn kernelPageDirectory() *PageDirectory {
@@ -257,12 +266,16 @@ pub fn directMapAddress(address: frame_allocator.PhysicalAddress) ?usize {
     return virtual_layout.directMappedAddress(address, MANAGED_PHYSICAL_BYTES);
 }
 
-fn tryAllocFrame() ?u32 {
+fn tryAllocFrame() ?frame_allocator.PhysicalAddress {
     acquireFrameLock();
     defer releaseFrameLock();
-    const run = physical_frames.allocateBetween(1, LOW_IDENTITY_PHYSICAL_LIMIT, MANAGED_PHYSICAL_BYTES) orelse
-        physical_frames.allocate(1) orelse return null;
-    return lowIdentityFrameAddress(run.base);
+    if (high_memory_zone_has_free_frames) {
+        if (physical_frames.allocateBetween(1, LOW_IDENTITY_PHYSICAL_LIMIT, MANAGED_PHYSICAL_BYTES)) |run| {
+            return run.base;
+        }
+        high_memory_zone_has_free_frames = false;
+    }
+    return (physical_frames.allocateBelow(1, LOW_IDENTITY_PHYSICAL_LIMIT) orelse return null).base;
 }
 
 pub fn allocLowIdentityFrames(count: u32) ?u32 {
@@ -279,7 +292,12 @@ pub fn releaseLowIdentityFrames(base: u32, count: u32) FrameReleaseError!void {
 fn releasePhysicalFrames(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
     acquireFrameLock();
     defer releaseFrameLock();
+    try releasePhysicalFramesLocked(base, count);
+}
+
+fn releasePhysicalFramesLocked(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
     try physical_frames.release(.{ .base = base, .count = count });
+    if (base >= LOW_IDENTITY_PHYSICAL_LIMIT) high_memory_zone_has_free_frames = true;
 }
 
 pub fn frameStats() FrameStats {
@@ -298,7 +316,7 @@ fn ensureChildTable(
     if (!entryPresent(entry.*)) {
         const table_phys = tryAllocFrame() orelse return error.OutOfMemory;
         const flags = ENTRY_PRESENT | ENTRY_WRITABLE | (if (user) ENTRY_USER else 0);
-        entry.* = tableEntry(table_phys, flags, owner);
+        entry.* = tableEntry(@intCast(table_phys), flags, owner);
         const table = tableAtPhysical(table_phys);
         zeroTable(table);
         return table;
@@ -442,7 +460,7 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
         if (entryPresent(kernel_entry)) user_entry.* = kernel_entry;
     }
 
-    pml4[0] = tableEntry(pdpt_phys, ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER, TABLE_OWNER_USER_PRIVATE);
+    pml4[0] = tableEntry(@intCast(pdpt_phys), ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_USER, TABLE_OWNER_USER_PRIVATE);
     const pcid = tryAllocProcessContext() orelse {
         releasePhysicalFrames(pdpt_phys, 1) catch haltWithMessage("Corrupt user PDPT accounting!\n");
         releasePhysicalFrames(pml4_phys, 1) catch haltWithMessage("Corrupt PML4 allocation accounting!\n");
@@ -450,7 +468,6 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
     };
     return .{
         .directory = pml4,
-        .directory_physical = pml4_phys,
         .pcid = pcid,
         .switch_cr3 = addressSpaceCr3(pml4_phys, pcid),
     };
@@ -516,7 +533,7 @@ pub fn mapOwnedUserRange(
         if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
         if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
         const entry_flags = table64.withExecutePermission(leafFlags(flags, false), permissions.executable);
-        page_entry.* = tableEntry(page_phys, entry_flags, PAGE_OWNER_USER_PRIVATE);
+        page_entry.* = tableEntry(@intCast(page_phys), entry_flags, PAGE_OWNER_USER_PRIVATE);
     }
 }
 
@@ -555,32 +572,32 @@ pub fn writeOwnedUserRange(
 fn releaseOwnedHierarchy(pml4: *PageDirectory) void {
     for (pml4) |*pml4_entry| {
         if (!entryPresent(pml4_entry.*) or entryOwner(pml4_entry.*) != TABLE_OWNER_USER_PRIVATE) continue;
-        const pdpt_phys: u32 = @intCast(entryAddress(pml4_entry.*));
+        const pdpt_phys: frame_allocator.PhysicalAddress = @intCast(entryAddress(pml4_entry.*));
         const pdpt = tableFromEntry(pml4_entry.*);
         for (pdpt) |*pdpt_entry| {
             if (!entryPresent(pdpt_entry.*) or entryOwner(pdpt_entry.*) != TABLE_OWNER_USER_PRIVATE) continue;
-            const page_directory_phys: u32 = @intCast(entryAddress(pdpt_entry.*));
+            const page_directory_phys: frame_allocator.PhysicalAddress = @intCast(entryAddress(pdpt_entry.*));
             const page_directory = tableFromEntry(pdpt_entry.*);
             for (page_directory) |*directory_entry| {
                 if (!entryPresent(directory_entry.*) or entryOwner(directory_entry.*) != TABLE_OWNER_USER_PRIVATE) continue;
-                const page_table_phys: u32 = @intCast(entryAddress(directory_entry.*));
+                const page_table_phys: frame_allocator.PhysicalAddress = @intCast(entryAddress(directory_entry.*));
                 const page_table = tableFromEntry(directory_entry.*);
                 for (page_table) |*page_entry| {
                     if (entryPresent(page_entry.*) and entryOwner(page_entry.*) == PAGE_OWNER_USER_PRIVATE) {
-                        physical_frames.release(.{ .base = @intCast(entryAddress(page_entry.*)), .count = 1 }) catch
+                        releasePhysicalFramesLocked(@intCast(entryAddress(page_entry.*)), 1) catch
                             haltWithMessage("Corrupt owned user-frame accounting!\n");
                     }
                     page_entry.* = 0;
                 }
-                physical_frames.release(.{ .base = page_table_phys, .count = 1 }) catch
+                releasePhysicalFramesLocked(page_table_phys, 1) catch
                     haltWithMessage("Corrupt user page-table accounting!\n");
                 directory_entry.* = 0;
             }
-            physical_frames.release(.{ .base = page_directory_phys, .count = 1 }) catch
+            releasePhysicalFramesLocked(page_directory_phys, 1) catch
                 haltWithMessage("Corrupt user page-directory accounting!\n");
             pdpt_entry.* = 0;
         }
-        physical_frames.release(.{ .base = pdpt_phys, .count = 1 }) catch
+        releasePhysicalFramesLocked(pdpt_phys, 1) catch
             haltWithMessage("Corrupt user PDPT accounting!\n");
         pml4_entry.* = 0;
     }
@@ -591,7 +608,7 @@ pub fn destroyUserAddressSpace(space: *UserAddressSpace) UserAddressSpaceDestroy
 
     acquireFrameLock();
     releaseOwnedHierarchy(space.directory);
-    physical_frames.release(.{ .base = space.directory_physical, .count = 1 }) catch
+    releasePhysicalFramesLocked(tablePhysicalAddress(space.directory), 1) catch
         haltWithMessage("Corrupt user PML4 accounting!\n");
     releaseFrameLock();
     releaseProcessContext(space.pcid);
@@ -611,7 +628,7 @@ fn initializeKernelHierarchy() void {
     zeroTable(&kernel_pdpt);
     zeroTable(&kernel_page_directory);
     zeroTable(&kernel_direct_pdpt);
-    zeroTable(&kernel_direct_page_directory);
+    for (&kernel_direct_page_directories) |*page_directory| zeroTable(page_directory);
 
     kernel_pml4[0] = tableEntry(@intFromPtr(&kernel_pdpt), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
     kernel_pdpt[0] = tableEntry(@intFromPtr(&kernel_page_directory), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
@@ -620,23 +637,25 @@ fn initializeKernelHierarchy() void {
         ENTRY_PRESENT | ENTRY_WRITABLE,
         TABLE_OWNER_INHERITED,
     );
-    kernel_direct_pdpt[0] = tableEntry(
-        @intFromPtr(&kernel_direct_page_directory),
-        ENTRY_PRESENT | ENTRY_WRITABLE,
-        TABLE_OWNER_INHERITED,
-    );
+    for (&kernel_direct_page_directories, 0..) |*page_directory, pdpt_index| {
+        kernel_direct_pdpt[pdpt_index] = tableEntry(
+            @intFromPtr(page_directory),
+            ENTRY_PRESENT | ENTRY_WRITABLE,
+            TABLE_OWNER_INHERITED,
+        );
+    }
 
     const image = kernelImageExtents();
-    var physical_address: u32 = 0;
+    var identity_physical_address: u32 = 0;
     for (&kernel_page_tables, 0..) |*page_table, table_index| {
         zeroTable(page_table);
         for (page_table) |*entry| {
             entry.* = tableEntry(
-                physical_address,
-                kernelIdentityLeafFlags(physical_address, image),
+                identity_physical_address,
+                kernelIdentityLeafFlags(identity_physical_address, image),
                 PAGE_OWNER_BORROWED,
             );
-            physical_address += PAGE_SIZE;
+            identity_physical_address += PAGE_SIZE;
         }
         kernel_page_directory[table_index] = tableEntry(
             @intFromPtr(page_table),
@@ -647,41 +666,63 @@ fn initializeKernelHierarchy() void {
 
     var directory_index: usize = kernel_page_tables.len;
     while (directory_index < IDENTITY_DIRECTORY_ENTRIES) : (directory_index += 1) {
-        kernel_page_directory[directory_index] = largeIdentityEntry(physical_address);
-        physical_address += LARGE_PAGE_SIZE;
+        kernel_page_directory[directory_index] = largePhysicalEntry(identity_physical_address);
+        identity_physical_address += @intCast(LARGE_PAGE_SIZE);
     }
 
-    physical_address = 0;
+    var direct_physical_address: frame_allocator.PhysicalAddress = 0;
     for (&kernel_direct_page_tables, 0..) |*page_table, table_index| {
         zeroTable(page_table);
         for (page_table) |*entry| {
             entry.* = tableEntry(
-                physical_address,
-                kernelDirectLeafFlags(physical_address, image),
+                @intCast(direct_physical_address),
+                kernelDirectLeafFlags(@intCast(direct_physical_address), image),
                 PAGE_OWNER_BORROWED,
             );
-            physical_address += PAGE_SIZE;
+            direct_physical_address += PAGE_SIZE;
         }
-        kernel_direct_page_directory[table_index] = tableEntry(
+        kernel_direct_page_directories[0][table_index] = tableEntry(
             @intFromPtr(page_table),
             ENTRY_PRESENT | ENTRY_WRITABLE,
             TABLE_OWNER_INHERITED,
         );
     }
 
-    directory_index = kernel_direct_page_tables.len;
-    while (directory_index < IDENTITY_DIRECTORY_ENTRIES) : (directory_index += 1) {
-        kernel_direct_page_directory[directory_index] = largeIdentityEntry(physical_address);
-        physical_address += LARGE_PAGE_SIZE;
+    for (&kernel_direct_page_directories, 0..) |*page_directory, pdpt_index| {
+        directory_index = if (pdpt_index == 0) kernel_direct_page_tables.len else 0;
+        while (directory_index < table64.TABLE_ENTRIES) : (directory_index += 1) {
+            page_directory[directory_index] = largePhysicalEntry(direct_physical_address);
+            direct_physical_address += LARGE_PAGE_SIZE;
+        }
     }
 }
 
-fn largeIdentityEntry(physical_address: u32) PageTableEntry {
+fn largePhysicalEntry(physical_address: frame_allocator.PhysicalAddress) PageTableEntry {
     return tableEntry(
-        physical_address,
+        @intCast(physical_address),
         ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_LARGE_PAGE | ENTRY_GLOBAL | table64.NO_EXECUTE,
         PAGE_OWNER_BORROWED,
     );
+}
+
+fn validateHighMemoryDirectMap() bool {
+    acquireFrameLock();
+    const run = physical_frames.allocateBetween(1, LOW_IDENTITY_PHYSICAL_LIMIT, MANAGED_PHYSICAL_BYTES) orelse {
+        releaseFrameLock();
+        return false;
+    };
+    releaseFrameLock();
+    defer releasePhysicalFrames(run.base, 1) catch
+        haltWithMessage("Corrupt high-memory probe accounting!\n");
+
+    const probe: *volatile u8 = @ptrFromInt(directMapAddress(run.base) orelse
+        haltWithMessage("High-memory probe lies outside the direct-map aperture!\n"));
+    const previous = probe.*;
+    const pattern = previous ^ 0xA5;
+    probe.* = pattern;
+    if (probe.* != pattern) haltWithMessage("High-memory direct-map probe failed!\n");
+    probe.* = previous;
+    return true;
 }
 
 pub fn init() void {
@@ -695,6 +736,7 @@ pub fn init() void {
         haltWithMessage("Missing Multiboot memory map!\n");
     firmware_memory_map.initializeAllocator(MANAGED_PHYSICAL_BYTES, PAGE_SIZE, &physical_frames, memory_map) catch
         haltWithMessage("Invalid Multiboot memory map!\n");
+    high_memory_zone_has_free_frames = false;
     firmware_memory_map.reserveLiveHandoffRanges(
         MANAGED_PHYSICAL_BYTES,
         PAGE_SIZE,
@@ -722,6 +764,9 @@ pub fn init() void {
     x86.writeCr3(kernel_pml4_physical);
     current_page_directory = kernelPageDirectory();
     kernel_switch_cr3 = addressSpaceCr3(kernel_pml4_physical, pcid_allocator.KERNEL_IDENTIFIER);
+    if (validateHighMemoryDirectMap()) {
+        early_console.print("High-memory direct map: online\n");
+    }
     unmapBootStackGuardPage();
     early_console.print("Four-level paging enabled!\n");
     const stats = frameStats();
@@ -785,9 +830,11 @@ pub fn getCurrentPageDirectory() *PageDirectory {
     return current_page_directory;
 }
 
-fn addressSpaceCr3(directory_physical: usize, pcid: pcid_allocator.Identifier) usize {
-    if (!process_context_identifiers_enabled) return directory_physical;
-    return x86.pcidCr3Value(directory_physical, pcid, true) orelse
+fn addressSpaceCr3(directory_physical: frame_allocator.PhysicalAddress, pcid: pcid_allocator.Identifier) usize {
+    const cr3_base = std.math.cast(usize, directory_physical) orelse
+        haltWithMessage("Address-space root exceeds the machine address width!\n");
+    if (!process_context_identifiers_enabled) return cr3_base;
+    return x86.pcidCr3Value(cr3_base, pcid, true) orelse
         haltWithMessage("Invalid address-space CR3 value!\n");
 }
 
@@ -802,13 +849,16 @@ fn invalidate_page(virt_addr: usize) void {
 }
 
 comptime {
-    if (MANAGED_PHYSICAL_BYTES % LARGE_PAGE_SIZE != 0) {
-        @compileError("the managed physical aperture must be large-page aligned");
+    if (MANAGED_PHYSICAL_BYTES % PAGE_DIRECTORY_COVERAGE_BYTES != 0) {
+        @compileError("the managed physical aperture must be page-directory aligned");
     }
     if (IDENTITY_DIRECTORY_ENTRIES != table64.TABLE_ENTRIES) {
-        @compileError("the managed physical aperture must fill one page directory");
+        @compileError("the low identity aperture must fill one page directory");
     }
-    if (PRECISE_IDENTITY_PAGE_TABLES * LARGE_PAGE_SIZE != 10 * 1024 * 1024) {
+    if (DIRECT_MAP_PDPT_ENTRIES == 0 or DIRECT_MAP_PDPT_ENTRIES > table64.TABLE_ENTRIES) {
+        @compileError("the direct-map aperture must fit one page-directory-pointer table");
+    }
+    if (PRECISE_IDENTITY_BYTES != 10 * 1024 * 1024) {
         @compileError("the precise identity region must cover the first 10 MiB");
     }
     if (MANAGED_PHYSICAL_BYTES > virtual_layout.PHYSICAL_WINDOW_CAPACITY_BYTES) {
@@ -822,8 +872,8 @@ comptime {
 }
 
 test "large identity leaves are writable global and non-executable" {
-    const physical_address: u32 = 8 * 1024 * 1024;
-    const entry = largeIdentityEntry(physical_address);
+    const physical_address: frame_allocator.PhysicalAddress = 8 * 1024 * 1024;
+    const entry = largePhysicalEntry(physical_address);
     try std.testing.expectEqual(@as(usize, physical_address), entryAddress(entry));
     try std.testing.expect(table64.isLargePage(entry));
     try std.testing.expect((entry & ENTRY_WRITABLE) != 0);
@@ -879,10 +929,16 @@ test "kernel direct mapping is non-executable and preserves image immutability" 
 test "direct physical aliases cover only the managed aperture" {
     try std.testing.expectEqual(virtual_layout.physical_memory.base, directMapAddress(0).?);
     try std.testing.expectEqual(
-        virtual_layout.physical_memory.base + MANAGED_PHYSICAL_BYTES - 1,
+        virtual_layout.physical_memory.base + @as(usize, @intCast(MANAGED_PHYSICAL_BYTES - 1)),
         directMapAddress(MANAGED_PHYSICAL_BYTES - 1).?,
     );
     try std.testing.expect(directMapAddress(MANAGED_PHYSICAL_BYTES) == null);
+}
+
+test "direct hierarchy covers the full 64 GiB physical aperture" {
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 64 * 1024 * 1024 * 1024), MANAGED_PHYSICAL_BYTES);
+    try std.testing.expectEqual(@as(usize, 64), DIRECT_MAP_PDPT_ENTRIES);
+    try std.testing.expectEqual(@as(usize, table64.TABLE_ENTRIES), IDENTITY_DIRECTORY_ENTRIES);
 }
 
 test "leaf mappings encode global and execute permissions explicitly" {

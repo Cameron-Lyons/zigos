@@ -17,6 +17,7 @@ USERSPACE_BIN_DIR="${5:-$ROOT_DIR/zig-out/bin}"
 BOOTLOADER_SOURCE_PATH="${6:-src/boot/boot_x86_64.S}"
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-420}"
 NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
+HIGH_MEMORY_MARKER="High-memory direct map: online"
 
 last_marker_for_group() {
   local group="$1"
@@ -85,6 +86,12 @@ run_boot() {
 
   if grep -Eqi "panic|KERNEL PANIC|System Halted|FAIL" "$log_path"; then
     echo "Zigos native smoke test failed: panic or failure marker found in $log_path" >&2
+    cat "$log_path" >&2
+    exit 1
+  fi
+
+  if [ "${ZIGOS_REQUIRE_HIGH_MEMORY:-0}" = 1 ] && ! grep -Fq "$HIGH_MEMORY_MARKER" "$log_path"; then
+    echo "Zigos native smoke test failed: high-memory direct-map proof was not observed in $log_path" >&2
     cat "$log_path" >&2
     exit 1
   fi
