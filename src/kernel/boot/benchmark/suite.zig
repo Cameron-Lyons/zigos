@@ -6,6 +6,7 @@ const gdt = @import("../../interrupts/gdt64.zig");
 const isr = @import("../../interrupts/isr.zig");
 const syscall64 = @import("../../interrupts/syscall64.zig");
 const paging = @import("../../memory/paging64.zig");
+const kernel_memory = @import("../../memory/memory.zig");
 const qemu_exit = @import("../../utils/qemu_exit.zig");
 const benchmark_cases = @import("cases.zig");
 const benchmark_authority = @import("authority.zig");
@@ -261,6 +262,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .task_checkpoint_write_restore = benchmarkTaskCheckpointWriteRestore,
     .task_checkpoint_write_low_occupancy = benchmarkTaskCheckpointWriteLowOccupancy,
     .address_space_roundtrip = benchmarkAddressSpaceRoundtrip,
+    .heap_allocate_free = benchmarkHeapAllocateFree,
     .syscall_fast_entry_roundtrip = benchmarkSyscallFastEntryRoundtrip,
     .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
@@ -1329,6 +1331,20 @@ fn benchmarkAddressSpaceRoundtrip(iteration: u32) u64 {
     paging.switchToUserAddressSpace(space);
     paging.switchToKernelAddressSpace();
     return @as(u64, iteration) ^ @as(u64, @intFromPtr(paging.getCurrentPageDirectory()));
+}
+
+fn benchmarkHeapAllocateFree(iteration: u32) u64 {
+    const size: usize = 16 + @as(usize, iteration & 3) * 16;
+    const allocation = kernel_memory.kmalloc(size) orelse
+        benchmark_reporting.benchStepFailure("heap allocation", error.OutOfMemory);
+    const bytes: [*]u8 = @ptrCast(allocation);
+    const first: u8 = @truncate(iteration);
+    const last: u8 = @truncate(iteration >> 8);
+    bytes[0] = first;
+    bytes[size - 1] = last;
+    const checksum = @as(u64, first) | (@as(u64, last) << 8) | (@as(u64, size) << 16);
+    kernel_memory.kfree(allocation);
+    return checksum;
 }
 
 fn benchmarkSyscallFastEntryRoundtrip(iteration: u32) u64 {
