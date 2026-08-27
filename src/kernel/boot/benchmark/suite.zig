@@ -263,6 +263,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .task_checkpoint_write_low_occupancy = benchmarkTaskCheckpointWriteLowOccupancy,
     .address_space_roundtrip = benchmarkAddressSpaceRoundtrip,
     .heap_allocate_free = benchmarkHeapAllocateFree,
+    .frame_allocate_release = benchmarkFrameAllocateRelease,
     .syscall_fast_entry_roundtrip = benchmarkSyscallFastEntryRoundtrip,
     .accelerator_claim_release = benchmarkAcceleratorClaimRelease,
     .file_bridge_resolve = benchmarkFileBridgeResolve,
@@ -1345,6 +1346,14 @@ fn benchmarkHeapAllocateFree(iteration: u32) u64 {
     const checksum = @as(u64, first) | (@as(u64, last) << 8) | (@as(u64, size) << 16);
     kernel_memory.kfree(allocation);
     return checksum;
+}
+
+fn benchmarkFrameAllocateRelease(iteration: u32) u64 {
+    const base = paging.alloc_frames(1) orelse
+        benchmark_reporting.benchStepFailure("frame allocation", error.OutOfMemory);
+    paging.release_frames(base, 1) catch |err|
+        benchmark_reporting.benchStepFailure("frame release", err);
+    return @as(u64, base) ^ iteration;
 }
 
 fn benchmarkSyscallFastEntryRoundtrip(iteration: u32) u64 {
