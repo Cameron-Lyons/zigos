@@ -7,6 +7,7 @@ const BYTES_PER_MIB: usize = 1024 * 1024;
 const HEAP_SIZE: usize = 16 * BYTES_PER_MIB;
 const MIN_BLOCK_SIZE = heap_geometry.minimum_free_data_size;
 const BLOCK_ALIGNMENT = heap_geometry.block_alignment;
+const ALLOCATION_BITMAP_BYTES = HEAP_SIZE / BLOCK_ALIGNMENT / 8;
 
 const PAGE_SIZE: usize = 4096;
 extern var __kernel_end: u8;
@@ -41,15 +42,17 @@ pub fn init() void {
     const heap_start_addr = heapStartAddress();
     heap_start = @ptrFromInt(heap_start_addr);
     heap_end = heap_start + HEAP_SIZE;
+    @memset(allocationBitmap(), 0);
 
-    const initial_block: *BlockHeader = @ptrCast(@alignCast(heap_start));
-    initial_block.size = HEAP_SIZE - @sizeOf(BlockHeader);
-    initial_block.is_free = true;
+    const initial_block: *BlockHeader = @ptrFromInt(heapDataStartAddress());
+    initial_block.size = HEAP_SIZE - ALLOCATION_BITMAP_BYTES - @sizeOf(BlockHeader);
+    initial_block.state = heap_geometry.block_state_free;
     initial_block.next = null;
     initial_block.prev = null;
     free_lists = .{null} ** heap_geometry.free_list_class_count;
     freeListPush(initial_block);
     is_initialized = true;
+    verifyAllocationStartGuards();
 
     console.print("Memory allocator initialized!\n");
     console.print("Heap start: 0x");
@@ -111,7 +114,7 @@ fn splitBlock(block: *BlockHeader, size: usize) void {
     const new_block: *BlockHeader = @ptrCast(@alignCast(block_bytes + new_block_offset));
 
     new_block.size = remainder_size;
-    new_block.is_free = true;
+    new_block.state = heap_geometry.block_state_free;
     new_block.next = block.next;
     new_block.prev = block;
 
@@ -133,10 +136,12 @@ fn takeFreeBlock(aligned_size: usize) ?*anyopaque {
             if (block.size >= aligned_size) {
                 freeListRemove(block);
                 splitBlock(block, aligned_size);
-                block.is_free = false;
+                block.state = heap_geometry.block_state_allocated;
 
                 const data_ptr: [*]u8 = @ptrCast(block);
-                return @ptrCast(data_ptr + @sizeOf(BlockHeader));
+                const payload: *anyopaque = @ptrCast(data_ptr + @sizeOf(BlockHeader));
+                setAllocationMarker(allocationBitIndex(@intFromPtr(payload)), true);
+                return payload;
             }
             current = next_free;
         }
@@ -159,38 +164,42 @@ pub fn kfree(ptr: ?*anyopaque) void {
     lockAllocator();
     defer unlockAllocator();
 
-    const raw_ptr: [*]u8 = @ptrCast(ptr.?);
-    const block: *BlockHeader = @ptrCast(@alignCast(raw_ptr - @sizeOf(BlockHeader)));
+    const payload_address = @intFromPtr(ptr.?);
+    const heap_start_address = heapDataStartAddress();
+    if (payload_address < heap_start_address + @sizeOf(BlockHeader)) return;
+    const bit_index = allocationMarkerIndex(payload_address) orelse return;
 
-    if (!blockWithinHeap(block)) {
+    const block_address = payload_address - @sizeOf(BlockHeader);
+    const block: *BlockHeader = @ptrFromInt(block_address);
+    if (!allocationStartMarked(bit_index) or
+        block.state != heap_geometry.block_state_allocated)
+    {
         return;
     }
-
-    if (block.is_free) {
-        return;
-    }
-
-    block.is_free = true;
+    setAllocationMarker(bit_index, false);
+    block.state = heap_geometry.block_state_free;
 
     if (block.next) |next| {
-        if (next.is_free) {
+        if (blockIsFree(next)) {
             freeListRemove(next);
             block.size += @sizeOf(BlockHeader) + next.size;
             block.next = next.next;
             if (next.next) |next_next| {
                 next_next.prev = block;
             }
+            next.state = 0;
         }
     }
 
     if (block.prev) |prev| {
-        if (prev.is_free) {
+        if (blockIsFree(prev)) {
             freeListRemove(prev);
             prev.size += @sizeOf(BlockHeader) + block.size;
             prev.next = block.next;
             if (block.next) |next| {
                 next.prev = prev;
             }
+            block.state = 0;
             freeListPush(prev);
             return;
         }
@@ -199,7 +208,63 @@ pub fn kfree(ptr: ?*anyopaque) void {
     freeListPush(block);
 }
 
-fn blockWithinHeap(block: *const BlockHeader) bool {
-    const addr = @intFromPtr(block);
-    return addr >= @intFromPtr(heap_start) and addr + @sizeOf(BlockHeader) <= @intFromPtr(heap_end);
+fn blockIsFree(block: *const BlockHeader) bool {
+    return block.state == heap_geometry.block_state_free;
+}
+
+fn heapDataStartAddress() usize {
+    return @intFromPtr(heap_start) + ALLOCATION_BITMAP_BYTES;
+}
+
+fn allocationBitmap() *[ALLOCATION_BITMAP_BYTES]u8 {
+    return @ptrCast(heap_start);
+}
+
+fn allocationStartMarked(bit_index: usize) bool {
+    const mask = @as(u8, 1) << @as(u3, @truncate(bit_index));
+    return (allocationBitmap()[bit_index / 8] & mask) != 0;
+}
+
+fn setAllocationMarker(bit_index: usize, is_live: bool) void {
+    const byte = &allocationBitmap()[bit_index / 8];
+    const mask = @as(u8, 1) << @as(u3, @truncate(bit_index));
+    if (is_live) {
+        byte.* |= mask;
+    } else {
+        byte.* &= ~mask;
+    }
+}
+
+fn allocationMarkerIndex(payload_address: usize) ?usize {
+    return heap_geometry.allocationMarkerIndex(
+        payload_address,
+        heapDataStartAddress(),
+        HEAP_SIZE - ALLOCATION_BITMAP_BYTES,
+        BLOCK_ALIGNMENT,
+    );
+}
+
+fn allocationBitIndex(payload_address: usize) usize {
+    return (payload_address - heapDataStartAddress()) / BLOCK_ALIGNMENT;
+}
+
+fn verifyAllocationStartGuards() void {
+    const allocation = kmalloc(64) orelse @panic("kernel heap allocation guard self-check failed");
+    const payload_address = @intFromPtr(allocation);
+    const bit_index = allocationBitIndex(payload_address);
+
+    kfree(@ptrFromInt(payload_address + BLOCK_ALIGNMENT));
+    if (!allocationStartMarked(bit_index)) {
+        @panic("kernel heap accepted an interior free");
+    }
+
+    kfree(allocation);
+    if (allocationStartMarked(bit_index)) {
+        @panic("kernel heap retained a released allocation marker");
+    }
+
+    kfree(allocation);
+    if (allocationStartMarked(bit_index)) {
+        @panic("kernel heap accepted a duplicate free");
+    }
 }
