@@ -99,9 +99,14 @@ const DMA_FRAME_COUNT: u32 = PRP_LIST_FIRST_FRAME + PRP_LIST_PAGE_COUNT;
 const DMA_WINDOW_COUNT: usize = 6;
 const MAX_ADDITIONAL_DMA_DOMAINS: usize = 2;
 
+const DmaAddress = struct {
+    physical: u32 = 0,
+    alias: usize = 0,
+};
+
 const Queue = struct {
-    sq_phys: u32,
-    cq_phys: u32,
+    sq: DmaAddress,
+    cq: DmaAddress,
     entries: u32,
     qid: u16,
     sq_tail: u32 = 0,
@@ -117,26 +122,29 @@ const OutstandingCommand = struct {
 const TransferSlots = nvme_pipeline.SlotSet(OutstandingCommand);
 
 const DmaFrames = struct {
-    base: u32,
+    base: DmaAddress,
 
-    fn frame(self: DmaFrames, index: u32) u32 {
-        return self.base + index * PAGE_SIZE;
+    fn frame(self: DmaFrames, index: u32) DmaAddress {
+        return .{
+            .physical = self.base.physical + index * PAGE_SIZE,
+            .alias = self.base.alias + @as(usize, index) * PAGE_SIZE,
+        };
     }
 
     fn windows(self: DmaFrames) [DMA_WINDOW_COUNT]intel_vtd.DmaWindow {
         return .{
-            .{ .base = self.frame(0), .device_readable = true, .device_writable = false },
-            .{ .base = self.frame(1), .device_readable = false, .device_writable = true },
-            .{ .base = self.frame(2), .device_readable = true, .device_writable = false },
-            .{ .base = self.frame(3), .device_readable = false, .device_writable = true },
+            .{ .base = self.frame(0).physical, .device_readable = true, .device_writable = false },
+            .{ .base = self.frame(1).physical, .device_readable = false, .device_writable = true },
+            .{ .base = self.frame(2).physical, .device_readable = true, .device_writable = false },
+            .{ .base = self.frame(3).physical, .device_readable = false, .device_writable = true },
             .{
-                .base = self.frame(BOUNCE_FIRST_FRAME),
+                .base = self.frame(BOUNCE_FIRST_FRAME).physical,
                 .length = @intCast(nvme_prp.MAX_TRANSFER_BYTES * IO_PIPELINE_DEPTH),
                 .device_readable = true,
                 .device_writable = true,
             },
             .{
-                .base = self.frame(PRP_LIST_FIRST_FRAME),
+                .base = self.frame(PRP_LIST_FIRST_FRAME).physical,
                 .length = PAGE_SIZE * PRP_LIST_PAGE_COUNT,
                 .device_readable = true,
                 .device_writable = false,
@@ -144,11 +152,11 @@ const DmaFrames = struct {
         };
     }
 
-    fn bounce(self: DmaFrames, slot: usize) u32 {
+    fn bounce(self: DmaFrames, slot: usize) DmaAddress {
         return self.frame(BOUNCE_FIRST_FRAME + @as(u32, @intCast(slot)) * BOUNCE_SLOT_PAGE_COUNT);
     }
 
-    fn prpList(self: DmaFrames, slot: usize) u32 {
+    fn prpList(self: DmaFrames, slot: usize) DmaAddress {
         return self.frame(PRP_LIST_FIRST_FRAME + @as(u32, @intCast(slot)));
     }
 };
@@ -162,7 +170,7 @@ pub const Controller = struct {
     nsid: u32 = 1,
     lba_bytes: u32 = SECTOR_BYTES,
     namespace_sectors: u64 = 0,
-    io_prp_list_phys: [IO_PIPELINE_DEPTH]u32 = [_]u32{0} ** IO_PIPELINE_DEPTH,
+    io_prp_lists: [IO_PIPELINE_DEPTH]DmaAddress = [_]DmaAddress{.{}} ** IO_PIPELINE_DEPTH,
 
     fn reg32(self: *const Controller, offset: usize) u32 {
         return @as(*volatile u32, @ptrFromInt(self.bar + offset)).*;
@@ -253,16 +261,21 @@ fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
         return error.ControllerResetTimeout;
     }
 
-    const sq_phys = frames.frame(0);
-    const cq_phys = frames.frame(1);
-    zeroFrame(sq_phys);
-    zeroFrame(cq_phys);
-    controller.admin = .{ .sq_phys = sq_phys, .cq_phys = cq_phys, .entries = ADMIN_QUEUE_ENTRIES, .qid = 0 };
+    const sq = frames.frame(0);
+    const cq = frames.frame(1);
+    zeroFrame(sq.alias);
+    zeroFrame(cq.alias);
+    controller.admin = .{
+        .sq = sq,
+        .cq = cq,
+        .entries = ADMIN_QUEUE_ENTRIES,
+        .qid = 0,
+    };
 
     const aqa = ((ADMIN_QUEUE_ENTRIES - 1) << 16) | (ADMIN_QUEUE_ENTRIES - 1);
     controller.writeReg32(REG_AQA, aqa);
-    controller.writeReg64(REG_ASQ, sq_phys);
-    controller.writeReg64(REG_ACQ, cq_phys);
+    controller.writeReg64(REG_ASQ, sq.physical);
+    controller.writeReg64(REG_ACQ, cq.physical);
 
     return controller;
 }
@@ -287,7 +300,7 @@ fn submitCommand(self: *Controller, queue: *Queue, command: *const [16]u32) Outs
     const cid = queue.next_cid;
     queue.next_cid +%= 1;
 
-    const sq_entry: [*]volatile u32 = @ptrFromInt(queue.sq_phys + queue.sq_tail * SQ_ENTRY_BYTES);
+    const sq_entry: [*]volatile u32 = @ptrFromInt(queue.sq.alias + queue.sq_tail * SQ_ENTRY_BYTES);
     var i: usize = 0;
     while (i < 16) : (i += 1) sq_entry[i] = command[i];
     sq_entry[0] = (command[0] & 0x0000_FFFF) | (@as(u32, cid) << 16);
@@ -308,7 +321,7 @@ fn waitForAnyCompletion(
     outstanding: []const OutstandingCommand,
 ) Error!u16 {
     if (outstanding.len == 0) return error.CompletionOwnershipMismatch;
-    const cqe: [*]volatile u32 = @ptrFromInt(queue.cq_phys + queue.cq_head * CQ_ENTRY_BYTES);
+    const cqe: [*]volatile u32 = @ptrFromInt(queue.cq.alias + queue.cq_head * CQ_ENTRY_BYTES);
     const wait_with_interrupt = nvme_interrupt.mayIdleWait(
         queue.qid,
         interruptsActive(),
@@ -376,26 +389,31 @@ fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void 
 }
 
 pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
-    const cq_phys = frames.frame(3);
-    const sq_phys = frames.frame(2);
-    zeroFrame(cq_phys);
-    zeroFrame(sq_phys);
+    const cq = frames.frame(3);
+    const sq = frames.frame(2);
+    zeroFrame(cq.alias);
+    zeroFrame(sq.alias);
 
     var create_cq = [_]u32{0} ** 16;
     create_cq[0] = ADMIN_OPC_CREATE_IO_CQ;
-    create_cq[6] = cq_phys;
+    create_cq[6] = cq.physical;
     create_cq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
     create_cq[11] = nvme_interrupt.createCompletionQueueControl();
     try submit(self, &self.admin, &create_cq);
 
     var create_sq = [_]u32{0} ** 16;
     create_sq[0] = ADMIN_OPC_CREATE_IO_SQ;
-    create_sq[6] = sq_phys;
+    create_sq[6] = sq.physical;
     create_sq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
     create_sq[11] = (@as(u32, IO_QUEUE_ID) << 16) | 1;
     try submit(self, &self.admin, &create_sq);
 
-    self.io = .{ .sq_phys = sq_phys, .cq_phys = cq_phys, .entries = IO_QUEUE_ENTRIES, .qid = IO_QUEUE_ID };
+    self.io = .{
+        .sq = sq,
+        .cq = cq,
+        .entries = IO_QUEUE_ENTRIES,
+        .qid = IO_QUEUE_ID,
+    };
     self.io_ready = true;
 }
 
@@ -403,22 +421,22 @@ fn submitIoCommand(
     self: *Controller,
     opcode: u32,
     lba: u64,
-    buffer_phys: u32,
-    prp_list_phys: u32,
+    buffer: DmaAddress,
+    prp_list: DmaAddress,
     sector_count: u16,
 ) Error!OutstandingCommand {
     if (!self.io_ready) return error.NamespaceMissing;
 
     if (sector_count == 0) return error.EmptyTransfer;
     const transfer_bytes = @as(usize, sector_count) * self.lba_bytes;
-    const prp = nvme_prp.plan(buffer_phys, prp_list_phys, transfer_bytes) catch |err| switch (err) {
+    const prp = nvme_prp.plan(buffer.physical, prp_list.physical, transfer_bytes) catch |err| switch (err) {
         error.EmptyTransfer => return error.EmptyTransfer,
         error.TransferTooLarge => return error.TransferTooLarge,
         else => return error.DmaIsolationBypassed,
     };
-    const prp_list: [*]volatile u64 = @ptrFromInt(prp_list_phys);
+    const prp_entries: [*]volatile u64 = @ptrFromInt(prp_list.alias);
     for (0..prp.list_entry_count) |index| {
-        prp_list[index] = prp.listEntryAddress(index) orelse return error.DmaIsolationBypassed;
+        prp_entries[index] = prp.listEntryAddress(index) orelse return error.DmaIsolationBypassed;
     }
 
     if (lba > self.namespace_sectors or self.namespace_sectors - lba < sector_count) return error.LbaOutOfRange;
@@ -440,30 +458,6 @@ fn waitForIoCommand(self: *Controller, command: OutstandingCommand) Error!void {
     _ = try waitForAnyCompletion(self, &self.io, &outstanding);
 }
 
-pub fn readSectors(self: *Controller, lba: u64, buffer_phys: u32, sector_count: u16) Error!void {
-    const command = try submitIoCommand(
-        self,
-        NVM_OPC_READ,
-        lba,
-        buffer_phys,
-        self.io_prp_list_phys[0],
-        sector_count,
-    );
-    try waitForIoCommand(self, command);
-}
-
-pub fn writeSectors(self: *Controller, lba: u64, buffer_phys: u32, sector_count: u16) Error!void {
-    const command = try submitIoCommand(
-        self,
-        NVM_OPC_WRITE,
-        lba,
-        buffer_phys,
-        self.io_prp_list_phys[0],
-        sector_count,
-    );
-    try waitForIoCommand(self, command);
-}
-
 pub fn flush(self: *Controller) Error!void {
     if (!self.io_ready) return error.NamespaceMissing;
     var command = [_]u32{0} ** 16;
@@ -472,8 +466,8 @@ pub fn flush(self: *Controller) Error!void {
     try submit(self, &self.io, &command);
 }
 
-fn zeroFrame(phys: u32) void {
-    const bytes: [*]u8 = @ptrFromInt(phys);
+fn zeroFrame(alias: usize) void {
+    const bytes: [*]u8 = @ptrFromInt(alias);
     @memset(bytes[0..PAGE_SIZE], 0);
 }
 
@@ -488,7 +482,7 @@ fn acquireCompletion() void {
 var active_controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
-var bounce_phys: [IO_PIPELINE_DEPTH]u32 = [_]u32{0} ** IO_PIPELINE_DEPTH;
+var bounce: [IO_PIPELINE_DEPTH]DmaAddress = [_]DmaAddress{.{}} ** IO_PIPELINE_DEPTH;
 var io_interrupts_active: bool = false;
 var completion_interrupt_count: u64 = 0;
 
@@ -536,15 +530,15 @@ pub fn completionInterruptCount() u64 {
     return @atomicLoad(u64, &completion_interrupt_count, .monotonic);
 }
 
-fn identifyNamespace(self: *Controller, buffer: u32) Error!void {
-    zeroFrame(buffer);
+fn identifyNamespace(self: *Controller, buffer: DmaAddress) Error!void {
+    zeroFrame(buffer.alias);
     var cmd = [_]u32{0} ** 16;
     cmd[0] = ADMIN_OPC_IDENTIFY;
     cmd[1] = self.nsid;
-    cmd[6] = buffer;
+    cmd[6] = buffer.physical;
     cmd[10] = IDENTIFY_CNS_NAMESPACE;
     try submit(self, &self.admin, &cmd);
-    const words: [*]volatile u32 = @ptrFromInt(buffer);
+    const words: [*]volatile u32 = @ptrFromInt(buffer.alias);
     const nsze_low: u64 = words[0];
     const nsze_high: u64 = words[1];
     const nsze = nsze_low | (nsze_high << 32);
@@ -569,7 +563,7 @@ fn issueFaultProbe(self: *Controller, guard_phys: u32) void {
 
     const command = faultProbeCommand(self.nsid, guard_phys);
 
-    const sq_entry: [*]volatile u32 = @ptrFromInt(queue.sq_phys + queue.sq_tail * SQ_ENTRY_BYTES);
+    const sq_entry: [*]volatile u32 = @ptrFromInt(queue.sq.alias + queue.sq_tail * SQ_ENTRY_BYTES);
     for (0..command.len) |index| sq_entry[index] = command[index];
     sq_entry[0] = (command[0] & 0x0000_FFFF) | (@as(u32, cid) << 16);
     publishSubmission();
@@ -586,13 +580,13 @@ fn faultProbeCommand(nsid: u32, guard_phys: u32) [16]u32 {
     return command;
 }
 
-fn fillGuardPage(guard_phys: u32) void {
-    const bytes: [*]u8 = @ptrFromInt(guard_phys);
+fn fillGuardPage(guard_alias: usize) void {
+    const bytes: [*]u8 = @ptrFromInt(guard_alias);
     @memset(bytes[0..PAGE_SIZE], 0xA5);
 }
 
-fn guardPageIntact(guard_phys: u32) bool {
-    const bytes: [*]const u8 = @ptrFromInt(guard_phys);
+fn guardPageIntact(guard_alias: usize) bool {
+    const bytes: [*]const u8 = @ptrFromInt(guard_alias);
     return guardPatternIntact(bytes[0..PAGE_SIZE]);
 }
 
@@ -613,10 +607,11 @@ pub fn attachAsBackend(
     publishInterruptsActive(false);
     resetCompletionInterruptCount();
     const dma_base = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
-    const frames = DmaFrames{ .base = dma_base };
     var retain_dma_frames = vtd_summary != null;
     errdefer if (!retain_dma_frames) paging.releaseIdentityDmaFrames(dma_base, DMA_FRAME_COUNT) catch {};
-    for (0..DMA_FRAME_COUNT) |index| zeroFrame(frames.frame(@intCast(index)));
+    const dma_alias = paging.directMapAddress(dma_base) orelse return error.QueueAllocationFailed;
+    const frames = DmaFrames{ .base = .{ .physical = dma_base, .alias = dma_alias } };
+    for (0..DMA_FRAME_COUNT) |index| zeroFrame(frames.frame(@intCast(index)).alias);
 
     var controller = try prepare(dev, frames);
     var bus_master_enabled = false;
@@ -645,12 +640,16 @@ pub fn attachAsBackend(
         const guard_phys = paging.allocIdentityDmaFrames(1) orelse return error.QueueAllocationFailed;
         var guard_releasable = false;
         defer if (guard_releasable) paging.releaseIdentityDmaFrames(guard_phys, 1) catch {};
-        fillGuardPage(guard_phys);
-        issueFaultProbe(&controller, guard_phys);
-        fault_proof = try intel_vtd.waitForBlockedWrite(guard_phys);
+        const guard = DmaAddress{
+            .physical = guard_phys,
+            .alias = paging.directMapAddress(guard_phys) orelse return error.QueueAllocationFailed,
+        };
+        fillGuardPage(guard.alias);
+        issueFaultProbe(&controller, guard.physical);
+        fault_proof = try intel_vtd.waitForBlockedWrite(guard.physical);
 
         controller = try prepare(dev, frames);
-        if (!guardPageIntact(guard_phys)) return error.DmaIsolationBypassed;
+        if (!guardPageIntact(guard.alias)) return error.DmaIsolationBypassed;
         guard_releasable = true;
         try enable(&controller);
     }
@@ -658,10 +657,10 @@ pub fn attachAsBackend(
     try createIoQueues(&controller, frames);
     var slot: usize = 0;
     while (slot < IO_PIPELINE_DEPTH) : (slot += 1) {
-        controller.io_prp_list_phys[slot] = frames.prpList(slot);
-        bounce_phys[slot] = frames.bounce(slot);
+        controller.io_prp_lists[slot] = frames.prpList(slot);
+        bounce[slot] = frames.bounce(slot);
     }
-    try identifyNamespace(&controller, bounce_phys[0]);
+    try identifyNamespace(&controller, bounce[0]);
     active_controller = controller;
     active_device = dev;
     active_present = true;
@@ -689,8 +688,8 @@ fn pipelineRead(start_lba: u64, buffer_ptr: [*]u8, total_sectors: usize) Error!v
                 &active_controller,
                 NVM_OPC_READ,
                 start_lba + @as(u64, @intCast(next_sector)),
-                bounce_phys[slot_index],
-                active_controller.io_prp_list_phys[slot_index],
+                bounce[slot_index],
+                active_controller.io_prp_lists[slot_index],
                 @intCast(chunk),
             );
             if (!slots.activate(
@@ -707,10 +706,10 @@ fn pipelineRead(start_lba: u64, buffer_ptr: [*]u8, total_sectors: usize) Error!v
         const completed_cid = try waitForAnyCompletion(&active_controller, &active_controller.io, outstanding);
         const completed = slots.complete(completed_cid) orelse
             return error.CompletionOwnershipMismatch;
-        const bounce: [*]const u8 = @ptrFromInt(bounce_phys[completed.index]);
+        const bounce_bytes: [*]const u8 = @ptrFromInt(bounce[completed.index].alias);
         @memcpy(
             (buffer_ptr + completed.sector_offset * SECTOR_BYTES)[0..completed.byte_count],
-            bounce[0..completed.byte_count],
+            bounce_bytes[0..completed.byte_count],
         );
     }
 }
@@ -732,17 +731,17 @@ fn pipelineWrite(start_lba: u64, buffer_ptr: [*]const u8, total_sectors: usize) 
             const slot_index = slots.freeIndex() orelse unreachable;
             const chunk = @min(total_sectors - next_sector, BOUNCE_SECTORS);
             const chunk_bytes = chunk * SECTOR_BYTES;
-            const bounce: [*]u8 = @ptrFromInt(bounce_phys[slot_index]);
+            const bounce_bytes: [*]u8 = @ptrFromInt(bounce[slot_index].alias);
             @memcpy(
-                bounce[0..chunk_bytes],
+                bounce_bytes[0..chunk_bytes],
                 (buffer_ptr + next_sector * SECTOR_BYTES)[0..chunk_bytes],
             );
             const command = try submitIoCommand(
                 &active_controller,
                 NVM_OPC_WRITE,
                 start_lba + @as(u64, @intCast(next_sector)),
-                bounce_phys[slot_index],
-                active_controller.io_prp_list_phys[slot_index],
+                bounce[slot_index],
+                active_controller.io_prp_lists[slot_index],
                 @intCast(chunk),
             );
             if (!slots.activate(slot_index, command, next_sector, chunk_bytes)) unreachable;
@@ -757,7 +756,7 @@ fn pipelineWrite(start_lba: u64, buffer_ptr: [*]const u8, total_sectors: usize) 
 }
 
 fn validateBackendTransfer(start_lba: u64, buffer_len: usize) ?usize {
-    if (!active_present or bounce_phys[0] == 0) return null;
+    if (!active_present or bounce[0].physical == 0 or bounce[0].alias == 0) return null;
     if (buffer_len == 0 or buffer_len % SECTOR_BYTES != 0) return null;
     const total_sectors = buffer_len / SECTOR_BYTES;
     if (start_lba > active_controller.namespace_sectors or
@@ -780,7 +779,7 @@ pub fn backendFlush() callconv(.c) bool {
 fn handleBackendError(err: anyerror) void {
     if (!backendErrorRequiresContainment(err) or !active_present) return;
     active_present = false;
-    bounce_phys = [_]u32{0} ** IO_PIPELINE_DEPTH;
+    bounce = [_]DmaAddress{.{}} ** IO_PIPELINE_DEPTH;
     publishInterruptsActive(false);
     pci.disableMsi(active_device) catch {};
     active_controller.writeReg32(REG_CC, active_controller.reg32(REG_CC) & ~CC_EN);
@@ -831,18 +830,18 @@ export fn zigosStorageBootstrapNvmeDmaWindow(
     if (!active_present) return false;
     const Window = struct { phys: u32, length: u64 = PAGE_SIZE, readable: bool, writable: bool };
     const window: Window = switch (index) {
-        0 => .{ .phys = active_controller.admin.sq_phys, .readable = true, .writable = false },
-        1 => .{ .phys = active_controller.admin.cq_phys, .readable = false, .writable = true },
-        2 => .{ .phys = active_controller.io.sq_phys, .readable = true, .writable = false },
-        3 => .{ .phys = active_controller.io.cq_phys, .readable = false, .writable = true },
+        0 => .{ .phys = active_controller.admin.sq.physical, .readable = true, .writable = false },
+        1 => .{ .phys = active_controller.admin.cq.physical, .readable = false, .writable = true },
+        2 => .{ .phys = active_controller.io.sq.physical, .readable = true, .writable = false },
+        3 => .{ .phys = active_controller.io.cq.physical, .readable = false, .writable = true },
         4 => .{
-            .phys = bounce_phys[0],
+            .phys = bounce[0].physical,
             .length = nvme_prp.MAX_TRANSFER_BYTES * IO_PIPELINE_DEPTH,
             .readable = true,
             .writable = true,
         },
         5 => .{
-            .phys = active_controller.io_prp_list_phys[0],
+            .phys = active_controller.io_prp_lists[0].physical,
             .length = PAGE_SIZE * IO_PIPELINE_DEPTH,
             .readable = true,
             .writable = false,
