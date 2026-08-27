@@ -1,5 +1,6 @@
 const console = @import("../utils/console.zig");
 const numfmt = @import("../utils/numfmt.zig");
+const spin = @import("../utils/spin.zig");
 
 const BYTES_PER_MIB: usize = 1024 * 1024;
 const HEAP_SIZE: usize = 16 * BYTES_PER_MIB;
@@ -33,18 +34,14 @@ var heap_start: [*]u8 = undefined;
 var heap_end: [*]u8 = undefined;
 var free_list: ?*BlockHeader = null;
 var is_initialized = false;
-var allocator_lock: u32 = 0;
+var allocator_lock = spin.Lock.init();
 
 fn lockAllocator() void {
-    while (@cmpxchgWeak(u32, &allocator_lock, 0, 1, .acquire, .monotonic) != null) {
-        while (@atomicLoad(u32, &allocator_lock, .monotonic) != 0) {
-            asm volatile ("pause");
-        }
-    }
+    allocator_lock.acquire();
 }
 
 fn unlockAllocator() void {
-    @atomicStore(u32, &allocator_lock, 0, .release);
+    allocator_lock.release();
 }
 
 pub fn init() void {

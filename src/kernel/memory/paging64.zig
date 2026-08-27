@@ -4,6 +4,7 @@ const handoff = @import("../boot/handoff.zig");
 const early_console = @import("../utils/console.zig");
 const memory = @import("memory.zig");
 const numfmt = @import("../utils/numfmt.zig");
+const spin = @import("../utils/spin.zig");
 const frame_allocator = @import("frame_allocator.zig");
 const firmware_memory_map = @import("firmware_memory_map.zig");
 const pcid_allocator = @import("pcid_allocator.zig");
@@ -105,9 +106,9 @@ var kernel_page_tables: [IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undef
 
 const PhysicalFrameAllocator = frame_allocator.Fixed(MEMORY_SIZE, PAGE_SIZE);
 var physical_frames = PhysicalFrameAllocator.init();
-var frame_lock: bool = false;
+var frame_lock = spin.Lock.init();
 var process_contexts = pcid_allocator.Allocator.init();
-var process_context_lock: bool = false;
+var process_context_lock = spin.Lock.init();
 var process_context_identifiers_enabled: bool = false;
 
 const tableIndex = table64.index;
@@ -178,23 +179,19 @@ fn zeroTable(table: *PageTable) void {
 }
 
 fn acquireFrameLock() void {
-    while (@atomicRmw(bool, &frame_lock, .Xchg, true, .seq_cst)) {
-        asm volatile ("pause");
-    }
+    frame_lock.acquire();
 }
 
 fn releaseFrameLock() void {
-    @atomicStore(bool, &frame_lock, false, .seq_cst);
+    frame_lock.release();
 }
 
 fn acquireProcessContextLock() void {
-    while (@atomicRmw(bool, &process_context_lock, .Xchg, true, .seq_cst)) {
-        asm volatile ("pause");
-    }
+    process_context_lock.acquire();
 }
 
 fn releaseProcessContextLock() void {
-    @atomicStore(bool, &process_context_lock, false, .seq_cst);
+    process_context_lock.release();
 }
 
 fn tryAllocProcessContext() ?pcid_allocator.Identifier {
