@@ -67,7 +67,11 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
         }
 
         pub fn reset(self: *Self) void {
-            self.* = init();
+            @memset(&self.reserved_bitmap, 0);
+            @memset(&self.allocated_bitmap, 0);
+            self.reserved_count = 0;
+            self.allocated_count = 0;
+            self.search_frame_hint = 0;
         }
 
         pub fn reserve(self: *Self, run: FrameRun) Error!void {
