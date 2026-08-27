@@ -7,6 +7,10 @@ pub const FrameRun = struct {
     count: u32,
 };
 
+pub const AllocationCursor = struct {
+    next_frame: u32 = 0,
+};
+
 pub const Stats = struct {
     total: u32,
     reserved: u32,
@@ -28,6 +32,7 @@ pub const RESERVATION_PREFLIGHT_USES_BITMAP_WORDS = true;
 pub const CONTIGUOUS_SEARCH_USES_BITMAP_WORDS = true;
 pub const SINGLE_FRAME_MUTATIONS_ARE_DIRECT = true;
 pub const SUPPORTS_BOUNDED_PHYSICAL_ALLOCATION = true;
+pub const SUPPORTS_INDEPENDENT_ALLOCATION_CURSORS = true;
 
 pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
@@ -129,6 +134,15 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
             return self.allocateBetween(count, 0, exclusive_end);
         }
 
+        pub fn allocateBelowWithCursor(
+            self: *Self,
+            count: u32,
+            exclusive_end: PhysicalAddress,
+            cursor: *AllocationCursor,
+        ) ?FrameRun {
+            return self.allocateBetweenWithCursor(count, 0, exclusive_end, cursor);
+        }
+
         pub fn allocateBetween(
             self: *Self,
             count: u32,
@@ -145,7 +159,8 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
             const upper_frame: u32 = @intCast(upper_frame_value);
             if (count == 0 or count > upper_frame - lower_frame) return null;
 
-            const search_start = if (self.search_frame_hint >= lower_frame and self.search_frame_hint < upper_frame)
+            const search_start = if (self.search_frame_hint >= lower_frame and
+                self.search_frame_hint < upper_frame)
                 self.search_frame_hint
             else
                 lower_frame;
@@ -171,6 +186,21 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
                 .base = @as(PhysicalAddress, start) * page_size,
                 .count = count,
             };
+        }
+
+        pub fn allocateBetweenWithCursor(
+            self: *Self,
+            count: u32,
+            inclusive_start: PhysicalAddress,
+            exclusive_end: PhysicalAddress,
+            cursor: *AllocationCursor,
+        ) ?FrameRun {
+            const shared_hint = self.search_frame_hint;
+            self.search_frame_hint = cursor.next_frame;
+            const run = self.allocateBetween(count, inclusive_start, exclusive_end);
+            cursor.next_frame = self.search_frame_hint;
+            self.search_frame_hint = shared_hint;
+            return run;
         }
 
         pub fn release(self: *Self, run: FrameRun) Error!void {
@@ -529,6 +559,35 @@ test "range allocation honors both physical boundaries" {
     try std.testing.expectEqual(@as(PhysicalAddress, 10 * page_size), second_high.base);
     try std.testing.expect(allocator.allocateBetween(1, 8 * page_size, 12 * page_size) == null);
     try std.testing.expectEqual(@as(PhysicalAddress, 0), allocator.allocateBelow(1, 8 * page_size).?.base);
+}
+
+test "bounded allocation cursors retain independent range progress" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(16 * page_size, page_size);
+    var allocator = Allocator.init();
+    var low_cursor = AllocationCursor{};
+    var high_cursor = AllocationCursor{ .next_frame = 8 };
+
+    const first_high = allocator.allocateBetweenWithCursor(
+        1,
+        8 * page_size,
+        16 * page_size,
+        &high_cursor,
+    ).?;
+    const first_low = allocator.allocateBelowWithCursor(1, 8 * page_size, &low_cursor).?;
+    const second_high = allocator.allocateBetweenWithCursor(
+        1,
+        8 * page_size,
+        16 * page_size,
+        &high_cursor,
+    ).?;
+
+    try std.testing.expectEqual(@as(PhysicalAddress, 8 * page_size), first_high.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 0), first_low.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 9 * page_size), second_high.base);
+    try std.testing.expectEqual(@as(u32, 1), low_cursor.next_frame);
+    try std.testing.expectEqual(@as(u32, 10), high_cursor.next_frame);
+    try std.testing.expect(SUPPORTS_INDEPENDENT_ALLOCATION_CURSORS);
 }
 
 test "single-frame allocation wraps from a non-word-aligned hint" {
