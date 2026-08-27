@@ -17,6 +17,10 @@ const userspace_scheduler = @import("../../task/userspace_scheduler.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
 const network_policy = @import("../../sync/network_policy.zig");
+const kernel_memory = if (builtin.target.os.tag == .freestanding)
+    @import("../../../kernel/memory/memory.zig")
+else
+    struct {};
 
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../../kernel/boot/common.zig")
@@ -44,25 +48,85 @@ const MMU_PROOF_BUNDLE_ID = "zigos.proof.mmu-isolation";
 const GP_PROOF_BUNDLE_ID = "zigos.system.termination-probe";
 const USER_PAGE_FAULT_VECTOR: u8 = 14;
 const PAGE_FAULT_USER_MODE_BIT: u32 = 1 << 2;
+const HEAP_BACKED_PROOF_FIXTURES = builtin.target.os.tag == .freestanding;
+
+const FreestandingProofFixtures = struct {
+    runtime: task_runtime.Runtime,
+    restarted_runtime: task_runtime.Runtime,
+    capabilities: capability.CapabilityTable,
+    endpoints: endpoint.Table,
+};
+
+const HostProofFixtures = if (HEAP_BACKED_PROOF_FIXTURES) struct {} else struct {
+    var runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+    var restarted_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+    var capabilities: capability.CapabilityTable = capability.CapabilityTable.init();
+    var endpoints: endpoint.Table = endpoint.Table.init();
+};
 
 var reboot_proof_checkpoint_store: task_runtime_service.CheckpointStore = .{};
-var reboot_proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
-var reboot_proof_restarted_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
-
-var proof_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
-var proof_capabilities: capability.CapabilityTable = capability.CapabilityTable.init();
-var proof_endpoints: endpoint.Table = endpoint.Table.init();
+var freestanding_proof_fixtures: ?*FreestandingProofFixtures = null;
 var proof_shared: shared_memory.Table = shared_memory.Table.init();
 
+fn allocateFreestandingProofFixtures() bool {
+    if (comptime !HEAP_BACKED_PROOF_FIXTURES) return true;
+    if (freestanding_proof_fixtures != null) return false;
+    const allocation = kernel_memory.kmalloc(@sizeOf(FreestandingProofFixtures)) orelse return false;
+    const fixtures: *FreestandingProofFixtures = @ptrCast(@alignCast(allocation));
+    fixtures.runtime.initializeAllocated();
+    fixtures.restarted_runtime.initializeAllocated();
+    fixtures.capabilities.initializeAllocated();
+    fixtures.endpoints.initializeAllocated();
+    freestanding_proof_fixtures = fixtures;
+    return true;
+}
+
+fn releaseFreestandingProofFixtures() void {
+    if (comptime !HEAP_BACKED_PROOF_FIXTURES) return;
+    const fixtures = freestanding_proof_fixtures orelse return;
+    fixtures.runtime.reset();
+    fixtures.restarted_runtime.reset();
+    fixtures.endpoints.reset();
+    proof_shared.deinit();
+    proof_shared = shared_memory.Table.init();
+    @memset(std.mem.asBytes(fixtures), 0);
+    kernel_memory.kfree(@ptrCast(fixtures));
+    freestanding_proof_fixtures = null;
+}
+
+fn proofRuntime() *task_runtime.Runtime {
+    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.runtime;
+    return &HostProofFixtures.runtime;
+}
+
+fn restartedProofRuntime() *task_runtime.Runtime {
+    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.restarted_runtime;
+    return &HostProofFixtures.restarted_runtime;
+}
+
+fn proofCapabilities() *capability.CapabilityTable {
+    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.capabilities;
+    return &HostProofFixtures.capabilities;
+}
+
+fn proofEndpoints() *endpoint.Table {
+    if (comptime HEAP_BACKED_PROOF_FIXTURES) return &freestanding_proof_fixtures.?.endpoints;
+    return &HostProofFixtures.endpoints;
+}
+
 fn resetProofFixtures() void {
-    proof_runtime.reset();
-    proof_capabilities = capability.CapabilityTable.init();
-    proof_endpoints.reset();
+    proofRuntime().reset();
+    proofCapabilities().initializeAllocated();
+    proofEndpoints().reset();
     proof_shared.deinit();
     proof_shared = shared_memory.Table.init();
 }
 
 pub fn runAndPrint() bool {
+    if (comptime HEAP_BACKED_PROOF_FIXTURES) {
+        if (!allocateFreestandingProofFixtures()) return false;
+    }
+    defer if (comptime HEAP_BACKED_PROOF_FIXTURES) releaseFreestandingProofFixtures();
     if (!processIsolationBlocksForeignSharedMemory()) return false;
     common.printBootMarker(boot_markers.runtime_proof_process_isolation);
 
@@ -213,9 +277,9 @@ fn userGeneralProtectionFaultIsContained(
 
 pub fn processIsolationBlocksForeignSharedMemory() bool {
     resetProofFixtures();
-    const runtime = &proof_runtime;
-    const capabilities = &proof_capabilities;
-    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, &proof_endpoints, &proof_shared);
+    const runtime = proofRuntime();
+    const capabilities = proofCapabilities();
+    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, proofEndpoints(), &proof_shared);
     var port = component_port.KernelPort.init(&kernel);
 
     const owner = runtime.createTask(.{
@@ -257,9 +321,9 @@ pub fn processIsolationBlocksForeignSharedMemory() bool {
 
 pub fn syscallSubjectSpoofingIsRejected() bool {
     resetProofFixtures();
-    const runtime = &proof_runtime;
-    const capabilities = &proof_capabilities;
-    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, &proof_endpoints, &proof_shared);
+    const runtime = proofRuntime();
+    const capabilities = proofCapabilities();
+    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, proofEndpoints(), &proof_shared);
     var port = component_port.KernelPort.init(&kernel);
 
     const receiver = runtime.createTask(.{
@@ -377,31 +441,33 @@ pub fn driverAuthorityEscapeIsRejected() bool {
 }
 
 pub fn rebootGrantAndRevocationStatePersists() bool {
+    const runtime = proofRuntime();
+    const restarted_runtime = restartedProofRuntime();
     reboot_proof_checkpoint_store.reset();
-    reboot_proof_runtime.reset();
-    reboot_proof_restarted_runtime.reset();
+    runtime.reset();
+    restarted_runtime.reset();
 
-    var service_instance = task_runtime_service.Service.initWithStore(&reboot_proof_runtime, &reboot_proof_checkpoint_store);
+    var service_instance = task_runtime_service.Service.initWithStore(runtime, &reboot_proof_checkpoint_store);
     service_instance.bind(50, service(50));
-    const task = reboot_proof_runtime.createTask(.{
+    const task = runtime.createTask(.{
         .owner = app(50),
         .component_class = .app_component,
         .budget = budget(),
         .local_only = true,
     }) catch return false;
     const task_id = task.id;
-    reboot_proof_runtime.grantCapability(task_id, 91) catch return false;
-    reboot_proof_runtime.grantCapability(task_id, 92) catch return false;
+    runtime.grantCapability(task_id, 91) catch return false;
+    runtime.grantCapability(task_id, 92) catch return false;
     service_instance.checkpoint(1) catch return false;
-    if (!(reboot_proof_runtime.revokeCapability(task_id, 91) catch return false)) return false;
+    if (!(runtime.revokeCapability(task_id, 91) catch return false)) return false;
     service_instance.checkpoint(2) catch return false;
 
-    var restarted = task_runtime_service.Service.initWithStore(&reboot_proof_restarted_runtime, &reboot_proof_checkpoint_store);
+    var restarted = task_runtime_service.Service.initWithStore(restarted_runtime, &reboot_proof_checkpoint_store);
     restarted.bind(50, service(50));
     if (!restarted.restartFromCheckpoint(3)) return false;
-    const restored = reboot_proof_restarted_runtime.find(task_id) orelse return false;
-    return !reboot_proof_restarted_runtime.hasCapability(restored.id, 91) and
-        reboot_proof_restarted_runtime.hasCapability(restored.id, 92);
+    const restored = restarted_runtime.find(task_id) orelse return false;
+    return !restarted_runtime.hasCapability(restored.id, 91) and
+        restarted_runtime.hasCapability(restored.id, 92);
 }
 
 fn budget() task_runtime.ResourceBudget {
