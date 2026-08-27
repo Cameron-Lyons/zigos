@@ -11,7 +11,6 @@ const pcid_allocator = @import("pcid_allocator.zig");
 const table64 = @import("page_table64.zig");
 
 const PAGE_SIZE: u32 = 4096;
-const TABLE_ENTRIES = table64.TABLE_ENTRIES;
 const PML4_SHIFT = table64.PML4_SHIFT;
 const PDPT_SHIFT = table64.PDPT_SHIFT;
 const PAGE_DIRECTORY_SHIFT = table64.PAGE_DIRECTORY_SHIFT;
@@ -38,6 +37,7 @@ const ENTRY_WRITABLE = table64.WRITABLE;
 const ENTRY_USER = table64.USER;
 const ENTRY_WRITE_THROUGH = table64.WRITE_THROUGH;
 const ENTRY_CACHE_DISABLE = table64.CACHE_DISABLE;
+const ENTRY_LARGE_PAGE = table64.LARGE_PAGE;
 const ENTRY_GLOBAL = table64.GLOBAL;
 
 pub const PageTableEntry = table64.Entry;
@@ -86,7 +86,9 @@ pub const UserAddressSpaceCreateError = error{
 };
 
 const MEMORY_SIZE: u32 = 128 * 1024 * 1024;
-const IDENTITY_PAGE_TABLES = MEMORY_SIZE / (PAGE_SIZE * TABLE_ENTRIES);
+const LARGE_PAGE_SIZE: u32 = 2 * 1024 * 1024;
+const IDENTITY_DIRECTORY_ENTRIES = MEMORY_SIZE / LARGE_PAGE_SIZE;
+const PRECISE_IDENTITY_PAGE_TABLES = 5;
 
 const TABLE_OWNER_INHERITED: u3 = 0;
 const TABLE_OWNER_KERNEL_DYNAMIC: u3 = 1;
@@ -102,7 +104,7 @@ extern const __kernel_relro_end: u8;
 var kernel_pml4: PageDirectory align(PAGE_SIZE) = undefined;
 var kernel_pdpt: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_directory: PageTable align(PAGE_SIZE) = undefined;
-var kernel_page_tables: [IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
+var kernel_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 
 const PhysicalFrameAllocator = frame_allocator.Fixed(MEMORY_SIZE, PAGE_SIZE);
 var physical_frames = PhysicalFrameAllocator.init();
@@ -254,6 +256,7 @@ fn ensureChildTable(
         zeroTable(table);
         return table;
     }
+    if (table64.isLargePage(entry.*)) return error.KernelMappingCollision;
 
     if (owner == TABLE_OWNER_USER_PRIVATE and entryOwner(entry.*) != TABLE_OWNER_USER_PRIVATE) {
         return error.KernelMappingCollision;
@@ -326,15 +329,16 @@ fn lookupLeaf(pml4: *PageDirectory, virt_addr: usize) ?*PageTableEntry {
     const pdpt_entry = pdpt[tableIndex(virt_addr, PDPT_SHIFT)];
     if (!entryPresent(pdpt_entry)) return null;
     const page_directory = tableFromEntry(pdpt_entry);
-    const directory_entry = page_directory[tableIndex(virt_addr, PAGE_DIRECTORY_SHIFT)];
-    if (!entryPresent(directory_entry)) return null;
-    const page_table = tableFromEntry(directory_entry);
+    const directory_entry = &page_directory[tableIndex(virt_addr, PAGE_DIRECTORY_SHIFT)];
+    if (!entryPresent(directory_entry.*)) return null;
+    if (table64.isLargePage(directory_entry.*)) return directory_entry;
+    const page_table = tableFromEntry(directory_entry.*);
     return &page_table[tableIndex(virt_addr, PAGE_TABLE_SHIFT)];
 }
 
 pub fn setPageReadOnly(virt_addr: usize) void {
     const entry = lookupLeaf(getCurrentPageDirectory(), virt_addr) orelse return;
-    if (!entryPresent(entry.*)) return;
+    if (!entryPresent(entry.*) or table64.isLargePage(entry.*)) return;
     entry.* &= ~ENTRY_WRITABLE;
     invalidate_page(virt_addr);
 }
@@ -361,7 +365,12 @@ pub fn enableWriteProtect() void {
 
 pub fn unmapBorrowedCurrentPage(virt_addr: usize) bool {
     const entry = lookupLeaf(getCurrentPageDirectory(), virt_addr) orelse return false;
-    if (!entryPresent(entry.*) or entryOwner(entry.*) != PAGE_OWNER_BORROWED) return false;
+    if (!entryPresent(entry.*) or
+        table64.isLargePage(entry.*) or
+        entryOwner(entry.*) != PAGE_OWNER_BORROWED)
+    {
+        return false;
+    }
     entry.* = 0;
     invalidate_page(virt_addr);
     return true;
@@ -575,6 +584,20 @@ fn initializeKernelHierarchy() void {
             TABLE_OWNER_INHERITED,
         );
     }
+
+    var directory_index: usize = kernel_page_tables.len;
+    while (directory_index < IDENTITY_DIRECTORY_ENTRIES) : (directory_index += 1) {
+        kernel_page_directory[directory_index] = largeIdentityEntry(physical_address);
+        physical_address += LARGE_PAGE_SIZE;
+    }
+}
+
+fn largeIdentityEntry(physical_address: u32) PageTableEntry {
+    return tableEntry(
+        physical_address,
+        ENTRY_PRESENT | ENTRY_WRITABLE | ENTRY_LARGE_PAGE | ENTRY_GLOBAL | table64.NO_EXECUTE,
+        PAGE_OWNER_BORROWED,
+    );
 }
 
 pub fn init() void {
@@ -694,7 +717,20 @@ fn invalidate_page(virt_addr: usize) void {
 }
 
 comptime {
-    if (IDENTITY_PAGE_TABLES != 64) @compileError("the 128 MiB identity aperture must use 64 page tables");
+    if (IDENTITY_DIRECTORY_ENTRIES != 64) @compileError("the 128 MiB identity aperture must use 64 directory entries");
+    if (PRECISE_IDENTITY_PAGE_TABLES * LARGE_PAGE_SIZE != 10 * 1024 * 1024) {
+        @compileError("the precise identity region must cover the first 10 MiB");
+    }
+}
+
+test "large identity leaves are writable global and non-executable" {
+    const physical_address: u32 = 8 * 1024 * 1024;
+    const entry = largeIdentityEntry(physical_address);
+    try std.testing.expectEqual(@as(usize, physical_address), entryAddress(entry));
+    try std.testing.expect(table64.isLargePage(entry));
+    try std.testing.expect((entry & ENTRY_WRITABLE) != 0);
+    try std.testing.expect((entry & ENTRY_GLOBAL) != 0);
+    try std.testing.expect(!table64.isExecutable(entry));
 }
 
 test "kernel identity mapping executes only the linker-bounded text pages" {
