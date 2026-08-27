@@ -1,4 +1,5 @@
 const std = @import("std");
+const paging = @import("../memory/paging64.zig");
 const ascii = @import("../utils/ascii.zig");
 const endian = @import("../utils/endian.zig");
 const checksum = @import("../utils/checksum.zig");
@@ -48,17 +49,27 @@ pub const EntryPoint = struct {
 };
 
 pub fn scanBiosForEntryPoint() ?EntryPoint {
-    const bytes = @as([*]const u8, @ptrFromInt(BIOS_SCAN_BASE))[0..BIOS_SCAN_LENGTH];
+    const bytes = mappedPhysicalBytes(BIOS_SCAN_BASE, BIOS_SCAN_LENGTH) orelse return null;
     return findEntryPoint(bytes, BIOS_SCAN_BASE);
 }
 
 pub fn scanBiosForNuc11Tnki5() bool {
     const entry = scanBiosForEntryPoint() orelse return false;
     if (entry.table_length == 0 or entry.table_length > MAX_TABLE_BYTES) return false;
-    const max_address: u64 = std.math.maxInt(usize);
-    if (entry.table_address > max_address - @as(u64, @intCast(entry.table_length))) return false;
-    const table = @as([*]const u8, @ptrFromInt(@as(usize, @intCast(entry.table_address))))[0..entry.table_length];
+    const table = mappedPhysicalBytes(entry.table_address, entry.table_length) orelse return false;
     return tableContainsTargetSku(table, NUC11TNKI5_SKU);
+}
+
+fn mappedPhysicalBytes(physical_address: u64, length: usize) ?[]const u8 {
+    if (length == 0) return null;
+    const last_physical_address = std.math.add(
+        u64,
+        physical_address,
+        std.math.cast(u64, length - 1) orelse return null,
+    ) catch return null;
+    _ = paging.directMapAddress(last_physical_address) orelse return null;
+    const alias = paging.directMapAddress(physical_address) orelse return null;
+    return @as([*]const u8, @ptrFromInt(alias))[0..length];
 }
 
 pub fn findEntryPoint(buffer: []const u8, base_physical_address: usize) ?EntryPoint {
@@ -176,4 +187,17 @@ test "SMBIOS 3 entry point validates checksum and table address" {
     entry[SMBIOS3_MAJOR_VERSION_OFFSET] = SMBIOS3_MAJOR_VERSION - 1;
     finishChecksum(entry[0..], SMBIOS3_CHECKSUM_OFFSET);
     try std.testing.expectError(error.UnsupportedVersion, parseEntryPoint(entry[0..]));
+}
+
+test "SMBIOS table mappings stay within the physical-memory window" {
+    const final_physical_address = paging.MANAGED_PHYSICAL_BYTES - 1;
+    const final_byte = mappedPhysicalBytes(final_physical_address, 1).?;
+
+    try std.testing.expectEqual(
+        paging.directMapAddress(final_physical_address).?,
+        @intFromPtr(final_byte.ptr),
+    );
+    try std.testing.expect(mappedPhysicalBytes(paging.MANAGED_PHYSICAL_BYTES, 1) == null);
+    try std.testing.expect(mappedPhysicalBytes(std.math.maxInt(u64), 2) == null);
+    try std.testing.expect(mappedPhysicalBytes(BIOS_SCAN_BASE, 0) == null);
 }

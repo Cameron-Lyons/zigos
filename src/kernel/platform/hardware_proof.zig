@@ -509,8 +509,6 @@ pub fn countersReady(probe: ProbeFacts) bool {
 }
 
 pub fn captureEarlyBootEvidence() void {
-    facts.real_target_sku = smbios.scanBiosForNuc11Tnki5();
-
     if (handoff.capturedInfo()) |info| {
         facts.multiboot_handoff = true;
         if (handoff.capturedMemoryMapSummary(info)) |summary| {
@@ -528,6 +526,7 @@ pub fn captureEarlyBootEvidence() void {
 }
 
 pub fn capturePlatformFirmwareEvidence() void {
+    facts.real_target_sku = smbios.scanBiosForNuc11Tnki5();
     captureAcpiEvidence();
     printNewMarkers();
 }
