@@ -127,6 +127,7 @@ const PhysicalFrameAllocator = frame_allocator.Fixed(MANAGED_PHYSICAL_BYTES, PAG
 var physical_frames = PhysicalFrameAllocator.init();
 var frame_lock = spin.Lock.init();
 var high_memory_zone_has_free_frames: bool = false;
+var low_identity_frame_cursor = frame_allocator.AllocationCursor{};
 var process_contexts = pcid_allocator.Allocator.init();
 var process_context_lock = spin.Lock.init();
 var process_context_identifiers_enabled: bool = false;
@@ -286,6 +287,7 @@ fn allocGeneralFramesLocked(count: u32) ?FrameRun {
     return allocGeneralRunFrom(
         &physical_frames,
         &high_memory_zone_has_free_frames,
+        &low_identity_frame_cursor,
         count,
         LOW_IDENTITY_PHYSICAL_LIMIT,
         MANAGED_PHYSICAL_BYTES,
@@ -295,6 +297,7 @@ fn allocGeneralFramesLocked(count: u32) ?FrameRun {
 fn allocGeneralRunFrom(
     allocator: anytype,
     high_zone_has_free_frames: *bool,
+    low_cursor: *frame_allocator.AllocationCursor,
     count: u32,
     low_identity_limit: frame_allocator.PhysicalAddress,
     managed_bytes: frame_allocator.PhysicalAddress,
@@ -303,18 +306,27 @@ fn allocGeneralRunFrom(
         if (allocator.allocateBetween(count, low_identity_limit, managed_bytes)) |run| return run;
         if (count == 1) high_zone_has_free_frames.* = false;
     }
-    return allocator.allocateBelow(count, low_identity_limit);
+    return allocator.allocateBelowWithCursor(count, low_identity_limit, low_cursor);
 }
 
 pub fn allocIdentityDmaFrames(count: u32) ?u32 {
     acquireFrameLock();
     defer releaseFrameLock();
-    const run = physical_frames.allocateBelow(count, LOW_IDENTITY_PHYSICAL_LIMIT) orelse return null;
+    const run = physical_frames.allocateBelowWithCursor(
+        count,
+        LOW_IDENTITY_PHYSICAL_LIMIT,
+        &low_identity_frame_cursor,
+    ) orelse return null;
     return lowIdentityFrameAddress(run.base);
 }
 
 pub fn releaseIdentityDmaFrames(base: u32, count: u32) FrameReleaseError!void {
-    return releasePhysicalFrames(base, count);
+    acquireFrameLock();
+    defer releaseFrameLock();
+    const shared_hint = physical_frames.search_frame_hint;
+    defer physical_frames.search_frame_hint = shared_hint;
+    try releasePhysicalFramesLocked(base, count);
+    low_identity_frame_cursor.next_frame = physical_frames.search_frame_hint;
 }
 
 pub fn releaseGeneralFrames(run: FrameRun) FrameReleaseError!void {
@@ -784,6 +796,7 @@ pub fn init() void {
     firmware_memory_map.initializeAllocator(MANAGED_PHYSICAL_BYTES, PAGE_SIZE, &physical_frames, memory_map) catch
         haltWithMessage("Invalid Multiboot memory map!\n");
     high_memory_zone_has_free_frames = false;
+    low_identity_frame_cursor = .{};
     firmware_memory_map.reserveLiveHandoffRanges(
         MANAGED_PHYSICAL_BYTES,
         PAGE_SIZE,
@@ -1002,10 +1015,12 @@ test "general contiguous allocation prefers high memory" {
     const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
     var allocator = TestAllocator.init();
     var high_zone_has_free_frames = true;
+    var low_cursor = frame_allocator.AllocationCursor{};
 
     const run = allocGeneralRunFrom(
         &allocator,
         &high_zone_has_free_frames,
+        &low_cursor,
         2,
         low_identity_limit,
         managed_bytes,
@@ -1013,6 +1028,42 @@ test "general contiguous allocation prefers high memory" {
     try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), run.base);
     try std.testing.expectEqual(@as(u32, 2), run.count);
     try std.testing.expect(high_zone_has_free_frames);
+}
+
+test "general allocation progress survives low-memory allocation activity" {
+    const test_frame_count = 12;
+    const low_frame_count = 4;
+    const managed_bytes = test_frame_count * PAGE_SIZE;
+    const low_identity_limit = low_frame_count * PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var allocator = TestAllocator.init();
+    var high_zone_has_free_frames = true;
+    var low_cursor = frame_allocator.AllocationCursor{};
+
+    const first_high = allocGeneralRunFrom(
+        &allocator,
+        &high_zone_has_free_frames,
+        &low_cursor,
+        1,
+        low_identity_limit,
+        managed_bytes,
+    ).?;
+    const first_low = allocator.allocateBelowWithCursor(1, low_identity_limit, &low_cursor).?;
+    const second_high = allocGeneralRunFrom(
+        &allocator,
+        &high_zone_has_free_frames,
+        &low_cursor,
+        1,
+        low_identity_limit,
+        managed_bytes,
+    ).?;
+
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), first_high.base);
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 0), first_low.base);
+    try std.testing.expectEqual(
+        @as(frame_allocator.PhysicalAddress, low_identity_limit + PAGE_SIZE),
+        second_high.base,
+    );
 }
 
 test "general contiguous allocation preserves the high-memory availability hint across fragmentation" {
@@ -1025,10 +1076,12 @@ test "general contiguous allocation preserves the high-memory availability hint 
     try allocator.reserve(.{ .base = 4 * PAGE_SIZE, .count = 1 });
     try allocator.reserve(.{ .base = 6 * PAGE_SIZE, .count = 1 });
     var high_zone_has_free_frames = true;
+    var low_cursor = frame_allocator.AllocationCursor{};
 
     const run = allocGeneralRunFrom(
         &allocator,
         &high_zone_has_free_frames,
+        &low_cursor,
         2,
         low_identity_limit,
         managed_bytes,
@@ -1046,10 +1099,12 @@ test "general single-frame allocation caches an exhausted high zone" {
     var allocator = TestAllocator.init();
     try allocator.reserve(.{ .base = low_identity_limit, .count = test_frame_count - low_frame_count });
     var high_zone_has_free_frames = true;
+    var low_cursor = frame_allocator.AllocationCursor{};
 
     const run = allocGeneralRunFrom(
         &allocator,
         &high_zone_has_free_frames,
+        &low_cursor,
         1,
         low_identity_limit,
         managed_bytes,
