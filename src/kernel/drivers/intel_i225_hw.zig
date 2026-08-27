@@ -12,6 +12,8 @@ const i225_rx = @import("intel_i225_rx.zig");
 const i225_tx = @import("intel_i225_tx.zig");
 const pci = @import("pci.zig");
 
+pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
+
 const PAGE_SIZE: u32 = 4096;
 const TX_DESCRIPTOR_FRAME: u32 = 0;
 const TX_BUFFER_FIRST_FRAME: u32 = 1;
@@ -147,8 +149,13 @@ const Controller = struct {
     }
 };
 
-var prepared = false;
-var active = false;
+const ControllerState = enum(u8) {
+    unprepared,
+    prepared,
+    active,
+};
+
+var controller_state: u8 = @intFromEnum(ControllerState.unprepared);
 var controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var dma_windows: [DMA_WINDOW_COUNT]intel_vtd.DmaWindow = undefined;
@@ -160,8 +167,28 @@ var failed_receive_polls: u64 = 0;
 var pending_interrupt_causes: u32 = 0;
 var empty_interrupt_streak: u8 = 0;
 
+fn controllerState() ControllerState {
+    return @enumFromInt(@atomicLoad(u8, &controller_state, .acquire));
+}
+
+fn publishControllerState(value: ControllerState) void {
+    @atomicStore(u8, &controller_state, @intFromEnum(value), .release);
+}
+
+fn controllerPrepared() bool {
+    return controllerState() != .unprepared;
+}
+
+fn controllerActive() bool {
+    return controllerState() == .active;
+}
+
+fn resetPendingInterruptCauses() void {
+    @atomicStore(u32, &pending_interrupt_causes, 0, .monotonic);
+}
+
 pub fn prepare(device_info: pci.PCIDevice) Error!void {
-    if (prepared) return error.AlreadyPrepared;
+    if (controllerPrepared()) return error.AlreadyPrepared;
     if (!pci.isIntelI225Lm(device_info)) return error.UnsupportedDevice;
     if (pci.busMasteringEnabled(device_info)) return error.BusMasteringNotRevoked;
 
@@ -237,19 +264,19 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
     received_frames = 0;
     dropped_receive_frames = 0;
     failed_receive_polls = 0;
-    pending_interrupt_causes = 0;
+    resetPendingInterruptCauses();
     empty_interrupt_streak = 0;
-    prepared = true;
+    publishControllerState(.prepared);
     committed = true;
 }
 
 pub fn isolationDomain() ?intel_vtd.DmaDomain {
-    if (!prepared) return null;
+    if (!controllerPrepared()) return null;
     return .{ .device = active_device, .windows = &dma_windows };
 }
 
 pub fn activate() Error!void {
-    if (!prepared or !intel_vtd.requesterProtected(active_device)) {
+    if (!controllerPrepared() or !intel_vtd.requesterProtected(active_device)) {
         return error.DmaIsolationBypassed;
     }
     if (!intel_vtd.faultMonitoringEnabled()) return error.DmaFaultMonitoringUnavailable;
@@ -270,20 +297,20 @@ pub fn activate() Error!void {
         pci.disableBusMastering(active_device);
         return error.BusMasterEnableFailed;
     }
-    pending_interrupt_causes = 0;
+    resetPendingInterruptCauses();
     empty_interrupt_streak = 0;
-    active = true;
     _ = controller.reg32(REG_ICR);
     controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
+    publishControllerState(.active);
     msi_enabled = false;
 }
 
 pub fn attached() bool {
-    return active;
+    return controllerActive();
 }
 
 pub fn macAddress() [6]u8 {
-    if (!prepared) return [_]u8{0} ** 6;
+    if (!controllerPrepared()) return [_]u8{0} ** 6;
     return controller.mac;
 }
 
@@ -308,13 +335,13 @@ pub fn failedReceivePollCount() u64 {
 }
 
 pub fn networkWorkPending() bool {
-    if (!active) return false;
-    if (@atomicLoad(u32, &pending_interrupt_causes, .seq_cst) != 0) return true;
+    if (!controllerActive()) return false;
+    if (@atomicLoad(u32, &pending_interrupt_causes, .monotonic) != 0) return true;
     return receiveCompletionReady();
 }
 
 pub fn handleInterrupt() void {
-    if (prepared) {
+    if (controllerPrepared()) {
         controller.writeReg32(REG_IMC, i225_irq.QUEUE_CAUSES);
         const cause = controller.reg32(REG_ICR);
         _ = @atomicRmw(
@@ -322,14 +349,14 @@ pub fn handleInterrupt() void {
             &pending_interrupt_causes,
             .Or,
             cause | PENDING_INTERRUPT_EVENT,
-            .seq_cst,
+            .monotonic,
         );
     }
     x2apic.acknowledge();
 }
 
 pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
-    if (!active or !i225_frame.validDestinationMac(destination) or
+    if (!controllerActive() or !i225_frame.validDestinationMac(destination) or
         payload.len == 0 or payload.len > MAX_PAYLOAD_BYTES or !controller.linkUp())
     {
         failed_transmit_frames +%= 1;
@@ -366,7 +393,7 @@ pub fn sendPayload(destination: [6]u8, payload: []const u8) bool {
 }
 
 pub fn pollReceive(output: []u8) ReceiveResult {
-    if (!active) {
+    if (!controllerActive()) {
         failed_receive_polls +%= 1;
         return .{ .status = .failed };
     }
@@ -433,7 +460,7 @@ fn configureTransmitQueue(pending: *Controller) Error!void {
 }
 
 fn reapTransmitCompletions() u32 {
-    if (!active) return 0;
+    if (!controllerActive()) return 0;
     var reaped: u32 = 0;
     while (controller.tx_queue.in_flight != 0) {
         const descriptor_index = controller.tx_queue.head;
@@ -465,7 +492,7 @@ fn servicePendingInterrupt() bool {
         &pending_interrupt_causes,
         .Xchg,
         0,
-        .seq_cst,
+        .monotonic,
     );
     if (pending == 0) return true;
     const cause = pending & ~PENDING_INTERRUPT_EVENT;
@@ -500,7 +527,7 @@ fn receiveCompletionReady() bool {
 }
 
 fn rearmQueueInterrupts() void {
-    if (active) controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
+    if (controllerActive()) controller.writeReg32(REG_IMS, i225_irq.QUEUE_CAUSES);
 }
 
 fn configureReceiveQueue(pending: *Controller) Error!void {
@@ -570,7 +597,7 @@ fn pollDmaFault() bool {
 fn containFailure(marker: []const u8) void {
     controller.writeReg32(REG_IMC, 0xFFFF_FFFF);
     controller.writeReg32(REG_EIMC, 0xFFFF_FFFF);
-    active = false;
+    publishControllerState(.prepared);
     pci.disableMsi(active_device) catch {};
     pci.disableBusMastering(active_device);
     controller.writeReg32(REG_TXDCTL0, 0);
@@ -659,8 +686,7 @@ export fn zigosNetworkBootstrapI225WorkPending() callconv(.c) bool {
 }
 
 export fn zigosNetworkBootstrapI225Mac(output: [*]u8) callconv(.c) bool {
-    if (!prepared) return false;
-    const mac = macAddress();
-    @memcpy(output[0..mac.len], &mac);
+    if (!controllerPrepared()) return false;
+    @memcpy(output[0..controller.mac.len], &controller.mac);
     return true;
 }
