@@ -85,9 +85,9 @@ pub const UserAddressSpaceCreateError = error{
     ProcessContextExhausted,
 };
 
-const MEMORY_SIZE: u32 = 128 * 1024 * 1024;
+const MANAGED_PHYSICAL_BYTES: u32 = 1024 * 1024 * 1024;
 const LARGE_PAGE_SIZE: u32 = 2 * 1024 * 1024;
-const IDENTITY_DIRECTORY_ENTRIES = MEMORY_SIZE / LARGE_PAGE_SIZE;
+const IDENTITY_DIRECTORY_ENTRIES = MANAGED_PHYSICAL_BYTES / LARGE_PAGE_SIZE;
 const PRECISE_IDENTITY_PAGE_TABLES = 5;
 
 const TABLE_OWNER_INHERITED: u3 = 0;
@@ -106,7 +106,7 @@ var kernel_pdpt: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_directory: PageTable align(PAGE_SIZE) = undefined;
 var kernel_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 
-const PhysicalFrameAllocator = frame_allocator.Fixed(MEMORY_SIZE, PAGE_SIZE);
+const PhysicalFrameAllocator = frame_allocator.Fixed(MANAGED_PHYSICAL_BYTES, PAGE_SIZE);
 var physical_frames = PhysicalFrameAllocator.init();
 var frame_lock = spin.Lock.init();
 var process_contexts = pcid_allocator.Allocator.init();
@@ -161,7 +161,7 @@ fn kernelImageExtents() KernelImageExtents {
         immutable_end % PAGE_SIZE != 0 or
         text_start >= text_end or
         text_end >= immutable_end or
-        immutable_end > MEMORY_SIZE)
+        immutable_end > MANAGED_PHYSICAL_BYTES)
     {
         haltWithMessage("Invalid page-aligned kernel image extents!\n");
     }
@@ -609,10 +609,10 @@ pub fn init() void {
         haltWithMessage("Invalid Multiboot information extent!\n");
     const memory_map = handoff.capturedMemoryMap(boot_info) orelse
         haltWithMessage("Missing Multiboot memory map!\n");
-    firmware_memory_map.initializeAllocator(MEMORY_SIZE, PAGE_SIZE, &physical_frames, memory_map) catch
+    firmware_memory_map.initializeAllocator(MANAGED_PHYSICAL_BYTES, PAGE_SIZE, &physical_frames, memory_map) catch
         haltWithMessage("Invalid Multiboot memory map!\n");
     firmware_memory_map.reserveLiveHandoffRanges(
-        MEMORY_SIZE,
+        MANAGED_PHYSICAL_BYTES,
         PAGE_SIZE,
         &physical_frames,
         boot_info_address,
@@ -717,7 +717,12 @@ fn invalidate_page(virt_addr: usize) void {
 }
 
 comptime {
-    if (IDENTITY_DIRECTORY_ENTRIES != 64) @compileError("the 128 MiB identity aperture must use 64 directory entries");
+    if (MANAGED_PHYSICAL_BYTES % LARGE_PAGE_SIZE != 0) {
+        @compileError("the managed physical aperture must be large-page aligned");
+    }
+    if (IDENTITY_DIRECTORY_ENTRIES != table64.TABLE_ENTRIES) {
+        @compileError("the managed physical aperture must fill one page directory");
+    }
     if (PRECISE_IDENTITY_PAGE_TABLES * LARGE_PAGE_SIZE != 10 * 1024 * 1024) {
         @compileError("the precise identity region must cover the first 10 MiB");
     }
