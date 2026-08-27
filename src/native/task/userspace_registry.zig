@@ -25,7 +25,8 @@ pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(contract.ServiceClass).len;
 pub const ServiceClassSlotIndex = u8;
 pub const RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA = true;
-pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 168;
+pub const SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION = true;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 152;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -55,7 +56,6 @@ pub const ImageSpec = struct {
     publisher: []const u8,
     label: []const u8,
     entry: []const u8,
-    components: []const manifest.ExecutionComponentDecl,
     provided_interfaces: []const manifest.InterfaceDecl = &.{},
     consumed_interfaces: []const manifest.InterfaceDecl = &.{},
     assets: []const manifest.AssetDecl = &.{},
@@ -102,7 +102,6 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
             .publisher = catalog_image.publisher,
             .label = catalog_image.label,
             .entry = catalog_image.entry,
-            .components = &.{.{ .id = catalog_image.label, .entry = catalog_image.entry }},
             .provided_interfaces = &.{entry.interface},
             .component_class = component_class,
             .role_tag = catalog_image.role_tag,
@@ -124,7 +123,6 @@ pub fn standaloneBuildImageSpec(spec: StandaloneImageSpec) BuildImageSpec {
             .publisher = spec.publisher,
             .label = spec.label,
             .entry = spec.entry,
-            .components = &.{.{ .id = spec.label, .entry = spec.entry }},
             .provided_interfaces = spec.provided_interfaces,
             .consumed_interfaces = spec.consumed_interfaces,
             .assets = spec.assets,
@@ -428,6 +426,8 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA);
     try std.testing.expect(!@hasField(ImageSpec, "artifact_name"));
     try std.testing.expect(!@hasField(ImageSpec, "source_path"));
+    try std.testing.expect(SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION);
+    try std.testing.expect(!@hasField(ImageSpec, "components"));
     try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
     for (production_boot_image_specs, 0..) |spec, index| {
         try std.testing.expect(spec.role_tag != 0);

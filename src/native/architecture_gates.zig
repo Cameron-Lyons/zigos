@@ -18,6 +18,7 @@ const component_abi_wire = @import("services/component_abi_wire.zig");
 const userspace_scheduler = @import("task/userspace_scheduler.zig");
 const userspace_executor = @import("task/userspace_executor.zig");
 const userspace_loader = @import("task/userspace_loader.zig");
+const userspace_launch = @import("task/userspace_launch.zig");
 const userspace_registry = @import("task/userspace_registry.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const process_isolation = @import("task/process_isolation.zig");
@@ -431,6 +432,11 @@ pub const indexed_hot_path_tables = .{
             !@hasField(userspace_registry.ImageSpec, "artifact_name") and
             !@hasField(userspace_registry.ImageSpec, "source_path") and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
+        .derives_single_component_manifests_on_registration = userspace_registry.SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION and
+            !@hasField(userspace_registry.ImageSpec, "components"),
+    },
+    .userspace_launch = .{
+        .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,
     },
     .task_runtime = .{
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),

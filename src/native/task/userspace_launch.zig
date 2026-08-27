@@ -13,6 +13,7 @@ else
     };
 
 pub const Error = userspace_boot_registry.Error || userspace_loader.Error || package_service.Error;
+pub const REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL: u8 = 0;
 
 pub fn launchRegisteredDirect(
     catalog: *userspace_loader.Catalog,
@@ -21,13 +22,14 @@ pub fn launchRegisteredDirect(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!*task_runtime.TaskRecord {
-    const bundle = try userspace_boot_registry.manifestFor(bundle_id);
-    return launchDirectBundle(
+    try ensureRegisteredBundle(catalog, bundle_id, "register-direct");
+    return launchDirectImage(
         catalog,
         runtime_ptr,
-        bundle,
+        bundle_id,
         request,
         schedule_task,
+        "launch-direct",
     );
 }
 
@@ -38,13 +40,14 @@ pub fn launchRegisteredKernel(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!abi.TaskDescriptor {
-    const bundle = try userspace_boot_registry.manifestFor(bundle_id);
-    return launchKernelBundle(
+    try ensureRegisteredBundle(catalog, bundle_id, "register-kernel");
+    return launchKernelImage(
         catalog,
         authority,
-        bundle,
+        bundle_id,
         request,
         schedule_task,
+        "launch-kernel",
     );
 }
 
@@ -55,9 +58,20 @@ pub fn launchDirectBundle(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!*task_runtime.TaskRecord {
-    try ensureRegisteredBundle(catalog, bundle, "register-direct");
-    const task = catalog.launchDirect(runtime_ptr, bundle.bundle_id, request) catch |err| {
-        logLaunchFailure(bundle.bundle_id, "launch-direct", err);
+    try ensureRegisteredBundle(catalog, bundle.bundle_id, "register-direct");
+    return launchDirectImage(catalog, runtime_ptr, bundle.bundle_id, request, schedule_task, "launch-direct");
+}
+
+fn launchDirectImage(
+    catalog: *userspace_loader.Catalog,
+    runtime_ptr: *task_runtime.Runtime,
+    bundle_id: []const u8,
+    request: userspace_loader.LaunchRequest,
+    schedule_task: anytype,
+    failure_phase: []const u8,
+) Error!*task_runtime.TaskRecord {
+    const task = catalog.launchDirect(runtime_ptr, bundle_id, request) catch |err| {
+        logLaunchFailure(bundle_id, failure_phase, err);
         return err;
     };
     scheduleTask(schedule_task, task.id);
@@ -71,9 +85,20 @@ pub fn launchKernelBundle(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!abi.TaskDescriptor {
-    try ensureRegisteredBundle(catalog, bundle, "register-kernel");
-    const task = catalog.launchViaKernel(authority, bundle.bundle_id, request) catch |err| {
-        logLaunchFailure(bundle.bundle_id, "launch-kernel", err);
+    try ensureRegisteredBundle(catalog, bundle.bundle_id, "register-kernel");
+    return launchKernelImage(catalog, authority, bundle.bundle_id, request, schedule_task, "launch-kernel");
+}
+
+fn launchKernelImage(
+    catalog: *userspace_loader.Catalog,
+    authority: userspace_loader.KernelLaunchAuthority,
+    bundle_id: []const u8,
+    request: userspace_loader.LaunchRequest,
+    schedule_task: anytype,
+    failure_phase: []const u8,
+) Error!abi.TaskDescriptor {
+    const task = catalog.launchViaKernel(authority, bundle_id, request) catch |err| {
+        logLaunchFailure(bundle_id, failure_phase, err);
         return err;
     };
     scheduleTask(schedule_task, task.task_id);
@@ -82,24 +107,24 @@ pub fn launchKernelBundle(
 
 fn ensureRegisteredBundle(
     catalog: *userspace_loader.Catalog,
-    bundle: manifest.BundleManifest,
+    bundle_id: []const u8,
     failure_phase: []const u8,
 ) Error!void {
-    if (catalog.findByBundleId(bundle.bundle_id)) |image| {
+    if (catalog.findByBundleId(bundle_id)) |image| {
         if (!image.embedsElf()) {
             return error.EmbeddedArtifactRequired;
         }
         return;
     }
 
-    if (userspace_boot_registry.find(bundle.bundle_id) != null) {
+    if (userspace_boot_registry.find(bundle_id) != null) {
         try userspace_boot_registry.registerAll(catalog);
-        const image = catalog.findByBundleId(bundle.bundle_id) orelse return error.ImageNotFound;
+        const image = catalog.findByBundleId(bundle_id) orelse return error.ImageNotFound;
         if (!image.embedsElf()) return error.EmbeddedArtifactRequired;
         return;
     }
 
-    logLaunchFailure(bundle.bundle_id, failure_phase, error.EmbeddedArtifactRequired);
+    logLaunchFailure(bundle_id, failure_phase, error.EmbeddedArtifactRequired);
     return error.EmbeddedArtifactRequired;
 }
 

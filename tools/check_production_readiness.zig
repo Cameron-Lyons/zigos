@@ -4026,7 +4026,7 @@ fn validateNativeOnlyLaunchTrack(
         "if (!image.embedsElf()) {",
         "try userspace_boot_registry.registerAll(catalog)",
         "if (!image.embedsElf()) return error.EmbeddedArtifactRequired",
-        "logLaunchFailure(bundle.bundle_id, failure_phase, error.EmbeddedArtifactRequired)",
+        "logLaunchFailure(bundle_id, failure_phase, error.EmbeddedArtifactRequired)",
     };
     for (required_launch_snippets) |snippet| {
         if (std.mem.indexOf(u8, launch_source, snippet) == null) {

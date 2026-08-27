@@ -49,11 +49,6 @@ pub fn specAt(index: usize) ?*const role_registry.ImageSpec {
     return &active_boot_image_specs[index];
 }
 
-pub fn manifestFor(bundle_id: []const u8) Error!manifest.BundleManifest {
-    const spec = find(bundle_id) orelse return error.UnknownBundleId;
-    return bundleForSpec(spec);
-}
-
 pub fn signerFor(bundle_id: []const u8) Error![]const u8 {
     const spec = find(bundle_id) orelse return error.UnknownBundleId;
     return (try userspace_manifest_signing.identityForPublisher(spec.publisher)).label;
@@ -63,7 +58,8 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
     for (active_boot_image_specs, 0..) |spec, artifact_index| {
         const artifact = archive_index.artifacts[artifact_index];
         try validateGeneratedArtifact(artifact);
-        const bundle = try bundleForSpec(&spec);
+        const components = [_]manifest.ExecutionComponentDecl{.{ .id = spec.label, .entry = spec.entry }};
+        const bundle = try bundleForSpec(&spec, &components);
         const executable_image = try executableImageFromArtifact(artifact);
         _ = catalog.registerBuildValidatedArtifact(.{
             .bundle = bundle,
@@ -92,14 +88,17 @@ pub fn bundleIdForServiceClass(class: contract.ServiceClass) Error![]const u8 {
     return service_catalog.bundleIdForServiceClass(class) orelse error.UnsupportedServiceClass;
 }
 
-fn bundleForSpec(spec: *const role_registry.ImageSpec) Error!manifest.BundleManifest {
+fn bundleForSpec(
+    spec: *const role_registry.ImageSpec,
+    components: []const manifest.ExecutionComponentDecl,
+) Error!manifest.BundleManifest {
     var bundle = manifest.BundleManifest{
         .bundle_id = spec.bundle_id,
         .display_name = spec.display_name,
         .publisher = spec.publisher,
         .provided_interfaces = spec.provided_interfaces,
         .consumed_interfaces = spec.consumed_interfaces,
-        .components = spec.components,
+        .components = components,
         .assets = spec.assets,
         .update_channel = spec.update_channel,
     };
