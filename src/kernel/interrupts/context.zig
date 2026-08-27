@@ -1,14 +1,23 @@
-var depth: u32 = 0;
+var local_depth: u32 = 0;
+
+fn depthSlot() *volatile u32 {
+    // The native runtime boots one logical processor, so interrupt nesting is
+    // CPU-local. Volatile access models asynchronous entry without cross-CPU locks.
+    return &local_depth;
+}
 
 pub fn enter() void {
-    _ = @atomicRmw(u32, &depth, .Add, 1, .seq_cst);
+    const depth = depthSlot();
+    depth.* +%= 1;
 }
 
 pub fn leave() void {
-    const previous = @atomicRmw(u32, &depth, .Sub, 1, .seq_cst);
+    const depth = depthSlot();
+    const previous = depth.*;
     if (previous == 0) unreachable;
+    depth.* = previous - 1;
 }
 
 pub fn active() bool {
-    return @atomicLoad(u32, &depth, .seq_cst) != 0;
+    return depthSlot().* != 0;
 }

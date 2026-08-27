@@ -7,6 +7,7 @@ const driver_runtime = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const first_target_telemetry = @import("../../kernel/drivers/first_target_telemetry.zig");
 const intel_i225_tx = @import("../../kernel/drivers/intel_i225_tx.zig");
+const interrupt_context = @import("../../kernel/interrupts/context.zig");
 const nvme_completion = @import("../../kernel/drivers/nvme_completion.zig");
 const nvme_prp = @import("../../kernel/drivers/nvme_prp.zig");
 const nvme_timing = @import("../../kernel/drivers/nvme_timing.zig");
@@ -24,4 +25,16 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(nvme_prp);
     std.testing.refAllDecls(nvme_timing);
     std.testing.refAllDecls(network_driver_task);
+}
+
+test "interrupt context tracks nested entry" {
+    try std.testing.expect(!interrupt_context.active());
+    interrupt_context.enter();
+    try std.testing.expect(interrupt_context.active());
+    interrupt_context.enter();
+    try std.testing.expect(interrupt_context.active());
+    interrupt_context.leave();
+    try std.testing.expect(interrupt_context.active());
+    interrupt_context.leave();
+    try std.testing.expect(!interrupt_context.active());
 }
