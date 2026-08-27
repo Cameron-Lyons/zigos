@@ -29,10 +29,11 @@ pub const SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_OMIT_BUILD_LOOKUP_METADATA = true;
 pub const COMPACT_RUNTIME_IMAGE_CONTRACT_METADATA = true;
 pub const RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS = true;
+pub const RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS = true;
 pub const RuntimeRoleTag = u16;
 pub const RuntimeHeartbeatIncrement = u8;
 pub const RuntimeContractFlags = u16;
-pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 120;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 96;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -80,14 +81,26 @@ pub const ImageSpec = struct {
     publisher: Publisher,
     label: []const u8,
     entry: []const u8,
-    provided_interfaces: []const manifest.InterfaceDecl = &.{},
-    consumed_interfaces: []const manifest.InterfaceDecl = &.{},
-    assets: []const manifest.AssetDecl = &.{},
+    provided_interface: ?*const [1]manifest.InterfaceDecl = null,
+    consumed_interface: ?*const [1]manifest.InterfaceDecl = null,
+    asset: ?*const [1]manifest.AssetDecl = null,
     update_channel: manifest.UpdateChannel = .stable,
     component_class: ComponentClass,
     role_tag: RuntimeRoleTag,
     heartbeat_increment: RuntimeHeartbeatIncrement,
     contract_flags: RuntimeContractFlags = 0,
+
+    pub fn providedInterfaces(self: *const ImageSpec) []const manifest.InterfaceDecl {
+        return optionalManifestDecls(manifest.InterfaceDecl, self.provided_interface);
+    }
+
+    pub fn consumedInterfaces(self: *const ImageSpec) []const manifest.InterfaceDecl {
+        return optionalManifestDecls(manifest.InterfaceDecl, self.consumed_interface);
+    }
+
+    pub fn assets(self: *const ImageSpec) []const manifest.AssetDecl {
+        return optionalManifestDecls(manifest.AssetDecl, self.asset);
+    }
 };
 
 pub const BuildImageSpec = struct {
@@ -127,7 +140,7 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
                 @compileError("userspace service publisher is not represented by the runtime catalog"),
             .label = catalog_image.label,
             .entry = catalog_image.entry,
-            .provided_interfaces = &.{entry.interface},
+            .provided_interface = optionalManifestDecl(manifest.InterfaceDecl, &.{entry.interface}, "provided interfaces"),
             .component_class = component_class,
             .role_tag = @intCast(catalog_image.role_tag),
             .heartbeat_increment = @intCast(catalog_image.heartbeat_increment),
@@ -140,7 +153,7 @@ fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: Componen
     };
 }
 
-pub fn standaloneBuildImageSpec(spec: StandaloneImageSpec) BuildImageSpec {
+pub fn standaloneBuildImageSpec(comptime spec: StandaloneImageSpec) BuildImageSpec {
     return .{
         .image = .{
             .bundle_id = spec.bundle_id,
@@ -148,9 +161,9 @@ pub fn standaloneBuildImageSpec(spec: StandaloneImageSpec) BuildImageSpec {
             .publisher = spec.publisher,
             .label = spec.label,
             .entry = spec.entry,
-            .provided_interfaces = spec.provided_interfaces,
-            .consumed_interfaces = spec.consumed_interfaces,
-            .assets = spec.assets,
+            .provided_interface = optionalManifestDecl(manifest.InterfaceDecl, spec.provided_interfaces, "provided interfaces"),
+            .consumed_interface = optionalManifestDecl(manifest.InterfaceDecl, spec.consumed_interfaces, "consumed interfaces"),
+            .asset = optionalManifestDecl(manifest.AssetDecl, spec.assets, "assets"),
             .update_channel = spec.update_channel,
             .component_class = spec.component_class,
             .role_tag = @intCast(spec.role_tag),
@@ -268,6 +281,21 @@ pub fn runtimeImageSpecs(comptime build_specs: anytype) [build_specs.len]ImageSp
     var runtime_specs: [build_specs.len]ImageSpec = undefined;
     for (build_specs, 0..) |spec, index| runtime_specs[index] = spec.image;
     return runtime_specs;
+}
+
+fn optionalManifestDecl(
+    comptime Decl: type,
+    comptime decls: []const Decl,
+    comptime description: []const u8,
+) ?*const [1]Decl {
+    if (decls.len > 1) {
+        @compileError("runtime image catalog supports at most one " ++ description ++ " declaration");
+    }
+    return if (decls.len == 1) &.{decls[0]} else null;
+}
+
+fn optionalManifestDecls(comptime Decl: type, decl: ?*const [1]Decl) []const Decl {
+    return decl orelse &.{};
 }
 
 pub const role_boot_image_specs = production_boot_image_specs;
@@ -445,6 +473,10 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(Publisher.fromName("zigos.unknown") == null);
     try std.testing.expectEqualStrings("zigos.system", Publisher.system.name());
     try std.testing.expectEqualStrings("zigos.dev", Publisher.development.name());
+    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS);
+    try std.testing.expectEqual(?*const [1]manifest.InterfaceDecl, @FieldType(ImageSpec, "provided_interface"));
+    try std.testing.expectEqual(?*const [1]manifest.InterfaceDecl, @FieldType(ImageSpec, "consumed_interface"));
+    try std.testing.expectEqual(?*const [1]manifest.AssetDecl, @FieldType(ImageSpec, "asset"));
     try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
     for (production_build_image_specs, 0..) |build_spec, index| {
         const spec = build_spec.image;
@@ -490,6 +522,21 @@ test "core platform services use the parameterized userspace service entrypoint"
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.object_resilience).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.secret_vault).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/component_main.zig", buildImageByServiceClass(.policy_mediation).?.source_path);
+}
+
+test "compact runtime manifest declarations preserve populated and empty collections" {
+    const viewer = findProduction("app.viewer") orelse return error.MissingViewerImage;
+    try std.testing.expectEqual(@as(usize, 1), viewer.providedInterfaces().len);
+    try std.testing.expectEqualStrings("zigos.viewer.document", viewer.providedInterfaces()[0].name);
+    try std.testing.expectEqual(@as(usize, 1), viewer.consumedInterfaces().len);
+    try std.testing.expectEqualStrings("zigos.object.workspace", viewer.consumedInterfaces()[0].name);
+    try std.testing.expectEqual(@as(usize, 1), viewer.assets().len);
+    try std.testing.expectEqualStrings("assets/viewer/icon.svg", viewer.assets()[0].path);
+
+    const network_service = findByServiceClass(.network_stack) orelse return error.MissingNetworkServiceImage;
+    try std.testing.expectEqual(@as(usize, 1), network_service.providedInterfaces().len);
+    try std.testing.expectEqual(@as(usize, 0), network_service.consumedInterfaces().len);
+    try std.testing.expectEqual(@as(usize, 0), network_service.assets().len);
 }
 
 test "production userspace registry contains exactly the production boot catalog" {

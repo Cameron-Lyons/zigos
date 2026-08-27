@@ -96,10 +96,10 @@ fn bundleForSpec(
         .bundle_id = spec.bundle_id,
         .display_name = spec.display_name,
         .publisher = spec.publisher.name(),
-        .provided_interfaces = spec.provided_interfaces,
-        .consumed_interfaces = spec.consumed_interfaces,
+        .provided_interfaces = spec.providedInterfaces(),
+        .consumed_interfaces = spec.consumedInterfaces(),
         .components = components,
-        .assets = spec.assets,
+        .assets = spec.assets(),
         .update_channel = spec.update_channel,
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);

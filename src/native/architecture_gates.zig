@@ -446,6 +446,11 @@ pub const indexed_hot_path_tables = .{
         .uses_compact_runtime_publishers = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_USE_COMPACT_PUBLISHERS and
             @FieldType(userspace_registry.ImageSpec, "publisher") == userspace_registry.Publisher and
             @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
+        .uses_optional_runtime_manifest_declarations = userspace_registry.RUNTIME_IMAGE_DESCRIPTORS_USE_OPTIONAL_MANIFEST_DECLS and
+            @FieldType(userspace_registry.ImageSpec, "provided_interface") == ?*const [1]manifest.InterfaceDecl and
+            @FieldType(userspace_registry.ImageSpec, "consumed_interface") == ?*const [1]manifest.InterfaceDecl and
+            @FieldType(userspace_registry.ImageSpec, "asset") == ?*const [1]manifest.AssetDecl and
+            @sizeOf(userspace_registry.ImageSpec) <= userspace_registry.IMAGE_SPEC_SIZE_CEILING_BYTES,
     },
     .userspace_launch = .{
         .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,
