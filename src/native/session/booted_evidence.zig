@@ -27,6 +27,7 @@ const signing = @import("../core/signing.zig");
 const storage_scenarios = @import("../demo/storage_scenarios.zig");
 const sync_scenarios = @import("../demo/sync_scenarios.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const transient_sync_service = @import("../sync/transient_service.zig");
 const xhci = @import("../../kernel/drivers/xhci.zig");
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -174,15 +175,17 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         scenario_support.diagnostic_ledger_signer,
     ) catch |err| native_util.bootProofFailure("booted evidence", err);
     lifecycle_context.update_ledger.absorb(&early_boot_ledger) catch |err| native_util.bootProofFailure("booted evidence", err);
-    var sync_service = sync_service_mod.Service.initWithStorage(
+    var sync_service_instance = transient_sync_service.Instance.init(
         lifecycle_context.sync_service_id,
         lifecycle_context.sync_task_id,
         lifecycle_context.sync_service_principal,
         lifecycle_context.storage_service_instance,
         lifecycle_context.sync_resident_state,
     ) catch |err| native_util.bootProofFailure("booted evidence", err);
-    _ = sync_scenarios.run(&lifecycle_context, &sync_service, storage_state);
-    if (!runNotesDailyDriverJourney(manager, graph, &lifecycle_context, &sync_service, &compositor_service, storage_state)) {
+    defer sync_service_instance.deinit();
+    const sync_service = sync_service_instance.ptr();
+    _ = sync_scenarios.run(&lifecycle_context, sync_service, storage_state);
+    if (!runNotesDailyDriverJourney(manager, graph, &lifecycle_context, sync_service, &compositor_service, storage_state)) {
         return false;
     }
     if (!runBootedNotesTypedInputLoop(graph, &lifecycle_context, &compositor_service, storage_state)) {

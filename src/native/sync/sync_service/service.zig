@@ -288,6 +288,19 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             storage: *storage_service.Service,
             resident_state: *ResidentState,
         ) Error!Self {
+            var service: Self = undefined;
+            try initWithStorageInto(&service, service_id, task_id, owner, storage, resident_state);
+            return service;
+        }
+
+        pub fn initWithStorageInto(
+            service: *Self,
+            service_id: u64,
+            task_id: u64,
+            owner: principal.PrincipalId,
+            storage: *storage_service.Service,
+            resident_state: *ResidentState,
+        ) Error!void {
             const workspace_id = try state_store.ensureWorkspace(storage, owner);
             const loaded_existing_state = if (resident_state.has_persisted_state)
                 true
@@ -298,10 +311,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 resident_state.resetForServiceInit();
             }
 
-            var service = initWithPreparedResidentState(service_id, task_id, owner, resident_state, loaded_existing_state);
+            service.* = initWithPreparedResidentState(service_id, task_id, owner, resident_state, loaded_existing_state);
             service.storage = storage;
             service.state_workspace_id = workspace_id;
-            return service;
         }
 
         pub fn bindSyncAdapters(

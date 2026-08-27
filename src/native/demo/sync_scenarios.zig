@@ -5,6 +5,7 @@ const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const std = @import("std");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const transient_sync_service = @import("../sync/transient_service.zig");
 const sync_transport = @import("../sync/sync_transport.zig");
 const support = @import("scenario_support.zig");
 
@@ -349,13 +350,15 @@ pub fn run(
         _ = context.supervisor.requestRestart(context.sync_service_id, 106);
         _ = context.runtime.rehostTask(context.sync_task_id, 106) catch |err| native_util.bootProofFailure("sync scenarios", err);
         var restarted_sync_resident = sync_service_mod.ResidentState{};
-        var restarted_sync_service = sync_service_mod.Service.initWithStorage(
+        var restarted_sync_instance = transient_sync_service.Instance.init(
             context.sync_service_id,
             context.sync_task_id,
             context.sync_service_principal,
             context.storage_service_instance,
             &restarted_sync_resident,
         ) catch |err| native_util.bootProofFailure("sync scenarios", err);
+        defer restarted_sync_instance.deinit();
+        const restarted_sync_service = restarted_sync_instance.ptr();
         _ = context.supervisor.completeRestart(context.sync_service_id, 107);
         if (restarted_sync_service.loaded_existing_state and
             restarted_sync_service.findWorkspacePolicy(storage_state.notes_workspace_id) != null and

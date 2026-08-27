@@ -22,6 +22,7 @@ const session_contexts = @import("session_manager_contexts.zig");
 const signing = @import("../core/signing.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service = @import("../sync/sync_service.zig");
+const transient_sync_service = @import("../sync/transient_service.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const update_health = @import("../platform/update_health.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
@@ -216,14 +217,16 @@ pub const TrustBoot = struct {
         const workspace_id = manager.workspace_id;
         const sync_record = self.supervisor.findByClass(.sync_replication) orelse return false;
         const sync_resident_state = self.native_store.syncResidentStatePtr() catch return false;
-        var sync_instance = sync_service.Service.initWithStorage(
+        var sync_instance_storage = transient_sync_service.Instance.init(
             sync_record.id,
             graph.service_bindings.bindingFor(.sync_replication).task_id,
             sync_record.owner,
             &self.native_store.storage_service_instance,
             sync_resident_state,
         ) catch return false;
-        const network_probe = self.seedProductionHealthNetworkProbe(&sync_instance, workspace_id, 81) catch return false;
+        defer sync_instance_storage.deinit();
+        const sync_instance = sync_instance_storage.ptr();
+        const network_probe = self.seedProductionHealthNetworkProbe(sync_instance, workspace_id, 81) catch return false;
         const compositor_task = self.runtime.find(graph.service_bindings.bindingFor(.compositor_ui_session).task_id) orelse return false;
         var compositor_snapshot: compositor_session.SessionSnapshot = undefined;
         self.compositor.snapshotInto(&compositor_snapshot);
