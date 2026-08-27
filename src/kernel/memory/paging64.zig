@@ -273,13 +273,37 @@ pub fn directMapAddress(address: frame_allocator.PhysicalAddress) ?usize {
 fn tryAllocFrame() ?frame_allocator.PhysicalAddress {
     acquireFrameLock();
     defer releaseFrameLock();
-    if (high_memory_zone_has_free_frames) {
-        if (physical_frames.allocateBetween(1, LOW_IDENTITY_PHYSICAL_LIMIT, MANAGED_PHYSICAL_BYTES)) |run| {
-            return run.base;
-        }
-        high_memory_zone_has_free_frames = false;
+    return (allocGeneralFramesLocked(1) orelse return null).base;
+}
+
+pub fn allocGeneralFrames(count: u32) ?FrameRun {
+    acquireFrameLock();
+    defer releaseFrameLock();
+    return allocGeneralFramesLocked(count);
+}
+
+fn allocGeneralFramesLocked(count: u32) ?FrameRun {
+    return allocGeneralRunFrom(
+        &physical_frames,
+        &high_memory_zone_has_free_frames,
+        count,
+        LOW_IDENTITY_PHYSICAL_LIMIT,
+        MANAGED_PHYSICAL_BYTES,
+    );
+}
+
+fn allocGeneralRunFrom(
+    allocator: anytype,
+    high_zone_has_free_frames: *bool,
+    count: u32,
+    low_identity_limit: frame_allocator.PhysicalAddress,
+    managed_bytes: frame_allocator.PhysicalAddress,
+) ?FrameRun {
+    if (high_zone_has_free_frames.*) {
+        if (allocator.allocateBetween(count, low_identity_limit, managed_bytes)) |run| return run;
+        if (count == 1) high_zone_has_free_frames.* = false;
     }
-    return (physical_frames.allocateBelow(1, LOW_IDENTITY_PHYSICAL_LIMIT) orelse return null).base;
+    return allocator.allocateBelow(count, low_identity_limit);
 }
 
 pub fn allocLowIdentityFrames(count: u32) ?u32 {
@@ -291,6 +315,10 @@ pub fn allocLowIdentityFrames(count: u32) ?u32 {
 
 pub fn releaseLowIdentityFrames(base: u32, count: u32) FrameReleaseError!void {
     return releasePhysicalFrames(base, count);
+}
+
+pub fn releaseGeneralFrames(run: FrameRun) FrameReleaseError!void {
+    return releasePhysicalFrames(run.base, run.count);
 }
 
 fn releasePhysicalFrames(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
@@ -964,6 +992,70 @@ test "direct physical aliases cover only the managed aperture" {
         directMapAddress(MANAGED_PHYSICAL_BYTES - 1).?,
     );
     try std.testing.expect(directMapAddress(MANAGED_PHYSICAL_BYTES) == null);
+}
+
+test "general contiguous allocation prefers high memory" {
+    const test_frame_count = 8;
+    const low_frame_count = 4;
+    const managed_bytes = test_frame_count * PAGE_SIZE;
+    const low_identity_limit = low_frame_count * PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var allocator = TestAllocator.init();
+    var high_zone_has_free_frames = true;
+
+    const run = allocGeneralRunFrom(
+        &allocator,
+        &high_zone_has_free_frames,
+        2,
+        low_identity_limit,
+        managed_bytes,
+    ).?;
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), run.base);
+    try std.testing.expectEqual(@as(u32, 2), run.count);
+    try std.testing.expect(high_zone_has_free_frames);
+}
+
+test "general contiguous allocation preserves the high-memory availability hint across fragmentation" {
+    const test_frame_count = 8;
+    const low_frame_count = 4;
+    const managed_bytes = test_frame_count * PAGE_SIZE;
+    const low_identity_limit = low_frame_count * PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var allocator = TestAllocator.init();
+    try allocator.reserve(.{ .base = 4 * PAGE_SIZE, .count = 1 });
+    try allocator.reserve(.{ .base = 6 * PAGE_SIZE, .count = 1 });
+    var high_zone_has_free_frames = true;
+
+    const run = allocGeneralRunFrom(
+        &allocator,
+        &high_zone_has_free_frames,
+        2,
+        low_identity_limit,
+        managed_bytes,
+    ).?;
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 0), run.base);
+    try std.testing.expect(high_zone_has_free_frames);
+}
+
+test "general single-frame allocation caches an exhausted high zone" {
+    const test_frame_count = 8;
+    const low_frame_count = 4;
+    const managed_bytes = test_frame_count * PAGE_SIZE;
+    const low_identity_limit = low_frame_count * PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var allocator = TestAllocator.init();
+    try allocator.reserve(.{ .base = low_identity_limit, .count = test_frame_count - low_frame_count });
+    var high_zone_has_free_frames = true;
+
+    const run = allocGeneralRunFrom(
+        &allocator,
+        &high_zone_has_free_frames,
+        1,
+        low_identity_limit,
+        managed_bytes,
+    ).?;
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 0), run.base);
+    try std.testing.expect(!high_zone_has_free_frames);
 }
 
 test "direct hierarchy covers the full 64 GiB physical aperture" {
