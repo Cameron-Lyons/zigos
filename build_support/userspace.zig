@@ -5,8 +5,8 @@ const verification_registry = @import("../src/native/task/userspace_verification
 const userspace_layout = @import("../src/native/core/userspace_layout.zig");
 const bootloader_source_path = "src/boot/boot_x86_64.S";
 
-pub const production_artifact_count = production_registry.production_boot_image_specs.len;
-pub const verification_only_artifact_count = verification_registry.verification_only_boot_image_specs.len;
+pub const production_artifact_count = production_registry.production_build_image_specs.len;
+pub const verification_only_artifact_count = verification_registry.verification_only_build_image_specs.len;
 
 pub const ArtifactSet = struct {
     step: *std.Build.Step,
@@ -66,22 +66,22 @@ pub fn addUserspaceArtifacts(
     var production_install_steps: [production_artifact_count]*std.Build.Step = undefined;
     var verification_only_install_steps: [verification_only_artifact_count]*std.Build.Step = undefined;
 
-    for (production_registry.production_boot_image_specs, 0..) |spec, artifact_index| {
+    for (production_registry.production_build_image_specs, 0..) |spec, artifact_index| {
         const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
         production_compile_steps[artifact_index] = artifact.compile_step;
         production_install_steps[artifact_index] = artifact.install_step;
-        production_archive_run.addArg(spec.bundle_id);
+        production_archive_run.addArg(spec.image.bundle_id);
         production_archive_run.addArtifactArg(artifact.compile_step);
-        verification_archive_run.addArg(spec.bundle_id);
+        verification_archive_run.addArg(spec.image.bundle_id);
         verification_archive_run.addArtifactArg(artifact.compile_step);
         production_step.dependOn(artifact.install_step);
         verification_step.dependOn(artifact.install_step);
     }
-    for (verification_registry.verification_only_boot_image_specs, 0..) |spec, artifact_index| {
+    for (verification_registry.verification_only_build_image_specs, 0..) |spec, artifact_index| {
         const artifact = addUserspaceArtifact(b, target, optimize, userspace_modules, spec);
         verification_only_compile_steps[artifact_index] = artifact.compile_step;
         verification_only_install_steps[artifact_index] = artifact.install_step;
-        verification_archive_run.addArg(spec.bundle_id);
+        verification_archive_run.addArg(spec.image.bundle_id);
         verification_archive_run.addArtifactArg(artifact.compile_step);
         verification_step.dependOn(artifact.install_step);
     }
@@ -96,7 +96,7 @@ pub fn addUserspaceArtifacts(
         .step = step,
         .production_step = production_step,
         .verification_step = verification_step,
-        .production_count = production_registry.production_boot_image_specs.len,
+        .production_count = production_registry.production_build_image_specs.len,
         .verification_count = verification_registry.verification_boot_image_specs.len,
         .production_compile_steps = production_compile_steps,
         .verification_only_compile_steps = verification_only_compile_steps,
@@ -147,9 +147,9 @@ fn addUserspaceArtifact(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     userspace_modules: native_modules.UserspaceRuntimeModules,
-    spec: production_registry.ImageSpec,
+    spec: production_registry.BuildImageSpec,
 ) BuiltArtifact {
-    const artifact = addUserspaceCompile(b, target, optimize, userspace_modules, spec, spec.artifact_name);
+    const artifact = addUserspaceCompile(b, target, optimize, userspace_modules, spec.image, spec.source_path, spec.artifact_name);
     const install = b.addInstallArtifact(artifact, .{});
     return .{
         .compile_step = artifact,
@@ -163,6 +163,7 @@ fn addUserspaceCompile(
     optimize: std.builtin.OptimizeMode,
     userspace_modules: native_modules.UserspaceRuntimeModules,
     spec: production_registry.ImageSpec,
+    source_path: []const u8,
     artifact_name: []const u8,
 ) *std.Build.Step.Compile {
     const options = b.addOptions();
@@ -175,7 +176,7 @@ fn addUserspaceCompile(
     options.addOption(u8, "service_kind", @intFromEnum(spec.service_kind));
 
     const module = b.createModule(.{
-        .root_source_file = b.path(spec.source_path),
+        .root_source_file = b.path(source_path),
         .target = target,
         .optimize = optimize,
         .strip = true,

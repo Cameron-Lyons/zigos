@@ -3004,9 +3004,11 @@ fn serviceBootImageRegistryCheck(
     interface_name: []const u8,
 ) bool {
     const image = userspace_registry.findByServiceClass(class) orelse return false;
+    const catalog_entry = service_catalog.entryForClass(class) orelse return false;
+    const build_image = catalog_entry.userspace_image orelse return false;
     return std.mem.eql(u8, image.bundle_id, bundle_id) and
-        std.mem.eql(u8, image.artifact_name, artifact_name) and
-        std.mem.eql(u8, image.source_path, "src/userspace/service_main.zig") and
+        std.mem.eql(u8, build_image.artifact_name, artifact_name) and
+        std.mem.eql(u8, build_image.source_path, "src/userspace/service_main.zig") and
         image.service_class.? == class and
         image.provided_interfaces.len == 1 and
         std.mem.eql(u8, image.provided_interfaces[0].name, interface_name);

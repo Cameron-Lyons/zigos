@@ -24,6 +24,8 @@ pub const DIRECT_SERVICE_CLASS_SLOTS = true;
 pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(contract.ServiceClass).len;
 pub const ServiceClassSlotIndex = u8;
+pub const RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA = true;
+pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 168;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -49,8 +51,6 @@ pub const ContractSpec = struct {
 
 pub const ImageSpec = struct {
     bundle_id: []const u8,
-    artifact_name: []const u8,
-    source_path: []const u8 = "src/userspace/component_main.zig",
     display_name: []const u8,
     publisher: []const u8,
     label: []const u8,
@@ -66,6 +66,12 @@ pub const ImageSpec = struct {
     contract_flags: u32 = 0,
     service_class: ?contract.ServiceClass = null,
     service_kind: userspace_mailbox.ServiceKind = .generic,
+};
+
+pub const BuildImageSpec = struct {
+    image: ImageSpec,
+    artifact_name: []const u8,
+    source_path: []const u8,
 };
 
 pub const StandaloneImageSpec = struct {
@@ -86,54 +92,58 @@ pub const StandaloneImageSpec = struct {
     contract_flags: u32 = 0,
 };
 
-fn serviceImageSpec(class: contract.ServiceClass, component_class: ComponentClass) ImageSpec {
+fn serviceBuildImageSpec(class: contract.ServiceClass, component_class: ComponentClass) BuildImageSpec {
     const entry = service_catalog.entryForClass(class).?;
-    const image = entry.userspace_image.?;
+    const catalog_image = entry.userspace_image.?;
     return .{
-        .bundle_id = image.bundle_id,
-        .artifact_name = image.artifact_name,
-        .source_path = image.source_path,
-        .display_name = image.display_name,
-        .publisher = image.publisher,
-        .label = image.label,
-        .entry = image.entry,
-        .components = &.{.{ .id = image.label, .entry = image.entry }},
-        .provided_interfaces = &.{entry.interface},
-        .component_class = component_class,
-        .role_tag = image.role_tag,
-        .heartbeat_increment = image.heartbeat_increment,
-        .contract_flags = image.contract_flags,
-        .service_class = class,
-        .service_kind = image.service_kind,
+        .image = .{
+            .bundle_id = catalog_image.bundle_id,
+            .display_name = catalog_image.display_name,
+            .publisher = catalog_image.publisher,
+            .label = catalog_image.label,
+            .entry = catalog_image.entry,
+            .components = &.{.{ .id = catalog_image.label, .entry = catalog_image.entry }},
+            .provided_interfaces = &.{entry.interface},
+            .component_class = component_class,
+            .role_tag = catalog_image.role_tag,
+            .heartbeat_increment = catalog_image.heartbeat_increment,
+            .contract_flags = catalog_image.contract_flags,
+            .service_class = class,
+            .service_kind = catalog_image.service_kind,
+        },
+        .artifact_name = catalog_image.artifact_name,
+        .source_path = catalog_image.source_path,
     };
 }
 
-pub fn standaloneImageSpec(spec: StandaloneImageSpec) ImageSpec {
+pub fn standaloneBuildImageSpec(spec: StandaloneImageSpec) BuildImageSpec {
     return .{
-        .bundle_id = spec.bundle_id,
+        .image = .{
+            .bundle_id = spec.bundle_id,
+            .display_name = spec.display_name,
+            .publisher = spec.publisher,
+            .label = spec.label,
+            .entry = spec.entry,
+            .components = &.{.{ .id = spec.label, .entry = spec.entry }},
+            .provided_interfaces = spec.provided_interfaces,
+            .consumed_interfaces = spec.consumed_interfaces,
+            .assets = spec.assets,
+            .update_channel = spec.update_channel,
+            .component_class = spec.component_class,
+            .role_tag = spec.role_tag,
+            .heartbeat_increment = spec.heartbeat_increment,
+            .contract_flags = spec.contract_flags,
+        },
         .artifact_name = spec.artifact_name,
         .source_path = spec.source_path,
-        .display_name = spec.display_name,
-        .publisher = spec.publisher,
-        .label = spec.label,
-        .entry = spec.entry,
-        .components = &.{.{ .id = spec.label, .entry = spec.entry }},
-        .provided_interfaces = spec.provided_interfaces,
-        .consumed_interfaces = spec.consumed_interfaces,
-        .assets = spec.assets,
-        .update_channel = spec.update_channel,
-        .component_class = spec.component_class,
-        .role_tag = spec.role_tag,
-        .heartbeat_increment = spec.heartbeat_increment,
-        .contract_flags = spec.contract_flags,
     };
 }
 
-pub const production_boot_image_specs = [_]ImageSpec{
-    serviceImageSpec(.session_manager, .session_manager),
-    serviceImageSpec(.permission_review_ui, .service_component),
-    serviceImageSpec(.service_registry, .service_component),
-    standaloneImageSpec(.{
+pub const production_build_image_specs = [_]BuildImageSpec{
+    serviceBuildImageSpec(.session_manager, .session_manager),
+    serviceBuildImageSpec(.permission_review_ui, .service_component),
+    serviceBuildImageSpec(.service_registry, .service_component),
+    standaloneBuildImageSpec(.{
         .bundle_id = "zigos.system.workspace-storage",
         .artifact_name = "userspace-workspace-storage.elf",
         .display_name = "Workspace Storage",
@@ -144,7 +154,7 @@ pub const production_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 3,
         .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_STORAGE_BOUNDARY,
     }),
-    standaloneImageSpec(.{
+    standaloneBuildImageSpec(.{
         .bundle_id = "app.viewer",
         .artifact_name = "userspace-viewer.elf",
         .display_name = "Viewer",
@@ -158,7 +168,7 @@ pub const production_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 6,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
     }),
-    standaloneImageSpec(.{
+    standaloneBuildImageSpec(.{
         .bundle_id = "app.notes",
         .artifact_name = "userspace-notes.elf",
         .display_name = "Notes",
@@ -173,7 +183,7 @@ pub const production_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 7,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
     }),
-    standaloneImageSpec(.{
+    standaloneBuildImageSpec(.{
         .bundle_id = "app.sync",
         .artifact_name = "userspace-sync.elf",
         .display_name = "Sync",
@@ -187,7 +197,7 @@ pub const production_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 8,
         .contract_flags = FLAG_BACKGROUND_ELIGIBLE,
     }),
-    standaloneImageSpec(.{
+    standaloneBuildImageSpec(.{
         .bundle_id = "app.capture",
         .artifact_name = "userspace-capture.elf",
         .display_name = "Capture",
@@ -201,10 +211,10 @@ pub const production_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 9,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
     }),
-    serviceImageSpec(.policy_mediation, .service_component),
-    serviceImageSpec(.network_stack, .service_component),
-    serviceImageSpec(.storage_object, .service_component),
-    standaloneImageSpec(.{
+    serviceBuildImageSpec(.policy_mediation, .service_component),
+    serviceBuildImageSpec(.network_stack, .service_component),
+    serviceBuildImageSpec(.storage_object, .service_component),
+    standaloneBuildImageSpec(.{
         .bundle_id = "zigos.system.storage-driver",
         .artifact_name = "userspace-storage-driver.elf",
         .display_name = "Storage Driver",
@@ -215,19 +225,27 @@ pub const production_boot_image_specs = [_]ImageSpec{
         .heartbeat_increment = 13,
         .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY,
     }),
-    serviceImageSpec(.package_install_update, .service_component),
-    serviceImageSpec(.compositor_ui_session, .service_component),
-    serviceImageSpec(.indexing_search, .service_component),
-    serviceImageSpec(.personal_context, .service_component),
-    serviceImageSpec(.sync_replication, .service_component),
-    serviceImageSpec(.media_print_helpers, .service_component),
-    serviceImageSpec(.attention_broker, .service_component),
-    serviceImageSpec(.task_lifecycle, .service_component),
-    serviceImageSpec(.sensitive_capture, .service_component),
-    serviceImageSpec(.secure_pasteboard, .service_component),
-    serviceImageSpec(.object_resilience, .service_component),
-    serviceImageSpec(.secret_vault, .service_component),
+    serviceBuildImageSpec(.package_install_update, .service_component),
+    serviceBuildImageSpec(.compositor_ui_session, .service_component),
+    serviceBuildImageSpec(.indexing_search, .service_component),
+    serviceBuildImageSpec(.personal_context, .service_component),
+    serviceBuildImageSpec(.sync_replication, .service_component),
+    serviceBuildImageSpec(.media_print_helpers, .service_component),
+    serviceBuildImageSpec(.attention_broker, .service_component),
+    serviceBuildImageSpec(.task_lifecycle, .service_component),
+    serviceBuildImageSpec(.sensitive_capture, .service_component),
+    serviceBuildImageSpec(.secure_pasteboard, .service_component),
+    serviceBuildImageSpec(.object_resilience, .service_component),
+    serviceBuildImageSpec(.secret_vault, .service_component),
 };
+
+pub const production_boot_image_specs = runtimeImageSpecs(production_build_image_specs);
+
+pub fn runtimeImageSpecs(comptime build_specs: anytype) [build_specs.len]ImageSpec {
+    var runtime_specs: [build_specs.len]ImageSpec = undefined;
+    for (build_specs, 0..) |spec, index| runtime_specs[index] = spec.image;
+    return runtime_specs;
+}
 
 pub const role_boot_image_specs = production_boot_image_specs;
 
@@ -398,10 +416,19 @@ fn debugAssertServiceClassIndexMissAbsent(class: contract.ServiceClass) void {
     }
 }
 
+fn buildImageByServiceClass(class: contract.ServiceClass) ?*const BuildImageSpec {
+    const spec_index = publicServiceClassSlot(service_class_slots[serviceClassIndex(class)]) orelse return null;
+    return &production_build_image_specs[spec_index];
+}
+
 test "userspace registry definitions stay unique and keep typed contract metadata attached" {
     try std.testing.expect(DIRECT_SERVICE_CLASS_SLOTS);
     try std.testing.expectEqual(@as(u8, 0), SERVICE_CLASS_HASH_PROBES_PER_QUERY);
     try std.testing.expectEqual(@as(usize, SERVICE_CLASS_COUNT), userspace_registry_indexing.service_class_slot_bytes);
+    try std.testing.expect(RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA);
+    try std.testing.expect(!@hasField(ImageSpec, "artifact_name"));
+    try std.testing.expect(!@hasField(ImageSpec, "source_path"));
+    try std.testing.expect(@sizeOf(ImageSpec) <= IMAGE_SPEC_SIZE_CEILING_BYTES);
     for (production_boot_image_specs, 0..) |spec, index| {
         try std.testing.expect(spec.role_tag != 0);
         try std.testing.expect(spec.heartbeat_increment != 0);
@@ -428,23 +455,23 @@ test "userspace registry definitions stay unique and keep typed contract metadat
 }
 
 test "core platform services use the parameterized userspace service entrypoint" {
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.storage_object).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.storage_object).?.source_path);
     try std.testing.expectEqual(userspace_mailbox.ServiceKind.storage, findByServiceClass(.storage_object).?.service_kind);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.sync_replication).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.sync_replication).?.source_path);
     try std.testing.expectEqual(userspace_mailbox.ServiceKind.sync, findByServiceClass(.sync_replication).?.service_kind);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.network_stack).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.network_stack).?.source_path);
     try std.testing.expectEqual(userspace_mailbox.ServiceKind.network, findByServiceClass(.network_stack).?.service_kind);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.package_install_update).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.package_install_update).?.source_path);
     try std.testing.expectEqual(userspace_mailbox.ServiceKind.package, findByServiceClass(.package_install_update).?.service_kind);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.compositor_ui_session).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.compositor_ui_session).?.source_path);
     try std.testing.expectEqual(userspace_mailbox.ServiceKind.compositor, findByServiceClass(.compositor_ui_session).?.service_kind);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.attention_broker).?.source_path);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.task_lifecycle).?.source_path);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.sensitive_capture).?.source_path);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.secure_pasteboard).?.source_path);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.object_resilience).?.source_path);
-    try std.testing.expectEqualStrings("src/userspace/service_main.zig", findByServiceClass(.secret_vault).?.source_path);
-    try std.testing.expectEqualStrings("src/userspace/component_main.zig", findByServiceClass(.policy_mediation).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.attention_broker).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.task_lifecycle).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.sensitive_capture).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.secure_pasteboard).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.object_resilience).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.secret_vault).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/component_main.zig", buildImageByServiceClass(.policy_mediation).?.source_path);
 }
 
 test "production userspace registry contains exactly the production boot catalog" {
