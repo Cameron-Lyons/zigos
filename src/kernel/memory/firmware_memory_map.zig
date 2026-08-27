@@ -81,12 +81,7 @@ pub fn reserveLiveHandoffRanges(
     }
 
     for (runs[0..run_count]) |run| {
-        var frame: u32 = 0;
-        while (frame < run.count) : (frame += 1) {
-            if (allocator.isAllocated(run.base + frame * page_size)) {
-                return error.FrameAllocated;
-            }
-        }
+        try allocator.validateReservation(run);
     }
     for (runs[0..run_count]) |run| {
         try allocator.reserve(run);
@@ -287,6 +282,33 @@ test "live Multiboot information map and command-line pages stay reserved" {
     try std.testing.expect(allocator.isReserved(6 * TEST_PAGE_SIZE));
     try std.testing.expect(allocator.isReserved(7 * TEST_PAGE_SIZE));
     try std.testing.expectEqual(@as(u32, 5), allocator.stats().reserved);
+}
+
+test "live Multiboot reservation preflight is transactional across ranges" {
+    const memory_bytes = 16 * TEST_PAGE_SIZE;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var allocator = Allocator.init();
+    _ = allocator.allocate(7).?;
+    const info = testInfo(
+        1 << 6,
+        3 * TEST_PAGE_SIZE,
+        24,
+        0,
+    );
+
+    try std.testing.expectError(
+        error.FrameAllocated,
+        reserveLiveHandoffRanges(
+            memory_bytes,
+            TEST_PAGE_SIZE,
+            &allocator,
+            9 * TEST_PAGE_SIZE,
+            info,
+        ),
+    );
+    try std.testing.expect(!allocator.isReserved(9 * TEST_PAGE_SIZE));
+    try std.testing.expectEqual(@as(u32, 0), allocator.stats().reserved);
+    try std.testing.expectEqual(@as(u32, 7), allocator.stats().allocated);
 }
 
 test "live Multiboot ranges outside the identity aperture fail transactionally" {

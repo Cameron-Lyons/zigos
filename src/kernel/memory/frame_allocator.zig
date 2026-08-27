@@ -22,6 +22,7 @@ pub const Error = error{
 };
 
 pub const MUTATES_RANGES_BY_BITMAP_WORD = true;
+pub const RESERVATION_PREFLIGHT_USES_BITMAP_WORDS = true;
 
 pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
     if (page_size == 0 or (page_size & (page_size - 1)) != 0) {
@@ -57,21 +58,33 @@ pub fn Fixed(comptime memory_bytes: u32, comptime page_size: u32) type {
         }
 
         pub fn reserve(self: *Self, run: FrameRun) Error!void {
-            const start = try validateRun(run);
+            const start = try self.reservableStart(run);
+            self.reserveValidated(start, run.count);
+        }
 
+        pub fn validateReservation(self: *const Self, run: FrameRun) Error!void {
+            _ = try self.reservableStart(run);
+        }
+
+        fn reservableStart(self: *const Self, run: FrameRun) Error!u32 {
+            const start = try validateRun(run);
             if (self.rangeHasAny(&self.allocated_bitmap, start, run.count)) {
                 return error.FrameAllocated;
             }
+            return start;
+        }
+
+        fn reserveValidated(self: *Self, start: u32, count: u32) void {
             self.reserved_count += self.mutateRange(
                 &self.reserved_bitmap,
                 start,
-                run.count,
+                count,
                 true,
                 true,
             );
 
-            if (start <= self.search_frame_hint and self.search_frame_hint < start + run.count) {
-                self.search_frame_hint = if (start + run.count == frame_count) 0 else start + run.count;
+            if (start <= self.search_frame_hint and self.search_frame_hint < start + count) {
+                self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
             }
         }
 
@@ -505,10 +518,9 @@ test "reservation over a live allocation is rejected transactionally" {
     var allocator = Allocator.init();
 
     _ = allocator.allocate(1).?;
-    try std.testing.expectError(error.FrameAllocated, allocator.reserve(.{
-        .base = 0,
-        .count = 2,
-    }));
+    const run = FrameRun{ .base = 0, .count = 2 };
+    try std.testing.expectError(error.FrameAllocated, allocator.validateReservation(run));
+    try std.testing.expectError(error.FrameAllocated, allocator.reserve(run));
     try std.testing.expect(!allocator.isReserved(0));
     try std.testing.expect(!allocator.isReserved(4096));
     try std.testing.expectEqual(Stats{
@@ -517,6 +529,7 @@ test "reservation over a live allocation is rejected transactionally" {
         .allocated = 1,
         .free = 7,
     }, allocator.stats());
+    try std.testing.expect(RESERVATION_PREFLIGHT_USES_BITMAP_WORDS);
 }
 
 test "allocator reports exhaustion without changing statistics" {
