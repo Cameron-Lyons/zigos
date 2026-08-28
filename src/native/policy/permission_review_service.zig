@@ -1573,7 +1573,7 @@ test "rendered permission review surface drives allow deny controls through comp
     try std.testing.expect(object_decision.allowed);
     try std.testing.expect(object_decision.local_only);
     try std.testing.expectEqual(@as(u64, 450), object_decision.expires_at_ticks);
-    const object_capability = capability_table.query(object_decision.capability_id.?).?;
+    const object_capability = capability_table.query(object_decision.capabilityId().?).?;
     try std.testing.expect(runtime.hasCapability(task.id, object_capability.id));
     try std.testing.expectEqual(capability.CapabilityTargetKind.object, object_capability.target.kind);
     try std.testing.expect(object_capability.rights.has(.object_read));
@@ -1585,7 +1585,7 @@ test "rendered permission review surface drives allow deny controls through comp
     const network_decision = summary.decisionForKind(.network_egress).?;
     try std.testing.expect(!network_decision.allowed);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, network_decision.reason);
-    try std.testing.expect(network_decision.capability_id == null);
+    try std.testing.expect(network_decision.capabilityId() == null);
     try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .permission_decision, .task_id = task.id }));
     try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .capability_grant, .task_id = task.id }));
     try std.testing.expectEqual(task_runtime.AuditEventKind.permission_prompted, task.auditEventAt(0).?.kind);

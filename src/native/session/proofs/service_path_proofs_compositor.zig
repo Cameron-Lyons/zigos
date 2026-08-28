@@ -700,7 +700,7 @@ fn proveBootedRenderedPermissionReviewSurface(
     try std.testing.expect(object_decision.allowed);
     try std.testing.expect(object_decision.local_only);
     try std.testing.expectEqual(@as(u64, 557), object_decision.expires_at_ticks);
-    const object_capability = capability_table.query(object_decision.capability_id.?).?;
+    const object_capability = capability_table.query(object_decision.capabilityId().?).?;
     try std.testing.expect(runtime.hasCapability(app_task_id, object_capability.id));
     try std.testing.expectEqual(capability.CapabilityTargetKind.object, object_capability.target.kind);
     try std.testing.expectEqual(@as(?u64, app_task_id), object_capability.scope.task_id);
@@ -710,7 +710,7 @@ fn proveBootedRenderedPermissionReviewSurface(
     const network_decision = summary.decisionForKind(.network_egress).?;
     try std.testing.expect(!network_decision.allowed);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, network_decision.reason);
-    try std.testing.expect(network_decision.capability_id == null);
+    try std.testing.expect(network_decision.capabilityId() == null);
     try std.testing.expectEqual(@as(usize, 2), ledger.countMatching(.{ .kind = .permission_review, .task_id = app_task_id }));
     try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .permission_decision, .task_id = app_task_id }));
     try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .capability_grant, .task_id = app_task_id }));

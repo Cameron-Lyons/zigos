@@ -201,7 +201,7 @@ pub fn explicitGrantsRequireAuthority() !void {
     try std.testing.expect(network_decision.local_only);
     try std.testing.expectEqual(@as(u64, 70), network_decision.expires_at_ticks);
 
-    const network_capability = capability_table.query(network_decision.capability_id.?).?;
+    const network_capability = capability_table.query(network_decision.capabilityId().?).?;
     try std.testing.expectEqual(granted_task.id, network_capability.scope.task_id.?);
     try std.testing.expect(network_capability.scope.local_only);
     try std.testing.expect(network_capability.scope.broker_only);

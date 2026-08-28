@@ -310,6 +310,7 @@ pub const indexed_hot_path_tables = .{
     .capability_table = .{
         .uses_capability_arena = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandle"),
         .uses_generational_capability_ids = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "getByHandle"),
+        .reserves_zero_capability_id = capability.ZERO_CAPABILITY_ID_RESERVED,
         .stores_compact_grant_metadata = capability.COMPACT_GRANT_METADATA and
             @FieldType(capability.GrantPlan, "entry_count") == u8 and
             @FieldType(capability.GrantReservation, "slot_indexes") == [capability.MAX_GRANT_PLAN_ENTRIES]capability.CapabilitySlotIndex and
@@ -1097,6 +1098,9 @@ pub const indexed_hot_path_tables = .{
             permission_review_service.BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS == 0,
     },
     .policy_activation = .{
+        .stores_compact_capability_ids = policy_mediation.ZERO_CAPABILITY_ID_IS_NONE and
+            @FieldType(policy_mediation.PermissionDecision, "capability_id") == u64 and
+            @sizeOf(policy_mediation.PermissionDecision) <= policy_mediation.PERMISSION_DECISION_SIZE_CEILING_BYTES,
         .stores_compact_summary_metadata = policy_mediation.COMPACT_ACTIVATION_SUMMARY_METADATA and
             @FieldType(policy_mediation.ActivationSummary, "granted_count") == u8 and
             @FieldType(policy_mediation.ActivationSummary, "denied_count") == u8 and

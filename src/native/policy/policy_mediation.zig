@@ -17,7 +17,9 @@ pub const GRANT_RECEIPT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const REVOCATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const AUTHORIZATION_TASK_INDEX_LOOKUPS: u8 = 1;
 pub const MANIFEST_PERMISSION_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 904;
+pub const ZERO_CAPABILITY_ID_IS_NONE = capability.ZERO_CAPABILITY_ID_RESERVED;
+pub const PERMISSION_DECISION_SIZE_CEILING_BYTES: usize = 48;
+pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 776;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
 const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
 
@@ -46,11 +48,21 @@ pub const PermissionDecision = struct {
     kind: manifest.PermissionKind,
     allowed: bool,
     reason: abi.DenialReason = .none,
-    capability_id: ?u64 = null,
+    capability_id: u64 = 0,
     local_only: bool = false,
     expires_at_ticks: u64 = 0,
     explanation: denial_explanation.Explanation = denial_explanation.none(),
+
+    pub fn capabilityId(self: *const PermissionDecision) ?u64 {
+        return if (self.capability_id == 0) null else self.capability_id;
+    }
 };
+
+comptime {
+    if (@sizeOf(PermissionDecision) > PERMISSION_DECISION_SIZE_CEILING_BYTES) {
+        @compileError("permission decision exceeds its compact size ceiling");
+    }
+}
 
 pub const GrantPlan = capability.GrantPlan;
 
@@ -464,7 +476,7 @@ pub const PolicyMediator = struct {
         while (index < summary.decision_count) : (index += 1) {
             const decision = summary.decisions[index];
             if (!decision.allowed) continue;
-            const capability_id = decision.capability_id orelse continue;
+            const capability_id = decision.capabilityId() orelse continue;
             _ = try self.revokeGrantedCapability(
                 task_id,
                 capability_id,
@@ -616,6 +628,10 @@ fn createMediationTestTask(
 }
 
 test "policy activation summary keeps bounded counters compact" {
+    try std.testing.expect(ZERO_CAPABILITY_ID_IS_NONE);
+    try std.testing.expectEqual(u64, @FieldType(PermissionDecision, "capability_id"));
+    try std.testing.expect(@sizeOf(PermissionDecision) <= PERMISSION_DECISION_SIZE_CEILING_BYTES);
+    try std.testing.expectEqual(@as(?u64, null), emptyDecision().capabilityId());
     try std.testing.expectEqual(u8, @FieldType(ActivationSummary, "granted_count"));
     try std.testing.expectEqual(u8, @FieldType(ActivationSummary, "denied_count"));
     try std.testing.expectEqual(u8, @FieldType(ActivationSummary, "required_denials"));
@@ -721,7 +737,7 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expectEqual(@as(usize, 2), task.capability_count);
     try std.testing.expect(summary.decisionForKind(.network_egress).?.local_only);
     try std.testing.expectEqual(@as(u64, 35), summary.decisionForKind(.network_egress).?.expires_at_ticks);
-    const network_capability = capability_table.query(summary.decisionForKind(.network_egress).?.capability_id.?).?;
+    const network_capability = capability_table.query(summary.decisionForKind(.network_egress).?.capabilityId().?).?;
     try std.testing.expectEqual(capability.CapabilityTargetKind.network_policy, network_capability.target.kind);
     try std.testing.expectEqual(resourceId("lan.sync"), network_capability.target.id);
     try std.testing.expect(ledger.latestKind(.permission_decision).?.allowed);
@@ -731,7 +747,7 @@ test "policy mediation grants local-only object and network capabilities" {
     try std.testing.expect(std.mem.indexOf(u8, ledger.latestKind(.capability_grant).?.detailSlice(), "revoke:") != null);
     try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, task.latestAuditEvent().?.kind);
 
-    const revoked_capability_id = summary.decisionForKind(.network_egress).?.capability_id.?;
+    const revoked_capability_id = summary.decisionForKind(.network_egress).?.capabilityId().?;
     try std.testing.expect(try mediator.revokeGrantedCapability(task.id, revoked_capability_id, .network_egress, 20, "data route grant revoked"));
     try std.testing.expect(!runtime.hasCapability(task.id, revoked_capability_id));
     try std.testing.expect(capability_table.query(revoked_capability_id) == null);
@@ -1021,7 +1037,7 @@ test "policy mediation rolls back activation grants when a required permission f
     try std.testing.expectEqual(@as(u8, 1), summary.required_denials);
     try std.testing.expectEqual(task_runtime.TaskState.suspended, task.state);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
-    try std.testing.expect(capability_table.query(summary.decisionForKind(.object_access).?.capability_id.?) == null);
+    try std.testing.expect(capability_table.query(summary.decisionForKind(.object_access).?.capabilityId().?) == null);
 }
 
 test "policy mediation covers device camera mic sensor and peer ipc permissions" {
@@ -1070,10 +1086,10 @@ test "policy mediation covers device camera mic sensor and peer ipc permissions"
     try std.testing.expect(summary.decisionForKind(.sensor).?.allowed);
     try std.testing.expect(summary.decisionForKind(.peer_ipc).?.allowed);
 
-    const device_capability = capability_table.query(summary.decisionForKind(.device_access).?.capability_id.?).?;
-    const camera_capability = capability_table.query(summary.decisionForKind(.camera).?.capability_id.?).?;
-    const sensor_capability = capability_table.query(summary.decisionForKind(.sensor).?.capability_id.?).?;
-    const peer_capability = capability_table.query(summary.decisionForKind(.peer_ipc).?.capability_id.?).?;
+    const device_capability = capability_table.query(summary.decisionForKind(.device_access).?.capabilityId().?).?;
+    const camera_capability = capability_table.query(summary.decisionForKind(.camera).?.capabilityId().?).?;
+    const sensor_capability = capability_table.query(summary.decisionForKind(.sensor).?.capabilityId().?).?;
+    const peer_capability = capability_table.query(summary.decisionForKind(.peer_ipc).?.capabilityId().?).?;
 
     try std.testing.expectEqual(capability.CapabilityTargetKind.device, device_capability.target.kind);
     try std.testing.expectEqual(@as(u64, 700), device_capability.target.id);
@@ -1159,10 +1175,10 @@ test "policy mediation maps location contacts screen capture and notification ca
     try std.testing.expect(summary.decisionForKind(.screen_capture).?.allowed);
     try std.testing.expect(summary.decisionForKind(.notification_post).?.allowed);
 
-    const location_capability = capability_table.query(summary.decisionForKind(.location).?.capability_id.?).?;
-    const contacts_capability = capability_table.query(summary.decisionForKind(.contacts).?.capability_id.?).?;
-    const capture_capability = capability_table.query(summary.decisionForKind(.screen_capture).?.capability_id.?).?;
-    const notification_capability = capability_table.query(summary.decisionForKind(.notification_post).?.capability_id.?).?;
+    const location_capability = capability_table.query(summary.decisionForKind(.location).?.capabilityId().?).?;
+    const contacts_capability = capability_table.query(summary.decisionForKind(.contacts).?.capabilityId().?).?;
+    const capture_capability = capability_table.query(summary.decisionForKind(.screen_capture).?.capabilityId().?).?;
+    const notification_capability = capability_table.query(summary.decisionForKind(.notification_post).?.capabilityId().?).?;
 
     try std.testing.expectEqual(capability.CapabilityTargetKind.device, location_capability.target.kind);
     try std.testing.expect(location_capability.rights.has(.location_read));
@@ -1219,7 +1235,7 @@ test "policy mediation seals sensory grants against transitive delegation" {
     };
 
     const summary = try mediator.applyManifest(task.id, bundle, &grants, 10);
-    const camera_capability = capability_table.query(summary.decisionForKind(.camera).?.capability_id.?).?;
+    const camera_capability = capability_table.query(summary.decisionForKind(.camera).?.capabilityId().?).?;
     try std.testing.expect(camera_capability.rights.has(.capability_derive));
     try std.testing.expectEqual(@as(u8, 0), camera_capability.audit.max_delegation_depth);
     try std.testing.expectError(error.DelegationDepthExceeded, capability_table.derive(.{
