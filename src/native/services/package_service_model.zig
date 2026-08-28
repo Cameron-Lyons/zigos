@@ -34,6 +34,9 @@ pub const MAX_INSTALL_SOURCE_BYTES: usize = 96;
 pub const MAX_REVISIONS_PER_BUNDLE: usize = 2;
 pub const DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS = true;
 pub const COMPACT_PACKAGE_RESULT_METADATA = true;
+pub const STORED_PERMISSION_SIZE_CEILING_BYTES: usize = 56;
+pub const BUNDLE_REVISION_SIZE_CEILING_BYTES: usize = 10_272;
+pub const INSTALLED_BUNDLE_SIZE_CEILING_BYTES: usize = 20_616;
 pub const REMOVE_RESULT_SIZE_CEILING_BYTES: usize = 2;
 pub const OFFBOARD_RESULT_SIZE_CEILING_BYTES: usize = 48;
 pub const PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES: usize = 216;
@@ -208,13 +211,20 @@ pub const StoredInterface = struct {
 };
 
 pub const PermissionTextRef = struct {
-    offset: u16 = 0,
-    len: u8 = 0,
-    reserved: u8 = 0,
+    bytes: [3]u8 = [_]u8{0} ** 3,
+
+    pub fn init(offset: u16, len: u8) PermissionTextRef {
+        return .{ .bytes = .{
+            @truncate(offset),
+            @truncate(offset >> 8),
+            len,
+        } };
+    }
 
     pub fn slice(self: PermissionTextRef, text: []const u8) []const u8 {
-        const start: usize = self.offset;
-        const end = start + self.len;
+        const start: usize = @as(u16, self.bytes[0]) |
+            (@as(u16, self.bytes[1]) << 8);
+        const end = start + self.bytes[2];
         std.debug.assert(end <= text.len);
         return text[start..end];
     }
@@ -263,6 +273,12 @@ pub const StoredPermission = struct {
 
     pub fn egressEventTypeSlice(self: *const StoredPermission, text: []const u8) []const u8 {
         return self.egress_event_type.slice(text);
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > STORED_PERMISSION_SIZE_CEILING_BYTES) {
+            @compileError("stored permission exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -605,14 +621,25 @@ pub const BundleSlot = struct {
     bundle: InstalledBundle = zeroBundle(),
 };
 
+test "permission text references preserve the full pooled offset range" {
+    const text_ref = PermissionTextRef.init(0xabcd, 3);
+    try std.testing.expectEqualSlices(u8, &.{ 0xcd, 0xab, 3 }, &text_ref.bytes);
+
+    var text = [_]u8{0} ** 0xabd0;
+    @memcpy(text[0xabcd..0xabd0], "end");
+    try std.testing.expectEqualStrings("end", text_ref.slice(&text));
+}
+
 test "package catalog uses capacity-sized resident metadata" {
     try std.testing.expect(DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS);
     try std.testing.expect(!@hasField(InstalledBundle, "revision_count"));
     try std.testing.expect(!@hasField(InstalledBundle, "next_revision_id"));
     try std.testing.expectEqual(@as(usize, 114), @sizeOf(StoredComponent));
     try std.testing.expectEqual(@as(usize, 180), @sizeOf(StoredSignature));
-    try std.testing.expectEqual(@as(usize, 10_400), @sizeOf(BundleRevision));
-    try std.testing.expectEqual(@as(usize, 20_880), @sizeOf(BundleSlot));
+    try std.testing.expectEqual(@as(usize, 3), @sizeOf(PermissionTextRef));
+    try std.testing.expectEqual(@as(usize, STORED_PERMISSION_SIZE_CEILING_BYTES), @sizeOf(StoredPermission));
+    try std.testing.expectEqual(@as(usize, BUNDLE_REVISION_SIZE_CEILING_BYTES), @sizeOf(BundleRevision));
+    try std.testing.expectEqual(@as(usize, INSTALLED_BUNDLE_SIZE_CEILING_BYTES + 8), @sizeOf(BundleSlot));
 }
 
 test "package results use compact bounded metadata" {
