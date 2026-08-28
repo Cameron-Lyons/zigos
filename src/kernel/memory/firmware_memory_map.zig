@@ -298,7 +298,7 @@ test "live Multiboot information map and command-line pages stay reserved" {
     try std.testing.expectEqual(@as(u32, 5), allocator.stats().reserved);
 }
 
-test "live Multiboot reservation preflight is transactional across ranges" {
+test "live Multiboot reservations are rejected after allocation begins" {
     const memory_bytes = 16 * TEST_PAGE_SIZE;
     const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
     var allocator = Allocator.init();
@@ -311,7 +311,7 @@ test "live Multiboot reservation preflight is transactional across ranges" {
     );
 
     try std.testing.expectError(
-        error.FrameAllocated,
+        error.ReservationsSealed,
         reserveLiveHandoffRanges(
             memory_bytes,
             TEST_PAGE_SIZE,

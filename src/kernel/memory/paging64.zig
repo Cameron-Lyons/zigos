@@ -827,6 +827,8 @@ pub fn init() void {
         haltWithMessage("Kernel reserved-memory extent exceeds the managed physical aperture!\n");
     physical_frames.reserve(.{ .base = 0, .count = reserved_frame_count }) catch
         haltWithMessage("Invalid physical-memory reservation!\n");
+    physical_frames.sealReservations() catch
+        haltWithMessage("Physical-memory reservation table overflow!\n");
     if (physical_frames.stats().free == 0) {
         haltWithMessage("No usable physical frames remain after kernel reservation!\n");
     }
