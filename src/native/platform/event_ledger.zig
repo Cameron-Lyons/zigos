@@ -32,13 +32,17 @@ pub const INLINE_EVENT_TEXT_WRITES = true;
 pub const DERIVES_PERMISSION_DENIAL_METADATA = true;
 pub const DIRECT_PERSISTENT_EVENT_ENCODING = true;
 pub const PACKS_PERSISTENT_EVENT_RECORD = true;
+pub const COMPACT_PERSISTENCE_BATCH_METADATA = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 584;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 46_536;
 pub const PERSISTENT_EVENT_RECORD_SIZE_BYTES: usize = 576;
+pub const LEDGER_RESIDENT_SIZE_BYTES: usize = 136;
 pub const state_workspace_label = "system-diagnostics";
 
 const MAX_PERSISTED_EVENTS: usize = MAX_EVENTS;
 const MAX_PERSISTED_DETAIL_BYTES: usize = MAX_DETAIL_BYTES;
+pub const PersistenceBatchDepth = u16;
+pub const PendingPersistenceCount = u16;
 const state_entry_path = "state/event-ledger";
 const event_entry_prefix = "events/";
 const persistent_header_magic: u32 = 0x454C4733;
@@ -52,6 +56,9 @@ const semantic_memory_query_byte_mask: usize = 0x0fff_ffff;
 comptime {
     if (MAX_DETAIL_BYTES > std.math.maxInt(u16)) {
         @compileError("event ledger text metadata exceeds compact length capacity");
+    }
+    if (MAX_EVENTS > std.math.maxInt(PendingPersistenceCount)) {
+        @compileError("event ledger batch metadata cannot represent the retained event capacity");
     }
 }
 
@@ -358,9 +365,9 @@ pub const Ledger = struct {
     next_sequence: u64 = 1,
     oldest_retained_sequence: u64 = 0,
     event_backing: EventBackingStorage = if (heap_backed_event_ledger) null else EventBacking.init(),
-    persistence_batch_depth: usize = 0,
+    persistence_batch_depth: PersistenceBatchDepth = 0,
     pending_persist_first_sequence: u64 = 0,
-    pending_persist_count: usize = 0,
+    pending_persist_count: PendingPersistenceCount = 0,
     pending_persist_latest_tick: u64 = 0,
 
     pub fn init() Ledger {
@@ -368,8 +375,8 @@ pub const Ledger = struct {
     }
 
     comptime {
-        if (heap_backed_event_ledger and @sizeOf(@This()) > 256) {
-            @compileError("heap-backed event ledgers exceed their compact resident layout");
+        if (heap_backed_event_ledger and @sizeOf(@This()) != LEDGER_RESIDENT_SIZE_BYTES) {
+            @compileError("heap-backed event ledger no longer matches its compact resident layout");
         }
     }
 
@@ -467,7 +474,7 @@ pub const Ledger = struct {
     }
 
     pub fn pendingPersistenceCount(self: *const Ledger) usize {
-        return self.pending_persist_count;
+        return @intCast(self.pending_persist_count);
     }
 
     pub fn recordPermissionDecision(
