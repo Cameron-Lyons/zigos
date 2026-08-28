@@ -793,17 +793,11 @@ pub fn copySlots(comptime T: type, dest: []T, src: []const T) void {
 
 pub fn copyBytes(dest: []u8, src: []const u8) void {
     const len = @min(dest.len, src.len);
-    var index: usize = 0;
-    while (index < len) : (index += 1) {
-        dest[index] = src[index];
-    }
+    @memcpy(dest[0..len], src[0..len]);
 }
 
 pub fn zeroBytes(dest: []u8) void {
-    var index: usize = 0;
-    while (index < dest.len) : (index += 1) {
-        dest[index] = 0;
-    }
+    @memset(dest, 0);
 }
 
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {

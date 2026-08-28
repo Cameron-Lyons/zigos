@@ -221,6 +221,7 @@ const TASK_LABEL_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_LABEL_INDEX_CAPACITY);
 const heap_backed_task_cold = builtin.target.os.tag == .freestanding;
 pub const HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING = true;
+pub const BULK_TASK_COLD_MEMORY_OPS = true;
 const heap_backed_address_spaces = builtin.target.os.tag == .freestanding and HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING;
 const TaskColdRecords = [MAX_TASKS]TaskColdRecord;
 const TaskColdBacking = if (heap_backed_task_cold) ?*TaskColdRecords else TaskColdRecords;

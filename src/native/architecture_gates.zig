@@ -499,6 +499,7 @@ pub const indexed_hot_path_tables = .{
         .removes_retired_capability_attachments = @hasDecl(task_runtime.Runtime, "revokeCapabilityEverywhere"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
         .reuses_live_snapshot_cold_backing = task_runtime.SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING,
+        .uses_bulk_task_cold_memory_ops = task_runtime.BULK_TASK_COLD_MEMORY_OPS,
         .validates_ordered_address_space_ranges_in_one_pass = task_runtime.ORDERED_EXECUTABLE_SEGMENTS and
             syscall_dispatch.SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION,
         .validates_terminal_stack_ranges_directly = syscall_dispatch.DIRECT_STACK_RANGE_VALIDATION,
