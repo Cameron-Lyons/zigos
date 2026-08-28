@@ -1438,15 +1438,11 @@ pub fn resetExportPackage(package: *ExportPackage) void {
 }
 
 fn copyEntries(dest: []Entry, src: []const Entry) void {
-    for (src, 0..) |entry, index| {
-        dest[index] = entry;
-    }
+    @memcpy(dest[0..src.len], src);
 }
 
 fn clearEntries(entries: *[MAX_WORKSPACE_ENTRIES]Entry) void {
-    for (entries) |*entry| {
-        entry.* = Entry{};
-    }
+    @memset(entries, Entry{});
 }
 
 fn signSnapshotRecord(snapshot: *SnapshotRecord, entries: []const Entry, identity: signing.SignerIdentity) !void {
@@ -1711,10 +1707,11 @@ fn insertSortedStagedEntry(workspace: *WorkspaceRecord, entry: Entry) Error!void
 
     const base_index = workspace.counts.entry_mutation_count;
     const mutations = workspace.mutation_log.entries();
-    var move_index = staged_count;
-    while (move_index > insert_index) : (move_index -= 1) {
-        mutations[base_index + move_index] = mutations[base_index + move_index - 1];
-    }
+    std.mem.copyBackwards(
+        EntryMutation,
+        mutations[base_index + insert_index + 1 .. base_index + staged_count + 1],
+        mutations[base_index + insert_index .. base_index + staged_count],
+    );
     mutations[base_index + insert_index] = .{ .entry = entry };
     workspace.staging.staged_entry_count += 1;
 }
@@ -1724,10 +1721,11 @@ fn removeStagedEntry(workspace: *WorkspaceRecord, staged_index: usize) void {
     if (staged_index >= staged_count) native_util.impossibleByInvariant("staged workspace entry removal stays within the transaction");
     const base_index = workspace.counts.entry_mutation_count;
     const mutations = workspace.mutation_log.entries();
-    var move_index = staged_index + 1;
-    while (move_index < staged_count) : (move_index += 1) {
-        mutations[base_index + move_index - 1] = mutations[base_index + move_index];
-    }
+    std.mem.copyForwards(
+        EntryMutation,
+        mutations[base_index + staged_index .. base_index + staged_count - 1],
+        mutations[base_index + staged_index + 1 .. base_index + staged_count],
+    );
     mutations[base_index + staged_count - 1] = .{};
     workspace.staging.staged_entry_count -= 1;
 }
@@ -1764,10 +1762,7 @@ fn debugAssertPathIndexMissAbsent(entries: []const Entry, path: []const u8) void
 
 fn removeEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, index: usize) void {
     var active_count: usize = @intCast(count.*);
-    var cursor = index;
-    while (cursor + 1 < active_count) : (cursor += 1) {
-        entries[cursor] = entries[cursor + 1];
-    }
+    std.mem.copyForwards(Entry, entries[index .. active_count - 1], entries[index + 1 .. active_count]);
     active_count -= 1;
     count.* = @intCast(active_count);
     entries[active_count] = Entry{};
@@ -1782,10 +1777,7 @@ fn insertSortedEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, ent
         return;
     }
 
-    var cursor = active_count;
-    while (cursor > insert_index) : (cursor -= 1) {
-        entries[cursor] = entries[cursor - 1];
-    }
+    std.mem.copyBackwards(Entry, entries[insert_index + 1 .. active_count + 1], entries[insert_index..active_count]);
     entries[insert_index] = entry;
     count.* = @intCast(active_count + 1);
 }
@@ -1830,10 +1822,11 @@ fn appendDeleted(workspace: *WorkspaceRecord, entry: Entry) void {
         return;
     }
 
-    var index: usize = 1;
-    while (index < MAX_RECOVERABLE_DELETES) : (index += 1) {
-        deleted_entries[index - 1] = deleted_entries[index];
-    }
+    std.mem.copyForwards(
+        Entry,
+        deleted_entries[0 .. MAX_RECOVERABLE_DELETES - 1],
+        deleted_entries[1..MAX_RECOVERABLE_DELETES],
+    );
     deleted_entries[MAX_RECOVERABLE_DELETES - 1] = entry;
 }
 
@@ -1852,9 +1845,7 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
     if (had_entries or source_entries.len != 0) clearEntries(workspace.path_index.entries());
     workspace.counts.entry_count = 0;
     workspace.counts.entry_mutation_count = 0;
-    for (workspace.mutation_log.entries()) |*mutation| {
-        mutation.* = EntryMutation{};
-    }
+    @memset(workspace.mutation_log.entries(), EntryMutation{});
 
     for (source_entries) |entry| {
         if (isDeleteTombstone(entry)) continue;
@@ -1867,9 +1858,7 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
 fn compactMutationLogToCurrentEntries(workspace: *WorkspaceRecord) Error!void {
     var current_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
     const count = workspace.counts.entry_count;
-    for (workspace.path_index.entriesConst(count), 0..) |entry, index| {
-        current_entries[index] = entry;
-    }
+    copyEntries(current_entries[0..count], workspace.path_index.entriesConst(count));
 
     try seedWorkspaceEntries(workspace, current_entries[0..count], workspace.generation);
 }
@@ -2055,9 +2044,7 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
 fn discardTransactionState(workspace: *WorkspaceRecord) void {
     const staged_entry_start = workspace.counts.entry_mutation_count;
     const staged_entry_end = @min(staged_entry_start + @as(usize, workspace.staging.staged_entry_count), MAX_WORKSPACE_ENTRY_MUTATIONS);
-    for (workspace.mutation_log.entries()[staged_entry_start..staged_entry_end]) |*mutation| {
-        mutation.* = .{};
-    }
+    @memset(workspace.mutation_log.entries()[staged_entry_start..staged_entry_end], EntryMutation{});
     closeTransactionState(workspace);
 }
 

@@ -99,6 +99,10 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     var stale_metadata = archive_index.artifacts[0];
     stale_metadata.entry_point +%= launch_helpers.SYNTHETIC_SEGMENT_ALIGNMENT;
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(stale_metadata));
+
+    var oversized_stack = archive_index.artifacts[0];
+    oversized_stack.stack_size_bytes = @as(usize, std.math.maxInt(task_runtime.UserStackByteLength)) + 1;
+    try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(oversized_stack));
 }
 
 fn metadataMatchesInspection(artifact: anytype, inspection: elf_image_inspector.Inspection) bool {
@@ -107,17 +111,17 @@ fn metadataMatchesInspection(artifact: anytype, inspection: elf_image_inspector.
     if (artifact.file_size_bytes != inspection.byte_len) return false;
     if (!std.mem.eql(u8, &artifact.file_sha256, &inspection.file_sha256)) return false;
 
-    const expected = executableImageFromArtifact(artifact);
+    const expected = executableImageFromArtifact(artifact) orelse return false;
     return expected.eql(&inspection.executable_image);
 }
 
-fn executableImageFromArtifact(artifact: anytype) task_runtime.ExecutableImageSpec {
+fn executableImageFromArtifact(artifact: anytype) ?task_runtime.ExecutableImageSpec {
     var image = task_runtime.ExecutableImageSpec{
         .entry_point = artifact.entry_point,
         .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
         .stack_top = artifact.stack_top,
-        .stack_size_bytes = artifact.stack_size_bytes,
-        .file_size_bytes = artifact.file_size_bytes,
+        .stack_size_bytes = std.math.cast(task_runtime.UserStackByteLength, artifact.stack_size_bytes) orelse return null,
+        .file_size_bytes = std.math.cast(task_runtime.UserImageByteLength, artifact.file_size_bytes) orelse return null,
         .file_sha256 = artifact.file_sha256,
         .segment_count = @intCast(artifact.segment_count),
     };

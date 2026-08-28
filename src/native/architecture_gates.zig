@@ -38,6 +38,7 @@ const kernel_dmar = @import("../kernel/platform/dmar.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const input_driver_task = @import("drivers/input_driver_task.zig");
+const denial_explanation = @import("policy/denial_explanation.zig");
 const permission_review = @import("policy/permission_review.zig");
 const permission_review_service = @import("policy/permission_review_service.zig");
 const policy_mediation = @import("policy/policy_mediation.zig");
@@ -309,6 +310,7 @@ pub const indexed_hot_path_tables = .{
     .capability_table = .{
         .uses_capability_arena = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandle"),
         .uses_generational_capability_ids = @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "getByHandle"),
+        .reserves_zero_capability_id = capability.ZERO_CAPABILITY_ID_RESERVED,
         .stores_compact_grant_metadata = capability.COMPACT_GRANT_METADATA and
             @FieldType(capability.GrantPlan, "entry_count") == u8 and
             @FieldType(capability.GrantReservation, "slot_indexes") == [capability.MAX_GRANT_PLAN_ENTRIES]capability.CapabilitySlotIndex and
@@ -497,6 +499,7 @@ pub const indexed_hot_path_tables = .{
         .removes_retired_capability_attachments = @hasDecl(task_runtime.Runtime, "revokeCapabilityEverywhere"),
         .installs_address_spaces_as_records = @hasDecl(task_runtime.Runtime, "installAddressSpaceRecord"),
         .reuses_live_snapshot_cold_backing = task_runtime.SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING,
+        .uses_bulk_task_cold_memory_ops = task_runtime.BULK_TASK_COLD_MEMORY_OPS,
         .validates_ordered_address_space_ranges_in_one_pass = task_runtime.ORDERED_EXECUTABLE_SEGMENTS and
             syscall_dispatch.SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION,
         .validates_terminal_stack_ranges_directly = syscall_dispatch.DIRECT_STACK_RANGE_VALIDATION,
@@ -740,7 +743,7 @@ pub const indexed_hot_path_tables = .{
             !@hasField(package_service.StoredComponent, "abi"),
         .reuses_revision_metadata_backing = package_service.REUSES_REVISION_METADATA_BACKING,
         .uses_revision_permission_text_pool = @hasField(package_service.BundleRevision, "permission_text"),
-        .uses_compact_permission_text_refs = @sizeOf(@FieldType(package_service.StoredPermission, "resource")) == 4 and
+        .uses_compact_permission_text_refs = @sizeOf(@FieldType(package_service.StoredPermission, "resource")) == 3 and
             @sizeOf(package_service.StoredPermission) < package_service.MAX_PERMISSION_RESOURCE_BYTES,
         .uses_compact_result_metadata = package_service.COMPACT_PACKAGE_RESULT_METADATA and
             @FieldType(package_service.RemoveResult, "removed_revision_count") == u8 and
@@ -750,6 +753,9 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(package_service.OffboardResult) <= package_service.OFFBOARD_RESULT_SIZE_CEILING_BYTES and
             @sizeOf(package_service.PackageLaunchProvenance) <= package_service.PACKAGE_LAUNCH_PROVENANCE_SIZE_CEILING_BYTES and
             @sizeOf(package_service.LaunchPlan) <= package_service.LAUNCH_PLAN_SIZE_CEILING_BYTES,
+        .keeps_package_metadata_within_ceilings = @sizeOf(package_service.StoredPermission) <= package_service.STORED_PERMISSION_SIZE_CEILING_BYTES and
+            @sizeOf(package_service.BundleRevision) <= package_service.BUNDLE_REVISION_SIZE_CEILING_BYTES and
+            @sizeOf(package_service.InstalledBundle) <= package_service.INSTALLED_BUNDLE_SIZE_CEILING_BYTES,
     },
     .public_store = .{
         .uses_bounded_release_scan = public_store.BOUNDED_RELEASE_SCAN and
@@ -895,9 +901,15 @@ pub const indexed_hot_path_tables = .{
     .event_ledger = .{
         .inlines_event_text_writes = event_ledger.INLINE_EVENT_TEXT_WRITES,
         .stores_compact_event_text_metadata = event_ledger.COMPACT_EVENT_TEXT_METADATA and
-            @FieldType(event_ledger.Event, "policy_label_len") == u8 and
-            @FieldType(event_ledger.Event, "missing_capability_len") == u8 and
-            @FieldType(event_ledger.Event, "detail_len") == u16,
+            @FieldType(event_ledger.Event, "detail_len") == u16 and
+            !@hasField(event_ledger.Event, "policy_label") and
+            !@hasField(event_ledger.Event, "missing_capability"),
+        .derives_permission_denial_metadata = event_ledger.DERIVES_PERMISSION_DENIAL_METADATA and
+            !@hasField(event_ledger.Event, "user_approval_can_resolve") and
+            !@hasField(event_ledger.Event, "retry_safe"),
+        .encodes_persistent_events_directly = event_ledger.DIRECT_PERSISTENT_EVENT_ENCODING,
+        .packs_persistent_event_records = event_ledger.PACKS_PERSISTENT_EVENT_RECORD and
+            event_ledger.PERSISTENT_EVENT_RECORD_SIZE_BYTES == 576,
         .keeps_event_state_within_ceilings = @sizeOf(event_ledger.Event) <= event_ledger.EVENT_SIZE_CEILING_BYTES and
             @sizeOf(event_ledger.EventBacking) <= event_ledger.EVENT_BACKING_SIZE_CEILING_BYTES,
         .uses_event_arena = @hasField(event_ledger.EventBacking, "events"),
@@ -976,7 +988,10 @@ pub const indexed_hot_path_tables = .{
             @FieldType(compositor_session.ReviewItemRecord, "resource_len") == u8 and
             @FieldType(compositor_session.ReviewItemRecord, "reason_len") == u8 and
             @FieldType(compositor_session.ReviewItemRecord, "object_scope_len") == u8 and
-            @FieldType(compositor_session.ReviewItemRecord, "network_path_len") == u8,
+            @FieldType(compositor_session.ReviewItemRecord, "network_path_len") == u8 and
+            compositor_session.COMPACT_REVIEW_LEASE_DURATIONS and
+            @FieldType(compositor_session.ReviewItemRecord, "requested_lease_ticks") == manifest.LeaseTicks and
+            @FieldType(compositor_session.ReviewItemRecord, "decision_lease_ticks") == manifest.LeaseTicks,
         .stores_compact_session_counts = compositor_session.COMPACT_SESSION_COUNT_METADATA and
             @FieldType(compositor_session.WindowSlot, "order_index") == compositor_session.WindowOrderIndex and
             @FieldType(compositor_session.Session, "window_count") == compositor_session.SessionCount and
@@ -1071,9 +1086,20 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(permission_review_service.CommandInput) <= permission_review_service.COMMAND_INPUT_SIZE_CEILING_BYTES,
     },
     .permission_review = .{
+        .stores_compact_denial_metadata = denial_explanation.COMPACT_DENIAL_EXPLANATION_METADATA and
+            @FieldType(denial_explanation.Explanation, "policy_len") == u8 and
+            @FieldType(denial_explanation.Explanation, "missing_capability_len") == u8 and
+            @FieldType(denial_explanation.Explanation, "user_approval_can_resolve") == bool and
+            @FieldType(denial_explanation.Explanation, "retry_safe") == bool and
+            @sizeOf(denial_explanation.Explanation) <= denial_explanation.EXPLANATION_SIZE_CEILING_BYTES,
+        .groups_denial_summary_text_writes = denial_explanation.GROUPS_DENIAL_SUMMARY_TEXT_WRITES,
         .groups_render_text_writes = permission_review.GROUPS_REVIEW_TEXT_WRITES,
+        .uses_compact_lease_durations = manifest.COMPACT_LEASE_DURATIONS and
+            @sizeOf(manifest.LeaseTicks) == 4 and
+            @FieldType(permission_review.ReviewCommand, "lease_ticks") == ?manifest.LeaseTicks,
         .stores_compact_session_decisions = permission_review.COMPACT_REVIEW_SESSION_DECISIONS and
             @FieldType(permission_review.ReviewSession, "decision_count") == u8 and
+            @FieldType(permission_review.ReviewSession, "lease_ticks") == [permission_review.MAX_REVIEW_DECISIONS]manifest.LeaseTicks and
             @FieldType(permission_review.ReviewSession, "allowed_mask") == u16 and
             @FieldType(permission_review.ReviewSession, "local_only_mask") == u16 and
             @FieldType(permission_review.ReviewSession, "lease_present_mask") == u16 and
@@ -1089,6 +1115,9 @@ pub const indexed_hot_path_tables = .{
             permission_review_service.BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS == 0,
     },
     .policy_activation = .{
+        .stores_compact_capability_ids = policy_mediation.ZERO_CAPABILITY_ID_IS_NONE and
+            @FieldType(policy_mediation.PermissionDecision, "capability_id") == u64 and
+            @sizeOf(policy_mediation.PermissionDecision) <= policy_mediation.PERMISSION_DECISION_SIZE_CEILING_BYTES,
         .stores_compact_summary_metadata = policy_mediation.COMPACT_ACTIVATION_SUMMARY_METADATA and
             @FieldType(policy_mediation.ActivationSummary, "granted_count") == u8 and
             @FieldType(policy_mediation.ActivationSummary, "denied_count") == u8 and
@@ -1569,6 +1598,8 @@ pub const indexed_hot_path_tables = .{
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
         .reuses_bootstrap_task_records = session_manager_boot_flow.BOOTSTRAP_TASK_INDEX_RELOOKUPS == 0,
         .reuses_ui_authority_task_records = session_manager_boot_flow.UI_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,
+        .avoids_steady_runtime_construction = session_manager_boot_flow.STEADY_RUNTIME_CONSTRUCTION_ATTEMPTS == 0,
+        .reuses_input_authority_batch_context = session_manager_boot_flow.INPUT_AUTHORITY_BATCH_CONTEXT_RELOOKUPS == 0,
         .waits_for_current_userspace_surface_presentation = session_manager_boot_flow.WAITS_FOR_CURRENT_USERSPACE_SURFACE_PRESENTATION,
         .derives_compositor_broker_service_id = session_manager_boot_flow.DERIVES_COMPOSITOR_BROKER_SERVICE_ID and
             !@hasField(session_manager_boot_flow.SessionManager, "compositor_broker_service_id"),

@@ -213,6 +213,7 @@ pub const HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING = true;
 pub const RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const RECEIVE_RESULT_SIZE_CEILING_BYTES: usize = 4;
 pub const SERVICE_IDENTITY_CONNECTION_SIZE_CEILING_BYTES: usize = 320;
+pub const SERVICE_IDENTITY_FRAME_SIZE_CEILING_BYTES: usize = 320;
 pub const LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES: usize = 192;
 pub const LOCAL_DISCOVERY_FRAME_SIZE_CEILING_BYTES: usize = 288;
 pub const QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES: usize = 1_502;
@@ -272,27 +273,31 @@ pub const NativeServiceIdentityConnection = struct {
     }
 };
 
-pub const NativeServiceIdentityFrame = struct {
-    connection_id: u64,
-    policy_id: u64,
-    capability_id: u64,
-    payload_len: usize,
-    ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
-    payload_digest: crypto_hash.Digest,
-    peer_root_digest: crypto_hash.Digest,
+pub const NativeServiceIdentityFrameFlags = packed struct(u8) {
     encrypted: bool,
     egress_allowed: bool,
     attested: bool,
     verified_remote_attestation: bool,
     identity_pinned: bool,
     attestation_request_digest_present: bool,
-    attestation_request_digest: crypto_hash.Digest,
     attestation_verifier_metadata_digest_present: bool,
     attestation_verifier_metadata_digest_bound: bool,
+};
+
+pub const NativeServiceIdentityFrame = struct {
+    connection_id: u64,
+    policy_id: u64,
+    capability_id: u64,
+    payload_len: u8,
+    ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
+    payload_digest: crypto_hash.Digest,
+    peer_root_digest: crypto_hash.Digest,
+    flags: NativeServiceIdentityFrameFlags,
+    attestation_request_digest: crypto_hash.Digest,
     attestation_verifier_metadata_digest: crypto_hash.Digest,
 
     pub fn ciphertextSlice(self: *const NativeServiceIdentityFrame) []const u8 {
-        return self.ciphertext[0..self.payload_len];
+        return self.ciphertext[0..@as(usize, self.payload_len)];
     }
 };
 
@@ -340,6 +345,7 @@ pub const NativeLocalDiscoveryFrame = struct {
 comptime {
     if (@sizeOf(ReceiveResult) > RECEIVE_RESULT_SIZE_CEILING_BYTES or
         @sizeOf(NativeServiceIdentityConnection) > SERVICE_IDENTITY_CONNECTION_SIZE_CEILING_BYTES or
+        @sizeOf(NativeServiceIdentityFrame) > SERVICE_IDENTITY_FRAME_SIZE_CEILING_BYTES or
         @sizeOf(NativeLocalDiscoveryConnection) > LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES or
         @sizeOf(NativeLocalDiscoveryFrame) > LOCAL_DISCOVERY_FRAME_SIZE_CEILING_BYTES)
     {
@@ -505,19 +511,21 @@ pub const NativeNetworkStack = struct {
             .connection_id = connection.id,
             .policy_id = connection.policy_id,
             .capability_id = connection.capability_id,
-            .payload_len = payload.len,
+            .payload_len = @intCast(payload.len),
             .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
             .payload_digest = nativePayloadDigest(connection, payload),
             .peer_root_digest = connection.peer_root_digest,
-            .encrypted = true,
-            .egress_allowed = true,
-            .attested = connection.attested,
-            .verified_remote_attestation = connection.verified_remote_attestation,
-            .identity_pinned = connection.identity_pinned,
-            .attestation_request_digest_present = connection.attestation_request_digest_present,
+            .flags = .{
+                .encrypted = true,
+                .egress_allowed = true,
+                .attested = connection.attested,
+                .verified_remote_attestation = connection.verified_remote_attestation,
+                .identity_pinned = connection.identity_pinned,
+                .attestation_request_digest_present = connection.attestation_request_digest_present,
+                .attestation_verifier_metadata_digest_present = connection.attestation_verifier_metadata_digest_present,
+                .attestation_verifier_metadata_digest_bound = connection.attestation_verifier_metadata_digest_bound,
+            },
             .attestation_request_digest = connection.attestation_request_digest,
-            .attestation_verifier_metadata_digest_present = connection.attestation_verifier_metadata_digest_present,
-            .attestation_verifier_metadata_digest_bound = connection.attestation_verifier_metadata_digest_bound,
             .attestation_verifier_metadata_digest = connection.attestation_verifier_metadata_digest,
         };
         applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
@@ -1130,11 +1138,14 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expectEqual(NetworkTelemetryCount, @FieldType(NativeNetworkStack, "transmitted_packets"));
     try std.testing.expectEqual(u16, @FieldType(ReceiveResult, "length"));
     try std.testing.expectEqual(u8, @FieldType(NativeServiceIdentityConnection, "service_identity_len"));
+    try std.testing.expectEqual(u8, @FieldType(NativeServiceIdentityFrame, "payload_len"));
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(NativeServiceIdentityFrameFlags));
     try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryConnection, "discovery_class_len"));
     try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryFrame, "probe_len"));
     try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryFrame, "discovery_class_len"));
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(ReceiveResult));
     try std.testing.expectEqual(@as(usize, 320), @sizeOf(NativeServiceIdentityConnection));
+    try std.testing.expectEqual(@as(usize, 320), @sizeOf(NativeServiceIdentityFrame));
     try std.testing.expectEqual(@as(usize, 192), @sizeOf(NativeLocalDiscoveryConnection));
     try std.testing.expectEqual(@as(usize, 288), @sizeOf(NativeLocalDiscoveryFrame));
     try std.testing.expectEqual(@as(usize, 1_502), bounded_metadata_layout.queued_receive_frame_size_bytes);
@@ -1646,16 +1657,16 @@ test "native network stack gates service identity packets on attested policy cap
 
     const frame = try stack.sendServiceIdentityFrame(&connection, "native payload");
     try std.testing.expectEqualSlices(u8, &target_mac, &Harness.last_destination);
-    try std.testing.expect(frame.encrypted);
-    try std.testing.expect(frame.egress_allowed);
-    try std.testing.expect(frame.attested);
-    try std.testing.expect(frame.verified_remote_attestation);
-    try std.testing.expect(frame.attestation_request_digest_present);
+    try std.testing.expect(frame.flags.encrypted);
+    try std.testing.expect(frame.flags.egress_allowed);
+    try std.testing.expect(frame.flags.attested);
+    try std.testing.expect(frame.flags.verified_remote_attestation);
+    try std.testing.expect(frame.flags.attestation_request_digest_present);
     try std.testing.expect(std.mem.eql(u8, &request_digest, &frame.attestation_request_digest));
-    try std.testing.expect(frame.attestation_verifier_metadata_digest_present);
-    try std.testing.expect(frame.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(frame.flags.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(frame.flags.attestation_verifier_metadata_digest_bound);
     try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &frame.attestation_verifier_metadata_digest));
-    try std.testing.expect(frame.identity_pinned);
+    try std.testing.expect(frame.flags.identity_pinned);
     try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native payload"));
     try std.testing.expectEqual(@as(usize, 6), stack.attempted_connections);
     try std.testing.expectEqual(@as(usize, 4), stack.denied_before_transmit);
@@ -1665,11 +1676,11 @@ test "native network stack gates service identity packets on attested policy cap
     try std.testing.expect(Harness.last_frame_len > "native payload".len);
 
     const brokered_frame = try stack.sendServiceIdentityFrameBrokered(&broker, &connection, "native brokered payload", 11);
-    try std.testing.expect(brokered_frame.verified_remote_attestation);
-    try std.testing.expect(brokered_frame.attestation_request_digest_present);
+    try std.testing.expect(brokered_frame.flags.verified_remote_attestation);
+    try std.testing.expect(brokered_frame.flags.attestation_request_digest_present);
     try std.testing.expect(std.mem.eql(u8, &request_digest, &brokered_frame.attestation_request_digest));
-    try std.testing.expect(brokered_frame.attestation_verifier_metadata_digest_present);
-    try std.testing.expect(brokered_frame.attestation_verifier_metadata_digest_bound);
+    try std.testing.expect(brokered_frame.flags.attestation_verifier_metadata_digest_present);
+    try std.testing.expect(brokered_frame.flags.attestation_verifier_metadata_digest_bound);
     try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &brokered_frame.attestation_verifier_metadata_digest));
     try std.testing.expectEqual(@as(usize, 2), stack.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 2), Harness.send_count);

@@ -1541,11 +1541,13 @@ fn completeTestHardwareEvidence() accelerator_scheduler.HardwareTelemetryEvidenc
     return .{
         .target_id = "test-hardware-telemetry",
         .reader_generation = 1,
-        .acpi_observed = true,
-        .thermal_observed = true,
-        .battery_observed = true,
-        .accelerator_observed = true,
-        .grid_carbon_observed = true,
+        .observations = .{
+            .acpi_observed = true,
+            .thermal_observed = true,
+            .battery_observed = true,
+            .accelerator_observed = true,
+            .grid_carbon_observed = true,
+        },
     };
 }
 
@@ -2394,9 +2396,10 @@ test "userspace scheduler requires complete hardware telemetry before waking har
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(2, 20, 3, .{
         .total_cpu_budget_ticks = 10_000,
         .memory_capacity_bytes = units.kibibytes(512),
-        .gpu_driver_online = false,
-        .npu_driver_online = false,
-        .media_driver_online = true,
+        .status = .{
+            .gpu_driver_online = false,
+            .npu_driver_online = false,
+        },
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -2509,9 +2512,10 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(3, 21, 2, .{
         .total_cpu_budget_ticks = 10_000,
         .memory_capacity_bytes = units.mebibytes(1),
-        .gpu_driver_online = false,
-        .npu_driver_online = true,
-        .media_driver_online = false,
+        .status = .{
+            .gpu_driver_online = false,
+            .media_driver_online = false,
+        },
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -2609,9 +2613,6 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .total_cpu_budget_ticks = 10_000,
         .memory_capacity_bytes = units.kibibytes(512),
         .thermal_milli_celsius = 91_000,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -2652,10 +2653,7 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
         .memory_capacity_bytes = units.kibibytes(512),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 15,
-        .battery_charging = false,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
+        .status = .{ .battery_charging = false },
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -2698,10 +2696,6 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .memory_capacity_bytes = units.mebibytes(1),
         .thermal_milli_celsius = 91_000,
         .battery_percent = 80,
-        .battery_charging = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -2740,11 +2734,10 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .memory_capacity_bytes = units.mebibytes(1),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 12,
-        .battery_charging = false,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
-        .privacy_sensitive_task_count = 1,
+        .status = .{
+            .battery_charging = false,
+            .privacy_sensitive_task_present = true,
+        },
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -2767,10 +2760,6 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .memory_capacity_bytes = units.mebibytes(1),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 80,
-        .battery_charging = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());

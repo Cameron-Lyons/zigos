@@ -137,7 +137,7 @@ fn runNotesPermissionFlow(
         .grants = notes_grants,
     }, 10) catch |err| native_util.bootProofFailure("permission flows", err);
     const notes_object_capability = env.capability_table.query(
-        notes_summary.decisionForKind(.object_access).?.capability_id.?,
+        notes_summary.decisionForKind(.object_access).?.capabilityId().?,
     ).?;
     if (notes_summary.decisionForKind(.object_access)) |decision| {
         if (decision.allowed and decision.local_only) {

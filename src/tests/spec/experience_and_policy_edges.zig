@@ -193,7 +193,7 @@ pub fn permissionReviewsAndSharingStayScopedAndInspectable() !void {
     try expectContains(knowledge, "data_can_leave=yes");
     try expectContains(knowledge, "revoke=Permission Review can revoke listed capability ids");
 
-    const object_capability_id = activation.decisionForKind(.object_access).?.capability_id.?;
+    const object_capability_id = activation.decisionForKind(.object_access).?.capabilityId().?;
     try std.testing.expect(try mediator.revokeGrantedCapability(
         app_task.id,
         object_capability_id,

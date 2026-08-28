@@ -336,7 +336,7 @@ test "policy examples deny screen capture grants and enforce retention audit req
     );
     try std.testing.expect(!denied_capture.allowed);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, denied_capture.reason);
-    try std.testing.expectEqual(@as(?u64, null), denied_capture.capability_id);
+    try std.testing.expectEqual(@as(?u64, null), denied_capture.capabilityId());
 
     var ledger = event_ledger.Ledger.init();
     try ledger.recordPermissionDecision(

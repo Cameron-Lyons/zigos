@@ -13,7 +13,8 @@ pub const MAX_DEVICES: usize = 4;
 pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
 pub const HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING = true;
-pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_504;
+pub const COMPACT_DMA_WINDOW_COUNTS = true;
+pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_440;
 pub const DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 const default_dma_window_bytes: u64 = 128 * 1024;
 const iommu_page_size: u64 = 4096;
@@ -175,6 +176,7 @@ const ControllerSlot = struct {
 
 const ControllerIndex = std.math.IntFittingRange(0, MAX_DEVICES - 1);
 const ControllerCount = std.math.IntFittingRange(0, MAX_DEVICES);
+const DmaWindowCount = std.math.IntFittingRange(0, MAX_DMA_WINDOWS);
 
 const DmaProgramSlot = struct {
     in_use: bool = false,
@@ -184,7 +186,7 @@ const DmaProgramSlot = struct {
     mode: DmaIsolationMode = .programmed_io_only,
     bus_master_dma_enabled: bool = false,
     program_generation: u64 = 0,
-    window_count: usize = 0,
+    window_count: DmaWindowCount = 0,
     windows: [MAX_DMA_WINDOWS]DmaWindow = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
     iommu_program: IommuProgramEvidence = zeroIommuProgramEvidence(),
     last_fault: ?IommuFaultEvidence = null,
@@ -629,7 +631,7 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
         .mode = request.mode,
         .bus_master_dma_enabled = request.bus_master_dma_enabled,
         .program_generation = program_generation,
-        .window_count = request.windows.len,
+        .window_count = @intCast(request.windows.len),
         .windows = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
         .iommu_program = iommu_program,
         .last_fault = null,
@@ -673,7 +675,7 @@ pub fn validateDmaAccess(
 ) Error!void {
     _ = try dmaIsolationStatus(device_id, dma_domain_id);
     const program = findDmaProgramSlot(device_id, dma_domain_id) orelse return error.DmaDomainNotProgrammed;
-    for (program.windows[0..program.window_count]) |window| {
+    for (program.windows[0..@as(usize, program.window_count)]) |window| {
         if (!window.contains(address, length)) continue;
         if (window.executable) {
             recordDmaFault(program, address, length, direction, .executable_window);
@@ -708,7 +710,7 @@ pub fn validateDmaAccess(
 pub fn brokeredDmaBufferStillValid(buffer: BrokeredDmaBuffer) bool {
     const program = findDmaProgram(buffer.device_id, buffer.dma_domain_id) orelse return false;
     if (program.program_generation != buffer.program_generation) return false;
-    for (program.windows[0..program.window_count]) |window| {
+    for (program.windows[0..@as(usize, program.window_count)]) |window| {
         if (window.permits(buffer.address, buffer.length, buffer.direction)) return true;
     }
     return false;
@@ -886,7 +888,7 @@ fn statusFromProgram(program: *const DmaProgramSlot) DmaIsolationStatus {
         .hardware_iommu_programmed = iommuProgramValid(program.iommu_program),
         .bus_master_dma_enabled = program.bus_master_dma_enabled,
         .program_generation = program.program_generation,
-        .window_count = program.window_count,
+        .window_count = @intCast(program.window_count),
         .iommu_program = program.iommu_program,
         .fault_count = program.fault_count,
     };
@@ -1147,7 +1149,9 @@ test "DMA program state uses on-demand freestanding backing" {
     try std.testing.expect(HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING);
     try std.testing.expect(dma_program_backing_layout.heap_backs_state_on_freestanding);
     try std.testing.expectEqual(@as(usize, 8), dma_program_backing_layout.freestanding_handle_size_bytes);
-    try std.testing.expect(dma_program_backing_layout.backing_size_bytes <= DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES);
+    try std.testing.expect(COMPACT_DMA_WINDOW_COUNTS);
+    try std.testing.expectEqual(DmaWindowCount, @FieldType(DmaProgramSlot, "window_count"));
+    try std.testing.expectEqual(DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES, dma_program_backing_layout.backing_size_bytes);
     try std.testing.expectEqual(
         dma_program_backing_layout.backing_size_bytes - dma_program_backing_layout.freestanding_handle_size_bytes,
         dma_program_backing_layout.freestanding_resident_savings_bytes,

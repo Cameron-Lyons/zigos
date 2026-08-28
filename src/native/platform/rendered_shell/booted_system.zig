@@ -331,8 +331,8 @@ pub const BootedSystem = struct {
                 @tagName(self.shell.state.last_denial.reason),
                 self.shell.state.last_denial.policySlice(),
                 self.shell.state.last_denial.missingCapabilitySlice(),
-                yesNo(self.shell.state.last_denial.user_approval_can_resolve),
-                yesNo(self.shell.state.last_denial.retry_safe),
+                yesNo(self.shell.state.last_denial.userApprovalCanResolve()),
+                yesNo(self.shell.state.last_denial.retryIsSafe()),
             });
         }
         if (latest) |notification| {

@@ -64,7 +64,7 @@ pub const COMPACT_REVIEW_PROGRESS_METADATA = true;
 pub const RENDERED_BEGIN_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
-pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_272;
+pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_144;
 
 comptime {
     if (MAX_INPUT_LINE > std.math.maxInt(u8) or
@@ -399,7 +399,7 @@ pub const ProfileRule = struct {
     allow: bool,
     local_only: bool = false,
     lease_mode: ProfileLeaseMode = .none,
-    fixed_lease_ticks: u64 = 0,
+    fixed_lease_ticks: manifest.LeaseTicks = 0,
 };
 
 pub const SurfaceControl = enum {
@@ -1573,7 +1573,7 @@ test "rendered permission review surface drives allow deny controls through comp
     try std.testing.expect(object_decision.allowed);
     try std.testing.expect(object_decision.local_only);
     try std.testing.expectEqual(@as(u64, 450), object_decision.expires_at_ticks);
-    const object_capability = capability_table.query(object_decision.capability_id.?).?;
+    const object_capability = capability_table.query(object_decision.capabilityId().?).?;
     try std.testing.expect(runtime.hasCapability(task.id, object_capability.id));
     try std.testing.expectEqual(capability.CapabilityTargetKind.object, object_capability.target.kind);
     try std.testing.expect(object_capability.rights.has(.object_read));
@@ -1585,7 +1585,7 @@ test "rendered permission review surface drives allow deny controls through comp
     const network_decision = summary.decisionForKind(.network_egress).?;
     try std.testing.expect(!network_decision.allowed);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, network_decision.reason);
-    try std.testing.expect(network_decision.capability_id == null);
+    try std.testing.expect(network_decision.capabilityId() == null);
     try std.testing.expectEqual(@as(usize, 4), ledger.countMatching(.{ .kind = .permission_decision, .task_id = task.id }));
     try std.testing.expectEqual(@as(usize, 1), ledger.countMatching(.{ .kind = .capability_grant, .task_id = task.id }));
     try std.testing.expectEqual(task_runtime.AuditEventKind.permission_prompted, task.auditEventAt(0).?.kind);

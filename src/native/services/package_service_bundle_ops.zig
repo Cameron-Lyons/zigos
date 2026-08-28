@@ -506,10 +506,7 @@ fn writePermissionText(revision: anytype, destination: anytype, text: []const u8
     const end = std.math.add(usize, start, text.len) catch return error.PermissionTextBudgetExceeded;
     if (end > revision.permission_text.len) return error.PermissionTextBudgetExceeded;
     @memcpy(revision.permission_text[start..end], text);
-    destination.* = .{
-        .offset = @intCast(start),
-        .len = @intCast(text.len),
-    };
+    destination.* = @TypeOf(destination.*).init(@intCast(start), @intCast(text.len));
     revision.permission_text_len = @intCast(end);
 }
 

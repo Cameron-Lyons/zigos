@@ -5,6 +5,15 @@ pub const MAGIC: u32 = 0x5356_4331;
 pub const WIRE_VERSION: u16 = 1;
 pub const MAX_OPERATIONS: usize = 4;
 pub const MAX_OPERATION_NAME_BYTES: usize = 32;
+pub const OperationCount = u8;
+pub const PLAN_SIZE_BYTES: usize = 120;
+pub const COMPACT_PLAN_METADATA = true;
+
+comptime {
+    if (MAX_OPERATIONS > std.math.maxInt(OperationCount)) {
+        @compileError("userspace service plan count cannot represent the operation capacity");
+    }
+}
 
 const REQUEST_FIXED_BYTES: usize = @sizeOf(u32) + @sizeOf(u16) + @sizeOf(u8) + @sizeOf(u8) + @sizeOf(u16) + @sizeOf(u16) + @sizeOf(u32);
 const RESPONSE_FIXED_BYTES: usize = REQUEST_FIXED_BYTES + @sizeOf(u64);
@@ -31,11 +40,17 @@ pub const Operation = struct {
 pub const Plan = struct {
     kind: ServiceKind,
     endpoint_label: []const u8,
-    operation_count: usize,
+    operation_count: OperationCount,
     operations: [MAX_OPERATIONS]Operation,
 
     pub fn slice(self: *const Plan) []const Operation {
-        return self.operations[0..self.operation_count];
+        return self.operations[0..@as(usize, self.operation_count)];
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != PLAN_SIZE_BYTES) {
+            @compileError("userspace service plan no longer matches its compact layout");
+        }
     }
 };
 
@@ -208,7 +223,7 @@ fn plan(comptime kind: ServiceKind, comptime endpoint_label: []const u8, comptim
     var out = Plan{
         .kind = kind,
         .endpoint_label = endpoint_label,
-        .operation_count = ops.len,
+        .operation_count = @intCast(ops.len),
         .operations = [_]Operation{.{ .code = 0, .name = "", .value = 0 }} ** MAX_OPERATIONS,
     };
     inline for (ops, 0..) |op, index| {
@@ -238,4 +253,10 @@ test "userspace service protocol round-trips every concrete service plan" {
             try std.testing.expect(response_payload.len <= MAX_RESPONSE_BYTES);
         }
     }
+}
+
+test "userspace service plan metadata stays compact" {
+    try std.testing.expect(COMPACT_PLAN_METADATA);
+    try std.testing.expectEqual(OperationCount, @FieldType(Plan, "operation_count"));
+    try std.testing.expectEqual(@as(usize, 120), @sizeOf(Plan));
 }

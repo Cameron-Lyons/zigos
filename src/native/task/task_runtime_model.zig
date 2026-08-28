@@ -27,12 +27,14 @@ pub const MAX_COMPONENT_LABEL_BYTES: usize = 48;
 pub const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_HASH_BYTES: usize = crypto_hash.digest_bytes;
+pub const UserImageByteLength = u32;
+pub const UserStackByteLength = u32;
 pub const INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_OWNER_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_CAPABILITY_SCAN_BOUND: usize = MAX_TASK_CAPABILITIES;
 pub const TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
-pub const DEFAULT_USER_STACK_SIZE_BYTES: usize = units.kibibytes(64);
+pub const DEFAULT_USER_STACK_SIZE_BYTES: UserStackByteLength = units.kibibytes(64);
 pub const USER_PAGE_SIZE: u64 = launch_helpers.USER_PAGE_SIZE;
 pub const USER_VIRTUAL_ADDRESS_MIN: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MIN;
 pub const USER_IMAGE_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_IMAGE_ADDRESS_MAX_EXCLUSIVE;
@@ -40,7 +42,7 @@ pub const USER_STACK_ADDRESS_MIN: u64 = launch_helpers.USER_STACK_ADDRESS_MIN;
 pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE;
 pub const ORDERED_EXECUTABLE_SEGMENTS = launch_helpers.ORDERED_EXECUTABLE_SEGMENTS;
 pub const DEFAULT_SYNTHETIC_ENTRY_POINT: u64 = USER_VIRTUAL_ADDRESS_MIN;
-pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: usize = units.kibibytes(8);
+pub const DEFAULT_SYNTHETIC_IMAGE_BYTES: UserImageByteLength = units.kibibytes(8);
 
 comptime {
     const byte_capacities = [_]usize{
@@ -62,7 +64,7 @@ comptime {
     if (MAX_TASKS > std.math.maxInt(u16)) {
         @compileError("task capacity exceeds its compact snapshot count");
     }
-    if (USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE - USER_STACK_ADDRESS_MIN > std.math.maxInt(u32)) {
+    if (USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE - USER_STACK_ADDRESS_MIN > std.math.maxInt(UserStackByteLength)) {
         @compileError("userspace stack aperture exceeds its compact byte extent");
     }
 }
@@ -127,8 +129,8 @@ pub const ExecutableImageSpec = struct {
     entry_point: u64 = 0,
     bootstrap_mailbox_address: u64 = 0,
     stack_top: u64 = DEFAULT_USER_STACK_TOP,
-    stack_size_bytes: usize = DEFAULT_USER_STACK_SIZE_BYTES,
-    file_size_bytes: usize = 0,
+    stack_size_bytes: UserStackByteLength = DEFAULT_USER_STACK_SIZE_BYTES,
+    file_size_bytes: UserImageByteLength = 0,
     file_sha256: crypto_hash.Digest = crypto_hash.zero_digest,
     segment_count: u8 = 0,
     segments: [MAX_EXECUTABLE_SEGMENTS]ExecutableSegmentSpec = [_]ExecutableSegmentSpec{ExecutableSegmentSpec{}} ** MAX_EXECUTABLE_SEGMENTS,
@@ -623,6 +625,9 @@ pub const Snapshot = struct {
 
 test "task runtime uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(ExecutableImageSpec, "segment_count")));
+    try std.testing.expectEqual(UserStackByteLength, @FieldType(ExecutableImageSpec, "stack_size_bytes"));
+    try std.testing.expectEqual(UserImageByteLength, @FieldType(ExecutableImageSpec, "file_size_bytes"));
+    try std.testing.expectEqual(@as(usize, 328), @sizeOf(ExecutableImageSpec));
     try std.testing.expectEqual(@as(usize, 128), @sizeOf(ExecutionComponentRecord));
     try std.testing.expectEqual(@as(usize, 248), @sizeOf(LaunchProvenanceRecord));
     try std.testing.expectEqual(@as(usize, 424), @sizeOf(TaskRecord));
@@ -632,9 +637,7 @@ test "task runtime uses capacity-sized resident metadata" {
 
     const expected_cold_bytes = 1_608 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
     try std.testing.expectEqual(expected_cold_bytes, @sizeOf(TaskColdRecord));
-    const expected_snapshot_bytes = 48 + MAX_TASKS * (
-        @sizeOf(TaskSlot) + expected_cold_bytes + @sizeOf(AddressSpaceSlot)
-    );
+    const expected_snapshot_bytes = 48 + MAX_TASKS * (@sizeOf(TaskSlot) + expected_cold_bytes + @sizeOf(AddressSpaceSlot));
     try std.testing.expectEqual(expected_snapshot_bytes, @sizeOf(Snapshot));
 }
 
@@ -793,17 +796,11 @@ pub fn copySlots(comptime T: type, dest: []T, src: []const T) void {
 
 pub fn copyBytes(dest: []u8, src: []const u8) void {
     const len = @min(dest.len, src.len);
-    var index: usize = 0;
-    while (index < len) : (index += 1) {
-        dest[index] = src[index];
-    }
+    @memcpy(dest[0..len], src[0..len]);
 }
 
 pub fn zeroBytes(dest: []u8) void {
-    var index: usize = 0;
-    while (index < dest.len) : (index += 1) {
-        dest[index] = 0;
-    }
+    @memset(dest, 0);
 }
 
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {

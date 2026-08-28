@@ -16,8 +16,10 @@ pub const MAX_DOCUMENT_OPERATIONS: usize = 16;
 pub const MAX_DOCUMENT_OPERATION_TEXT_BYTES: usize = 64;
 pub const MAX_DOCUMENT_VECTOR_CLOCKS: usize = 8;
 pub const COMPACT_DOCUMENT_LOG_METADATA = true;
-pub const DOCUMENT_OPERATION_SIZE_CEILING_BYTES: usize = 112;
-pub const DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES: usize = 2_472;
+pub const COMPACT_DOCUMENT_OPERATION_OFFSETS = true;
+pub const DocumentOffset = u32;
+pub const DOCUMENT_OPERATION_SIZE_CEILING_BYTES: usize = 104;
+pub const DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES: usize = 2_344;
 pub const MEDIA_REPLICATION_CHUNK_BYTES: usize = 128;
 pub const MAX_MEDIA_REPLICATION_CHUNKS: usize =
     (object_store.MAX_PAYLOAD_BYTES + MEDIA_REPLICATION_CHUNK_BYTES - 1) / MEDIA_REPLICATION_CHUNK_BYTES;
@@ -32,6 +34,9 @@ comptime {
     {
         @compileError("document operation metadata no longer fits compact lengths and counters");
     }
+    if (object_store.MAX_PAYLOAD_BYTES > std.math.maxInt(DocumentOffset)) {
+        @compileError("document payload capacity exceeds its compact operation offset");
+    }
 }
 
 pub const DocumentOperationKind = enum(u8) {
@@ -41,14 +46,14 @@ pub const DocumentOperationKind = enum(u8) {
 
 pub const DocumentOperation = struct {
     kind: DocumentOperationKind,
-    position: usize,
-    delete_len: usize = 0,
+    position: DocumentOffset,
+    delete_len: DocumentOffset = 0,
     text_len: u8 = 0,
     text: [MAX_DOCUMENT_OPERATION_TEXT_BYTES]u8 = [_]u8{0} ** MAX_DOCUMENT_OPERATION_TEXT_BYTES,
     actor: principal.PrincipalId,
     lamport: u64,
 
-    pub fn insert(position: usize, text: []const u8, actor: principal.PrincipalId, lamport: u64) Error!DocumentOperation {
+    pub fn insert(position: DocumentOffset, text: []const u8, actor: principal.PrincipalId, lamport: u64) Error!DocumentOperation {
         if (text.len > MAX_DOCUMENT_OPERATION_TEXT_BYTES) return error.DocumentOperationTooLarge;
         var operation = DocumentOperation{
             .kind = .insert,
@@ -61,7 +66,7 @@ pub const DocumentOperation = struct {
         return operation;
     }
 
-    pub fn remove(position: usize, delete_len: usize, actor: principal.PrincipalId, lamport: u64) DocumentOperation {
+    pub fn remove(position: DocumentOffset, delete_len: DocumentOffset, actor: principal.PrincipalId, lamport: u64) DocumentOperation {
         return .{
             .kind = .delete,
             .position = position,
@@ -661,7 +666,7 @@ fn applyInsert(operation: DocumentOperation, output: []u8, current_len: usize) E
     if (operation.text_len == 0) return current_len;
     const text_len: usize = @intCast(operation.text_len);
     if (current_len + text_len > output.len) return error.DocumentBufferTooSmall;
-    const position = @min(operation.position, current_len);
+    const position = @min(@as(usize, operation.position), current_len);
     var index = current_len;
     while (index > position) : (index -= 1) {
         output[index + text_len - 1] = output[index - 1];
@@ -671,9 +676,10 @@ fn applyInsert(operation: DocumentOperation, output: []u8, current_len: usize) E
 }
 
 fn applyDelete(operation: DocumentOperation, output: []u8, current_len: usize) Error!usize {
-    if (operation.delete_len == 0 or operation.position >= current_len) return current_len;
-    const delete_end = @min(current_len, operation.position + operation.delete_len);
-    const removed = delete_end - operation.position;
+    const position: usize = @intCast(operation.position);
+    if (operation.delete_len == 0 or position >= current_len) return current_len;
+    const delete_end = @min(current_len, position + @as(usize, operation.delete_len));
+    const removed = delete_end - position;
     var index = delete_end;
     while (index < current_len) : (index += 1) {
         output[index - removed] = output[index];
@@ -781,11 +787,16 @@ test "compact document log metadata preserves exact capacities" {
             .kind = .device,
             .serial = (operation_index % MAX_DOCUMENT_VECTOR_CLOCKS) + 1,
         };
-        try log.append(try DocumentOperation.insert(operation_index, &full_text, actor, operation_index + 1));
+        try log.append(try DocumentOperation.insert(@intCast(operation_index), &full_text, actor, operation_index + 1));
     }
 
     try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_OPERATIONS), log.operation_count);
     try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_VECTOR_CLOCKS), log.clock_count);
+    try std.testing.expect(COMPACT_DOCUMENT_OPERATION_OFFSETS);
+    try std.testing.expectEqual(DocumentOffset, @FieldType(DocumentOperation, "position"));
+    try std.testing.expectEqual(DocumentOffset, @FieldType(DocumentOperation, "delete_len"));
+    try std.testing.expectEqual(@as(usize, DOCUMENT_OPERATION_SIZE_CEILING_BYTES), @sizeOf(DocumentOperation));
+    try std.testing.expectEqual(@as(usize, DOCUMENT_OPERATION_LOG_SIZE_CEILING_BYTES), @sizeOf(DocumentOperationLog));
     try std.testing.expectEqual(@as(u8, MAX_DOCUMENT_OPERATION_TEXT_BYTES), log.slice()[0].text_len);
     try std.testing.expectEqualSlices(u8, &full_text, log.slice()[0].textSlice());
     try std.testing.expectError(error.DocumentOperationLogFull, log.append(try DocumentOperation.insert(

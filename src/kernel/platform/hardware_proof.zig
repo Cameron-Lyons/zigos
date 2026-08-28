@@ -383,47 +383,96 @@ pub const AttestationRootLifecycleFacts = struct {
     verifier_metadata_digest_bound: bool,
 };
 
-const PrintedMarkers = struct {
-    source: bool = false,
-    board: bool = false,
-    smbios_sku: bool = false,
-    multiboot_memory_map: bool = false,
-    acpi_xsdt: bool = false,
-    acpi_madt: bool = false,
-    acpi_fadt: bool = false,
-    acpi_dmar: bool = false,
-    vtd_segment_zero: bool = false,
-    apic_timer_interrupt: bool = false,
-    framebuffer_scanout: bool = false,
-    xhci_keyboard_report: bool = false,
-    nvme_write_read_completion: bool = false,
-    i225_frame_interrupt: bool = false,
-    suspend_resume_power: bool = false,
-    crash_record_reboot_persistence: bool = false,
-    update_rollback_power_cycle: bool = false,
-    attestation_root_lifecycle: bool = false,
-    uefi: bool = false,
-    acpi_tables: bool = false,
-    vtd_discovery: bool = false,
-    vtd_storage_isolation: bool = false,
-    vtd_interrupt_isolation: bool = false,
-    vtd_blocked_dma_fault: bool = false,
-    apic_timer: bool = false,
-    framebuffer_gop: bool = false,
-    xhci_input: bool = false,
-    nvme_block: bool = false,
-    i225_packet_io: bool = false,
-    suspend_resume: bool = false,
-    crash_recovery: bool = false,
-    cold_boots: bool = false,
-    warm_reboots: bool = false,
-    storage_cycles: bool = false,
-    network_cycles: bool = false,
-    suspend_cycles: bool = false,
-    crash_cycles: bool = false,
-    crash_record_persistence_cycles: bool = false,
-    update_rollback_cycles: bool = false,
+const RuntimeMarker = enum(u5) {
+    evidence_source,
+    board_sku,
+    smbios_sku,
+    multiboot_memory_map,
+    acpi_xsdt,
+    acpi_madt,
+    acpi_fadt,
+    acpi_dmar,
+    vtd_segment_zero,
+    uefi_boot,
+    acpi_tables,
+    vtd_discovery,
+    vtd_storage_isolation,
+    vtd_interrupt_isolation,
+    vtd_blocked_dma_fault,
+    apic_timer_interrupt,
+    apic_timer,
+    framebuffer_scanout,
+    framebuffer_gop,
+    xhci_keyboard_report,
+    xhci_input,
+    nvme_write_read_completion,
+    nvme_block,
+    i225_frame_interrupt,
+    i225_packet_io,
+    suspend_resume_power,
+    suspend_resume,
+    crash_record_reboot_persistence,
+    crash_recovery,
+    update_rollback_power_cycle,
+    attestation_root_lifecycle,
 };
+
+const runtime_markers = [_][]const u8{
+    hardware_target.nuc11tnki5_proof_metadata_markers[0],
+    hardware_target.nuc11tnki5_proof_metadata_markers[1],
+    hardware_target.nuc11tnki5_hardware_fact_markers[0],
+    hardware_target.nuc11tnki5_hardware_fact_markers[1],
+    hardware_target.nuc11tnki5_hardware_fact_markers[2],
+    hardware_target.nuc11tnki5_hardware_fact_markers[3],
+    hardware_target.nuc11tnki5_hardware_fact_markers[4],
+    hardware_target.nuc11tnki5_hardware_fact_markers[5],
+    hardware_target.nuc11tnki5_hardware_fact_markers[6],
+    hardware_target.nuc11tnki5_markers[0],
+    hardware_target.nuc11tnki5_markers[1],
+    hardware_target.nuc11tnki5_markers[2],
+    hardware_target.nuc11tnki5_markers[3],
+    hardware_target.nuc11tnki5_markers[4],
+    hardware_target.nuc11tnki5_markers[5],
+    hardware_target.nuc11tnki5_hardware_fact_markers[7],
+    hardware_target.nuc11tnki5_markers[6],
+    hardware_target.nuc11tnki5_hardware_fact_markers[8],
+    hardware_target.nuc11tnki5_markers[7],
+    hardware_target.nuc11tnki5_hardware_fact_markers[9],
+    hardware_target.nuc11tnki5_markers[8],
+    hardware_target.nuc11tnki5_hardware_fact_markers[10],
+    hardware_target.nuc11tnki5_markers[9],
+    hardware_target.nuc11tnki5_hardware_fact_markers[11],
+    hardware_target.nuc11tnki5_markers[10],
+    hardware_target.nuc11tnki5_hardware_fact_markers[12],
+    hardware_target.nuc11tnki5_markers[11],
+    hardware_target.nuc11tnki5_hardware_fact_markers[13],
+    hardware_target.nuc11tnki5_markers[12],
+    hardware_target.nuc11tnki5_hardware_fact_markers[14],
+    hardware_target.nuc11tnki5_hardware_fact_markers[15],
+};
+
+comptime {
+    if (runtime_markers.len != std.meta.fields(RuntimeMarker).len) {
+        @compileError("runtime marker table and index enum must stay aligned");
+    }
+}
+
+const PrintedMarkers = struct {
+    runtime_bits: u32 = 0,
+    counter_bits: u8 = 0,
+
+    fn contains(self: PrintedMarkers, marker: RuntimeMarker) bool {
+        return self.runtime_bits & runtimeMarkerBit(marker) != 0;
+    }
+
+    fn insert(self: *PrintedMarkers, marker: RuntimeMarker) void {
+        self.runtime_bits |= runtimeMarkerBit(marker);
+    }
+};
+
+fn runtimeMarkerBit(marker: RuntimeMarker) u32 {
+    return @as(u32, 1) << @intFromEnum(marker);
+}
 
 var facts = ProbeFacts{};
 var printed = PrintedMarkers{};
@@ -795,167 +844,58 @@ fn mapAcpiPages(physical_base: usize, virtual_base: usize, page_count: usize) vo
 }
 
 fn printNewMarkers() void {
-    if (facts.real_target_sku and !printed.source) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE");
-        printed.source = true;
-    }
-    if (facts.real_target_sku and !printed.board) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":BOARD_SKU:NUC11TNKi5");
-        printed.board = true;
-    }
-    if (facts.real_target_sku and !printed.smbios_sku) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":SMBIOS_SKU:OBSERVED");
-        printed.smbios_sku = true;
-    }
-    if (facts.real_target_sku and facts.multiboot_handoff and facts.memory_map and !printed.multiboot_memory_map) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED");
-        printed.multiboot_memory_map = true;
-    }
-    if (facts.real_target_sku and facts.acpi_xsdt and !printed.acpi_xsdt) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_XSDT:OBSERVED");
-        printed.acpi_xsdt = true;
-    }
-    if (facts.real_target_sku and facts.acpi_madt and !printed.acpi_madt) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_MADT:OBSERVED");
-        printed.acpi_madt = true;
-    }
-    if (facts.real_target_sku and facts.acpi_fadt and !printed.acpi_fadt) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_FADT:OBSERVED");
-        printed.acpi_fadt = true;
-    }
-    if (facts.real_target_sku and facts.acpi_dmar and !printed.acpi_dmar) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_DMAR:OBSERVED");
-        printed.acpi_dmar = true;
-    }
-    if (facts.vtdDiscoveryReady() and !printed.vtd_segment_zero) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED");
-        printed.vtd_segment_zero = true;
-    }
-    if (facts.uefiBootReady() and !printed.uefi) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":UEFI_BOOT:PASS");
-        printed.uefi = true;
-    }
-    if (facts.real_target_sku and facts.acpiTablesReady() and !printed.acpi_tables) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_TABLES:PASS");
-        printed.acpi_tables = true;
-    }
-    if (facts.vtdDiscoveryReady() and !printed.vtd_discovery) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_DISCOVERY:PASS");
-        printed.vtd_discovery = true;
-    }
-    if (facts.vtdStorageIsolationReady() and !printed.vtd_storage_isolation) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_STORAGE_ISOLATION:ENFORCED");
-        printed.vtd_storage_isolation = true;
-    }
-    if (facts.vtdInterruptIsolationReady() and !printed.vtd_interrupt_isolation) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_INTERRUPT_ISOLATION:ENFORCED");
-        printed.vtd_interrupt_isolation = true;
-    }
-    if (facts.vtdFaultProofReady() and !printed.vtd_blocked_dma_fault) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_BLOCKED_DMA_FAULT:OBSERVED");
-        printed.vtd_blocked_dma_fault = true;
-    }
-    if (facts.real_target_sku and facts.apic_timer and !printed.apic_timer) {
-        if (!printed.apic_timer_interrupt) {
-            printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED");
-            printed.apic_timer_interrupt = true;
-        }
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":APIC_TIMER:PASS");
-        printed.apic_timer = true;
-    }
-    if (facts.real_target_sku and facts.framebuffer_gop and !printed.framebuffer_gop) {
-        if (!printed.framebuffer_scanout) {
-            printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP_SCANOUT:OBSERVED");
-            printed.framebuffer_scanout = true;
-        }
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP:PASS");
-        printed.framebuffer_gop = true;
-    }
-    if (facts.real_target_sku and facts.xhci_keyboard_input and !printed.xhci_input) {
-        if (!printed.xhci_keyboard_report) {
-            printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":XHCI_BOOT_KEYBOARD_REPORT:OBSERVED");
-            printed.xhci_keyboard_report = true;
-        }
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":USB_INPUT_XHCI:PASS");
-        printed.xhci_input = true;
-    }
-    if (facts.real_target_sku and facts.nvmeBlockReady() and !printed.nvme_block) {
-        if (!printed.nvme_write_read_completion) {
-            printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":NVME_WRITE_READ_COMPLETION:OBSERVED");
-            printed.nvme_write_read_completion = true;
-        }
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":NVME_BLOCK:PASS");
-        printed.nvme_block = true;
-    }
-    if (facts.real_target_sku and facts.i225PacketIoReady() and !printed.i225_packet_io) {
-        if (!printed.i225_frame_interrupt) {
-            printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":I225_LM_FRAME_INTERRUPT:OBSERVED");
-            printed.i225_frame_interrupt = true;
-        }
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":NETWORK_I225_LM:PASS");
-        printed.i225_packet_io = true;
-    }
-    if (facts.real_target_sku and facts.suspendResumeReady() and !printed.suspend_resume) {
-        if (!printed.suspend_resume_power) {
-            printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME_POWER:OBSERVED");
-            printed.suspend_resume_power = true;
-        }
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME:PASS");
-        printed.suspend_resume = true;
-    }
-    if (facts.real_target_sku and facts.crashRecoveryReady() and !printed.crash_recovery) {
-        if (!printed.crash_record_reboot_persistence) {
-            printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED");
-            printed.crash_record_reboot_persistence = true;
-        }
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":CRASH_RECOVERY:PASS");
-        printed.crash_recovery = true;
-    }
-    if (facts.real_target_sku and facts.updateRollbackReady() and !printed.update_rollback_power_cycle) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED");
-        printed.update_rollback_power_cycle = true;
-    }
-    if (facts.real_target_sku and facts.attestationRootLifecycleFacts() != null and !printed.attestation_root_lifecycle) {
-        printMarker(hardware_target.nuc11tnki5_marker_prefix ++ ":ATTESTATION_ROOT_LIFECYCLE:OBSERVED");
-        printed.attestation_root_lifecycle = true;
+    if (!facts.real_target_sku) return;
+    for (runtime_markers, 0..) |text, index| {
+        const marker: RuntimeMarker = @enumFromInt(index);
+        if (printed.contains(marker) or !runtimeMarkerReady(marker)) continue;
+        printMarker(text);
+        printed.insert(marker);
     }
     printCounters();
 }
 
+fn runtimeMarkerReady(marker: RuntimeMarker) bool {
+    return switch (marker) {
+        .evidence_source, .board_sku, .smbios_sku => true,
+        .multiboot_memory_map => facts.multiboot_handoff and facts.memory_map,
+        .acpi_xsdt => facts.acpi_xsdt,
+        .acpi_madt => facts.acpi_madt,
+        .acpi_fadt => facts.acpi_fadt,
+        .acpi_dmar => facts.acpi_dmar,
+        .vtd_segment_zero, .vtd_discovery => facts.vtdDiscoveryReady(),
+        .uefi_boot => facts.uefiBootReady(),
+        .acpi_tables => facts.acpiTablesReady(),
+        .vtd_storage_isolation => facts.vtdStorageIsolationReady(),
+        .vtd_interrupt_isolation => facts.vtdInterruptIsolationReady(),
+        .vtd_blocked_dma_fault => facts.vtdFaultProofReady(),
+        .apic_timer_interrupt, .apic_timer => facts.apic_timer,
+        .framebuffer_scanout, .framebuffer_gop => facts.framebuffer_gop,
+        .xhci_keyboard_report, .xhci_input => facts.xhci_keyboard_input,
+        .nvme_write_read_completion, .nvme_block => facts.nvmeBlockReady(),
+        .i225_frame_interrupt, .i225_packet_io => facts.i225PacketIoReady(),
+        .suspend_resume_power, .suspend_resume => facts.suspendResumeReady(),
+        .crash_record_reboot_persistence, .crash_recovery => facts.crashRecoveryReady(),
+        .update_rollback_power_cycle => facts.updateRollbackReady(),
+        .attestation_root_lifecycle => facts.attestationRootLifecycleFacts() != null,
+    };
+}
+
 fn printCounters() void {
-    if (!facts.real_target_sku) return;
-    const minimums = hardware_target.first_supported_target.proof_minimums;
-    if (facts.cold_boots >= minimums.cold_boots and !printed.cold_boots) {
-        printCounter("COLD_BOOTS", facts.cold_boots);
-        printed.cold_boots = true;
-    }
-    if (facts.warm_reboots >= minimums.warm_reboots and !printed.warm_reboots) {
-        printCounter("WARM_REBOOTS", facts.warm_reboots);
-        printed.warm_reboots = true;
-    }
-    if (facts.storage_write_read_cycles >= minimums.storage_write_read_cycles and !printed.storage_cycles) {
-        printCounter("STORAGE_WRITE_READ_CYCLES", facts.storage_write_read_cycles);
-        printed.storage_cycles = true;
-    }
-    if (facts.network_frame_cycles >= minimums.network_frame_cycles and !printed.network_cycles) {
-        printCounter("NETWORK_FRAME_CYCLES", facts.network_frame_cycles);
-        printed.network_cycles = true;
-    }
-    if (facts.suspend_resume_cycles >= minimums.suspend_resume_cycles and !printed.suspend_cycles) {
-        printCounter("SUSPEND_RESUME_CYCLES", facts.suspend_resume_cycles);
-        printed.suspend_cycles = true;
-    }
-    if (facts.crash_recovery_cycles >= minimums.crash_recovery_cycles and !printed.crash_cycles) {
-        printCounter("CRASH_RECOVERY_CYCLES", facts.crash_recovery_cycles);
-        printed.crash_cycles = true;
-    }
-    if (facts.crash_record_persistence_cycles >= minimums.crash_record_persistence_cycles and !printed.crash_record_persistence_cycles) {
-        printCounter("CRASH_RECORD_PERSISTENCE_CYCLES", facts.crash_record_persistence_cycles);
-        printed.crash_record_persistence_cycles = true;
-    }
-    if (facts.update_rollback_cycles >= minimums.update_rollback_cycles and !printed.update_rollback_cycles) {
-        printCounter("UPDATE_ROLLBACK_CYCLES", facts.update_rollback_cycles);
-        printed.update_rollback_cycles = true;
+    const values = [_]u16{
+        facts.cold_boots,
+        facts.warm_reboots,
+        facts.storage_write_read_cycles,
+        facts.network_frame_cycles,
+        facts.suspend_resume_cycles,
+        facts.crash_recovery_cycles,
+        facts.crash_record_persistence_cycles,
+        facts.update_rollback_cycles,
+    };
+    for (hardware_target.nuc11tnki5_counter_markers, values, 0..) |counter, value, index| {
+        const bit = @as(u8, 1) << @intCast(index);
+        if (printed.counter_bits & bit != 0 or value < counter.minimum) continue;
+        printCounter(counter.marker_prefix, value);
+        printed.counter_bits |= bit;
     }
 }
 
@@ -965,12 +905,9 @@ fn printMarker(marker: []const u8) void {
     console.print("\n");
 }
 
-fn printCounter(name: []const u8, value: u16) void {
+fn printCounter(marker_prefix: []const u8, value: u16) void {
     if (builtin.is_test) return;
-    console.print(hardware_target.nuc11tnki5_marker_prefix);
-    console.print(":");
-    console.print(name);
-    console.print(":");
+    console.print(marker_prefix);
     printDec(value);
     console.print("\n");
 }
@@ -1594,7 +1531,7 @@ test "hardware proof records attestation root lifecycle only from complete real 
     try std.testing.expect(recorded.real_target_sku);
     const lifecycle = recorded.attestationRootLifecycleFacts();
     try std.testing.expect(lifecycle != null);
-    try std.testing.expect(printed.attestation_root_lifecycle);
+    try std.testing.expect(printed.contains(.attestation_root_lifecycle));
     try std.testing.expectEqual(@as(u64, 7), lifecycle.?.initial_generation);
     try std.testing.expectEqual(@as(u64, 9), lifecycle.?.active_generation);
     try std.testing.expectEqual(@as(u8, 1), lifecycle.?.revoked_generation_count);

@@ -47,12 +47,16 @@ const GRANULARITY: u4 = 0x8;
 const LONG_MODE: u4 = 0x2;
 const SIZE_32: u4 = 0x4;
 const FLAT_SEGMENT_LIMIT: u20 = 0xFFFFF;
-const DOUBLE_FAULT_STACK_BYTES: usize = 16 * 1024;
+pub const DOUBLE_FAULT_STACK_GUARD_BYTES: usize = 4096;
+pub const DOUBLE_FAULT_STACK_USABLE_BYTES: usize = 16 * 1024;
+pub const DOUBLE_FAULT_STACK_TOTAL_BYTES: usize = DOUBLE_FAULT_STACK_GUARD_BYTES + DOUBLE_FAULT_STACK_USABLE_BYTES;
+pub const DOUBLE_FAULT_STACK_ALIGNMENT: usize = DOUBLE_FAULT_STACK_GUARD_BYTES;
+pub const DoubleFaultStackStorage = [DOUBLE_FAULT_STACK_TOTAL_BYTES]u8;
 
 var gdt: [7]u64 align(8) = [_]u64{0} ** 7;
 var gdt_ptr: GdtPtr = undefined;
 var tss: Tss align(16) = .{};
-var double_fault_stack: [DOUBLE_FAULT_STACK_BYTES]u8 align(16) = [_]u8{0} ** DOUBLE_FAULT_STACK_BYTES;
+var double_fault_stack: ?*align(DOUBLE_FAULT_STACK_ALIGNMENT) DoubleFaultStackStorage = null;
 
 const KERNEL_CODE_DESCRIPTOR = segmentDescriptor(
     0,
@@ -82,6 +86,20 @@ const USER_DATA_DESCRIPTOR = segmentDescriptor(
 extern fn gdt_flush(gdt_ptr: *const GdtPtr) void;
 extern fn tss_flush() void;
 
+pub fn bindDoubleFaultStack(storage: *anyopaque) bool {
+    if (double_fault_stack != null) return false;
+    double_fault_stack = @ptrCast(@alignCast(storage));
+    return true;
+}
+
+pub fn doubleFaultStackGuardAddress() usize {
+    return @intFromPtr(doubleFaultStackStorage());
+}
+
+fn doubleFaultStackStorage() *align(DOUBLE_FAULT_STACK_ALIGNMENT) DoubleFaultStackStorage {
+    return double_fault_stack orelse @panic("double-fault stack storage is not bound");
+}
+
 pub fn init() void {
     gdt[NULL_DESCRIPTOR_INDEX] = 0;
     gdt[KERNEL_CODE_DESCRIPTOR_INDEX] = KERNEL_CODE_DESCRIPTOR;
@@ -106,7 +124,7 @@ pub fn setKernelStack(stack: usize) void {
 }
 
 pub fn configureDoubleFaultIst() void {
-    tss.ist1 = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
+    tss.ist1 = @intFromPtr(doubleFaultStackStorage()) + DOUBLE_FAULT_STACK_TOTAL_BYTES;
 }
 
 pub fn userDataDescriptor() u64 {
@@ -141,6 +159,11 @@ fn writeTssDescriptor() void {
 comptime {
     if (@sizeOf(Tss) != 104) @compileError("x86-64 TSS must be 104 bytes");
     if (@sizeOf(GdtPtr) != 10) @compileError("x86-64 GDTR operand must be 10 bytes");
+    if (@sizeOf(DoubleFaultStackStorage) != 20 * 1024 or
+        DOUBLE_FAULT_STACK_USABLE_BYTES != 16 * 1024)
+    {
+        @compileError("double-fault stack must retain a guarded 16 KiB emergency capacity");
+    }
     if (KERNEL_CODE_DESCRIPTOR != 0x00AF_9B00_0000_FFFF or
         KERNEL_DATA_DESCRIPTOR != 0x00CF_9300_0000_FFFF or
         USER_CODE_DESCRIPTOR != 0x00AF_FB00_0000_FFFF or

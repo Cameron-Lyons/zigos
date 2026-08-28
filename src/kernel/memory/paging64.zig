@@ -103,6 +103,7 @@ pub const DIRECT_MAP_1G_LEAF_COUNT: usize = DIRECT_MAP_PDPT_ENTRIES - 1;
 pub const DIRECT_MAP_PAGE_DIRECTORY_COUNT: usize = 1;
 const PRECISE_IDENTITY_PAGE_TABLES = 5;
 const PRECISE_IDENTITY_BYTES: u32 = PRECISE_IDENTITY_PAGE_TABLES * 2 * 1024 * 1024;
+const BOOTSTRAP_PAGE_TABLE_COUNT = 5 + 2 * PRECISE_IDENTITY_PAGE_TABLES;
 
 const TABLE_OWNER_INHERITED: u3 = 0;
 const TABLE_OWNER_KERNEL_DYNAMIC: u3 = 1;
@@ -115,13 +116,17 @@ extern const __kernel_text_start: u8;
 extern const __kernel_text_end: u8;
 extern const __kernel_relro_end: u8;
 
-var kernel_pml4: PageDirectory align(PAGE_SIZE) = undefined;
-var kernel_pdpt: PageTable align(PAGE_SIZE) = undefined;
-var kernel_page_directory: PageTable align(PAGE_SIZE) = undefined;
-var kernel_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
-var kernel_direct_pdpt: PageTable align(PAGE_SIZE) = undefined;
-var kernel_direct_page_directory: PageTable align(PAGE_SIZE) = undefined;
-var kernel_direct_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
+const BootstrapPageTables = struct {
+    pml4: PageDirectory align(PAGE_SIZE),
+    pdpt: PageTable align(PAGE_SIZE),
+    page_directory: PageTable align(PAGE_SIZE),
+    page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE),
+    direct_pdpt: PageTable align(PAGE_SIZE),
+    direct_page_directory: PageTable align(PAGE_SIZE),
+    direct_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE),
+};
+
+var bootstrap_page_tables: ?*BootstrapPageTables = null;
 
 const PhysicalFrameAllocator = frame_allocator.Fixed(MANAGED_PHYSICAL_BYTES, PAGE_SIZE);
 var physical_frames: PhysicalFrameAllocator = undefined;
@@ -218,7 +223,11 @@ fn tablePhysicalAddress(table: *const PageTable) frame_allocator.PhysicalAddress
 }
 
 fn kernelPageDirectory() *PageDirectory {
-    return tableAtPhysical(@intFromPtr(&kernel_pml4));
+    return tableAtPhysical(@intFromPtr(&bootstrapPageTables().pml4));
+}
+
+fn bootstrapPageTables() *BootstrapPageTables {
+    return bootstrap_page_tables orelse haltWithMessage("Missing bootstrap page-table storage!\n");
 }
 
 fn zeroTable(table: *PageTable) void {
@@ -510,7 +519,7 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
     };
     const pdpt = tableAtPhysical(pdpt_phys);
     zeroTable(pdpt);
-    for (tableAtPhysical(@intFromPtr(&kernel_pdpt)), pdpt) |kernel_entry, *user_entry| {
+    for (tableAtPhysical(@intFromPtr(&bootstrapPageTables().pdpt)), pdpt) |kernel_entry, *user_entry| {
         if (entryPresent(kernel_entry)) user_entry.* = kernel_entry;
     }
 
@@ -682,28 +691,29 @@ pub fn switchToKernelAddressSpace() void {
 }
 
 fn initializeKernelHierarchy() void {
-    zeroTable(&kernel_pml4);
-    zeroTable(&kernel_pdpt);
-    zeroTable(&kernel_page_directory);
-    zeroTable(&kernel_direct_pdpt);
-    zeroTable(&kernel_direct_page_directory);
+    const tables = bootstrapPageTables();
+    zeroTable(&tables.pml4);
+    zeroTable(&tables.pdpt);
+    zeroTable(&tables.page_directory);
+    zeroTable(&tables.direct_pdpt);
+    zeroTable(&tables.direct_page_directory);
 
-    kernel_pml4[0] = tableEntry(@intFromPtr(&kernel_pdpt), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
-    kernel_pdpt[0] = tableEntry(@intFromPtr(&kernel_page_directory), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
-    kernel_pml4[tableIndex(virtual_layout.physical_memory.base, PML4_SHIFT)] = tableEntry(
-        @intFromPtr(&kernel_direct_pdpt),
+    tables.pml4[0] = tableEntry(@intFromPtr(&tables.pdpt), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
+    tables.pdpt[0] = tableEntry(@intFromPtr(&tables.page_directory), ENTRY_PRESENT | ENTRY_WRITABLE, TABLE_OWNER_INHERITED);
+    tables.pml4[tableIndex(virtual_layout.physical_memory.base, PML4_SHIFT)] = tableEntry(
+        @intFromPtr(&tables.direct_pdpt),
         ENTRY_PRESENT | ENTRY_WRITABLE,
         TABLE_OWNER_INHERITED,
     );
-    kernel_direct_pdpt[0] = tableEntry(
-        @intFromPtr(&kernel_direct_page_directory),
+    tables.direct_pdpt[0] = tableEntry(
+        @intFromPtr(&tables.direct_page_directory),
         ENTRY_PRESENT | ENTRY_WRITABLE,
         TABLE_OWNER_INHERITED,
     );
 
     const image = kernelImageExtents();
     var identity_physical_address: u32 = 0;
-    for (&kernel_page_tables, 0..) |*page_table, table_index| {
+    for (&tables.page_tables, 0..) |*page_table, table_index| {
         zeroTable(page_table);
         for (page_table) |*entry| {
             entry.* = tableEntry(
@@ -713,21 +723,21 @@ fn initializeKernelHierarchy() void {
             );
             identity_physical_address += PAGE_SIZE;
         }
-        kernel_page_directory[table_index] = tableEntry(
+        tables.page_directory[table_index] = tableEntry(
             @intFromPtr(page_table),
             ENTRY_PRESENT | ENTRY_WRITABLE,
             TABLE_OWNER_INHERITED,
         );
     }
 
-    var directory_index: usize = kernel_page_tables.len;
+    var directory_index: usize = tables.page_tables.len;
     while (directory_index < IDENTITY_DIRECTORY_ENTRIES) : (directory_index += 1) {
-        kernel_page_directory[directory_index] = large2MiBPhysicalEntry(identity_physical_address);
+        tables.page_directory[directory_index] = large2MiBPhysicalEntry(identity_physical_address);
         identity_physical_address += @intCast(LARGE_2M_PAGE_SIZE);
     }
 
     var direct_physical_address: frame_allocator.PhysicalAddress = 0;
-    for (&kernel_direct_page_tables, 0..) |*page_table, table_index| {
+    for (&tables.direct_page_tables, 0..) |*page_table, table_index| {
         zeroTable(page_table);
         for (page_table) |*entry| {
             entry.* = tableEntry(
@@ -737,19 +747,19 @@ fn initializeKernelHierarchy() void {
             );
             direct_physical_address += PAGE_SIZE;
         }
-        kernel_direct_page_directory[table_index] = tableEntry(
+        tables.direct_page_directory[table_index] = tableEntry(
             @intFromPtr(page_table),
             ENTRY_PRESENT | ENTRY_WRITABLE,
             TABLE_OWNER_INHERITED,
         );
     }
 
-    directory_index = kernel_direct_page_tables.len;
+    directory_index = tables.direct_page_tables.len;
     while (directory_index < table64.TABLE_ENTRIES) : (directory_index += 1) {
-        kernel_direct_page_directory[directory_index] = large2MiBPhysicalEntry(direct_physical_address);
+        tables.direct_page_directory[directory_index] = large2MiBPhysicalEntry(direct_physical_address);
         direct_physical_address += LARGE_2M_PAGE_SIZE;
     }
-    for (kernel_direct_pdpt[1..DIRECT_MAP_PDPT_ENTRIES]) |*entry| {
+    for (tables.direct_pdpt[1..DIRECT_MAP_PDPT_ENTRIES]) |*entry| {
         entry.* = large1GiBPhysicalEntry(direct_physical_address);
         direct_physical_address += LARGE_1G_PAGE_SIZE;
     }
@@ -806,6 +816,11 @@ pub fn init() void {
         haltWithMessage("Invalid Multiboot information extent!\n");
     const memory_map = handoff.capturedMemoryMap(boot_info) orelse
         haltWithMessage("Missing Multiboot memory map!\n");
+    const bootstrap_tables_memory = memory.claimEarly(
+        @sizeOf(BootstrapPageTables),
+        @alignOf(BootstrapPageTables),
+    ) orelse haltWithMessage("Insufficient early heap for bootstrap page tables!\n");
+    bootstrap_page_tables = @ptrCast(@alignCast(bootstrap_tables_memory));
     const frame_storage_memory = memory.claimEarly(
         PhysicalFrameAllocator.storage_bytes,
         @alignOf(PhysicalFrameAllocator.Storage),
@@ -841,7 +856,7 @@ pub fn init() void {
 
     enableWriteProtect();
     process_context_identifiers_enabled = x86.processContextIdentifiersEnabled();
-    const kernel_pml4_physical = @intFromPtr(&kernel_pml4);
+    const kernel_pml4_physical = @intFromPtr(&bootstrapPageTables().pml4);
     x86.writeCr3(kernel_pml4_physical);
     current_page_directory = kernelPageDirectory();
     kernel_switch_cr3 = addressSpaceCr3(kernel_pml4_physical, pcid_allocator.KERNEL_IDENTIFIER);
@@ -904,7 +919,7 @@ fn printHex(value: anytype, console: anytype) void {
     }
 }
 
-var current_page_directory: *PageDirectory = &kernel_pml4;
+var current_page_directory: *PageDirectory = undefined;
 var kernel_switch_cr3: usize = 0;
 
 pub fn getCurrentPageDirectory() *PageDirectory {
@@ -944,6 +959,11 @@ comptime {
     }
     if (PRECISE_IDENTITY_BYTES != 10 * 1024 * 1024) {
         @compileError("the precise identity region must cover the first 10 MiB");
+    }
+    if (@sizeOf(BootstrapPageTables) != BOOTSTRAP_PAGE_TABLE_COUNT * PAGE_SIZE or
+        @alignOf(BootstrapPageTables) != PAGE_SIZE)
+    {
+        @compileError("bootstrap page-table storage must occupy whole page-aligned frames");
     }
     if (MANAGED_PHYSICAL_BYTES > virtual_layout.PHYSICAL_WINDOW_CAPACITY_BYTES) {
         @compileError("the managed physical aperture exceeds the direct-map window");

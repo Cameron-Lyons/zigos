@@ -51,6 +51,8 @@ pub const kernel_context_layout = session_contexts.kernel_context_layout;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 pub const BOOTSTRAP_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const UI_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const STEADY_RUNTIME_CONSTRUCTION_ATTEMPTS: u8 = 0;
+pub const INPUT_AUTHORITY_BATCH_CONTEXT_RELOOKUPS: u8 = 0;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
@@ -260,24 +262,26 @@ pub const SessionManager = struct {
     }
 
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
-        const runtime = self.runtimePtr();
+        if (!self.runtime_context.constructed) return false;
+        const runtime = self.runtime_context.taskRuntime().?;
         _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
-        return self.runtime_context.runScheduler(now_ticks);
+        return self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
-        return self.runtime_context.schedulerHasReadyTasks();
+        if (!self.runtime_context.constructed) return false;
+        return self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
     pub fn servicePendingNetworkWork(self: *SessionManager, now_ticks: u64) usize {
         const service = bootstrap_driver_port.servicePendingNetworkFrames(NETWORK_RECEIVE_SERVICE_BUDGET);
         if (service.frames_queued != 0) {
             const task_id = bootstrap_driver_port.activeNetworkTaskId();
-            if (task_id != 0) {
-                _ = self.userspaceSchedulerPtr().wakeTask(
+            if (task_id != 0 and self.runtime_context.constructed) {
+                _ = self.runtime_context.userspaceScheduler().?.wakeTask(
                     task_id,
                     .external_event,
                     now_ticks,
@@ -294,12 +298,20 @@ pub const SessionManager = struct {
 
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
+        if (!self.runtime_context.constructed) return events_routed;
+        const runtime = self.runtime_context.taskRuntime().?;
+        const scheduler = self.runtime_context.userspaceScheduler().?;
+        const capability_table = self.kernel_context.capabilityTable().?;
         while (self.input_router.pollWakeTarget()) |task_id| {
-            if (self.ensureFocusedInputCapability(task_id, now_ticks) == null) {
+            const task = runtime.find(task_id) orelse {
+                _ = self.input_router.dropForTask(task_id);
+                continue;
+            };
+            if (self.ensureFocusedInputCapabilityForResolvedTask(task, capability_table, now_ticks) == null) {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
             }
-            _ = self.userspaceSchedulerPtr().wakeTask(
+            _ = scheduler.wakeTask(
                 task_id,
                 .external_event,
                 now_ticks,
@@ -311,12 +323,16 @@ pub const SessionManager = struct {
 
     pub fn focusedInputCapabilityForTask(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
         const task = self.runtimePtr().find(task_id) orelse return null;
-        return self.focusedInputCapabilityForResolvedTask(task, now_ticks);
+        return focusedInputCapabilityForResolvedTask(self.capabilityTablePtr(), task, now_ticks);
     }
 
-    fn focusedInputCapabilityForResolvedTask(self: *SessionManager, task: *const task_runtime.TaskRecord, now_ticks: u64) ?u64 {
+    fn focusedInputCapabilityForResolvedTask(
+        capability_table: *capability.CapabilityTable,
+        task: *const task_runtime.TaskRecord,
+        now_ticks: u64,
+    ) ?u64 {
         for (task.capabilityIds()) |capability_id| {
-            const granted = self.capabilityTablePtr().requireUsable(capability_id, now_ticks) catch continue;
+            const granted = capability_table.requireUsable(capability_id, now_ticks) catch continue;
             if (granted.target.kind != .task or granted.target.id != task.id) continue;
             if (granted.scope.task_id != task.id or !granted.rights.has(.input_recv)) continue;
             return capability_id;
@@ -324,11 +340,15 @@ pub const SessionManager = struct {
         return null;
     }
 
-    fn ensureFocusedInputCapability(self: *SessionManager, task_id: u64, now_ticks: u64) ?u64 {
-        const task = self.runtimePtr().find(task_id) orelse return null;
-        if (self.focusedInputCapabilityForResolvedTask(task, now_ticks)) |capability_id| return capability_id;
+    fn ensureFocusedInputCapabilityForResolvedTask(
+        self: *SessionManager,
+        task: *task_runtime.TaskRecord,
+        capability_table: *capability.CapabilityTable,
+        now_ticks: u64,
+    ) ?u64 {
+        if (focusedInputCapabilityForResolvedTask(capability_table, task, now_ticks)) |capability_id| return capability_id;
         const compositor_broker_service_id = self.compositorBrokerServiceId() orelse return null;
-        const granted = self.capabilityTablePtr().mintBootRoot(.{
+        const granted = capability_table.mintBootRoot(.{
             .holder = task.owner,
             .issuer = self.kernel_context.kernel_instance.policy_authority,
             .target = .{ .kind = .task, .id = task.id },
@@ -351,7 +371,7 @@ pub const SessionManager = struct {
             },
         }) catch return null;
         task_runtime.grantCapabilityToTask(task, granted.id) catch {
-            self.capabilityTablePtr().revokeGrant(granted.id) catch {};
+            capability_table.revokeGrant(granted.id) catch {};
             return null;
         };
         return granted.id;

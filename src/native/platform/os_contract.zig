@@ -4675,7 +4675,7 @@ fn sensitiveCaptureEvidence() SensitiveCaptureEvidence {
     return evidence;
 }
 
-fn capturePermission(kind: manifest.PermissionKind, resource: []const u8, lease_ticks: u64, reason: []const u8) manifest.PermissionRequest {
+fn capturePermission(kind: manifest.PermissionKind, resource: []const u8, lease_ticks: manifest.LeaseTicks, reason: []const u8) manifest.PermissionRequest {
     return .{
         .kind = kind,
         .resource = resource,
@@ -5855,10 +5855,6 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         .memory_capacity_bytes = units.mebibytes(2),
         .thermal_milli_celsius = 92_000,
         .battery_percent = 90,
-        .battery_charging = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
         .hardware_evidence = resourceGovernanceHardwareEvidence(),
     }) catch return evidence;
     const telemetry_provider = provider.telemetryProvider();
@@ -5901,11 +5897,10 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         .memory_capacity_bytes = units.mebibytes(2),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 12,
-        .battery_charging = false,
-        .privacy_sensitive_task_count = 1,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
+        .status = .{
+            .battery_charging = false,
+            .privacy_sensitive_task_present = true,
+        },
         .hardware_evidence = resourceGovernanceHardwareEvidence(),
     }) catch return evidence;
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -5930,10 +5925,6 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         .memory_capacity_bytes = units.mebibytes(2),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 80,
-        .battery_charging = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
         .hardware_evidence = resourceGovernanceHardwareEvidence(),
     }) catch return evidence;
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -6088,11 +6079,13 @@ fn resourceGovernanceHardwareEvidence() accelerator_scheduler.HardwareTelemetryE
     return .{
         .target_id = "contract-resource-governance",
         .reader_generation = 1,
-        .acpi_observed = true,
-        .thermal_observed = true,
-        .battery_observed = true,
-        .accelerator_observed = true,
-        .grid_carbon_observed = true,
+        .observations = .{
+            .acpi_observed = true,
+            .thermal_observed = true,
+            .battery_observed = true,
+            .accelerator_observed = true,
+            .grid_carbon_observed = true,
+        },
     };
 }
 
