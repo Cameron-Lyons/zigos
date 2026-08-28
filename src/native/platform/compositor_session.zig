@@ -30,6 +30,7 @@ pub const MAX_PRESENTED_SURFACES: usize = MAX_WINDOWS;
 pub const SERVICE_ENDPOINT_BYTES: usize = abi.ENDPOINT_INLINE_BYTES;
 pub const COMPACT_RECORD_METADATA = true;
 pub const COMPACT_SESSION_COUNT_METADATA = true;
+pub const COMPACT_REVIEW_LEASE_DURATIONS = true;
 pub const HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING = true;
 pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
@@ -40,10 +41,10 @@ pub const SURFACE_REMOVAL_TASK_INDEX_LOOKUPS: u8 = 1;
 pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
-pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 520;
-pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_552;
-pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_560;
-pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_560;
+pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 512;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_296;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_304;
+pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_304;
 pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 216;
 pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_SESSION_SIZE_CEILING_BYTES
@@ -153,11 +154,11 @@ pub const ReviewItemRecord = struct {
     network_path_len: u8 = 0,
     network_path: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
     requested_local_only: bool = false,
-    requested_lease_ticks: u64 = 0,
+    requested_lease_ticks: manifest.LeaseTicks = 0,
     decision: DecisionState = .pending,
     decision_local_only: bool = false,
     decision_has_lease: bool = false,
-    decision_lease_ticks: u64 = 0,
+    decision_lease_ticks: manifest.LeaseTicks = 0,
 
     pub fn labelSlice(self: *const ReviewItemRecord) []const u8 {
         return self.label[0..@as(usize, self.label_len)];
@@ -221,7 +222,7 @@ const NO_WINDOW_ORDER_INDEX: WindowOrderIndex = @intCast(MAX_WINDOWS);
 const REVIEW_ITEM_INDEX_CAPACITY: usize = MAX_REVIEW_ITEMS * 2;
 const SURFACE_INDEX_CAPACITY: usize = MAX_PRESENTED_SURFACES * 2;
 const NO_SURFACE_SLOT_INDEX: u16 = std.math.maxInt(u16);
-const WIRE_MAGIC_REQUEST = [_]u8{ 'Z', 'U', 'X', '1' };
+const WIRE_MAGIC_REQUEST = [_]u8{ 'Z', 'U', 'X', '2' };
 const WIRE_MAGIC_RESPONSE = [_]u8{ 'Z', 'U', 'R', '1' };
 const RequestWriter = binary_cursor.Writer(Error, error.RequestTooLarge);
 const ResponseWriter = binary_cursor.Writer(Error, error.ResponseTooLarge);
@@ -349,8 +350,8 @@ pub const ServiceRequest = struct {
     reviewer_task_id: u64 = 0,
     window_id: u64 = 0,
     workspace_id: u64 = 0,
-    lease_ticks: u64 = 0,
-    max_lease_ticks: u64 = 0,
+    lease_ticks: manifest.LeaseTicks = 0,
+    max_lease_ticks: manifest.LeaseTicks = 0,
     bundle_id: []const u8 = "",
     display_name: []const u8 = "",
     resource: []const u8 = "",
@@ -660,7 +661,7 @@ pub const Session = struct {
         request: manifest.PermissionRequest,
         allow: bool,
         local_only: bool,
-        lease_ticks: ?u64,
+        lease_ticks: ?manifest.LeaseTicks,
     ) Error!*ReviewItemRecord {
         const item = self.findReviewItem(window_id, request.kind, request.resource) orelse return error.ReviewItemNotFound;
         item.decision = if (allow) .allow else .deny;
@@ -1451,8 +1452,8 @@ pub fn encodeRequest(buffer: []u8, request: ServiceRequest) Error![]const u8 {
     try writer.writeU64(request.reviewer_task_id);
     try writer.writeU64(request.window_id);
     try writer.writeU64(request.workspace_id);
-    try writer.writeU64(request.lease_ticks);
-    try writer.writeU64(request.max_lease_ticks);
+    try writer.writeU32(request.lease_ticks);
+    try writer.writeU32(request.max_lease_ticks);
     try writeText(&writer, request.bundle_id);
     try writeText(&writer, request.display_name);
     try writeText(&writer, request.resource);
@@ -1476,8 +1477,8 @@ pub fn decodeRequest(payload: []const u8) Error!ServiceRequest {
     const reviewer_task_id = try reader.readU64();
     const window_id = try reader.readU64();
     const workspace_id = try reader.readU64();
-    const lease_ticks = try reader.readU64();
-    const max_lease_ticks = try reader.readU64();
+    const lease_ticks = try reader.readU32();
+    const max_lease_ticks = try reader.readU32();
     const bundle_id = try readText(&reader);
     const display_name = try readText(&reader);
     const resource = try readText(&reader);
@@ -2001,6 +2002,20 @@ test "compositor service wire protocol opens switches reviews decides and recove
     try std.testing.expectEqual(DecisionState.allow, session.findReviewItemConst(review_response.window_id, .object_access, "ws:trip").?.decision);
 }
 
+test "compositor request wire stores compact lease durations" {
+    var buffer: [SERVICE_ENDPOINT_BYTES]u8 = undefined;
+    const encoded = try encodeRequest(&buffer, .{
+        .operation = .record_decision,
+        .lease_ticks = std.math.maxInt(manifest.LeaseTicks),
+        .max_lease_ticks = std.math.maxInt(manifest.LeaseTicks),
+    });
+    try std.testing.expectEqual(@as(usize, 57), encoded.len);
+
+    const decoded = try decodeRequest(encoded);
+    try std.testing.expectEqual(std.math.maxInt(manifest.LeaseTicks), decoded.lease_ticks);
+    try std.testing.expectEqual(std.math.maxInt(manifest.LeaseTicks), decoded.max_lease_ticks);
+}
+
 test "compositor service closes task windows during app removal" {
     var runtime = task_runtime.Runtime.init();
     const app_task = try runtime.createTask(.{
@@ -2426,7 +2441,7 @@ test "compositor session creates app-panel permission review windows and cards" 
     const object_item = try session.ensureReviewItem(window.id, bundle, permissions[0]);
     _ = try session.ensureReviewItem(window.id, bundle, permissions[1]);
     try std.testing.expectEqualStrings("workspace:notes", object_item.objectScopeSlice());
-    try std.testing.expectEqual(@as(u64, 400), object_item.requested_lease_ticks);
+    try std.testing.expectEqual(@as(manifest.LeaseTicks, 400), object_item.requested_lease_ticks);
 
     _ = try session.recordDecision(window.id, permissions[0], true, true, 400);
     try std.testing.expectEqual(DecisionState.allow, session.findReviewItemConst(window.id, .object_access, "workspace:notes").?.decision);

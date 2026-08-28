@@ -64,7 +64,7 @@ pub const COMPACT_REVIEW_PROGRESS_METADATA = true;
 pub const RENDERED_BEGIN_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
-pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_272;
+pub const RENDERED_REVIEW_SURFACE_SIZE_CEILING_BYTES: usize = 1_144;
 
 comptime {
     if (MAX_INPUT_LINE > std.math.maxInt(u8) or
@@ -399,7 +399,7 @@ pub const ProfileRule = struct {
     allow: bool,
     local_only: bool = false,
     lease_mode: ProfileLeaseMode = .none,
-    fixed_lease_ticks: u64 = 0,
+    fixed_lease_ticks: manifest.LeaseTicks = 0,
 };
 
 pub const SurfaceControl = enum {

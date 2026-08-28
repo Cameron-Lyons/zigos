@@ -2,6 +2,9 @@ const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const units = @import("../core/units.zig");
 
+pub const LeaseTicks = u32;
+pub const COMPACT_LEASE_DURATIONS = true;
+
 pub const MAX_DATA_RIGHTS_FORMAT_BYTES: usize = 64;
 pub const MAX_AI_MODEL_DIGEST_BYTES: usize = 96;
 pub const MAX_AI_MODEL_SOURCE_BYTES: usize = 96;
@@ -147,7 +150,7 @@ pub const PermissionRequest = struct {
     rights: capability.CapabilityRights,
     required: bool = true,
     local_only: bool = false,
-    max_lease_ticks: u64 = 0,
+    max_lease_ticks: LeaseTicks = 0,
     target_id: u64 = 0,
     egress_intent: DataEgressIntent = .{},
     sensitivity: DataSensitivity = .internal_data,

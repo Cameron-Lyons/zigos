@@ -13,7 +13,7 @@ const REVIEW_REQUEST_BUFFER_BYTES: usize = 512;
 pub const MAX_REVIEW_DECISIONS: usize = policy_mediation.MAX_PERMISSION_DECISIONS;
 pub const COMPACT_REVIEW_SESSION_DECISIONS = true;
 pub const GROUPS_REVIEW_TEXT_WRITES = true;
-pub const REVIEW_SESSION_SIZE_CEILING_BYTES: usize = 152;
+pub const REVIEW_SESSION_SIZE_CEILING_BYTES: usize = 88;
 
 const DecisionMask = u16;
 
@@ -30,13 +30,13 @@ pub const ReviewDecision = struct {
     resource: []const u8,
     allow: bool,
     local_only: bool = false,
-    lease_ticks: ?u64 = null,
+    lease_ticks: ?manifest.LeaseTicks = null,
 };
 
 pub const ReviewCommand = struct {
     allow: bool,
     local_only: bool = false,
-    lease_ticks: ?u64 = null,
+    lease_ticks: ?manifest.LeaseTicks = null,
 };
 
 pub const CommandError = error{
@@ -57,7 +57,7 @@ pub const SessionError = error{
 pub const ReviewSession = struct {
     task_id: u64,
     bundle: *const manifest.BundleManifest,
-    lease_ticks: [MAX_REVIEW_DECISIONS]u64,
+    lease_ticks: [MAX_REVIEW_DECISIONS]manifest.LeaseTicks,
     allowed_mask: DecisionMask,
     local_only_mask: DecisionMask,
     lease_present_mask: DecisionMask,
@@ -213,7 +213,7 @@ pub fn parseCommand(line: []const u8) CommandError!ReviewCommand {
         }
         if (std.mem.startsWith(u8, token, "lease=")) {
             const raw_ticks = token["lease=".len..];
-            command.lease_ticks = std.fmt.parseInt(u64, raw_ticks, 10) catch return error.InvalidLeaseTicks;
+            command.lease_ticks = std.fmt.parseInt(manifest.LeaseTicks, raw_ticks, 10) catch return error.InvalidLeaseTicks;
             continue;
         }
         return error.InvalidCommand;
@@ -239,8 +239,8 @@ fn resolveDecisionExpiry(
     return leaseEndFromTicks(now_ticks, clamped_lease);
 }
 
-fn leaseEndFromTicks(now_ticks: u64, lease_ticks: u64) u64 {
-    return std.math.add(u64, now_ticks, lease_ticks) catch std.math.maxInt(u64);
+fn leaseEndFromTicks(now_ticks: u64, lease_ticks: manifest.LeaseTicks) u64 {
+    return std.math.add(u64, now_ticks, @as(u64, lease_ticks)) catch std.math.maxInt(u64);
 }
 
 fn appendRequest(
@@ -465,11 +465,11 @@ test "review sessions store decisions in compact masks" {
     const first = session.decisionAt(0).?;
     try std.testing.expect(first.allow);
     try std.testing.expect(first.local_only);
-    try std.testing.expectEqual(@as(?u64, 40), first.lease_ticks);
+    try std.testing.expectEqual(@as(?manifest.LeaseTicks, 40), first.lease_ticks);
     const second = session.decisionAt(1).?;
     try std.testing.expect(!second.allow);
     try std.testing.expect(!second.local_only);
-    try std.testing.expectEqual(@as(?u64, null), second.lease_ticks);
+    try std.testing.expectEqual(@as(?manifest.LeaseTicks, null), second.lease_ticks);
     try std.testing.expectEqual(@as(?ReviewCommand, null), session.decisionAt(2));
 }
 
@@ -677,12 +677,14 @@ test "parseCommand accepts allow local leases and deny commands" {
     const allow = try parseCommand("allow local lease=45");
     try std.testing.expect(allow.allow);
     try std.testing.expect(allow.local_only);
-    try std.testing.expectEqual(@as(?u64, 45), allow.lease_ticks);
+    try std.testing.expectEqual(@as(?manifest.LeaseTicks, 45), allow.lease_ticks);
 
     const deny = try parseCommand("deny");
     try std.testing.expect(!deny.allow);
     try std.testing.expect(!deny.local_only);
-    try std.testing.expectEqual(@as(?u64, null), deny.lease_ticks);
+    try std.testing.expectEqual(@as(?manifest.LeaseTicks, null), deny.lease_ticks);
+
+    try std.testing.expectError(error.InvalidLeaseTicks, parseCommand("allow lease=4294967296"));
 }
 
 test "renderRequestToBuffer marks undecided requests as pending" {

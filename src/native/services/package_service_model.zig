@@ -229,7 +229,7 @@ pub const StoredPermission = struct {
     rights: @FieldType(manifest.PermissionRequest, "rights") = .{ .policy = .{} },
     required: bool = true,
     local_only: bool = false,
-    max_lease_ticks: u64 = 0,
+    max_lease_ticks: manifest.LeaseTicks = 0,
     target_id: u64 = 0,
     egress_intent_kind: manifest.DataEgressIntentKind = .unspecified,
     sensitivity: manifest.DataSensitivity = .internal_data,

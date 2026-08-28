@@ -4675,7 +4675,7 @@ fn sensitiveCaptureEvidence() SensitiveCaptureEvidence {
     return evidence;
 }
 
-fn capturePermission(kind: manifest.PermissionKind, resource: []const u8, lease_ticks: u64, reason: []const u8) manifest.PermissionRequest {
+fn capturePermission(kind: manifest.PermissionKind, resource: []const u8, lease_ticks: manifest.LeaseTicks, reason: []const u8) manifest.PermissionRequest {
     return .{
         .kind = kind,
         .resource = resource,

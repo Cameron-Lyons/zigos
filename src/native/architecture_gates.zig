@@ -984,7 +984,10 @@ pub const indexed_hot_path_tables = .{
             @FieldType(compositor_session.ReviewItemRecord, "resource_len") == u8 and
             @FieldType(compositor_session.ReviewItemRecord, "reason_len") == u8 and
             @FieldType(compositor_session.ReviewItemRecord, "object_scope_len") == u8 and
-            @FieldType(compositor_session.ReviewItemRecord, "network_path_len") == u8,
+            @FieldType(compositor_session.ReviewItemRecord, "network_path_len") == u8 and
+            compositor_session.COMPACT_REVIEW_LEASE_DURATIONS and
+            @FieldType(compositor_session.ReviewItemRecord, "requested_lease_ticks") == manifest.LeaseTicks and
+            @FieldType(compositor_session.ReviewItemRecord, "decision_lease_ticks") == manifest.LeaseTicks,
         .stores_compact_session_counts = compositor_session.COMPACT_SESSION_COUNT_METADATA and
             @FieldType(compositor_session.WindowSlot, "order_index") == compositor_session.WindowOrderIndex and
             @FieldType(compositor_session.Session, "window_count") == compositor_session.SessionCount and
@@ -1087,8 +1090,12 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(denial_explanation.Explanation) <= denial_explanation.EXPLANATION_SIZE_CEILING_BYTES,
         .groups_denial_summary_text_writes = denial_explanation.GROUPS_DENIAL_SUMMARY_TEXT_WRITES,
         .groups_render_text_writes = permission_review.GROUPS_REVIEW_TEXT_WRITES,
+        .uses_compact_lease_durations = manifest.COMPACT_LEASE_DURATIONS and
+            @sizeOf(manifest.LeaseTicks) == 4 and
+            @FieldType(permission_review.ReviewCommand, "lease_ticks") == ?manifest.LeaseTicks,
         .stores_compact_session_decisions = permission_review.COMPACT_REVIEW_SESSION_DECISIONS and
             @FieldType(permission_review.ReviewSession, "decision_count") == u8 and
+            @FieldType(permission_review.ReviewSession, "lease_ticks") == [permission_review.MAX_REVIEW_DECISIONS]manifest.LeaseTicks and
             @FieldType(permission_review.ReviewSession, "allowed_mask") == u16 and
             @FieldType(permission_review.ReviewSession, "local_only_mask") == u16 and
             @FieldType(permission_review.ReviewSession, "lease_present_mask") == u16 and

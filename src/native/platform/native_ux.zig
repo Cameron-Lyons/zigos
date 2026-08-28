@@ -18,7 +18,8 @@ pub const MAX_FLOWS: usize = 16;
 pub const MAX_DETAIL_BYTES: usize = 128;
 pub const MAX_BUNDLE_ID_BYTES: usize = 64;
 pub const APPEND_ONLY_FLOW_LOG = true;
-pub const CONTROLLER_SIZE_CEILING_BYTES: usize = MAX_FLOWS * 256 + @sizeOf(usize);
+pub const FLOW_RECORD_SIZE_CEILING_BYTES: usize = 248;
+pub const CONTROLLER_SIZE_CEILING_BYTES: usize = MAX_FLOWS * FLOW_RECORD_SIZE_CEILING_BYTES + @sizeOf(usize);
 const REVIEW_FLOW_TEST_BUFFER_BYTES: usize = 384;
 
 pub const FlowKind = enum(u8) {
@@ -53,7 +54,7 @@ pub const FlowRecord = struct {
     permission_local_only: bool = false,
     decision_local_only: bool = false,
     decision_has_lease: bool = false,
-    decision_lease_ticks: u64 = 0,
+    decision_lease_ticks: manifest.LeaseTicks = 0,
     bundle_id_len: u8 = 0,
     bundle_id: [MAX_BUNDLE_ID_BYTES]u8 = [_]u8{0} ** MAX_BUNDLE_ID_BYTES,
     detail_len: u8 = 0,
@@ -72,7 +73,7 @@ pub const FlowRecord = struct {
     }
 
     comptime {
-        if (@sizeOf(@This()) > 256) {
+        if (@sizeOf(@This()) > FLOW_RECORD_SIZE_CEILING_BYTES) {
             @compileError("native UX flow records exceed their compact text-sharing layout");
         }
     }
@@ -287,7 +288,7 @@ pub const Controller = struct {
         request: manifest.PermissionRequest,
         approved: bool,
         decision_local_only: bool,
-        decision_lease_ticks: ?u64,
+        decision_lease_ticks: ?manifest.LeaseTicks,
     ) Error!*FlowRecord {
         const flow = try self.record(.review_permission_request, task_id, 0, subject, request.resource, approved);
         flow.permission_kind = request.kind;
