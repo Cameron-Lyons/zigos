@@ -9,6 +9,7 @@ const TAG_COMMAND_LINE: u32 = 1;
 const TAG_BASIC_MEMORY: u32 = 4;
 const TAG_MEMORY_MAP: u32 = 6;
 const TAG_FRAMEBUFFER: u32 = 8;
+const TAG_EFI64_SYSTEM_TABLE: u32 = 12;
 const TAG_ACPI_NEW: u32 = 15;
 const TAG_HEADER_BYTES: usize = 8;
 const INFO_HEADER_BYTES: usize = 8;
@@ -16,6 +17,7 @@ const MEMORY_MAP_HEADER_BYTES: usize = 16;
 const MEMORY_MAP_ENTRY_MIN_BYTES: usize = 24;
 const FRAMEBUFFER_COMMON_BYTES: usize = 32;
 const FRAMEBUFFER_RGB_BYTES: usize = 6;
+const EFI64_SYSTEM_TABLE_TAG_BYTES: usize = 16;
 const ACPI_RSDP_V2_MIN_BYTES: usize = 36;
 const TAG_ALIGNMENT: usize = 8;
 
@@ -37,6 +39,7 @@ pub const ParsedInfo = struct {
     has_command_line: bool = false,
     has_memory_map: bool = false,
     has_framebuffer: bool = false,
+    has_efi64_system_table: bool = false,
     has_acpi2_rsdp: bool = false,
     mem_lower_kib: u32 = 0,
     mem_upper_kib: u32 = 0,
@@ -52,6 +55,7 @@ pub const ParsedInfo = struct {
     framebuffer_bpp: u8 = 0,
     framebuffer_type: u8 = 0,
     framebuffer_rgb: [FRAMEBUFFER_RGB_BYTES]u8 = [_]u8{0} ** FRAMEBUFFER_RGB_BYTES,
+    efi64_system_table_addr: u64 = 0,
     acpi2_rsdp_addr: u32 = 0,
     acpi2_rsdp_length: u32 = 0,
 };
@@ -76,6 +80,7 @@ pub fn parse(bytes: []const u8, physical_base: u32) Error!ParsedInfo {
     var seen_basic_memory = false;
     var seen_memory_map = false;
     var seen_framebuffer = false;
+    var seen_efi64_system_table = false;
     var seen_acpi_new = false;
     var saw_end = false;
     var offset: usize = INFO_HEADER_BYTES;
@@ -156,6 +161,14 @@ pub fn parse(bytes: []const u8, physical_base: u32) Error!ParsedInfo {
                     }
                     @memcpy(parsed.framebuffer_rgb[0..], bytes[offset + FRAMEBUFFER_COMMON_BYTES ..][0..FRAMEBUFFER_RGB_BYTES]);
                 }
+            },
+            TAG_EFI64_SYSTEM_TABLE => {
+                if (seen_efi64_system_table) return error.DuplicateTag;
+                seen_efi64_system_table = true;
+                if (tag_size != EFI64_SYSTEM_TABLE_TAG_BYTES) return error.InvalidTag;
+                parsed.has_efi64_system_table = true;
+                parsed.efi64_system_table_addr = readU64Le(bytes[header_end..tag_end]);
+                if (parsed.efi64_system_table_addr == 0) return error.InvalidTag;
             },
             TAG_ACPI_NEW => {
                 if (seen_acpi_new) return error.DuplicateTag;
@@ -270,6 +283,28 @@ test "Multiboot2 parser captures only the ACPI 2 RSDP handoff" {
     try std.testing.expect(parsed.has_acpi2_rsdp);
     try std.testing.expectEqual(@as(u32, @intCast(expected_address)), parsed.acpi2_rsdp_addr);
     try std.testing.expectEqual(@as(u32, ACPI_RSDP_V2_MIN_BYTES), parsed.acpi2_rsdp_length);
+}
+
+test "Multiboot2 parser captures the EFI64 system table pointer" {
+    var bytes = [_]u8{0} ** 32;
+    writeU32(bytes[0..4], bytes.len);
+
+    const offset: usize = INFO_HEADER_BYTES;
+    writeU32(bytes[offset .. offset + 4], TAG_EFI64_SYSTEM_TABLE);
+    writeU32(bytes[offset + 4 .. offset + 8], EFI64_SYSTEM_TABLE_TAG_BYTES);
+    writeU64(bytes[offset + TAG_HEADER_BYTES .. offset + EFI64_SYSTEM_TABLE_TAG_BYTES], 0x1234_5678_9abc_def0);
+
+    const end_offset = offset + EFI64_SYSTEM_TABLE_TAG_BYTES;
+    writeU32(bytes[end_offset .. end_offset + 4], TAG_END);
+    writeU32(bytes[end_offset + 4 .. end_offset + 8], TAG_HEADER_BYTES);
+    try std.testing.expectEqual(bytes.len, end_offset + TAG_HEADER_BYTES);
+
+    const parsed = try parse(&bytes, 0x6000);
+    try std.testing.expect(parsed.has_efi64_system_table);
+    try std.testing.expectEqual(@as(u64, 0x1234_5678_9abc_def0), parsed.efi64_system_table_addr);
+
+    writeU32(bytes[offset + 4 .. offset + 8], EFI64_SYSTEM_TABLE_TAG_BYTES - 1);
+    try std.testing.expectError(error.InvalidTag, parse(&bytes, 0x6000));
 }
 
 test "Multiboot2 parser does not accept an obsolete ACPI descriptor as ACPI 2" {

@@ -31,6 +31,7 @@ pub const MUTATES_RANGES_BY_BITMAP_WORD = true;
 pub const RESERVATION_PREFLIGHT_USES_BITMAP_WORDS = true;
 pub const CONTIGUOUS_SEARCH_USES_BITMAP_WORDS = true;
 pub const SINGLE_FRAME_MUTATIONS_ARE_DIRECT = true;
+pub const SINGLE_FRAME_HINT_IS_PROBED_DIRECTLY = true;
 pub const SUPPORTS_BOUNDED_PHYSICAL_ALLOCATION = true;
 pub const SUPPORTS_INDEPENDENT_ALLOCATION_CURSORS = true;
 
@@ -143,12 +144,34 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
             return self.allocateBetweenWithCursor(count, 0, exclusive_end, cursor);
         }
 
+        pub fn allocateFrameBetween(
+            self: *Self,
+            inclusive_start: PhysicalAddress,
+            exclusive_end: PhysicalAddress,
+        ) ?PhysicalAddress {
+            const lower_bytes = @min(inclusive_start, memory_bytes);
+            const upper_bytes = @min(exclusive_end, memory_bytes);
+            const lower_frame_value = lower_bytes / page_size + @intFromBool(lower_bytes % page_size != 0);
+            const upper_frame_value = upper_bytes / page_size;
+            if (lower_frame_value >= upper_frame_value) return null;
+
+            const lower_frame: u32 = @intCast(lower_frame_value);
+            const upper_frame: u32 = @intCast(upper_frame_value);
+            const start = self.allocateFrameIndexBetween(lower_frame, upper_frame) orelse return null;
+            return @as(PhysicalAddress, start) * page_size;
+        }
+
         pub fn allocateBetween(
             self: *Self,
             count: u32,
             inclusive_start: PhysicalAddress,
             exclusive_end: PhysicalAddress,
         ) ?FrameRun {
+            if (count == 1) {
+                const base = self.allocateFrameBetween(inclusive_start, exclusive_end) orelse return null;
+                return .{ .base = base, .count = 1 };
+            }
+
             const lower_bytes = @min(inclusive_start, memory_bytes);
             const upper_bytes = @min(exclusive_end, memory_bytes);
             const lower_frame_value = lower_bytes / page_size + @intFromBool(lower_bytes % page_size != 0);
@@ -165,20 +188,10 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
             else
                 lower_frame;
 
-            const start = if (count == 1)
-                self.findFreeFrame(search_start, upper_frame) orelse
-                    (if (search_start == lower_frame) null else self.findFreeFrame(lower_frame, upper_frame)) orelse return null
-            else
-                self.findRun(search_start, upper_frame, count) orelse
-                    (if (search_start == lower_frame) null else self.findRun(lower_frame, upper_frame, count)) orelse return null;
+            const start = self.findRun(search_start, upper_frame, count) orelse
+                (if (search_start == lower_frame) null else self.findRun(lower_frame, upper_frame, count)) orelse return null;
 
-            if (count == 1) {
-                const word: usize = @intCast(start / bitmap_word_bits);
-                const bit: u6 = @truncate(start % bitmap_word_bits);
-                self.allocated_bitmap[word] |= @as(BitmapWord, 1) << bit;
-            } else {
-                _ = self.mutateRange(&self.allocated_bitmap, start, count, true, false);
-            }
+            _ = self.mutateRange(&self.allocated_bitmap, start, count, true, false);
             self.allocated_count += count;
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
 
@@ -204,23 +217,28 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
         }
 
         pub fn release(self: *Self, run: FrameRun) Error!void {
+            if (run.count == 1) return self.releaseFrame(run.base);
             const start = try validateRun(run);
-
-            if (run.count == 1) {
-                const word: usize = @intCast(start / bitmap_word_bits);
-                const bit: u6 = @truncate(start % bitmap_word_bits);
-                const mask = @as(BitmapWord, 1) << bit;
-                if ((self.reserved_bitmap[word] & mask) != 0) return error.FrameReserved;
-                if ((self.allocated_bitmap[word] & mask) == 0) return error.NotAllocated;
-                self.allocated_bitmap[word] &= ~mask;
-                self.allocated_count -= 1;
-                self.search_frame_hint = start;
-                return;
-            }
 
             try self.validateReleasableRange(start, run.count);
             _ = self.mutateRange(&self.allocated_bitmap, start, run.count, false, false);
             self.allocated_count -= run.count;
+            self.search_frame_hint = start;
+        }
+
+        pub fn releaseFrame(self: *Self, base: PhysicalAddress) Error!void {
+            if (base % page_size != 0) return error.Unaligned;
+            const start_value = base / page_size;
+            if (start_value >= frame_count) return error.OutOfRange;
+
+            const start: u32 = @intCast(start_value);
+            const word: usize = @intCast(start / bitmap_word_bits);
+            const bit: u6 = @truncate(start % bitmap_word_bits);
+            const mask = @as(BitmapWord, 1) << bit;
+            if ((self.reserved_bitmap[word] & mask) != 0) return error.FrameReserved;
+            if ((self.allocated_bitmap[word] & mask) == 0) return error.NotAllocated;
+            self.allocated_bitmap[word] &= ~mask;
+            self.allocated_count -= 1;
             self.search_frame_hint = start;
         }
 
@@ -339,6 +357,34 @@ pub fn Fixed(comptime memory_bytes: u64, comptime page_size: u32) type {
                 return word_start + free_bit;
             }
             return null;
+        }
+
+        fn allocateFrameIndexBetween(self: *Self, lower_frame: u32, upper_frame: u32) ?u32 {
+            const search_start = if (self.search_frame_hint >= lower_frame and
+                self.search_frame_hint < upper_frame)
+                self.search_frame_hint
+            else
+                lower_frame;
+
+            const start = (if (self.frameIsFree(search_start))
+                search_start
+            else
+                self.findFreeFrame(search_start + 1, upper_frame) orelse
+                    (if (search_start == lower_frame) null else self.findFreeFrame(lower_frame, search_start))) orelse return null;
+
+            const word: usize = @intCast(start / bitmap_word_bits);
+            const bit: u6 = @truncate(start % bitmap_word_bits);
+            self.allocated_bitmap[word] |= @as(BitmapWord, 1) << bit;
+            self.allocated_count += 1;
+            self.search_frame_hint = if (start + 1 == frame_count) 0 else start + 1;
+            return start;
+        }
+
+        fn frameIsFree(self: *const Self, frame: u32) bool {
+            const word: usize = @intCast(frame / bitmap_word_bits);
+            const bit: u6 = @truncate(frame % bitmap_word_bits);
+            const mask = @as(BitmapWord, 1) << bit;
+            return ((self.reserved_bitmap[word] | self.allocated_bitmap[word]) & mask) == 0;
         }
 
         fn rangeHasAny(
@@ -500,6 +546,20 @@ test "single-frame mutations use native bitmap words and preserve accounting" {
     try std.testing.expectError(error.NotAllocated, allocator.release(run));
     try std.testing.expect(SINGLE_FRAME_MUTATIONS_ARE_DIRECT);
     try std.testing.expectEqual(@as(u32, 64), Allocator.bits_per_bitmap_word);
+}
+
+test "single-frame allocation probes a released search hint directly" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(96 * page_size, page_size);
+    var allocator = Allocator.init();
+
+    const lower_bound = 65 * page_size;
+    allocator.search_frame_hint = 65;
+    const first = allocator.allocateFrameBetween(lower_bound, 96 * page_size).?;
+    try allocator.releaseFrame(first);
+
+    try std.testing.expectEqual(first, allocator.allocateFrameBetween(lower_bound, 96 * page_size).?);
+    try std.testing.expect(SINGLE_FRAME_HINT_IS_PROBED_DIRECTLY);
 }
 
 test "physical frame addresses remain exact above 4 GiB" {

@@ -15,6 +15,7 @@ const FLAG_CMDLINE: u32 = 1 << 2;
 const FLAG_MEMORY_MAP: u32 = 1 << 6;
 const FLAG_FRAMEBUFFER: u32 = 1 << 12;
 const FLAG_ACPI2_RSDP: u32 = 1 << 13;
+const FLAG_EFI64_SYSTEM_TABLE: u32 = 1 << 14;
 
 const FRAMEBUFFER_RGB_COLOR_INFO_BYTES: usize = 6;
 const MULTIBOOT2_INFO_HEADER_BYTES: usize = 8;
@@ -51,6 +52,7 @@ pub const Info = struct {
     mmap_entry_size: u32,
     acpi2_rsdp_addr: u32 = 0,
     acpi2_rsdp_length: u32 = 0,
+    efi64_system_table_addr: u64 = 0,
 
     pub fn hasMemoryInfo(self: Info) bool {
         return (self.flags & FLAG_MEMORY_INFO) != 0;
@@ -70,6 +72,10 @@ pub const Info = struct {
 
     pub fn hasAcpi2Rsdp(self: Info) bool {
         return (self.flags & FLAG_ACPI2_RSDP) != 0 and self.acpi2_rsdp_addr != 0 and self.acpi2_rsdp_length > 0;
+    }
+
+    pub fn hasEfi64SystemTable(self: Info) bool {
+        return (self.flags & FLAG_EFI64_SYSTEM_TABLE) != 0 and self.efi64_system_table_addr != 0;
     }
 };
 
@@ -169,6 +175,7 @@ pub fn parseMultiboot2Info(bytes: []const u8, physical_base: u32) Error!Info {
     if (parsed.has_memory_map) flags |= FLAG_MEMORY_MAP;
     if (parsed.has_framebuffer) flags |= FLAG_FRAMEBUFFER;
     if (parsed.has_acpi2_rsdp) flags |= FLAG_ACPI2_RSDP;
+    if (parsed.has_efi64_system_table) flags |= FLAG_EFI64_SYSTEM_TABLE;
 
     return .{
         .flags = flags,
@@ -189,6 +196,7 @@ pub fn parseMultiboot2Info(bytes: []const u8, physical_base: u32) Error!Info {
         .mmap_entry_size = parsed.mmap_entry_size,
         .acpi2_rsdp_addr = parsed.acpi2_rsdp_addr,
         .acpi2_rsdp_length = parsed.acpi2_rsdp_length,
+        .efi64_system_table_addr = parsed.efi64_system_table_addr,
     };
 }
 
@@ -216,6 +224,11 @@ pub fn capturedAcpi2Rsdp(info: Info) ?[]const u8 {
     if (!info.hasAcpi2Rsdp()) return null;
     const length = std.math.cast(usize, info.acpi2_rsdp_length) orelse return null;
     return checkedPhysicalBytes(info.acpi2_rsdp_addr, length);
+}
+
+pub fn efi64SystemTableAddress(info: Info) ?u64 {
+    if (!info.hasEfi64SystemTable()) return null;
+    return info.efi64_system_table_addr;
 }
 
 pub fn summarizeMemoryMap(map: MemoryMap) Error!MemoryMapSummary {
@@ -388,6 +401,20 @@ test "Multiboot2 handoff normalizes tagged map metadata and entries" {
     try std.testing.expectEqual(@as(u32, 1), summary.entry_count);
     try std.testing.expectEqual(@as(u64, 0x2000000), summary.usable_bytes);
     try std.testing.expectEqual(@as(u64, 0x2100000), summary.highest_usable_end);
+}
+
+test "Multiboot2 handoff captures the EFI64 system table pointer" {
+    var info_bytes = [_]u8{0} ** 32;
+    writeU32Le(info_bytes[0..4], info_bytes.len);
+    writeU32Le(info_bytes[8..12], 12);
+    writeU32Le(info_bytes[12..16], 16);
+    writeU64Le(info_bytes[16..24], 0x1234_5678_9abc_def0);
+    writeU32Le(info_bytes[24..28], 0);
+    writeU32Le(info_bytes[28..32], 8);
+
+    const info = try parseMultiboot2Info(&info_bytes, 0x8000);
+    try std.testing.expect(info.hasEfi64SystemTable());
+    try std.testing.expectEqual(@as(?u64, 0x1234_5678_9abc_def0), efi64SystemTableAddress(info));
 }
 
 test "Multiboot2 memory map iterator rejects invalid fixed strides" {

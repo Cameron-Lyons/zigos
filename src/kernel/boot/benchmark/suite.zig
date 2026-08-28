@@ -1349,11 +1349,11 @@ fn benchmarkHeapAllocateFree(iteration: u32) u64 {
 }
 
 fn benchmarkFrameAllocateRelease(iteration: u32) u64 {
-    const frames = paging.allocGeneralFrames(1) orelse
+    const frame = paging.allocGeneralFrame() orelse
         benchmark_reporting.benchStepFailure("frame allocation", error.OutOfMemory);
-    paging.releaseGeneralFrames(frames) catch |err|
+    paging.releaseGeneralFrame(frame) catch |err|
         benchmark_reporting.benchStepFailure("frame release", err);
-    return frames.base ^ iteration;
+    return frame ^ iteration;
 }
 
 fn benchmarkSyscallFastEntryRoundtrip(iteration: u32) u64 {
