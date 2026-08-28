@@ -15,6 +15,11 @@ pub const AuthorityError = service.AuthorityError;
 pub const SharedWorkspaceGrant = service.SharedWorkspaceGrant;
 pub const ShareCapabilityError = service.ShareCapabilityError;
 
+pub const DeferredCheckpointCount = service.DeferredCheckpointCount;
+pub const CheckpointBatchDepth = service.CheckpointBatchDepth;
+pub const COMPACT_CHECKPOINT_METADATA = service.COMPACT_CHECKPOINT_METADATA;
+pub const STORAGE_CORE_SIZE_BYTES = service.STORAGE_CORE_SIZE_BYTES;
+
 pub const StorageCore = service.StorageCore;
 pub const Service = service.Service;
 pub const StoragePort = service.StoragePort;

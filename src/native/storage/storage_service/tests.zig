@@ -19,6 +19,15 @@ const StorageCore = storage_service.StorageCore;
 const StoragePort = storage_service.StoragePort;
 const SHARE_SHEET_TEST_BUFFER_BYTES: usize = 360;
 
+test "storage core checkpoint metadata stays compact" {
+    try std.testing.expect(storage_service.COMPACT_CHECKPOINT_METADATA);
+    try std.testing.expectEqual(u16, storage_service.DeferredCheckpointCount);
+    try std.testing.expectEqual(u16, storage_service.CheckpointBatchDepth);
+    try std.testing.expectEqual(storage_service.DeferredCheckpointCount, @FieldType(StorageCore, "deferred_checkpoint_count"));
+    try std.testing.expectEqual(storage_service.CheckpointBatchDepth, @FieldType(StorageCore, "checkpoint_batch_depth"));
+    try std.testing.expectEqual(storage_service.STORAGE_CORE_SIZE_BYTES, @sizeOf(StorageCore));
+}
+
 const FakeStorageVolumeBackend = struct {
     var image: []u8 = &.{};
 

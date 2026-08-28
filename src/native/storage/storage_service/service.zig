@@ -1,3 +1,4 @@
+const std = @import("std");
 const abi = @import("../../core/abi.zig");
 const capability = @import("../../kernel_api/capability.zig");
 const debug_contract = @import("../../security/debug_contract.zig");
@@ -46,6 +47,17 @@ pub const SharedWorkspaceGrant = struct {
 
 pub const ShareCapabilityError = AuthorityError || workspace.Error || capability.Error;
 
+pub const DeferredCheckpointCount = u16;
+pub const CheckpointBatchDepth = u16;
+pub const COMPACT_CHECKPOINT_METADATA = true;
+pub const STORAGE_CORE_SIZE_BYTES: usize = 72;
+
+comptime {
+    if (workspace.MAX_WORKSPACES > std.math.maxInt(DeferredCheckpointCount)) {
+        @compileError("deferred checkpoint metadata cannot represent the workspace capacity");
+    }
+}
+
 pub const StorageCore = struct {
     service_id: u64,
     task_id: u64,
@@ -53,11 +65,17 @@ pub const StorageCore = struct {
     capability_table: ?*const capability.CapabilityTable = null,
     loaded_from_volume: bool = false,
     checkpoint_enabled: bool = true,
-    deferred_checkpoint_count: usize = 0,
-    checkpoint_batch_depth: usize = 0,
+    deferred_checkpoint_count: DeferredCheckpointCount = 0,
+    checkpoint_batch_depth: CheckpointBatchDepth = 0,
     checkpoint_store: *CheckpointStore,
     store: *object_store.Store,
     workspaces: *workspace.Directory,
+
+    comptime {
+        if (@sizeOf(@This()) != STORAGE_CORE_SIZE_BYTES) {
+            @compileError("storage core no longer matches its compact resident layout");
+        }
+    }
 
     pub fn initWithStore(
         service_id: u64,
