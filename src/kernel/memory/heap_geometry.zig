@@ -15,6 +15,11 @@ pub const FreeLinks = struct {
     prev: ?*BlockHeader,
 };
 
+pub const AlignedRange = struct {
+    start: usize,
+    end: usize,
+};
+
 pub const minimum_free_data_size: usize = @sizeOf(FreeLinks);
 pub const block_state_allocated: u64 = 0x4c49_5645_424c_4f43;
 pub const block_state_free: u64 = 0x4652_4545_424c_4f43;
@@ -40,6 +45,19 @@ pub fn alignSize(size: usize, alignment: usize) ?usize {
     if (alignment == 0 or (alignment & (alignment - 1)) != 0) return null;
     const rounded = std.math.add(usize, size, alignment - 1) catch return null;
     return rounded & ~(alignment - 1);
+}
+
+pub fn claimAlignedRange(
+    cursor: usize,
+    size: usize,
+    alignment: usize,
+    exclusive_end: usize,
+) ?AlignedRange {
+    if (size == 0) return null;
+    const start = alignSize(cursor, alignment) orelse return null;
+    const end = std.math.add(usize, start, size) catch return null;
+    if (end > exclusive_end) return null;
+    return .{ .start = start, .end = end };
 }
 
 pub fn splitRemainder(
@@ -81,6 +99,24 @@ test "heap block splitting accepts the exact reusable tail threshold" {
     try std.testing.expectEqual(
         @as(?usize, null),
         splitRemainder(std.math.maxInt(usize), std.math.maxInt(usize), header_size, minimum_free_data_size),
+    );
+}
+
+test "aligned prefix claims are bounded and overflow safe" {
+    try std.testing.expectEqual(
+        @as(?AlignedRange, .{ .start = 0x1020, .end = 0x1060 }),
+        claimAlignedRange(0x1011, 0x40, 16, 0x1100),
+    );
+    try std.testing.expectEqual(
+        @as(?AlignedRange, .{ .start = 0x1100, .end = 0x1200 }),
+        claimAlignedRange(0x10f1, 0x100, 256, 0x1200),
+    );
+    try std.testing.expectEqual(@as(?AlignedRange, null), claimAlignedRange(0x10f1, 0x101, 256, 0x1200));
+    try std.testing.expectEqual(@as(?AlignedRange, null), claimAlignedRange(0x1000, 0, 16, 0x1200));
+    try std.testing.expectEqual(@as(?AlignedRange, null), claimAlignedRange(0x1000, 16, 24, 0x1200));
+    try std.testing.expectEqual(
+        @as(?AlignedRange, null),
+        claimAlignedRange(std.math.maxInt(usize) - 7, 16, 8, std.math.maxInt(usize)),
     );
 }
 
