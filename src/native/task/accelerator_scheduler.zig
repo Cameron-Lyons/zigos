@@ -130,6 +130,8 @@ pub const HardwareTelemetryEvidence = struct {
 };
 
 pub const LivePlatformCounters = struct {
+    pub const SIZE_BYTES: usize = 88;
+
     total_cpu_budget_ticks: u64 = std.math.maxInt(u64),
     consumed_cpu_ticks: u64 = 0,
     memory_capacity_bytes: usize = std.math.maxInt(usize),
@@ -141,10 +143,18 @@ pub const LivePlatformCounters = struct {
     thermal_milli_celsius: u32 = 45_000,
     battery_percent: u8 = 100,
     battery_charging: bool = true,
-    privacy_sensitive_task_count: usize = 0,
+    privacy_sensitive_task_present: bool = false,
     grid_carbon_intensity_grams_per_kwh: u16 = 0,
     hardware_evidence: HardwareTelemetryEvidence = .{},
+
+    comptime {
+        if (@sizeOf(@This()) != SIZE_BYTES) {
+            @compileError("live platform counters no longer match their compact layout");
+        }
+    }
 };
+
+pub const COMPACT_LIVE_PLATFORM_COUNTERS = true;
 
 pub const TelemetrySample = struct {
     source: TelemetrySource = .synthetic,
@@ -927,7 +937,7 @@ fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCoun
         .observed_tick = observed_tick,
         .thermal_pressure = thermalPressureFromMilliCelsius(counters.thermal_milli_celsius),
         .battery_saver = !counters.battery_charging and counters.battery_percent <= 20,
-        .privacy_mode = counters.privacy_sensitive_task_count != 0,
+        .privacy_mode = counters.privacy_sensitive_task_present,
         .gpu_available = counters.gpu_driver_online,
         .npu_available = counters.npu_driver_online,
         .media_available = counters.media_driver_online,
@@ -1262,6 +1272,12 @@ test "accelerator scheduler rejects stale production telemetry observations" {
     try std.testing.expect(provider.current.npu_available);
 }
 
+test "accelerator live platform counters stay compact" {
+    try std.testing.expect(COMPACT_LIVE_PLATFORM_COUNTERS);
+    try std.testing.expectEqual(bool, @FieldType(LivePlatformCounters, "privacy_sensitive_task_present"));
+    try std.testing.expectEqual(@as(usize, 88), @sizeOf(LivePlatformCounters));
+}
+
 test "accelerator scheduler derives hardware telemetry from booted live counters" {
     try std.testing.expectError(error.TelemetryProviderUnauthorized, BootedPlatformTelemetryProvider.initForBootedService(0, 70, 99, .{
         .total_cpu_budget_ticks = 10_000,
@@ -1279,7 +1295,7 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
         .thermal_milli_celsius = 82_000,
         .battery_percent = 15,
         .battery_charging = false,
-        .privacy_sensitive_task_count = 1,
+        .privacy_sensitive_task_present = true,
         .grid_carbon_intensity_grams_per_kwh = 590,
     });
     var controller = Controller.init();

@@ -957,7 +957,7 @@ pub fn collectLiveCounters(
         if (scheduler.slots.getConst(task.id)) |scheduler_slot| {
             counters.consumed_cpu_ticks = saturatingAdd(u64, counters.consumed_cpu_ticks, scheduler_slot.cpu_ticks_consumed);
             if (scheduler_slot.dispatch_request.privacy_sensitive) {
-                counters.privacy_sensitive_task_count += 1;
+                counters.privacy_sensitive_task_present = true;
             }
         }
     }
@@ -1266,7 +1266,7 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     try std.testing.expectEqual(@as(usize, units.kibibytes(512)), counters.memory_capacity_bytes);
     try std.testing.expectEqual(@as(usize, units.kibibytes(192)), counters.reserved_memory_bytes);
     try std.testing.expectEqual(@as(usize, shared_memory.PAGE_SIZE * 3), counters.reserved_shared_memory_bytes);
-    try std.testing.expectEqual(@as(usize, 1), counters.privacy_sensitive_task_count);
+    try std.testing.expect(counters.privacy_sensitive_task_present);
 
     var provider = try FreestandingPlatformTelemetryProvider.initForBootedService(91, 91_000, 30, counters);
     const provider_interface = provider.telemetryProvider();

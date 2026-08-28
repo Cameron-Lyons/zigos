@@ -5902,7 +5902,7 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         .thermal_milli_celsius = 45_000,
         .battery_percent = 12,
         .battery_charging = false,
-        .privacy_sensitive_task_count = 1,
+        .privacy_sensitive_task_present = true,
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = true,

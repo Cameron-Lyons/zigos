@@ -2744,7 +2744,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
         .gpu_driver_online = true,
         .npu_driver_online = true,
         .media_driver_online = true,
-        .privacy_sensitive_task_count = 1,
+        .privacy_sensitive_task_present = true,
         .hardware_evidence = completeTestHardwareEvidence(),
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
