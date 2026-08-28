@@ -124,7 +124,7 @@ var kernel_direct_page_directory: PageTable align(PAGE_SIZE) = undefined;
 var kernel_direct_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE) = undefined;
 
 const PhysicalFrameAllocator = frame_allocator.Fixed(MANAGED_PHYSICAL_BYTES, PAGE_SIZE);
-var physical_frames = PhysicalFrameAllocator.init();
+var physical_frames: PhysicalFrameAllocator = undefined;
 var frame_lock = spin.Lock.init();
 var high_memory_zone_has_free_frames: bool = false;
 var low_identity_frame_cursor = frame_allocator.AllocationCursor{};
@@ -806,6 +806,12 @@ pub fn init() void {
         haltWithMessage("Invalid Multiboot information extent!\n");
     const memory_map = handoff.capturedMemoryMap(boot_info) orelse
         haltWithMessage("Missing Multiboot memory map!\n");
+    const frame_storage_memory = memory.claimEarly(
+        PhysicalFrameAllocator.storage_bytes,
+        @alignOf(PhysicalFrameAllocator.Storage),
+    ) orelse haltWithMessage("Insufficient early heap for physical-frame state!\n");
+    const frame_storage: *PhysicalFrameAllocator.Storage = @ptrCast(@alignCast(frame_storage_memory));
+    physical_frames = PhysicalFrameAllocator.bindStorage(frame_storage);
     firmware_memory_map.initializeAllocator(MANAGED_PHYSICAL_BYTES, PAGE_SIZE, &physical_frames, memory_map) catch
         haltWithMessage("Invalid Multiboot memory map!\n");
     high_memory_zone_has_free_frames = false;
@@ -1028,7 +1034,8 @@ test "general contiguous allocation prefers high memory" {
     const managed_bytes = test_frame_count * PAGE_SIZE;
     const low_identity_limit = low_frame_count * PAGE_SIZE;
     const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var allocator = TestAllocator.init();
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
     var high_zone_has_free_frames = true;
     var low_cursor = frame_allocator.AllocationCursor{};
 
@@ -1051,7 +1058,8 @@ test "general allocation progress survives low-memory allocation activity" {
     const managed_bytes = test_frame_count * PAGE_SIZE;
     const low_identity_limit = low_frame_count * PAGE_SIZE;
     const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var allocator = TestAllocator.init();
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
     var high_zone_has_free_frames = true;
     var low_cursor = frame_allocator.AllocationCursor{};
 
@@ -1087,7 +1095,8 @@ test "general contiguous allocation preserves the high-memory availability hint 
     const managed_bytes = test_frame_count * PAGE_SIZE;
     const low_identity_limit = low_frame_count * PAGE_SIZE;
     const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var allocator = TestAllocator.init();
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
     try allocator.reserve(.{ .base = 4 * PAGE_SIZE, .count = 1 });
     try allocator.reserve(.{ .base = 6 * PAGE_SIZE, .count = 1 });
     var high_zone_has_free_frames = true;
@@ -1111,7 +1120,8 @@ test "general single-frame allocation caches an exhausted high zone" {
     const managed_bytes = test_frame_count * PAGE_SIZE;
     const low_identity_limit = low_frame_count * PAGE_SIZE;
     const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
-    var allocator = TestAllocator.init();
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
     try allocator.reserve(.{ .base = low_identity_limit, .count = test_frame_count - low_frame_count });
     var high_zone_has_free_frames = true;
     var low_cursor = frame_allocator.AllocationCursor{};
