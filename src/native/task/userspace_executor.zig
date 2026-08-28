@@ -210,17 +210,28 @@ const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || 
     LaunchPolicyInvalid,
 };
 
-var trap_stack: [TRAP_STACK_TOTAL_BYTES]u8 align(PAGE_SIZE) = [_]u8{0} ** TRAP_STACK_TOTAL_BYTES;
+var trap_stack: ?*align(PAGE_SIZE) [TRAP_STACK_TOTAL_BYTES]u8 = null;
 var trap_stack_guard_armed: bool = false;
 
+pub fn reserveTrapStackStorage() error{OutOfMemory}!void {
+    if (comptime builtin.target.os.tag != .freestanding) return;
+    if (trap_stack != null) return;
+    const storage = kernel_memory.claimEarly(TRAP_STACK_TOTAL_BYTES, PAGE_SIZE) orelse return error.OutOfMemory;
+    trap_stack = @ptrCast(@alignCast(storage));
+}
+
+fn trapStackStorage() *align(PAGE_SIZE) [TRAP_STACK_TOTAL_BYTES]u8 {
+    return trap_stack orelse unreachable;
+}
+
 fn trapStackPaintableBase() usize {
-    return @intFromPtr(&trap_stack) + TRAP_STACK_GUARD_BYTES;
+    return @intFromPtr(trapStackStorage()) + TRAP_STACK_GUARD_BYTES;
 }
 
 fn armTrapStackGuard() void {
     if (builtin.target.os.tag != .freestanding) return;
     if (trap_stack_guard_armed) return;
-    const guard_address = @intFromPtr(&trap_stack);
+    const guard_address = @intFromPtr(trapStackStorage());
     _ = freestanding.paging.unmapBorrowedCurrentPage(guard_address);
     const base = trapStackPaintableBase();
     const words: [*]u32 = @ptrFromInt(base);
@@ -235,14 +246,14 @@ fn armTrapStackGuard() void {
 pub fn prepareKernelStack() usize {
     if (builtin.target.os.tag != .freestanding) return 0;
     armTrapStackGuard();
-    return @intFromPtr(&trap_stack) + trap_stack.len;
+    return @intFromPtr(trapStackStorage()) + TRAP_STACK_TOTAL_BYTES;
 }
 
 pub fn reportTrapStackPeak() void {
     if (builtin.target.os.tag != .freestanding) return;
     if (!trap_stack_guard_armed) return;
     const base = trapStackPaintableBase();
-    const top = @intFromPtr(&trap_stack) + trap_stack.len;
+    const top = @intFromPtr(trapStackStorage()) + TRAP_STACK_TOTAL_BYTES;
     var addr = base;
     var untouched: usize = 0;
     while (addr < top) : (addr += @sizeOf(u32)) {

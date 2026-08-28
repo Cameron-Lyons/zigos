@@ -2,6 +2,7 @@ const console = @import("../../utils/console.zig");
 const isr = @import("../../interrupts/isr.zig");
 const paging = @import("../../memory/paging64.zig");
 const memory = @import("../../memory/memory.zig");
+const userspace_executor = @import("../../../native/task/userspace_executor.zig");
 
 pub fn init() void {
     const stack_watermark = @import("../../utils/stack_watermark.zig");
@@ -29,6 +30,8 @@ pub fn init() void {
     const protection = @import("../../memory/protection.zig");
     protection.protectKernelMemory();
     @import("../common.zig").printBootMarker(@import("../markers.zig").kernel_wx_enforced);
+
+    userspace_executor.reserveTrapStackStorage() catch @panic("insufficient early heap for userspace trap stack");
 
     console.print("Initializing memory allocator...\n");
     memory.init();
