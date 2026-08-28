@@ -1,3 +1,4 @@
+const std = @import("std");
 const console = @import("../utils/console.zig");
 const heap_geometry = @import("heap_geometry.zig");
 const numfmt = @import("../utils/numfmt.zig");
@@ -27,6 +28,7 @@ var heap_start: [*]u8 = undefined;
 
 var heap_end: [*]u8 = undefined;
 var free_lists: [heap_geometry.free_list_class_count]?*BlockHeader = .{null} ** heap_geometry.free_list_class_count;
+var early_claimed_bytes: usize = 0;
 var is_initialized = false;
 var allocator_lock = spin.Lock.init();
 
@@ -39,13 +41,14 @@ fn unlockAllocator() void {
 }
 
 pub fn init() void {
-    const heap_start_addr = heapStartAddress();
+    const heap_base = heapStartAddress();
+    const heap_start_addr = heap_base + early_claimed_bytes;
     heap_start = @ptrFromInt(heap_start_addr);
-    heap_end = heap_start + HEAP_SIZE;
+    heap_end = @ptrFromInt(heap_base + HEAP_SIZE);
     @memset(allocationBitmap(), 0);
 
     const initial_block: *BlockHeader = @ptrFromInt(heapDataStartAddress());
-    initial_block.size = HEAP_SIZE - ALLOCATION_BITMAP_BYTES - @sizeOf(BlockHeader);
+    initial_block.size = heapByteCapacity() - ALLOCATION_BITMAP_BYTES - @sizeOf(BlockHeader);
     initial_block.state = heap_geometry.block_state_free;
     initial_block.next = null;
     initial_block.prev = null;
@@ -57,9 +60,23 @@ pub fn init() void {
     console.print("Memory allocator initialized!\n");
     console.print("Heap start: 0x");
     numfmt.printHex(@intFromPtr(heap_start));
-    console.print("\nHeap size: ");
-    numfmt.printDec(HEAP_SIZE / BYTES_PER_MIB);
-    console.print(" MB\n");
+    console.print("\nEarly heap state: ");
+    numfmt.printDec(early_claimed_bytes);
+    console.print(" bytes\nHeap allocatable: ");
+    numfmt.printDec(initial_block.size);
+    console.print(" bytes\n");
+}
+
+pub fn claimEarly(bytes: usize, alignment: usize) ?*anyopaque {
+    if (is_initialized) return null;
+
+    const heap_base = heapStartAddress();
+    const cursor = std.math.add(usize, heap_base, early_claimed_bytes) catch return null;
+    const minimum_heap_bytes = ALLOCATION_BITMAP_BYTES + @sizeOf(BlockHeader) + MIN_BLOCK_SIZE;
+    const claim_limit = std.math.add(usize, heap_base, HEAP_SIZE - minimum_heap_bytes) catch return null;
+    const claim = heap_geometry.claimAlignedRange(cursor, bytes, alignment, claim_limit) orelse return null;
+    early_claimed_bytes = claim.end - heap_base;
+    return @ptrFromInt(claim.start);
 }
 
 pub fn getReservedMemoryEnd() usize {
@@ -216,6 +233,14 @@ fn heapDataStartAddress() usize {
     return @intFromPtr(heap_start) + ALLOCATION_BITMAP_BYTES;
 }
 
+fn heapByteCapacity() usize {
+    return @intFromPtr(heap_end) - @intFromPtr(heap_start);
+}
+
+fn heapDataCapacity() usize {
+    return heapByteCapacity() - ALLOCATION_BITMAP_BYTES;
+}
+
 fn allocationBitmap() *[ALLOCATION_BITMAP_BYTES]u8 {
     return @ptrCast(heap_start);
 }
@@ -239,7 +264,7 @@ fn allocationMarkerIndex(payload_address: usize) ?usize {
     return heap_geometry.allocationMarkerIndex(
         payload_address,
         heapDataStartAddress(),
-        HEAP_SIZE - ALLOCATION_BITMAP_BYTES,
+        heapDataCapacity(),
         BLOCK_ALIGNMENT,
     );
 }

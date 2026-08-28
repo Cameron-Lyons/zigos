@@ -187,7 +187,8 @@ fn testInfo(flags: u32, mmap_addr: u32, mmap_length: u32, cmdline_addr: u32) han
 
 test "firmware map opens only complete usable pages" {
     const Allocator = frame_allocator.Fixed(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE);
-    var allocator = Allocator.init();
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
     var bytes = [_]u8{0} ** 24;
     _ = appendEntry(&bytes, 0, TEST_PAGE_SIZE / 2, 3 * TEST_PAGE_SIZE, 1);
 
@@ -204,7 +205,8 @@ test "firmware map opens usable frames above 4 GiB" {
     const high_frame_base: u64 = @as(u64, std.math.maxInt(u32)) + 1;
     const memory_bytes = high_frame_base + 4 * TEST_PAGE_SIZE;
     const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
-    var allocator = Allocator.init();
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
     var bytes = [_]u8{0} ** 24;
     _ = appendEntry(&bytes, 0, high_frame_base, 2 * TEST_PAGE_SIZE, 1);
 
@@ -224,8 +226,10 @@ test "non-usable pages win over usable pages in either descriptor order" {
     offset = appendEntry(&reserved_first, 0, 2 * TEST_PAGE_SIZE + 100, 200, 2);
     _ = appendEntry(&reserved_first, offset, 0, 6 * TEST_PAGE_SIZE, 1);
 
-    var first = Allocator.init();
-    var second = Allocator.init();
+    var first_storage: Allocator.Storage = undefined;
+    var first = Allocator.init(&first_storage);
+    var second_storage: Allocator.Storage = undefined;
+    var second = Allocator.init(&second_storage);
     try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &first, handoff.multiboot2MemoryMap(&usable_first, 24));
     try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &second, handoff.multiboot2MemoryMap(&reserved_first, 24));
 
@@ -242,7 +246,8 @@ test "non-usable page ceilings and aperture clipping are conservative" {
     offset = appendEntry(&bytes, offset, TEST_PAGE_SIZE - 1, 2, 2);
     _ = appendEntry(&bytes, offset, 8 * TEST_PAGE_SIZE - 1, 2, 4);
 
-    var allocator = Allocator.init();
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
     try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24));
 
     try std.testing.expect(allocator.isReserved(0));
@@ -254,7 +259,8 @@ test "non-usable page ceilings and aperture clipping are conservative" {
 
 test "malformed or overflowing firmware maps leave the aperture closed" {
     const Allocator = frame_allocator.Fixed(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE);
-    var allocator = Allocator.init();
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
     var bytes = [_]u8{0} ** 24;
     _ = appendEntry(&bytes, 0, std.math.maxInt(u64) - 1, 4, 1);
 
@@ -274,7 +280,8 @@ test "malformed or overflowing firmware maps leave the aperture closed" {
 test "live Multiboot information map and command-line pages stay reserved" {
     const memory_bytes = 16 * TEST_PAGE_SIZE;
     const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
-    var allocator = Allocator.init();
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
     const info = testInfo(
         (1 << 2) | (1 << 6),
         3 * TEST_PAGE_SIZE + 100,
@@ -301,7 +308,8 @@ test "live Multiboot information map and command-line pages stay reserved" {
 test "live Multiboot reservations are rejected after allocation begins" {
     const memory_bytes = 16 * TEST_PAGE_SIZE;
     const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
-    var allocator = Allocator.init();
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
     _ = allocator.allocate(7).?;
     const info = testInfo(
         1 << 6,
@@ -328,7 +336,8 @@ test "live Multiboot reservations are rejected after allocation begins" {
 test "live Multiboot ranges outside the identity aperture fail transactionally" {
     const memory_bytes = 16 * TEST_PAGE_SIZE;
     const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
-    var allocator = Allocator.init();
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
     const info = testInfo(
         (1 << 2) | (1 << 6),
         3 * TEST_PAGE_SIZE,
