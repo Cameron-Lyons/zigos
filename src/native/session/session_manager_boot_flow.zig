@@ -51,6 +51,7 @@ pub const kernel_context_layout = session_contexts.kernel_context_layout;
 pub const HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_CATALOG_ON_FREESTANDING;
 pub const BOOTSTRAP_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const UI_AUTHORITY_TASK_INDEX_RELOOKUPS: u8 = 0;
+pub const STEADY_RUNTIME_CONSTRUCTION_ATTEMPTS: u8 = 0;
 pub const HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING = session_contexts.HEAP_BACKED_USERSPACE_SCHEDULER_ON_FREESTANDING;
 pub const HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING = session_contexts.HEAP_BACKED_TASK_RUNTIME_ON_FREESTANDING;
 pub const HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING = service_graph_builder.HEAP_BACKED_PACKAGE_SERVICE_ON_FREESTANDING;
@@ -260,24 +261,26 @@ pub const SessionManager = struct {
     }
 
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
-        const runtime = self.runtimePtr();
+        if (!self.runtime_context.constructed) return false;
+        const runtime = self.runtime_context.taskRuntime().?;
         _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
-        return self.runtime_context.runScheduler(now_ticks);
+        return self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
-        return self.runtime_context.schedulerHasReadyTasks();
+        if (!self.runtime_context.constructed) return false;
+        return self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
     pub fn servicePendingNetworkWork(self: *SessionManager, now_ticks: u64) usize {
         const service = bootstrap_driver_port.servicePendingNetworkFrames(NETWORK_RECEIVE_SERVICE_BUDGET);
         if (service.frames_queued != 0) {
             const task_id = bootstrap_driver_port.activeNetworkTaskId();
-            if (task_id != 0) {
-                _ = self.userspaceSchedulerPtr().wakeTask(
+            if (task_id != 0 and self.runtime_context.constructed) {
+                _ = self.runtime_context.userspaceScheduler().?.wakeTask(
                     task_id,
                     .external_event,
                     now_ticks,
@@ -294,12 +297,14 @@ pub const SessionManager = struct {
 
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
+        if (!self.runtime_context.constructed) return events_routed;
+        const scheduler = self.runtime_context.userspaceScheduler().?;
         while (self.input_router.pollWakeTarget()) |task_id| {
             if (self.ensureFocusedInputCapability(task_id, now_ticks) == null) {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
             }
-            _ = self.userspaceSchedulerPtr().wakeTask(
+            _ = scheduler.wakeTask(
                 task_id,
                 .external_event,
                 now_ticks,

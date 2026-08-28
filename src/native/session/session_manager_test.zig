@@ -187,6 +187,15 @@ test "surface authority provisioning follows lifecycle generations at stable tas
     try std.testing.expectEqual(runtime.taskLifecycleGeneration(), manager.surface_authority_scanned_lifecycle_generation);
 }
 
+test "steady runtime polling stays idle before session construction" {
+    var manager = session_manager.SessionManager.init();
+
+    try std.testing.expect(!manager.runtime_context.constructed);
+    try std.testing.expect(!manager.runUserspaceScheduler(1));
+    try std.testing.expect(!manager.userspaceSchedulerHasReadyTasks());
+    try std.testing.expect(!manager.runtime_context.constructed);
+}
+
 test "bootstrap scenario world wires storage sync recovery and policy flows explicitly" {
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();
