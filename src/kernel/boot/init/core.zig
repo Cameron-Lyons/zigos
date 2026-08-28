@@ -10,6 +10,11 @@ pub fn init() void {
 
     console.print("Initializing GDT...\n");
     const gdt = @import("../../interrupts/gdt64.zig");
+    const double_fault_stack_memory = memory.claimEarly(
+        gdt.DOUBLE_FAULT_STACK_TOTAL_BYTES,
+        gdt.DOUBLE_FAULT_STACK_ALIGNMENT,
+    ) orelse @panic("insufficient early heap for double-fault stack");
+    if (!gdt.bindDoubleFaultStack(double_fault_stack_memory)) @panic("double-fault stack already bound");
     gdt.init();
     console.print("GDT initialized!\n");
 
@@ -24,6 +29,9 @@ pub fn init() void {
 
     console.print("Initializing paging...\n");
     paging.init();
+    if (!paging.unmapBorrowedCurrentPage(gdt.doubleFaultStackGuardAddress())) {
+        @panic("failed to arm double-fault stack guard");
+    }
     @import("../common.zig").printBootMarker(@import("../markers.zig").x86_64_paging_ready);
 
     console.print("Enabling kernel memory protection...\n");
