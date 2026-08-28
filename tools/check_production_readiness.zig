@@ -2052,7 +2052,7 @@ fn validateNuc11tnki5KernelProofSources(
         "paging.mapKernelBorrowedPage",
         "acpi.xsdtEntryCount",
         "mcfg.segmentZeroAllocation",
-        ":ACPI_XSDT:OBSERVED",
+        "hardware_target.nuc11tnki5_hardware_fact_markers[2]",
     };
     for (required_mapped_acpi_snippets) |snippet| {
         if (std.mem.indexOf(u8, hardware_proof_source, snippet) == null) {
