@@ -17,6 +17,7 @@ const heap_backed_table = builtin.target.os.tag == .freestanding;
 pub const MAX_SHARED_MEMORY_OBJECTS: usize = 24;
 pub const MAX_MAPPINGS_PER_OBJECT: usize = 8;
 pub const PAGE_SIZE: usize = 4096;
+pub const OBJECT_SIZE_CEILING_BYTES: usize = 128;
 const SHARED_MEMORY_INDEX_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * 2;
 pub const SHARED_MEMORY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const SHARED_MEMORY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
@@ -27,6 +28,7 @@ const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PE
 const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
 const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MMU_OBJECT_MAPPING_SCAN_BOUND;
 const no_mmu_mapping: u16 = std.math.maxInt(u16);
+const ObjectMappingCount = u16;
 const FREESTANDING_PHYSICAL_BASE: u64 = 0x0010_0000;
 const TASK_SHARED_VIRTUAL_BASE: u64 = userspace_layout.shared_start;
 const TASK_SHARED_VIRTUAL_END_EXCLUSIVE: u64 = userspace_layout.shared_end_exclusive;
@@ -79,7 +81,7 @@ pub const Object = struct {
     compute_access: ComputeAccess,
     attached_compute: ComputeAccess,
     mapped_task_ids: [MAX_MAPPINGS_PER_OBJECT]ids.TaskId,
-    mapping_count: usize,
+    mapping_count: ObjectMappingCount,
     mmu_mapping_head: u16 = no_mmu_mapping,
     mmu_mapping_count: u16 = 0,
 
@@ -89,6 +91,15 @@ pub const Object = struct {
 
     pub fn attachedTo(self: *const Object, target: ComputeTarget) bool {
         return self.attached_compute.allows(target);
+    }
+
+    comptime {
+        if (MAX_MAPPINGS_PER_OBJECT > std.math.maxInt(ObjectMappingCount)) {
+            @compileError("shared-memory task mapping capacity exceeds its compact count");
+        }
+        if (@sizeOf(@This()) > OBJECT_SIZE_CEILING_BYTES) {
+            @compileError("shared-memory object exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -1043,6 +1054,10 @@ fn setComputeAccess(access: *ComputeAccess, target: ComputeTarget, value: bool) 
         .npu => access.npu = value,
         .media => access.media = value,
     }
+}
+
+test "shared memory objects keep bounded mapping counts compact" {
+    try std.testing.expectEqual(OBJECT_SIZE_CEILING_BYTES, @sizeOf(Object));
 }
 
 test "allocated shared memory backing initializes every arena and index" {
