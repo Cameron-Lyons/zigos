@@ -1003,7 +1003,7 @@ fn networkDriverBrokerRevocationGate() !void {
     }, source_device, target_device);
 
     const first_frame = try stack.sendServiceIdentityFrameBrokered(&broker, &connection, "brokered network payload", 11);
-    try std.testing.expect(first_frame.egress_allowed);
+    try std.testing.expect(first_frame.flags.egress_allowed);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
 
     try capabilities.revokeTargetAuthority(revocation_trigger.id);

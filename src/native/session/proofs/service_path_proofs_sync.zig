@@ -751,10 +751,10 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     try std.testing.expectEqualStrings("overlay.service-path.notes", connection.serviceIdentitySlice());
 
     const frame = try stack.sendServiceIdentityFrame(&connection, "native service identity payload");
-    try std.testing.expect(frame.encrypted);
-    try std.testing.expect(frame.egress_allowed);
-    try std.testing.expect(frame.attested);
-    try std.testing.expect(frame.identity_pinned);
+    try std.testing.expect(frame.flags.encrypted);
+    try std.testing.expect(frame.flags.egress_allowed);
+    try std.testing.expect(frame.flags.attested);
+    try std.testing.expect(frame.flags.identity_pinned);
     try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native service identity payload"));
     try std.testing.expectEqual(@as(usize, 4), stack.attempted_connections);
     try std.testing.expectEqual(@as(usize, 3), stack.denied_before_transmit);
