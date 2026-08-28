@@ -1892,8 +1892,7 @@ fn qualityBatterySaverBatchDelay() u64 {
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = mebibytes(8),
         .battery_percent = 12,
-        .battery_charging = false,
-        .npu_driver_online = true,
+        .status = .{ .battery_charging = false },
     });
 
     const batch = createLoadTask(
@@ -1961,7 +1960,6 @@ fn qualityMemoryPressureBatchDelay() u64 {
     configureLoadTelemetry(&scheduler, 7_003, 703, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = kibibytes(32),
-        .npu_driver_online = true,
     });
 
     const batch = createLoadTask(
@@ -2100,7 +2098,6 @@ fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
     configureLoadTelemetry(&scheduler, 7_007, 707, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = mebibytes(8),
-        .npu_driver_online = true,
     });
 
     const background = createLoadTask(
@@ -2157,7 +2154,6 @@ fn qualityAcceleratorClaimDeadlinePriority() u64 {
     configureLoadTelemetry(&scheduler, 7_008, 708, 1, .{
         .total_cpu_budget_ticks = 200_000,
         .memory_capacity_bytes = mebibytes(8),
-        .gpu_driver_online = true,
     });
 
     const batch = createLoadTask(

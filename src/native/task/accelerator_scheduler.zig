@@ -129,21 +129,26 @@ pub const HardwareTelemetryEvidence = struct {
     }
 };
 
+pub const LivePlatformStatusFlags = packed struct(u8) {
+    gpu_driver_online: bool = true,
+    npu_driver_online: bool = true,
+    media_driver_online: bool = true,
+    battery_charging: bool = true,
+    privacy_sensitive_task_present: bool = false,
+    reserved: u3 = 0,
+};
+
 pub const LivePlatformCounters = struct {
-    pub const SIZE_BYTES: usize = 88;
+    pub const SIZE_BYTES: usize = 80;
 
     total_cpu_budget_ticks: u64 = std.math.maxInt(u64),
     consumed_cpu_ticks: u64 = 0,
     memory_capacity_bytes: usize = std.math.maxInt(usize),
     reserved_memory_bytes: usize = 0,
     reserved_shared_memory_bytes: usize = 0,
-    gpu_driver_online: bool = true,
-    npu_driver_online: bool = true,
-    media_driver_online: bool = true,
     thermal_milli_celsius: u32 = 45_000,
     battery_percent: u8 = 100,
-    battery_charging: bool = true,
-    privacy_sensitive_task_present: bool = false,
+    status: LivePlatformStatusFlags = .{},
     grid_carbon_intensity_grams_per_kwh: u16 = 0,
     hardware_evidence: HardwareTelemetryEvidence = .{},
 
@@ -936,11 +941,11 @@ fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCoun
         .source = .hardware,
         .observed_tick = observed_tick,
         .thermal_pressure = thermalPressureFromMilliCelsius(counters.thermal_milli_celsius),
-        .battery_saver = !counters.battery_charging and counters.battery_percent <= 20,
-        .privacy_mode = counters.privacy_sensitive_task_present,
-        .gpu_available = counters.gpu_driver_online,
-        .npu_available = counters.npu_driver_online,
-        .media_available = counters.media_driver_online,
+        .battery_saver = !counters.status.battery_charging and counters.battery_percent <= 20,
+        .privacy_mode = counters.status.privacy_sensitive_task_present,
+        .gpu_available = counters.status.gpu_driver_online,
+        .npu_available = counters.status.npu_driver_online,
+        .media_available = counters.status.media_driver_online,
         .cpu_budget_ticks = counters.total_cpu_budget_ticks -| counters.consumed_cpu_ticks,
         .memory_bandwidth_units = available_memory_bytes / units.bytes_per_kib,
         .grid_carbon_intensity_grams_per_kwh = counters.grid_carbon_intensity_grams_per_kwh,
@@ -1243,17 +1248,16 @@ test "accelerator scheduler rejects stale production telemetry observations" {
     var provider = try BootedPlatformTelemetryProvider.initForBootedService(8, 80, 10, .{
         .total_cpu_budget_ticks = 1_000,
         .memory_capacity_bytes = units.kibibytes(256),
-        .gpu_driver_online = true,
-        .npu_driver_online = false,
-        .media_driver_online = true,
+        .status = .{ .npu_driver_online = false },
     });
 
     try std.testing.expectError(error.TelemetryObservationStale, provider.observeLive(80, 9, .{
         .total_cpu_budget_ticks = 1_000,
         .memory_capacity_bytes = units.kibibytes(256),
-        .gpu_driver_online = false,
-        .npu_driver_online = true,
-        .media_driver_online = false,
+        .status = .{
+            .gpu_driver_online = false,
+            .media_driver_online = false,
+        },
     }));
     try std.testing.expectEqual(@as(u32, 1), provider.rejected_observation_count);
     try std.testing.expectEqual(@as(u64, 10), provider.current.observed_tick);
@@ -1263,9 +1267,10 @@ test "accelerator scheduler rejects stale production telemetry observations" {
     try provider.observeLive(80, 11, .{
         .total_cpu_budget_ticks = 1_000,
         .memory_capacity_bytes = units.kibibytes(256),
-        .gpu_driver_online = false,
-        .npu_driver_online = true,
-        .media_driver_online = false,
+        .status = .{
+            .gpu_driver_online = false,
+            .media_driver_online = false,
+        },
     });
     try std.testing.expectEqual(@as(u64, 11), provider.current.observed_tick);
     try std.testing.expect(!provider.current.gpu_available);
@@ -1274,8 +1279,9 @@ test "accelerator scheduler rejects stale production telemetry observations" {
 
 test "accelerator live platform counters stay compact" {
     try std.testing.expect(COMPACT_LIVE_PLATFORM_COUNTERS);
-    try std.testing.expectEqual(bool, @FieldType(LivePlatformCounters, "privacy_sensitive_task_present"));
-    try std.testing.expectEqual(@as(usize, 88), @sizeOf(LivePlatformCounters));
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(LivePlatformStatusFlags));
+    try std.testing.expectEqual(LivePlatformStatusFlags, @FieldType(LivePlatformCounters, "status"));
+    try std.testing.expectEqual(@as(usize, 80), @sizeOf(LivePlatformCounters));
 }
 
 test "accelerator scheduler derives hardware telemetry from booted live counters" {
@@ -1289,13 +1295,13 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
         .memory_capacity_bytes = units.kibibytes(128),
         .reserved_memory_bytes = units.kibibytes(64),
         .reserved_shared_memory_bytes = units.kibibytes(16),
-        .gpu_driver_online = true,
-        .npu_driver_online = false,
-        .media_driver_online = true,
         .thermal_milli_celsius = 82_000,
         .battery_percent = 15,
-        .battery_charging = false,
-        .privacy_sensitive_task_present = true,
+        .status = .{
+            .npu_driver_online = false,
+            .battery_charging = false,
+            .privacy_sensitive_task_present = true,
+        },
         .grid_carbon_intensity_grams_per_kwh = 590,
     });
     var controller = Controller.init();
@@ -1332,12 +1338,9 @@ test "accelerator scheduler derives hardware telemetry from booted live counters
         .consumed_cpu_ticks = 2_000,
         .memory_capacity_bytes = units.kibibytes(256),
         .reserved_memory_bytes = units.kibibytes(64),
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = false,
         .thermal_milli_celsius = 91_000,
         .battery_percent = 80,
-        .battery_charging = true,
+        .status = .{ .media_driver_online = false },
     });
     controller.configureFromProvider(provider.telemetryProvider());
     try std.testing.expectEqual(@as(u64, 102), controller.last_telemetry_observed_tick);

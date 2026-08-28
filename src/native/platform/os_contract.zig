@@ -5855,10 +5855,6 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         .memory_capacity_bytes = units.mebibytes(2),
         .thermal_milli_celsius = 92_000,
         .battery_percent = 90,
-        .battery_charging = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
         .hardware_evidence = resourceGovernanceHardwareEvidence(),
     }) catch return evidence;
     const telemetry_provider = provider.telemetryProvider();
@@ -5901,11 +5897,10 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         .memory_capacity_bytes = units.mebibytes(2),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 12,
-        .battery_charging = false,
-        .privacy_sensitive_task_present = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
+        .status = .{
+            .battery_charging = false,
+            .privacy_sensitive_task_present = true,
+        },
         .hardware_evidence = resourceGovernanceHardwareEvidence(),
     }) catch return evidence;
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
@@ -5930,10 +5925,6 @@ fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
         .memory_capacity_bytes = units.mebibytes(2),
         .thermal_milli_celsius = 45_000,
         .battery_percent = 80,
-        .battery_charging = true,
-        .gpu_driver_online = true,
-        .npu_driver_online = true,
-        .media_driver_online = true,
         .hardware_evidence = resourceGovernanceHardwareEvidence(),
     }) catch return evidence;
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());

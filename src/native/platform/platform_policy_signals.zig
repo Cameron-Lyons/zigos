@@ -935,12 +935,14 @@ pub fn collectLiveCounters(
 ) accelerator_scheduler.LivePlatformCounters {
     var counters = accelerator_scheduler.LivePlatformCounters{
         .memory_capacity_bytes = snapshot.memory_capacity_bytes,
-        .gpu_driver_online = snapshot.gpu_driver_online,
-        .npu_driver_online = snapshot.npu_driver_online,
-        .media_driver_online = snapshot.media_driver_online,
         .thermal_milli_celsius = snapshot.thermal_milli_celsius,
         .battery_percent = snapshot.battery_percent,
-        .battery_charging = snapshot.battery_charging,
+        .status = .{
+            .gpu_driver_online = snapshot.gpu_driver_online,
+            .npu_driver_online = snapshot.npu_driver_online,
+            .media_driver_online = snapshot.media_driver_online,
+            .battery_charging = snapshot.battery_charging,
+        },
     };
     counters.total_cpu_budget_ticks = 0;
 
@@ -957,7 +959,7 @@ pub fn collectLiveCounters(
         if (scheduler.slots.getConst(task.id)) |scheduler_slot| {
             counters.consumed_cpu_ticks = saturatingAdd(u64, counters.consumed_cpu_ticks, scheduler_slot.cpu_ticks_consumed);
             if (scheduler_slot.dispatch_request.privacy_sensitive) {
-                counters.privacy_sensitive_task_present = true;
+                counters.status.privacy_sensitive_task_present = true;
             }
         }
     }
@@ -1266,7 +1268,7 @@ test "platform policy signals derive hardware scheduler telemetry from booted ru
     try std.testing.expectEqual(@as(usize, units.kibibytes(512)), counters.memory_capacity_bytes);
     try std.testing.expectEqual(@as(usize, units.kibibytes(192)), counters.reserved_memory_bytes);
     try std.testing.expectEqual(@as(usize, shared_memory.PAGE_SIZE * 3), counters.reserved_shared_memory_bytes);
-    try std.testing.expect(counters.privacy_sensitive_task_present);
+    try std.testing.expect(counters.status.privacy_sensitive_task_present);
 
     var provider = try FreestandingPlatformTelemetryProvider.initForBootedService(91, 91_000, 30, counters);
     const provider_interface = provider.telemetryProvider();
@@ -1302,7 +1304,6 @@ test "platform telemetry providers expose test-only host fake and production fre
         .memory_capacity_bytes = units.kibibytes(128),
         .thermal_milli_celsius = 76_000,
         .battery_percent = 90,
-        .battery_charging = true,
     });
     const freestanding_provider = freestanding.telemetryProvider();
     try std.testing.expect(!freestanding_provider.testOnly());
@@ -1536,9 +1537,9 @@ test "first target hardware proof facts feed production driver callback telemetr
     try std.testing.expectEqual(@as(usize, units.mebibytes(16)), counters.memory_capacity_bytes);
     try std.testing.expectEqual(@as(u32, 64_000), counters.thermal_milli_celsius);
     try std.testing.expectEqual(@as(u8, 55), counters.battery_percent);
-    try std.testing.expect(counters.gpu_driver_online);
-    try std.testing.expect(!counters.npu_driver_online);
-    try std.testing.expect(counters.media_driver_online);
+    try std.testing.expect(counters.status.gpu_driver_online);
+    try std.testing.expect(!counters.status.npu_driver_online);
+    try std.testing.expect(counters.status.media_driver_online);
     try std.testing.expectEqual(@as(u16, 215), counters.grid_carbon_intensity_grams_per_kwh);
 
     var telemetry_provider = try FirstTargetPlatformTelemetryProvider.initFromReaderProvider(
