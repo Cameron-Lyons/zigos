@@ -904,6 +904,8 @@ pub const indexed_hot_path_tables = .{
             !@hasField(event_ledger.Event, "user_approval_can_resolve") and
             !@hasField(event_ledger.Event, "retry_safe"),
         .encodes_persistent_events_directly = event_ledger.DIRECT_PERSISTENT_EVENT_ENCODING,
+        .packs_persistent_event_records = event_ledger.PACKS_PERSISTENT_EVENT_RECORD and
+            event_ledger.PERSISTENT_EVENT_RECORD_SIZE_BYTES == 576,
         .keeps_event_state_within_ceilings = @sizeOf(event_ledger.Event) <= event_ledger.EVENT_SIZE_CEILING_BYTES and
             @sizeOf(event_ledger.EventBacking) <= event_ledger.EVENT_BACKING_SIZE_CEILING_BYTES,
         .uses_event_arena = @hasField(event_ledger.EventBacking, "events"),

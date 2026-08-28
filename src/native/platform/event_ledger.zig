@@ -31,25 +31,24 @@ pub const RECORDS_EVENTS_IN_PLACE = true;
 pub const INLINE_EVENT_TEXT_WRITES = true;
 pub const DERIVES_PERMISSION_DENIAL_METADATA = true;
 pub const DIRECT_PERSISTENT_EVENT_ENCODING = true;
+pub const PACKS_PERSISTENT_EVENT_RECORD = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 584;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 46_536;
+pub const PERSISTENT_EVENT_RECORD_SIZE_BYTES: usize = 576;
 pub const state_workspace_label = "system-diagnostics";
 
 const MAX_PERSISTED_EVENTS: usize = MAX_EVENTS;
 const MAX_PERSISTED_DETAIL_BYTES: usize = MAX_DETAIL_BYTES;
 const state_entry_path = "state/event-ledger";
 const event_entry_prefix = "events/";
-const persistent_header_magic: u32 = 0x454C4732;
+const persistent_header_magic: u32 = 0x454C4733;
 const permission_kind_none: u8 = 0xFF;
 const DENIAL_HELP_BUFFER_BYTES: usize = 256;
-const PERSISTENT_EVENT_RESERVED_BYTES: usize = 5;
-const PERSISTENT_EVENT_TAIL_RESERVED_BYTES: usize = 4;
+const PERSISTENT_EVENT_RESERVED_BYTES: usize = 3;
 const persistent_event_flag_allowed: u8 = 1 << 0;
 const persistent_event_flag_detail_protected: u8 = 1 << 3;
 const semantic_memory_flag_receipt_audit: u32 = @as(u32, 1) << @as(u5, 28);
 const semantic_memory_query_byte_mask: usize = 0x0fff_ffff;
-const PERSISTENT_EVENT_RECORD_SIZE_CEILING_BYTES: usize = 592;
-
 comptime {
     if (MAX_DETAIL_BYTES > std.math.maxInt(u16)) {
         @compileError("event ledger text metadata exceeds compact length capacity");
@@ -2184,21 +2183,20 @@ pub const Ledger = struct {
 
 const PersistentEventRecord = extern struct {
     sequence: u64 = 0,
-    kind: u8 = 0,
-    subject_kind: u8 = 0,
-    service_class: u8 = 0,
-    permission_kind: u8 = permission_kind_none,
-    denial_reason: u16 = 0,
-    flags: u8 = 0,
-    detail_len: u16 = 0,
-    _reserved: [PERSISTENT_EVENT_RESERVED_BYTES]u8 = [_]u8{0} ** PERSISTENT_EVENT_RESERVED_BYTES,
     tick: u64 = 0,
     subject_serial: u64 = 0,
     task_id: u64 = 0,
     workspace_id: u64 = 0,
     related_id: u64 = 0,
     detail_code: u32 = 0,
-    _tail_reserved: [PERSISTENT_EVENT_TAIL_RESERVED_BYTES]u8 = [_]u8{0} ** PERSISTENT_EVENT_TAIL_RESERVED_BYTES,
+    denial_reason: u16 = 0,
+    detail_len: u16 = 0,
+    kind: u8 = 0,
+    subject_kind: u8 = 0,
+    service_class: u8 = 0,
+    permission_kind: u8 = permission_kind_none,
+    flags: u8 = 0,
+    _reserved: [PERSISTENT_EVENT_RESERVED_BYTES]u8 = [_]u8{0} ** PERSISTENT_EVENT_RESERVED_BYTES,
     detail: [MAX_PERSISTED_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_DETAIL_BYTES,
 
     fn fromEvent(event: *const Event) PersistentEventRecord {
@@ -2251,8 +2249,8 @@ const PersistentEventRecord = extern struct {
 };
 
 comptime {
-    if (@sizeOf(PersistentEventRecord) > PERSISTENT_EVENT_RECORD_SIZE_CEILING_BYTES) {
-        @compileError("persistent event record exceeds its compact layout ceiling");
+    if (@sizeOf(PersistentEventRecord) != PERSISTENT_EVENT_RECORD_SIZE_BYTES) {
+        @compileError("persistent event record no longer matches its packed wire size");
     }
 }
 
