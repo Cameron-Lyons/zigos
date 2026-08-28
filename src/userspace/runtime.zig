@@ -759,11 +759,11 @@ test "userspace service startup plans expose domain-specific endpoint operations
     const sync = service_protocol.planFor(.sync);
 
     try std.testing.expectEqual(@as(u8, @intFromEnum(ServiceKind.storage)), @as(u8, @intFromEnum(storage.kind)));
-    try std.testing.expectEqual(@as(usize, 4), storage.operation_count);
-    try std.testing.expectEqual(@as(usize, 3), network.operation_count);
-    try std.testing.expectEqual(@as(usize, 4), package.operation_count);
-    try std.testing.expectEqual(@as(usize, 4), compositor.operation_count);
-    try std.testing.expectEqual(@as(usize, 4), sync.operation_count);
+    try std.testing.expectEqual(@as(u8, 4), storage.operation_count);
+    try std.testing.expectEqual(@as(u8, 3), network.operation_count);
+    try std.testing.expectEqual(@as(u8, 4), package.operation_count);
+    try std.testing.expectEqual(@as(u8, 4), compositor.operation_count);
+    try std.testing.expectEqual(@as(u8, 4), sync.operation_count);
     try std.testing.expect(!std.mem.eql(u8, storage.endpoint_label, network.endpoint_label));
     try std.testing.expect(!std.mem.eql(u8, package.operations[0].name, compositor.operations[0].name));
 }
