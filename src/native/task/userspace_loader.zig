@@ -142,7 +142,7 @@ pub const ImageRecord = struct {
     artifact_source: ArtifactSource,
     entry_point: u64,
     loadable_segment_count: u8,
-    byte_len: usize,
+    byte_len: task_runtime.UserImageByteLength,
     bootstrap_mailbox_address: u64,
     file_sha256: crypto_hash.Digest,
     executable_image: task_runtime.ExecutableImageSpec,
@@ -364,10 +364,12 @@ pub const Catalog = struct {
 };
 
 test "userspace catalog uses capacity-sized resident metadata" {
+    try std.testing.expectEqual(embedded_file.ByteLength, task_runtime.UserImageByteLength);
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(ImageRecord, "loadable_segment_count")));
-    try std.testing.expectEqual(@as(usize, 720), @sizeOf(ImageRecord));
-    try std.testing.expectEqual(@as(usize, 728), @sizeOf(ImageSlot));
-    try std.testing.expectEqual(@as(usize, 24_872), @sizeOf(Catalog));
+    try std.testing.expectEqual(task_runtime.UserImageByteLength, @FieldType(ImageRecord, "byte_len"));
+    try std.testing.expectEqual(@as(usize, 712), @sizeOf(ImageRecord));
+    try std.testing.expectEqual(@as(usize, 720), @sizeOf(ImageSlot));
+    try std.testing.expectEqual(@as(usize, 24_616), @sizeOf(Catalog));
     try std.testing.expect(DERIVES_IMAGE_IDS_FROM_ARENA_COUNT);
     try std.testing.expect(!@hasField(Catalog, "next_image_id"));
 }
@@ -487,7 +489,7 @@ fn imageMatchesRequest(
     const expected_source: ArtifactSource = .embedded_elf;
     const expected_entry_point: u64 = expected_image.entry_point;
     const expected_segment_count: u16 = @intCast(expected_image.segment_count);
-    const expected_byte_len: usize = expected_image.file_size_bytes;
+    const expected_byte_len: task_runtime.UserImageByteLength = expected_image.file_size_bytes;
     const expected_bootstrap_mailbox_address: u64 = expected_image.bootstrap_mailbox_address;
     const expected_hash = expected_image.file_sha256;
 

@@ -236,8 +236,8 @@ pub fn syntheticUserspaceImage(
     var image = std.mem.zeroes(ImageType);
     image.entry_point = default_entry_point;
     image.stack_top = default_stack_top;
-    image.stack_size_bytes = default_stack_size_bytes;
-    image.file_size_bytes = default_file_size_bytes;
+    image.stack_size_bytes = @intCast(default_stack_size_bytes);
+    image.file_size_bytes = @intCast(default_file_size_bytes);
     image.file_sha256 = crypto_hash.finalize(&hasher);
     image.segment_count = 2;
     image.segments[0] = .{

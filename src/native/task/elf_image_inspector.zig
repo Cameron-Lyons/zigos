@@ -8,7 +8,7 @@ const userspace_layout = @import("../core/userspace_layout.zig");
 pub const Inspection = struct {
     entry_point: u64,
     loadable_segment_count: u16,
-    byte_len: usize,
+    byte_len: task_runtime.UserImageByteLength,
     bootstrap_mailbox_address: u64,
     file_sha256: crypto_hash.Digest,
     executable_image: task_runtime.ExecutableImageSpec,

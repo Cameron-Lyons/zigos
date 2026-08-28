@@ -23,6 +23,7 @@ const SignBundleReturn = @typeInfo(@TypeOf(userspace_manifest_signing.signBundle
 const SigningError = @typeInfo(SignBundleReturn).error_union.error_set;
 
 pub const Error = userspace_loader.Error || SigningError || error{
+    GeneratedArtifactByteLengthInvalid,
     GeneratedArtifactSegmentCountInvalid,
     UnsupportedServiceClass,
     UnknownBundleId,
@@ -129,8 +130,10 @@ fn executableImageFromArtifact(artifact: anytype) Error!task_runtime.ExecutableI
         .entry_point = artifact.entry_point,
         .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
         .stack_top = artifact.stack_top,
-        .stack_size_bytes = artifact.stack_size_bytes,
-        .file_size_bytes = artifact.file_size_bytes,
+        .stack_size_bytes = std.math.cast(task_runtime.UserStackByteLength, artifact.stack_size_bytes) orelse
+            return error.GeneratedArtifactByteLengthInvalid,
+        .file_size_bytes = std.math.cast(task_runtime.UserImageByteLength, artifact.file_size_bytes) orelse
+            return error.GeneratedArtifactByteLengthInvalid,
         .file_sha256 = artifact.file_sha256,
         .segment_count = @intCast(artifact.segment_count),
     };
