@@ -2387,11 +2387,13 @@ fn configureLoadTelemetry(
         telemetry_counters.hardware_evidence = .{
             .target_id = "benchmark-hardware-telemetry",
             .reader_generation = 1,
-            .acpi_observed = true,
-            .thermal_observed = true,
-            .battery_observed = true,
-            .accelerator_observed = true,
-            .grid_carbon_observed = true,
+            .observations = .{
+                .acpi_observed = true,
+                .thermal_observed = true,
+                .battery_observed = true,
+                .accelerator_observed = true,
+                .grid_carbon_observed = true,
+            },
         };
     }
     var provider = accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(

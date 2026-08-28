@@ -1541,11 +1541,13 @@ fn completeTestHardwareEvidence() accelerator_scheduler.HardwareTelemetryEvidenc
     return .{
         .target_id = "test-hardware-telemetry",
         .reader_generation = 1,
-        .acpi_observed = true,
-        .thermal_observed = true,
-        .battery_observed = true,
-        .accelerator_observed = true,
-        .grid_carbon_observed = true,
+        .observations = .{
+            .acpi_observed = true,
+            .thermal_observed = true,
+            .battery_observed = true,
+            .accelerator_observed = true,
+            .grid_carbon_observed = true,
+        },
     };
 }
 

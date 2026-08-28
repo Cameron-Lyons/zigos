@@ -88,11 +88,13 @@ pub const FirstTargetReaderSnapshot = struct {
         return .{
             .target_id = self.target_id,
             .reader_generation = self.reader_generation,
-            .acpi_observed = self.acpi_tables_observed,
-            .thermal_observed = self.thermal_reader_observed,
-            .battery_observed = self.battery_reader_observed,
-            .accelerator_observed = self.accelerator_reader_observed,
-            .grid_carbon_observed = self.grid_carbon_reader_observed,
+            .observations = .{
+                .acpi_observed = self.acpi_tables_observed,
+                .thermal_observed = self.thermal_reader_observed,
+                .battery_observed = self.battery_reader_observed,
+                .accelerator_observed = self.accelerator_reader_observed,
+                .grid_carbon_observed = self.grid_carbon_reader_observed,
+            },
         };
     }
 };

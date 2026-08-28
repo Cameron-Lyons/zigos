@@ -109,25 +109,40 @@ pub const PlatformTelemetrySignals = struct {
     grid_carbon_intensity_grams_per_kwh: u16 = 0,
 };
 
-pub const HardwareTelemetryEvidence = struct {
-    target_id: []const u8 = "",
-    reader_generation: u32 = 0,
+pub const HardwareTelemetryObservationFlags = packed struct(u8) {
     acpi_observed: bool = false,
     thermal_observed: bool = false,
     battery_observed: bool = false,
     accelerator_observed: bool = false,
     grid_carbon_observed: bool = false,
+    reserved: u3 = 0,
+};
+
+pub const HardwareTelemetryEvidence = struct {
+    pub const SIZE_BYTES: usize = 24;
+
+    target_id: []const u8 = "",
+    reader_generation: u32 = 0,
+    observations: HardwareTelemetryObservationFlags = .{},
 
     pub fn complete(self: HardwareTelemetryEvidence) bool {
         return self.target_id.len != 0 and
             self.reader_generation != 0 and
-            self.acpi_observed and
-            self.thermal_observed and
-            self.battery_observed and
-            self.accelerator_observed and
-            self.grid_carbon_observed;
+            self.observations.acpi_observed and
+            self.observations.thermal_observed and
+            self.observations.battery_observed and
+            self.observations.accelerator_observed and
+            self.observations.grid_carbon_observed;
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != SIZE_BYTES) {
+            @compileError("hardware telemetry evidence no longer matches its compact layout");
+        }
     }
 };
+
+pub const COMPACT_HARDWARE_TELEMETRY_EVIDENCE = true;
 
 pub const LivePlatformStatusFlags = packed struct(u8) {
     gpu_driver_online: bool = true,
@@ -139,7 +154,7 @@ pub const LivePlatformStatusFlags = packed struct(u8) {
 };
 
 pub const LivePlatformCounters = struct {
-    pub const SIZE_BYTES: usize = 80;
+    pub const SIZE_BYTES: usize = 72;
 
     total_cpu_budget_ticks: u64 = std.math.maxInt(u64),
     consumed_cpu_ticks: u64 = 0,
@@ -162,6 +177,8 @@ pub const LivePlatformCounters = struct {
 pub const COMPACT_LIVE_PLATFORM_COUNTERS = true;
 
 pub const TelemetrySample = struct {
+    pub const SIZE_BYTES: usize = 64;
+
     source: TelemetrySource = .synthetic,
     observed_tick: u64 = 0,
     thermal_pressure: ThermalPressure = .nominal,
@@ -195,6 +212,12 @@ pub const TelemetrySample = struct {
 
     pub fn hardwareReaderEvidenceComplete(self: TelemetrySample) bool {
         return self.source != .hardware or self.hardware_evidence.complete();
+    }
+
+    comptime {
+        if (@sizeOf(@This()) != SIZE_BYTES) {
+            @compileError("telemetry sample no longer matches its compact layout");
+        }
     }
 };
 
@@ -1279,9 +1302,13 @@ test "accelerator scheduler rejects stale production telemetry observations" {
 
 test "accelerator live platform counters stay compact" {
     try std.testing.expect(COMPACT_LIVE_PLATFORM_COUNTERS);
+    try std.testing.expect(COMPACT_HARDWARE_TELEMETRY_EVIDENCE);
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(HardwareTelemetryObservationFlags));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(HardwareTelemetryEvidence));
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(LivePlatformStatusFlags));
     try std.testing.expectEqual(LivePlatformStatusFlags, @FieldType(LivePlatformCounters, "status"));
-    try std.testing.expectEqual(@as(usize, 80), @sizeOf(LivePlatformCounters));
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(LivePlatformCounters));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(TelemetrySample));
 }
 
 test "accelerator scheduler derives hardware telemetry from booted live counters" {
@@ -1407,11 +1434,13 @@ test "accelerator scheduler production mode requires complete hardware telemetry
         .hardware_evidence = .{
             .target_id = "nuc11tnki5",
             .reader_generation = 7,
-            .acpi_observed = true,
-            .thermal_observed = true,
-            .battery_observed = true,
-            .accelerator_observed = true,
-            .grid_carbon_observed = true,
+            .observations = .{
+                .acpi_observed = true,
+                .thermal_observed = true,
+                .battery_observed = true,
+                .accelerator_observed = true,
+                .grid_carbon_observed = true,
+            },
         },
     });
     const claim = try controller.claim(.{

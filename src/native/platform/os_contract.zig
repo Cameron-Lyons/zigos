@@ -6079,11 +6079,13 @@ fn resourceGovernanceHardwareEvidence() accelerator_scheduler.HardwareTelemetryE
     return .{
         .target_id = "contract-resource-governance",
         .reader_generation = 1,
-        .acpi_observed = true,
-        .thermal_observed = true,
-        .battery_observed = true,
-        .accelerator_observed = true,
-        .grid_carbon_observed = true,
+        .observations = .{
+            .acpi_observed = true,
+            .thermal_observed = true,
+            .battery_observed = true,
+            .accelerator_observed = true,
+            .grid_carbon_observed = true,
+        },
     };
 }
 
