@@ -1698,8 +1698,8 @@ fn benchmarkDenialExplanationRender(iteration: u32) u64 {
     return rendered.len +
         explanation.policySlice().len +
         explanation.missingCapabilitySlice().len +
-        @as(u64, @intFromBool(explanation.user_approval_can_resolve)) +
-        @as(u64, @intFromBool(explanation.retry_safe));
+        @as(u64, @intFromBool(explanation.userApprovalCanResolve())) +
+        @as(u64, @intFromBool(explanation.retryIsSafe()));
 }
 
 fn benchmarkOverlaySessionFlow(iteration: u32) u64 {

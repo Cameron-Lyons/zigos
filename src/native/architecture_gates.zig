@@ -38,6 +38,7 @@ const kernel_dmar = @import("../kernel/platform/dmar.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const input_driver_task = @import("drivers/input_driver_task.zig");
+const denial_explanation = @import("policy/denial_explanation.zig");
 const permission_review = @import("policy/permission_review.zig");
 const permission_review_service = @import("policy/permission_review_service.zig");
 const policy_mediation = @import("policy/policy_mediation.zig");
@@ -1071,6 +1072,13 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(permission_review_service.CommandInput) <= permission_review_service.COMMAND_INPUT_SIZE_CEILING_BYTES,
     },
     .permission_review = .{
+        .stores_compact_denial_metadata = denial_explanation.COMPACT_DENIAL_EXPLANATION_METADATA and
+            @FieldType(denial_explanation.Explanation, "policy_len") == u8 and
+            @FieldType(denial_explanation.Explanation, "missing_capability_len") == u8 and
+            @FieldType(denial_explanation.Explanation, "user_approval_can_resolve") == bool and
+            @FieldType(denial_explanation.Explanation, "retry_safe") == bool and
+            @sizeOf(denial_explanation.Explanation) <= denial_explanation.EXPLANATION_SIZE_CEILING_BYTES,
+        .groups_denial_summary_text_writes = denial_explanation.GROUPS_DENIAL_SUMMARY_TEXT_WRITES,
         .groups_render_text_writes = permission_review.GROUPS_REVIEW_TEXT_WRITES,
         .stores_compact_session_decisions = permission_review.COMPACT_REVIEW_SESSION_DECISIONS and
             @FieldType(permission_review.ReviewSession, "decision_count") == u8 and

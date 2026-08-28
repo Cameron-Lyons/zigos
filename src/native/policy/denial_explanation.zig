@@ -5,23 +5,42 @@ const native_util = @import("../core/util.zig");
 const yesNo = native_util.yesNo;
 
 pub const MAX_LABEL_BYTES: usize = 48;
+pub const COMPACT_DENIAL_EXPLANATION_METADATA = true;
+pub const GROUPS_DENIAL_SUMMARY_TEXT_WRITES = true;
+pub const EXPLANATION_SIZE_CEILING_BYTES: usize = 24;
 const USER_HELP_BUFFER_BYTES: usize = 256;
 
 pub const Explanation = struct {
     reason: abi.DenialReason = .none,
-    policy: []const u8 = "",
-    missing_capability: []const u8 = "",
+    policy_ptr: [*]const u8 = "".ptr,
+    missing_capability_ptr: [*]const u8 = "".ptr,
+    policy_len: u8 = 0,
+    missing_capability_len: u8 = 0,
     user_approval_can_resolve: bool = false,
     retry_safe: bool = false,
 
     pub fn policySlice(self: *const Explanation) []const u8 {
-        return self.policy;
+        return self.policy_ptr[0..self.policy_len];
     }
 
     pub fn missingCapabilitySlice(self: *const Explanation) []const u8 {
-        return self.missing_capability;
+        return self.missing_capability_ptr[0..self.missing_capability_len];
+    }
+
+    pub fn userApprovalCanResolve(self: *const Explanation) bool {
+        return self.user_approval_can_resolve;
+    }
+
+    pub fn retryIsSafe(self: *const Explanation) bool {
+        return self.retry_safe;
     }
 };
+
+comptime {
+    if (@sizeOf(Explanation) > EXPLANATION_SIZE_CEILING_BYTES) {
+        @compileError("permission denial explanation exceeds its compact metadata ceiling");
+    }
+}
 
 pub const RenderError = error{NoSpaceLeft};
 
@@ -30,10 +49,14 @@ pub fn none() Explanation {
 }
 
 pub fn forPermissionDecision(kind: manifest.PermissionKind, reason: abi.DenialReason) Explanation {
+    const policy = policyLabel(reason);
+    const missing_capability = capabilityLabel(kind);
     return .{
         .reason = reason,
-        .policy = policyLabel(reason),
-        .missing_capability = capabilityLabel(kind),
+        .policy_ptr = policy.ptr,
+        .missing_capability_ptr = missing_capability.ptr,
+        .policy_len = @intCast(policy.len),
+        .missing_capability_len = @intCast(missing_capability.len),
         .user_approval_can_resolve = approvalCanResolve(reason),
         .retry_safe = retrySafe(reason),
     };
@@ -41,16 +64,13 @@ pub fn forPermissionDecision(kind: manifest.PermissionKind, reason: abi.DenialRe
 
 pub fn renderToBuffer(buffer: []u8, explanation: Explanation) RenderError![]const u8 {
     var used: usize = 0;
-    try appendText(buffer, &used, "reason=");
-    try appendText(buffer, &used, @tagName(explanation.reason));
-    try appendText(buffer, &used, " policy=");
-    try appendText(buffer, &used, explanation.policySlice());
-    try appendText(buffer, &used, " missing=");
-    try appendText(buffer, &used, explanation.missingCapabilitySlice());
-    try appendText(buffer, &used, " approval=");
-    try appendText(buffer, &used, yesNo(explanation.user_approval_can_resolve));
-    try appendText(buffer, &used, " retry_safe=");
-    try appendText(buffer, &used, yesNo(explanation.retry_safe));
+    try appendTextParts(buffer, &used, .{
+        "reason=",      @tagName(explanation.reason),
+        " policy=",     explanation.policySlice(),
+        " missing=",    explanation.missingCapabilitySlice(),
+        " approval=",   yesNo(explanation.userApprovalCanResolve()),
+        " retry_safe=", yesNo(explanation.retryIsSafe()),
+    });
     return buffer[0..used];
 }
 
@@ -88,10 +108,10 @@ pub fn renderUserHelpToBuffer(
 }
 
 fn resolutionHint(explanation: Explanation) []const u8 {
-    if (explanation.user_approval_can_resolve) {
+    if (explanation.userApprovalCanResolve()) {
         return "Open Permission Review to grant a narrower scope or keep it blocked.";
     }
-    if (explanation.retry_safe) {
+    if (explanation.retryIsSafe()) {
         return "It is safe to try again after activity quiets down.";
     }
     return "This needs a different app route or administrator policy change.";
@@ -200,13 +220,31 @@ pub fn retrySafe(reason: abi.DenialReason) bool {
     };
 }
 
+comptime {
+    if (MAX_LABEL_BYTES > std.math.maxInt(u8)) {
+        @compileError("permission denial labels exceed compact length metadata");
+    }
+    for (std.meta.fields(manifest.PermissionKind)) |field| {
+        const kind: manifest.PermissionKind = @enumFromInt(field.value);
+        if (capabilityLabel(kind).len > MAX_LABEL_BYTES) {
+            @compileError("permission capability label exceeds its compact ceiling");
+        }
+    }
+    for (std.meta.fields(abi.DenialReason)) |field| {
+        const reason: abi.DenialReason = @enumFromInt(field.value);
+        if (policyLabel(reason).len > MAX_LABEL_BYTES) {
+            @compileError("permission policy label exceeds its compact ceiling");
+        }
+    }
+}
+
 fn appendText(buffer: []u8, used: *usize, text: []const u8) RenderError!void {
     if (used.* + text.len > buffer.len) return error.NoSpaceLeft;
     @memcpy(buffer[used.*..][0..text.len], text);
     used.* += text.len;
 }
 
-fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) RenderError!void {
+inline fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) RenderError!void {
     var total_len: usize = 0;
     inline for (parts) |part| total_len += part.len;
     if (total_len > buffer.len -| used.*) return error.NoSpaceLeft;
@@ -218,17 +256,26 @@ fn appendTextParts(buffer: []u8, used: *usize, parts: anytype) RenderError!void 
 }
 
 test "permission denials explain blocking policy capability approval and retry hints" {
+    try std.testing.expect(COMPACT_DENIAL_EXPLANATION_METADATA);
+    try std.testing.expect(GROUPS_DENIAL_SUMMARY_TEXT_WRITES);
+    try std.testing.expectEqual([*]const u8, @FieldType(Explanation, "policy_ptr"));
+    try std.testing.expectEqual([*]const u8, @FieldType(Explanation, "missing_capability_ptr"));
+    try std.testing.expectEqual(u8, @FieldType(Explanation, "policy_len"));
+    try std.testing.expectEqual(u8, @FieldType(Explanation, "missing_capability_len"));
+    try std.testing.expectEqual(bool, @FieldType(Explanation, "user_approval_can_resolve"));
+    try std.testing.expectEqual(bool, @FieldType(Explanation, "retry_safe"));
+    try std.testing.expect(@sizeOf(Explanation) <= EXPLANATION_SIZE_CEILING_BYTES);
     const denied = forPermissionDecision(.network_egress, .policy_denied);
     try std.testing.expectEqualStrings("user-grant-policy", denied.policySlice());
     try std.testing.expectEqualStrings("network-egress-capability", denied.missingCapabilitySlice());
-    try std.testing.expect(denied.user_approval_can_resolve);
-    try std.testing.expect(!denied.retry_safe);
+    try std.testing.expect(denied.userApprovalCanResolve());
+    try std.testing.expect(!denied.retryIsSafe());
 
     const throttled = forPermissionDecision(.background_execution, .budget_exhausted);
     try std.testing.expectEqualStrings("resource-budget-policy", throttled.policySlice());
     try std.testing.expectEqualStrings("background-execution-capability", throttled.missingCapabilitySlice());
-    try std.testing.expect(!throttled.user_approval_can_resolve);
-    try std.testing.expect(throttled.retry_safe);
+    try std.testing.expect(!throttled.userApprovalCanResolve());
+    try std.testing.expect(throttled.retryIsSafe());
 }
 
 test "permission denial rendering respects exact buffer bounds" {

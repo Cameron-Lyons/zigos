@@ -17,7 +17,7 @@ pub const GRANT_RECEIPT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const REVOCATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const AUTHORIZATION_TASK_INDEX_LOOKUPS: u8 = 1;
 pub const MANIFEST_PERMISSION_TASK_INDEX_RELOOKUPS: u8 = 0;
-pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 1_160;
+pub const ACTIVATION_SUMMARY_SIZE_CEILING_BYTES: usize = 904;
 const PERMISSION_RECEIPT_BUFFER_BYTES: usize = 512;
 const REVOCATION_RECEIPT_BUFFER_BYTES: usize = 240;
 
@@ -652,7 +652,7 @@ test "policy mediation denies zero-authority requests without user grants" {
     try std.testing.expect(!decision.allowed);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, decision.reason);
     try std.testing.expectEqualStrings("user-grant-policy", decision.explanation.policySlice());
-    try std.testing.expect(decision.explanation.user_approval_can_resolve);
+    try std.testing.expect(decision.explanation.userApprovalCanResolve());
     try std.testing.expectEqual(event_ledger.EventKind.permission_decision, ledger.latestKind(.permission_decision).?.kind);
     try std.testing.expectEqual(abi.DenialReason.policy_denied, ledger.latestKind(.permission_decision).?.denial_reason);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
@@ -846,7 +846,7 @@ test "policy mediation suspends tasks when required background permission is den
     try std.testing.expectEqual(@as(u8, 1), summary.required_denials);
     try std.testing.expectEqual(abi.DenialReason.budget_exhausted, summary.decisionForKind(.background_execution).?.reason);
     try std.testing.expectEqualStrings("resource-budget-policy", summary.decisionForKind(.background_execution).?.explanation.policySlice());
-    try std.testing.expect(summary.decisionForKind(.background_execution).?.explanation.retry_safe);
+    try std.testing.expect(summary.decisionForKind(.background_execution).?.explanation.retryIsSafe());
     try std.testing.expectEqual(task_runtime.TaskState.suspended, task.state);
 }
 

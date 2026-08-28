@@ -493,8 +493,8 @@ pub const HumaneShell = struct {
                 @tagName(self.state.last_denial.reason),
                 self.state.last_denial.policySlice(),
                 self.state.last_denial.missingCapabilitySlice(),
-                yesNo(self.state.last_denial.user_approval_can_resolve),
-                yesNo(self.state.last_denial.retry_safe),
+                yesNo(self.state.last_denial.userApprovalCanResolve()),
+                yesNo(self.state.last_denial.retryIsSafe()),
             });
         }
         try appendFmt(buffer, &used, "device paired={s} trusted={s} label={s}\n", .{

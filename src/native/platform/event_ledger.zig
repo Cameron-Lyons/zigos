@@ -493,8 +493,8 @@ pub const Ledger = struct {
             .permission_kind = permission_kind,
             .allowed = allowed,
             .denial_reason = denial_reason,
-            .user_approval_can_resolve = explanation.user_approval_can_resolve,
-            .retry_safe = explanation.retry_safe,
+            .user_approval_can_resolve = explanation.userApprovalCanResolve(),
+            .retry_safe = explanation.retryIsSafe(),
             .policy_label = explanation.policySlice(),
             .missing_capability = explanation.missingCapabilitySlice(),
             .detail_protected = protected,
@@ -2520,11 +2520,7 @@ fn renderTextEvent(event: *const Event, buffer: []u8, used: *usize, include_prot
                 "This app",
                 permission_kind,
                 detail,
-                .{
-                    .reason = event.denial_reason,
-                    .user_approval_can_resolve = event.user_approval_can_resolve,
-                    .retry_safe = event.retry_safe,
-                },
+                denial_explanation.forPermissionDecision(permission_kind, event.denial_reason),
             ) catch "Blocked: open Permission Review for details.";
             try appendTextParts(buffer, used, .{ " blocked_help=\"", blocked, "\"" });
         }
