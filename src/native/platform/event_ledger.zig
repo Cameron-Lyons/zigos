@@ -30,6 +30,7 @@ pub const COMPACT_EVENT_TEXT_METADATA = true;
 pub const RECORDS_EVENTS_IN_PLACE = true;
 pub const INLINE_EVENT_TEXT_WRITES = true;
 pub const DERIVES_PERMISSION_DENIAL_METADATA = true;
+pub const DIRECT_PERSISTENT_EVENT_ENCODING = true;
 pub const EVENT_SIZE_CEILING_BYTES: usize = 584;
 pub const EVENT_BACKING_SIZE_CEILING_BYTES: usize = 46_536;
 pub const state_workspace_label = "system-diagnostics";
@@ -47,7 +48,7 @@ const persistent_event_flag_allowed: u8 = 1 << 0;
 const persistent_event_flag_detail_protected: u8 = 1 << 3;
 const semantic_memory_flag_receipt_audit: u32 = @as(u32, 1) << @as(u5, 28);
 const semantic_memory_query_byte_mask: usize = 0x0fff_ffff;
-const PERSISTENT_EVENT_SIZE_CEILING_BYTES: usize = 592;
+const PERSISTENT_EVENT_RECORD_SIZE_CEILING_BYTES: usize = 592;
 
 comptime {
     if (MAX_DETAIL_BYTES > std.math.maxInt(u16)) {
@@ -2062,10 +2063,10 @@ pub const Ledger = struct {
         self.pending_persist_latest_tick = 0;
     }
 
-    fn findEventBySequence(self: *const Ledger, sequence: u64) ?Event {
+    fn findEventBySequence(self: *const Ledger, sequence: u64) ?*const Event {
         const backing = self.backingConst() orelse return null;
         const slot = backing.events.getConst(sequence) orelse return null;
-        return slot.event;
+        return &slot.event;
     }
 
     fn persistRange(self: *Ledger, first_sequence: u64, latest_sequence: u64, latest_tick: u64) Error!void {
@@ -2117,7 +2118,7 @@ pub const Ledger = struct {
             const event = self.findEventBySequence(sequence) orelse return error.CorruptState;
             var event_path_buffer: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined;
             const event_path = event_path_buffer[0..try writeEventEntryPath(&event_path_buffer, event.sequence)];
-            var payload_record = PersistentEventRecord.fromEvent(PersistentEvent.fromEvent(event));
+            var payload_record = PersistentEventRecord.fromEvent(event);
             const payload = std.mem.asBytes(&payload_record);
             const result = try storage.putLocallySignedVersion(.{
                 .preferred_object_id = object_store.ids.object(eventObjectId(event.sequence)),
@@ -2158,7 +2159,7 @@ pub const Ledger = struct {
             if (!std.mem.startsWith(u8, entry.pathSlice(), event_entry_prefix)) continue;
             if (loaded_count >= MAX_EVENTS) break;
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
-            const event = (try parsePersistentEvent(try storage.versionPayload(version))).intoEvent();
+            const event = try parsePersistentEvent(try storage.versionPayload(version));
             const slot_index = backing.events.reserveIndexAt(event.sequence, loaded_count) orelse return error.CorruptState;
             backing.events.slots[slot_index].event = event;
             loaded_count += 1;
@@ -2181,68 +2182,6 @@ pub const Ledger = struct {
     }
 };
 
-const PersistentEvent = struct {
-    sequence: u64 = 0,
-    kind: EventKind = .permission_decision,
-    tick: u64 = 0,
-    subject: principal.PrincipalId = .{ .kind = .service, .serial = 0 },
-    task_id: u64 = 0,
-    workspace_id: u64 = 0,
-    related_id: u64 = 0,
-    detail_code: u32 = 0,
-    service_class: contract.ServiceClass = .task_runtime,
-    permission_kind: ?manifest.PermissionKind = null,
-    allowed: bool = false,
-    denial_reason: abi.DenialReason = .none,
-    detail_protected: bool = false,
-    detail_len: u16 = 0,
-    detail: [MAX_PERSISTED_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_DETAIL_BYTES,
-
-    fn fromEvent(event: Event) PersistentEvent {
-        var persisted = zeroPersistentEvent();
-        persisted.sequence = event.sequence;
-        persisted.kind = event.kind;
-        persisted.tick = event.tick;
-        persisted.subject = event.subject;
-        persisted.task_id = event.task_id;
-        persisted.workspace_id = event.workspace_id;
-        persisted.related_id = event.related_id;
-        persisted.detail_code = event.detail_code;
-        persisted.service_class = event.service_class;
-        persisted.permission_kind = event.permission_kind;
-        persisted.allowed = event.allowed;
-        persisted.denial_reason = event.denial_reason;
-        persisted.detail_protected = event.detail_protected;
-        persisted.detail_len = @intCast(copyText(&persisted.detail, event.detailSlice()));
-        return persisted;
-    }
-
-    fn intoEvent(self: PersistentEvent) Event {
-        var event = zeroEvent();
-        event.sequence = self.sequence;
-        event.kind = self.kind;
-        event.tick = self.tick;
-        event.subject = self.subject;
-        event.task_id = self.task_id;
-        event.workspace_id = self.workspace_id;
-        event.related_id = self.related_id;
-        event.detail_code = self.detail_code;
-        event.service_class = self.service_class;
-        event.permission_kind = self.permission_kind;
-        event.allowed = self.allowed;
-        event.denial_reason = self.denial_reason;
-        event.detail_protected = self.detail_protected;
-        event.detail_len = @intCast(copyText(&event.detail, self.detail[0..@as(usize, self.detail_len)]));
-        return event;
-    }
-};
-
-comptime {
-    if (@sizeOf(PersistentEvent) > PERSISTENT_EVENT_SIZE_CEILING_BYTES) {
-        @compileError("persistent event staging record exceeds its compact layout ceiling");
-    }
-}
-
 const PersistentEventRecord = extern struct {
     sequence: u64 = 0,
     kind: u8 = 0,
@@ -2262,7 +2201,7 @@ const PersistentEventRecord = extern struct {
     _tail_reserved: [PERSISTENT_EVENT_TAIL_RESERVED_BYTES]u8 = [_]u8{0} ** PERSISTENT_EVENT_TAIL_RESERVED_BYTES,
     detail: [MAX_PERSISTED_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_DETAIL_BYTES,
 
-    fn fromEvent(event: PersistentEvent) PersistentEventRecord {
+    fn fromEvent(event: *const Event) PersistentEventRecord {
         var record = PersistentEventRecord{
             .sequence = event.sequence,
             .kind = @intFromEnum(event.kind),
@@ -2276,7 +2215,7 @@ const PersistentEventRecord = extern struct {
             .workspace_id = event.workspace_id,
             .related_id = event.related_id,
             .detail_code = event.detail_code,
-            .detail_len = @intCast(event.detail_len),
+            .detail_len = event.detail_len,
             .detail = event.detail,
         };
         if (event.allowed) record.flags |= persistent_event_flag_allowed;
@@ -2284,8 +2223,8 @@ const PersistentEventRecord = extern struct {
         return record;
     }
 
-    fn intoEvent(self: PersistentEventRecord) Error!PersistentEvent {
-        var event = zeroPersistentEvent();
+    fn intoEvent(self: *const PersistentEventRecord) Error!Event {
+        var event = zeroEvent();
         event.sequence = self.sequence;
         event.kind = std.enums.fromInt(EventKind, self.kind) orelse return error.CorruptState;
         event.tick = self.tick;
@@ -2311,6 +2250,12 @@ const PersistentEventRecord = extern struct {
     }
 };
 
+comptime {
+    if (@sizeOf(PersistentEventRecord) > PERSISTENT_EVENT_RECORD_SIZE_CEILING_BYTES) {
+        @compileError("persistent event record exceeds its compact layout ceiling");
+    }
+}
+
 fn zeroEvent() Event {
     return .{
         .sequence = 0,
@@ -2318,10 +2263,6 @@ fn zeroEvent() Event {
         .tick = 0,
         .subject = .{ .kind = .service, .serial = 0 },
     };
-}
-
-fn zeroPersistentEvent() PersistentEvent {
-    return .{};
 }
 
 fn updateFailureLabel(code: u32) []const u8 {
@@ -2676,7 +2617,7 @@ fn parseHeader(payload: []const u8) Error!u64 {
     return header.next_sequence;
 }
 
-fn parsePersistentEvent(payload: []const u8) Error!PersistentEvent {
+fn parsePersistentEvent(payload: []const u8) Error!Event {
     if (payload.len != @sizeOf(PersistentEventRecord)) return error.CorruptState;
     var record = std.mem.zeroes(PersistentEventRecord);
     @memcpy(std.mem.asBytes(&record), payload);
