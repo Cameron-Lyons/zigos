@@ -21,11 +21,14 @@ const QUERY_EVENT_RECORD_CAPACITY: usize = 4;
 
 test "event ledger text metadata stays compact" {
     try std.testing.expect(event_ledger.RECORDS_EVENTS_IN_PLACE);
-    try std.testing.expectEqual(u8, @FieldType(Event, "policy_label_len"));
-    try std.testing.expectEqual(u8, @FieldType(Event, "missing_capability_len"));
+    try std.testing.expect(event_ledger.DERIVES_PERMISSION_DENIAL_METADATA);
+    try std.testing.expect(!@hasField(Event, "policy_label"));
+    try std.testing.expect(!@hasField(Event, "missing_capability"));
+    try std.testing.expect(!@hasField(Event, "user_approval_can_resolve"));
+    try std.testing.expect(!@hasField(Event, "retry_safe"));
     try std.testing.expectEqual(u16, @FieldType(Event, "detail_len"));
-    try std.testing.expectEqual(@as(usize, 688), @sizeOf(Event));
-    try std.testing.expectEqual(@as(usize, 53_192), @sizeOf(event_ledger.EventBacking));
+    try std.testing.expectEqual(@as(usize, 584), @sizeOf(Event));
+    try std.testing.expectEqual(@as(usize, 46_536), @sizeOf(event_ledger.EventBacking));
 }
 
 test "event ledger reset clears events indexes and sequence state" {

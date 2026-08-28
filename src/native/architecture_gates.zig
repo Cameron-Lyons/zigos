@@ -897,9 +897,12 @@ pub const indexed_hot_path_tables = .{
     .event_ledger = .{
         .inlines_event_text_writes = event_ledger.INLINE_EVENT_TEXT_WRITES,
         .stores_compact_event_text_metadata = event_ledger.COMPACT_EVENT_TEXT_METADATA and
-            @FieldType(event_ledger.Event, "policy_label_len") == u8 and
-            @FieldType(event_ledger.Event, "missing_capability_len") == u8 and
-            @FieldType(event_ledger.Event, "detail_len") == u16,
+            @FieldType(event_ledger.Event, "detail_len") == u16 and
+            !@hasField(event_ledger.Event, "policy_label") and
+            !@hasField(event_ledger.Event, "missing_capability"),
+        .derives_permission_denial_metadata = event_ledger.DERIVES_PERMISSION_DENIAL_METADATA and
+            !@hasField(event_ledger.Event, "user_approval_can_resolve") and
+            !@hasField(event_ledger.Event, "retry_safe"),
         .keeps_event_state_within_ceilings = @sizeOf(event_ledger.Event) <= event_ledger.EVENT_SIZE_CEILING_BYTES and
             @sizeOf(event_ledger.EventBacking) <= event_ledger.EVENT_BACKING_SIZE_CEILING_BYTES,
         .uses_event_arena = @hasField(event_ledger.EventBacking, "events"),
