@@ -365,9 +365,9 @@ pub const Catalog = struct {
 
 test "userspace catalog uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(ImageRecord, "loadable_segment_count")));
-    try std.testing.expectEqual(@as(usize, 728), @sizeOf(ImageRecord));
-    try std.testing.expectEqual(@as(usize, 736), @sizeOf(ImageSlot));
-    try std.testing.expectEqual(@as(usize, 25_128), @sizeOf(Catalog));
+    try std.testing.expectEqual(@as(usize, 720), @sizeOf(ImageRecord));
+    try std.testing.expectEqual(@as(usize, 728), @sizeOf(ImageSlot));
+    try std.testing.expectEqual(@as(usize, 24_872), @sizeOf(Catalog));
     try std.testing.expect(DERIVES_IMAGE_IDS_FROM_ARENA_COUNT);
     try std.testing.expect(!@hasField(Catalog, "next_image_id"));
 }

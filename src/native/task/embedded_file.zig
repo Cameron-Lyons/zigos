@@ -5,6 +5,8 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 // compact cross-image deduplication for the packed userspace artifacts.
 pub const CHUNK_SIZE_BYTES: usize = 896;
 pub const ChunkIndex = u16;
+pub const ByteLength = u32;
+pub const FILE_SIZE_CEILING_BYTES: usize = 24;
 
 test "archive chunk geometry balances page traversal and deduplication" {
     try std.testing.expectEqual(@as(usize, 0), CHUNK_SIZE_BYTES % 128);
@@ -16,14 +18,15 @@ test "archive chunk geometry balances page traversal and deduplication" {
 
 pub const File = struct {
     data_bytes: ?[*]const u8 = null,
-    byte_len: usize = 0,
     chunk_indices: ?[*]const ChunkIndex = null,
+    byte_len: ByteLength = 0,
     pool_chunk_count: ChunkIndex = 0,
 
     pub fn fromBytes(bytes: []const u8) File {
+        const byte_len = std.math.cast(ByteLength, bytes.len) orelse return invalid(bytes.len);
         return .{
             .data_bytes = bytes.ptr,
-            .byte_len = bytes.len,
+            .byte_len = byte_len,
         };
     }
 
@@ -32,6 +35,7 @@ pub const File = struct {
         chunk_pool: []const u8,
         chunk_indices: []const ChunkIndex,
     ) File {
+        const compact_byte_len = std.math.cast(ByteLength, byte_len) orelse return invalid(byte_len);
         if (byte_len == 0) {
             if (chunk_pool.len == 0 and chunk_indices.len == 0) return .{};
             return invalid(byte_len);
@@ -44,7 +48,7 @@ pub const File = struct {
             if (chunk_index >= pool_chunk_count) return invalid(byte_len);
         }
         return .{
-            .byte_len = byte_len,
+            .byte_len = compact_byte_len,
             .data_bytes = chunk_pool.ptr,
             .chunk_indices = chunk_indices.ptr,
             .pool_chunk_count = pool_chunk_count,
@@ -63,20 +67,25 @@ pub const File = struct {
         return self.byte_len != 0 and self.isValid();
     }
 
+    pub fn byteLength(self: File) usize {
+        return self.byte_len;
+    }
+
     pub fn reader(self: File) ?Reader {
         if (!self.isValid()) return null;
         return .{ .file = self };
     }
 
     pub fn isValid(self: File) bool {
-        if (self.byte_len == 0) {
+        const byte_len = self.byteLength();
+        if (byte_len == 0) {
             return self.chunk_indices == null and self.pool_chunk_count == 0;
         }
         if (self.data_bytes == null) return false;
         const chunk_indices = self.chunk_indices orelse return self.pool_chunk_count == 0;
         if (self.pool_chunk_count == 0) return false;
 
-        const required_chunks = std.math.divCeil(usize, self.byte_len, CHUNK_SIZE_BYTES) catch return false;
+        const required_chunks = std.math.divCeil(usize, byte_len, CHUNK_SIZE_BYTES) catch return false;
         for (chunk_indices[0..required_chunks]) |chunk_index| {
             if (chunk_index >= self.pool_chunk_count) return false;
         }
@@ -105,9 +114,15 @@ pub const File = struct {
 
     fn invalid(byte_len: usize) File {
         return .{
-            .byte_len = byte_len,
+            .byte_len = std.math.cast(ByteLength, byte_len) orelse std.math.maxInt(ByteLength),
             .pool_chunk_count = std.math.maxInt(ChunkIndex),
         };
+    }
+
+    comptime {
+        if (@sizeOf(@This()) > FILE_SIZE_CEILING_BYTES) {
+            @compileError("embedded file descriptor exceeds its compact size ceiling");
+        }
     }
 };
 
@@ -116,7 +131,7 @@ pub const Reader = struct {
 
     pub fn readInto(self: Reader, offset: usize, output: []u8) bool {
         const end = std.math.add(usize, offset, output.len) catch return false;
-        if (end > self.file.byte_len) return false;
+        if (end > self.file.byteLength()) return false;
         if (output.len == 0) return true;
         const data_bytes = self.file.data_bytes orelse unreachable;
         const chunk_indices = self.file.chunk_indices orelse {
@@ -139,7 +154,7 @@ pub const Reader = struct {
     }
 
     pub fn byteAt(self: Reader, offset: usize) ?u8 {
-        if (offset >= self.file.byte_len) return null;
+        if (offset >= self.file.byteLength()) return null;
         const data_bytes = self.file.data_bytes orelse unreachable;
         const chunk_indices = self.file.chunk_indices orelse return data_bytes[offset];
         const chunk_ordinal = offset / CHUNK_SIZE_BYTES;
@@ -150,14 +165,15 @@ pub const Reader = struct {
 
     pub fn sha256(self: Reader) crypto_hash.Digest {
         var hasher = crypto_hash.init();
-        if (self.file.byte_len == 0) return crypto_hash.finalize(&hasher);
+        const byte_len = self.file.byteLength();
+        if (byte_len == 0) return crypto_hash.finalize(&hasher);
         const data_bytes = self.file.data_bytes orelse unreachable;
         const chunk_indices = self.file.chunk_indices orelse {
-            hasher.update(data_bytes[0..self.file.byte_len]);
+            hasher.update(data_bytes[0..byte_len]);
             return crypto_hash.finalize(&hasher);
         };
 
-        var remaining = self.file.byte_len;
+        var remaining = byte_len;
         const required_chunks = std.math.divCeil(usize, remaining, CHUNK_SIZE_BYTES) catch unreachable;
         for (chunk_indices[0..required_chunks]) |chunk_index| {
             const chunk_len = @min(remaining, CHUNK_SIZE_BYTES);
@@ -170,13 +186,14 @@ pub const Reader = struct {
     }
 
     pub fn logicalSliceAt(self: Reader, offset: usize) ?[]const u8 {
-        if (offset >= self.file.byte_len) return null;
+        const byte_len = self.file.byteLength();
+        if (offset >= byte_len) return null;
         const data_bytes = self.file.data_bytes orelse unreachable;
-        const chunk_indices = self.file.chunk_indices orelse return data_bytes[offset..self.file.byte_len];
+        const chunk_indices = self.file.chunk_indices orelse return data_bytes[offset..byte_len];
         const chunk_ordinal = offset / CHUNK_SIZE_BYTES;
         const chunk_offset = offset % CHUNK_SIZE_BYTES;
         const pool_offset = @as(usize, chunk_indices[chunk_ordinal]) * CHUNK_SIZE_BYTES + chunk_offset;
-        const logical_remaining = self.file.byte_len - offset;
+        const logical_remaining = byte_len - offset;
         const available = @min(logical_remaining, CHUNK_SIZE_BYTES - chunk_offset);
         return data_bytes[pool_offset..][0..available];
     }
@@ -184,6 +201,9 @@ pub const Reader = struct {
 
 test "chunked embedded files preserve logical bytes across shared chunks" {
     try std.testing.expectEqual(u16, ChunkIndex);
+    try std.testing.expectEqual(u32, ByteLength);
+    try std.testing.expectEqual(ByteLength, @FieldType(File, "byte_len"));
+    try std.testing.expectEqual(FILE_SIZE_CEILING_BYTES, @sizeOf(File));
     const chunk_pool = ([_]u8{'a'} ** CHUNK_SIZE_BYTES) ++ ([_]u8{'A'} ** CHUNK_SIZE_BYTES);
     const chunk_indices = [_]ChunkIndex{ 0, 1, 0 };
     const byte_len = CHUNK_SIZE_BYTES * 2 + 2;
@@ -210,6 +230,7 @@ test "chunked embedded files reject invalid index layouts" {
     const out_of_range = [_]ChunkIndex{ 0, 1 };
     try std.testing.expect(!File.fromChunks(CHUNK_SIZE_BYTES + 1, &chunk_pool, &missing_index).isValid());
     try std.testing.expect(!File.fromChunks(CHUNK_SIZE_BYTES + 1, &chunk_pool, &out_of_range).isValid());
+    try std.testing.expect(!File.fromChunks(@as(usize, std.math.maxInt(ByteLength)) + 1, &.{}, &.{}).isValid());
     try std.testing.expect(!(File{ .byte_len = 1 }).isValid());
     try std.testing.expect((File{}).sha256() != null);
 }
