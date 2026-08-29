@@ -34,6 +34,8 @@ comptime {
     }
 }
 
+pub const PROBE_FACTS_SIZE_CEILING_BYTES: usize = 656;
+
 pub const ProbeFacts = struct {
     real_target_sku: bool = false,
     multiboot_handoff: bool = false,
@@ -98,65 +100,65 @@ pub const ProbeFacts = struct {
     attestation_stale_attestation_rejected_by_verifier: bool = false,
     attestation_verifier_metadata_digest_bound: bool = false,
 
-    pub fn uefiBootReady(self: ProbeFacts) bool {
+    pub fn uefiBootReady(self: *const ProbeFacts) bool {
         return self.real_target_sku and self.multiboot_handoff and self.memory_map and self.framebuffer_gop;
     }
 
-    pub fn acpiTablesReady(self: ProbeFacts) bool {
+    pub fn acpiTablesReady(self: *const ProbeFacts) bool {
         return self.acpi_xsdt and self.acpi_madt and self.acpi_fadt and self.acpi_mcfg and self.acpi_dmar;
     }
 
-    pub fn vtdDiscoveryReady(self: ProbeFacts) bool {
+    pub fn vtdDiscoveryReady(self: *const ProbeFacts) bool {
         if (!self.real_target_sku or !self.acpi_dmar) return false;
         const summary = self.dmar_summary orelse return false;
         return summary.productionDiscoveryReady();
     }
 
-    pub fn vtdStorageIsolationReady(self: ProbeFacts) bool {
+    pub fn vtdStorageIsolationReady(self: *const ProbeFacts) bool {
         return self.vtdDiscoveryReady() and self.vtd_storage_isolation;
     }
 
-    pub fn vtdInterruptIsolationReady(self: ProbeFacts) bool {
+    pub fn vtdInterruptIsolationReady(self: *const ProbeFacts) bool {
         return self.vtdStorageIsolationReady() and self.vtd_interrupt_isolation;
     }
 
-    pub fn vtdFaultProofReady(self: ProbeFacts) bool {
+    pub fn vtdFaultProofReady(self: *const ProbeFacts) bool {
         return self.vtdInterruptIsolationReady() and self.vtd_blocked_dma_fault;
     }
 
-    pub fn nvmeBlockReady(self: ProbeFacts) bool {
+    pub fn nvmeBlockReady(self: *const ProbeFacts) bool {
         return self.nvme_controller and
             self.nvme_write_read_io and
             self.storage_write_read_cycles >= hardware_target.first_supported_target.proof_minimums.storage_write_read_cycles;
     }
 
-    pub fn i225PacketIoReady(self: ProbeFacts) bool {
+    pub fn i225PacketIoReady(self: *const ProbeFacts) bool {
         return self.i225_lm_controller and
             self.i225_frame_io and
             self.network_frame_cycles >= hardware_target.first_supported_target.proof_minimums.network_frame_cycles;
     }
 
-    pub fn suspendResumeReady(self: ProbeFacts) bool {
+    pub fn suspendResumeReady(self: *const ProbeFacts) bool {
         return self.suspend_resume_power and
             self.suspend_resume_cycles >= hardware_target.first_supported_target.proof_minimums.suspend_resume_cycles;
     }
 
-    pub fn crashRecoveryReady(self: ProbeFacts) bool {
+    pub fn crashRecoveryReady(self: *const ProbeFacts) bool {
         return self.crash_recovery_record and
             self.crash_recovery_cycles >= hardware_target.first_supported_target.proof_minimums.crash_recovery_cycles;
     }
 
-    pub fn crashRecordPersistenceReady(self: ProbeFacts) bool {
+    pub fn crashRecordPersistenceReady(self: *const ProbeFacts) bool {
         return self.crash_record_persisted and
             self.crash_record_persistence_cycles >= hardware_target.first_supported_target.proof_minimums.crash_record_persistence_cycles;
     }
 
-    pub fn updateRollbackReady(self: ProbeFacts) bool {
+    pub fn updateRollbackReady(self: *const ProbeFacts) bool {
         return self.update_rollback_power_cycle and
             self.update_rollback_cycles >= hardware_target.first_supported_target.proof_minimums.update_rollback_cycles;
     }
 
-    pub fn acpiTelemetryFacts(self: ProbeFacts) ?AcpiTelemetryFacts {
+    pub fn acpiTelemetryFacts(self: *const ProbeFacts) ?AcpiTelemetryFacts {
         if (!self.real_target_sku or !self.acpi_fadt) return null;
         const firmware = self.fadt_firmware orelse return null;
         if (self.thermal_zone_count == 0 or self.battery_device_count == 0) return null;
@@ -167,7 +169,7 @@ pub const ProbeFacts = struct {
         };
     }
 
-    pub fn thermalTelemetryFacts(self: ProbeFacts) ?ThermalTelemetryFacts {
+    pub fn thermalTelemetryFacts(self: *const ProbeFacts) ?ThermalTelemetryFacts {
         if (self.telemetry_reader_generation == 0 or self.thermal_zone_count == 0 or self.thermal_sample_sequence == 0) return null;
         if (self.thermal_milli_celsius > MAX_TELEMETRY_THERMAL_MILLI_CELSIUS) return null;
         return .{
@@ -177,7 +179,7 @@ pub const ProbeFacts = struct {
         };
     }
 
-    pub fn batteryTelemetryFacts(self: ProbeFacts) ?BatteryTelemetryFacts {
+    pub fn batteryTelemetryFacts(self: *const ProbeFacts) ?BatteryTelemetryFacts {
         if (self.telemetry_reader_generation == 0 or self.battery_device_count == 0 or self.battery_sample_sequence == 0) return null;
         if (self.battery_percent > 100) return null;
         return .{
@@ -188,7 +190,7 @@ pub const ProbeFacts = struct {
         };
     }
 
-    pub fn acceleratorTelemetryFacts(self: ProbeFacts) ?AcceleratorTelemetryFacts {
+    pub fn acceleratorTelemetryFacts(self: *const ProbeFacts) ?AcceleratorTelemetryFacts {
         if (self.telemetry_reader_generation == 0 or self.accelerator_sample_sequence == 0 or self.accelerator_completion_interrupts == 0) return null;
         if (!acceleratorDriverStateVerified(self.gpu_driver_online, self.gpu_driver_generation)) return null;
         if (!acceleratorDriverStateVerified(self.npu_driver_online, self.npu_driver_generation)) return null;
@@ -205,7 +207,7 @@ pub const ProbeFacts = struct {
         };
     }
 
-    pub fn gridCarbonTelemetryFacts(self: ProbeFacts) ?GridCarbonTelemetryFacts {
+    pub fn gridCarbonTelemetryFacts(self: *const ProbeFacts) ?GridCarbonTelemetryFacts {
         if (self.telemetry_reader_generation == 0 or !self.grid_carbon_intensity_observed or self.grid_carbon_sample_sequence == 0) return null;
         if (self.grid_carbon_intensity_grams_per_kwh > MAX_GRID_CARBON_INTENSITY_GRAMS_PER_KWH) return null;
         return .{
@@ -214,7 +216,7 @@ pub const ProbeFacts = struct {
         };
     }
 
-    pub fn attestationRootLifecycleFacts(self: ProbeFacts) ?AttestationRootLifecycleFacts {
+    pub fn attestationRootLifecycleFacts(self: *const ProbeFacts) ?AttestationRootLifecycleFacts {
         if (!self.attestation_root_lifecycle_observed) return null;
         if (self.attestation_root_initial_generation == 0) return null;
         if (self.attestation_root_active_generation <= self.attestation_root_initial_generation) return null;
@@ -511,7 +513,7 @@ pub fn telemetryRecordingReady() bool {
         facts.memory_capacity_bytes != 0;
 }
 
-pub fn evaluateEvidence(probe: ProbeFacts) hardware_target.EvidenceSummary {
+pub fn evaluateEvidence(probe: *const ProbeFacts) hardware_target.EvidenceSummary {
     return .{
         .target_id = hardware_target.first_supported_target.id,
         .source = if (probe.real_target_sku) .real_hardware else .unknown,
@@ -527,7 +529,7 @@ pub fn evaluateEvidence(probe: ProbeFacts) hardware_target.EvidenceSummary {
     };
 }
 
-pub fn allSubsystemMarkersReady(probe: ProbeFacts) bool {
+pub fn allSubsystemMarkersReady(probe: *const ProbeFacts) bool {
     return probe.uefiBootReady() and
         probe.acpiTablesReady() and
         probe.vtdDiscoveryReady() and
@@ -545,7 +547,7 @@ pub fn allSubsystemMarkersReady(probe: ProbeFacts) bool {
         probe.updateRollbackReady();
 }
 
-pub fn countersReady(probe: ProbeFacts) bool {
+pub fn countersReady(probe: *const ProbeFacts) bool {
     const minimums = hardware_target.first_supported_target.proof_minimums;
     return probe.cold_boots >= minimums.cold_boots and
         probe.warm_reboots >= minimums.warm_reboots and
@@ -997,8 +999,8 @@ test "hardware proof requires composed NUC subsystem evidence" {
     opted_out_summary.dma_remapping_opt_out = true;
     opted_out.dmar_summary = opted_out_summary;
     try std.testing.expect(!opted_out.vtdDiscoveryReady());
-    try std.testing.expect(!allSubsystemMarkersReady(partial));
-    try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, evaluateEvidence(partial)));
+    try std.testing.expect(!allSubsystemMarkersReady(&partial));
+    try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, evaluateEvidence(&partial)));
 
     const complete = ProbeFacts{
         .real_target_sku = true,
@@ -1034,8 +1036,8 @@ test "hardware proof requires composed NUC subsystem evidence" {
         .update_rollback_power_cycle = true,
         .update_rollback_cycles = target.proof_minimums.update_rollback_cycles,
     };
-    try std.testing.expect(allSubsystemMarkersReady(complete));
-    const runtime_evidence = evaluateEvidence(complete);
+    try std.testing.expect(allSubsystemMarkersReady(&complete));
+    const runtime_evidence = evaluateEvidence(&complete);
     try std.testing.expect(runtime_evidence.required_markers_captured);
     try std.testing.expect(!hardware_target.hardwareProofSatisfied(target, runtime_evidence));
 

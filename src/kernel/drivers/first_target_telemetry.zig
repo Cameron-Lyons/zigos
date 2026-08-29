@@ -355,7 +355,7 @@ pub fn recordInstalledFirstTargetTelemetry(reader_generation: u32) Error!hardwar
     };
     if (installed_registry_source_kind == .hardware_proof) {
         const recorded = hardware_proof.factsSnapshot();
-        if (recordedTelemetryMatches(recorded, reading)) return recorded;
+        if (recordedTelemetryMatches(&recorded, reading)) return recorded;
     }
     return recordFirstTargetTelemetry(reading);
 }
@@ -451,7 +451,8 @@ pub fn recordFirstTargetTelemetry(reading: FirstTargetTelemetryReading) Error!ha
     if (!accelerators.verified()) return error.InvalidAcceleratorDriverSample;
     const carbon = reading.grid_carbon.toSample(reading.reader_generation);
     if (!carbon.verified()) return error.InvalidGridCarbonTelemetrySample;
-    if (telemetrySampleSequenceStale(hardware_proof.factsSnapshot(), reading)) return error.TelemetrySampleSequenceStale;
+    const previous = hardware_proof.factsSnapshot();
+    if (telemetrySampleSequenceStale(&previous, reading)) return error.TelemetrySampleSequenceStale;
 
     hardware_proof.recordThermalZoneSample(thermal);
     hardware_proof.recordBatteryStatusSample(battery);
@@ -459,12 +460,12 @@ pub fn recordFirstTargetTelemetry(reading: FirstTargetTelemetryReading) Error!ha
     hardware_proof.recordGridCarbonIntensitySample(carbon);
 
     const recorded = hardware_proof.factsSnapshot();
-    if (!recordedTelemetryMatches(recorded, reading)) return error.HardwareTelemetryRecorderRejected;
+    if (!recordedTelemetryMatches(&recorded, reading)) return error.HardwareTelemetryRecorderRejected;
     return recorded;
 }
 
 fn telemetrySampleSequenceStale(
-    recorded: hardware_proof.ProbeFacts,
+    recorded: *const hardware_proof.ProbeFacts,
     reading: FirstTargetTelemetryReading,
 ) bool {
     if (recorded.telemetry_reader_generation == 0) return false;
@@ -477,12 +478,13 @@ fn telemetrySampleSequenceStale(
 }
 
 fn recordedTelemetryMatches(
-    recorded: hardware_proof.ProbeFacts,
+    recorded: *const hardware_proof.ProbeFacts,
     reading: FirstTargetTelemetryReading,
 ) bool {
     const thermal = recorded.thermalTelemetryFacts() orelse return false;
     const battery = recorded.batteryTelemetryFacts() orelse return false;
     const accelerators = recorded.acceleratorTelemetryFacts() orelse return false;
+    const carbon = recorded.gridCarbonTelemetryFacts() orelse return false;
 
     return recorded.telemetry_reader_generation == reading.reader_generation and
         thermal.zone_count == reading.thermal.zone_count and
@@ -500,9 +502,8 @@ fn recordedTelemetryMatches(
         accelerators.npu_driver_generation == reading.accelerators.npu.driver_generation and
         accelerators.media_driver_generation == reading.accelerators.media.driver_generation and
         accelerators.completion_interrupts_observed == reading.accelerators.completion_interrupts_observed and
-        recorded.gridCarbonTelemetryFacts() != null and
-        recorded.gridCarbonTelemetryFacts().?.sample_sequence == reading.grid_carbon.sample_sequence and
-        recorded.gridCarbonTelemetryFacts().?.grams_per_kwh == reading.grid_carbon.grams_per_kwh;
+        carbon.sample_sequence == reading.grid_carbon.sample_sequence and
+        carbon.grams_per_kwh == reading.grid_carbon.grams_per_kwh;
 }
 
 fn validReading(reader_generation: u32) FirstTargetTelemetryReading {

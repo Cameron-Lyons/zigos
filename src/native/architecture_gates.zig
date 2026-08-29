@@ -35,6 +35,7 @@ const attestation_service = @import("platform/attestation_service.zig");
 const immutable_base = @import("platform/immutable_base.zig");
 const measured_boot = @import("platform/measured_boot.zig");
 const kernel_dmar = @import("../kernel/platform/dmar.zig");
+const kernel_hardware_proof = @import("../kernel/platform/hardware_proof.zig");
 const compositor_session = @import("platform/compositor_session.zig");
 const input_router = @import("platform/input_router.zig");
 const input_driver_task = @import("drivers/input_driver_task.zig");
@@ -969,6 +970,31 @@ pub const indexed_hot_path_tables = .{
             @FieldType(kernel_dmar.Summary, "reserved_memory_with_non_pci_scope_count") == u32 and
             @FieldType(kernel_dmar.Summary, "ats_capability_count") == u32,
         .keeps_summary_within_ceiling = @sizeOf(kernel_dmar.Summary) <= kernel_dmar.SUMMARY_SIZE_CEILING_BYTES,
+    },
+    .hardware_proof = .{
+        .keeps_probe_facts_within_ceiling = @sizeOf(kernel_hardware_proof.ProbeFacts) <=
+            kernel_hardware_proof.PROBE_FACTS_SIZE_CEILING_BYTES,
+        .borrows_probe_facts = @typeInfo(@TypeOf(kernel_hardware_proof.evaluateEvidence)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.allSubsystemMarkersReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.countersReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.uefiBootReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.acpiTablesReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.vtdDiscoveryReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.vtdStorageIsolationReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.vtdInterruptIsolationReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.vtdFaultProofReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.nvmeBlockReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.i225PacketIoReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.suspendResumeReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.crashRecoveryReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.crashRecordPersistenceReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.updateRollbackReady)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.acpiTelemetryFacts)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.thermalTelemetryFacts)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.batteryTelemetryFacts)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.acceleratorTelemetryFacts)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.gridCarbonTelemetryFacts)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts and
+            @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.attestationRootLifecycleFacts)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts,
     },
     .measured_boot = .{
         .stores_compact_measurement_metadata = measured_boot.COMPACT_MEASUREMENT_METADATA and
