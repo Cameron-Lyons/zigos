@@ -1401,6 +1401,7 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(sync_state_store.StalePathIndex) == 1 and
             @FieldType(sync_state_store.StalePathIndexes, "indexes") == [workspace.MAX_WORKSPACE_ENTRIES]sync_state_store.StalePathIndex and
             @sizeOf(sync_state_store.PathSet) + @sizeOf(sync_state_store.StalePathIndexes) <= sync_state_store.PERSIST_PATH_STACK_SIZE_CEILING_BYTES,
+        .borrows_persistent_state_collections = sync_state_store.BORROWS_PERSISTENT_STATE_COLLECTIONS,
         .keeps_path_set_within_ceiling = @sizeOf(sync_state_store.PathSet) <= sync_state_store.PATH_SET_SIZE_CEILING_BYTES,
         .uses_workspace_policy_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "workspace_policies"), "reserveIndex"),
         .uses_replica_arena = @hasDecl(@FieldType(sync_state_support.PersistentState, "replica_entries"), "reserveIndex"),
