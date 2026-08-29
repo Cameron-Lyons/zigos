@@ -85,6 +85,7 @@ const network_driver_task = @import("drivers/network_driver_task.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
 const supervisor = @import("session/supervisor.zig");
+const daily_journey_state = @import("session/daily_journey_state.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const session_manager_boot_flow = @import("session/session_manager_boot_flow.zig");
@@ -1658,6 +1659,12 @@ pub const indexed_hot_path_tables = .{
         .launches_contract_services = @hasDecl(session_service_bootstrap, "bootServices"),
         .reuses_service_client_tasks = session_service_bootstrap.SERVICE_CLIENT_TASK_INDEX_RELOOKUPS == 0,
         .reuses_service_launch_controller_tasks = session_service_bootstrap.SERVICE_LAUNCH_CONTROLLER_TASK_INDEX_RELOOKUPS == 0,
+    },
+    .daily_journey_state = .{
+        .initializes_fixed_state_in_place = @hasDecl(daily_journey_state.State, "initializeAllocated"),
+        .heap_backs_state_on_freestanding = daily_journey_state.HEAP_BACKED_ON_FREESTANDING and
+            daily_journey_state.FREESTANDING_HANDLE_SIZE_BYTES <= daily_journey_state.HANDLE_SIZE_CEILING_BYTES,
+        .keeps_fixed_state_within_ceiling = @sizeOf(daily_journey_state.State) <= daily_journey_state.STATE_SIZE_CEILING_BYTES,
     },
     .session_manager_boot_flow = .{
         .initializes_session_state_in_place = @hasDecl(session_manager_boot_flow.SessionManager, "initializeAllocated"),

@@ -6,12 +6,12 @@ const booted_system = @import("../platform/rendered_shell/booted_system.zig");
 const bootstrap_packages = @import("../demo/bootstrap_packages.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
+const daily_journey_state = @import("daily_journey_state.zig");
 const humane_shell = @import("../platform/rendered_shell/humane_shell.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const notification_center = @import("../services/notification_center.zig");
 const permission_flows = @import("../demo/permission_flows.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
-const policy_object = @import("../policy/policy_object.zig");
 const policy_component_port = @import("../policy/policy_component_port.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
@@ -299,27 +299,25 @@ fn runNotesDailyDriverJourney(
 
     var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
     const sync_authority = scenario_support.mintSyncAuthority(context, 221);
-    var policies: policy_object.Directory = undefined;
-    policies.initializeAllocated();
-    var journey_ux: native_ux.Controller = undefined;
-    journey_ux.initializeAllocated();
     const install_bundle = signedNotesDailyBundle(0) catch |err| return evidenceStepFailed("daily.sign_install_bundle", err);
     const update_bundle = signedNotesDailyBundle(1) catch |err| return evidenceStepFailed("daily.sign_update_bundle", err);
-    var store_channel: public_store.Channel = undefined;
-    store_channel.initializeAllocated(notes_daily_public_store_source, .beta);
-    store_channel.trustPublisher("zigos.dev", signing.publicKey(notes_daily_bundle_signer) catch |err| return evidenceStepFailed("daily.store_signer_public_key", err)) catch |err| return evidenceStepFailed("daily.store_trust_publisher", err);
-    store_channel.publish(store_channel.prepareRelease(install_bundle, &notes_daily_v1_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_install_release", err);
-    store_channel.publish(store_channel.prepareRelease(update_bundle, &notes_daily_v2_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_update_release", err);
+    var state_instance: daily_journey_state.Instance = undefined;
+    state_instance.initInto(notes_daily_public_store_source, .beta) catch |err| return evidenceStepFailed("daily.initialize_state", err);
+    defer state_instance.deinit();
+    const state = state_instance.ptr();
+    state.store_channel.trustPublisher("zigos.dev", signing.publicKey(notes_daily_bundle_signer) catch |err| return evidenceStepFailed("daily.store_signer_public_key", err)) catch |err| return evidenceStepFailed("daily.store_trust_publisher", err);
+    state.store_channel.publish(state.store_channel.prepareRelease(install_bundle, &notes_daily_v1_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_install_release", err);
+    state.store_channel.publish(state.store_channel.prepareRelease(update_bundle, &notes_daily_v2_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_update_release", err);
     var journey = production_journey.ProductionJourneyService.init(
         context.runtime_service,
-        &journey_ux,
+        &state.ux,
         compositor_service,
         context.storage_service_instance,
         &package_port,
         package_authority,
         &sync_port,
         sync_authority,
-        &policies,
+        &state.policies,
         context.update_ledger,
         .{
             .user = context.session_user,
@@ -342,7 +340,7 @@ fn runNotesDailyDriverJourney(
             .policy_label = "notes-daily-native-smoke",
             .install_bundle = install_bundle,
             .update_bundle = update_bundle,
-            .public_store_channel = &store_channel,
+            .public_store_channel = &state.store_channel,
             .ui_surface_id = 26_026,
             .image_id = 26_026_001,
             .share_principal = principal.PrincipalId{ .kind = .user, .serial = 26_027 },
