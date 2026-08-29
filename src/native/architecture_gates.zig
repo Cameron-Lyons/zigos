@@ -1102,6 +1102,12 @@ pub const indexed_hot_path_tables = .{
             input_router.event_slot_layout.freestanding_handle_size_bytes <= input_router.EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES,
     },
     .input_queues = .{
+        .initializes_hid_controller_in_place = xhci.IN_PLACE_HID_CONTROLLER_INITIALIZATION and
+            @hasDecl(xhci.HidController, "initInto") and
+            @hasDecl(xhci.HidController, "initWithMmioInto"),
+        .initializes_modeled_input_in_place = permission_review_service.IN_PLACE_MODELED_INPUT_INITIALIZATION and
+            @hasDecl(permission_review_service.CommandInput, "initializeAllocated") and
+            @hasDecl(permission_review_service.ModeledInputSource, "initDefaultInto"),
         .stores_compact_xhci_protocol_metadata = xhci.COMPACT_SUPPORTED_PROTOCOL_METADATA and
             @FieldType(xhci.SupportedProtocols, "first_ports") == [xhci.MAX_EXTENDED_CAPABILITIES]u8 and
             @FieldType(xhci.SupportedProtocols, "port_counts") == [xhci.MAX_EXTENDED_CAPABILITIES]u8 and

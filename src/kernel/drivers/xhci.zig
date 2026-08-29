@@ -34,6 +34,7 @@ pub const HID_EVENT_QUEUE_CAPACITY: usize = 8;
 pub const HARDWARE_HID_REPORT_QUEUE_CAPACITY: usize = 64;
 pub const COMPACT_INPUT_QUEUE_METADATA = true;
 pub const COMPACT_SUPPORTED_PROTOCOL_METADATA = true;
+pub const IN_PLACE_HID_CONTROLLER_INITIALIZATION = true;
 pub const HID_REPORT_SIZE_CEILING_BYTES: usize = 24;
 pub const BOOT_KEYBOARD_REPORT_PUBLISHER_SIZE_CEILING_BYTES: usize = 1_584;
 pub const HID_CONTROLLER_SIZE_CEILING_BYTES: usize = 2_032;
@@ -1970,12 +1971,32 @@ pub const HidController = struct {
     recycled_slots: [MAX_DEVICE_SLOTS]u8 = [_]u8{0} ** MAX_DEVICE_SLOTS,
     recycled_slot_count: u8 = 0,
 
-    pub fn init(ring_plan: RingPlan) Error!HidController {
+    pub fn initInto(self: *HidController, ring_plan: RingPlan) Error!void {
         try validateRingPlan(ring_plan);
-        return .{ .ring_plan = ring_plan };
+        self.ring_plan = ring_plan;
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+        self.boot_keyboard = null;
+        for (&self.ports) |*port| port.* = .{};
+        for (&self.slots) |*slot| slot.* = .{};
+        self.port_limit = maxBootPortsU8();
+        self.device_slot_limit = maxDeviceSlotsU8();
+        self.input_events_delivered = 0;
+        for (&self.reports) |*report| report.* = emptyHidReport();
+        self.mmio = null;
+        self.next_unclaimed_slot = 1;
+        @memset(self.recycled_slots[0..], 0);
+        self.recycled_slot_count = 0;
     }
 
-    pub fn initWithMmio(capabilities: CapabilityRegisters, ring_plan: RingPlan) Error!HidController {
+    pub fn init(ring_plan: RingPlan) Error!HidController {
+        var controller: HidController = undefined;
+        try controller.initInto(ring_plan);
+        return controller;
+    }
+
+    pub fn initWithMmioInto(self: *HidController, capabilities: CapabilityRegisters, ring_plan: RingPlan) Error!void {
         if (!capabilities.supports_64_bit_addressing) return error.Unsupported32BitAddressing;
         if (capabilities.max_scratchpad_buffers == 0 and capabilities.scratchpad_restore) {
             return error.InvalidScratchpadRestore;
@@ -1989,18 +2010,23 @@ pub const HidController = struct {
         if ((capabilities.runtime_register_offset & RUNTIME_REGISTER_OFFSET_ALIGNMENT_MASK) != 0) {
             return error.InvalidRuntimeRegisterOffset;
         }
-        var controller = try HidController.init(ring_plan);
-        controller.port_limit = @min(capabilities.max_ports, maxBootPortsU8());
-        controller.device_slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
+        try self.initInto(ring_plan);
+        self.port_limit = @min(capabilities.max_ports, maxBootPortsU8());
+        self.device_slot_limit = @min(capabilities.max_device_slots, maxDeviceSlotsU8());
         const dma_plan = try planControllerDmaFromRings(
             capabilities,
-            controller.device_slot_limit,
+            self.device_slot_limit,
             ring_plan,
         );
-        controller.mmio = .{
+        self.mmio = .{
             .capabilities = capabilities,
             .dma_plan = dma_plan,
         };
+    }
+
+    pub fn initWithMmio(capabilities: CapabilityRegisters, ring_plan: RingPlan) Error!HidController {
+        var controller: HidController = undefined;
+        try controller.initWithMmioInto(capabilities, ring_plan);
         return controller;
     }
 
@@ -5500,6 +5526,23 @@ test "xHCI input queues use capacity-sized resident metadata" {
         @sizeOf(BootKeyboardReportPublisher),
     );
     try std.testing.expectEqual(@as(usize, HID_CONTROLLER_SIZE_CEILING_BYTES), @sizeOf(HidController));
+
+    var initialized: HidController = undefined;
+    @memset(std.mem.asBytes(&initialized), 0xaa);
+    try initialized.initWithMmioInto(defaultCapabilityRegisters(), .{
+        .command_ring_trbs = TEST_RING_TRBS,
+        .event_ring_trbs = TEST_RING_TRBS,
+        .command_ring_address = TEST_COMMAND_RING_ADDRESS,
+        .event_ring_address = TEST_EVENT_RING_ADDRESS,
+    });
+    try std.testing.expectEqual(@as(u8, 0), initialized.head);
+    try std.testing.expectEqual(@as(u8, 0), initialized.tail);
+    try std.testing.expectEqual(@as(u8, 0), initialized.count);
+    try std.testing.expectEqual(@as(u8, 1), initialized.next_unclaimed_slot);
+    try std.testing.expect(initialized.boot_keyboard == null);
+    try std.testing.expect(initialized.mmio != null);
+    try std.testing.expect(!initialized.ports[0].connected);
+    try std.testing.expect(!initialized.slots[1].enabled);
 }
 
 test "xHCI HID controller requires port slot address and event delivery for input proof" {
