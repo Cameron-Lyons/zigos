@@ -157,7 +157,7 @@ pub const MlDsaSignatureEnvelope = struct {
     public_key: [ML_DSA65_PUBLIC_KEY_BYTES]u8,
     value: [ML_DSA65_SIGNATURE_BYTES]u8,
 
-    pub fn isComplete(self: MlDsaSignatureEnvelope) bool {
+    pub fn isComplete(self: *const MlDsaSignatureEnvelope) bool {
         return std.mem.eql(u8, self.format, manifest.SIGNATURE_FORMAT_ML_DSA65) and
             self.signer.len != 0;
     }
@@ -192,34 +192,21 @@ pub const ReleaseVerifierMetadata = struct {
 
     pub fn fromEd25519Provider(
         descriptor: SignatureProviderDescriptor,
-        key: ReleaseRootKeyHandle,
+        key: *const ReleaseRootKeyHandle,
     ) !ReleaseVerifierMetadata {
-        if (!descriptor.releaseEligible()) return error.ReleaseProviderNotEligible;
-        if (descriptor.profile != .ed25519) return error.ReleaseProviderUnsupportedProfile;
-        if (key.generation == 0) return error.ReleaseKeyGenerationInvalid;
-        if (key.key_id.len == 0 or key.label.len == 0) return error.ReleaseKeyIdentityMissing;
-        if (key.provider_boundary != descriptor.provider_boundary) return error.ReleaseProviderBoundaryMismatch;
-        if (key.custody != descriptor.custody) return error.ReleaseProviderCustodyMismatch;
+        try validateEd25519Provider(descriptor, key);
         return metadataFromDescriptor(descriptor, key.key_id, key.label, key.public_key[0..], key.generation);
     }
 
     pub fn fromMlDsaProvider(
         descriptor: SignatureProviderDescriptor,
-        key: MlDsaReleaseRootKeyHandle,
+        key: *const MlDsaReleaseRootKeyHandle,
     ) !ReleaseVerifierMetadata {
-        if (!descriptor.releaseEligible()) return error.ReleaseProviderNotEligible;
-        if (descriptor.profile != .ml_dsa65_fips204) return error.ReleaseProviderUnsupportedProfile;
-        if (key.generation == 0) return error.ReleaseKeyGenerationInvalid;
-        if (key.key_id.len == 0 or key.label.len == 0) return error.ReleaseKeyIdentityMissing;
-        if (key.provider_boundary != descriptor.provider_boundary) return error.ReleaseProviderBoundaryMismatch;
-        if (key.custody != descriptor.custody) return error.ReleaseProviderCustodyMismatch;
-        if (!std.mem.eql(u8, key.validation_certificate, descriptor.validation_certificate)) {
-            return error.ReleaseProviderValidationMismatch;
-        }
+        try validateMlDsaProvider(descriptor, key);
         return metadataFromDescriptor(descriptor, key.key_id, key.label, key.public_key[0..], key.generation);
     }
 
-    pub fn releaseEligible(self: ReleaseVerifierMetadata) bool {
+    pub fn releaseEligible(self: *const ReleaseVerifierMetadata) bool {
         if (self.provider_name.len == 0 or self.key_id.len == 0 or self.label.len == 0) return false;
         if (self.generation == 0) return false;
         if (!std.mem.eql(u8, self.signature_format, formatForProfile(self.profile))) return false;
@@ -253,24 +240,36 @@ pub const ReleaseVerifierMetadata = struct {
     }
 
     pub fn matchesEd25519Provider(
-        self: ReleaseVerifierMetadata,
+        self: *const ReleaseVerifierMetadata,
         descriptor: SignatureProviderDescriptor,
-        key: ReleaseRootKeyHandle,
+        key: *const ReleaseRootKeyHandle,
     ) bool {
-        const expected = fromEd25519Provider(descriptor, key) catch return false;
-        return self.matches(expected);
+        validateEd25519Provider(descriptor, key) catch return false;
+        return self.matchesProviderComponents(
+            descriptor,
+            key.key_id,
+            key.label,
+            &key.public_key,
+            key.generation,
+        );
     }
 
     pub fn matchesMlDsaProvider(
-        self: ReleaseVerifierMetadata,
+        self: *const ReleaseVerifierMetadata,
         descriptor: SignatureProviderDescriptor,
-        key: MlDsaReleaseRootKeyHandle,
+        key: *const MlDsaReleaseRootKeyHandle,
     ) bool {
-        const expected = fromMlDsaProvider(descriptor, key) catch return false;
-        return self.matches(expected);
+        validateMlDsaProvider(descriptor, key) catch return false;
+        return self.matchesProviderComponents(
+            descriptor,
+            key.key_id,
+            key.label,
+            &key.public_key,
+            key.generation,
+        );
     }
 
-    pub fn digest(self: ReleaseVerifierMetadata) crypto_hash.Digest {
+    pub fn digest(self: *const ReleaseVerifierMetadata) crypto_hash.Digest {
         var hasher = crypto_hash.init();
         crypto_hash.updateBytes(&hasher, "schema", "zigos.release-verifier-metadata");
         crypto_hash.updateBytes(&hasher, "provider-name", self.provider_name);
@@ -296,27 +295,35 @@ pub const ReleaseVerifierMetadata = struct {
         return crypto_hash.finalize(&hasher);
     }
 
-    fn matches(self: ReleaseVerifierMetadata, expected: ReleaseVerifierMetadata) bool {
-        return std.mem.eql(u8, self.provider_name, expected.provider_name) and
-            std.mem.eql(u8, self.key_id, expected.key_id) and
-            std.mem.eql(u8, self.label, expected.label) and
-            self.profile == expected.profile and
-            std.mem.eql(u8, self.signature_format, expected.signature_format) and
-            std.mem.eql(u8, self.publicKeySlice(), expected.publicKeySlice()) and
-            self.generation == expected.generation and
-            self.provider_boundary == expected.provider_boundary and
-            self.custody == expected.custody and
-            self.hardware_backed == expected.hardware_backed and
-            self.rotation_supported == expected.rotation_supported and
-            self.revocation_supported == expected.revocation_supported and
-            self.customer_verifiable == expected.customer_verifiable and
-            self.verifier_protocol == expected.verifier_protocol and
-            self.fips_standard == expected.fips_standard and
-            self.post_quantum_algorithm == expected.post_quantum_algorithm and
-            self.fips_204 == expected.fips_204 and
-            self.fips_validated == expected.fips_validated and
-            self.fips_140_validated_module == expected.fips_140_validated_module and
-            std.mem.eql(u8, self.validation_certificate, expected.validation_certificate);
+    fn matchesProviderComponents(
+        self: *const ReleaseVerifierMetadata,
+        descriptor: SignatureProviderDescriptor,
+        key_id: []const u8,
+        label: []const u8,
+        public_key: []const u8,
+        generation: u32,
+    ) bool {
+        return std.mem.eql(u8, self.provider_name, descriptor.name) and
+            std.mem.eql(u8, self.key_id, key_id) and
+            std.mem.eql(u8, self.label, label) and
+            self.profile == descriptor.profile and
+            std.mem.eql(u8, self.signature_format, formatForProfile(descriptor.profile)) and
+            self.public_key_len == public_key.len and
+            std.mem.eql(u8, self.publicKeySlice(), public_key) and
+            self.generation == generation and
+            self.provider_boundary == descriptor.provider_boundary and
+            self.custody == descriptor.custody and
+            self.hardware_backed == descriptor.hardware_backed and
+            self.rotation_supported == descriptor.rotation_supported and
+            self.revocation_supported == descriptor.revocation_supported and
+            self.customer_verifiable == descriptor.customer_verifiable and
+            self.verifier_protocol == descriptor.verifier_protocol and
+            self.fips_standard == descriptor.fips_standard and
+            self.post_quantum_algorithm == descriptor.post_quantum_algorithm and
+            self.fips_204 == descriptor.fips_204 and
+            self.fips_validated == descriptor.fips_validated and
+            self.fips_140_validated_module == descriptor.fips_140_validated_module and
+            std.mem.eql(u8, self.validation_certificate, descriptor.validation_certificate);
     }
 
     comptime {
@@ -358,6 +365,33 @@ pub const ReleaseVerifierMetadata = struct {
         };
         @memcpy(metadata.public_key[0..public_key.len], public_key);
         return metadata;
+    }
+
+    fn validateEd25519Provider(
+        descriptor: SignatureProviderDescriptor,
+        key: *const ReleaseRootKeyHandle,
+    ) !void {
+        if (!descriptor.releaseEligible()) return error.ReleaseProviderNotEligible;
+        if (descriptor.profile != .ed25519) return error.ReleaseProviderUnsupportedProfile;
+        if (key.generation == 0) return error.ReleaseKeyGenerationInvalid;
+        if (key.key_id.len == 0 or key.label.len == 0) return error.ReleaseKeyIdentityMissing;
+        if (key.provider_boundary != descriptor.provider_boundary) return error.ReleaseProviderBoundaryMismatch;
+        if (key.custody != descriptor.custody) return error.ReleaseProviderCustodyMismatch;
+    }
+
+    fn validateMlDsaProvider(
+        descriptor: SignatureProviderDescriptor,
+        key: *const MlDsaReleaseRootKeyHandle,
+    ) !void {
+        if (!descriptor.releaseEligible()) return error.ReleaseProviderNotEligible;
+        if (descriptor.profile != .ml_dsa65_fips204) return error.ReleaseProviderUnsupportedProfile;
+        if (key.generation == 0) return error.ReleaseKeyGenerationInvalid;
+        if (key.key_id.len == 0 or key.label.len == 0) return error.ReleaseKeyIdentityMissing;
+        if (key.provider_boundary != descriptor.provider_boundary) return error.ReleaseProviderBoundaryMismatch;
+        if (key.custody != descriptor.custody) return error.ReleaseProviderCustodyMismatch;
+        if (!std.mem.eql(u8, key.validation_certificate, descriptor.validation_certificate)) {
+            return error.ReleaseProviderValidationMismatch;
+        }
     }
 };
 
@@ -424,18 +458,31 @@ pub const ExternalReleaseProvider = struct {
 };
 
 pub const ExternalMlDsaReleaseProvider = struct {
+    pub const SignFn = *const fn (
+        *anyopaque,
+        *const MlDsaReleaseRootKeyHandle,
+        []const u8,
+        *[ML_DSA65_SIGNATURE_BYTES]u8,
+    ) anyerror!void;
+    pub const VerifyFn = *const fn (
+        *anyopaque,
+        *const MlDsaReleaseRootKeyHandle,
+        []const u8,
+        *const [ML_DSA65_SIGNATURE_BYTES]u8,
+    ) bool;
+
     descriptor: SignatureProviderDescriptor,
     key: MlDsaReleaseRootKeyHandle,
     context: *anyopaque,
-    sign_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8) anyerror![ML_DSA65_SIGNATURE_BYTES]u8,
-    verify_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8, [ML_DSA65_SIGNATURE_BYTES]u8) bool,
+    sign_fn: SignFn,
+    verify_fn: VerifyFn,
 
     pub fn init(
         descriptor: SignatureProviderDescriptor,
-        key: MlDsaReleaseRootKeyHandle,
+        key: *const MlDsaReleaseRootKeyHandle,
         context: *anyopaque,
-        sign_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8) anyerror![ML_DSA65_SIGNATURE_BYTES]u8,
-        verify_fn: *const fn (*anyopaque, MlDsaReleaseRootKeyHandle, []const u8, [ML_DSA65_SIGNATURE_BYTES]u8) bool,
+        sign_fn: SignFn,
+        verify_fn: VerifyFn,
     ) !ExternalMlDsaReleaseProvider {
         if (!descriptor.releaseEligible()) return error.ReleaseProviderNotEligible;
         if (descriptor.profile != .ml_dsa65_fips204) return error.ReleaseProviderUnsupportedProfile;
@@ -448,14 +495,14 @@ pub const ExternalMlDsaReleaseProvider = struct {
         }
         return .{
             .descriptor = descriptor,
-            .key = key,
+            .key = key.*,
             .context = context,
             .sign_fn = sign_fn,
             .verify_fn = verify_fn,
         };
     }
 
-    pub fn releaseEligible(self: ExternalMlDsaReleaseProvider) bool {
+    pub fn releaseEligible(self: *const ExternalMlDsaReleaseProvider) bool {
         return self.descriptor.releaseEligible();
     }
 
@@ -469,22 +516,24 @@ pub const ExternalMlDsaReleaseProvider = struct {
         );
     }
 
-    pub fn sign(self: *ExternalMlDsaReleaseProvider, identity: SignerIdentity, message: []const u8) !MlDsaSignatureEnvelope {
+    pub fn sign(
+        self: *ExternalMlDsaReleaseProvider,
+        identity: SignerIdentity,
+        message: []const u8,
+        output: *MlDsaSignatureEnvelope,
+    ) !void {
         if (!std.mem.eql(u8, identity.label, self.key.label)) return error.ReleaseKeyIdentityMismatch;
-        const signature_bytes = try self.sign_fn(self.context, self.key, message);
-        return .{
-            .format = manifest.SIGNATURE_FORMAT_ML_DSA65,
-            .signer = self.key.label,
-            .public_key = self.key.public_key,
-            .value = signature_bytes,
-        };
+        output.format = manifest.SIGNATURE_FORMAT_ML_DSA65;
+        output.signer = self.key.label;
+        @memcpy(&output.public_key, &self.key.public_key);
+        try self.sign_fn(self.context, &self.key, message, &output.value);
     }
 
-    pub fn verify(self: *ExternalMlDsaReleaseProvider, signature: MlDsaSignatureEnvelope, message: []const u8) bool {
+    pub fn verify(self: *ExternalMlDsaReleaseProvider, signature: *const MlDsaSignatureEnvelope, message: []const u8) bool {
         if (!std.mem.eql(u8, signature.format, manifest.SIGNATURE_FORMAT_ML_DSA65)) return false;
         if (!std.mem.eql(u8, signature.signer, self.key.label)) return false;
         if (!std.mem.eql(u8, &signature.public_key, &self.key.public_key)) return false;
-        return self.verify_fn(self.context, self.key, message, signature.value);
+        return self.verify_fn(self.context, &self.key, message, &signature.value);
     }
 };
 
@@ -911,19 +960,19 @@ test "external release provider uses key handles instead of software signer seed
     try std.testing.expect(provider.releaseEligible());
     const verifier_metadata = provider_impl.verifierMetadata();
     try std.testing.expect(verifier_metadata.releaseEligible());
-    try std.testing.expect(verifier_metadata.matchesEd25519Provider(provider_impl.descriptor, provider_impl.key));
+    try std.testing.expect(verifier_metadata.matchesEd25519Provider(provider_impl.descriptor, &provider_impl.key));
     const verifier_digest = verifier_metadata.digest();
     try std.testing.expect(!std.mem.eql(u8, &verifier_digest, &crypto_hash.zero_digest));
 
     var stale_metadata = verifier_metadata;
     stale_metadata.generation += 1;
-    try std.testing.expect(!stale_metadata.matchesEd25519Provider(provider_impl.descriptor, provider_impl.key));
+    try std.testing.expect(!stale_metadata.matchesEd25519Provider(provider_impl.descriptor, &provider_impl.key));
     var local_metadata = verifier_metadata;
     local_metadata.provider_boundary = .local_software;
     try std.testing.expect(!local_metadata.releaseEligible());
     var tampered_key = provider_impl.key;
     tampered_key.public_key[0] ^= 0x40;
-    try std.testing.expect(!verifier_metadata.matchesEd25519Provider(provider_impl.descriptor, tampered_key));
+    try std.testing.expect(!verifier_metadata.matchesEd25519Provider(provider_impl.descriptor, &tampered_key));
     const tampered_metadata_digest = stale_metadata.digest();
     try std.testing.expect(!std.mem.eql(u8, &verifier_digest, &tampered_metadata_digest));
 
@@ -942,7 +991,11 @@ test "external release provider uses key handles instead of software signer seed
 
 test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
     const PqcBackend = struct {
-        fn signatureFor(key: MlDsaReleaseRootKeyHandle, message: []const u8) [ML_DSA65_SIGNATURE_BYTES]u8 {
+        fn writeSignature(
+            key: *const MlDsaReleaseRootKeyHandle,
+            message: []const u8,
+            output: *[ML_DSA65_SIGNATURE_BYTES]u8,
+        ) void {
             var hasher = crypto_hash.init();
             hasher.update("zigos.external-ml-dsa-provider-test");
             hasher.update(key.key_id);
@@ -951,27 +1004,31 @@ test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
             hasher.update(message);
             const digest = crypto_hash.finalize(&hasher);
 
-            var output: [ML_DSA65_SIGNATURE_BYTES]u8 = undefined;
-            for (&output, 0..) |*byte, index| {
+            for (output, 0..) |*byte, index| {
                 byte.* = digest[index % digest.len] ^ @as(u8, @intCast(index & 0xff));
             }
-            return output;
         }
 
-        fn sign(context: *anyopaque, key: MlDsaReleaseRootKeyHandle, message: []const u8) ![ML_DSA65_SIGNATURE_BYTES]u8 {
+        fn sign(
+            context: *anyopaque,
+            key: *const MlDsaReleaseRootKeyHandle,
+            message: []const u8,
+            output: *[ML_DSA65_SIGNATURE_BYTES]u8,
+        ) !void {
             _ = context;
-            return signatureFor(key, message);
+            writeSignature(key, message, output);
         }
 
         fn verify(
             context: *anyopaque,
-            key: MlDsaReleaseRootKeyHandle,
+            key: *const MlDsaReleaseRootKeyHandle,
             message: []const u8,
-            signature: [ML_DSA65_SIGNATURE_BYTES]u8,
+            signature: *const [ML_DSA65_SIGNATURE_BYTES]u8,
         ) bool {
             _ = context;
-            const expected = signatureFor(key, message);
-            return std.mem.eql(u8, &signature, &expected);
+            var expected: [ML_DSA65_SIGNATURE_BYTES]u8 = undefined;
+            writeSignature(key, message, &expected);
+            return std.mem.eql(u8, signature, &expected);
         }
     };
 
@@ -994,17 +1051,18 @@ test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
         .validation_certificate = "CMVP-ML-DSA65-0001",
     };
     var backend = PqcBackend{};
+    const key = MlDsaReleaseRootKeyHandle{
+        .key_id = "hsm://zigos/release/ml-dsa65/1",
+        .label = "zigos.release.ml-dsa65",
+        .public_key = [_]u8{0xa5} ** ML_DSA65_PUBLIC_KEY_BYTES,
+        .generation = 1,
+        .provider_boundary = .offline_hsm,
+        .custody = .hardware_security_module,
+        .validation_certificate = descriptor.validation_certificate,
+    };
     var provider_impl = try ExternalMlDsaReleaseProvider.init(
         descriptor,
-        .{
-            .key_id = "hsm://zigos/release/ml-dsa65/1",
-            .label = "zigos.release.ml-dsa65",
-            .public_key = [_]u8{0xa5} ** ML_DSA65_PUBLIC_KEY_BYTES,
-            .generation = 1,
-            .provider_boundary = .offline_hsm,
-            .custody = .hardware_security_module,
-            .validation_certificate = descriptor.validation_certificate,
-        },
+        &key,
         &backend,
         PqcBackend.sign,
         PqcBackend.verify,
@@ -1012,7 +1070,7 @@ test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
     try std.testing.expect(provider_impl.releaseEligible());
     const verifier_metadata = provider_impl.verifierMetadata();
     try std.testing.expect(verifier_metadata.releaseEligible());
-    try std.testing.expect(verifier_metadata.matchesMlDsaProvider(provider_impl.descriptor, provider_impl.key));
+    try std.testing.expect(verifier_metadata.matchesMlDsaProvider(provider_impl.descriptor, &provider_impl.key));
     try std.testing.expectEqualStrings("CMVP-ML-DSA65-0001", verifier_metadata.validation_certificate);
     const verifier_digest = verifier_metadata.digest();
     try std.testing.expect(!std.mem.eql(u8, &verifier_digest, &crypto_hash.zero_digest));
@@ -1022,7 +1080,7 @@ test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
     try std.testing.expect(!unvalidated_metadata.releaseEligible());
     var tampered_key = provider_impl.key;
     tampered_key.validation_certificate = "CMVP-OTHER";
-    try std.testing.expect(!verifier_metadata.matchesMlDsaProvider(provider_impl.descriptor, tampered_key));
+    try std.testing.expect(!verifier_metadata.matchesMlDsaProvider(provider_impl.descriptor, &tampered_key));
     const unvalidated_digest = unvalidated_metadata.digest();
     try std.testing.expect(!std.mem.eql(u8, &verifier_digest, &unvalidated_digest));
 
@@ -1030,16 +1088,17 @@ test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
         .label = "zigos.release.ml-dsa65",
         .seed = seedFromByte(0x7a),
     };
-    const signature = try provider_impl.sign(identity, "release-dsse-pae");
+    var signature: MlDsaSignatureEnvelope = undefined;
+    try provider_impl.sign(identity, "release-dsse-pae", &signature);
     try std.testing.expect(signature.isComplete());
     try std.testing.expectEqual(@as(usize, ML_DSA65_PUBLIC_KEY_BYTES), signature.public_key.len);
     try std.testing.expectEqual(@as(usize, ML_DSA65_SIGNATURE_BYTES), signature.value.len);
-    try std.testing.expect(provider_impl.verify(signature, "release-dsse-pae"));
-    try std.testing.expect(!provider_impl.verify(signature, "tampered-release-dsse-pae"));
+    try std.testing.expect(provider_impl.verify(&signature, "release-dsse-pae"));
+    try std.testing.expect(!provider_impl.verify(&signature, "tampered-release-dsse-pae"));
 
     var tampered = signature;
     tampered.value[0] ^= 0x01;
-    try std.testing.expect(!provider_impl.verify(tampered, "release-dsse-pae"));
+    try std.testing.expect(!provider_impl.verify(&tampered, "release-dsse-pae"));
 }
 
 test "signature provider fails closed when implementation returns the wrong profile" {

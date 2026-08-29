@@ -297,6 +297,17 @@ pub const indexed_hot_path_tables = .{
         .stores_compact_verifier_metadata = signing.COMPACT_RELEASE_VERIFIER_METADATA and
             @FieldType(signing.ReleaseVerifierMetadata, "public_key_len") == u16,
         .keeps_verifier_metadata_within_ceiling = @sizeOf(signing.ReleaseVerifierMetadata) <= signing.RELEASE_VERIFIER_METADATA_SIZE_CEILING_BYTES,
+        .borrows_large_post_quantum_records = @typeInfo(@TypeOf(signing.ExternalMlDsaReleaseProvider.init)).@"fn".params[1].type.? == *const signing.MlDsaReleaseRootKeyHandle and
+            @typeInfo(@TypeOf(signing.ExternalMlDsaReleaseProvider.sign)).@"fn".params[3].type.? == *signing.MlDsaSignatureEnvelope and
+            @typeInfo(@TypeOf(signing.ExternalMlDsaReleaseProvider.verify)).@"fn".params[1].type.? == *const signing.MlDsaSignatureEnvelope and
+            @typeInfo(@typeInfo(signing.ExternalMlDsaReleaseProvider.SignFn).pointer.child).@"fn".params[1].type.? == *const signing.MlDsaReleaseRootKeyHandle and
+            @typeInfo(@typeInfo(signing.ExternalMlDsaReleaseProvider.SignFn).pointer.child).@"fn".params[3].type.? == *[signing.ML_DSA65_SIGNATURE_BYTES]u8 and
+            @typeInfo(@typeInfo(signing.ExternalMlDsaReleaseProvider.VerifyFn).pointer.child).@"fn".params[1].type.? == *const signing.MlDsaReleaseRootKeyHandle and
+            @typeInfo(@typeInfo(signing.ExternalMlDsaReleaseProvider.VerifyFn).pointer.child).@"fn".params[3].type.? == *const [signing.ML_DSA65_SIGNATURE_BYTES]u8 and
+            @typeInfo(@TypeOf(signing.MlDsaSignatureEnvelope.isComplete)).@"fn".params[0].type.? == *const signing.MlDsaSignatureEnvelope and
+            @typeInfo(@TypeOf(signing.ReleaseVerifierMetadata.fromMlDsaProvider)).@"fn".params[1].type.? == *const signing.MlDsaReleaseRootKeyHandle and
+            @typeInfo(@TypeOf(signing.ReleaseVerifierMetadata.digest)).@"fn".params[0].type.? == *const signing.ReleaseVerifierMetadata and
+            @typeInfo(@TypeOf(signing.ReleaseVerifierMetadata.matchesMlDsaProvider)).@"fn".params[2].type.? == *const signing.MlDsaReleaseRootKeyHandle,
     },
     .principal_keyring = .{
         .uses_key_arena = @hasDecl(@FieldType(principal.Keyring, "slots"), "reserveIndex"),
