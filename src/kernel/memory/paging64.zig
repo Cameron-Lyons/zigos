@@ -39,6 +39,7 @@ pub const IDENTITY_DMA_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT = true;
 pub const GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY = true;
 pub const GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY = true;
 pub const DIRECT_MAP_USES_1G_PAGES = true;
+pub const PRECISE_IDENTITY_LIMIT_MATCHES_LINKER = true;
 
 const ENTRY_PRESENT = table64.PRESENT;
 const ENTRY_WRITABLE = table64.WRITABLE;
@@ -101,8 +102,9 @@ const IDENTITY_DIRECTORY_ENTRIES: usize = @intCast(LOW_IDENTITY_PHYSICAL_LIMIT /
 pub const DIRECT_MAP_PDPT_ENTRIES: usize = @intCast(MANAGED_PHYSICAL_BYTES / PAGE_DIRECTORY_COVERAGE_BYTES);
 pub const DIRECT_MAP_1G_LEAF_COUNT: usize = DIRECT_MAP_PDPT_ENTRIES - 1;
 pub const DIRECT_MAP_PAGE_DIRECTORY_COUNT: usize = 1;
-const PRECISE_IDENTITY_PAGE_TABLES = 5;
-const PRECISE_IDENTITY_BYTES: u32 = PRECISE_IDENTITY_PAGE_TABLES * 2 * 1024 * 1024;
+// Keep synchronized with __kernel_precise_identity_end in the linker script.
+pub const PRECISE_IDENTITY_PAGE_TABLES: usize = 8;
+pub const PRECISE_IDENTITY_BYTES: u32 = PRECISE_IDENTITY_PAGE_TABLES * 2 * 1024 * 1024;
 const BOOTSTRAP_PAGE_TABLE_COUNT = 5 + 2 * PRECISE_IDENTITY_PAGE_TABLES;
 
 const TABLE_OWNER_INHERITED: u3 = 0;
@@ -115,6 +117,7 @@ extern var stack_bottom: u8;
 extern const __kernel_text_start: u8;
 extern const __kernel_text_end: u8;
 extern const __kernel_relro_end: u8;
+extern const __kernel_precise_identity_end: u8;
 
 const BootstrapPageTables = struct {
     pml4: PageDirectory align(PAGE_SIZE),
@@ -187,12 +190,15 @@ fn kernelImageExtents() KernelImageExtents {
         haltWithMessage("Kernel text lies outside the low physical aperture!\n");
     const immutable_end = std.math.cast(u32, @intFromPtr(&__kernel_relro_end)) orelse
         haltWithMessage("Kernel immutable image lies outside the low physical aperture!\n");
+    const precise_identity_end = std.math.cast(u32, @intFromPtr(&__kernel_precise_identity_end)) orelse
+        haltWithMessage("Kernel precise identity limit lies outside the low physical aperture!\n");
     if (text_start % PAGE_SIZE != 0 or
         text_end % PAGE_SIZE != 0 or
         immutable_end % PAGE_SIZE != 0 or
         text_start >= text_end or
         text_end >= immutable_end or
-        immutable_end > PRECISE_IDENTITY_BYTES)
+        immutable_end > PRECISE_IDENTITY_BYTES or
+        precise_identity_end != PRECISE_IDENTITY_BYTES)
     {
         haltWithMessage("Invalid page-aligned kernel image extents!\n");
     }
@@ -957,8 +963,8 @@ comptime {
     if (LOW_IDENTITY_PHYSICAL_LIMIT != LARGE_1G_PAGE_SIZE) {
         @compileError("the low identity aperture must occupy exactly one page directory");
     }
-    if (PRECISE_IDENTITY_BYTES != 10 * 1024 * 1024) {
-        @compileError("the precise identity region must cover the first 10 MiB");
+    if (PRECISE_IDENTITY_BYTES != 16 * 1024 * 1024) {
+        @compileError("the precise identity region must cover the first 16 MiB");
     }
     if (@sizeOf(BootstrapPageTables) != BOOTSTRAP_PAGE_TABLE_COUNT * PAGE_SIZE or
         @alignOf(BootstrapPageTables) != PAGE_SIZE)
@@ -1017,6 +1023,12 @@ test "kernel identity mapping executes only the linker-bounded text pages" {
     const mutable_data = kernelIdentityLeafFlags(image.immutable_end, image);
     try std.testing.expect((mutable_data & ENTRY_WRITABLE) != 0);
     try std.testing.expect(!table64.isExecutable(mutable_data));
+}
+
+test "precise identity mapping retains verification image headroom" {
+    try std.testing.expect(PRECISE_IDENTITY_LIMIT_MATCHES_LINKER);
+    try std.testing.expectEqual(@as(usize, 8), PRECISE_IDENTITY_PAGE_TABLES);
+    try std.testing.expectEqual(@as(u32, 16 * 1024 * 1024), PRECISE_IDENTITY_BYTES);
 }
 
 test "kernel direct mapping is non-executable and preserves image immutability" {

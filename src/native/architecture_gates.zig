@@ -324,6 +324,9 @@ pub const indexed_hot_path_tables = .{
         .overwrites_reserved_capability_slots = capability.OVERWRITES_RESERVED_CAPABILITY_SLOTS and
             @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleForOverwrite") and
             @hasDecl(@FieldType(capability.CapabilityTable, "slots"), "reserveHandleAtForOverwrite"),
+        .avoids_batch_plans_for_single_grants = capability.SINGLE_GRANT_AVOIDS_BATCH_PLAN and
+            @hasDecl(capability.CapabilityTable, "mintSingle") and
+            @hasDecl(capability.CapabilityTable, "rollbackSingleGrant"),
         .avoids_redundant_holder_index = capability.AVOIDS_REDUNDANT_HOLDER_INDEX and
             !@hasField(capability.CapabilityTable, "holder_index") and
             !@hasDecl(capability.CapabilityTable, "queryByHolder"),
@@ -413,8 +416,8 @@ pub const indexed_hot_path_tables = .{
         .avoids_cold_mapping_slot_scans = userspace_executor.COLD_MAPPING_LINEAR_SLOT_SCANS == 0,
         .avoids_steady_retirement_slot_scans = userspace_executor.STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH == 0,
         .reuses_resolved_retirement_mappings = userspace_executor.RETIREMENT_MAPPING_HANDLE_RELOOKUPS == 0,
-        .right_sizes_userspace_trap_stack = userspace_executor.TRAP_STACK_TOTAL_BYTES <= 24 * 1024 and
-            userspace_executor.TRAP_STACK_USABLE_BYTES >= 20 * 1024,
+        .right_sizes_userspace_trap_stack = userspace_executor.TRAP_STACK_TOTAL_BYTES == 40 * 1024 and
+            userspace_executor.TRAP_STACK_USABLE_BYTES == 36 * 1024,
         .avoids_unrelated_capability_mutation_authority_scans = userspace_executor.UNRELATED_CAPABILITY_MUTATION_AUTHORITY_SCANS == 0,
         .avoids_unchanged_resume_mailbox_writes = userspace_executor.UNCHANGED_RESUME_KERNEL_MAILBOX_FIELD_WRITES_PER_DISPATCH == 0,
     },

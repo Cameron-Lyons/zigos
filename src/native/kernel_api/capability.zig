@@ -17,6 +17,7 @@ pub const CACHES_RECENT_TARGET_GENERATION = true;
 pub const OVERWRITES_RESERVED_CAPABILITY_SLOTS = true;
 pub const AVOIDS_REDUNDANT_HOLDER_INDEX = true;
 pub const ZERO_CAPABILITY_ID_RESERVED = true;
+pub const SINGLE_GRANT_AVOIDS_BATCH_PLAN = true;
 pub const GRANT_RESERVATION_SIZE_CEILING_BYTES: usize = 312;
 pub const CAPABILITY_TABLE_SIZE_CEILING_BYTES: usize = 32_040;
 pub const CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_QUERY: u8 = 0;
@@ -253,7 +254,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         }
 
         pub fn mintBootRoot(self: *Self, request: MintRequest) Error!Capability {
-            return self.mintFromGrantPlan(request);
+            return self.mintSingle(request);
+        }
+
+        pub fn mintSingle(self: *Self, request: MintRequest) Error!Capability {
+            return self.mintSingleRequest(request);
         }
 
         pub fn applyGrantPlan(self: *Self, plan: *const GrantPlan, output: []Capability) Error![]Capability {
@@ -268,6 +273,10 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             for (capabilities) |minted| {
                 self.discard(minted.id);
             }
+        }
+
+        pub fn rollbackSingleGrant(self: *Self, capability_id: u64) void {
+            self.discard(capability_id);
         }
 
         pub fn queryByTarget(self: *const Self, target: CapabilityTarget, output: []Capability) []Capability {
@@ -288,7 +297,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             return output[0..count];
         }
 
-        fn mintFromGrantPlan(self: *Self, request: MintRequest) Error!Capability {
+        fn mintSingleRequest(self: *Self, request: MintRequest) Error!Capability {
             if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
             if (request.audit.delegation_depth > request.audit.max_delegation_depth) return error.DelegationDepthExceeded;
             const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
@@ -693,7 +702,9 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 
         fn debugAssertTargetGenerationIndexMissAbsent(self: *const Self, target: CapabilityTarget) void {
             if (!debugIndexChecksEnabledForTable()) return;
-            for (self.target_generations.slots) |entry| {
+            var index: usize = 0;
+            while (index < self.target_generations.slots.len) : (index += 1) {
+                const entry = &self.target_generations.slots[index];
                 if (entry.in_use and entry.target.eql(target)) {
                     native_util.impossibleByInvariant("target generation index missed a live target");
                 }
@@ -917,6 +928,18 @@ test "capability grant metadata retains full atomic plan capacity" {
     const granted = try table.applyGrantPlan(&plan, &output);
     try std.testing.expectEqual(@as(usize, MAX_GRANT_PLAN_ENTRIES), granted.len);
     try std.testing.expectEqual(@as(usize, MAX_GRANT_PLAN_ENTRIES), table.activeCount());
+}
+
+test "single grants avoid batch plans and retain transactional rollback" {
+    try std.testing.expect(SINGLE_GRANT_AVOIDS_BATCH_PLAN);
+
+    var table = CapabilityTable.init();
+    const minted = try table.mintSingle(emptyGrantPlanEntry().request);
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+
+    table.rollbackSingleGrant(minted.id);
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+    try std.testing.expect(table.query(minted.id) == null);
 }
 
 test "capability table omits redundant holder index state" {

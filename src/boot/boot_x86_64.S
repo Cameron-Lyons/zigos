@@ -61,7 +61,7 @@ boot_page_directory:
 
 .align 4096
 # Native smoke tests require at least 25% unused watermark headroom.
-.equ BOOT_STACK_SIZE, 640 * 1024
+.equ BOOT_STACK_SIZE, 708 * 1024
 .global stack_bottom
 stack_bottom:
     .skip BOOT_STACK_SIZE

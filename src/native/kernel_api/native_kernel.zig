@@ -408,16 +408,16 @@ pub const Kernel = struct {
         return minted;
     }
 
-    fn applySingleGrantPlan(
+    fn applySingleGrant(
         self: *Kernel,
         task: *task_runtime.TaskRecord,
         request: capability.MintRequest,
-    ) Error!struct { capability: capability.Capability } {
-        var plan = capability.GrantPlan{};
-        try plan.addMint(task.id, request);
-        var minted_buffer: [1]capability.Capability = undefined;
-        const minted = try self.applyGrantPlan(&plan, &minted_buffer, task);
-        return .{ .capability = minted[0] };
+    ) Error!capability.Capability {
+        try validateRuntimeGrantForTask(task, 1);
+        const minted = try self.capability_table.mintSingle(request);
+        errdefer self.capability_table.rollbackSingleGrant(minted.id);
+        try task_runtime.grantCapabilityToTask(task, minted.id);
+        return minted;
     }
 
     fn applySingleAutoGrant(
@@ -435,7 +435,7 @@ pub const Kernel = struct {
             .request => request_local_only,
             .always_local => true,
         };
-        return (try self.applySingleGrantPlan(task, .{
+        return self.applySingleGrant(task, .{
             .holder = task.owner,
             .issuer = self.policy_authority,
             .target = target,
@@ -454,7 +454,7 @@ pub const Kernel = struct {
                 .policy_generation = 1,
                 .source_task_id = task.id,
             },
-        })).capability;
+        });
     }
 
     pub fn capabilityDerive(self: *Kernel, context: KernelCallContext, request: capability.DeriveRequest) Error!abi.CapabilityDescriptor {
