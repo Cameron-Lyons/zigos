@@ -84,8 +84,7 @@ pub const Builder = struct {
                 self.package_service_instance = null;
             }
         } else {
-            self.package_service_instance.deinit();
-            self.package_service_instance = package_service.Service.init();
+            self.package_service_instance.reset();
         }
     }
 

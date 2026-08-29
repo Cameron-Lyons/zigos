@@ -21,6 +21,7 @@ const userspace_loader = @import("task/userspace_loader.zig");
 const userspace_launch = @import("task/userspace_launch.zig");
 const userspace_registry = @import("task/userspace_registry.zig");
 const task_runtime = @import("task/task_runtime.zig");
+const task_runtime_service = @import("task/task_runtime_service.zig");
 const process_isolation = @import("task/process_isolation.zig");
 const syscall_dispatch = @import("kernel_api/syscall_dispatch.zig");
 const component_port = @import("kernel_api/component_port.zig");
@@ -96,6 +97,7 @@ fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
 const ProbeArena = indexed_arena.IndexedArenaWithKey(u64, ProbeArenaSlot, 1, 2, probeArenaKey);
 const ProbeGenerationalArena = indexed_arena.GenerationalArena("ProbeHandle", ProbeArenaSlot, 1);
 const ProbePagedArena = indexed_arena.PagedIndexedArenaWithKey(u64, ProbeArenaSlot, 1, 1, 2, probeArenaKey);
+const ProbeMultimap = indexed_arena.MultimapIndex(1, 1, 2);
 
 pub const sync_private_overlay = .{
     .native_transport = .{
@@ -119,6 +121,8 @@ pub const indexed_hot_path_tables = .{
     .indexed_arena = .{
         .tracks_used_count = @hasField(ProbeArena, "used_count"),
         .inserts_complete_values_at_exact_indexes = @hasDecl(ProbeArena, "insertIndexAt"),
+        .initializes_allocated_arenas_in_place = @hasDecl(ProbeArena, "initializeAllocated") and
+            @hasDecl(ProbeMultimap, "initializeAllocated"),
         .uses_split_primary_index_storage = id_index.SlotIndex(256) == u8 and
             id_index.SlotIndex(257) == u16 and
             @sizeOf(id_index.Table(1_536)) == 16_896,
@@ -483,6 +487,10 @@ pub const indexed_hot_path_tables = .{
         .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,
     },
     .task_runtime = .{
+        .initializes_allocated_state_in_place = task_runtime.IN_PLACE_RUNTIME_STATE_INITIALIZATION and
+            @hasDecl(task_runtime.Runtime, "initializeAllocated") and
+            @hasDecl(task_runtime.Runtime.AddressSpaceArenaType, "initializeAllocated"),
+        .resets_checkpoints_in_place = task_runtime_service.IN_PLACE_CHECKPOINT_RESET,
         .uses_task_arena = @hasDecl(@FieldType(task_runtime.Runtime, "tasks"), "reserveIndex"),
         .uses_address_space_arena = @hasDecl(task_runtime.Runtime.AddressSpaceArenaType, "reserveIndex"),
         .heap_backs_address_space_arena_on_freestanding = task_runtime.HEAP_BACKED_ADDRESS_SPACE_ARENA_ON_FREESTANDING,
@@ -751,6 +759,8 @@ pub const indexed_hot_path_tables = .{
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(package_service.BundleArena, "reserve"),
+        .initializes_bundle_arena_in_place = @hasDecl(package_service.BundleArena, "initializeAllocated") and
+            @hasDecl(package_service.Service, "initializeAllocated"),
         .derives_revision_metadata_from_retained_slots = package_service.DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS and
             !@hasField(package_service.InstalledBundle, "revision_count") and
             !@hasField(package_service.InstalledBundle, "next_revision_id"),
@@ -1249,6 +1259,8 @@ pub const indexed_hot_path_tables = .{
         .rebuilds_loaded_indexes = @hasDecl(device_graph.Graph, "rebuildIndexes"),
     },
     .sync_service = .{
+        .initializes_storage_bound_service_state_in_place = sync_service.IN_PLACE_STORAGE_SERVICE_INITIALIZATION and
+            @hasDecl(sync_service.Service, "initWithStorageInto"),
         .stores_compact_latest_mutation_indexes = sync_latest_mutations.COMPACT_MUTATION_INDEX_METADATA and
             @sizeOf(sync_latest_mutations.MutationIndex) == 1,
         .keeps_latest_mutation_index_within_ceiling = @sizeOf(sync_latest_mutations.Index) <= sync_latest_mutations.INDEX_SIZE_CEILING_BYTES,
@@ -1635,6 +1647,7 @@ pub const indexed_hot_path_tables = .{
         .reuses_service_launch_controller_tasks = session_service_bootstrap.SERVICE_LAUNCH_CONTROLLER_TASK_INDEX_RELOOKUPS == 0,
     },
     .session_manager_boot_flow = .{
+        .initializes_session_state_in_place = @hasDecl(session_manager_boot_flow.SessionManager, "initializeAllocated"),
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
         .reuses_bootstrap_task_records = session_manager_boot_flow.BOOTSTRAP_TASK_INDEX_RELOOKUPS == 0,
         .reuses_ui_authority_task_records = session_manager_boot_flow.UI_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,

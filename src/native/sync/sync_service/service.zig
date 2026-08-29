@@ -42,6 +42,7 @@ pub const OVERLAY_SESSION_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SIZ
 pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES;
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
 pub const COMPACT_SERVICE_QUEUE_METADATA = true;
+pub const IN_PLACE_STORAGE_SERVICE_INITIALIZATION = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 88_792;
 pub const COMPACT_REPLICATION_SUMMARY_METADATA = state_support.COMPACT_REPLICATION_SUMMARY_METADATA;
 pub const REPLICATION_SUMMARY_SIZE_CEILING_BYTES = state_support.REPLICATION_SUMMARY_SIZE_CEILING_BYTES;
@@ -235,22 +236,45 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         replication_batch_depth: usize = 0,
         replication_checkpoint_pending: bool = false,
 
-        fn initDefault(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
-            return .{
-                .service_id = service_id,
-                .task_id = task_id,
-                .owner = owner,
-            };
+        fn initializeDefault(self: *Self, service_id: u64, task_id: u64, owner: principal.PrincipalId) void {
+            @memset(std.mem.asBytes(self), 0);
+            self.service_id = service_id;
+            self.task_id = task_id;
+            self.owner = owner;
+            self.workspace_policy_index.reset();
+            self.overlay_index.reset();
+            self.database_contract_id_index.reset();
+            self.database_contract_bundle_index.initializeAllocated();
+            self.database_contract_equivalent_index.reset();
+            self.conflict_path_index.reset();
+            self.conflict_object_index.reset();
+            self.conflict_scope_index.initializeAllocated();
+            self.replica_index.reset();
+            self.replica_scope_index.initializeAllocated();
+            self.outbound_transport_path_index.initializeAllocated();
+            self.inbound_transport_path_index.initializeAllocated();
+            self.outbound_transport_target_index.initializeAllocated();
+            self.inbound_transport_target_index.initializeAllocated();
+            self.inbound_source_high_water_index.initializeAllocated();
+            self.inbound_source_frame_index.initializeAllocated();
+            self.overlay_sessions.reset();
+            self.closed_overlay_sessions.initializeAllocated();
+            self.mergeable_document_adapter = sync_adapters.default_mergeable_document_adapter;
+            self.chunk_media_adapter = sync_adapters.default_chunk_media_adapter;
+            self.secret_transfer_adapter = sync_adapters.default_secret_transfer_adapter;
+            self.database_sync_adapter = sync_adapters.default_database_sync_adapter;
+            self.transport_queue.initializeAllocated();
         }
 
-        fn initWithPreparedResidentState(
+        fn initWithPreparedResidentStateInto(
+            service: *Self,
             service_id: u64,
             task_id: u64,
             owner: principal.PrincipalId,
             resident_state: *ResidentState,
             loaded_existing_state: bool,
-        ) Self {
-            var service = initDefault(service_id, task_id, owner);
+        ) void {
+            service.initializeDefault(service_id, task_id, owner);
             service.loaded_existing_state = loaded_existing_state;
             service.resident_store = resident_state;
             service.rebuildWorkspacePolicyIndex();
@@ -259,12 +283,21 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             service.rebuildConflictIndexes();
             service.rebuildReplicaIndexes();
             service.rebuildTransportFrameIndexes();
-            return service;
         }
 
         pub fn init(service_id: u64, task_id: u64, owner: principal.PrincipalId) Self {
-            var service = initDefault(service_id, task_id, owner);
-            service.owned_resident_state.resetForServiceInit();
+            if (@inComptime()) {
+                var service = Self{
+                    .service_id = service_id,
+                    .task_id = task_id,
+                    .owner = owner,
+                };
+                service.owned_resident_state.resetForServiceInit();
+                return service;
+            }
+            var service: Self = undefined;
+            service.initializeDefault(service_id, task_id, owner);
+            service.owned_resident_state.initializeAllocated();
             return service;
         }
 
@@ -278,7 +311,9 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (!loaded_existing_state) {
                 resident_state.resetForServiceInit();
             }
-            return initWithPreparedResidentState(service_id, task_id, owner, resident_state, loaded_existing_state);
+            var service: Self = undefined;
+            initWithPreparedResidentStateInto(&service, service_id, task_id, owner, resident_state, loaded_existing_state);
+            return service;
         }
 
         pub fn initWithStorage(
@@ -311,7 +346,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 resident_state.resetForServiceInit();
             }
 
-            service.* = initWithPreparedResidentState(service_id, task_id, owner, resident_state, loaded_existing_state);
+            initWithPreparedResidentStateInto(service, service_id, task_id, owner, resident_state, loaded_existing_state);
             service.storage = storage;
             service.state_workspace_id = workspace_id;
         }

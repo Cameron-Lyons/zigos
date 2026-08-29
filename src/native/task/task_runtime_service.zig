@@ -11,6 +11,7 @@ else
 
 const heap_backed_checkpoints = builtin.target.os.tag == .freestanding;
 const SnapshotBacking = if (heap_backed_checkpoints) ?*task_runtime.Snapshot else task_runtime.Snapshot;
+pub const IN_PLACE_CHECKPOINT_RESET = true;
 
 pub const CheckpointStore = struct {
     checkpoint_state: SnapshotBacking = if (heap_backed_checkpoints) null else task_runtime.Runtime.initSnapshot(),
@@ -25,7 +26,7 @@ pub const CheckpointStore = struct {
                 self.checkpoint_state = null;
             }
         } else {
-            self.checkpoint_state = task_runtime.Runtime.initSnapshot();
+            @memset(std.mem.asBytes(&self.checkpoint_state), 0);
         }
         self.has_checkpoint = false;
         self.last_checkpoint_tick = 0;
@@ -182,6 +183,39 @@ test "task runtime service refuses restart before a checkpoint exists" {
 
     try std.testing.expect(!service.restartFromCheckpoint(10));
     try std.testing.expectEqual(@as(u32, 0), service.restart_generation);
+}
+
+test "task checkpoint reset wipes invalid state before reuse" {
+    if (heap_backed_checkpoints) return;
+
+    var checkpoint_store = CheckpointStore{};
+    var runtime = task_runtime.Runtime.init();
+    var service = Service.initWithStore(&runtime, &checkpoint_store);
+    _ = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 70 },
+        .component_class = .app_component,
+        .budget = .{
+            .cpu_time_ticks = 100,
+            .memory_bytes = units.kibibytes(1),
+            .endpoint_slots = 2,
+            .shared_memory_bytes = units.kibibytes(1),
+        },
+        .local_only = true,
+    });
+    try service.checkpoint(20);
+    try std.testing.expect(checkpoint_store.has_checkpoint);
+
+    checkpoint_store.reset();
+    try std.testing.expect(!checkpoint_store.has_checkpoint);
+    try std.testing.expectEqual(@as(u64, 0), checkpoint_store.last_checkpoint_tick);
+    for (std.mem.asBytes(&checkpoint_store.checkpoint_state)) |byte| {
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+
+    var restarted = Service.initWithStore(&runtime, &checkpoint_store);
+    try std.testing.expect(!restarted.restartFromCheckpoint(21));
+    try restarted.checkpoint(22);
+    try std.testing.expect(restarted.restartFromCheckpoint(23));
 }
 
 test "task runtime service can restore a persisted checkpoint after service re-instantiation" {

@@ -367,8 +367,16 @@ pub const TransportQueue = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *TransportQueue) void {
+        @memset(std.mem.asBytes(self), 0);
+        self.next_frame_id = 1;
+        self.frames.initializeAllocated();
+        self.target_index.initializeAllocated();
+        self.path_index.initializeAllocated();
+    }
+
     pub fn reset(self: *TransportQueue) void {
-        self.* = .{};
+        self.initializeAllocated();
     }
 
     pub fn enqueue(self: *TransportQueue, request: QueueFrameRequest) Error!TransportFrame {
@@ -878,7 +886,9 @@ test "secret transfer adapter refuses plaintext secret payloads" {
 }
 
 test "transport queue records encrypted semantic replication frames" {
-    var queue = TransportQueue.init();
+    var queue: TransportQueue = undefined;
+    @memset(std.mem.asBytes(&queue), 0xa5);
+    queue.initializeAllocated();
     const frame = try queue.enqueue(.{
         .workspace_id = 42,
         .object_id = 80,

@@ -128,7 +128,9 @@ pub fn UniqueIndex(comptime capacity: usize) type {
         }
 
         pub fn reset(self: *Self) void {
-            self.table = id_index.emptyTable(capacity);
+            @memset(&self.table.ids, 0);
+            @memset(&self.table.slot_indices, 0);
+            @memset(&self.table.states, .empty);
         }
 
         pub fn lookup(self: *const Self, key: u64) ?usize {
@@ -193,8 +195,16 @@ pub fn MultimapIndex(
             return .{};
         }
 
+        pub fn initializeAllocated(self: *Self) void {
+            self.bucket_index.reset();
+            for (&self.buckets) |*bucket| bucket.* = .{};
+            for (&self.links) |*link| link.* = .{};
+            self.free_bucket_head = compact_no_index;
+            self.next_unclaimed_bucket = 0;
+        }
+
         pub fn reset(self: *Self) void {
-            self.* = Self.init();
+            self.initializeAllocated();
         }
 
         pub fn count(self: *const Self, key: u64) usize {
@@ -456,8 +466,39 @@ pub fn IndexedArenaWithKeyOptions(
             return .{};
         }
 
+        pub fn initializeAllocated(self: *Self) void {
+            for (&self.slots) |*slot| slot.* = Slot{};
+            self.primary_index.reset();
+            if (comptime options.store_keys) @memset(&self.slot_keys, ids.zero(Key));
+            @memset(&self.free_next, free_no_index);
+            self.free_head = free_no_index;
+            self.next_unclaimed_index = 0;
+            self.used_count = 0;
+            self.dirty_count = 0;
+            if (comptime options.track_dirty) {
+                @memset(&self.dirty_ids, ids.zero(Key));
+                self.dirty_id_index.reset();
+            }
+        }
+
         pub fn reset(self: *Self) void {
-            self.* = Self.init();
+            const claimed_count = self.claimedCount();
+            const dirty_count = self.dirty_count;
+            if (dirty_count > dirty_capacity) {
+                native_util.impossibleByInvariant("indexed arena dirty count fits its storage");
+            }
+            for (self.slots[0..claimed_count]) |*slot| slot.* = Slot{};
+            self.primary_index.reset();
+            if (comptime options.store_keys) @memset(self.slot_keys[0..claimed_count], ids.zero(Key));
+            @memset(self.free_next[0..claimed_count], free_no_index);
+            self.free_head = free_no_index;
+            self.next_unclaimed_index = 0;
+            self.used_count = 0;
+            self.dirty_count = 0;
+            if (comptime options.track_dirty) {
+                @memset(self.dirty_ids[0..dirty_count], ids.zero(Key));
+                self.dirty_id_index.reset();
+            }
         }
 
         pub fn resetRetainingPayloads(self: *Self) void {
@@ -675,8 +716,8 @@ pub fn IndexedArenaWithKeyOptions(
 
         pub fn rebuildPrimaryIndex(self: *Self) void {
             self.primary_index.reset();
-            if (comptime options.store_keys) self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
-            self.free_next = [_]FreeIndex{free_no_index} ** capacity;
+            if (comptime options.store_keys) @memset(&self.slot_keys, ids.zero(Key));
+            @memset(&self.free_next, free_no_index);
             self.free_head = free_no_index;
             self.next_unclaimed_index = @intCast(capacity);
             self.used_count = 0;
@@ -1721,6 +1762,40 @@ test "indexed arena reserves reuses indexes and tracks dirty ids" {
     try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
     try std.testing.expectEqualStrings("restored", arena.get(45).?.record.label);
     try std.testing.expectEqualStrings("restored-index", arena.get(46).?.record.label);
+}
+
+test "indexed arenas initialize and reset allocated storage in place" {
+    const Arena = DirtyTrackedIndexedArenaWithKey(u64, TestSlot, 4, 8, testSlotId);
+    var arena: Arena = undefined;
+    arena.initializeAllocated();
+
+    const first = arena.reserve(41).?;
+    first.record = .{ .id = 41, .owner = 7, .label = "first" };
+    _ = arena.reserveAtIndex(42, 3).?;
+    try std.testing.expectEqual(@as(usize, 2), arena.countInUse());
+
+    arena.reset();
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), arena.claimedCount());
+    try std.testing.expectEqual(reusableNoIndex(4), arena.free_head);
+    try std.testing.expectEqual(@as(?usize, null), arena.primary_index.lookup(41));
+    try std.testing.expectEqual(@as(usize, 0), arena.dirtyIds().len);
+    try std.testing.expectEqualStrings("", arena.slots[0].record.label);
+    try std.testing.expectEqualStrings("", arena.slots[3].record.label);
+    try std.testing.expectEqual(@as(usize, 0), arena.reserveIndex(43).?);
+}
+
+test "multimap indexes initialize allocated storage in place" {
+    const Index = MultimapIndex(4, 4, 8);
+    var index: Index = undefined;
+    index.initializeAllocated();
+
+    try std.testing.expect(index.append(41, 2));
+    try std.testing.expectEqual(@as(usize, 1), index.count(41));
+    index.reset();
+    try std.testing.expectEqual(@as(usize, 0), index.count(41));
+    try std.testing.expectEqual(no_index, index.next(2));
+    try std.testing.expect(index.append(42, 2));
 }
 
 test "indexed arena reuses tombstoned primary index slots" {
