@@ -1640,6 +1640,7 @@ pub const indexed_hot_path_tables = .{
         .reuses_service_launch_controller_tasks = session_service_bootstrap.SERVICE_LAUNCH_CONTROLLER_TASK_INDEX_RELOOKUPS == 0,
     },
     .session_manager_boot_flow = .{
+        .initializes_session_state_in_place = @hasDecl(session_manager_boot_flow.SessionManager, "initializeAllocated"),
         .delegates_service_record_lookup = @hasDecl(session_bootstrap, "serviceRecordForClass"),
         .reuses_bootstrap_task_records = session_manager_boot_flow.BOOTSTRAP_TASK_INDEX_RELOOKUPS == 0,
         .reuses_ui_authority_task_records = session_manager_boot_flow.UI_AUTHORITY_TASK_INDEX_RELOOKUPS == 0,

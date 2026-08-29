@@ -111,7 +111,11 @@ pub const SessionManager = struct {
     surface_authority_scanned_lifecycle_generation: u64 = 0,
 
     pub fn init() SessionManager {
-        return .{};
+        return initial_session_manager;
+    }
+
+    pub fn initializeAllocated(self: *SessionManager) void {
+        @memcpy(std.mem.asBytes(self), std.mem.asBytes(&initial_session_manager));
     }
 
     fn ensureConstructed(self: *SessionManager) bool {
@@ -136,7 +140,7 @@ pub const SessionManager = struct {
         self.service_graph_builder.releaseBackgroundDispatch();
         self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();
-        self.* = SessionManager.init();
+        self.initializeAllocated();
         bootstrap_driver_port.reset();
         session_service_bootstrap.resetBootedDataPlanes();
         if (self.ensureConstructed()) self.runtime_context.resetScheduler();
@@ -804,6 +808,8 @@ pub const SessionManager = struct {
         );
     }
 };
+
+const initial_session_manager = SessionManager{};
 
 fn pollFocusedInputForKernel(context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor {
     const router: *input_router_mod.Router = @ptrCast(@alignCast(context));
