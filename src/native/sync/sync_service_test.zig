@@ -2073,6 +2073,20 @@ test "sync service overlay session capacity is configurable" {
     try std.testing.expectEqual(@as(usize, 2), service.overlaySessionCapacity());
 }
 
+test "default sync service initialization overwrites allocated storage" {
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 9_401 };
+    var service: Service = undefined;
+    @memset(std.mem.asBytes(&service), 0xa5);
+
+    Service.initInto(&service, 9_400, 9_402, owner);
+
+    try std.testing.expectEqual(@as(u64, 9_400), service.service_id);
+    try std.testing.expectEqual(@as(u64, 9_402), service.task_id);
+    try std.testing.expect(service.owner.eql(owner));
+    try std.testing.expectEqual(@as(usize, 0), service.transportFrameCount());
+    try std.testing.expectEqual(@as(usize, 0), service.activeOverlaySessionCount());
+}
+
 test "sync service default state matches its exact size ceiling" {
     try std.testing.expectEqual(@as(usize, sync_service.SERVICE_SIZE_CEILING_BYTES), @sizeOf(sync_service.Service));
 }

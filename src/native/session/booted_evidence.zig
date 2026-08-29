@@ -458,7 +458,8 @@ fn runBootedNotesTypedInputLoop(
 ) bool {
     const local_device = principal.PrincipalId{ .kind = .device, .serial = 26_031 };
     const tablet_device = principal.PrincipalId{ .kind = .device, .serial = 26_032 };
-    var typed_sync_service = sync_service_mod.Service.init(context.sync_service_id, context.sync_task_id, context.sync_service_principal);
+    var typed_sync_service: sync_service_mod.Service = undefined;
+    sync_service_mod.Service.initInto(&typed_sync_service, context.sync_service_id, context.sync_task_id, context.sync_service_principal);
     var sync_port = sync_service_mod.SyncPort.init(&typed_sync_service, context.capability_table);
     const sync_authority = scenario_support.mintSyncAuthority(context, 260);
     _ = sync_port.ensureUserRoot(sync_authority, context.session_user, "notes-typed", notes_daily_user_signer) catch |err| return evidenceStepFailed("typed.ensure_user_root", err);

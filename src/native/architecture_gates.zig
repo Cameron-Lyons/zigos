@@ -1259,6 +1259,8 @@ pub const indexed_hot_path_tables = .{
         .rebuilds_loaded_indexes = @hasDecl(device_graph.Graph, "rebuildIndexes"),
     },
     .sync_service = .{
+        .initializes_default_service_state_in_place = sync_service.IN_PLACE_DEFAULT_SERVICE_INITIALIZATION and
+            @hasDecl(sync_service.Service, "initInto"),
         .initializes_storage_bound_service_state_in_place = sync_service.IN_PLACE_STORAGE_SERVICE_INITIALIZATION and
             @hasDecl(sync_service.Service, "initWithStorageInto"),
         .stores_compact_latest_mutation_indexes = sync_latest_mutations.COMPACT_MUTATION_INDEX_METADATA and

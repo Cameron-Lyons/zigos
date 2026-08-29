@@ -42,6 +42,7 @@ pub const OVERLAY_SESSION_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SIZ
 pub const OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_RELAY_FRAME_RESULT_SIZE_CEILING_BYTES;
 pub const OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES = overlay_model.OVERLAY_SESSION_SLOT_SIZE_CEILING_BYTES;
 pub const COMPACT_SERVICE_QUEUE_METADATA = true;
+pub const IN_PLACE_DEFAULT_SERVICE_INITIALIZATION = true;
 pub const IN_PLACE_STORAGE_SERVICE_INITIALIZATION = true;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 88_792;
 pub const COMPACT_REPLICATION_SUMMARY_METADATA = state_support.COMPACT_REPLICATION_SUMMARY_METADATA;
@@ -299,6 +300,11 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             service.initializeDefault(service_id, task_id, owner);
             service.owned_resident_state.initializeAllocated();
             return service;
+        }
+
+        pub fn initInto(service: *Self, service_id: u64, task_id: u64, owner: principal.PrincipalId) void {
+            service.initializeDefault(service_id, task_id, owner);
+            service.owned_resident_state.initializeAllocated();
         }
 
         pub fn initWithResidentState(
