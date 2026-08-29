@@ -79,6 +79,8 @@ SECTIONS
     } :kernel
 
     __kernel_end = .;
+    /* Keep synchronized with PRECISE_IDENTITY_BYTES in paging64.zig. */
+    __kernel_precise_identity_end = 16M;
 
     ASSERT(__kernel_start == __kernel_text_start,
            "unexpected loadable section before kernel text")
@@ -94,7 +96,7 @@ SECTIONS
            "unexpected loadable section between kernel data and bss")
     ASSERT(__kernel_bss_end == __kernel_end,
            "unexpected loadable section after kernel bss")
-    ASSERT(__kernel_relro_end <= 10M,
+    ASSERT(__kernel_relro_end <= __kernel_precise_identity_end,
            "immutable kernel image exceeds the precise identity-mapping region")
     ASSERT(__kernel_end <= 0x40000000,
            "kernel exceeds the low identity-mapping region")

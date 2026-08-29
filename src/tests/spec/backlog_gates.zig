@@ -1026,6 +1026,9 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expect(kernel_paging.GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY);
     try std.testing.expect(kernel_paging.GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY);
     try std.testing.expect(kernel_paging.DIRECT_MAP_USES_1G_PAGES);
+    try std.testing.expect(kernel_paging.PRECISE_IDENTITY_LIMIT_MATCHES_LINKER);
+    try std.testing.expectEqual(@as(usize, 8), kernel_paging.PRECISE_IDENTITY_PAGE_TABLES);
+    try std.testing.expectEqual(@as(u32, 16 * 1024 * 1024), kernel_paging.PRECISE_IDENTITY_BYTES);
     try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), kernel_paging.LOW_IDENTITY_PHYSICAL_LIMIT);
     try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024 * 1024), kernel_paging.MANAGED_PHYSICAL_BYTES);
     try std.testing.expectEqual(@as(usize, 64), kernel_paging.DIRECT_MAP_PDPT_ENTRIES);

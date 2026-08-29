@@ -854,10 +854,19 @@ const ProgramAnalysis = struct {
 fn validateKernelSectionPolicy(name: []const u8, section: Section) ParseError!void {
     if (section.flags & shf_alloc == 0) return;
 
+    const permission_flags = section.flags & (shf_write | shf_alloc | shf_execinstr);
+    if (std.mem.eql(u8, name, ".zigos_userspace_archive")) {
+        // Zig varies SHF_WRITE on custom const sections by optimization mode.
+        // The precise identity mapper seals the archive read-only before use.
+        if (permission_flags != shf_alloc and permission_flags != shf_alloc | shf_write) {
+            return error.InvalidKernelSectionPermissions;
+        }
+        return;
+    }
+
     const expected_flags: u64 = if (std.mem.eql(u8, name, ".text"))
         shf_alloc | shf_execinstr
-    else if (std.mem.eql(u8, name, ".rodata") or
-        std.mem.eql(u8, name, ".zigos_userspace_archive"))
+    else if (std.mem.eql(u8, name, ".rodata"))
         shf_alloc
     else if (std.mem.eql(u8, name, ".relro") or
         std.mem.eql(u8, name, ".data") or
@@ -866,7 +875,7 @@ fn validateKernelSectionPolicy(name: []const u8, section: Section) ParseError!vo
     else
         return error.UnexpectedAllocatedKernelSection;
 
-    if (section.flags & (shf_write | shf_alloc | shf_execinstr) != expected_flags) {
+    if (permission_flags != expected_flags) {
         return error.InvalidKernelSectionPermissions;
     }
 }
@@ -1734,6 +1743,15 @@ test "kernel ELF section policy rejects unknown and incorrectly flagged sections
     };
 
     try validateKernelSectionPolicy(".rodata", section);
+    section.flags = shf_alloc | shf_write;
+    try validateKernelSectionPolicy(".zigos_userspace_archive", section);
+    section.flags = shf_alloc;
+    try validateKernelSectionPolicy(".zigos_userspace_archive", section);
+    section.flags = shf_alloc | shf_execinstr;
+    try std.testing.expectError(
+        error.InvalidKernelSectionPermissions,
+        validateKernelSectionPolicy(".zigos_userspace_archive", section),
+    );
     section.flags = shf_alloc | shf_execinstr;
     try validateKernelSectionPolicy(".text", section);
     try std.testing.expectError(
