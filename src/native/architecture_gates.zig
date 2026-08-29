@@ -51,6 +51,7 @@ const sync_transport_harness = @import("sync/sync_transport_harness.zig");
 const sync_transport = @import("sync/sync_transport.zig");
 const device_graph = @import("sync/device_graph.zig");
 const sync_service = @import("sync/sync_service.zig");
+const transient_sync_service = @import("sync/transient_service.zig");
 const sync_latest_mutations = @import("sync/sync_service/latest_mutations.zig");
 const sync_service_test = @import("sync/sync_service_test.zig");
 const sync_adapters = @import("sync/sync_adapters.zig");
@@ -113,6 +114,8 @@ pub const sync_private_overlay = .{
         .submits_relay_packets = @hasDecl(sync_transport.Relay, "submit"),
     },
     .sync_service = .{
+        .scopes_transient_resident_state = transient_sync_service.TRANSIENT_RESIDENT_STATE_INSTANCE and
+            @hasDecl(transient_sync_service, "ResidentInstance"),
         .sends_overlay_relay_frames_via_service_port = @hasDecl(sync_service.Service, "sendOverlayRelayFrameViaService"),
     },
 };
