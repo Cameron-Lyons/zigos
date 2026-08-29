@@ -34,8 +34,8 @@ pub fn run(
     sync_service: *sync_service_mod.Service,
     storage_state: support.StorageScenarioState,
 ) support.SyncScenarioState {
-    const local_device_principal = principal.PrincipalId{ .kind = .device, .serial = 1 };
-    const tablet_device_principal = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    const local_device_principal = support.default_local_device_principal;
+    const tablet_device_principal = support.default_tablet_device_principal;
     const phone_device_principal = principal.PrincipalId{ .kind = .device, .serial = 3 };
     const user_root_signer = signing.SignerIdentity{
         .label = "zigos-user-root",
