@@ -149,21 +149,19 @@ pub const Service = struct {
     }
 
     pub fn initializeAllocated(self: *Service) void {
-        @memset(std.mem.asBytes(self), 0);
+        self.service_id = 0;
         self.owner = .{ .kind = .service, .serial = 0 };
-        if (comptime !heap_backed_bundle_arena) {
-            self.slots = BundleArena.init();
+        if (comptime heap_backed_bundle_arena) {
+            self.slots = null;
+        } else {
+            self.slots.initializeAllocated();
         }
         self.trust_store.initializeAllocated();
     }
 
     pub fn reset(self: *Service) void {
         self.deinit();
-        if (comptime builtin.target.os.tag == .freestanding) {
-            self.initializeAllocated();
-        } else {
-            self.* = Service.init();
-        }
+        self.initializeAllocated();
     }
 
     pub fn deinit(self: *Service) void {

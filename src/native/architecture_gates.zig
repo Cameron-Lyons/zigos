@@ -96,6 +96,7 @@ fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
 const ProbeArena = indexed_arena.IndexedArenaWithKey(u64, ProbeArenaSlot, 1, 2, probeArenaKey);
 const ProbeGenerationalArena = indexed_arena.GenerationalArena("ProbeHandle", ProbeArenaSlot, 1);
 const ProbePagedArena = indexed_arena.PagedIndexedArenaWithKey(u64, ProbeArenaSlot, 1, 1, 2, probeArenaKey);
+const ProbeMultimap = indexed_arena.MultimapIndex(1, 1, 2);
 
 pub const sync_private_overlay = .{
     .native_transport = .{
@@ -119,6 +120,8 @@ pub const indexed_hot_path_tables = .{
     .indexed_arena = .{
         .tracks_used_count = @hasField(ProbeArena, "used_count"),
         .inserts_complete_values_at_exact_indexes = @hasDecl(ProbeArena, "insertIndexAt"),
+        .initializes_allocated_arenas_in_place = @hasDecl(ProbeArena, "initializeAllocated") and
+            @hasDecl(ProbeMultimap, "initializeAllocated"),
         .uses_split_primary_index_storage = id_index.SlotIndex(256) == u8 and
             id_index.SlotIndex(257) == u16 and
             @sizeOf(id_index.Table(1_536)) == 16_896,
@@ -751,6 +754,8 @@ pub const indexed_hot_path_tables = .{
     },
     .package_service = .{
         .uses_bundle_arena = @hasDecl(package_service.BundleArena, "reserve"),
+        .initializes_bundle_arena_in_place = @hasDecl(package_service.BundleArena, "initializeAllocated") and
+            @hasDecl(package_service.Service, "initializeAllocated"),
         .derives_revision_metadata_from_retained_slots = package_service.DERIVES_REVISION_METADATA_FROM_RETAINED_SLOTS and
             !@hasField(package_service.InstalledBundle, "revision_count") and
             !@hasField(package_service.InstalledBundle, "next_revision_id"),
