@@ -400,6 +400,11 @@ pub const CheckpointStore = struct {
     valid: bool = false,
     snapshot: SessionSnapshot = .{},
 
+    pub fn initializeAllocated(self: *CheckpointStore) void {
+        self.valid = false;
+        self.snapshot = undefined;
+    }
+
     pub fn reset(self: *CheckpointStore) void {
         self.* = .{};
     }

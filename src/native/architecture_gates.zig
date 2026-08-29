@@ -86,6 +86,8 @@ const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
 const supervisor = @import("session/supervisor.zig");
 const daily_journey_state = @import("session/daily_journey_state.zig");
+const production_evidence_state = @import("session/production_evidence_state.zig");
+const transient_state = @import("session/transient_state.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const session_bootstrap = @import("session/session_bootstrap.zig");
 const session_manager_boot_flow = @import("session/session_manager_boot_flow.zig");
@@ -1671,6 +1673,14 @@ pub const indexed_hot_path_tables = .{
         .heap_backs_state_on_freestanding = daily_journey_state.HEAP_BACKED_ON_FREESTANDING and
             daily_journey_state.FREESTANDING_HANDLE_SIZE_BYTES <= daily_journey_state.HANDLE_SIZE_CEILING_BYTES,
         .keeps_fixed_state_within_ceiling = @sizeOf(daily_journey_state.State) <= daily_journey_state.STATE_SIZE_CEILING_BYTES,
+    },
+    .production_evidence_state = .{
+        .initializes_fixed_state_in_place = @hasDecl(production_evidence_state.State, "initializeAllocated") and
+            @hasDecl(compositor_session.CheckpointStore, "initializeAllocated"),
+        .heap_backs_state_on_freestanding = production_evidence_state.HEAP_BACKED_ON_FREESTANDING and
+            production_evidence_state.FREESTANDING_HANDLE_SIZE_BYTES <= production_evidence_state.HANDLE_SIZE_CEILING_BYTES,
+        .keeps_fixed_state_within_ceiling = @sizeOf(production_evidence_state.State) <= production_evidence_state.STATE_SIZE_CEILING_BYTES,
+        .uses_shared_scoped_state_ownership = @hasDecl(transient_state, "ScopedState"),
     },
     .session_manager_boot_flow = .{
         .initializes_session_state_in_place = @hasDecl(session_manager_boot_flow.SessionManager, "initializeAllocated"),

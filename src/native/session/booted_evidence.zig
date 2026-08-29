@@ -12,6 +12,7 @@ const native_ux = @import("../platform/native_ux.zig");
 const notification_center = @import("../services/notification_center.zig");
 const permission_flows = @import("../demo/permission_flows.zig");
 const permission_review_service = @import("../policy/permission_review_service.zig");
+const production_evidence_state = @import("production_evidence_state.zig");
 const policy_component_port = @import("../policy/policy_component_port.zig");
 const policy_mediation = @import("../policy/policy_mediation.zig");
 const review_component_port = @import("../policy/review_component_port.zig");
@@ -74,8 +75,11 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         "allow local lease=25",
         "allow local lease=15",
     };
-    var modeled_review_input: permission_review_service.ModeledInputSource = undefined;
-    modeled_review_input.initDefaultInto() catch |err| native_util.bootProofFailure("booted evidence", err);
+    var evidence_state_instance: production_evidence_state.Instance = .{};
+    evidence_state_instance.initInto() catch |err| native_util.bootProofFailure("booted evidence", err);
+    defer evidence_state_instance.deinit();
+    const evidence_state = evidence_state_instance.ptr();
+    const modeled_review_input = &evidence_state.modeled_input;
     var expected_physical_review_reports: usize = 0;
     for (physical_review_commands) |command| {
         modeled_review_input.enqueueTextCommand(
@@ -94,14 +98,13 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     );
     review_service.compositor = manager.compositorSessionPtr();
     review_service.ux = manager.reviewUxControllerPtr() catch |err| native_util.bootProofFailure("booted evidence", err);
-    review_service.bindModeledInput(&modeled_review_input);
-    var compositor_checkpoint_store = compositor_session.CheckpointStore{};
+    review_service.bindModeledInput(modeled_review_input);
     var compositor_service = compositor_session.Service.initWithCheckpoint(
         graph.state.services.compositor_service.id,
         graph.service_bindings.bindingFor(.compositor_ui_session).task_id,
         manager.runtimePtr(),
         manager.compositorSessionPtr(),
-        &compositor_checkpoint_store,
+        &evidence_state.compositor_checkpoint,
     );
     review_service.bindCompositorService(&compositor_service);
     common.printBootMarker(boot_markers.compositor_service_ready);
@@ -302,7 +305,7 @@ fn runNotesDailyDriverJourney(
     const sync_authority = scenario_support.mintSyncAuthority(context, 221);
     const install_bundle = signedNotesDailyBundle(0) catch |err| return evidenceStepFailed("daily.sign_install_bundle", err);
     const update_bundle = signedNotesDailyBundle(1) catch |err| return evidenceStepFailed("daily.sign_update_bundle", err);
-    var state_instance: daily_journey_state.Instance = undefined;
+    var state_instance: daily_journey_state.Instance = .{};
     state_instance.initInto(notes_daily_public_store_source, .beta) catch |err| return evidenceStepFailed("daily.initialize_state", err);
     defer state_instance.deinit();
     const state = state_instance.ptr();
