@@ -350,7 +350,8 @@ pub fn run(
         _ = context.supervisor.requestRestart(context.sync_service_id, 106);
         _ = context.runtime.rehostTask(context.sync_task_id, 106) catch |err| native_util.bootProofFailure("sync scenarios", err);
         var restarted_sync_resident = sync_service_mod.ResidentState{};
-        var restarted_sync_instance = transient_sync_service.Instance.init(
+        var restarted_sync_instance: transient_sync_service.Instance = undefined;
+        restarted_sync_instance.initInto(
             context.sync_service_id,
             context.sync_task_id,
             context.sync_service_principal,

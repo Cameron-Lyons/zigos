@@ -254,8 +254,15 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
             return .{};
         }
 
+        pub fn initializeAllocated(self: *Self) void {
+            for (&self.buckets) |*bucket| bucket.* = .{};
+            @memset(&self.next_by_slot, empty_link);
+            @memset(&self.previous_by_slot, empty_link);
+            @memset(&self.bucket_by_slot, empty_link);
+        }
+
         pub fn reset(self: *Self) void {
-            self.* = Self.init();
+            self.initializeAllocated();
         }
 
         pub fn count(self: *const Self, key: u64) usize {
@@ -363,7 +370,9 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
 
 test "compact multimap traverses backward and unlinks arbitrary slots" {
     const Index = CompactMultimapIndex(5, 3);
-    var index = Index.init();
+    var index: Index = undefined;
+    @memset(std.mem.asBytes(&index), 0xa5);
+    index.initializeAllocated();
 
     try std.testing.expect(index.append(7, 0));
     try std.testing.expect(index.append(7, 2));
