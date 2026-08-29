@@ -217,7 +217,8 @@ pub const TrustBoot = struct {
         const workspace_id = manager.workspace_id;
         const sync_record = self.supervisor.findByClass(.sync_replication) orelse return false;
         const sync_resident_state = self.native_store.syncResidentStatePtr() catch return false;
-        var sync_instance_storage = transient_sync_service.Instance.init(
+        var sync_instance_storage: transient_sync_service.Instance = undefined;
+        sync_instance_storage.initInto(
             sync_record.id,
             graph.service_bindings.bindingFor(.sync_replication).task_id,
             sync_record.owner,
