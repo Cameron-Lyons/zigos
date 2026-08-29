@@ -462,7 +462,8 @@ pub const TrustBoot = struct {
 
         const root = @import("root");
         if (!@hasDecl(root, "production_artifact_manifest")) return false;
-        const generated_manifest = measured_boot.buildArtifactManifestFromGenerated(root.production_artifact_manifest) catch return false;
+        var generated_manifest: measured_boot.BuildArtifactManifest = undefined;
+        measured_boot.buildArtifactManifestFromGeneratedInto(&generated_manifest, root.production_artifact_manifest) catch return false;
         if (!measured_boot.verifyBuildArtifactManifest(&generated_manifest)) return false;
 
         const bootloader_source_digest = bootloaderSourceDigest() catch return false;

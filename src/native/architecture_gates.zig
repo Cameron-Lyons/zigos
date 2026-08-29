@@ -1011,6 +1011,9 @@ pub const indexed_hot_path_tables = .{
             @typeInfo(@TypeOf(kernel_hardware_proof.ProbeFacts.attestationRootLifecycleFacts)).@"fn".params[0].type.? == *const kernel_hardware_proof.ProbeFacts,
     },
     .measured_boot = .{
+        .builds_generated_artifact_manifests_in_place = measured_boot.IN_PLACE_GENERATED_BUILD_ARTIFACT_MANIFEST and
+            @hasDecl(measured_boot, "buildArtifactManifestFromGeneratedInto") and
+            !@hasDecl(measured_boot, "buildArtifactManifestFromGenerated"),
         .stores_compact_measurement_metadata = measured_boot.COMPACT_MEASUREMENT_METADATA and
             @FieldType(measured_boot.MeasurementRecord, "label_len") == u8 and
             @FieldType(measured_boot.BuildArtifactEntry, "label_len") == u8,
