@@ -16,15 +16,16 @@ pub const InitError = sync_service.Error || error{NoSpaceLeft};
 pub const Instance = struct {
     backing: Backing = if (HEAP_BACKED_ON_FREESTANDING) null else undefined,
 
-    pub fn init(
+    pub fn initInto(
+        instance: *Instance,
         service_id: u64,
         task_id: u64,
         owner: principal.PrincipalId,
         storage: *storage_service.Service,
         resident_state: *sync_service.ResidentState,
-    ) InitError!Instance {
-        var instance = Instance{};
+    ) InitError!void {
         if (comptime HEAP_BACKED_ON_FREESTANDING) {
+            instance.backing = null;
             const allocation = kernel_memory.kmalloc(@sizeOf(sync_service.Service)) orelse
                 return error.NoSpaceLeft;
             errdefer kernel_memory.kfree(allocation);
@@ -39,7 +40,8 @@ pub const Instance = struct {
             );
             instance.backing = service;
         } else {
-            instance.backing = try sync_service.Service.initWithStorage(
+            try sync_service.Service.initWithStorageInto(
+                &instance.backing,
                 service_id,
                 task_id,
                 owner,
@@ -47,7 +49,6 @@ pub const Instance = struct {
                 resident_state,
             );
         }
-        return instance;
     }
 
     pub fn deinit(self: *Instance) void {

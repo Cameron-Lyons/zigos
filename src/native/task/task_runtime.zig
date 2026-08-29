@@ -38,6 +38,7 @@ pub const DEFAULT_SYNTHETIC_IMAGE_BYTES = model.DEFAULT_SYNTHETIC_IMAGE_BYTES;
 pub const TaskStateCount = u8;
 pub const COMPACT_LIFECYCLE_METADATA = true;
 pub const SNAPSHOT_RESTORE_REUSES_LIVE_COLD_BACKING = true;
+pub const IN_PLACE_RUNTIME_STATE_INITIALIZATION = true;
 pub const TERMINATION_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const TERMINATION_TASK_SLOT_LOOKUPS: u8 = 1;
 pub const RESOLVED_TERMINATION_SLOT_RELOOKUPS: u8 = 0;
@@ -284,10 +285,10 @@ pub const Runtime = struct {
         initializeTaskMultimapIndex(&self.task_initial_component_label_index);
         self.task_lifecycle_generation = 1;
         if (comptime !heap_backed_task_cold) {
-            self.task_cold = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS;
+            for (&self.task_cold) |*cold| resetTaskCold(cold);
         }
         if (comptime !heap_backed_address_spaces) {
-            self.address_spaces = model.AddressSpaceArena.init();
+            self.address_spaces.initializeAllocated();
         }
     }
 
@@ -1298,10 +1299,19 @@ fn createTaskIdTestTask(runtime: *Runtime, owner_serial: u64) Error!*TaskRecord 
 
 test "allocated runtime initialization preserves empty indexes and id sequences" {
     var runtime: Runtime = undefined;
+    @memset(std.mem.asBytes(&runtime), 0xa5);
     runtime.initializeAllocated();
 
     try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
     try std.testing.expectEqual(@as(u64, 1), runtime.taskLifecycleGeneration());
+    if (comptime !heap_backed_task_cold) {
+        try std.testing.expectEqual(@as(u64, 1), runtime.task_cold[0].capability_generation);
+        try std.testing.expectEqual(@as(u64, 1), runtime.task_cold[MAX_TASKS - 1].capability_generation);
+        try std.testing.expectEqual(@as(u64, 0), runtime.task_cold[MAX_TASKS - 1].capability_ids[MAX_TASK_CAPABILITIES - 1]);
+    }
+    if (comptime !heap_backed_address_spaces) {
+        try std.testing.expectEqual(@as(usize, 0), runtime.address_spaces.claimedCount());
+    }
 
     const task = try createTaskIdTestTask(&runtime, 42);
     try std.testing.expectEqual(@as(u64, 1), task.id);

@@ -216,7 +216,11 @@ test "sync service persists platform-backed device key bindings across restart" 
     var storage = storage_service.Service.initWithStore(9_310, 9_311, storage_owner, &storage_checkpoint_store);
     var resident = ResidentState{};
     var service: Service = undefined;
+    @memset(std.mem.asBytes(&service), 0xa5);
     try Service.initWithStorageInto(&service, 9_320, 9_321, sync_owner, &storage, &resident);
+    try std.testing.expectEqual(@as(u64, 9_320), service.service_id);
+    try std.testing.expectEqual(@as(usize, 0), service.transportFrameCount());
+    try std.testing.expectEqual(@as(usize, 0), service.activeOverlaySessionCount());
     var capabilities = capability.CapabilityTable.init();
     var port = sync_service.SyncPort.init(&service, &capabilities);
     const authority_capability = try mintSyncServiceAuthority(&capabilities, &service, sync_owner);
