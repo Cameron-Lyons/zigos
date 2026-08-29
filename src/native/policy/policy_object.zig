@@ -13,6 +13,7 @@ pub const MAX_ALLOW_LIST = model.MAX_ALLOW_LIST;
 pub const MAX_LABEL_BYTES = model.MAX_LABEL_BYTES;
 pub const COMPACT_POLICY_METADATA = model.COMPACT_POLICY_METADATA;
 pub const DERIVES_POLICY_IDS_FROM_ARENA_COUNT = true;
+pub const IN_PLACE_DIRECTORY_INITIALIZATION = true;
 pub const POLICY_OBJECT_SIZE_CEILING_BYTES = model.POLICY_OBJECT_SIZE_CEILING_BYTES;
 pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 33_232;
 const POLICY_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
@@ -66,6 +67,11 @@ pub const Directory = struct {
 
     pub fn init() Directory {
         return .{};
+    }
+
+    pub fn initializeAllocated(self: *Directory) void {
+        self.policies.initializeAllocated();
+        self.scope_index.initializeAllocated();
     }
 
     pub fn create(
@@ -1199,7 +1205,9 @@ fn backgroundActivityIsVisible(visibility: manifest.BackgroundVisibility) bool {
 }
 
 test "policy objects remain signed scoped and enforce enterprise controls" {
-    var directory = Directory.init();
+    var directory: Directory = undefined;
+    @memset(std.mem.asBytes(&directory), 0xa5);
+    directory.initializeAllocated();
     const policy = try directory.create(.{
         .scope = .organization,
         .subject_id = 77,

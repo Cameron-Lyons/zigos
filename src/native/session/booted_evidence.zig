@@ -299,11 +299,14 @@ fn runNotesDailyDriverJourney(
 
     var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
     const sync_authority = scenario_support.mintSyncAuthority(context, 221);
-    var policies = policy_object.Directory.init();
-    var journey_ux = native_ux.Controller.init();
+    var policies: policy_object.Directory = undefined;
+    policies.initializeAllocated();
+    var journey_ux: native_ux.Controller = undefined;
+    journey_ux.initializeAllocated();
     const install_bundle = signedNotesDailyBundle(0) catch |err| return evidenceStepFailed("daily.sign_install_bundle", err);
     const update_bundle = signedNotesDailyBundle(1) catch |err| return evidenceStepFailed("daily.sign_update_bundle", err);
-    var store_channel = public_store.Channel.init(notes_daily_public_store_source, .beta);
+    var store_channel: public_store.Channel = undefined;
+    store_channel.initializeAllocated(notes_daily_public_store_source, .beta);
     store_channel.trustPublisher("zigos.dev", signing.publicKey(notes_daily_bundle_signer) catch |err| return evidenceStepFailed("daily.store_signer_public_key", err)) catch |err| return evidenceStepFailed("daily.store_trust_publisher", err);
     store_channel.publish(store_channel.prepareRelease(install_bundle, &notes_daily_v1_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_install_release", err);
     store_channel.publish(store_channel.prepareRelease(update_bundle, &notes_daily_v2_store_assets, 1)) catch |err| return evidenceStepFailed("daily.publish_update_release", err);

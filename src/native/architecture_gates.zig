@@ -783,6 +783,8 @@ pub const indexed_hot_path_tables = .{
             @sizeOf(package_service.InstalledBundle) <= package_service.INSTALLED_BUNDLE_SIZE_CEILING_BYTES,
     },
     .public_store = .{
+        .initializes_channel_state_in_place = public_store.IN_PLACE_CHANNEL_INITIALIZATION and
+            @hasDecl(public_store.Channel, "initializeAllocated"),
         .uses_bounded_release_scan = public_store.BOUNDED_RELEASE_SCAN and
             public_store.RELEASE_SCAN_BOUND == public_store.MAX_RELEASES_PER_CHANNEL,
         .uses_bounded_trusted_publisher_scan = public_store.BOUNDED_TRUSTED_PUBLISHER_SCAN and
@@ -908,6 +910,8 @@ pub const indexed_hot_path_tables = .{
             !@hasField(network_policy.Directory, "next_policy_id"),
     },
     .policy_object = .{
+        .initializes_directory_state_in_place = policy_object.IN_PLACE_DIRECTORY_INITIALIZATION and
+            @hasDecl(policy_object.Directory, "initializeAllocated"),
         .stores_compact_policy_metadata = policy_object.COMPACT_POLICY_METADATA and
             @FieldType(policy_object.PolicyObject, "label_len") == u8 and
             @FieldType(policy_object.PolicyObject, "allowed_install_source_count") == u8 and
