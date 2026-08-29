@@ -175,7 +175,8 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         scenario_support.diagnostic_ledger_signer,
     ) catch |err| native_util.bootProofFailure("booted evidence", err);
     lifecycle_context.update_ledger.absorb(&early_boot_ledger) catch |err| native_util.bootProofFailure("booted evidence", err);
-    var sync_service_instance = transient_sync_service.Instance.init(
+    var sync_service_instance: transient_sync_service.Instance = undefined;
+    sync_service_instance.initInto(
         lifecycle_context.sync_service_id,
         lifecycle_context.sync_task_id,
         lifecycle_context.sync_service_principal,
