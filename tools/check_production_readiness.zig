@@ -1473,15 +1473,19 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "NUC11TNKi5 QEMU validation must use hardware-backed x2APIC when KVM is available: {s}", .{snippet});
         }
     }
-    const required_compact_benchmark_boot_snippets = [_][]const u8{
-        "boot_profile == .benchmark",
+    const required_compact_kernel_boot_snippets = [_][]const u8{
+        "const boot_link = b.addSystemCommand",
         "--strip-debug",
+        "const boot_kernel = boot_link.addOutputFileArg",
         "qemu_iso.addFileArg(boot_kernel)",
     };
-    for (required_compact_benchmark_boot_snippets) |snippet| {
+    for (required_compact_kernel_boot_snippets) |snippet| {
         if (std.mem.indexOf(u8, kernel_build_source, snippet) == null) {
-            try common.addError(errors, allocator, "benchmark boot media must use the debug-stripped diagnostic-ELF derivative: {s}", .{snippet});
+            try common.addError(errors, allocator, "kernel boot media must use a debug-stripped diagnostic-ELF derivative: {s}", .{snippet});
         }
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "const boot_kernel = if") != null) {
+        try common.addError(errors, allocator, "debug stripping must apply to every kernel boot profile", .{});
     }
     if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
         try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});

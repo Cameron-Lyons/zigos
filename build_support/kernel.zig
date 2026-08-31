@@ -499,26 +499,23 @@ pub fn addKernelArtifact(
     const linked_kernel = link.addOutputFileArg(name);
     link.addFileArg(kernel_object.getEmittedBin());
 
-    const boot_kernel = if (boot_profile == .benchmark) boot: {
-        const boot_link = b.addSystemCommand(&.{
-            b.graph.zig_exe,
-            "ld.lld",
-            "-m",
-            "elf_x86_64",
-            "--gc-sections",
-            "--strip-debug",
-            "-z",
-            "common-page-size=4096",
-            "-z",
-            "max-page-size=4096",
-            "-T",
-        });
-        boot_link.addFileArg(b.path("src/arch/x86_64/linker.ld"));
-        boot_link.addArg("-o");
-        const boot_output = boot_link.addOutputFileArg(b.fmt("{s}.boot", .{name}));
-        boot_link.addFileArg(kernel_object.getEmittedBin());
-        break :boot boot_output;
-    } else linked_kernel;
+    const boot_link = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "ld.lld",
+        "-m",
+        "elf_x86_64",
+        "--gc-sections",
+        "--strip-debug",
+        "-z",
+        "common-page-size=4096",
+        "-z",
+        "max-page-size=4096",
+        "-T",
+    });
+    boot_link.addFileArg(b.path("src/arch/x86_64/linker.ld"));
+    boot_link.addArg("-o");
+    const boot_kernel = boot_link.addOutputFileArg(b.fmt("{s}.boot", .{name}));
+    boot_link.addFileArg(kernel_object.getEmittedBin());
 
     const validate_qemu_image = b.addSystemCommand(&.{"bash"});
     validate_qemu_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
