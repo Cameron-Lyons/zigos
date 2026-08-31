@@ -30,6 +30,7 @@ pub const COMPACT_PATH_SET_METADATA = true;
 pub const COMPACT_PATH_SET_FINGERPRINTS = true;
 pub const BOUNDS_SYNC_RECORD_PATHS_TO_SCHEMA = true;
 pub const TRACKS_STALE_SYNC_PATHS_BY_INDEX = true;
+pub const BORROWS_PERSISTENT_STATE_COLLECTIONS = true;
 pub const StalePathIndex = u8;
 pub const MAX_RECORD_PATH_BYTES: usize = record_prefix.len + 1 + 1 + max_u64_decimal_bytes + 1 +
     max_principal_kind_decimal_bytes + 1 + max_u64_decimal_bytes + 1 + max_u64_hex_bytes;
@@ -191,43 +192,43 @@ fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet)
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     try out.add(transport_cursor_path);
 
-    for (resident.persisted_state.graph.user_roots.slots) |slot| {
+    for (&resident.persisted_state.graph.user_roots.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try userRootPath(path_buffer[0..], slot.root.principal_id));
     }
-    for (resident.persisted_state.graph.devices.slots) |slot| {
+    for (&resident.persisted_state.graph.devices.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try devicePath(path_buffer[0..], slot.device.principal_id));
     }
-    for (resident.persisted_state.network_policies.policies.slots) |slot| {
+    for (&resident.persisted_state.network_policies.policies.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try networkPolicyPath(path_buffer[0..], slot.policy.id));
     }
-    for (resident.persisted_state.workspace_policies.slots) |slot| {
+    for (&resident.persisted_state.workspace_policies.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try workspacePolicyPath(path_buffer[0..], slot.policy.workspace_id));
     }
-    for (resident.persisted_state.replica_entries.slots) |slot| {
+    for (&resident.persisted_state.replica_entries.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try replicaPath(path_buffer[0..], slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash()));
     }
-    for (resident.persisted_state.conflicts.slots) |slot| {
+    for (&resident.persisted_state.conflicts.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try conflictPath(path_buffer[0..], slot.conflict.workspace_id, slot.conflict.device_id, workspace.pathHash(slot.conflict.pathSlice())));
     }
-    for (resident.persisted_state.database_contracts.slots) |slot| {
+    for (&resident.persisted_state.database_contracts.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try databaseContractPath(path_buffer[0..], slot.contract.id));
     }
-    for (resident.persisted_state.overlays.slots) |slot| {
+    for (&resident.persisted_state.overlays.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try overlayPath(path_buffer[0..], slot.overlay.workspace_id));
     }
-    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.outbound_transport_frames.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try transportFramePath(path_buffer[0..], .outbound, slot.frame.id));
     }
-    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.inbound_transport_frames.slots) |*slot| {
         if (!slot.in_use) continue;
         try out.add(try transportFramePath(path_buffer[0..], .inbound, slot.frame.id));
     }
@@ -261,7 +262,7 @@ fn deleteStaleRecords(
 fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.graph.user_roots.slots) |slot| {
+    for (&resident.persisted_state.graph.user_roots.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try userRootPath(path_buffer[0..], slot.root.principal_id);
         const bytes = try encodeUserRoot(payload[0..], &slot.root);
@@ -272,7 +273,7 @@ fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, reside
 fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.graph.devices.slots) |slot| {
+    for (&resident.persisted_state.graph.devices.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try devicePath(path_buffer[0..], slot.device.principal_id);
         const bytes = try encodeDevice(payload[0..], &slot.device);
@@ -283,7 +284,7 @@ fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident
 fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.network_policies.policies.slots) |slot| {
+    for (&resident.persisted_state.network_policies.policies.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try networkPolicyPath(path_buffer[0..], slot.policy.id);
         const bytes = try encodeNetworkPolicy(payload[0..], &slot.policy);
@@ -294,7 +295,7 @@ fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, 
 fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.workspace_policies.slots) |slot| {
+    for (&resident.persisted_state.workspace_policies.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try workspacePolicyPath(path_buffer[0..], slot.policy.workspace_id);
         const bytes = try encodeWorkspacePolicy(payload[0..], &slot.policy);
@@ -305,7 +306,7 @@ fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64
 fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.replica_entries.slots) |slot| {
+    for (&resident.persisted_state.replica_entries.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try replicaPath(path_buffer[0..], slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash());
         const bytes = try encodeReplica(payload[0..], &slot.entry);
@@ -316,7 +317,7 @@ fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, residen
 fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.conflicts.slots) |slot| {
+    for (&resident.persisted_state.conflicts.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try conflictPath(path_buffer[0..], slot.conflict.workspace_id, slot.conflict.device_id, workspace.pathHash(slot.conflict.pathSlice()));
         const bytes = try encodeConflict(payload[0..], &slot.conflict);
@@ -327,7 +328,7 @@ fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, reside
 fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.database_contracts.slots) |slot| {
+    for (&resident.persisted_state.database_contracts.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try databaseContractPath(path_buffer[0..], slot.contract.id);
         const bytes = try encodeDatabaseContract(payload[0..], &slot.contract);
@@ -338,7 +339,7 @@ fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64
 fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.overlays.slots) |slot| {
+    for (&resident.persisted_state.overlays.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try overlayPath(path_buffer[0..], slot.overlay.workspace_id);
         const bytes = try encodeOverlay(payload[0..], &slot.overlay);
@@ -349,16 +350,16 @@ fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, residen
 fn persistTransportFrames(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
-    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.outbound_transport_frames.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try transportFramePath(path_buffer[0..], .outbound, slot.frame.id);
-        const bytes = try encodeTransportFrame(payload[0..], .outbound, &slot);
+        const bytes = try encodeTransportFrame(payload[0..], .outbound, slot);
         try putRecord(storage, workspace_id, path, bytes, tick);
     }
-    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.inbound_transport_frames.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try transportFramePath(path_buffer[0..], .inbound, slot.frame.id);
-        const bytes = try encodeTransportFrame(payload[0..], .inbound, &slot);
+        const bytes = try encodeTransportFrame(payload[0..], .inbound, slot);
         try putRecord(storage, workspace_id, path, bytes, tick);
     }
 }
@@ -962,22 +963,22 @@ fn recordObjectId(workspace_id: u64, path: []const u8) u64 {
 
 fn repairNextIds(resident: *state_support.ResidentState) Error!void {
     var next_overlay_id: u64 = 1;
-    for (resident.persisted_state.overlays.slots) |slot| {
+    for (&resident.persisted_state.overlays.slots) |*slot| {
         if (slot.in_use) next_overlay_id = @max(next_overlay_id, slot.overlay.id + 1);
     }
     resident.persisted_state.next_overlay_id = next_overlay_id;
 
     var next_contract_id: u64 = 1;
-    for (resident.persisted_state.database_contracts.slots) |slot| {
+    for (&resident.persisted_state.database_contracts.slots) |*slot| {
         if (slot.in_use) next_contract_id = @max(next_contract_id, slot.contract.id + 1);
     }
     resident.persisted_state.next_contract_id = next_contract_id;
     resident.persisted_state.graph.rebuildIndexes();
     resident.persisted_state.network_policies.rebuildIndexes();
-    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.outbound_transport_frames.slots) |*slot| {
         if (slot.in_use) try validateTransportFrameCursor(resident.persisted_state.next_transport_frame_id, slot.frame.id);
     }
-    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.inbound_transport_frames.slots) |*slot| {
         if (slot.in_use) try validateTransportFrameCursor(resident.persisted_state.next_transport_frame_id, slot.frame.id);
     }
 }
@@ -989,10 +990,10 @@ fn validateTransportFrameCursor(next_frame_id: u64, retained_frame_id: u64) Erro
 
 fn retainedFrameCoversTransportCursor(resident: *const state_support.ResidentState) bool {
     const next_frame_id = resident.persisted_state.next_transport_frame_id;
-    for (resident.persisted_state.outbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.outbound_transport_frames.slots) |*slot| {
         if (slot.in_use and slot.next_frame_id_after_publish == next_frame_id) return true;
     }
-    for (resident.persisted_state.inbound_transport_frames.slots) |slot| {
+    for (&resident.persisted_state.inbound_transport_frames.slots) |*slot| {
         if (slot.in_use and slot.next_frame_id_after_publish == next_frame_id) return true;
     }
     return false;
