@@ -13,6 +13,7 @@ pub const BOUNDED_TRUSTED_PUBLISHER_SCAN = true;
 pub const DENSE_RELEASE_TABLE = true;
 pub const DENSE_TRUSTED_PUBLISHER_TABLE = true;
 pub const DIRECT_RELEASE_IDENTITY_COMPARISON = true;
+pub const IN_PLACE_CHANNEL_INITIALIZATION = true;
 pub const RELEASE_SCAN_BOUND: usize = MAX_RELEASES_PER_CHANNEL;
 pub const TRUSTED_PUBLISHER_SCAN_BOUND: usize = MAX_TRUSTED_PUBLISHERS_PER_CHANNEL;
 pub const CHANNEL_SIZE_CEILING_BYTES: usize = 5_816;
@@ -132,6 +133,16 @@ pub const Channel = struct {
             .source_identity = source_identity,
             .update_channel = update_channel,
         };
+    }
+
+    pub fn initializeAllocated(self: *Channel, source_identity: []const u8, update_channel: manifest.UpdateChannel) void {
+        self.source_identity = source_identity;
+        self.update_channel = update_channel;
+        for (&self.releases) |*release| release.* = emptyRelease();
+        self.release_count = 0;
+        self.transparency_root = crypto_hash.zero_digest;
+        for (&self.trusted_publishers) |*publisher| publisher.* = .{};
+        self.trusted_publisher_count = 0;
     }
 
     pub fn prepareRelease(
@@ -553,7 +564,9 @@ test "public store publishes signed asset releases and resolves package install 
     };
     v2.signature = try signStoreTestBundle(signer, v2);
 
-    var channel = Channel.init("store:zigos/public", .beta);
+    var channel: Channel = undefined;
+    @memset(std.mem.asBytes(&channel), 0xa5);
+    channel.initializeAllocated("store:zigos/public", .beta);
     try channel.trustPublisher("zigos.dev", try signing.publicKey(signer));
     try channel.publish(channel.prepareRelease(v1, &v1_release_assets, 1));
     try channel.publish(channel.prepareRelease(v2, &v2_release_assets, 2));
