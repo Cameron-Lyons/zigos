@@ -50,7 +50,6 @@ pub fn run(
         .label = "paired-device",
         .seed = signing.seedFromByte(0xA5),
     };
-    const local_device_principal = principal.PrincipalId{ .kind = .device, .serial = 1 };
     const recovery_device_principal = principal.PrincipalId{
         .kind = .device,
         .serial = 4,
@@ -83,7 +82,7 @@ pub fn run(
         .storage_state = storage_state,
         .sync_state = sync_state,
         .core_health_service_ids = core_health_service_ids[0..],
-        .local_device_principal = local_device_principal,
+        .local_device_principal = support.default_local_device_principal,
         .capability_table = context.capability_table,
         .sync_authority = sync_authority,
     };

@@ -189,7 +189,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     if (!runNotesDailyDriverJourney(manager, graph, &lifecycle_context, sync_service, &compositor_service, storage_state)) {
         return false;
     }
-    if (!runBootedNotesTypedInputLoop(graph, &lifecycle_context, &compositor_service, storage_state)) {
+    if (!runBootedNotesTypedInputLoop(graph, &lifecycle_context, sync_service, &compositor_service, storage_state)) {
         return false;
     }
     return true;
@@ -453,34 +453,14 @@ fn printJourneyControlRejectedMarker(control: production_journey.ProductionJourn
 fn runBootedNotesTypedInputLoop(
     graph: anytype,
     context: *scenario_support.Context,
+    sync_service: *sync_service_mod.Service,
     compositor_service: *compositor_session.Service,
     storage_state: scenario_support.StorageScenarioState,
 ) bool {
-    const local_device = principal.PrincipalId{ .kind = .device, .serial = 26_031 };
-    const tablet_device = principal.PrincipalId{ .kind = .device, .serial = 26_032 };
-    var typed_sync_service: sync_service_mod.Service = undefined;
-    sync_service_mod.Service.initInto(&typed_sync_service, context.sync_service_id, context.sync_task_id, context.sync_service_principal);
-    var sync_port = sync_service_mod.SyncPort.init(&typed_sync_service, context.capability_table);
+    const local_device = scenario_support.default_local_device_principal;
+    const tablet_device = scenario_support.default_tablet_device_principal;
+    var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
     const sync_authority = scenario_support.mintSyncAuthority(context, 260);
-    _ = sync_port.ensureUserRoot(sync_authority, context.session_user, "notes-typed", notes_daily_user_signer) catch |err| return evidenceStepFailed("typed.ensure_user_root", err);
-    _ = sync_port.enrollTrustedDevice(
-        sync_authority,
-        context.session_user,
-        local_device,
-        "local-devbox",
-        notes_daily_user_signer,
-        notes_daily_primary_device_signer,
-        260,
-    ) catch |err| return evidenceStepFailed("typed.enroll_local_device", err);
-    _ = sync_port.enrollTrustedDevice(
-        sync_authority,
-        context.session_user,
-        tablet_device,
-        "tablet",
-        notes_daily_user_signer,
-        notes_daily_paired_device_signer,
-        261,
-    ) catch |err| return evidenceStepFailed("typed.enroll_tablet_device", err);
     const local_policy = sync_port.createNetworkPolicy(sync_authority, .{
         .owner = context.sync_service_principal,
         .workspace_id = storage_state.notes_workspace_id,
@@ -557,7 +537,7 @@ fn runBootedNotesTypedInputLoop(
 
     if (!system.dispatchInput(.{ .kind = .sync_document, .tick = 265 }).accepted) return evidenceCheckFailed("typed.input_sync_document");
     if (!shell.state.document_synced or shell.state.sync_selected_entries == 0 or shell.state.sync_transport_frames == 0) return evidenceCheckFailed("typed.sync_state");
-    const synced_replica_version = typed_sync_service.replicaVersion(
+    const synced_replica_version = sync_service.replicaVersion(
         storage_state.notes_workspace_id,
         tablet_device,
         "documents/notes.md",

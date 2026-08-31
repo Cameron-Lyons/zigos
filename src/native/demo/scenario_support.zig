@@ -76,6 +76,9 @@ pub const StorageScenarioState = struct {
     latest_notes_version_id: u64,
 };
 
+pub const default_local_device_principal = principal.PrincipalId{ .kind = .device, .serial = 1 };
+pub const default_tablet_device_principal = principal.PrincipalId{ .kind = .device, .serial = 2 };
+
 pub const SyncScenarioState = struct {
     workspace_policy: sync_service_mod.WorkspacePolicy,
     tablet_device_principal: principal.PrincipalId,
