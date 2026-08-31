@@ -34,6 +34,7 @@ pub const MAX_MANIFEST_ENTRIES: usize = MAX_RECORDS;
 pub const MAX_BUILD_ARTIFACTS: usize = 32;
 pub const state_workspace_label = "system-measured-boot";
 pub const COMPACT_MEASUREMENT_METADATA = true;
+pub const IN_PLACE_GENERATED_BUILD_ARTIFACT_MANIFEST = true;
 pub const MEASUREMENT_RECORD_SIZE_CEILING_BYTES: usize = 82;
 pub const BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES: usize = 82;
 pub const ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 1_328;
@@ -204,6 +205,13 @@ pub const BuildArtifactManifest = struct {
             .entries = [_]BuildArtifactEntry{zeroBuildArtifactEntry()} ** MAX_BUILD_ARTIFACTS,
             .signature = .{},
         };
+    }
+
+    pub fn initializeAllocated(self: *BuildArtifactManifest, generation: u64) void {
+        self.generation = generation;
+        self.entry_count = 0;
+        for (&self.entries) |*entry| entry.* = zeroBuildArtifactEntry();
+        self.signature = .{};
     }
 
     pub fn addDigest(self: *BuildArtifactManifest, kind: BuildArtifactKind, label: []const u8, digest: crypto_hash.Digest) Error!void {
@@ -535,7 +543,9 @@ pub fn generatedProductionArtifactManifestMatchesUserspaceArchive() !void {
     const generated_manifest = @import("production_artifact_manifest");
     const generated_archive = @import("userspace_archive");
 
-    var manifest = try buildArtifactManifestFromGenerated(generated_manifest);
+    var manifest: BuildArtifactManifest = undefined;
+    @memset(std.mem.asBytes(&manifest), 0xa5);
+    try buildArtifactManifestFromGeneratedInto(&manifest, generated_manifest);
     try std.testing.expect(verifyBuildArtifactManifest(&manifest));
     try std.testing.expectEqual(generated_archive.artifacts.len, manifest.countKind(.userspace_image));
     try std.testing.expect(generatedUserspaceArchiveMatchesManifest(&manifest));
@@ -569,8 +579,8 @@ pub fn buildArtifactEntry(kind: BuildArtifactKind, label: []const u8, digest: cr
     return entry;
 }
 
-pub fn buildArtifactManifestFromGenerated(comptime generated: anytype) Error!BuildArtifactManifest {
-    var manifest = BuildArtifactManifest.init(generated.generation);
+pub fn buildArtifactManifestFromGeneratedInto(manifest: *BuildArtifactManifest, comptime generated: anytype) Error!void {
+    manifest.initializeAllocated(generated.generation);
     inline for (generated.entries) |entry| {
         const kind = std.enums.fromInt(BuildArtifactKind, entry.kind) orelse return error.InvalidBuildArtifactKind;
         try manifest.addDigest(kind, entry.label, entry.digest);
@@ -584,7 +594,6 @@ pub fn buildArtifactManifestFromGenerated(comptime generated: anytype) Error!Bui
     @memcpy(signature.public_key[0..generated.signature_public_key.len], generated.signature_public_key[0..]);
     @memcpy(signature.value[0..generated.signature_value.len], generated.signature_value[0..]);
     manifest.signature = signature;
-    return manifest;
 }
 
 fn signBuildArtifactManifestForTest(manifest: *BuildArtifactManifest) !void {
