@@ -74,7 +74,8 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
         "allow local lease=25",
         "allow local lease=15",
     };
-    var modeled_review_input = permission_review_service.ModeledInputSource.initDefault() catch |err| native_util.bootProofFailure("booted evidence", err);
+    var modeled_review_input: permission_review_service.ModeledInputSource = undefined;
+    modeled_review_input.initDefaultInto() catch |err| native_util.bootProofFailure("booted evidence", err);
     var expected_physical_review_reports: usize = 0;
     for (physical_review_commands) |command| {
         modeled_review_input.enqueueTextCommand(

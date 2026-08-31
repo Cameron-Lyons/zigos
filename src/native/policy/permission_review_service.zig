@@ -61,6 +61,7 @@ pub const MAX_PHYSICAL_INPUT_COMMANDS: usize = MAX_REVIEW_DECISIONS;
 pub const MAX_SCRIPTED_PLAN_ENTRIES: usize = 16;
 pub const COMPACT_COMMAND_QUEUE_METADATA = true;
 pub const COMPACT_REVIEW_PROGRESS_METADATA = true;
+pub const IN_PLACE_MODELED_INPUT_INITIALIZATION = true;
 pub const RENDERED_BEGIN_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const BATCH_REVIEW_AUDIT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const COMMAND_INPUT_SIZE_CEILING_BYTES: usize = 1_664;
@@ -104,6 +105,17 @@ pub const CommandInput = struct {
     pending_command_tail: u8 = 0,
     pending_command_count: u8 = 0,
     commands_completed: usize = 0,
+
+    pub fn initializeAllocated(self: *CommandInput) void {
+        @memset(self.pending_line[0..], 0);
+        self.pending_line_len = 0;
+        for (&self.pending_commands) |*command| @memset(command[0..], 0);
+        @memset(self.pending_command_lens[0..], 0);
+        self.pending_command_head = 0;
+        self.pending_command_tail = 0;
+        self.pending_command_count = 0;
+        self.commands_completed = 0;
+    }
 
     pub fn submit(self: *CommandInput, event: input_driver_task.KeyboardEvent) InputError!bool {
         switch (event.kind) {
@@ -172,29 +184,42 @@ pub const ModeledInputSource = struct {
     decoder: input_driver_task.Decoder = .{},
     reports_consumed: usize = 0,
 
-    pub fn init(plan: xhci.RingPlan) xhci.Error!ModeledInputSource {
-        return .{
-            .controller = try xhci.HidController.init(plan),
-        };
+    pub fn initInto(self: *ModeledInputSource, plan: xhci.RingPlan) xhci.Error!void {
+        try self.controller.initInto(plan);
+        self.commands.initializeAllocated();
+        self.decoder = .{};
+        self.reports_consumed = 0;
     }
 
-    pub fn initDefault() xhci.Error!ModeledInputSource {
-        var source = ModeledInputSource{
-            .controller = try xhci.HidController.initWithMmio(
-                xhci.defaultCapabilityRegisters(),
-                .{
-                    .command_ring_trbs = 64,
-                    .event_ring_trbs = 64,
-                    .command_ring_address = 0x1000,
-                    .event_ring_address = 0x2000,
-                },
-            ),
-        };
+    pub fn init(plan: xhci.RingPlan) xhci.Error!ModeledInputSource {
+        var source: ModeledInputSource = undefined;
+        try source.initInto(plan);
+        return source;
+    }
+
+    pub fn initDefaultInto(self: *ModeledInputSource) xhci.Error!void {
+        try self.controller.initWithMmioInto(
+            xhci.defaultCapabilityRegisters(),
+            .{
+                .command_ring_trbs = 64,
+                .event_ring_trbs = 64,
+                .command_ring_address = 0x1000,
+                .event_ring_address = 0x2000,
+            },
+        );
+        self.commands.initializeAllocated();
+        self.decoder = .{};
+        self.reports_consumed = 0;
         const descriptor = xhci.bootKeyboardConfigurationDescriptor(xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID);
-        _ = try source.controller.attachBootKeyboard(
+        _ = try self.controller.attachBootKeyboard(
             xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
             descriptor[0..],
         );
+    }
+
+    pub fn initDefault() xhci.Error!ModeledInputSource {
+        var source: ModeledInputSource = undefined;
+        try source.initDefaultInto();
         return source;
     }
 
@@ -1452,7 +1477,12 @@ test "hosted modeled xHCI reports still count when a focused router is bound" {
 }
 
 test "physical input command editing honors shift punctuation and backspace" {
-    var source = try ModeledInputSource.initDefault();
+    var source: ModeledInputSource = undefined;
+    @memset(std.mem.asBytes(&source), 0xaa);
+    try source.initDefaultInto();
+    try std.testing.expectEqual(@as(usize, 0), source.reports_consumed);
+    try std.testing.expectEqual(@as(u8, 0), source.commands.pending_command_count);
+    try std.testing.expectEqual(@as(usize, 0), source.commands.commands_completed);
     try source.enqueueTextCommand(
         xhci.DEFAULT_BOOT_KEYBOARD_DEVICE_ID,
         xhci.DEFAULT_BOOT_KEYBOARD_ENDPOINT_ID,
