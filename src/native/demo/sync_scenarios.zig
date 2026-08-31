@@ -349,14 +349,16 @@ pub fn run(
     if (context.supervisor.recordCrash(context.sync_service_id, 105, 0x59)) {
         _ = context.supervisor.requestRestart(context.sync_service_id, 106);
         _ = context.runtime.rehostTask(context.sync_task_id, 106) catch |err| native_util.bootProofFailure("sync scenarios", err);
-        var restarted_sync_resident = sync_service_mod.ResidentState{};
+        var restarted_sync_resident: transient_sync_service.ResidentInstance = undefined;
+        restarted_sync_resident.initInto() catch |err| native_util.bootProofFailure("sync scenarios", err);
+        defer restarted_sync_resident.deinit();
         var restarted_sync_instance: transient_sync_service.Instance = undefined;
         restarted_sync_instance.initInto(
             context.sync_service_id,
             context.sync_task_id,
             context.sync_service_principal,
             context.storage_service_instance,
-            &restarted_sync_resident,
+            restarted_sync_resident.ptr(),
         ) catch |err| native_util.bootProofFailure("sync scenarios", err);
         defer restarted_sync_instance.deinit();
         const restarted_sync_service = restarted_sync_instance.ptr();
