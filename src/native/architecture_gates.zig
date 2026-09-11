@@ -84,6 +84,7 @@ const bootstrap_driver_port = @import("drivers/bootstrap_driver_port.zig");
 const dataplane_handoff = @import("drivers/dataplane_handoff.zig");
 const kernel_config = @import("../kernel/config.zig");
 const kernel_smp = @import("../kernel/smp.zig");
+const cpu_baseline = @import("../arch/cpu_baseline.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
@@ -387,6 +388,10 @@ pub const indexed_hot_path_tables = .{
         .avoids_mmu_primary_index_lookups = shared_memory.MMU_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
         .uses_reusable_mmu_mapping_slots = @hasDecl(@FieldType(shared_memory.FreestandingMmu, "mappings"), "reserveIndex"),
         .retires_task_owned_objects_and_peer_mappings = @hasDecl(shared_memory.Table, "retireTask"),
+        .seals_ipc_rings = shared_memory.SEALS_IPC_RINGS and
+            @hasDecl(shared_memory.Table, "createSealedRing") and
+            @hasField(shared_memory.ComputeAccess, "sealed") and
+            @hasField(shared_memory.ComputeAccess, "ring"),
     },
     .userspace_scheduler = .{
         .uses_scheduler_slot_arena = @hasField(userspace_scheduler.Scheduler, "slots"),
@@ -1728,5 +1733,10 @@ pub const indexed_hot_path_tables = .{
         .uses_per_cpu_runqueues = kernel_smp.USES_PER_CPU_RUNQUEUES and userspace_scheduler.USES_PER_CPU_RUNQUEUES,
         .shoots_down_remote_tlb = kernel_smp.SHOOTS_DOWN_REMOTE_TLB,
         .pins_device_irqs_to_bsp = kernel_smp.PINS_DEVICE_IRQS_TO_BSP,
+    },
+    .extended_state = .{
+        .requires_xsaves = cpu_baseline.REQUIRES_XSAVES,
+        .requires_xsave = @hasField(cpu_baseline.Features, "xsave") and
+            @hasField(cpu_baseline.Features, "xsaves"),
     },
 };

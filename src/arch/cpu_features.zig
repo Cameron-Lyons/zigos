@@ -46,6 +46,9 @@ pub fn detect() baseline.Features {
         registers.leaf7_ebx = leaf7.ebx;
         registers.leaf7_ecx = leaf7.ecx;
     }
+    if (registers.max_basic_leaf >= 0xD) {
+        registers.leaf13_1_eax = cpuid(0xD, 1).eax;
+    }
 
     registers.max_extended_leaf = cpuid(0x8000_0000, 0).eax;
     if (registers.max_extended_leaf >= 0x8000_0001) {
@@ -84,4 +87,7 @@ pub fn enableModernFeatures(features: baseline.Features, process_context_mode: P
         x86.enableProcessContextIdentifiers();
         if (!x86.processContextIdentifiersEnabled()) unreachable;
     }
+    if (!features.xsave or !features.xsaves) unreachable;
+    x86.enableXsaves();
+    if (!x86.xsavesEnabled()) unreachable;
 }
