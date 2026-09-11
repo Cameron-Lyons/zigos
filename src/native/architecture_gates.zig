@@ -1501,6 +1501,9 @@ pub const indexed_hot_path_tables = .{
         .resolves_shared_paths_from_one_workspace_record = @hasDecl(workspace.WorkspaceRecord, "resolveBorrowedWithPathHash") and
             @hasDecl(workspace.WorkspaceRecord, "hasAccess"),
         .supports_indexed_object_lookup = workspace.workspace_entry_layout.caches_object_index,
+        .updates_path_index_incrementally = workspace.UPDATES_PATH_INDEX_INCREMENTALLY,
+        .updates_object_index_incrementally = workspace.UPDATES_OBJECT_INDEX_INCREMENTALLY,
+        .updates_merkle_leaves_incrementally = workspace.UPDATES_MERKLE_LEAVES_INCREMENTALLY,
         .supports_indexed_snapshot_lookup = @hasDecl(workspace.Directory, "findSnapshotConst"),
         .tracks_workspace_count = @hasDecl(workspace.Directory, "workspaceCount"),
         .tracks_snapshot_count = @hasDecl(workspace.Directory, "snapshotCount"),
@@ -1520,6 +1523,10 @@ pub const indexed_hot_path_tables = .{
         .bounds_log_io_workspace_to_one_data_region = storage_volume.IO_LOG_WORKSPACE_BYTES == storage_volume.DATA_REGION_BYTES,
         .tracks_replay_id_bounds_inline = storage_volume.TRACKS_REPLAY_ID_BOUNDS_INLINE,
         .builds_object_store_derived_indexes_during_replay = storage_volume.BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY,
+        .builds_workspace_indexes_during_replay = storage_volume.BUILDS_WORKSPACE_INDEXES_DURING_REPLAY and
+            @hasDecl(workspace.Directory, "indexReplayedWorkspaceEntries"),
+        .skips_post_replay_full_workspace_index_rebuild = storage_volume.SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD and
+            @hasDecl(workspace.Directory, "rebuildDirectoryIndexes"),
         .skips_empty_object_store_arena_reset_work = object_store.SKIPS_EMPTY_ARENA_RESET_WORK,
         .scrubs_only_used_signer_text = storage_volume.SCRUBS_ONLY_USED_SIGNER_TEXT,
         .heap_backs_signer_text_on_freestanding = storage_volume.HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING and

@@ -30,6 +30,9 @@ pub const WorkspaceMutationCount = directory.WorkspaceMutationCount;
 pub const WorkspaceShareGrantCount = directory.WorkspaceShareGrantCount;
 pub const RecoverableDeleteCount = directory.RecoverableDeleteCount;
 pub const COMPACT_WORKSPACE_TABLE_METADATA = directory.COMPACT_WORKSPACE_TABLE_METADATA;
+pub const UPDATES_PATH_INDEX_INCREMENTALLY = directory.UPDATES_PATH_INDEX_INCREMENTALLY;
+pub const UPDATES_OBJECT_INDEX_INCREMENTALLY = directory.UPDATES_OBJECT_INDEX_INCREMENTALLY;
+pub const UPDATES_MERKLE_LEAVES_INCREMENTALLY = directory.UPDATES_MERKLE_LEAVES_INCREMENTALLY;
 
 pub const SnapshotRootAddress = directory.SnapshotRootAddress;
 pub const WorkspaceEntrySlotIndex = directory.WorkspaceEntrySlotIndex;

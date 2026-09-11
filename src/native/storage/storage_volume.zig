@@ -38,6 +38,8 @@ pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
 pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
 pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
+pub const BUILDS_WORKSPACE_INDEXES_DURING_REPLAY = true;
+pub const SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD = true;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 const SignerTextPool = [SIGNER_TEXT_POOL_BYTES]u8;
@@ -962,7 +964,7 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     store.next_version_id = root.next_version_id;
     workspaces.next_workspace_id = root.next_workspace_id;
     workspaces.next_snapshot_id = root.next_snapshot_id;
-    workspaces.rebuildDerivedIndexes();
+    workspaces.rebuildDirectoryIndexes();
 }
 
 fn countLogRecords(log: []const u8) Error!u16 {
@@ -1306,6 +1308,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     slot.workspace.staging.transaction_open = false;
     slot.workspace.staging.staged_entry_count = 0;
     slot.workspace.staging.staged_effective_entry_count = 0;
+    workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
     return workspace_id.raw();
 }
 
@@ -1545,6 +1548,7 @@ fn deserializeState(
                 deleted_entries[entry_index] = try readEntry(&reader);
             }
         }
+        workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
     }
 
     for (0..@as(usize, snapshot_count_value)) |_| {
