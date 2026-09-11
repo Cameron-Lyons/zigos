@@ -94,6 +94,7 @@ else
             pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
             pub fn registerHandler(_: u8, _: InterruptHandler) void {}
+            pub fn setTimerPreemption(_: *const fn (regs: *InterruptFrame) void) void {}
         };
 
         pub const paging = struct {
@@ -282,6 +283,12 @@ pub fn reportTrapStackPeak() void {
 }
 
 pub export var zigos_userspace_resume_requested: u32 = 0;
+const PreemptCheck = *const fn (u64) bool;
+var preempt_check: ?PreemptCheck = null;
+
+pub fn setPreemptCheck(check: ?PreemptCheck) void {
+    preempt_check = check;
+}
 pub export var zigos_userspace_resume_esp: usize = 0;
 pub export var zigos_userspace_resume_eip: usize = 0;
 
@@ -500,6 +507,7 @@ pub const Executor = struct {
                 freestanding.isr.registerHandler(vector, userspaceExceptionHandler);
             }
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
+            freestanding.isr.setTimerPreemption(userspaceTimerPreemption);
             trap_handler_registered = true;
         }
         const trap_stack_top = prepareKernelStack();
@@ -1381,6 +1389,24 @@ fn scanMailboxAuthorities(
         resolved.bootstrap_service_id = query_service_id;
     }
     return resolution;
+}
+
+fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
+    if (comptime builtin.target.os.tag != .freestanding) return;
+    const executor = registered_executor orelse return;
+    if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) return;
+    const check = preempt_check orelse return;
+    if (!check(executor.active_task_id)) return;
+    const mapping = executor.active_mapping orelse return;
+    mapping.resume_valid = true;
+    mapping.resume_instruction_pointer = @truncate(frame.eip);
+    mapping.resume_stack_pointer = @truncate(frame.useresp);
+    captureUserContext64(mapping, frame);
+    mapping.yield_count += 1;
+    executor.last_yield_disposition = .runnable;
+    executor.handoff_completed = true;
+    zigos_userspace_resume_requested = 1;
+    freestanding.paging.switchToKernelAddressSpace();
 }
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {

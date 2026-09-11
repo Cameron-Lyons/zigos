@@ -24,6 +24,7 @@ else
         pub fn invalidatePcid(_: u16) void {}
         pub fn sti() void {}
         pub fn hlt() void {}
+        pub fn stiHlt() void {}
         pub fn enableSse() void {}
     };
 const tsc_clock = if (builtin.target.os.tag == .freestanding)
@@ -62,6 +63,7 @@ pub const STARTS_APPLICATION_PROCESSORS = true;
 pub const USES_PER_CPU_RUNQUEUES = true;
 pub const SHOOTS_DOWN_REMOTE_TLB = true;
 pub const PINS_DEVICE_IRQS_TO_BSP = true;
+pub const IDLES_PER_CPU = true;
 pub const SIPI_PHYSICAL_LIMIT: u32 = 1024 * 1024;
 
 pub const Cpu = struct {
@@ -131,6 +133,11 @@ pub fn assignedCpu(task_id: u64, pin_to_bsp: bool) u8 {
     const online = onlineCpuCount();
     if (pin_to_bsp or online <= 1) return 0;
     return @intCast((task_id % (online - 1)) + 1);
+}
+
+pub fn idle() void {
+    if (builtin.target.os.tag != .freestanding) return;
+    x86.stiHlt();
 }
 
 pub fn shootdownPcid(pcid: u16) void {
@@ -207,6 +214,7 @@ test "SMP IRQ affinity stays on the BSP" {
     try std.testing.expect(PINS_DEVICE_IRQS_TO_BSP);
     try std.testing.expect(STARTS_APPLICATION_PROCESSORS);
     try std.testing.expect(SHOOTS_DOWN_REMOTE_TLB);
+    try std.testing.expect(IDLES_PER_CPU);
     try std.testing.expectEqual(@as(u8, 0x70), TLB_IPI_VECTOR);
     try std.testing.expectEqual(@as(u8, 1), onlineCpuCount());
 }

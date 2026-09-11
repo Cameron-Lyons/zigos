@@ -109,6 +109,5 @@ fn apEntry(cpu_index: u64) callconv(.c) noreturn {
     smp.setCurrentCpuIndex(index);
     bringup_cpus[index].online = true;
     bringup_online_count.* += 1;
-    x86.sti();
-    while (true) x86.hlt();
+    while (true) smp.idle();
 }

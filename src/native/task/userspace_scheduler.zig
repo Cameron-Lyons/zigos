@@ -48,6 +48,8 @@ pub const QueueSlotIndex = u8;
 pub const QUEUE_NO_INDEX: QueueSlotIndex = @intCast(task_runtime.MAX_TASKS);
 pub const COMPACT_QUEUE_METADATA = true;
 pub const USES_PER_CPU_RUNQUEUES = true;
+pub const PREEMPTS_BATCH_FOR_INTERACTIVE = true;
+var bound_preempt_scheduler: ?*Scheduler = null;
 pub const MAX_SCHEDULER_CPUS: usize = smp.MAX_CPUS;
 pub const STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS: u8 = 0;
 pub const TASK_REGISTRATION_HANDLE_SLOT_RELOOKUPS: u8 = 0;
@@ -317,6 +319,10 @@ pub const Scheduler = struct {
     }
 
     pub fn deinit(self: *Scheduler) void {
+        if (bound_preempt_scheduler == self) {
+            bound_preempt_scheduler = null;
+            userspace_executor.setPreemptCheck(null);
+        }
         const runtime = self.runtime_ptr;
         if (builtin.target.os.tag == .freestanding) {
             if (runtime) |bound_runtime| {
@@ -375,6 +381,8 @@ pub const Scheduler = struct {
         self.initialized = true;
         self.last_dispatch_tick = 0;
         self.executor.init();
+        bound_preempt_scheduler = self;
+        userspace_executor.setPreemptCheck(preemptCheck);
         if (builtin.target.os.tag == .freestanding and !self.ready_marker_printed) {
             common.printBootMarker(boot_markers.userspace_scheduler_ready);
             self.ready_marker_printed = true;
@@ -873,7 +881,14 @@ pub const Scheduler = struct {
             const deadline = slot.deadline_tick;
             if (deadline != 0 and
                 deadline <= now_ticks and
-                expiredReadyCandidateBeats(slot, deadline, earliest_deadline, selected_dispatch_count, selected_last_dispatch_tick))
+                expiredReadyCandidateBeats(
+                    slot,
+                    deadline,
+                    deadline_class,
+                    earliest_deadline,
+                    selected_dispatch_count,
+                    selected_last_dispatch_tick,
+                ))
             {
                 earliest_deadline = deadline;
                 selected_dispatch_count = slot.dispatch_count;
@@ -887,6 +902,21 @@ pub const Scheduler = struct {
             if (self.ready_heads[dispatchCpu()][resourceClassIndex(class)] != QUEUE_NO_INDEX) return class;
         }
         return null;
+    }
+
+    pub fn hasReadyLatencySensitiveWork(self: *const Scheduler) bool {
+        for (resource_priority_order) |class| {
+            if (!latencySensitiveClass(class)) continue;
+            if (!self.resourceClassDispatchable(class)) continue;
+            if (self.ready_heads[dispatchCpu()][resourceClassIndex(class)] != QUEUE_NO_INDEX) return true;
+        }
+        return false;
+    }
+
+    pub fn shouldPreemptTask(self: *const Scheduler, task_id: u64) bool {
+        const slot = self.slots.getConst(task_id) orelse return false;
+        if (latencySensitiveClass(slot.resource_class)) return false;
+        return self.hasReadyLatencySensitiveWork();
     }
 
     fn resourceClassDispatchable(self: *const Scheduler, class: accelerator_scheduler.ResourceClass) bool {
@@ -1495,6 +1525,18 @@ fn resourceClassPriorityRank(class: accelerator_scheduler.ResourceClass) usize {
     return resource_priority_order.len;
 }
 
+fn latencySensitiveClass(class: accelerator_scheduler.ResourceClass) bool {
+    return switch (class) {
+        .emergency_system_critical, .foreground_interactive, .media_export => true,
+        .background_light, .batch_compute => false,
+    };
+}
+
+fn preemptCheck(task_id: u64) bool {
+    const scheduler = bound_preempt_scheduler orelse return false;
+    return scheduler.shouldPreemptTask(task_id);
+}
+
 fn engineIndex(engine: accelerator_scheduler.Engine) usize {
     return switch (engine) {
         .cpu => 0,
@@ -1542,10 +1584,16 @@ fn contractOwnsUiSurface(contract_flags: u32) bool {
 fn expiredReadyCandidateBeats(
     slot: *const Slot,
     deadline: u64,
+    selected_class: ?accelerator_scheduler.ResourceClass,
     selected_deadline: u64,
     selected_dispatch_count: u64,
     selected_last_dispatch_tick: u64,
 ) bool {
+    if (selected_class) |class| {
+        const candidate_latency = latencySensitiveClass(slot.resource_class);
+        const selected_latency = latencySensitiveClass(class);
+        if (candidate_latency != selected_latency) return candidate_latency;
+    }
     if (deadline < selected_deadline) return true;
     if (deadline > selected_deadline) return false;
     if (slot.dispatch_count < selected_dispatch_count) return true;
@@ -1966,6 +2014,43 @@ test "userspace scheduler dispatches resource ready queues by priority" {
     try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(foreground.id).?.dispatch_count);
     try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(foreground.id).?.missed_deadline_count);
     try std.testing.expectEqual(@as(u64, 0), scheduler.slots.getConst(background.id).?.dispatch_count);
+}
+
+test "userspace scheduler keeps compositor-class work ahead of expired log compact" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+
+    const compact = try createRunnableSchedulerTask(
+        &runtime,
+        31,
+        .batch_compute,
+        "log-compact",
+        "sys.storage.log-compact",
+        null,
+    );
+    const compositor = try createRunnableSchedulerTask(
+        &runtime,
+        32,
+        .foreground_interactive,
+        "compositor",
+        "sys.compositor.session",
+        32,
+    );
+
+    try std.testing.expect(scheduler.registerTask(compact.id));
+    try std.testing.expect(scheduler.registerTask(compositor.id));
+    try std.testing.expect(scheduler.wakeTask(compact.id, .timer, 50, 1));
+    try std.testing.expect(scheduler.wakeTask(compositor.id, .timer, 50, 2));
+    try std.testing.expect(scheduler.shouldPreemptTask(compact.id));
+    try std.testing.expect(!scheduler.shouldPreemptTask(compositor.id));
+    try std.testing.expect(PREEMPTS_BATCH_FOR_INTERACTIVE);
+    try std.testing.expect(!scheduler.runNext(50));
+    try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(compositor.id).?.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.slots.getConst(compact.id).?.dispatch_count);
 }
 
 test "userspace scheduler uses event wakeups and explicit budget refills" {

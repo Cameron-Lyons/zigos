@@ -400,6 +400,9 @@ pub const indexed_hot_path_tables = .{
             userspace_scheduler.MAX_SCHEDULER_CPUS == 8 and
             @FieldType(userspace_scheduler.Scheduler, "ready_heads") ==
                 [userspace_scheduler.MAX_SCHEDULER_CPUS][userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex,
+        .preempts_batch_for_interactive = userspace_scheduler.PREEMPTS_BATCH_FOR_INTERACTIVE and
+            @hasDecl(userspace_scheduler.Scheduler, "shouldPreemptTask") and
+            @hasDecl(userspace_scheduler.Scheduler, "hasReadyLatencySensitiveWork"),
         .selects_ready_resource_class = @hasDecl(userspace_scheduler.Scheduler, "readyQueueDepth"),
         .wakes_tasks = @hasDecl(userspace_scheduler.Scheduler, "wakeTask"),
         .refills_task_budget = @hasDecl(userspace_scheduler.Scheduler, "refillTaskBudget"),
@@ -1733,6 +1736,7 @@ pub const indexed_hot_path_tables = .{
         .uses_per_cpu_runqueues = kernel_smp.USES_PER_CPU_RUNQUEUES and userspace_scheduler.USES_PER_CPU_RUNQUEUES,
         .shoots_down_remote_tlb = kernel_smp.SHOOTS_DOWN_REMOTE_TLB,
         .pins_device_irqs_to_bsp = kernel_smp.PINS_DEVICE_IRQS_TO_BSP,
+        .idles_per_cpu = kernel_smp.IDLES_PER_CPU and @hasDecl(kernel_smp, "idle"),
     },
     .extended_state = .{
         .requires_xsaves = cpu_baseline.REQUIRES_XSAVES,
