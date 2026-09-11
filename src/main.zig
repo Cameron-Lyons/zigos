@@ -39,7 +39,7 @@ pub fn publishUserspaceActiveTaskId(task_id: u64) void {
 
 pub fn bootloaderMeasurementDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "bootloader", "multiboot");
+    crypto_hash.updateBytes(&hasher, "bootloader", "efi");
     crypto_hash.updateBytes(&hasher, "boot-profile", config.name());
     crypto_hash.updateBytes(&hasher, "entry-assembly", bootloaderSourcePath());
     return crypto_hash.finalize(&hasher);
@@ -47,12 +47,12 @@ pub fn bootloaderMeasurementDigest() [32]u8 {
 
 pub fn bootloaderSourceDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    hasher.update(@embedFile("boot/boot_x86_64.S"));
+    hasher.update(@embedFile("boot/efi_stub.zig"));
     return crypto_hash.finalize(&hasher);
 }
 
 pub fn bootloaderSourcePath() []const u8 {
-    return "src/boot/boot_x86_64.S";
+    return "src/boot/efi_stub.zig";
 }
 
 pub fn kernelImageDigest() [32]u8 {

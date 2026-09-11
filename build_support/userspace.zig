@@ -3,7 +3,7 @@ const native_modules = @import("native_modules.zig");
 const production_registry = @import("../src/native/task/userspace_registry.zig");
 const verification_registry = @import("../src/native/task/userspace_verification_registry.zig");
 const userspace_layout = @import("../src/native/core/userspace_layout.zig");
-const bootloader_source_path = "src/boot/boot_x86_64.S";
+const bootloader_source_path = "src/boot/efi_stub.zig";
 
 pub const production_artifact_count = production_registry.production_build_image_specs.len;
 pub const verification_only_artifact_count = verification_registry.verification_only_build_image_specs.len;

@@ -1276,8 +1276,8 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     const bootloader_measurement_digest = crypto_hash.digestFromByte(0x11);
     const unexpected_bootloader_digest = crypto_hash.digestFromByte(0x12);
 
-    try manifest.addDigest(.bootloader_source, "src/boot/boot_x86_64.S", bootloader_source_digest);
-    try manifest.addDigest(.bootloader_measurement, "multiboot:zigos_native", bootloader_measurement_digest);
+    try manifest.addDigest(.bootloader_source, "src/boot/efi_stub.zig", bootloader_source_digest);
+    try manifest.addDigest(.bootloader_measurement, "efi:zigos_native", bootloader_measurement_digest);
     inline for (0..10) |index| {
         const digest = crypto_hash.digestFromByte(@intCast(0x20 + index));
         var label_buffer: [BUILD_ARTIFACT_LABEL_BUFFER_BYTES]u8 = undefined;
@@ -1290,29 +1290,29 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
 
     try std.testing.expect(verifyBuildArtifactManifest(&manifest));
-    try std.testing.expect(manifest.find(.bootloader_measurement, "multiboot:zigos_native") != null);
+    try std.testing.expect(manifest.find(.bootloader_measurement, "efi:zigos_native") != null);
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
-        "src/boot/boot_x86_64.S",
+        "src/boot/efi_stub.zig",
         &bootloader_source_digest,
     ));
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
         .bootloader_measurement,
-        "multiboot:zigos_native",
+        "efi:zigos_native",
         &bootloader_measurement_digest,
     ));
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
-        "src/boot/boot_x86_64.S",
+        "src/boot/efi_stub.zig",
         &unexpected_bootloader_digest,
     ));
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
         .bootloader_measurement,
-        "multiboot:zigos_native",
+        "efi:zigos_native",
         &unexpected_bootloader_digest,
     ));
 

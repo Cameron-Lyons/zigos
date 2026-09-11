@@ -337,3 +337,40 @@ test "Multiboot2 parser requires a final end tag and bounded physical offsets" {
     try std.testing.expectError(error.PhysicalRangeOverflow, physicalAddress(0xffff_fff8, 8));
     _ = try parse(&bytes, 0xffff_fff0);
 }
+
+test "EFI stub handoff round-trips through the Multiboot2 parser" {
+    const efi_handoff = @import("../../boot/efi_handoff.zig");
+    const mmap = [_]efi_handoff.MmapEntry{
+        .{ .base = 0x100000, .length = 0x1ff00000, .kind = efi_handoff.MULTIBOOT_MEMORY_AVAILABLE },
+        .{ .base = 0x20000000, .length = 0x1000, .kind = efi_handoff.MULTIBOOT_MEMORY_ACPI_RECLAIMABLE },
+    };
+    var rsdp = [_]u8{0} ** efi_handoff.ACPI_RSDP_V2_MIN_BYTES;
+    @memcpy(rsdp[0..8], "RSD PTR ");
+    const request = efi_handoff.Request{
+        .cmdline = "model_inventory",
+        .mmap = &mmap,
+        .framebuffer = .{
+            .addr = 0x8000_0000,
+            .pitch = 1024 * 4,
+            .width = 1024,
+            .height = 768,
+            .rgb = efi_handoff.rgbFromMasks(16, 8, 0),
+        },
+        .efi_system_table = 0x1234_0000,
+        .acpi_rsdp = &rsdp,
+    };
+
+    var storage: [512]u8 = undefined;
+    const encoded = try efi_handoff.encode(&storage, request);
+    const parsed = try parse(encoded, 0x2000);
+    try std.testing.expect(parsed.has_command_line);
+    try std.testing.expect(parsed.has_memory_map);
+    try std.testing.expect(parsed.has_framebuffer);
+    try std.testing.expect(parsed.has_efi64_system_table);
+    try std.testing.expect(parsed.has_acpi2_rsdp);
+    try std.testing.expectEqual(@as(u32, 24), parsed.mmap_entry_size);
+    try std.testing.expectEqual(@as(u32, 48), parsed.mmap_length);
+    try std.testing.expectEqual(@as(u64, 0x8000_0000), parsed.framebuffer_addr);
+    try std.testing.expectEqual(@as(u64, 0x1234_0000), parsed.efi64_system_table_addr);
+    try std.testing.expectEqual(@as(u32, efi_handoff.ACPI_RSDP_V2_MIN_BYTES), parsed.acpi2_rsdp_length);
+}

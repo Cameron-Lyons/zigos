@@ -147,6 +147,16 @@ _start:
     ljmp $LONG_MODE_CODE_SELECTOR, $long_mode_start
 
 .code64
+.global zigos_efi_entry
+.type zigos_efi_entry, @function
+zigos_efi_entry:
+    movl %edi, zigos_multiboot_info_addr
+    movl $0x36D76289, zigos_multiboot_magic
+    movq $stack_top, %rsp
+    xorq %rbp, %rbp
+    call kernel_main
+    jmp .halt
+
 long_mode_start:
     movw $LONG_MODE_DATA_SELECTOR, %ax
     movw %ax, %ds

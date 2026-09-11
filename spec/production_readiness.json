@@ -540,6 +540,7 @@
         "spec/hardware/nuc11tnki5-proof-bundle.md",
         "scripts/check-nuc11tnki5-hardware-proof.sh",
         "scripts/run-uefi-boot-test.sh",
+        "scripts/build-efi-iso.sh",
         "scripts/build-grub-iso.sh",
         "scripts/qemu-harness.sh",
         "src/kernel/platform/acpi.zig",
