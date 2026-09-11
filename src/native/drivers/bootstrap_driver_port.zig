@@ -4,6 +4,7 @@ const native_util = @import("../core/util.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const device_broker_client = @import("../kernel_api/device_broker_client.zig");
+const dataplane_handoff = @import("dataplane_handoff.zig");
 const device_inventory = @import("device_inventory.zig");
 const driver_service = @import("driver_service.zig");
 const network_driver_task = @import("network_driver_task.zig");
@@ -153,7 +154,12 @@ pub fn reset() void {
     published_network = null;
     published_storage = null;
     published_device_planes = [_]?DeviceDataPlanePublication{null} ** device_class_count;
+    owned_storage_device_id = 0;
+    owned_storage_task_id = 0;
+    owned_storage_generation = 0;
+    owned_storage_backend = null;
     device_broker.reset();
+    dataplane_handoff.reset();
     kernel_network_claim.init();
     network_driver_task.reset();
     storage_volume.clearAttachedBackend();
@@ -391,7 +397,7 @@ pub fn activateStorageBackend(
         } else if (builtin.target.os.tag == .freestanding) {
             return false;
         }
-        if (!attachPublishedStorageBackend(publication, publication.backend.?)) return false;
+        if (!attachOwnedStorageBackend(publication, publication.backend.?)) return false;
         publication.active_service_id = service_id;
         return true;
     }
@@ -412,6 +418,11 @@ pub fn deactivateStorageBackend(service_id: u64) bool {
     if (publicationForDeactivation(StoragePublication, &published_storage, service_id)) |publication| {
         publication.active_service_id = 0;
         publication.controller_session = null;
+        _ = dataplane_handoff.release(publication.device_id);
+        owned_storage_device_id = 0;
+        owned_storage_task_id = 0;
+        owned_storage_generation = 0;
+        owned_storage_backend = null;
         storage_volume.clearAttachedBackend();
         return true;
     }
@@ -585,6 +596,57 @@ fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
     }
     _ = device_broker.programBusMasterStorageDmaIsolation(device_id, dma_domain_id, windows[0..count]) catch return false;
     return true;
+}
+
+fn attachOwnedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {
+    const session = publication.controller_session;
+    const owner_task_id = if (session) |bound| bound.task_id else 0;
+    const process_generation = if (session) |bound| bound.process_generation else 0;
+    dataplane_handoff.claim(publication.device_id, owner_task_id, process_generation) catch return false;
+    owned_storage_device_id = publication.device_id;
+    owned_storage_task_id = owner_task_id;
+    owned_storage_generation = process_generation;
+    owned_storage_backend = backend;
+    if (!attachPublishedStorageBackend(publication, .{
+        .sector_count = backend.sector_count,
+        .read = ownedStorageRead,
+        .write = ownedStorageWrite,
+        .flush = ownedStorageFlush,
+    })) {
+        _ = dataplane_handoff.release(publication.device_id);
+        owned_storage_device_id = 0;
+        owned_storage_task_id = 0;
+        owned_storage_generation = 0;
+        owned_storage_backend = null;
+        return false;
+    }
+    return true;
+}
+
+var owned_storage_device_id: u64 = 0;
+var owned_storage_task_id: u64 = 0;
+var owned_storage_generation: u32 = 0;
+var owned_storage_backend: ?storage_volume.Backend = null;
+
+fn ownedStorageRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+    dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return false;
+    defer dataplane_handoff.endOwnedSubmit(owned_storage_device_id);
+    const backend = owned_storage_backend orelse return false;
+    return backend.read(start_lba, buffer_ptr, buffer_len);
+}
+
+fn ownedStorageWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+    dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return false;
+    defer dataplane_handoff.endOwnedSubmit(owned_storage_device_id);
+    const backend = owned_storage_backend orelse return false;
+    return backend.write(start_lba, buffer_ptr, buffer_len);
+}
+
+fn ownedStorageFlush() callconv(.c) bool {
+    dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return false;
+    defer dataplane_handoff.endOwnedSubmit(owned_storage_device_id);
+    const backend = owned_storage_backend orelse return false;
+    return backend.flush();
 }
 
 fn attachPublishedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {

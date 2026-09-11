@@ -174,6 +174,7 @@ const ControllerState = enum(u8) {
 var controller_state: u8 = @intFromEnum(ControllerState.unprepared);
 var controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
+var published_bar_physical: u64 = 0;
 var dma_windows: [DMA_WINDOW_COUNT]intel_vtd.DmaWindow = undefined;
 var completed_transmit_frames: u64 = 0;
 var failed_transmit_frames: u64 = 0;
@@ -210,6 +211,7 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
 
     const bar_phys = barPhysicalAddress(device_info) orelse return error.BarUnmappable;
     if (bar_phys == 0) return error.BarUnmappable;
+    published_bar_physical = bar_phys;
     const bar = mapBar(bar_phys);
     var pending = Controller{
         .bar = bar,
@@ -327,6 +329,11 @@ pub fn activate() Error!void {
 
 pub fn attached() bool {
     return controllerActive();
+}
+
+pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
+    if (!controllerPrepared() or published_bar_physical == 0) return null;
+    return .{ .physical_base = published_bar_physical, .length = BAR_MAP_BYTES };
 }
 
 pub fn macAddress() [6]u8 {
