@@ -1,3 +1,4 @@
+const std = @import("std");
 const indexed_arena = @import("core/indexed_arena.zig");
 const abi = @import("core/abi.zig");
 const id_index = @import("core/id_index.zig");
@@ -11,6 +12,7 @@ const sdk_object_store = @import("sdk/object_store_api.zig");
 const sdk_permissions = @import("sdk/permissions.zig");
 const sdk_simulator = @import("sdk/simulator.zig");
 const sdk_ui = @import("sdk/ui.zig");
+const benchmark_cases = @import("../kernel/boot/benchmark/cases.zig");
 const service_registry = @import("services/service_registry.zig");
 const task_lifecycle_service = @import("services/task_lifecycle_service.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
@@ -1769,5 +1771,11 @@ pub const indexed_hot_path_tables = .{
             efi_elf.MAX_LOAD_SEGMENTS > 0,
         .synthesizes_firmware_handoff = efi_handoff.SYNTHESIZES_MULTIBOOT2_HANDOFF,
         .exits_boot_services = efi_handoff.EXITS_BOOT_SERVICES,
+    },
+    .slo = .{
+        .measures_irq_to_task = std.mem.eql(u8, benchmark_cases.SLO_IRQ_TO_TASK, "slo.irq_to_task"),
+        .measures_nvme_queued_io = std.mem.eql(u8, benchmark_cases.SLO_NVME_QUEUED_IO, "slo.nvme_queued_io"),
+        .measures_endpoint_rtt = std.mem.eql(u8, benchmark_cases.SLO_ENDPOINT_RTT, "slo.endpoint_rtt"),
+        .measures_focused_input = std.mem.eql(u8, benchmark_cases.SLO_FOCUSED_INPUT, "slo.focused_input"),
     },
 };

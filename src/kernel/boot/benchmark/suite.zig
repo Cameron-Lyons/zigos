@@ -44,12 +44,16 @@ const indexing_service = @import("../../../native/services/indexing_service.zig"
 const notification_center = @import("../../../native/services/notification_center.zig");
 const media_print_service = @import("../../../native/services/media_print_service.zig");
 const compositor_session = @import("../../../native/platform/compositor_session.zig");
+const input_router = @import("../../../native/platform/input_router.zig");
+const endpoint = @import("../../../native/kernel_api/endpoint.zig");
 const event_ledger = @import("../../../native/platform/event_ledger.zig");
 const immutable_base = @import("../../../native/platform/immutable_base.zig");
 const recovery_environment = @import("../../../native/platform/recovery_environment.zig");
 const secure_secret_store = @import("../../../native/platform/secure_secret_store.zig");
 const update_health = @import("../../../native/platform/update_health.zig");
 const driver_service = @import("../../../native/drivers/driver_service.zig");
+const kernel_nvme = @import("../../drivers/nvme.zig");
+const kernel_xhci = @import("../../drivers/xhci.zig");
 const contract = @import("../../../native/session/contract.zig");
 const supervisor_mod = @import("../../../native/session/supervisor.zig");
 
@@ -280,6 +284,10 @@ const cases = benchmark_cases.benchmarkCases(.{
     .recovery_lifecycle = benchmarkRecoveryLifecycle,
     .update_health_validation = benchmarkUpdateHealthValidation,
     .driver_recovery_restart = benchmarkDriverRecoveryRestart,
+    .slo_irq_to_task = benchmarkSloIrqToTask,
+    .slo_nvme_queued_io = benchmarkSloNvmeQueuedIo,
+    .slo_endpoint_rtt = benchmarkSloEndpointRtt,
+    .slo_focused_input = benchmarkSloFocusedInput,
 });
 
 const quality_gates = benchmark_cases.qualityGateCases(.{
@@ -481,6 +489,8 @@ var address_space_benchmark_context = AddressSpaceBenchmarkContext{};
 var syscall_benchmark_context = SyscallBenchmarkContext{};
 
 var quality_gate_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+var slo_irq_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
+var slo_input_runtime: task_runtime.Runtime = task_runtime.Runtime.init();
 
 pub fn run() noreturn {
     console.print("Running native spec-aligned benchmarks...\n");
@@ -2403,6 +2413,197 @@ fn configureLoadTelemetry(
         telemetry_counters,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
+}
+
+const SloIrqContext = struct {
+    executor: userspace_executor.Executor = .{},
+    scheduler: userspace_scheduler.Scheduler = undefined,
+    catalog: userspace_loader.Catalog = userspace_loader.Catalog.init(),
+    capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
+    task_id: u64 = 0,
+    ready: bool = false,
+    tick: u64 = 1,
+};
+
+const SloNvmeContext = struct {
+    image: [kernel_nvme.SECTOR_BYTES * 8]u8 = [_]u8{0} ** (kernel_nvme.SECTOR_BYTES * 8),
+    namespaces: [1]kernel_nvme.Namespace = undefined,
+    controller: kernel_nvme.Controller = undefined,
+    ready: bool = false,
+};
+
+const SloEndpointContext = struct {
+    table: endpoint.Table = endpoint.Table.init(),
+    source_id: ids.EndpointId = ids.endpoint(0),
+    target_id: ids.EndpointId = ids.endpoint(0),
+    payload: [4]u8 = [_]u8{ 'p', 'i', 'n', 'g' },
+    recv_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = [_]u8{0} ** endpoint.MAX_MESSAGE_BYTES,
+    ready: bool = false,
+    correlation: u64 = 1,
+};
+
+const SloInputContext = struct {
+    compositor: compositor_session.Session = compositor_session.Session.init(),
+    router: input_router.Router = .{},
+    task_id: u64 = 0,
+    sequence: u64 = 1,
+    pending: ?kernel_xhci.HardwareBootKeyboardReport = null,
+    ready: bool = false,
+};
+
+var slo_irq_context = SloIrqContext{};
+var slo_nvme_context = SloNvmeContext{};
+var slo_endpoint_context = SloEndpointContext{};
+var slo_input_context = SloInputContext{};
+
+fn prepareSloIrqFixture() void {
+    if (slo_irq_context.ready) return;
+    slo_irq_runtime.reset();
+    slo_irq_context.scheduler = userspace_scheduler.Scheduler.init(&slo_irq_context.executor);
+    slo_irq_context.scheduler.bind(&slo_irq_context.catalog, &slo_irq_runtime, &slo_irq_context.capabilities);
+    const task = createLoadTask(
+        &slo_irq_runtime,
+        901,
+        .foreground_interactive,
+        "slo-irq-task",
+        "app.slo.irq",
+        load_dispatch_cpu_tick_cost * 32,
+        kibibytes(64),
+        21,
+    );
+    if (!slo_irq_context.scheduler.registerTask(task.id)) {
+        benchmark_reporting.benchStepFailure("benchmark suite", error.TaskNotRunnable);
+    }
+    if (!slo_irq_context.scheduler.parkTaskUntilEvent(task.id)) {
+        benchmark_reporting.benchStepFailure("benchmark suite", error.TaskNotRunnable);
+    }
+    slo_irq_context.task_id = task.id;
+    slo_irq_context.ready = true;
+}
+
+fn benchmarkSloIrqToTask(iteration: u32) u64 {
+    _ = iteration;
+    prepareSloIrqFixture();
+    slo_irq_context.tick += 1;
+    const scheduler = &slo_irq_context.scheduler;
+    if (!scheduler.wakeTask(slo_irq_context.task_id, .external_event, slo_irq_context.tick, slo_irq_context.tick + 1)) {
+        return 0;
+    }
+    _ = scheduler.runNext(slo_irq_context.tick);
+    const stats = scheduler.taskDispatchStats(slo_irq_context.task_id) orelse return 0;
+    if (stats.last_dispatch_tick < stats.last_wake_tick) return 0;
+    if (!scheduler.parkTaskUntilEvent(slo_irq_context.task_id)) return 0;
+    return stats.last_dispatch_tick - stats.last_wake_tick + stats.wake_event_count;
+}
+
+fn prepareSloNvmeFixture() void {
+    if (slo_nvme_context.ready) return;
+    slo_nvme_context.namespaces[0] = .{
+        .id = 1,
+        .sector_count = 8,
+        .image = slo_nvme_context.image[0..],
+    };
+    slo_nvme_context.controller = kernel_nvme.Controller.init(
+        kernel_nvme.softwareQueueCapabilities(),
+        slo_nvme_context.namespaces[0..],
+        16,
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    slo_nvme_context.ready = true;
+}
+
+fn benchmarkSloNvmeQueuedIo(iteration: u32) u64 {
+    _ = iteration;
+    prepareSloNvmeFixture();
+    const proof = slo_nvme_context.controller.proveWriteReadCycles(1, 0, 8) catch |err|
+        benchmark_reporting.benchStepFailure("benchmark suite", err);
+    return proof.write_completions + proof.read_completions + proof.mmio.completed_commands;
+}
+
+fn prepareSloEndpointFixture() void {
+    if (slo_endpoint_context.ready) return;
+    const source = slo_endpoint_context.table.create(ids.task(11), "slo-source", .{ .local_only = true }) catch |err|
+        benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const target = slo_endpoint_context.table.create(ids.task(12), "slo-target", .{ .local_only = true }) catch |err|
+        benchmark_reporting.benchStepFailure("benchmark suite", err);
+    slo_endpoint_context.table.connect(source.id, target.id) catch |err|
+        benchmark_reporting.benchStepFailure("benchmark suite", err);
+    slo_endpoint_context.source_id = source.id;
+    slo_endpoint_context.target_id = target.id;
+    slo_endpoint_context.ready = true;
+}
+
+fn benchmarkSloEndpointRtt(iteration: u32) u64 {
+    _ = iteration;
+    prepareSloEndpointFixture();
+    slo_endpoint_context.correlation += 1;
+    slo_endpoint_context.table.send(
+        slo_endpoint_context.source_id,
+        ids.task(11),
+        slo_endpoint_context.correlation,
+        slo_endpoint_context.payload[0..],
+        null,
+        false,
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const received = slo_endpoint_context.table.recvInto(
+        slo_endpoint_context.target_id,
+        slo_endpoint_context.recv_buffer[0..],
+    ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    const message = received orelse return 0;
+    return message.len + message.correlation_id;
+}
+
+fn pollSloInputReport() ?kernel_xhci.HardwareBootKeyboardReport {
+    const report = slo_input_context.pending orelse return null;
+    slo_input_context.pending = null;
+    return report;
+}
+
+fn sloInputProof() ?kernel_xhci.InputProof {
+    return null;
+}
+
+fn prepareSloInputFixture() void {
+    if (slo_input_context.ready) return;
+    slo_input_runtime.reset();
+    const task = createLoadTask(
+        &slo_input_runtime,
+        31,
+        .foreground_interactive,
+        "slo-focused-input",
+        "app.slo.input",
+        1_000,
+        kibibytes(64),
+        71,
+    );
+    _ = slo_input_context.compositor.openDocumentView(task, 1, "slo-note.md") catch |err|
+        benchmark_reporting.benchStepFailure("benchmark suite", err);
+    slo_input_context.router.bindHardwareSource(.{
+        .poll_report = pollSloInputReport,
+        .input_proof = sloInputProof,
+    });
+    slo_input_context.router.bindCompositor(&slo_input_context.compositor, 99);
+    slo_input_context.task_id = task.id;
+    slo_input_context.ready = true;
+}
+
+fn benchmarkSloFocusedInput(iteration: u32) u64 {
+    _ = iteration;
+    prepareSloInputFixture();
+    slo_input_context.sequence += 1;
+    var report = kernel_xhci.HardwareBootKeyboardReport{
+        .sequence = slo_input_context.sequence,
+        .port_id = 1,
+        .slot_id = 1,
+        .interface_number = 1,
+        .endpoint_id = 3,
+        .vendor_id = 0x046D,
+        .product_id = 0xC31C,
+    };
+    report.bytes[2] = 0x04;
+    slo_input_context.pending = report;
+    const routed = slo_input_context.router.service(slo_input_context.sequence, 1);
+    const event = slo_input_context.router.pollForTask(slo_input_context.task_id) orelse return 0;
+    return routed + event.sequence + event.task_id;
 }
 
 fn createLoadTask(
