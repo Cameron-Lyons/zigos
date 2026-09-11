@@ -82,6 +82,8 @@ const driver_service = @import("drivers/driver_service.zig");
 const driver_runtime = @import("drivers/driver_runtime.zig");
 const bootstrap_driver_port = @import("drivers/bootstrap_driver_port.zig");
 const dataplane_handoff = @import("drivers/dataplane_handoff.zig");
+const kernel_config = @import("../kernel/config.zig");
+const kernel_smp = @import("../kernel/smp.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
@@ -389,6 +391,10 @@ pub const indexed_hot_path_tables = .{
     .userspace_scheduler = .{
         .uses_scheduler_slot_arena = @hasField(userspace_scheduler.Scheduler, "slots"),
         .uses_ready_heads = @hasField(userspace_scheduler.Scheduler, "ready_heads"),
+        .uses_per_cpu_runqueues = userspace_scheduler.USES_PER_CPU_RUNQUEUES and
+            userspace_scheduler.MAX_SCHEDULER_CPUS == 8 and
+            @FieldType(userspace_scheduler.Scheduler, "ready_heads") ==
+                [userspace_scheduler.MAX_SCHEDULER_CPUS][userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex,
         .selects_ready_resource_class = @hasDecl(userspace_scheduler.Scheduler, "readyQueueDepth"),
         .wakes_tasks = @hasDecl(userspace_scheduler.Scheduler, "wakeTask"),
         .refills_task_budget = @hasDecl(userspace_scheduler.Scheduler, "refillTaskBudget"),
@@ -399,9 +405,9 @@ pub const indexed_hot_path_tables = .{
         .uses_accelerator_claim_task_index = @hasField(userspace_scheduler.AcceleratorClaimBacking, "task_index"),
         .grants_next_accelerator_claim = @hasDecl(userspace_scheduler.Scheduler, "grantNextAcceleratorClaim"),
         .stores_compact_queue_metadata = userspace_scheduler.COMPACT_QUEUE_METADATA and
-            @FieldType(userspace_scheduler.Scheduler, "ready_heads") == [userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
-            @FieldType(userspace_scheduler.Scheduler, "ready_tails") == [userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
-            @FieldType(userspace_scheduler.Scheduler, "ready_counts") == [userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "ready_heads") == [userspace_scheduler.MAX_SCHEDULER_CPUS][userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "ready_tails") == [userspace_scheduler.MAX_SCHEDULER_CPUS][userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
+            @FieldType(userspace_scheduler.Scheduler, "ready_counts") == [userspace_scheduler.MAX_SCHEDULER_CPUS][userspace_scheduler.RESOURCE_CLASS_COUNT]userspace_scheduler.QueueSlotIndex and
             @FieldType(userspace_scheduler.Scheduler, "ready_task_count") == userspace_scheduler.QueueSlotIndex and
             @FieldType(userspace_scheduler.Scheduler, "accelerator_claim_heads") == [userspace_scheduler.ENGINE_COUNT]userspace_scheduler.QueueSlotIndex and
             @FieldType(userspace_scheduler.Scheduler, "accelerator_claim_tails") == [userspace_scheduler.ENGINE_COUNT]userspace_scheduler.QueueSlotIndex and
@@ -1716,5 +1722,11 @@ pub const indexed_hot_path_tables = .{
             session_manager_boot_flow.recovery_context_layout.heap_backs_review_ux_controller_on_freestanding and
             session_manager_boot_flow.recovery_context_layout.freestanding_review_ux_controller_handle_size_bytes <=
                 session_manager_boot_flow.REVIEW_UX_CONTROLLER_HANDLE_SIZE_CEILING_BYTES,
+    },
+    .smp = .{
+        .enables_bringup = kernel_config.shouldInitSmp() and kernel_smp.STARTS_APPLICATION_PROCESSORS,
+        .uses_per_cpu_runqueues = kernel_smp.USES_PER_CPU_RUNQUEUES and userspace_scheduler.USES_PER_CPU_RUNQUEUES,
+        .shoots_down_remote_tlb = kernel_smp.SHOOTS_DOWN_REMOTE_TLB,
+        .pins_device_irqs_to_bsp = kernel_smp.PINS_DEVICE_IRQS_TO_BSP,
     },
 };

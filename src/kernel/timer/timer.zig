@@ -4,17 +4,11 @@ const x2apic = @import("../interrupts/x2apic.zig");
 const x86 = @import("../../arch/x86.zig");
 const cpu_baseline = @import("../../arch/cpu_baseline.zig");
 
-const IA32_APIC_BASE_MSR: u32 = 0x1B;
 const IA32_TSC_DEADLINE_MSR: u32 = 0x6E0;
-const X2APIC_SPURIOUS_VECTOR_MSR: u32 = 0x80F;
 const X2APIC_LVT_TIMER_MSR: u32 = 0x832;
 const X2APIC_TIMER_INITIAL_COUNT_MSR: u32 = 0x838;
 const X2APIC_TIMER_CURRENT_COUNT_MSR: u32 = 0x839;
 const X2APIC_TIMER_DIVIDE_CONFIG_MSR: u32 = 0x83E;
-const APIC_GLOBAL_ENABLE: u64 = 1 << 11;
-const X2APIC_ENABLE: u64 = 1 << 10;
-const X2APIC_SOFTWARE_ENABLE: u64 = 1 << 8;
-const X2APIC_VECTOR_MASK: u64 = 0xFF;
 const X2APIC_TIMER_MASKED: u64 = 1 << 16;
 const X2APIC_TIMER_MODE_PERIODIC: u64 = 1 << 17;
 const X2APIC_TIMER_MODE_TSC_DEADLINE: u64 = 1 << 18;
@@ -49,15 +43,7 @@ pub fn init(features: cpu_baseline.Features, mode: Mode) void {
     tsc_ticks_per_tick = features.tsc_frequency_hz / TICKS_PER_SECOND;
     if (tsc_ticks_per_tick == 0) @panic("invalid TSC frequency for timer");
 
-    x86.writeMsr(
-        IA32_APIC_BASE_MSR,
-        x86.readMsr(IA32_APIC_BASE_MSR) | APIC_GLOBAL_ENABLE | X2APIC_ENABLE,
-    );
-    const spurious = x86.readMsr(X2APIC_SPURIOUS_VECTOR_MSR);
-    x86.writeMsr(
-        X2APIC_SPURIOUS_VECTOR_MSR,
-        (spurious & ~X2APIC_VECTOR_MASK) | X2APIC_SOFTWARE_ENABLE | SPURIOUS_VECTOR,
-    );
+    x2apic.enable();
     switch (mode) {
         .tsc_deadline => {
             x86.writeMsr(

@@ -123,6 +123,11 @@ pub fn setKernelStack(stack: usize) void {
     tss.rsp0 = stack;
 }
 
+pub fn loadCurrent() void {
+    gdt_flush(&gdt_ptr);
+    tss_flush();
+}
+
 pub fn configureDoubleFaultIst() void {
     tss.ist1 = @intFromPtr(doubleFaultStackStorage()) + DOUBLE_FAULT_STACK_TOTAL_BYTES;
 }

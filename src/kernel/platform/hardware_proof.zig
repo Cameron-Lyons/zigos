@@ -477,10 +477,16 @@ fn runtimeMarkerBit(marker: RuntimeMarker) u32 {
 }
 
 var facts = ProbeFacts{};
+var captured_madt_table: []const u8 = &.{};
 var printed = PrintedMarkers{};
+
+pub fn madtTable() []const u8 {
+    return captured_madt_table;
+}
 
 pub fn resetForTest() void {
     facts = .{};
+    captured_madt_table = &.{};
     printed = .{};
 }
 
@@ -759,6 +765,7 @@ fn captureAcpiEvidence() void {
         if (std.mem.eql(u8, header.signature[0..], apic.MADT_SIGNATURE)) {
             if (apic.parseMadt(table)) |summary| {
                 found_madt = summary.local_apic_address != 0 and summary.enabled_processor_count > 0;
+                if (found_madt) captured_madt_table = table;
             } else |_| {}
         } else if (std.mem.eql(u8, header.signature[0..], fadt.FADT_SIGNATURE)) {
             const firmware = fadt.parseFadt(table) catch continue;

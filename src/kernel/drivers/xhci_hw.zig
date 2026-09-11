@@ -7,6 +7,7 @@ const x2apic = @import("../interrupts/x2apic.zig");
 const intel_vtd = @import("../platform/intel_vtd.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
 const pci = @import("pci.zig");
+const smp = @import("../smp.zig");
 const xhci = @import("xhci.zig");
 
 const PAGE_BYTES = mmio_windows.PAGE_BYTES;
@@ -483,7 +484,7 @@ pub fn activate() Error!void {
     const remapped = intel_vtd.routeInterrupt(
         active_device,
         INTERRUPT_VECTOR,
-        x2apic.localId(),
+        smp.irqDestinationId(),
     ) catch return error.InterruptRouteInstallFailed;
     pci.enableSingleMsi(active_device, .{
         .address = remapped.address,

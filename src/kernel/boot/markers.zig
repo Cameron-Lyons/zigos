@@ -18,6 +18,7 @@ pub const cpu_syscall_enabled = "ZIGOS:CPU:SYSCALL:ENABLED";
 pub const cpu_pcid_enabled = "ZIGOS:CPU:PCID:ENABLED";
 pub const cpu_pcid_software_fallback = "ZIGOS:CPU:PCID:SOFTWARE_FLUSH";
 pub const cpu_pcid_ready = "ZIGOS:CPU:PCID:READY";
+pub const smp_ready = "ZIGOS:SMP:READY";
 pub const kernel_wx_enforced = "ZIGOS:KERNEL:W_X:ENFORCED";
 
 pub const bench_start = "BENCH:START";

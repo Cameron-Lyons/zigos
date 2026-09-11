@@ -11,6 +11,7 @@ const i225_irq = @import("intel_i225_irq.zig");
 const i225_rx = @import("intel_i225_rx.zig");
 const i225_tx = @import("intel_i225_tx.zig");
 const pci = @import("pci.zig");
+const smp = @import("../smp.zig");
 
 pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
 
@@ -306,7 +307,7 @@ pub fn activate() Error!void {
     const remapped = intel_vtd.routeInterrupt(
         active_device,
         INTERRUPT_VECTOR,
-        x2apic.localId(),
+        smp.irqDestinationId(),
     ) catch return error.InterruptRouteInstallFailed;
     pci.enableSingleMsi(active_device, .{
         .address = remapped.address,

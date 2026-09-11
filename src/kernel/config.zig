@@ -25,7 +25,7 @@ pub fn name() []const u8 {
 }
 
 pub fn shouldInitSmp() bool {
-    return false;
+    return true;
 }
 
 pub fn shouldInitNetworkStack() bool {
