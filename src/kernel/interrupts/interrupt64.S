@@ -121,6 +121,8 @@ ISR_NOERRCODE 112
 ISR_NOERRCODE 255
 
 isr_common_stub:
+    # endbr64
+    .byte 0xf3, 0x0f, 0x1e, 0xfa
     clac
     SAVE_REGISTERS
     movq %rsp, %r12

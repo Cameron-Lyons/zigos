@@ -1525,6 +1525,8 @@ fn validateNuc11tnki5KernelProofSources(
         "x2apic",
         "xsave",
         "xsaves",
+        "cet_ibt",
+        "cet_ss",
         "tsc_deadline",
         "invariant_tsc",
         "tsc_frequency_hz",
@@ -1547,6 +1549,7 @@ fn validateNuc11tnki5KernelProofSources(
         "CR4_PCIDE",
         "CR4_PGE",
         "CR4_OSXSAVE",
+        "CR4_CET",
         "CR3_NO_FLUSH",
         "pcidCr3Value",
         "writeCr3WithPcid",
@@ -1555,6 +1558,9 @@ fn validateNuc11tnki5KernelProofSources(
         "processContextIdentifiersEnabled",
         "enableXsaves",
         "xsavesEnabled",
+        "enableCet",
+        "cetEnabled",
+        "enableCetOnApplicationProcessor",
         "globalPagesEnabled",
         "CR4_SMEP",
         "CR4_SMAP",
@@ -1612,8 +1618,11 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, kernel_build_source, "src/arch/x86/xsaves.S") == null) {
         try common.addError(errors, allocator, "kernel build must include the x86 XSAVES assembly", .{});
     }
-    if (std.mem.indexOf(u8, interrupt_stubs_source, "isr_common_stub:\n    clac") == null) {
-        try common.addError(errors, allocator, "x86 interrupt entry must clear AC before entering kernel handlers", .{});
+    if (std.mem.indexOf(u8, interrupt_stubs_source, "isr_common_stub:") == null or
+        std.mem.indexOf(u8, interrupt_stubs_source, "endbr64") == null or
+        std.mem.indexOf(u8, interrupt_stubs_source, "clac") == null)
+    {
+        try common.addError(errors, allocator, "x86 interrupt entry must land on endbr64 and clear AC before entering kernel handlers", .{});
     }
     if (std.mem.indexOf(u8, interrupt_stubs_source, "xsaves") == null or
         std.mem.indexOf(u8, interrupt_stubs_source, "xrstors") == null)
@@ -1635,6 +1644,9 @@ fn validateNuc11tnki5KernelProofSources(
         "processContextIdentifiersEnabled",
         "enableXsaves",
         "xsavesEnabled",
+        "enableCet",
+        "cetEnabled",
+        "CetMode",
     };
     for (required_cpu_feature_pcid_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_features_source, snippet) == null) {
@@ -1676,6 +1688,18 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "CPU boot timer gate must retain snippet: {s}", .{snippet});
         }
     }
+    const required_boot_cet_snippets = [_][]const u8{
+        "hardware_cet",
+        "software_cet_fallback",
+        "required_features.cet_ibt = true",
+        "required_features.cet_ss = true",
+        ".deferred",
+    };
+    for (required_boot_cet_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "CPU boot CET gate must retain snippet: {s}", .{snippet});
+        }
+    }
     const required_pcid_allocator_snippets = [_][]const u8{
         "KERNEL_IDENTIFIER",
         "MAX_IDENTIFIER",
@@ -1703,6 +1727,10 @@ fn validateNuc11tnki5KernelProofSources(
         "switchAddressSpace",
         "ENTRY_GLOBAL",
         "leafFlags(flags, global)",
+        "USES_RUNTIME_2M_PAGES",
+        "mapOwnedUserHugePage",
+        "LARGE_2M_PAGE_SIZE",
+        "ENTRY_LARGE_PAGE",
     };
     for (required_pcid_paging_snippets) |snippet| {
         if (std.mem.indexOf(u8, paging_source, snippet) == null) {
@@ -1793,6 +1821,7 @@ fn validateNuc11tnki5KernelProofSources(
         "CPU_USER_STACK_POINTER",
         "xsaves",
         "xrstors",
+        "endbr64",
         "sysretq",
         "call syscall_handler",
         "call isrHandler",

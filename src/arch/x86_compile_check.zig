@@ -19,7 +19,7 @@ pub export fn zigos_x86_arch_compile_check(port: u16, value: u32) u64 {
 
     const features = cpu_features.detect();
     if (cpu_features.baseline.isSupported(features)) {
-        cpu_features.enableModernFeatures(features, .hardware_pcid);
+        cpu_features.enableModernFeatures(features, .hardware_pcid, .hardware);
     }
     x86.invalidatePage(x86.readCr2());
     x86.loadIdt(&empty_idt);
@@ -31,5 +31,6 @@ pub export fn zigos_x86_arch_compile_check(port: u16, value: u32) u64 {
     _ = x86.syscallExtensionEnabled();
     x86.enableSse();
     x86.enableXsaves();
+    x86.enableCet();
     return x86.rdtsc() ^ input ^ x86.stackPointer();
 }

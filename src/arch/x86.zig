@@ -135,6 +135,7 @@ pub const CR4_PCIDE: usize = 1 << 17;
 pub const CR4_OSXSAVE: usize = 1 << 18;
 pub const CR4_SMEP: usize = 1 << 20;
 pub const CR4_SMAP: usize = 1 << 21;
+pub const CR4_CET: usize = 1 << 23;
 
 pub const XCR0_X87: u64 = 1 << 0;
 pub const XCR0_SSE: u64 = 1 << 1;
@@ -162,6 +163,10 @@ pub const IA32_LSTAR_MSR: u32 = 0xC000_0082;
 pub const IA32_FMASK_MSR: u32 = 0xC000_0084;
 pub const IA32_GS_BASE_MSR: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
+pub const IA32_U_CET_MSR: u32 = 0x6A0;
+pub const IA32_S_CET_MSR: u32 = 0x6A2;
+pub const CET_SH_STK_EN: u64 = 1 << 0;
+pub const CET_ENDBR_EN: u64 = 1 << 2;
 
 pub inline fn enableNoExecute() void {
     writeMsr(EFER_MSR, readMsr(EFER_MSR) | EFER_NXE);
@@ -277,6 +282,24 @@ pub fn enableXsaves() void {
 
 pub fn xsavesEnabled() bool {
     return (readCr4() & CR4_OSXSAVE) != 0 and readXcr0() == (XCR0_X87 | XCR0_SSE);
+}
+
+var cet_programmed = false;
+
+pub fn enableCet() void {
+    writeMsr(IA32_S_CET_MSR, CET_ENDBR_EN);
+    writeMsr(IA32_U_CET_MSR, 0);
+    writeCr4(readCr4() | CR4_CET);
+    cet_programmed = true;
+}
+
+pub fn enableCetOnApplicationProcessor() void {
+    if (cet_programmed) enableCet();
+}
+
+pub fn cetEnabled() bool {
+    return (readCr4() & CR4_CET) != 0 and
+        (readMsr(IA32_S_CET_MSR) & CET_ENDBR_EN) != 0;
 }
 
 pub fn writeXcr0(value: u64) void {

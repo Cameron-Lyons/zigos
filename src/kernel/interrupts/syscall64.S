@@ -60,6 +60,8 @@
 .global zigos_syscall_entry
 .type zigos_syscall_entry, @function
 zigos_syscall_entry:
+    # endbr64
+    .byte 0xf3, 0x0f, 0x1e, 0xfa
     swapgs
     movq %rsp, %gs:CPU_USER_STACK_POINTER
     movq %gs:CPU_KERNEL_STACK_TOP, %rsp
