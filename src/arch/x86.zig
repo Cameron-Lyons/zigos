@@ -132,8 +132,12 @@ pub const CR4_OSFXSR: usize = 1 << 9;
 pub const CR4_OSXMMEXCPT: usize = 1 << 10;
 pub const CR4_UMIP: usize = 1 << 11;
 pub const CR4_PCIDE: usize = 1 << 17;
+pub const CR4_OSXSAVE: usize = 1 << 18;
 pub const CR4_SMEP: usize = 1 << 20;
 pub const CR4_SMAP: usize = 1 << 21;
+
+pub const XCR0_X87: u64 = 1 << 0;
+pub const XCR0_SSE: u64 = 1 << 1;
 
 pub const CR3_PCID_MASK: usize = 0x0FFF;
 pub const CR3_ADDRESS_MASK: usize = 0x000F_FFFF_FFFF_F000;
@@ -147,6 +151,8 @@ const InvpcidDescriptor = extern struct {
 extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 extern fn x86_allow_supervisor_user_memory() callconv(.c) void;
 extern fn x86_forbid_supervisor_user_memory() callconv(.c) void;
+extern fn x86_write_xcr0(value: u64) callconv(.c) void;
+extern fn x86_read_xcr0() callconv(.c) u64;
 
 pub const EFER_MSR: u32 = 0xC000_0080;
 pub const EFER_SCE: u64 = 1 << 0;
@@ -262,6 +268,23 @@ pub fn enableSse() void {
     writeCr4(readCr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
 
     asm volatile ("fninit");
+}
+
+pub fn enableXsaves() void {
+    writeCr4(readCr4() | CR4_OSXSAVE);
+    writeXcr0(XCR0_X87 | XCR0_SSE);
+}
+
+pub fn xsavesEnabled() bool {
+    return (readCr4() & CR4_OSXSAVE) != 0 and readXcr0() == (XCR0_X87 | XCR0_SSE);
+}
+
+pub fn writeXcr0(value: u64) void {
+    x86_write_xcr0(value);
+}
+
+pub fn readXcr0() u64 {
+    return x86_read_xcr0();
 }
 
 test "PCID CR3 composition preserves an aligned page-table root" {

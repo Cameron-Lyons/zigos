@@ -13,8 +13,9 @@
 .equ USER_CODE_SELECTOR, 0x23
 .equ CPU_KERNEL_STACK_TOP, 0
 .equ CPU_USER_STACK_POINTER, 8
-.equ FXSAVE_BYTES, 512
-.equ FXSAVE_ALIGN_SLACK, 16
+.equ XSAVE_BYTES, 576
+.equ XSAVE_ALIGN_SLACK, 64
+.equ XCOMP_BV, 0x8000000000000003
 
 .macro SAVE_REGISTERS
     pushq %rax
@@ -89,11 +90,20 @@ zigos_syscall_entry:
 .save_and_dispatch:
     SAVE_REGISTERS
     movq %rsp, %r12
-    movq %r12, %rdi
-    subq $(FXSAVE_BYTES + FXSAVE_ALIGN_SLACK), %rsp
-    andq $-16, %rsp
-    fxsave64 (%rsp)
+    subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
+    andq $-64, %rsp
+    leaq 512(%rsp), %rdi
+    xorl %eax, %eax
+    movl $8, %ecx
+    rep stosq
+    movabsq $XCOMP_BV, %rax
+    movq %rax, 520(%rsp)
+    movl $3, %eax
+    xorl %edx, %edx
+    # xsaves (%rsp)
+    .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
+    movq %r12, %rdi
 
     cmpq $SYSCALL_VECTOR, 136(%r12)
     jne .handle_userspace_yield
@@ -104,7 +114,10 @@ zigos_syscall_entry:
     call isrHandler
 
 .dispatch_complete:
-    fxrstor64 (%rsp)
+    movl $3, %eax
+    xorl %edx, %edx
+    # xrstors (%rsp)
+    .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
     movq %r12, %rsp
     cmpl $0, zigos_userspace_resume_requested(%rip)
     jne .userspace_resume

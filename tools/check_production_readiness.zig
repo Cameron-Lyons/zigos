@@ -839,6 +839,7 @@ fn validateNuc11tnki5KernelProofSources(
     const x86_path = "src/arch/x86.zig";
     const invpcid_path = "src/arch/x86/invpcid.S";
     const user_access_path = "src/arch/x86/user_access.S";
+    const xsaves_path = "src/arch/x86/xsaves.S";
     const cpu_features_path = "src/arch/cpu_features.zig";
     const boot_entry_path = "src/kernel/boot/entry.zig";
     const paging_path = "src/kernel/memory/paging64.zig";
@@ -986,6 +987,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "x86 supervisor user-memory access assembly is missing: {s}", .{user_access_path});
         return;
     }
+    if (!common.pathExists(io, xsaves_path)) {
+        try common.addError(errors, allocator, "x86 XSAVES extended-state assembly is missing: {s}", .{xsaves_path});
+        return;
+    }
     if (!common.pathExists(io, cpu_features_path)) {
         try common.addError(errors, allocator, "modern CPU feature enablement source is missing: {s}", .{cpu_features_path});
         return;
@@ -1089,6 +1094,7 @@ fn validateNuc11tnki5KernelProofSources(
     const x86_source = try common.readFileAlloc(allocator, io, x86_path, common.source_file_max_bytes);
     const invpcid_source = try common.readFileAlloc(allocator, io, invpcid_path, common.source_file_max_bytes);
     const user_access_source = try common.readFileAlloc(allocator, io, user_access_path, common.source_file_max_bytes);
+    const xsaves_source = try common.readFileAlloc(allocator, io, xsaves_path, common.source_file_max_bytes);
     const cpu_features_source = try common.readFileAlloc(allocator, io, cpu_features_path, common.source_file_max_bytes);
     const boot_entry_source = try common.readFileAlloc(allocator, io, boot_entry_path, common.source_file_max_bytes);
     const paging_source = try common.readFileAlloc(allocator, io, paging_path, common.source_file_max_bytes);
@@ -1517,6 +1523,8 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_modern_cpu_baseline_snippets = [_][]const u8{
         "x2apic",
+        "xsave",
+        "xsaves",
         "tsc_deadline",
         "invariant_tsc",
         "tsc_frequency_hz",
@@ -1538,12 +1546,15 @@ fn validateNuc11tnki5KernelProofSources(
     const required_x86_pcid_snippets = [_][]const u8{
         "CR4_PCIDE",
         "CR4_PGE",
+        "CR4_OSXSAVE",
         "CR3_NO_FLUSH",
         "pcidCr3Value",
         "writeCr3WithPcid",
         "invalidatePcid",
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
+        "enableXsaves",
+        "xsavesEnabled",
         "globalPagesEnabled",
         "CR4_SMEP",
         "CR4_SMAP",
@@ -1587,8 +1598,27 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, kernel_build_source, "src/arch/x86/user_access.S") == null) {
         try common.addError(errors, allocator, "kernel build must include the x86 SMAP user-memory access assembly", .{});
     }
+    const required_xsaves_assembly_snippets = [_][]const u8{
+        "x86_write_xcr0",
+        "x86_read_xcr0",
+        "0x0f, 0x01, 0xd1",
+        "0x0f, 0x01, 0xd0",
+    };
+    for (required_xsaves_assembly_snippets) |snippet| {
+        if (std.mem.indexOf(u8, xsaves_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 XSAVES support must retain snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "src/arch/x86/xsaves.S") == null) {
+        try common.addError(errors, allocator, "kernel build must include the x86 XSAVES assembly", .{});
+    }
     if (std.mem.indexOf(u8, interrupt_stubs_source, "isr_common_stub:\n    clac") == null) {
         try common.addError(errors, allocator, "x86 interrupt entry must clear AC before entering kernel handlers", .{});
+    }
+    if (std.mem.indexOf(u8, interrupt_stubs_source, "xsaves") == null or
+        std.mem.indexOf(u8, interrupt_stubs_source, "xrstors") == null)
+    {
+        try common.addError(errors, allocator, "x86 interrupt entry must save compact extended state with XSAVES", .{});
     }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
@@ -1603,6 +1633,8 @@ fn validateNuc11tnki5KernelProofSources(
         "supervisorAccessPreventionEnabled",
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
+        "enableXsaves",
+        "xsavesEnabled",
     };
     for (required_cpu_feature_pcid_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_features_source, snippet) == null) {
@@ -1759,7 +1791,8 @@ fn validateNuc11tnki5KernelProofSources(
         "swapgs",
         "CPU_KERNEL_STACK_TOP",
         "CPU_USER_STACK_POINTER",
-        "fxsave64",
+        "xsaves",
+        "xrstors",
         "sysretq",
         "call syscall_handler",
         "call isrHandler",
@@ -3020,7 +3053,7 @@ fn validateStorageModernOnlyTrack(
     const driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
     const driver_port_source = try readRequiredSource(allocator, io, errors, driver_port_path) orelse return;
     const driver_port_snippets = [_][]const u8{
-        "attachPublishedStorageBackend(publication, publication.backend.?)",
+        "attachPublishedStorageBackend(publication, backend)",
         "storagePublicationMatchesTargetNvme",
         "storage_volume.attachNvmePciBackend(backend)",
         "StorageControllerSession",

@@ -102,6 +102,7 @@ fn waitMilliseconds(milliseconds: u64) void {
 fn apEntry(cpu_index: u64) callconv(.c) noreturn {
     const index: u8 = @truncate(cpu_index);
     x86.enableSse();
+    x86.enableXsaves();
     gdt.loadCurrent();
     idt.init();
     x2apic.enable();

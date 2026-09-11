@@ -548,6 +548,7 @@ fn addKernelAssemblyFiles(
     kernel_module.addAssemblyFile(b.path("src/boot/boot_x86_64.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/invpcid.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/user_access.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/xsaves.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/syscall64.S"));
