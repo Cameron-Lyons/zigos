@@ -16,6 +16,7 @@ const nvme_prp = @import("nvme_prp.zig");
 const nvme_timing = @import("nvme_timing.zig");
 const pci = @import("pci.zig");
 const dataplane_handoff = @import("../../native/drivers/dataplane_handoff.zig");
+const smp = @import("../smp.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 pub const INTERRUPT_VECTOR = nvme_interrupt.INTERRUPT_VECTOR;
@@ -527,7 +528,7 @@ pub fn activateInterrupts() Error!void {
     const remapped = intel_vtd.routeInterrupt(
         active_device,
         INTERRUPT_VECTOR,
-        x2apic.localId(),
+        smp.irqDestinationId(),
     ) catch return error.InterruptRouteInstallFailed;
     pci.enableSingleMsi(active_device, .{
         .address = remapped.address,

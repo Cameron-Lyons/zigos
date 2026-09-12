@@ -9,6 +9,7 @@ const timer = @import("../timer/timer.zig");
 const intel_i225_hw = @import("../drivers/intel_i225_hw.zig");
 const nvme_hw = @import("../drivers/nvme_hw.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
+const smp = @import("../smp.zig");
 
 const GateHandler = *const fn () callconv(.c) void;
 
@@ -60,6 +61,7 @@ extern fn isr64() void;
 extern fn isr65() void;
 extern fn isr66() void;
 extern fn isr67() void;
+extern fn isr112() void;
 extern fn isr255() void;
 
 const exception_stubs = [_]GateHandler{
@@ -187,10 +189,11 @@ const external_handler_vectors = [_]u8{
     intel_i225_hw.INTERRUPT_VECTOR,
     nvme_hw.INTERRUPT_VECTOR,
     xhci_hw.INTERRUPT_VECTOR,
+    smp.TLB_IPI_VECTOR,
     USERSPACE_YIELD_VECTOR,
     timer.SPURIOUS_VECTOR,
 };
-const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 304;
+const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 320;
 
 var exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler = [_]?InterruptHandler{null} ** EXCEPTION_VECTOR_COUNT;
 var external_handlers: [external_handler_vectors.len]?InterruptHandler = [_]?InterruptHandler{null} ** external_handler_vectors.len;
@@ -241,6 +244,8 @@ pub fn init() void {
     registerHandler(nvme_hw.INTERRUPT_VECTOR, nvmeInterrupt);
     setKernelGate(xhci_hw.INTERRUPT_VECTOR, &isr67);
     registerHandler(xhci_hw.INTERRUPT_VECTOR, xhciInterrupt);
+    setKernelGate(smp.TLB_IPI_VECTOR, &isr112);
+    registerHandler(smp.TLB_IPI_VECTOR, tlbIpiInterrupt);
     setKernelGate(timer.SPURIOUS_VECTOR, &isr255);
     registerHandler(timer.SPURIOUS_VECTOR, spuriousInterrupt);
 
@@ -269,6 +274,10 @@ fn nvmeInterrupt(_: *InterruptFrame) void {
 
 fn xhciInterrupt(_: *InterruptFrame) void {
     xhci_hw.handleInterrupt();
+}
+
+fn tlbIpiInterrupt(_: *InterruptFrame) void {
+    smp.handleTlbIpi();
 }
 
 fn spuriousInterrupt(_: *InterruptFrame) void {

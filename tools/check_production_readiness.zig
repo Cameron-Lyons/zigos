@@ -1347,7 +1347,7 @@ fn validateNuc11tnki5KernelProofSources(
         "exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler",
         "external_handlers: [external_handler_vectors.len]?InterruptHandler",
         "fn externalHandlerIndex(vector: usize) ?usize",
-        "const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 304",
+        "const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 320",
     };
     for (required_compact_handler_dispatch_snippets) |snippet| {
         if (std.mem.indexOf(u8, isr_source, snippet) == null) {
@@ -1377,6 +1377,7 @@ fn validateNuc11tnki5KernelProofSources(
     const required_x2apic_stubs = [_][]const u8{
         "ISR_NOERRCODE 64",
         "ISR_NOERRCODE 67",
+        "ISR_NOERRCODE 112",
         "ISR_NOERRCODE 255",
     };
     for (required_x2apic_stubs) |snippet| {

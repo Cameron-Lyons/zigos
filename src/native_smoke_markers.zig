@@ -15,6 +15,7 @@ pub const production_required = [_][]const u8{
     boot_markers.cpu_pge_enabled,
     boot_markers.cpu_syscall_enabled,
     boot_markers.cpu_pcid_ready,
+    boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
     boot_markers.boot_core_ready,
     boot_markers.kernel_network_deferred,
@@ -91,6 +92,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.cpu_pge_enabled,
     boot_markers.cpu_syscall_enabled,
     boot_markers.cpu_pcid_ready,
+    boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
     boot_markers.boot_core_ready,
     boot_markers.kernel_network_deferred,
@@ -401,6 +403,7 @@ pub const recovery_required = [_][]const u8{
     boot_markers.cpu_pge_enabled,
     boot_markers.cpu_syscall_enabled,
     boot_markers.cpu_pcid_ready,
+    boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
     boot_markers.boot_core_ready,
     boot_markers.recovery_start,
@@ -434,6 +437,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.cpu_pge_enabled,
         boot_markers.cpu_syscall_enabled,
         boot_markers.cpu_pcid_ready,
+    boot_markers.smp_ready,
         boot_markers.kernel_wx_enforced,
         boot_markers.boot_core_ready,
         boot_markers.userspace_artifacts_ready,
@@ -470,6 +474,8 @@ test "verification smoke groups require the verification kernel role" {
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_syscall_enabled));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_pcid_ready));
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_pcid_ready));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.smp_ready));
+    try std.testing.expect(contains(&recovery_required, boot_markers.smp_ready));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.kernel_wx_enforced));
     try std.testing.expect(contains(&recovery_required, boot_markers.kernel_wx_enforced));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.kernel_role_verification));

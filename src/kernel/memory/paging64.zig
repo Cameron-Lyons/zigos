@@ -139,6 +139,7 @@ var low_identity_frame_cursor = frame_allocator.AllocationCursor{};
 var process_contexts = pcid_allocator.Allocator.init();
 var process_context_lock = spin.Lock.init();
 var process_context_identifiers_enabled: bool = false;
+var remote_pcid_shootdown: ?*const fn (u16) void = null;
 
 const tableIndex = table64.index;
 
@@ -265,9 +266,16 @@ fn tryAllocProcessContext() ?pcid_allocator.Identifier {
 fn releaseProcessContext(identifier: pcid_allocator.Identifier) void {
     acquireProcessContextLock();
     defer releaseProcessContextLock();
-    if (process_context_identifiers_enabled) x86.invalidatePcid(identifier);
+    if (process_context_identifiers_enabled) {
+        x86.invalidatePcid(identifier);
+        if (remote_pcid_shootdown) |shootdown| shootdown(identifier);
+    }
     process_contexts.release(identifier) catch
         haltWithMessage("Corrupt process-context identifier accounting!\n");
+}
+
+pub fn setRemotePcidShootdown(hook: *const fn (u16) void) void {
+    remote_pcid_shootdown = hook;
 }
 
 fn haltWithMessage(message: []const u8) noreturn {
@@ -284,6 +292,19 @@ inline fn lowIdentityFrameAddress(address: frame_allocator.PhysicalAddress) u32 
 
 pub fn directMapAddress(address: frame_allocator.PhysicalAddress) ?usize {
     return virtual_layout.directMappedAddress(address, MANAGED_PHYSICAL_BYTES);
+}
+
+pub const SIPI_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 1024;
+
+pub fn claimSipiTrampolinePage() ?u32 {
+    acquireFrameLock();
+    defer releaseFrameLock();
+    var attempts: u8 = 0;
+    while (attempts < 16) : (attempts += 1) {
+        const run = physical_frames.allocateBelow(1, SIPI_PHYSICAL_LIMIT) orelse return null;
+        if (run.base != 0) return lowIdentityFrameAddress(run.base);
+    }
+    return null;
 }
 
 pub fn allocGeneralFrame() ?frame_allocator.PhysicalAddress {

@@ -93,6 +93,7 @@ pub fn kernelMain() void {
         features,
         if (hardware_tsc_timer) .tsc_deadline else .calibrated_countdown,
     );
+    @import("../smp.zig").init(hardware_proof.madtTable());
 
     common.printBootMarker(boot_markers.boot_core_ready);
     switch (comptime config.bootProfile()) {

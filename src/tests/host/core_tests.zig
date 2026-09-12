@@ -16,6 +16,8 @@ const native_util = @import("../../native/core/util.zig");
 const principal = @import("../../native/core/principal.zig");
 const request_header = @import("../../native/core/request_header.zig");
 const signing = @import("../../native/core/signing.zig");
+const kernel_smp = @import("../../kernel/smp.zig");
+const x2apic = @import("../../kernel/interrupts/x2apic.zig");
 
 test "core host tests import native core modules" {
     std.testing.refAllDecls(cpu_baseline);
@@ -34,4 +36,6 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(principal);
     std.testing.refAllDecls(request_header);
     std.testing.refAllDecls(signing);
+    std.testing.refAllDecls(kernel_smp);
+    std.testing.refAllDecls(x2apic);
 }
