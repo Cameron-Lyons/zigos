@@ -1,3 +1,4 @@
+const std = @import("std");
 const console = @import("../../utils/console.zig");
 const config = @import("../../config.zig");
 const first_target_telemetry = @import("../../drivers/first_target_telemetry.zig");
@@ -7,6 +8,7 @@ const nvme_hw = @import("../../drivers/nvme_hw.zig");
 const xhci_hw = @import("../../drivers/xhci_hw.zig");
 const intel_vtd = @import("../../platform/intel_vtd.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
+const device_broker = @import("../../../native/kernel_api/device_broker.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
 const common = @import("../common.zig");
 const data_plane_boundary = @import("data_plane_boundary.zig");
@@ -75,6 +77,7 @@ pub fn init() void {
     );
     if (!device_inventory.recordForClass(.compositor_policy).detected) {
         device_inventory.registerDetected(.compositor_policy, 0xC0DE_9001, .platform_policy, false);
+        registerFramebufferWindow(0xC0DE_9001);
     }
     console.print("Bootstrap device inventory ready!\n");
 
@@ -179,6 +182,9 @@ fn capturePciInventory() void {
             @panic("I225-LM preparation omitted its DMA isolation domain");
         isolation_domain_count += 1;
         network_prepared = true;
+        if (intel_i225_hw.publishedBar()) |bar| {
+            registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
+        }
     }
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);
@@ -196,6 +202,9 @@ fn capturePciInventory() void {
             isolation_domain_count += 1;
             console.print("ZIGOS:XHCI:HW:DMA_OK\n");
             xhci_prepared = true;
+            if (xhci_hw.publishedBar()) |bar| {
+                registerDeviceMmio(xhci_device_id, bar.physical_base, bar.length);
+            }
         } else |err| {
             reportHardwareFailure(
                 "ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ",
@@ -232,6 +241,9 @@ fn capturePciInventory() void {
         };
         if (fault_proof) |proof| hardware_proof.recordVtdIsolationProof(proof);
         storage_attached = true;
+        if (nvme_hw.publishedBar()) |bar| {
+            registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
+        }
     }
 }
 
@@ -242,4 +254,29 @@ fn publishDeferredNetworkBootstrap() void {
 
 fn pciDeviceId(device_info: pci.PCIDevice) u64 {
     return pci.stableDeviceId(device_info);
+}
+
+fn registerFramebufferWindow(device_id: u64) void {
+    const info = handoff.capturedInfo() orelse return;
+    const framebuffer_info = handoff.framebufferInfo(info) catch return;
+    registerDeviceMmio(device_id, framebuffer_info.physical_address, framebuffer_info.buffer_bytes);
+}
+
+fn registerDeviceMmio(device_id: u64, physical_base: u64, length: u64) void {
+    const page_size: u64 = 4096;
+    if (physical_base == 0 or physical_base % page_size != 0 or length == 0) return;
+    const mapped_length = std.mem.alignForward(u64, length, page_size);
+    device_broker.registerMmioWindows(device_id, &.{.{
+        .base = 0,
+        .physical_base = physical_base,
+        .length = mapped_length,
+        .writable = true,
+    }}) catch {
+        reportHardwareFailure(
+            "ZIGOS:DEVICE:MMIO:REGISTER_FAIL ",
+            error.InvalidMmioWindow,
+            hardware_proof.realTargetDetected(),
+            "userspace MMIO window registration failed closed",
+        );
+    };
 }

@@ -81,6 +81,7 @@ const public_store = @import("services/public_store.zig");
 const driver_service = @import("drivers/driver_service.zig");
 const driver_runtime = @import("drivers/driver_runtime.zig");
 const bootstrap_driver_port = @import("drivers/bootstrap_driver_port.zig");
+const dataplane_handoff = @import("drivers/dataplane_handoff.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
@@ -902,6 +903,9 @@ pub const indexed_hot_path_tables = .{
             device_broker.dma_program_backing_layout.heap_backs_state_on_freestanding and
             device_broker.dma_program_backing_layout.freestanding_handle_size_bytes <= device_broker.DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES and
             device_broker.dma_program_backing_layout.backing_size_bytes <= device_broker.DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES,
+        .exposes_registered_mmio_windows = device_broker.EXPOSES_REGISTERED_MMIO_WINDOWS,
+        .maps_mmio_into_owner_tasks = dataplane_handoff.MAPS_MMIO_INTO_OWNER_TASKS,
+        .seals_kernel_runtime_io_after_claim = dataplane_handoff.SEALS_KERNEL_RUNTIME_IO_AFTER_CLAIM,
     },
     .network_policy = .{
         .stores_compact_policy_metadata = network_policy.COMPACT_POLICY_METADATA and

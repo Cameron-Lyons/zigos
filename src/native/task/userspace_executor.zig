@@ -143,6 +143,15 @@ else
             pub fn mapOwnedUserRange(_: *UserAddressSpace, _: u32, _: u32, _: UserPermissions) UserMapError!void {
                 return error.OutOfMemory;
             }
+            pub fn mapBorrowedPhysicalUserRange(
+                _: *UserAddressSpace,
+                _: u32,
+                _: u64,
+                _: u32,
+                _: UserPermissions,
+            ) UserMapError!void {
+                return error.OutOfMemory;
+            }
             pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: u32, _: []const u8) UserWriteError!void {
                 return error.PageNotOwned;
             }

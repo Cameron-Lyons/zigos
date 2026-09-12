@@ -408,6 +408,46 @@ fn ensureChildTable(
     return tableFromEntry(entry.*);
 }
 
+pub fn mapBorrowedPhysicalUserRange(
+    space: *UserAddressSpace,
+    virtual_start: u32,
+    physical_start: u64,
+    size_bytes: u32,
+    permissions: UserPermissions,
+) UserMapError!void {
+    if (pageOffset(virtual_start) != 0 or size_bytes == 0) return error.InvalidRange;
+    if (physical_start > std.math.maxInt(usize)) return error.InvalidRange;
+    const physical_address: usize = @intCast(physical_start);
+    if (pageOffset(physical_address) != 0) return error.InvalidRange;
+    if (permissions.writable and permissions.executable) return error.WritableExecutable;
+    if (permissions.executable) return error.WritableExecutable;
+    if (size_bytes > MAX_U32 - (PAGE_SIZE - 1)) return error.AddressOverflow;
+
+    const mapped_size = (size_bytes + PAGE_SIZE - 1) & ~PAGE_OFFSET_MASK;
+    if (virtual_start > MAX_U32 - mapped_size) return error.AddressOverflow;
+    if (!table64.physicalAddressFits(physical_address + (mapped_size - PAGE_SIZE))) return error.InvalidRange;
+
+    var offset: u32 = 0;
+    while (offset < mapped_size) : (offset += PAGE_SIZE) {
+        try validateOwnedMappingSlot(space, virtual_start + offset);
+    }
+
+    offset = 0;
+    while (offset < mapped_size) : (offset += PAGE_SIZE) {
+        var flags: u32 = PAGE_PRESENT | PAGE_USER | PAGE_CACHE_DISABLE;
+        if (permissions.writable) flags |= PAGE_WRITABLE;
+        if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
+        try mapBorrowedPageIn(
+            space.directory,
+            virtual_start + offset,
+            physical_address + offset,
+            flags,
+            TABLE_OWNER_USER_PRIVATE,
+            false,
+        );
+    }
+}
+
 fn mapBorrowedPageIn(
     pml4: *PageDirectory,
     virt_addr: usize,

@@ -1776,9 +1776,17 @@ test "native kernel brokers device metadata and port io through device capabilit
     device_broker.reset();
     defer device_broker.reset();
     try std.testing.expect(device_broker.publishPciController(0x1F001));
+    try device_broker.registerMmioWindows(0x1F001, &.{.{
+        .base = 0,
+        .physical_base = 0xF000_0000,
+        .length = 4096,
+        .writable = true,
+    }});
 
     const descriptor = try kernel.deviceDescribe(testContext(.device_describe, device_capability.id, .none), 12);
     try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
-    try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
-    try std.testing.expectError(error.UnsupportedMmioWindow, kernel.deviceMmioWindow(testContext(.device_mmio_window, device_capability.id, .none), 0, 12));
+    try std.testing.expectEqual(@as(u8, 1), descriptor.mmio_window_count);
+    const window = try kernel.deviceMmioWindow(testContext(.device_mmio_window, device_capability.id, .none), 0, 12);
+    try std.testing.expectEqual(@as(u64, 4096), window.length);
+    try std.testing.expect((window.flags & abi.MMIO_WINDOW_FLAG_WRITABLE) != 0);
 }

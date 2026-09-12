@@ -424,6 +424,11 @@ pub fn probedCapabilities() ?xhci.CapabilityRegisters {
     return active_capabilities;
 }
 
+pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
+    if (active_bar_address == 0) return null;
+    return .{ .physical_base = active_bar_address, .length = PAGE_BYTES };
+}
+
 pub fn probedLegacyOwnership() ?xhci.LegacyOwnership {
     return active_legacy_ownership;
 }
