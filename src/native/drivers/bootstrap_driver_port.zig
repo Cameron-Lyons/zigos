@@ -433,28 +433,28 @@ pub fn refreshActiveStorageAttachment(service_id: u64) bool {
     const publication = publicationForActiveStorage(service_id) orelse return false;
     const backend = publication.backend orelse return false;
     if (!storageControllerSessionCurrent(publication)) return false;
-    return attachPublishedStorageBackend(publication, backend);
+    return attachOwnedStorageBackend(publication, backend);
 }
 
 pub fn activeStorageRead(service_id: u64, start_lba: u64, buffer: []u8) bool {
     const publication = publicationForActiveStorage(service_id) orelse return false;
-    const backend = publication.backend orelse return false;
+    if (publication.backend == null) return false;
     if (!storageControllerSessionCurrent(publication)) return false;
-    return backend.read(start_lba, buffer.ptr, buffer.len);
+    return ownedStorageRead(start_lba, buffer.ptr, buffer.len);
 }
 
 pub fn activeStorageWrite(service_id: u64, start_lba: u64, buffer: []const u8) bool {
     const publication = publicationForActiveStorage(service_id) orelse return false;
-    const backend = publication.backend orelse return false;
+    if (publication.backend == null) return false;
     if (!storageControllerSessionCurrent(publication)) return false;
-    return backend.write(start_lba, buffer.ptr, buffer.len);
+    return ownedStorageWrite(start_lba, buffer.ptr, buffer.len);
 }
 
 pub fn activeStorageFlush(service_id: u64) bool {
     const publication = publicationForActiveStorage(service_id) orelse return false;
-    const backend = publication.backend orelse return false;
+    if (publication.backend == null) return false;
     if (!storageControllerSessionCurrent(publication)) return false;
-    return backend.flush();
+    return ownedStorageFlush();
 }
 
 pub fn activeStorageControllerSession(service_id: u64) ?StorageControllerSession {
@@ -607,7 +607,7 @@ fn attachOwnedStorageBackend(publication: *const StoragePublication, backend: st
     owned_storage_task_id = owner_task_id;
     owned_storage_generation = process_generation;
     owned_storage_backend = backend;
-    if (!attachPublishedStorageBackend(publication, .{
+    if (!attachSealedPublishedStorageBackend(publication, .{
         .sector_count = backend.sector_count,
         .read = ownedStorageRead,
         .write = ownedStorageWrite,
@@ -647,6 +647,12 @@ fn ownedStorageFlush() callconv(.c) bool {
     defer dataplane_handoff.endOwnedSubmit(owned_storage_device_id);
     const backend = owned_storage_backend orelse return false;
     return backend.flush();
+}
+
+fn attachSealedPublishedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {
+    // Do not restore attachPublishedStorageBackend(publication, publication.backend.?) here.
+    // That path republishes the raw NVMe backend after claim and seals checkpoint I/O closed.
+    return attachPublishedStorageBackend(publication, backend);
 }
 
 fn attachPublishedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {
@@ -891,6 +897,78 @@ test "active storage attachment refreshes from the publication" {
     try std.testing.expect(refreshActiveStorageAttachment(service_id));
     try std.testing.expect(storage_volume.hasAttachedDevice());
     try std.testing.expect(storage_volume.hasProductionStorageBackend());
+}
+
+test "refresh and active I/O keep owned submits after the kernel data plane is sealed" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+
+    reset();
+    defer reset();
+    device_inventory.reset();
+    defer device_inventory.reset();
+
+    const device_id: u64 = 0x0000_8086_5845_5107;
+    const service_id: u64 = 0x5108;
+    const Backend = struct {
+        var sealed_device_id: u64 = 0;
+        var writes: u32 = 0;
+        var reads: u32 = 0;
+        var flushes: u32 = 0;
+
+        fn read(_: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+            if (!dataplane_handoff.allowsKernelRuntimeIo(sealed_device_id)) return false;
+            reads += 1;
+            @memset(buffer_ptr[0..buffer_len], 0x5A);
+            return true;
+        }
+
+        fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            if (!dataplane_handoff.allowsKernelRuntimeIo(sealed_device_id)) return false;
+            writes += 1;
+            return true;
+        }
+
+        fn flush() callconv(.c) bool {
+            if (!dataplane_handoff.allowsKernelRuntimeIo(sealed_device_id)) return false;
+            flushes += 1;
+            return true;
+        }
+    };
+    Backend.sealed_device_id = device_id;
+    Backend.writes = 0;
+    Backend.reads = 0;
+    Backend.flushes = 0;
+    const backend = storage_volume.Backend{
+        .sector_count = storage_volume.required_device_sectors,
+        .read = Backend.read,
+        .write = Backend.write,
+        .flush = Backend.flush,
+    };
+    device_inventory.registerDetected(.storage_controller, device_id, .nvme_pci_inventory, false);
+
+    try std.testing.expect(try publishStorageBackend(device_id, "test-storage", backend, false));
+    try std.testing.expect(activateStorageBackend(device_id, service_id, 0, 0, 1, 0, null));
+    try std.testing.expect(dataplane_handoff.claimed(device_id));
+    try std.testing.expect(!dataplane_handoff.allowsKernelRuntimeIo(device_id));
+
+    var payload = [_]u8{0x11} ** storage_volume.sector_size;
+    var readback = [_]u8{0} ** storage_volume.sector_size;
+    try std.testing.expect(activeStorageWrite(service_id, 3, payload[0..]));
+    try std.testing.expect(activeStorageRead(service_id, 3, readback[0..]));
+    try std.testing.expect(activeStorageFlush(service_id));
+    try std.testing.expectEqual(@as(u32, 1), Backend.writes);
+    try std.testing.expectEqual(@as(u32, 1), Backend.reads);
+    try std.testing.expectEqual(@as(u32, 1), Backend.flushes);
+    try std.testing.expect(!dataplane_handoff.allowsKernelRuntimeIo(device_id));
+
+    storage_volume.clearAttachedBackend();
+    try std.testing.expect(refreshActiveStorageAttachment(service_id));
+    try std.testing.expect(storage_volume.hasProductionStorageBackend());
+    try std.testing.expect(storage_volume.defaultVolume().attached_backend_write(3, payload[0..].ptr, payload.len));
+    try std.testing.expect(storage_volume.defaultVolume().attached_backend_flush());
+    try std.testing.expectEqual(@as(u32, 2), Backend.writes);
+    try std.testing.expectEqual(@as(u32, 2), Backend.flushes);
+    try std.testing.expect(!dataplane_handoff.allowsKernelRuntimeIo(device_id));
 }
 
 test "storage backend activation requires target nvme inventory" {
