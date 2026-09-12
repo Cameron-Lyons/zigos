@@ -184,6 +184,12 @@ pub export fn isrHandler(regs: *Registers) void {
 pub const InterruptFrame = Registers;
 pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
+var timer_preemption: ?InterruptHandler = null;
+
+pub fn setTimerPreemption(handler: InterruptHandler) void {
+    timer_preemption = handler;
+}
+
 const external_handler_vectors = [_]u8{
     timer.INTERRUPT_VECTOR,
     intel_i225_hw.INTERRUPT_VECTOR,
@@ -260,8 +266,9 @@ fn doubleFaultInterrupt(frame: *InterruptFrame) void {
     );
 }
 
-fn timerInterrupt(_: *InterruptFrame) void {
+fn timerInterrupt(frame: *InterruptFrame) void {
     timer.handleInterrupt();
+    if (timer_preemption) |hook| hook(frame);
 }
 
 fn i225Interrupt(_: *InterruptFrame) void {
