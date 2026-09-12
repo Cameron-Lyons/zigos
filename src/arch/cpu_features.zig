@@ -45,6 +45,7 @@ pub fn detect() baseline.Features {
         const leaf7 = cpuid(7, 0);
         registers.leaf7_ebx = leaf7.ebx;
         registers.leaf7_ecx = leaf7.ecx;
+        registers.leaf7_edx = leaf7.edx;
     }
     if (registers.max_basic_leaf >= 0xD) {
         registers.leaf13_1_eax = cpuid(0xD, 1).eax;
@@ -65,11 +66,24 @@ pub const ProcessContextMode = enum {
     software_flush,
 };
 
-pub fn enableModernFeatures(features: baseline.Features, process_context_mode: ProcessContextMode) void {
+pub const CetMode = enum {
+    hardware,
+    deferred,
+};
+
+pub fn enableModernFeatures(
+    features: baseline.Features,
+    process_context_mode: ProcessContextMode,
+    cet_mode: CetMode,
+) void {
     var required_features = features;
     if (process_context_mode == .software_flush) {
         required_features.pcid = true;
         required_features.invpcid = true;
+    }
+    if (cet_mode == .deferred) {
+        required_features.cet_ibt = true;
+        required_features.cet_ss = true;
     }
     if (!baseline.isSupported(required_features)) unreachable;
     x86.enableNoExecute();
@@ -90,4 +104,9 @@ pub fn enableModernFeatures(features: baseline.Features, process_context_mode: P
     if (!features.xsave or !features.xsaves) unreachable;
     x86.enableXsaves();
     if (!x86.xsavesEnabled()) unreachable;
+    if (cet_mode == .hardware) {
+        if (!features.cet_ibt or !features.cet_ss) unreachable;
+        x86.enableCet();
+        if (!x86.cetEnabled()) unreachable;
+    }
 }

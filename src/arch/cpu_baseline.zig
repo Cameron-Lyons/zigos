@@ -11,6 +11,8 @@ const leaf7_ebx_smep: u32 = 1 << 7;
 const leaf7_ebx_invpcid: u32 = 1 << 10;
 const leaf7_ebx_smap: u32 = 1 << 20;
 const leaf7_ecx_umip: u32 = 1 << 2;
+const leaf7_ecx_cet_ss: u32 = 1 << 7;
+const leaf7_edx_cet_ibt: u32 = 1 << 20;
 const extended1_edx_syscall: u32 = 1 << 11;
 const extended1_edx_nx: u32 = 1 << 20;
 const extended1_edx_pages_1g: u32 = 1 << 26;
@@ -29,6 +31,7 @@ pub const Registers = struct {
     leaf16_eax: u32 = 0,
     leaf7_ebx: u32 = 0,
     leaf7_ecx: u32 = 0,
+    leaf7_edx: u32 = 0,
     leaf13_1_eax: u32 = 0,
     max_extended_leaf: u32 = 0,
     extended1_edx: u32 = 0,
@@ -36,6 +39,7 @@ pub const Registers = struct {
 };
 
 pub const REQUIRES_XSAVES = true;
+pub const REQUIRES_CET = true;
 
 pub const Features = struct {
     cpuid: bool = false,
@@ -52,6 +56,8 @@ pub const Features = struct {
     x2apic: bool = false,
     xsave: bool = false,
     xsaves: bool = false,
+    cet_ibt: bool = false,
+    cet_ss: bool = false,
     pages_1g: bool = false,
     tsc_deadline: bool = false,
     invariant_tsc: bool = false,
@@ -73,6 +79,8 @@ pub const MissingFeature = enum {
     x2apic,
     xsave,
     xsaves,
+    cet_ibt,
+    cet_ss,
     pages_1g,
     tsc,
 };
@@ -94,6 +102,8 @@ pub fn decode(registers: Registers) Features {
         features.invpcid = (registers.leaf7_ebx & leaf7_ebx_invpcid) != 0;
         features.smap = (registers.leaf7_ebx & leaf7_ebx_smap) != 0;
         features.umip = (registers.leaf7_ecx & leaf7_ecx_umip) != 0;
+        features.cet_ss = (registers.leaf7_ecx & leaf7_ecx_cet_ss) != 0;
+        features.cet_ibt = (registers.leaf7_edx & leaf7_edx_cet_ibt) != 0;
     }
     if (registers.max_basic_leaf >= 0xD) {
         features.xsaves = (registers.leaf13_1_eax & leaf13_1_eax_xsaves) != 0;
@@ -141,6 +151,8 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.x2apic) return .x2apic;
     if (!features.xsave) return .xsave;
     if (!features.xsaves) return .xsaves;
+    if (!features.cet_ibt) return .cet_ibt;
+    if (!features.cet_ss) return .cet_ss;
     if (!features.pages_1g) return .pages_1g;
     if (!features.tsc_deadline or !features.invariant_tsc or features.tsc_frequency_hz == 0) return .tsc;
     return null;
@@ -161,7 +173,8 @@ test "decode recognizes the modern x86-64-capable baseline" {
         .leaf15_ebx = 200,
         .leaf15_ecx = 24_000_000,
         .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_invpcid | leaf7_ebx_smap,
-        .leaf7_ecx = leaf7_ecx_umip,
+        .leaf7_ecx = leaf7_ecx_umip | leaf7_ecx_cet_ss,
+        .leaf7_edx = leaf7_edx_cet_ibt,
         .max_extended_leaf = 0x8000_0007,
         .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_pages_1g | extended1_edx_long_mode,
         .extended7_edx = extended7_edx_invariant_tsc,
@@ -174,6 +187,8 @@ test "decode recognizes the modern x86-64-capable baseline" {
     try std.testing.expect(features.syscall);
     try std.testing.expect(features.xsave);
     try std.testing.expect(features.xsaves);
+    try std.testing.expect(features.cet_ibt);
+    try std.testing.expect(features.cet_ss);
     try std.testing.expect(features.pages_1g);
     try std.testing.expectEqual(@as(?MissingFeature, null), firstMissing(features));
 }
@@ -201,6 +216,8 @@ test "decode ignores registers outside advertised CPUID ranges" {
     try std.testing.expect(!features.x2apic);
     try std.testing.expect(!features.xsave);
     try std.testing.expect(!features.xsaves);
+    try std.testing.expect(!features.cet_ibt);
+    try std.testing.expect(!features.cet_ss);
     try std.testing.expect(!features.pages_1g);
     try std.testing.expect(!features.tsc_deadline);
     try std.testing.expect(!features.invariant_tsc);
@@ -223,6 +240,8 @@ test "baseline rejects every missing required feature" {
         .x2apic = true,
         .xsave = true,
         .xsaves = true,
+        .cet_ibt = true,
+        .cet_ss = true,
         .pages_1g = true,
         .tsc_deadline = true,
         .invariant_tsc = true,
@@ -297,6 +316,12 @@ test "baseline rejects every missing required feature" {
     var missing_xsaves = complete;
     missing_xsaves.xsaves = false;
     try std.testing.expectEqual(MissingFeature.xsaves, firstMissing(missing_xsaves).?);
+    var missing_cet_ibt = complete;
+    missing_cet_ibt.cet_ibt = false;
+    try std.testing.expectEqual(MissingFeature.cet_ibt, firstMissing(missing_cet_ibt).?);
+    var missing_cet_ss = complete;
+    missing_cet_ss.cet_ss = false;
+    try std.testing.expectEqual(MissingFeature.cet_ss, firstMissing(missing_cet_ss).?);
     var missing_pages_1g = complete;
     missing_pages_1g.pages_1g = false;
     try std.testing.expectEqual(MissingFeature.pages_1g, firstMissing(missing_pages_1g).?);
@@ -321,6 +346,8 @@ test "baseline rejects every missing required feature" {
         .x2apic = true,
         .xsave = true,
         .xsaves = true,
+        .cet_ibt = true,
+        .cet_ss = true,
         .pages_1g = true,
         .tsc_deadline = true,
         .invariant_tsc = true,
@@ -341,6 +368,8 @@ test "baseline rejects every missing required feature" {
         .x2apic = true,
         .xsave = true,
         .xsaves = true,
+        .cet_ibt = true,
+        .cet_ss = true,
         .pages_1g = true,
         .tsc_deadline = true,
         .invariant_tsc = true,

@@ -38,7 +38,8 @@ pub const LOW_IDENTITY_PHYSICAL_LIMIT: frame_allocator.PhysicalAddress = 1024 * 
 pub const IDENTITY_DMA_ALLOCATION_USES_EXPLICIT_PHYSICAL_LIMIT = true;
 pub const GENERAL_ALLOCATION_PREFERS_HIGH_MEMORY = true;
 pub const GENERAL_ALLOCATION_CACHES_HIGH_ZONE_AVAILABILITY = true;
-pub const DIRECT_MAP_USES_1G_PAGES = true;
+pub const DIRECT_MAP_USES_1G_PAGES = virtual_layout.DIRECT_MAP_USES_1G_PAGES;
+pub const USES_RUNTIME_2M_PAGES = virtual_layout.USES_RUNTIME_2M_PAGES;
 pub const PRECISE_IDENTITY_LIMIT_MATCHES_LINKER = true;
 
 const ENTRY_PRESENT = table64.PRESENT;
@@ -615,6 +616,45 @@ fn ensureOwnedLeaf(space: *UserAddressSpace, virtual_address: u32) UserMapError!
     return &page_table[tableIndex(address, PAGE_TABLE_SHIFT)];
 }
 
+fn ensureOwnedDirectorySlot(space: *UserAddressSpace, virtual_address: u32) UserMapError!*PageTableEntry {
+    const address: usize = virtual_address;
+    const pdpt = try ensureChildTable(space.directory, tableIndex(address, PML4_SHIFT), true, TABLE_OWNER_USER_PRIVATE);
+    const page_directory = try ensureChildTable(pdpt, tableIndex(address, PDPT_SHIFT), true, TABLE_OWNER_USER_PRIVATE);
+    return &page_directory[tableIndex(address, PAGE_DIRECTORY_SHIFT)];
+}
+
+fn directorySlotFreeForHugePage(space: *const UserAddressSpace, virtual_address: u32) bool {
+    const address: usize = virtual_address;
+    const pml4_entry = space.directory[tableIndex(address, PML4_SHIFT)];
+    if (!entryPresent(pml4_entry)) return true;
+    const pdpt = tableFromEntry(pml4_entry);
+    const pdpt_entry = pdpt[tableIndex(address, PDPT_SHIFT)];
+    if (!entryPresent(pdpt_entry) or table64.isLargePage(pdpt_entry)) return !entryPresent(pdpt_entry);
+    const page_directory = tableFromEntry(pdpt_entry);
+    const directory_entry = page_directory[tableIndex(address, PAGE_DIRECTORY_SHIFT)];
+    return !entryPresent(directory_entry);
+}
+
+fn mapOwnedUserHugePage(
+    space: *UserAddressSpace,
+    virtual_address: u32,
+    permissions: UserPermissions,
+) UserMapError!void {
+    const directory_entry = try ensureOwnedDirectorySlot(space, virtual_address);
+    if (entryPresent(directory_entry.*)) return error.AlreadyMapped;
+    const run = allocGeneralFrames(LARGE_2M_FRAME_COUNT) orelse return error.OutOfMemory;
+    const kernel_alias = bytesAtPhysical(run.base);
+    @memset(kernel_alias[0..LARGE_2M_PAGE_SIZE], 0);
+    var flags: u32 = PAGE_PRESENT | PAGE_USER;
+    if (permissions.writable) flags |= PAGE_WRITABLE;
+    if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
+    if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
+    const entry_flags = table64.withExecutePermission(leafFlags(flags, false), permissions.executable) | ENTRY_LARGE_PAGE;
+    directory_entry.* = tableEntry(@intCast(run.base), entry_flags, PAGE_OWNER_USER_PRIVATE);
+}
+
+const LARGE_2M_FRAME_COUNT: u32 = @intCast(LARGE_2M_PAGE_SIZE / PAGE_SIZE);
+
 fn validateOwnedMappingSlot(space: *const UserAddressSpace, virtual_address: u32) UserMapError!void {
     const address: usize = virtual_address;
     const pml4_entry = space.directory[tableIndex(address, PML4_SHIFT)];
@@ -629,7 +669,10 @@ fn validateOwnedMappingSlot(space: *const UserAddressSpace, virtual_address: u32
     const page_directory = tableFromEntry(pdpt_entry);
     const directory_entry = page_directory[tableIndex(address, PAGE_DIRECTORY_SHIFT)];
     if (!entryPresent(directory_entry)) return;
-    if (entryOwner(directory_entry) != TABLE_OWNER_USER_PRIVATE) return error.KernelMappingCollision;
+    if (entryOwner(directory_entry) != TABLE_OWNER_USER_PRIVATE and
+        entryOwner(directory_entry) != PAGE_OWNER_USER_PRIVATE)
+        return error.KernelMappingCollision;
+    if (table64.isLargePage(directory_entry)) return error.AlreadyMapped;
 
     const page_table = tableFromEntry(directory_entry);
     if (entryPresent(page_table[tableIndex(address, PAGE_TABLE_SHIFT)])) return error.AlreadyMapped;
@@ -654,8 +697,20 @@ pub fn mapOwnedUserRange(
     }
 
     offset = 0;
-    while (offset < mapped_size) : (offset += PAGE_SIZE) {
+    while (offset < mapped_size) {
         const virtual_address = virtual_start + offset;
+        const remaining = mapped_size - offset;
+        if (USES_RUNTIME_2M_PAGES and
+            remaining >= LARGE_2M_PAGE_SIZE and
+            (virtual_address & @as(u32, @intCast(LARGE_2M_PAGE_SIZE - 1))) == 0 and
+            directorySlotFreeForHugePage(space, virtual_address))
+        {
+            try mapOwnedUserHugePage(space, virtual_address, permissions);
+            offset += @intCast(LARGE_2M_PAGE_SIZE);
+            continue;
+        }
+
+        try validateOwnedMappingSlot(space, virtual_address);
         const page_entry = try ensureOwnedLeaf(space, virtual_address);
         if (entryPresent(page_entry.*)) return error.AlreadyMapped;
 
@@ -668,6 +723,7 @@ pub fn mapOwnedUserRange(
         if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
         const entry_flags = table64.withExecutePermission(leafFlags(flags, false), permissions.executable);
         page_entry.* = tableEntry(@intCast(page_phys), entry_flags, PAGE_OWNER_USER_PRIVATE);
+        offset += PAGE_SIZE;
     }
 }
 
@@ -695,9 +751,10 @@ pub fn writeOwnedUserRange(
             return error.PageNotOwned;
         }
 
-        const offset_in_page: usize = virtual_address & PAGE_OFFSET_MASK;
-        const copy_len = @min(source.len - copied, PAGE_SIZE - offset_in_page);
-        const destination = bytesAtPhysical(@intCast(entryAddress(entry.*))) + offset_in_page;
+        const leaf_size: usize = if (table64.isLargePage(entry.*)) @intCast(LARGE_2M_PAGE_SIZE) else PAGE_SIZE;
+        const offset_in_leaf = virtual_address & (leaf_size - 1);
+        const copy_len = @min(source.len - copied, leaf_size - offset_in_leaf);
+        const destination = bytesAtPhysical(@intCast(entryAddress(entry.*))) + offset_in_leaf;
         @memcpy(destination[0..copy_len], source[copied..][0..copy_len]);
         copied += copy_len;
     }
@@ -713,7 +770,17 @@ fn releaseOwnedHierarchy(pml4: *PageDirectory) void {
             const page_directory_phys: frame_allocator.PhysicalAddress = @intCast(entryAddress(pdpt_entry.*));
             const page_directory = tableFromEntry(pdpt_entry.*);
             for (page_directory) |*directory_entry| {
-                if (!entryPresent(directory_entry.*) or entryOwner(directory_entry.*) != TABLE_OWNER_USER_PRIVATE) continue;
+                if (!entryPresent(directory_entry.*) or
+                    (entryOwner(directory_entry.*) != TABLE_OWNER_USER_PRIVATE and
+                        entryOwner(directory_entry.*) != PAGE_OWNER_USER_PRIVATE)) continue;
+                if (table64.isLargePage(directory_entry.*)) {
+                    if (entryOwner(directory_entry.*) == PAGE_OWNER_USER_PRIVATE) {
+                        releasePhysicalFramesLocked(@intCast(entryAddress(directory_entry.*)), LARGE_2M_FRAME_COUNT) catch
+                            haltWithMessage("Corrupt owned user huge-page accounting!\n");
+                    }
+                    directory_entry.* = 0;
+                    continue;
+                }
                 const page_table_phys: frame_allocator.PhysicalAddress = @intCast(entryAddress(directory_entry.*));
                 const page_table = tableFromEntry(directory_entry.*);
                 for (page_table) |*page_entry| {
@@ -1237,6 +1304,12 @@ test "direct hierarchy covers the full 64 GiB physical aperture" {
     try std.testing.expectEqual(@as(usize, 63), DIRECT_MAP_1G_LEAF_COUNT);
     try std.testing.expectEqual(@as(usize, 1), DIRECT_MAP_PAGE_DIRECTORY_COUNT);
     try std.testing.expectEqual(@as(usize, table64.TABLE_ENTRIES), IDENTITY_DIRECTORY_ENTRIES);
+}
+
+test "aligned user mappings prefer 2 MiB leaves" {
+    try std.testing.expect(USES_RUNTIME_2M_PAGES);
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 2 * 1024 * 1024), LARGE_2M_PAGE_SIZE);
+    try std.testing.expectEqual(@as(u32, 512), LARGE_2M_FRAME_COUNT);
 }
 
 test "leaf mappings encode global and execute permissions explicitly" {

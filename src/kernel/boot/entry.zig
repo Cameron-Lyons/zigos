@@ -44,6 +44,8 @@ pub fn kernelMain() void {
     const software_process_context_fallback = !hardware_process_contexts and software_cpu_fallback;
     const hardware_tsc_timer = features.tsc_deadline and features.invariant_tsc;
     const software_timer_fallback = !hardware_tsc_timer and software_cpu_fallback;
+    const hardware_cet = features.cet_ibt and features.cet_ss;
+    const software_cet_fallback = !hardware_cet and software_cpu_fallback;
     var required_features = features;
     if (software_process_context_fallback) {
         required_features.pcid = true;
@@ -52,6 +54,10 @@ pub fn kernelMain() void {
     if (software_timer_fallback) {
         required_features.tsc_deadline = true;
         required_features.invariant_tsc = true;
+    }
+    if (software_cet_fallback) {
+        required_features.cet_ibt = true;
+        required_features.cet_ss = true;
     }
     if (cpu_features.baseline.firstMissing(required_features)) |missing_feature| {
         printBootIdentity();
@@ -68,6 +74,7 @@ pub fn kernelMain() void {
     cpu_features.enableModernFeatures(
         required_features,
         if (hardware_process_contexts) .hardware_pcid else .software_flush,
+        .deferred,
     );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);

@@ -85,6 +85,8 @@ const dataplane_handoff = @import("drivers/dataplane_handoff.zig");
 const kernel_config = @import("../kernel/config.zig");
 const kernel_smp = @import("../kernel/smp.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
+const virtual_layout = @import("../kernel/memory/virtual_layout.zig");
+const firmware_memory_map = @import("../kernel/memory/firmware_memory_map.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
@@ -1743,9 +1745,14 @@ pub const indexed_hot_path_tables = .{
         .requires_xsave = @hasField(cpu_baseline.Features, "xsave") and
             @hasField(cpu_baseline.Features, "xsaves"),
     },
-    .extended_state = .{
-        .requires_xsaves = cpu_baseline.REQUIRES_XSAVES,
-        .requires_xsave = @hasField(cpu_baseline.Features, "xsave") and
-            @hasField(cpu_baseline.Features, "xsaves"),
+    .cet = .{
+        .requires_ibt_and_shadow_stacks = cpu_baseline.REQUIRES_CET and
+            @hasField(cpu_baseline.Features, "cet_ibt") and
+            @hasField(cpu_baseline.Features, "cet_ss"),
+    },
+    .runtime_pages = .{
+        .uses_2m_pages = virtual_layout.USES_RUNTIME_2M_PAGES,
+        .uses_1g_direct_map = virtual_layout.DIRECT_MAP_USES_1G_PAGES,
+        .uses_firmware_memory_map = @hasDecl(firmware_memory_map, "initializeAllocator"),
     },
 };
