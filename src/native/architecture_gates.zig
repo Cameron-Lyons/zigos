@@ -1,3 +1,4 @@
+const std = @import("std");
 const indexed_arena = @import("core/indexed_arena.zig");
 const abi = @import("core/abi.zig");
 const id_index = @import("core/id_index.zig");
@@ -11,6 +12,7 @@ const sdk_object_store = @import("sdk/object_store_api.zig");
 const sdk_permissions = @import("sdk/permissions.zig");
 const sdk_simulator = @import("sdk/simulator.zig");
 const sdk_ui = @import("sdk/ui.zig");
+const benchmark_cases = @import("../kernel/boot/benchmark/cases.zig");
 const service_registry = @import("services/service_registry.zig");
 const task_lifecycle_service = @import("services/task_lifecycle_service.zig");
 const component_abi_schema = @import("services/component_abi_schema.zig");
@@ -1501,6 +1503,9 @@ pub const indexed_hot_path_tables = .{
         .resolves_shared_paths_from_one_workspace_record = @hasDecl(workspace.WorkspaceRecord, "resolveBorrowedWithPathHash") and
             @hasDecl(workspace.WorkspaceRecord, "hasAccess"),
         .supports_indexed_object_lookup = workspace.workspace_entry_layout.caches_object_index,
+        .updates_path_index_incrementally = workspace.UPDATES_PATH_INDEX_INCREMENTALLY,
+        .updates_object_index_incrementally = workspace.UPDATES_OBJECT_INDEX_INCREMENTALLY,
+        .updates_merkle_leaves_incrementally = workspace.UPDATES_MERKLE_LEAVES_INCREMENTALLY,
         .supports_indexed_snapshot_lookup = @hasDecl(workspace.Directory, "findSnapshotConst"),
         .tracks_workspace_count = @hasDecl(workspace.Directory, "workspaceCount"),
         .tracks_snapshot_count = @hasDecl(workspace.Directory, "snapshotCount"),
@@ -1520,6 +1525,10 @@ pub const indexed_hot_path_tables = .{
         .bounds_log_io_workspace_to_one_data_region = storage_volume.IO_LOG_WORKSPACE_BYTES == storage_volume.DATA_REGION_BYTES,
         .tracks_replay_id_bounds_inline = storage_volume.TRACKS_REPLAY_ID_BOUNDS_INLINE,
         .builds_object_store_derived_indexes_during_replay = storage_volume.BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY,
+        .builds_workspace_indexes_during_replay = storage_volume.BUILDS_WORKSPACE_INDEXES_DURING_REPLAY and
+            @hasDecl(workspace.Directory, "indexReplayedWorkspaceEntries"),
+        .skips_post_replay_full_workspace_index_rebuild = storage_volume.SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD and
+            @hasDecl(workspace.Directory, "rebuildDirectoryIndexes"),
         .skips_empty_object_store_arena_reset_work = object_store.SKIPS_EMPTY_ARENA_RESET_WORK,
         .scrubs_only_used_signer_text = storage_volume.SCRUBS_ONLY_USED_SIGNER_TEXT,
         .heap_backs_signer_text_on_freestanding = storage_volume.HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING and
@@ -1762,5 +1771,11 @@ pub const indexed_hot_path_tables = .{
             efi_elf.MAX_LOAD_SEGMENTS > 0,
         .synthesizes_firmware_handoff = efi_handoff.SYNTHESIZES_MULTIBOOT2_HANDOFF,
         .exits_boot_services = efi_handoff.EXITS_BOOT_SERVICES,
+    },
+    .slo = .{
+        .measures_irq_to_task = std.mem.eql(u8, benchmark_cases.SLO_IRQ_TO_TASK, "slo.irq_to_task"),
+        .measures_nvme_queued_io = std.mem.eql(u8, benchmark_cases.SLO_NVME_QUEUED_IO, "slo.nvme_queued_io"),
+        .measures_endpoint_rtt = std.mem.eql(u8, benchmark_cases.SLO_ENDPOINT_RTT, "slo.endpoint_rtt"),
+        .measures_focused_input = std.mem.eql(u8, benchmark_cases.SLO_FOCUSED_INPUT, "slo.focused_input"),
     },
 };

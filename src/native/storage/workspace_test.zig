@@ -273,6 +273,39 @@ test "workspace path index keeps cached root and lookups current across incremen
     try std.testing.expectEqualStrings("m.md", (try directory.resolveObject(workspace.id, ids.object(32))).pathSlice());
 }
 
+test "workspace commits keep path and object indexes current without a full rebuild" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 14 },
+        .label = "incremental-index",
+    });
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "z.md", ids.object(1), ids.version(1), .document);
+    try directory.stagePut(workspace.id, "a.md", ids.object(2), ids.version(2), .document);
+    _ = try directory.commit(workspace.id, 60);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "z.md");
+    try directory.stagePut(workspace.id, "m.md", ids.object(3), ids.version(3), .document);
+    try directory.stagePut(workspace.id, "a.md", ids.object(4), ids.version(4), .document);
+    _ = try directory.commit(workspace.id, 61);
+
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "z.md"));
+    try std.testing.expectEqual(ids.object(4), (try directory.resolve(workspace.id, "a.md")).object_id);
+    try std.testing.expectEqual(ids.object(3), (try directory.resolve(workspace.id, "m.md")).object_id);
+    try std.testing.expectEqualStrings("a.md", (try directory.resolveObject(workspace.id, ids.object(4))).pathSlice());
+    try std.testing.expectEqualStrings("m.md", (try directory.resolveObject(workspace.id, ids.object(3))).pathSlice());
+    try std.testing.expectError(error.EntryNotFound, directory.resolveObject(workspace.id, ids.object(1)));
+    try std.testing.expectError(error.EntryNotFound, directory.resolveObject(workspace.id, ids.object(2)));
+
+    const entries = try directory.entries(workspace.id);
+    try std.testing.expectEqual(workspaceRootAddress(entries), directory.find(workspace.id).?.rootAddress());
+    directory.rebuildIndexes();
+    try std.testing.expectEqual(ids.object(4), (try directory.resolve(workspace.id, "a.md")).object_id);
+    try std.testing.expectEqualStrings("m.md", (try directory.resolveObject(workspace.id, ids.object(3))).pathSlice());
+}
+
 test "compact workspace indexes cover every entry slot at capacity" {
     var directory = Directory.init();
     const workspace = try directory.create(.{

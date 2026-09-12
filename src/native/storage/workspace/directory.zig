@@ -40,6 +40,9 @@ pub const SNAPSHOT_RECORD_SIZE_CEILING_BYTES: usize = 224;
 pub const EXPORT_PACKAGE_SIZE_CEILING_BYTES: usize = 11_808;
 pub const COMPACT_WORKSPACE_LABEL_METADATA = true;
 pub const COMPACT_WORKSPACE_TABLE_METADATA = true;
+pub const UPDATES_PATH_INDEX_INCREMENTALLY = workspace_index.UPDATES_PATH_INDEX_INCREMENTALLY;
+pub const UPDATES_OBJECT_INDEX_INCREMENTALLY = workspace_index.UPDATES_OBJECT_INDEX_INCREMENTALLY;
+pub const UPDATES_MERKLE_LEAVES_INCREMENTALLY = true;
 pub const NO_SNAPSHOT_GENERATION: u32 = std.math.maxInt(u32);
 
 comptime {
@@ -416,6 +419,8 @@ pub const WorkspacePathIndex = struct {
             }
         } else {
             @memset(std.mem.asBytes(&self.entry_backing), 0);
+            self.entry_backing.path_slots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY);
+            self.entry_backing.object_slots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY);
         }
     }
 };
@@ -828,6 +833,14 @@ pub const Directory = struct {
     }
 
     pub fn rebuildDerivedIndexes(self: *Directory) void {
+        for (&self.workspaces.slots) |*slot| {
+            if (!slot.in_use) continue;
+            normalizeAndRebuildWorkspaceIndexes(&slot.workspace);
+        }
+        self.rebuildDirectoryIndexes();
+    }
+
+    pub fn rebuildDirectoryIndexes(self: *Directory) void {
         self.workspace_owner_label_index.reset();
         self.workspace_label_index.reset();
         self.snapshot_label_index.reset();
@@ -835,13 +848,17 @@ pub const Directory = struct {
         for (&self.workspaces.slots, 0..) |*slot, slot_index| {
             if (!slot.in_use) continue;
             self.indexWorkspace(slot_index);
-            normalizeAndRebuildWorkspaceIndexes(&slot.workspace);
+            slot.workspace.oldest_snapshot_generation = NO_SNAPSHOT_GENERATION;
         }
         for (self.snapshots.slots, 0..) |slot, slot_index| {
             if (!slot.in_use) continue;
             self.snapshot_label_index.insert(snapshotLabelKey(slot.snapshot.workspace_id, slot.snapshot.labelSlice()), slot_index);
             self.recordWorkspaceSnapshotGeneration(slot.snapshot.workspace_id, slot.snapshot.generation);
         }
+    }
+
+    pub fn indexReplayedWorkspaceEntries(_: *Directory, workspace: *WorkspaceRecord) void {
+        normalizeAndRebuildWorkspaceIndexes(workspace);
     }
 
     pub fn create(self: *Directory, request: CreateRequest) Error!*WorkspaceRecord {
@@ -1169,8 +1186,9 @@ pub const Directory = struct {
 
             workspace.generation += 1;
             try appendEntryMutation(workspace, workspace.generation, entry);
-            try insertSortedEntry(workspace.path_index.entries(), &workspace.counts.entry_count, entry);
-            rebuildWorkspaceEntryIndex(workspace);
+            const insert_index = try insertSortedEntry(workspace.path_index.entries(), &workspace.counts.entry_count, entry);
+            indexInsertedEntry(workspace, insert_index);
+            refreshIndexedWorkspaceRoot(workspace);
             self.markWorkspaceDirty(workspace_id);
             return true;
         }
@@ -1768,18 +1786,19 @@ fn removeEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, index: us
     entries[active_count] = Entry{};
 }
 
-fn insertSortedEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, entry: Entry) Error!void {
+fn insertSortedEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, entry: Entry) Error!usize {
     const active_count: usize = @intCast(count.*);
     if (active_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
     const insert_index = lowerBoundEntry(entries[0..active_count], entry.pathSlice());
     if (insert_index < active_count and compareEntryPath(entries[insert_index].pathSlice(), entry.pathSlice()) == .eq) {
         entries[insert_index] = entry;
-        return;
+        return insert_index;
     }
 
     std.mem.copyBackwards(Entry, entries[insert_index + 1 .. active_count + 1], entries[insert_index..active_count]);
     entries[insert_index] = entry;
     count.* = @intCast(active_count + 1);
+    return insert_index;
 }
 
 fn sortEntries(entries: []Entry) void {
@@ -1849,7 +1868,7 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
 
     for (source_entries) |entry| {
         if (isDeleteTombstone(entry)) continue;
-        try insertSortedEntry(workspace.path_index.entries(), &workspace.counts.entry_count, entry);
+        _ = try insertSortedEntry(workspace.path_index.entries(), &workspace.counts.entry_count, entry);
         try appendEntryMutation(workspace, generation, entry);
     }
     rebuildWorkspaceEntryIndex(workspace);
@@ -1879,7 +1898,7 @@ fn materializeEntriesAtGeneration(
             continue;
         }
 
-        try insertSortedEntry(out, &out_count, mutation.entry);
+        _ = try insertSortedEntry(out, &out_count, mutation.entry);
     }
     return out_count;
 }
@@ -1889,7 +1908,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
     var target_count: usize = 0;
     for (source_entries) |entry| {
         if (isDeleteTombstone(entry)) continue;
-        try insertSortedEntry(&target_entries, &target_count, entry);
+        _ = try insertSortedEntry(&target_entries, &target_count, entry);
     }
 
     var mutation_count_needed: usize = 0;
@@ -1940,7 +1959,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
     while (current_index < workspace.counts.entry_count or target_index < target_count) {
         if (current_index >= workspace.counts.entry_count) {
             const target_entry = target_entries[target_index];
-            try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
+            _ = try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
             try appendEntryMutation(workspace, next_generation, target_entry);
             current_index += 1;
             target_index += 1;
@@ -1963,7 +1982,7 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
                 removeEntry(entries.?, &workspace.counts.entry_count, current_index);
             },
             .gt => {
-                try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
+                _ = try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
                 try appendEntryMutation(workspace, next_generation, target_entry);
                 current_index += 1;
                 target_index += 1;
@@ -1980,6 +1999,105 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
     }
     workspace.generation = next_generation;
     rebuildWorkspaceEntryIndex(workspace);
+}
+
+fn indexInsertedEntry(workspace: *WorkspaceRecord, insert_index: usize) void {
+    const count: usize = workspace.counts.entry_count;
+    const entries = workspace.path_index.entries();
+    const leaf_hashes = workspace.path_index.leafHashes();
+    if (insert_index + 1 < count) {
+        std.mem.copyBackwards(
+            SnapshotRootAddress,
+            leaf_hashes[insert_index + 1 .. count],
+            leaf_hashes[insert_index .. count - 1],
+        );
+        workspace_index.adjustEntrySlotsAfterInsert(ENTRY_INDEX_CAPACITY, workspace.path_index.pathSlots(), insert_index);
+        workspace_index.adjustEntrySlotsAfterInsert(ENTRY_OBJECT_INDEX_CAPACITY, workspace.path_index.objectSlots(), insert_index);
+    }
+    workspace_merkle.updatePathLeaf(leaf_hashes, insert_index, entries[insert_index]);
+    workspace_index.insertEntryPathSlot(
+        ENTRY_INDEX_CAPACITY,
+        workspace.path_index.pathSlots(),
+        entries[0..count],
+        entries[insert_index].pathSlice(),
+        insert_index,
+    );
+        workspace_index.insertEntryObjectSlot(
+            ENTRY_OBJECT_INDEX_CAPACITY,
+            workspace.path_index.objectSlots(),
+            entries[insert_index].object_id.raw(),
+            insert_index,
+        );
+}
+
+fn unindexRemovedEntry(workspace: *WorkspaceRecord, remove_index: usize) void {
+    const count_before: usize = workspace.counts.entry_count;
+    const entries = workspace.path_index.entries();
+    const removed = entries[remove_index];
+    workspace_index.removeEntryPathSlot(
+        ENTRY_INDEX_CAPACITY,
+        workspace.path_index.pathSlots(),
+        entries[0..count_before],
+        removed.pathSlice(),
+        remove_index,
+    );
+    workspace_index.removeEntryObjectSlot(
+        ENTRY_OBJECT_INDEX_CAPACITY,
+        workspace.path_index.objectSlots(),
+        remove_index,
+        removed.object_id.raw(),
+    );
+    const leaf_hashes = workspace.path_index.leafHashes();
+    if (remove_index + 1 < count_before) {
+        std.mem.copyForwards(
+            SnapshotRootAddress,
+            leaf_hashes[remove_index .. count_before - 1],
+            leaf_hashes[remove_index + 1 .. count_before],
+        );
+    }
+    leaf_hashes[count_before - 1] = workspace_merkle.zeroRootAddress();
+    removeEntry(entries, &workspace.counts.entry_count, remove_index);
+    workspace_index.adjustEntrySlotsAfterRemove(ENTRY_INDEX_CAPACITY, workspace.path_index.pathSlots(), remove_index);
+    workspace_index.adjustEntrySlotsAfterRemove(ENTRY_OBJECT_INDEX_CAPACITY, workspace.path_index.objectSlots(), remove_index);
+}
+
+fn updateIndexedEntry(workspace: *WorkspaceRecord, existing_index: usize, staged_entry: Entry) void {
+    const entries = workspace.path_index.entries();
+    const previous = entries[existing_index];
+    if (!previous.object_id.eql(staged_entry.object_id)) {
+        workspace_index.removeEntryObjectSlot(
+            ENTRY_OBJECT_INDEX_CAPACITY,
+            workspace.path_index.objectSlots(),
+            existing_index,
+            previous.object_id.raw(),
+        );
+        entries[existing_index] = staged_entry;
+        workspace_index.insertEntryObjectSlot(
+            ENTRY_OBJECT_INDEX_CAPACITY,
+            workspace.path_index.objectSlots(),
+            staged_entry.object_id.raw(),
+            existing_index,
+        );
+    } else {
+        entries[existing_index] = staged_entry;
+    }
+    workspace_merkle.updatePathLeaf(workspace.path_index.leafHashes(), existing_index, staged_entry);
+}
+
+fn refreshIndexedWorkspaceRoot(workspace: *WorkspaceRecord) void {
+    if (workspace.counts.entry_count == 0) {
+        workspace.path_index.root_address = workspace_merkle.rootAddress(workspace.path_index.entriesConst(0));
+        workspace.path_index.releaseEntryBacking();
+        return;
+    }
+    const leaf_hashes = workspace.path_index.leafHashes();
+    for (leaf_hashes[workspace.counts.entry_count..]) |*leaf_hash| {
+        leaf_hash.* = workspace_merkle.zeroRootAddress();
+    }
+    workspace_merkle.refreshPathRoot(
+        &workspace.path_index.root_address,
+        leaf_hashes[0..workspace.counts.entry_count],
+    );
 }
 
 fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
@@ -1999,46 +2117,26 @@ fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
         workspace.path_index.entries()
     else
         null;
-    var structural_change = false;
-    var object_index_dirty = false;
     for (0..staged_entry_count) |staged_index| {
         const staged_entry = mutations[staged_entry_start + staged_index].entry;
         if (isDeleteTombstone(staged_entry)) {
             const existing_index = findEntryIndex(entries.?[0..workspace.counts.entry_count], staged_entry.pathSlice()) orelse return error.EntryNotFound;
             appendDeleted(workspace, entries.?[existing_index]);
-            removeEntry(entries.?, &workspace.counts.entry_count, existing_index);
-            structural_change = true;
+            unindexRemovedEntry(workspace, existing_index);
             try appendEntryMutation(workspace, next_generation, staged_entry);
             continue;
         }
 
         if (findEntryIndex(entries.?[0..workspace.counts.entry_count], staged_entry.pathSlice())) |existing_index| {
-            object_index_dirty = object_index_dirty or
-                !entries.?[existing_index].object_id.eql(staged_entry.object_id);
-            entries.?[existing_index] = staged_entry;
-            workspace_merkle.updatePathLeaf(workspace.path_index.leafHashes(), existing_index, staged_entry);
+            updateIndexedEntry(workspace, existing_index, staged_entry);
         } else {
-            try insertSortedEntry(entries.?, &workspace.counts.entry_count, staged_entry);
-            structural_change = true;
+            const insert_index = try insertSortedEntry(entries.?, &workspace.counts.entry_count, staged_entry);
+            indexInsertedEntry(workspace, insert_index);
         }
         try appendEntryMutation(workspace, next_generation, staged_entry);
     }
     workspace.generation = next_generation;
-    if (structural_change) {
-        rebuildWorkspaceEntryIndex(workspace);
-    } else if (workspace.staging.staged_entry_count != 0) {
-        if (object_index_dirty) {
-            workspace_index.rebuildObjectSlots(
-                ENTRY_OBJECT_INDEX_CAPACITY,
-                workspace.path_index.objectSlots(),
-                entries.?[0..workspace.counts.entry_count],
-            );
-        }
-        workspace_merkle.refreshPathRoot(
-            &workspace.path_index.root_address,
-            workspace.path_index.leafHashes()[0..workspace.counts.entry_count],
-        );
-    }
+    if (workspace.staging.staged_entry_count != 0) refreshIndexedWorkspaceRoot(workspace);
 }
 
 fn discardTransactionState(workspace: *WorkspaceRecord) void {

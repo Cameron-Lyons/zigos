@@ -27,3 +27,7 @@ sync_service.overlay_session_flow 1000
 recovery_environment.reinstall_restore_repair 17000000
 update_health.validate_pending_activation 10000000
 driver_recovery.restart_driver 22000
+slo.irq_to_task 250000
+slo.nvme_queued_io 400000
+slo.endpoint_rtt 40000
+slo.focused_input 150000
