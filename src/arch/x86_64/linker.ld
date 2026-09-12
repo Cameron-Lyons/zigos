@@ -1,4 +1,4 @@
-ENTRY(_start)
+ENTRY(zigos_efi_entry)
 
 PHDRS
 {
@@ -16,7 +16,7 @@ SECTIONS
         __kernel_text_start = .;
         KEEP(*(.multiboot2))
         *(.multiboot)
-        *(.text.boot)
+        KEEP(*(.text.boot))
         *(.text)
         *(.text.*)
         . = ALIGN(4K);

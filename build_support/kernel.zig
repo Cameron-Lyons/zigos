@@ -25,6 +25,26 @@ pub const KernelSteps = struct {
     recovery: *std.Build.Step,
 };
 
+pub fn addEfiStub(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .uefi,
+        .abi = .none,
+    });
+    return b.addExecutable(.{
+        .name = "bootx64",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/boot/efi_stub.zig"),
+            .target = target,
+            .optimize = optimize,
+            .red_zone = false,
+        }),
+    });
+}
+
 pub fn addX86_64ArchitectureCompileCheck(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
@@ -536,7 +556,7 @@ pub fn addKernelArtifact(
         .install_step = &install.step,
         .output_path = b.getInstallPath(.bin, name),
         .kernel_role = kernel_role,
-        .bootloader_source_path = "src/boot/boot_x86_64.S",
+        .bootloader_source_path = "src/boot/efi_stub.zig",
         .qemu_boot_iso_path = qemu_iso_path,
     };
 }

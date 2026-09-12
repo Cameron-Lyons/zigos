@@ -261,10 +261,14 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(x86_64_long_mode_entry_check);
     verify_step.dependOn(x86_64_kernel_core_boot_check);
 
+    const efi_stub = kernel_build.addEfiStub(b, optimize);
+    kernel_steps.kernel.dependOn(&efi_stub.step);
+
     const iso_cmd = qemu_build.addIsoCommand(
         b,
         kernels.zigos_native,
         userspace_images,
+        efi_stub,
         "build/os.iso",
         "build/iso",
     );
@@ -276,6 +280,7 @@ pub fn build(b: *std.Build) void {
         b,
         kernels.zigos_native_verification,
         userspace_images,
+        efi_stub,
         "build/os-verification.iso",
         "build/iso-verification",
     );

@@ -87,6 +87,8 @@ const kernel_smp = @import("../kernel/smp.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
 const virtual_layout = @import("../kernel/memory/virtual_layout.zig");
 const firmware_memory_map = @import("../kernel/memory/firmware_memory_map.zig");
+const efi_handoff = @import("../boot/efi_handoff.zig");
+const efi_elf = @import("../boot/efi_elf.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const device_broker = @import("kernel_api/device_broker.zig");
 const network_policy = @import("sync/network_policy.zig");
@@ -1754,5 +1756,11 @@ pub const indexed_hot_path_tables = .{
         .uses_2m_pages = virtual_layout.USES_RUNTIME_2M_PAGES,
         .uses_1g_direct_map = virtual_layout.DIRECT_MAP_USES_1G_PAGES,
         .uses_firmware_memory_map = @hasDecl(firmware_memory_map, "initializeAllocator"),
+    },
+    .boot = .{
+        .uses_native_efi_stub = efi_handoff.USES_NATIVE_EFI_STUB and
+            efi_elf.MAX_LOAD_SEGMENTS > 0,
+        .synthesizes_firmware_handoff = efi_handoff.SYNTHESIZES_MULTIBOOT2_HANDOFF,
+        .exits_boot_services = efi_handoff.EXITS_BOOT_SERVICES,
     },
 };

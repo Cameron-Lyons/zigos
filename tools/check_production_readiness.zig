@@ -831,9 +831,14 @@ fn validateNuc11tnki5KernelProofSources(
     const qemu_harness_path = "scripts/qemu-harness.sh";
     const kernel_build_path = "build_support/kernel.zig";
     const bootloader_path = "src/boot/boot_x86_64.S";
+    const efi_stub_path = "src/boot/efi_stub.zig";
+    const efi_handoff_path = "src/boot/efi_handoff.zig";
+    const efi_elf_path = "src/boot/efi_elf.zig";
+    const efi_iso_path = "scripts/build-efi-iso.sh";
+    const efi_image_check_path = "scripts/check-efi-image.sh";
     const kernel_linker_path = "src/arch/x86_64/linker.ld";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
-    const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
+    const production_cmdline_path = "src/boot/cmdline.txt";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
     const cpu_baseline_path = "src/arch/cpu_baseline.zig";
     const x86_path = "src/arch/x86.zig";
@@ -959,12 +964,32 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "x86-64 kernel linker source is missing: {s}", .{kernel_linker_path});
         return;
     }
+    if (!common.pathExists(io, efi_stub_path)) {
+        try common.addError(errors, allocator, "native EFI stub is missing: {s}", .{efi_stub_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_handoff_path)) {
+        try common.addError(errors, allocator, "EFI firmware handoff encoder is missing: {s}", .{efi_handoff_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_elf_path)) {
+        try common.addError(errors, allocator, "EFI kernel ELF loader is missing: {s}", .{efi_elf_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_iso_path)) {
+        try common.addError(errors, allocator, "EFI production ISO builder is missing: {s}", .{efi_iso_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_image_check_path)) {
+        try common.addError(errors, allocator, "EFI PE/COFF image checker is missing: {s}", .{efi_image_check_path});
+        return;
+    }
     if (!common.pathExists(io, qemu_grub_path)) {
         try common.addError(errors, allocator, "QEMU boot configuration is missing: {s}", .{qemu_grub_path});
         return;
     }
-    if (!common.pathExists(io, production_grub_path)) {
-        try common.addError(errors, allocator, "production boot configuration is missing: {s}", .{production_grub_path});
+    if (!common.pathExists(io, production_cmdline_path)) {
+        try common.addError(errors, allocator, "production EFI command line is missing: {s}", .{production_cmdline_path});
         return;
     }
     if (!common.pathExists(io, ci_setup_path)) {
@@ -1086,9 +1111,12 @@ fn validateNuc11tnki5KernelProofSources(
     const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
     const kernel_build_source = try common.readFileAlloc(allocator, io, kernel_build_path, common.source_file_max_bytes);
     const bootloader_source = try common.readFileAlloc(allocator, io, bootloader_path, common.source_file_max_bytes);
+    const efi_stub_source = try common.readFileAlloc(allocator, io, efi_stub_path, common.source_file_max_bytes);
+    const efi_handoff_source = try common.readFileAlloc(allocator, io, efi_handoff_path, common.source_file_max_bytes);
+    const efi_iso_source = try common.readFileAlloc(allocator, io, efi_iso_path, common.source_file_max_bytes);
     const kernel_linker_source = try common.readFileAlloc(allocator, io, kernel_linker_path, common.source_file_max_bytes);
     const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
-    const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
+    const production_cmdline_source = try common.readFileAlloc(allocator, io, production_cmdline_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
     const cpu_baseline_source = try common.readFileAlloc(allocator, io, cpu_baseline_path, common.source_file_max_bytes);
     const x86_source = try common.readFileAlloc(allocator, io, x86_path, common.source_file_max_bytes);
@@ -1497,8 +1525,43 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
         try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
     }
-    if (std.mem.indexOf(u8, production_grub_source, "qemu_software_cpu_fallback") != null) {
-        try common.addError(errors, allocator, "production boot configuration must not permit the software-emulator CPU fallback", .{});
+    if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
+        try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "addEfiStub") == null or
+        std.mem.indexOf(u8, kernel_build_source, ".os_tag = .uefi") == null)
+    {
+        try common.addError(errors, allocator, "kernel build must emit a native x86-64 UEFI stub", .{});
+    }
+    if (std.mem.indexOf(u8, efi_iso_source, "EFI/BOOT/BOOTX64.EFI") == null or
+        std.mem.indexOf(u8, efi_iso_source, "exitBootServices") != null)
+    {
+        try common.addError(errors, allocator, "production ISO builder must install BOOTX64.EFI", .{});
+    }
+    const required_efi_stub_snippets = [_][]const u8{
+        "exitBootServices",
+        "GraphicsOutput",
+        "acpi_20_table_guid",
+        "efi_elf.load",
+        "efi_handoff.encode",
+        "enterKernel",
+    };
+    for (required_efi_stub_snippets) |snippet| {
+        if (std.mem.indexOf(u8, efi_stub_source, snippet) == null) {
+            try common.addError(errors, allocator, "native EFI stub must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_efi_handoff_snippets = [_][]const u8{
+        "kindFromEfiMemoryType",
+        "SYNTHESIZES_MULTIBOOT2_HANDOFF",
+        "EXITS_BOOT_SERVICES",
+        "TAG_ACPI_NEW",
+        "TAG_EFI64_SYSTEM_TABLE",
+    };
+    for (required_efi_handoff_snippets) |snippet| {
+        if (std.mem.indexOf(u8, efi_handoff_source, snippet) == null) {
+            try common.addError(errors, allocator, "EFI firmware handoff must retain snippet: {s}", .{snippet});
+        }
     }
     const required_ci_kvm_snippets = [_][]const u8{
         "Enable KVM acceleration when available",
@@ -2028,7 +2091,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_boot_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, handoff_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must remain Multiboot2-only: {s}", .{snippet});
+            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must parse firmware memory map tags: {s}", .{snippet});
         }
     }
     const required_bootloader_load_contract_snippets = [_][]const u8{
@@ -2036,15 +2099,18 @@ fn validateNuc11tnki5KernelProofSources(
         "MULTIBOOT2_INFO_TAG_EFI64_SYSTEM_TABLE",
         "MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS",
         ".long _start",
+        "zigos_efi_entry",
+        "0x36D76289",
     };
     for (required_bootloader_load_contract_snippets) |snippet| {
         if (std.mem.indexOf(u8, bootloader_source, snippet) == null) {
-            try common.addError(errors, allocator, "x86-64 bootloader must retain its explicit Multiboot2 entry contract: {s}", .{snippet});
+            try common.addError(errors, allocator, "x86-64 bootloader must retain its Multiboot2 and EFI entry contracts: {s}", .{snippet});
         }
     }
     const required_kernel_load_contract_snippets = [_][]const u8{
         "PHDRS",
         "kernel PT_LOAD FLAGS(6);",
+        "ENTRY(zigos_efi_entry)",
         "__kernel_start = .;",
         "__kernel_data_end = .;",
         "__kernel_end = .;",
