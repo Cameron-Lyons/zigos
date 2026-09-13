@@ -40,6 +40,7 @@ pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
 pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
 pub const BUILDS_WORKSPACE_INDEXES_DURING_REPLAY = true;
 pub const SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD = true;
+pub const USES_INCREMENTAL_LIVE_INDEX = volume_layout.USES_INCREMENTAL_LIVE_INDEX;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 const SignerTextPool = [SIGNER_TEXT_POOL_BYTES]u8;
@@ -128,6 +129,8 @@ pub const Volume = struct {
     signer_text_len: u16 = 0,
     signer_text_pool: SignerTextPoolBacking = if (heap_backed_signer_text_pool) null else [_]u8{0} ** SIGNER_TEXT_POOL_BYTES,
     workspace_state_hashes: WorkspaceStateHashCache = .{},
+    live_index_generation: u64 = 0,
+    live_index_root_checksum: u64 = 0,
 
     pub fn init() Volume {
         return .{};
@@ -144,6 +147,8 @@ pub const Volume = struct {
         self.attached_backend_kind = .none;
         self.resetSignerText();
         self.workspace_state_hashes = .{};
+        self.live_index_generation = 0;
+        self.live_index_root_checksum = 0;
     }
 
     fn ioLogWorkspace(self: *Volume) Error![]u8 {
@@ -633,12 +638,23 @@ fn loadImageRootCandidate(
     loaded: LoadedRoot,
 ) Error!u64 {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
+    if (USES_INCREMENTAL_LIVE_INDEX and
+        self.live_index_generation == loaded.root.generation and
+        self.live_index_root_checksum == liveIndexChecksum(loaded.root) and
+        store.objectCount() != 0)
+    {
+        return loaded.root.generation;
+    }
     const region_start = data_start_byte + loaded.root.data_offset;
     if (region_start + loaded.root.log_bytes > image.len) return error.CorruptImage;
     try replayLog(self, store, workspaces, image[region_start .. region_start + loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
+    if (USES_INCREMENTAL_LIVE_INDEX) {
+        self.live_index_generation = loaded.root.generation;
+        self.live_index_root_checksum = liveIndexChecksum(loaded.root);
+    }
     return loaded.root.generation;
 }
 
@@ -649,12 +665,23 @@ fn loadBackendRootCandidate(
     loaded: LoadedRoot,
 ) Error!void {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
+    if (USES_INCREMENTAL_LIVE_INDEX and
+        self.live_index_generation == loaded.root.generation and
+        self.live_index_root_checksum == liveIndexChecksum(loaded.root) and
+        store.objectCount() != 0)
+    {
+        return;
+    }
     const io_log_buffer = try self.ioLogWorkspace();
     if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
     try replayLog(self, store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
+    if (USES_INCREMENTAL_LIVE_INDEX) {
+        self.live_index_generation = loaded.root.generation;
+        self.live_index_root_checksum = liveIndexChecksum(loaded.root);
+    }
 }
 
 pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, workspaces: *const workspace.Directory) Error!void {
@@ -916,6 +943,13 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
         if (summary.id == workspace_id) return summary;
     }
     return null;
+}
+
+fn liveIndexChecksum(root: RootState) u64 {
+    return root.generation ^
+        (@as(u64, root.log_bytes) << 32) ^
+        root.compacted_generation ^
+        @as(u64, root.log_record_count);
 }
 
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {

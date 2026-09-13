@@ -1023,7 +1023,7 @@ test "critical service measurements bind launched userspace image artifacts" {
         },
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
-    const image_bytes = userspace_loader.makeSyntheticElf32ForTest(0x4000_5000, 2, 2);
+    const image_bytes = userspace_loader.makeSyntheticElf64ForTest(0x4000_5000, 2, 2);
     const image = try catalog.registerEmbeddedArtifact(.{
         .bundle = bundle,
         .component_class = .service_component,

@@ -10,9 +10,13 @@ const leaf13_1_eax_xsaves: u32 = 1 << 3;
 const leaf7_ebx_smep: u32 = 1 << 7;
 const leaf7_ebx_invpcid: u32 = 1 << 10;
 const leaf7_ebx_smap: u32 = 1 << 20;
+const leaf7_ecx_pku: u32 = 1 << 3;
 const leaf7_ecx_umip: u32 = 1 << 2;
 const leaf7_ecx_cet_ss: u32 = 1 << 7;
 const leaf7_edx_cet_ibt: u32 = 1 << 20;
+const leaf7_1_eax_lass: u32 = 1 << 6;
+const leaf7_1_eax_fred: u32 = 1 << 17;
+const leaf7_1_eax_lkgs: u32 = 1 << 18;
 const extended1_edx_syscall: u32 = 1 << 11;
 const extended1_edx_nx: u32 = 1 << 20;
 const extended1_edx_pages_1g: u32 = 1 << 26;
@@ -29,9 +33,11 @@ pub const Registers = struct {
     leaf15_ebx: u32 = 0,
     leaf15_ecx: u32 = 0,
     leaf16_eax: u32 = 0,
+    leaf7_eax: u32 = 0,
     leaf7_ebx: u32 = 0,
     leaf7_ecx: u32 = 0,
     leaf7_edx: u32 = 0,
+    leaf7_1_eax: u32 = 0,
     leaf13_1_eax: u32 = 0,
     max_extended_leaf: u32 = 0,
     extended1_edx: u32 = 0,
@@ -40,6 +46,9 @@ pub const Registers = struct {
 
 pub const REQUIRES_XSAVES = true;
 pub const REQUIRES_CET = true;
+pub const REQUIRES_PKU = true;
+pub const REQUIRES_LASS = true;
+pub const REQUIRES_FRED = true;
 
 pub const Features = struct {
     cpuid: bool = false,
@@ -58,6 +67,10 @@ pub const Features = struct {
     xsaves: bool = false,
     cet_ibt: bool = false,
     cet_ss: bool = false,
+    pku: bool = false,
+    lass: bool = false,
+    fred: bool = false,
+    lkgs: bool = false,
     pages_1g: bool = false,
     tsc_deadline: bool = false,
     invariant_tsc: bool = false,
@@ -81,6 +94,10 @@ pub const MissingFeature = enum {
     xsaves,
     cet_ibt,
     cet_ss,
+    pku,
+    lass,
+    fred,
+    lkgs,
     pages_1g,
     tsc,
 };
@@ -102,8 +119,14 @@ pub fn decode(registers: Registers) Features {
         features.invpcid = (registers.leaf7_ebx & leaf7_ebx_invpcid) != 0;
         features.smap = (registers.leaf7_ebx & leaf7_ebx_smap) != 0;
         features.umip = (registers.leaf7_ecx & leaf7_ecx_umip) != 0;
+        features.pku = (registers.leaf7_ecx & leaf7_ecx_pku) != 0;
         features.cet_ss = (registers.leaf7_ecx & leaf7_ecx_cet_ss) != 0;
         features.cet_ibt = (registers.leaf7_edx & leaf7_edx_cet_ibt) != 0;
+        if (registers.leaf7_eax >= 1) {
+            features.lass = (registers.leaf7_1_eax & leaf7_1_eax_lass) != 0;
+            features.fred = (registers.leaf7_1_eax & leaf7_1_eax_fred) != 0;
+            features.lkgs = (registers.leaf7_1_eax & leaf7_1_eax_lkgs) != 0;
+        }
     }
     if (registers.max_basic_leaf >= 0xD) {
         features.xsaves = (registers.leaf13_1_eax & leaf13_1_eax_xsaves) != 0;
@@ -153,6 +176,10 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.xsaves) return .xsaves;
     if (!features.cet_ibt) return .cet_ibt;
     if (!features.cet_ss) return .cet_ss;
+    if (!features.pku) return .pku;
+    if (!features.lass) return .lass;
+    if (!features.fred) return .fred;
+    if (!features.lkgs) return .lkgs;
     if (!features.pages_1g) return .pages_1g;
     if (!features.tsc_deadline or !features.invariant_tsc or features.tsc_frequency_hz == 0) return .tsc;
     return null;
@@ -162,8 +189,37 @@ pub fn isSupported(features: Features) bool {
     return firstMissing(features) == null;
 }
 
-test "decode recognizes the modern x86-64-capable baseline" {
-    const features = decode(.{
+pub fn completeFeatures() Features {
+    return .{
+        .cpuid = true,
+        .sse2 = true,
+        .long_mode = true,
+        .syscall = true,
+        .nx = true,
+        .smep = true,
+        .smap = true,
+        .umip = true,
+        .pge = true,
+        .pcid = true,
+        .invpcid = true,
+        .x2apic = true,
+        .xsave = true,
+        .xsaves = true,
+        .cet_ibt = true,
+        .cet_ss = true,
+        .pku = true,
+        .lass = true,
+        .fred = true,
+        .lkgs = true,
+        .pages_1g = true,
+        .tsc_deadline = true,
+        .invariant_tsc = true,
+        .tsc_frequency_hz = 2_400_000_000,
+    };
+}
+
+fn modernRegisters() Registers {
+    return .{
         .cpuid_available = true,
         .max_basic_leaf = 0x16,
         .leaf1_ecx = leaf1_ecx_pcid | leaf1_ecx_x2apic | leaf1_ecx_xsave | leaf1_ecx_tsc_deadline,
@@ -172,24 +228,28 @@ test "decode recognizes the modern x86-64-capable baseline" {
         .leaf15_eax = 2,
         .leaf15_ebx = 200,
         .leaf15_ecx = 24_000_000,
+        .leaf7_eax = 1,
         .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_invpcid | leaf7_ebx_smap,
-        .leaf7_ecx = leaf7_ecx_umip | leaf7_ecx_cet_ss,
+        .leaf7_ecx = leaf7_ecx_umip | leaf7_ecx_cet_ss | leaf7_ecx_pku,
         .leaf7_edx = leaf7_edx_cet_ibt,
+        .leaf7_1_eax = leaf7_1_eax_lass | leaf7_1_eax_fred | leaf7_1_eax_lkgs,
         .max_extended_leaf = 0x8000_0007,
         .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_pages_1g | extended1_edx_long_mode,
         .extended7_edx = extended7_edx_invariant_tsc,
-    });
+    };
+}
 
+test "decode recognizes the 2026 x86-64 baseline" {
+    const features = decode(modernRegisters());
     try std.testing.expect(isSupported(features));
     try std.testing.expect(features.pcid);
     try std.testing.expect(features.invpcid);
-    try std.testing.expect(features.pge);
-    try std.testing.expect(features.syscall);
-    try std.testing.expect(features.xsave);
-    try std.testing.expect(features.xsaves);
+    try std.testing.expect(features.pku);
+    try std.testing.expect(features.lass);
+    try std.testing.expect(features.fred);
+    try std.testing.expect(features.lkgs);
     try std.testing.expect(features.cet_ibt);
     try std.testing.expect(features.cet_ss);
-    try std.testing.expect(features.pages_1g);
     try std.testing.expectEqual(@as(?MissingFeature, null), firstMissing(features));
 }
 
@@ -218,6 +278,9 @@ test "decode ignores registers outside advertised CPUID ranges" {
     try std.testing.expect(!features.xsaves);
     try std.testing.expect(!features.cet_ibt);
     try std.testing.expect(!features.cet_ss);
+    try std.testing.expect(!features.pku);
+    try std.testing.expect(!features.lass);
+    try std.testing.expect(!features.fred);
     try std.testing.expect(!features.pages_1g);
     try std.testing.expect(!features.tsc_deadline);
     try std.testing.expect(!features.invariant_tsc);
@@ -225,32 +288,8 @@ test "decode ignores registers outside advertised CPUID ranges" {
 }
 
 test "baseline rejects every missing required feature" {
-    const complete = Features{
-        .cpuid = true,
-        .sse2 = true,
-        .long_mode = true,
-        .syscall = true,
-        .nx = true,
-        .smep = true,
-        .smap = true,
-        .umip = true,
-        .pge = true,
-        .pcid = true,
-        .invpcid = true,
-        .x2apic = true,
-        .xsave = true,
-        .xsaves = true,
-        .cet_ibt = true,
-        .cet_ss = true,
-        .pages_1g = true,
-        .tsc_deadline = true,
-        .invariant_tsc = true,
-        .tsc_frequency_hz = 2_400_000_000,
-    };
     try std.testing.expectEqual(MissingFeature.cpuid, firstMissing(.{}).?);
-    try std.testing.expectEqual(MissingFeature.sse2, firstMissing(.{
-        .cpuid = true,
-    }).?);
+    try std.testing.expectEqual(MissingFeature.sse2, firstMissing(.{ .cpuid = true }).?);
     try std.testing.expectEqual(MissingFeature.long_mode, firstMissing(.{
         .cpuid = true,
         .sse2 = true,
@@ -261,120 +300,28 @@ test "baseline rejects every missing required feature" {
         .long_mode = true,
         .syscall = true,
     }).?);
-    var missing_syscall = complete;
+    var missing_syscall = completeFeatures();
     missing_syscall.syscall = false;
     try std.testing.expectEqual(MissingFeature.syscall, firstMissing(missing_syscall).?);
-    try std.testing.expectEqual(MissingFeature.smep, firstMissing(.{
-        .cpuid = true,
-        .sse2 = true,
-        .long_mode = true,
-        .syscall = true,
-        .nx = true,
-    }).?);
-    try std.testing.expectEqual(MissingFeature.smap, firstMissing(.{
-        .cpuid = true,
-        .sse2 = true,
-        .long_mode = true,
-        .syscall = true,
-        .nx = true,
-        .smep = true,
-    }).?);
-    try std.testing.expectEqual(MissingFeature.umip, firstMissing(.{
-        .cpuid = true,
-        .sse2 = true,
-        .long_mode = true,
-        .syscall = true,
-        .nx = true,
-        .smep = true,
-        .smap = true,
-    }).?);
-    var missing_pcid = complete;
+    var missing_pcid = completeFeatures();
     missing_pcid.pcid = false;
     try std.testing.expectEqual(MissingFeature.pcid, firstMissing(missing_pcid).?);
-    var missing_invpcid = complete;
-    missing_invpcid.invpcid = false;
-    try std.testing.expectEqual(MissingFeature.invpcid, firstMissing(missing_invpcid).?);
-    var missing_pge = complete;
-    missing_pge.pge = false;
-    try std.testing.expectEqual(MissingFeature.pge, firstMissing(missing_pge).?);
-    try std.testing.expectEqual(MissingFeature.x2apic, firstMissing(.{
-        .cpuid = true,
-        .sse2 = true,
-        .long_mode = true,
-        .syscall = true,
-        .nx = true,
-        .smep = true,
-        .smap = true,
-        .umip = true,
-        .pge = true,
-        .pcid = true,
-        .invpcid = true,
-    }).?);
-    var missing_xsave = complete;
-    missing_xsave.xsave = false;
-    try std.testing.expectEqual(MissingFeature.xsave, firstMissing(missing_xsave).?);
-    var missing_xsaves = complete;
-    missing_xsaves.xsaves = false;
-    try std.testing.expectEqual(MissingFeature.xsaves, firstMissing(missing_xsaves).?);
-    var missing_cet_ibt = complete;
-    missing_cet_ibt.cet_ibt = false;
-    try std.testing.expectEqual(MissingFeature.cet_ibt, firstMissing(missing_cet_ibt).?);
-    var missing_cet_ss = complete;
-    missing_cet_ss.cet_ss = false;
-    try std.testing.expectEqual(MissingFeature.cet_ss, firstMissing(missing_cet_ss).?);
-    var missing_pages_1g = complete;
-    missing_pages_1g.pages_1g = false;
-    try std.testing.expectEqual(MissingFeature.pages_1g, firstMissing(missing_pages_1g).?);
-    var missing_tsc_deadline = complete;
-    missing_tsc_deadline.tsc_deadline = false;
-    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(missing_tsc_deadline).?);
-    var missing_invariant_tsc = complete;
-    missing_invariant_tsc.invariant_tsc = false;
-    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(missing_invariant_tsc).?);
-    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(.{
-        .cpuid = true,
-        .sse2 = true,
-        .long_mode = true,
-        .syscall = true,
-        .nx = true,
-        .smep = true,
-        .smap = true,
-        .umip = true,
-        .pge = true,
-        .pcid = true,
-        .invpcid = true,
-        .x2apic = true,
-        .xsave = true,
-        .xsaves = true,
-        .cet_ibt = true,
-        .cet_ss = true,
-        .pages_1g = true,
-        .tsc_deadline = true,
-        .invariant_tsc = true,
-    }).?);
-    try std.testing.expect(isSupported(complete));
-    try std.testing.expect(isSupported(.{
-        .cpuid = true,
-        .sse2 = true,
-        .long_mode = true,
-        .syscall = true,
-        .nx = true,
-        .smep = true,
-        .smap = true,
-        .umip = true,
-        .pge = true,
-        .pcid = true,
-        .invpcid = true,
-        .x2apic = true,
-        .xsave = true,
-        .xsaves = true,
-        .cet_ibt = true,
-        .cet_ss = true,
-        .pages_1g = true,
-        .tsc_deadline = true,
-        .invariant_tsc = true,
-        .tsc_frequency_hz = 2_400_000_000,
-    }));
+    var missing_pku = completeFeatures();
+    missing_pku.pku = false;
+    try std.testing.expectEqual(MissingFeature.pku, firstMissing(missing_pku).?);
+    var missing_lass = completeFeatures();
+    missing_lass.lass = false;
+    try std.testing.expectEqual(MissingFeature.lass, firstMissing(missing_lass).?);
+    var missing_fred = completeFeatures();
+    missing_fred.fred = false;
+    try std.testing.expectEqual(MissingFeature.fred, firstMissing(missing_fred).?);
+    var missing_lkgs = completeFeatures();
+    missing_lkgs.lkgs = false;
+    try std.testing.expectEqual(MissingFeature.lkgs, firstMissing(missing_lkgs).?);
+    var missing_cet = completeFeatures();
+    missing_cet.cet_ibt = false;
+    try std.testing.expectEqual(MissingFeature.cet_ibt, firstMissing(missing_cet).?);
+    try std.testing.expect(isSupported(completeFeatures()));
 }
 
 test "TSC frequency prefers CPUID ratio and falls back to base MHz" {

@@ -120,7 +120,7 @@ fn firstTargetDriverProvider(
 ) platform_policy_signals.FirstTargetDriverCallbackProvider {
     return platform_policy_signals.FirstTargetDriverCallbackProvider.init(
         .{
-            .name = "booted-nuc11tnki5-driver-callbacks",
+            .name = "booted-nuc15crsu7-driver-callbacks",
             .role = .production,
             .reader_generation = readings.reader_generation,
         },

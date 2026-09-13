@@ -1432,7 +1432,7 @@ test "accelerator scheduler production mode requires complete hardware telemetry
         .observed_tick = 3,
         .media_available = true,
         .hardware_evidence = .{
-            .target_id = "nuc11tnki5",
+            .target_id = "nuc15crsu7",
             .reader_generation = 7,
             .observations = .{
                 .acpi_observed = true,

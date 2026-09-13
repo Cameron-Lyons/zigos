@@ -1,6 +1,7 @@
 const std = @import("std");
 const shared = @import("shared.zig");
 const userspace_build = @import("userspace.zig");
+const kernel_build = @import("kernel.zig");
 
 pub const NativeSmokeMode = enum {
     production,

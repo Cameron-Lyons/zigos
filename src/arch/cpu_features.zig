@@ -43,9 +43,13 @@ pub fn detect() baseline.Features {
     }
     if (registers.max_basic_leaf >= 7) {
         const leaf7 = cpuid(7, 0);
+        registers.leaf7_eax = leaf7.eax;
         registers.leaf7_ebx = leaf7.ebx;
         registers.leaf7_ecx = leaf7.ecx;
         registers.leaf7_edx = leaf7.edx;
+        if (leaf7.eax >= 1) {
+            registers.leaf7_1_eax = cpuid(7, 1).eax;
+        }
     }
     if (registers.max_basic_leaf >= 0xD) {
         registers.leaf13_1_eax = cpuid(0xD, 1).eax;
@@ -85,6 +89,10 @@ pub fn enableModernFeatures(
         required_features.cet_ibt = true;
         required_features.cet_ss = true;
     }
+    required_features.pku = true;
+    required_features.lass = true;
+    required_features.fred = true;
+    required_features.lkgs = true;
     if (!baseline.isSupported(required_features)) unreachable;
     x86.enableNoExecute();
     if (!x86.noExecuteEnabled()) unreachable;
@@ -108,5 +116,13 @@ pub fn enableModernFeatures(
         if (!features.cet_ibt or !features.cet_ss) unreachable;
         x86.enableCet();
         if (!x86.cetEnabled()) unreachable;
+    }
+    if (features.pku) {
+        x86.enablePku();
+        if (!x86.pkuEnabled()) unreachable;
+    }
+    if (features.lass) {
+        x86.enableLass();
+        if (!x86.lassEnabled()) unreachable;
     }
 }

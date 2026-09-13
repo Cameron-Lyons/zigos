@@ -9,15 +9,49 @@ const device_inventory = @import("device_inventory.zig");
 const driver_service = @import("driver_service.zig");
 const network_driver_task = @import("network_driver_task.zig");
 const root = @import("root");
+const kernel_device_start = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/boot/init/devices.zig")
+else
+    struct {
+        pub fn startStorageDataplane() bool {
+            return true;
+        }
+        pub fn startNetworkDataplane() bool {
+            return true;
+        }
+        pub fn startInputDataplane() bool {
+            return true;
+        }
+        pub fn startGraphicsDataplane() bool {
+            return true;
+        }
+    };
 const kernel_network_claim = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/net/link_port.zig")
 else
     struct {
-        pub fn init() void {}
-        pub fn recordDriverClaim(_: u64, _: u64) bool {
+        var claimed_device_id: u64 = 0;
+        var claimed_service_id: u64 = 0;
+
+        pub fn init() void {
+            claimed_device_id = 0;
+            claimed_service_id = 0;
+        }
+
+        pub fn recordDriverClaim(device_id: u64, service_id: u64) bool {
+            if (device_id == 0 or service_id == 0) return false;
+            if (claimed_service_id != 0) {
+                return claimed_device_id == device_id and claimed_service_id == service_id;
+            }
+            claimed_device_id = device_id;
+            claimed_service_id = service_id;
             return true;
         }
-        pub fn clearDriverClaim(_: u64) bool {
+
+        pub fn clearDriverClaim(service_id: u64) bool {
+            if (claimed_service_id == 0 or claimed_service_id != service_id) return false;
+            claimed_device_id = 0;
+            claimed_service_id = 0;
             return true;
         }
     };
@@ -62,6 +96,7 @@ pub const COMPACT_PUBLICATION_METADATA = true;
 pub const DEVICE_DATA_PLANE_PUBLICATION_SIZE_CEILING_BYTES: usize = 56;
 pub const NETWORK_PUBLICATION_SIZE_CEILING_BYTES: usize = 72;
 pub const STORAGE_PUBLICATION_SIZE_CEILING_BYTES: usize = 328;
+pub const STARTS_DATAPLANE_AT_USERSPACE_CLAIM = true;
 
 comptime {
     if (MAX_PUBLISHER_BYTES > std.math.maxInt(u8)) {
@@ -349,6 +384,7 @@ pub fn activateNetworkDeviceForTask(device_id: u64, service_id: u64, task_id: u6
             const activator = publication.activator orelse return false;
             publication.network_device = activator(device_id) orelse return false;
         }
+        if (builtin.target.os.tag == .freestanding and !kernel_device_start.startNetworkDataplane()) return false;
         if (!kernel_network_claim.recordDriverClaim(device_id, service_id)) return false;
         if (!network_driver_task.activateDeviceForTask(publication.network_device.?, service_id, task_id)) {
             _ = kernel_network_claim.clearDriverClaim(service_id);
@@ -364,6 +400,12 @@ pub fn activateDeviceDataPlane(device_class: driver_service.DeviceClass, device_
     if (!supportsGenericDeviceDataPlane(device_class)) return false;
     if (publicationForActivation(DeviceDataPlanePublication, &published_device_planes[deviceClassIndex(device_class)], device_id, service_id)) |publication| {
         if (publication.device_class != device_class) return false;
+        if (builtin.target.os.tag == .freestanding and device_class == .usb_controller) {
+            if (!kernel_device_start.startInputDataplane()) return false;
+        }
+        if (builtin.target.os.tag == .freestanding and device_class == .graphics_adapter) {
+            if (!kernel_device_start.startGraphicsDataplane()) return false;
+        }
         publication.active_service_id = service_id;
         return true;
     }
@@ -384,6 +426,7 @@ pub fn activateStorageBackend(
             const activator = publication.activator orelse return false;
             publication.backend = activator(device_id) orelse return false;
         }
+        if (builtin.target.os.tag == .freestanding and !kernel_device_start.startStorageDataplane()) return false;
         if (kernel_port) |bound_kernel_port| {
             if (!establishStorageControllerSession(
                 publication,

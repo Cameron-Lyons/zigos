@@ -46,7 +46,7 @@ const BASEBOARD_INFORMATION_TYPE: u8 = 2;
 const END_OF_TABLE_TYPE: u8 = 127;
 const STRING_SET_TERMINATOR_BYTES: usize = 2;
 
-pub const NUC11TNKI5_SKU = "NUC11TNKi5";
+pub const NUC15CRSU7_SKU = "RNUC15CRSU7";
 pub const REQUIRES_SMBIOS3 = true;
 pub const USES_EFI64_SYSTEM_TABLE_HANDOFF = true;
 
@@ -248,7 +248,7 @@ test "EFI configuration table locates only the SMBIOS 3 entry point" {
     try std.testing.expectEqual(@as(?u64, null), findSmbios3EntryPointAddress(entries[0 .. entries.len - 1]));
 }
 
-test "SMBIOS parser finds NUC11TNKi5 SKU in system information strings" {
+test "SMBIOS parser finds RNUC15CRSU7 SKU in system information strings" {
     const table = [_]u8{
         1,   0x1B, 0x01, 0x00,
         1,   2,    3,    4,
@@ -256,29 +256,29 @@ test "SMBIOS parser finds NUC11TNKi5 SKU in system information strings" {
         0,   0,    0,    0,
         0,   0,    0,    0,
         0,   0,    0,    0,
-        5,   6,    0,    'I',
-        'n', 't',  'e',  'l',
-        0,   'N',  'U',  'C',
-        ' ', '1',  '1',  ' ',
-        'P', 'r',  'o',  0,
-        'T', 'N',  0,    'S',
-        'E', 'R',  'I',  'A',
-        'L', 0,    'N',  'U',
-        'C', '1',  '1',  'T',
-        'N', 'K',  'i',  '5',
-        0,   'T',  'i',  'g',
-        'e', 'r',  ' ',  'C',
-        'a', 'n',  'y',  'o',
-        'n', 0,    0,    127,
+        5,   6,    0,    'A',
+        'S', 'U',  'S',  0,
+        'N', 'U',  'C',  ' ',
+        '1', '5',  ' ',  'P',
+        'r', 'o',  0,    'C',
+        'R', 0,    'S',  'E',
+        'R', 'I',  'A',  'L',
+        0,   'R',  'N',  'U',
+        'C', '1',  '5',  'C',
+        'R', 'S',  'U',  '7',
+        0,   'A',  'r',  'r',
+        'o', 'w',  ' ',  'L',
+        'a', 'k',  'e',  0,
+        0,   127,
         4,   0x7F, 0x00, 0,
         0,
     };
-    try std.testing.expect(tableContainsTargetSku(table[0..], NUC11TNKI5_SKU));
-    try std.testing.expect(!tableContainsTargetSku(table[0..], "NUC12"));
+    try std.testing.expect(tableContainsTargetSku(table[0..], NUC15CRSU7_SKU));
+    try std.testing.expect(!tableContainsTargetSku(table[0..], "NUC11"));
 }
 
 test "SMBIOS parser rejects malformed structure bounds" {
-    try std.testing.expect(!tableContainsTargetSku(&[_]u8{ 1, 3, 0, 0, 0, 0 }, NUC11TNKI5_SKU));
-    try std.testing.expect(!tableContainsTargetSku(&[_]u8{ 1, 8, 0, 0, 'N', 'U', 'C', '1' }, NUC11TNKI5_SKU));
-    try std.testing.expect(!tableContainsTargetSku(&[_]u8{ 127, 4, 0, 0, 0, 0 }, NUC11TNKI5_SKU));
+    try std.testing.expect(!tableContainsTargetSku(&[_]u8{ 1, 3, 0, 0, 0, 0 }, NUC15CRSU7_SKU));
+    try std.testing.expect(!tableContainsTargetSku(&[_]u8{ 1, 8, 0, 0, 'N', 'U', 'C', '1' }, NUC15CRSU7_SKU));
+    try std.testing.expect(!tableContainsTargetSku(&[_]u8{ 127, 4, 0, 0, 0, 0 }, NUC15CRSU7_SKU));
 }

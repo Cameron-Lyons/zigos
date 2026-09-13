@@ -3,13 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
-CHECKER="$ROOT_DIR/scripts/check-nuc11tnki5-hardware-proof.sh"
-STATEMENT_WRITER="$ROOT_DIR/scripts/write-nuc11tnki5-capture-statement.sh"
-PRODUCTION_MARKERS="$ROOT_DIR/spec/hardware/nuc11tnki5-production-required-markers.txt"
-VERIFICATION_MARKERS="$ROOT_DIR/spec/hardware/nuc11tnki5-required-markers.txt"
-TARGET_PREFIX="ZIGOS:HW_TARGET:INTEL_NUC11TNKI5"
+CHECKER="$ROOT_DIR/scripts/check-nuc15crsu7-hardware-proof.sh"
+STATEMENT_WRITER="$ROOT_DIR/scripts/write-nuc15crsu7-capture-statement.sh"
+PRODUCTION_MARKERS="$ROOT_DIR/spec/hardware/nuc15crsu7-production-required-markers.txt"
+VERIFICATION_MARKERS="$ROOT_DIR/spec/hardware/nuc15crsu7-required-markers.txt"
+TARGET_PREFIX="ZIGOS:HW_TARGET:ASUS_NUC15CRSU7"
 NONCE="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-DEVICE_ID="nuc11tnki5-system-00112233"
+DEVICE_ID="nuc15crsu7-system-00112233"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/zigos-nuc-proof-checker.XXXXXX")"
 trap 'rm -rf -- "$TMP_ROOT"' EXIT
@@ -58,8 +58,8 @@ REQUIRED_ARTIFACTS=(
 REQUIRED_CAPTURE_INPUTS=(
   "build/os-verification.iso"
   "zig-out/bin/kernel-zigos-native-verification.elf"
-  "spec/hardware/nuc11tnki5-production-required-markers.txt"
-  "spec/hardware/nuc11tnki5-required-markers.txt"
+  "spec/hardware/nuc15crsu7-production-required-markers.txt"
+  "spec/hardware/nuc15crsu7-required-markers.txt"
 )
 
 RELEASE_EVIDENCE_NAMES=(
@@ -89,10 +89,10 @@ write_required_artifacts() {
   for artifact in "${REQUIRED_ARTIFACTS[@]}" "${REQUIRED_CAPTURE_INPUTS[@]}"; do
     mkdir -p "$ARTIFACT_ROOT/$(dirname -- "$artifact")"
     case "$artifact" in
-      spec/hardware/nuc11tnki5-production-required-markers.txt)
+      spec/hardware/nuc15crsu7-production-required-markers.txt)
         cp "$PRODUCTION_MARKERS" "$ARTIFACT_ROOT/$artifact"
         ;;
-      spec/hardware/nuc11tnki5-required-markers.txt)
+      spec/hardware/nuc15crsu7-required-markers.txt)
         cp "$VERIFICATION_MARKERS" "$ARTIFACT_ROOT/$artifact"
         ;;
       *)
@@ -149,7 +149,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(sha256_file "$statement")" = "$statement_sha256" ]
-[ "$target_id" = "intel-nuc11tnki5" ]
+[ "$target_id" = "asus-nuc15crsu7" ]
 
 verify_role() {
   local role="$1"
@@ -237,9 +237,9 @@ write_manifest() {
   export ZIGOS_EXPECTED_REPO_COMMIT="$repo_commit"
   export ZIGOS_EXPECTED_REPO_CHANGE_ID="$repo_change_id"
   cat > "$dir/proof-manifest.txt" <<EOF
-format=zigos-nuc11tnki5-proof-v2
-target_id=intel-nuc11tnki5
-board_sku=NUC11TNKi5
+format=zigos-nuc15crsu7-proof-v2
+target_id=asus-nuc15crsu7
+board_sku=RNUC15CRSU7
 evidence_source=real_hardware
 capture_nonce=$NONCE
 device_id=$DEVICE_ID
@@ -247,11 +247,11 @@ device_identity=device-identity.txt
 production_serial_log=production-serial.log
 production_boot_medium=build/os.iso
 production_boot_kernel=zig-out/bin/kernel-zigos-native.elf
-production_required_markers=spec/hardware/nuc11tnki5-production-required-markers.txt
+production_required_markers=spec/hardware/nuc15crsu7-production-required-markers.txt
 verification_serial_log=verification-serial.log
 verification_boot_medium=build/os-verification.iso
 verification_boot_kernel=zig-out/bin/kernel-zigos-native-verification.elf
-verification_required_markers=spec/hardware/nuc11tnki5-required-markers.txt
+verification_required_markers=spec/hardware/nuc15crsu7-required-markers.txt
 cycle_manifest=cycle-manifest.txt
 firmware_settings=firmware-settings.txt
 power_cycle_notes=power-cycle-notes.txt
@@ -283,9 +283,9 @@ EOF
 write_device_identity() {
   local dir="$1"
   cat > "$dir/device-identity.txt" <<EOF
-format=zigos-nuc11tnki5-device-identity-v1
-target_id=intel-nuc11tnki5
-board_sku=NUC11TNKi5
+format=zigos-nuc15crsu7-device-identity-v1
+target_id=asus-nuc15crsu7
+board_sku=RNUC15CRSU7
 device_id=$DEVICE_ID
 smbios_system_uuid=00112233-4455-6677-8899-aabbccddeeff
 baseboard_serial=BTNUC11SERIAL001
@@ -296,8 +296,8 @@ EOF
 write_sidecars() {
   local dir="$1"
   cat > "$dir/firmware-settings.txt" <<'EOF'
-target_id=intel-nuc11tnki5
-board_sku=NUC11TNKi5
+target_id=asus-nuc15crsu7
+board_sku=RNUC15CRSU7
 bios_version=TNTGL357.0071.2025.0123.1200
 boot_mode=UEFI
 secure_boot=disabled-for-local-proof-media
@@ -306,7 +306,7 @@ wake_suspend=S3 wake by keyboard and power button enabled
 changed_options=boot order set to USB first
 EOF
   cat > "$dir/power-cycle-notes.txt" <<'EOF'
-target_id=intel-nuc11tnki5
+target_id=asus-nuc15crsu7
 operator=hardware-operator
 started_at_utc=2026-06-10T00:00:00Z
 completed_at_utc=2026-06-10T01:00:00Z
@@ -321,7 +321,7 @@ update_rollback_cycles=10
 notes=operator observed all required physical power and device cycles
 EOF
   cat > "$dir/attestation-lifecycle.txt" <<'EOF'
-target_id=intel-nuc11tnki5
+target_id=asus-nuc15crsu7
 evidence_source=real_hardware
 operator=hardware-operator
 captured_at_utc=2026-06-10T00:30:00Z
@@ -340,7 +340,7 @@ notes=operator captured root lifecycle rejection and request binding
 EOF
   cat > "$dir/operator-metadata-markers.txt" <<EOF
 $TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE
-$TARGET_PREFIX:BOARD_SKU:NUC11TNKi5
+$TARGET_PREFIX:BOARD_SKU:RNUC15CRSU7
 $TARGET_PREFIX:PROOF_MANIFEST:RECORDED
 $TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED
 $TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED
@@ -368,7 +368,7 @@ write_verification_log() {
   local dir="$1"
   {
     printf '%s:EVIDENCE_SOURCE:REAL_HARDWARE\n' "$TARGET_PREFIX"
-    printf '%s:BOARD_SKU:NUC11TNKi5\n' "$TARGET_PREFIX"
+    printf '%s:BOARD_SKU:RNUC15CRSU7\n' "$TARGET_PREFIX"
     printf '%s:PROOF_MANIFEST:RECORDED\n' "$TARGET_PREFIX"
     printf '%s:FIRMWARE_SETTINGS:RECORDED\n' "$TARGET_PREFIX"
     printf '%s:POWER_CYCLE_NOTES:RECORDED\n' "$TARGET_PREFIX"
@@ -390,7 +390,7 @@ write_verification_log() {
 write_cycles() {
   local dir="$1"
   mkdir -p "$dir/cycles"
-  printf 'format=zigos-nuc11tnki5-cycle-manifest-v1\n' > "$dir/cycle-manifest.txt"
+  printf 'format=zigos-nuc15crsu7-cycle-manifest-v1\n' > "$dir/cycle-manifest.txt"
   add_cycles() {
     local type="$1"
     local count="$2"
@@ -402,9 +402,9 @@ write_cycles() {
       padded="$(printf '%06d' "$index")"
       path="cycles/${type}-${padded}.log"
       cat > "$dir/$path" <<EOF
-format=zigos-nuc11tnki5-cycle-log-v1
+format=zigos-nuc15crsu7-cycle-log-v1
 capture_nonce=$NONCE
-target_id=intel-nuc11tnki5
+target_id=asus-nuc15crsu7
 device_id=$DEVICE_ID
 cycle_type=$type
 cycle_index=$padded
@@ -674,7 +674,7 @@ write_statement "$missing_verification_ready"
 expect_fail "$missing_verification_ready"
 
 device_mismatch="$(copy_valid device-mismatch)"
-sed 's/^device_id=.*/device_id=nuc11tnki5-different-device/' "$device_mismatch/device-identity.txt" > "$device_mismatch/device-identity.next"
+sed 's/^device_id=.*/device_id=nuc15crsu7-different-device/' "$device_mismatch/device-identity.txt" > "$device_mismatch/device-identity.next"
 mv "$device_mismatch/device-identity.next" "$device_mismatch/device-identity.txt"
 write_statement "$device_mismatch"
 expect_fail "$device_mismatch"
@@ -699,4 +699,4 @@ printf 'changed production ISO\n' >> "$ARTIFACT_ROOT/build/os.iso"
 expect_fail "$artifact_hash"
 printf 'hardware checker artifact %s\n' "build/os.iso" > "$ARTIFACT_ROOT/build/os.iso"
 
-printf 'NUC11TNKi5 hardware proof checker self-test: PASS\n'
+printf 'RNUC15CRSU7 hardware proof checker self-test: PASS\n'

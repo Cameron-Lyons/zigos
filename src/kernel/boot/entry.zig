@@ -46,6 +46,12 @@ pub fn kernelMain() void {
     const software_timer_fallback = !hardware_tsc_timer and software_cpu_fallback;
     const hardware_cet = features.cet_ibt and features.cet_ss;
     const software_cet_fallback = !hardware_cet and software_cpu_fallback;
+    const hardware_pku = features.pku;
+    const software_pku_fallback = !hardware_pku and software_cpu_fallback;
+    const hardware_lass = features.lass;
+    const software_lass_fallback = !hardware_lass and software_cpu_fallback;
+    const hardware_fred = features.fred and features.lkgs;
+    const software_fred_fallback = !hardware_fred and software_cpu_fallback;
     var required_features = features;
     if (software_process_context_fallback) {
         required_features.pcid = true;
@@ -58,6 +64,16 @@ pub fn kernelMain() void {
     if (software_cet_fallback) {
         required_features.cet_ibt = true;
         required_features.cet_ss = true;
+    }
+    if (software_pku_fallback) {
+        required_features.pku = true;
+    }
+    if (software_lass_fallback) {
+        required_features.lass = true;
+    }
+    if (software_fred_fallback) {
+        required_features.fred = true;
+        required_features.lkgs = true;
     }
     if (cpu_features.baseline.firstMissing(required_features)) |missing_feature| {
         printBootIdentity();
@@ -72,9 +88,9 @@ pub fn kernelMain() void {
     printBootIdentity();
     common.printBootMarker(boot_markers.cpu_baseline_ready);
     cpu_features.enableModernFeatures(
-        required_features,
+        features,
         if (hardware_process_contexts) .hardware_pcid else .software_flush,
-        .deferred,
+        if (hardware_cet) .hardware else .deferred,
     );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);
@@ -87,14 +103,24 @@ pub fn kernelMain() void {
         common.printBootMarker(boot_markers.cpu_pcid_software_fallback);
     }
     common.printBootMarker(boot_markers.cpu_pcid_ready);
+    if (hardware_pku) {
+        common.printBootMarker(boot_markers.cpu_pku_enabled);
+    }
+    if (hardware_lass) {
+        common.printBootMarker(boot_markers.cpu_lass_enabled);
+    }
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
 
     init_core.init();
     common.printBootMarker(boot_markers.cpu_syscall_enabled);
+    if (hardware_fred) {
+        common.printBootMarker(boot_markers.cpu_fred_enabled);
+    }
     init_devices.init();
-    console.print("Delegating network ownership to native service contracts.\n");
+    console.print("Delegating device dataplanes to userspace driver claims.\n");
+    common.printBootMarker(boot_markers.kernel_dataplane_userspace);
     common.printBootMarker(boot_markers.kernel_network_deferred);
     init_runtime.init(
         features,

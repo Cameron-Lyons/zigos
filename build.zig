@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
 
     const verify_smoke = b.option(bool, "verify-smoke", "Include the QEMU native smoke test in `zig build verify`") orelse false;
     const verify_benchmark = b.option(bool, "verify-benchmark", "Include the QEMU benchmark suite in `zig build verify`") orelse false;
-    const hardware_proof_dir_option = b.option([]const u8, "hardware-proof-dir", "Path to the completed NUC11TNKi5 hardware proof bundle");
+    const hardware_proof_dir_option = b.option([]const u8, "hardware-proof-dir", "Path to the completed RNUC15CRSU7 hardware proof bundle");
     const hardware_proof_dir = hardware_proof_dir_option orelse "<missing-hardware-proof-dir>";
     const release_trust_root = b.option([]const u8, "release-trust-root", "Absolute path to independently provisioned release root metadata");
     const release_trust_root_sha256 = b.option([]const u8, "release-trust-root-sha256", "Pinned lowercase SHA-256 digest of release root metadata");
@@ -312,10 +312,10 @@ pub fn build(b: *std.Build) void {
 
     const hardware_proof_cmd = b.addSystemCommand(&.{
         "bash",
-        "scripts/check-nuc11tnki5-hardware-proof.sh",
+        "scripts/check-nuc15crsu7-hardware-proof.sh",
         hardware_proof_dir,
     });
-    const hardware_proof_step = b.step("hardware-proof", "Validate the completed NUC11TNKi5 real-hardware proof bundle");
+    const hardware_proof_step = b.step("hardware-proof", "Validate the completed RNUC15CRSU7 real-hardware proof bundle");
     hardware_proof_step.dependOn(&hardware_proof_cmd.step);
     if (hardware_proof_dir_option == null) {
         hardware_proof_cmd.step.dependOn(&b.addFail("hardware proof validation requires -Dhardware-proof-dir=build/hardware-proofs/<fresh-name>").step);
@@ -431,7 +431,7 @@ pub fn build(b: *std.Build) void {
     reproducible_build_cmd.step.dependOn(release_security_preflight_step);
 
     hardware_proof_cmd.step.dependOn(&release_bundle_existing_cmd.step);
-    const release_security_gate_step = b.step("release-security-gate", "Seal a frozen verified release candidate with its current NUC11TNKi5 hardware proof without regenerating artifacts");
+    const release_security_gate_step = b.step("release-security-gate", "Seal a frozen verified release candidate with its current RNUC15CRSU7 hardware proof without regenerating artifacts");
     release_security_gate_step.dependOn(hardware_proof_step);
 }
 

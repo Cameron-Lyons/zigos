@@ -87,6 +87,7 @@ const dataplane_handoff = @import("drivers/dataplane_handoff.zig");
 const kernel_config = @import("../kernel/config.zig");
 const kernel_smp = @import("../kernel/smp.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
+const os_contract = @import("platform/os_contract.zig");
 const virtual_layout = @import("../kernel/memory/virtual_layout.zig");
 const firmware_memory_map = @import("../kernel/memory/firmware_memory_map.zig");
 const efi_handoff = @import("../boot/efi_handoff.zig");
@@ -134,6 +135,11 @@ pub const sync_private_overlay = .{
 };
 
 pub const indexed_hot_path_tables = .{
+    .generated_idl_contract = .{
+        .uses_single_requirement_enum = os_contract.uses_single_requirement_enum,
+        .generated_from_typed_idl = os_contract.generated_from_typed_idl,
+        .uses_u16_feature_width = os_contract.uses_u16_feature_width,
+    },
     .indexed_arena = .{
         .tracks_used_count = @hasField(ProbeArena, "used_count"),
         .inserts_complete_values_at_exact_indexes = @hasDecl(ProbeArena, "insertIndexAt"),
@@ -926,6 +932,7 @@ pub const indexed_hot_path_tables = .{
         .exposes_registered_mmio_windows = device_broker.EXPOSES_REGISTERED_MMIO_WINDOWS,
         .maps_mmio_into_owner_tasks = dataplane_handoff.MAPS_MMIO_INTO_OWNER_TASKS,
         .seals_kernel_runtime_io_after_claim = dataplane_handoff.SEALS_KERNEL_RUNTIME_IO_AFTER_CLAIM,
+        .starts_dataplane_at_userspace_claim = bootstrap_driver_port.STARTS_DATAPLANE_AT_USERSPACE_CLAIM,
     },
     .network_policy = .{
         .stores_compact_policy_metadata = network_policy.COMPACT_POLICY_METADATA and
@@ -1529,6 +1536,7 @@ pub const indexed_hot_path_tables = .{
             @hasDecl(workspace.Directory, "indexReplayedWorkspaceEntries"),
         .skips_post_replay_full_workspace_index_rebuild = storage_volume.SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD and
             @hasDecl(workspace.Directory, "rebuildDirectoryIndexes"),
+        .uses_incremental_live_index = storage_volume.USES_INCREMENTAL_LIVE_INDEX,
         .skips_empty_object_store_arena_reset_work = object_store.SKIPS_EMPTY_ARENA_RESET_WORK,
         .scrubs_only_used_signer_text = storage_volume.SCRUBS_ONLY_USED_SIGNER_TEXT,
         .heap_backs_signer_text_on_freestanding = storage_volume.HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING and
@@ -1748,7 +1756,7 @@ pub const indexed_hot_path_tables = .{
         .enables_bringup = kernel_config.shouldInitSmp() and kernel_smp.STARTS_APPLICATION_PROCESSORS,
         .uses_per_cpu_runqueues = kernel_smp.USES_PER_CPU_RUNQUEUES and userspace_scheduler.USES_PER_CPU_RUNQUEUES,
         .shoots_down_remote_tlb = kernel_smp.SHOOTS_DOWN_REMOTE_TLB,
-        .pins_device_irqs_to_bsp = kernel_smp.PINS_DEVICE_IRQS_TO_BSP,
+        .spreads_device_irqs = !kernel_smp.PINS_DEVICE_IRQS_TO_BSP,
         .idles_per_cpu = kernel_smp.IDLES_PER_CPU and @hasDecl(kernel_smp, "idle"),
     },
     .extended_state = .{
@@ -1760,6 +1768,17 @@ pub const indexed_hot_path_tables = .{
         .requires_ibt_and_shadow_stacks = cpu_baseline.REQUIRES_CET and
             @hasField(cpu_baseline.Features, "cet_ibt") and
             @hasField(cpu_baseline.Features, "cet_ss"),
+    },
+    .pku = .{
+        .requires_pku = cpu_baseline.REQUIRES_PKU and @hasField(cpu_baseline.Features, "pku"),
+    },
+    .lass = .{
+        .requires_lass = cpu_baseline.REQUIRES_LASS and @hasField(cpu_baseline.Features, "lass"),
+    },
+    .fred = .{
+        .requires_fred = cpu_baseline.REQUIRES_FRED and
+            @hasField(cpu_baseline.Features, "fred") and
+            @hasField(cpu_baseline.Features, "lkgs"),
     },
     .runtime_pages = .{
         .uses_2m_pages = virtual_layout.USES_RUNTIME_2M_PAGES,

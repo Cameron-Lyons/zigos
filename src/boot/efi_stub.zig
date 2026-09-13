@@ -3,6 +3,9 @@ const uefi = std.os.uefi;
 const efi_elf = @import("efi_elf.zig");
 const efi_handoff = @import("efi_handoff.zig");
 
+pub const NATIVE_EFI_LONG_MODE_ENTRY = true;
+pub const DROPS_MULTIBOOT2_PROTECTED_MODE_ENTRY = true;
+
 const KERNEL_PATH = [_:0]u16{ '\\', 'b', 'o', 'o', 't', '\\', 'k', 'e', 'r', 'n', 'e', 'l', '.', 'e', 'l', 'f' };
 const CMDLINE_PATH = [_:0]u16{ '\\', 'b', 'o', 'o', 't', '\\', 'c', 'm', 'd', 'l', 'i', 'n', 'e', '.', 't', 'x', 't' };
 const KERNEL_MAX_BYTES: usize = 16 * 1024 * 1024;

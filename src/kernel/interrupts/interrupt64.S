@@ -126,6 +126,9 @@ isr_common_stub:
     clac
     SAVE_REGISTERS
     movq %rsp, %r12
+    movq FRAME_CS(%r12), %rax
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .skip_xstate
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -140,7 +143,12 @@ isr_common_stub:
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
+    jmp .isr_enter
 
+.skip_xstate:
+    movq %r12, %rdi
+
+.isr_enter:
     call isrHandler
 
     movq FRAME_CS(%r12), %rax
@@ -187,10 +195,14 @@ isr_common_stub:
     call zigos_handle_invalid_interrupt_return
 
 .isr_dispatch_complete:
+    movq FRAME_CS(%r12), %rax
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .skip_xrstors
     movl $3, %eax
     xorl %edx, %edx
     # xrstors (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
+.skip_xrstors:
     movq %r12, %rsp
     cmpl $0, zigos_userspace_resume_requested(%rip)
     jne .userspace_resume

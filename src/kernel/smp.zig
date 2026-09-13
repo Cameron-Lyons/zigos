@@ -62,13 +62,14 @@ pub const AP_STACK_BYTES: usize = 16 * 1024;
 pub const STARTS_APPLICATION_PROCESSORS = true;
 pub const USES_PER_CPU_RUNQUEUES = true;
 pub const SHOOTS_DOWN_REMOTE_TLB = true;
-pub const PINS_DEVICE_IRQS_TO_BSP = true;
+pub const PINS_DEVICE_IRQS_TO_BSP = false;
 pub const IDLES_PER_CPU = true;
 pub const SIPI_PHYSICAL_LIMIT: u32 = 1024 * 1024;
 
 pub const Cpu = struct {
     apic_id: u32 = 0,
     online: bool = false,
+    kernel_stack_top: usize = 0,
 };
 
 const bringup = if (builtin.target.os.tag == .freestanding)
@@ -85,6 +86,7 @@ var bsp_cpu_index: u8 = 0;
 var tlb_target_pcid: u16 = 0;
 var tlb_ack_count: u32 = 0;
 var initialized = false;
+var irq_route_cursor: u8 = 0;
 
 pub fn init(madt: []const u8) void {
     const madt_table = madt;
@@ -118,7 +120,10 @@ pub fn onlineCpuCount() u8 {
 
 pub fn currentCpuIndex() u8 {
     if (builtin.target.os.tag != .freestanding) return 0;
-    return @truncate(x86.readMsr(x86.IA32_GS_BASE_MSR));
+    const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
+    if (gs_base < 4096) return @truncate(gs_base);
+    const cpu_index: *const usize = @ptrFromInt(gs_base + 16);
+    return @truncate(cpu_index.*);
 }
 
 pub fn irqDestinationId() u32 {
@@ -126,7 +131,11 @@ pub fn irqDestinationId() u32 {
         if (builtin.target.os.tag == .freestanding) return x2apic.localId();
         return 0;
     }
-    return cpus[bsp_cpu_index].apic_id;
+    const online = onlineCpuCount();
+    if (online <= 1) return cpus[bsp_cpu_index].apic_id;
+    const irq_cpu = irq_route_cursor % online;
+    irq_route_cursor +%= 1;
+    return cpus[irq_cpu].apic_id;
 }
 
 pub fn assignedCpu(task_id: u64, pin_to_bsp: bool) u8 {
@@ -176,6 +185,12 @@ pub fn handleTlbIpi() void {
 
 pub fn setCurrentCpuIndex(index: u8) void {
     if (builtin.target.os.tag != .freestanding) return;
+    const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
+    if (gs_base >= 4096) {
+        const cpu_index: *usize = @ptrFromInt(gs_base + 16);
+        cpu_index.* = index;
+        return;
+    }
     x86.writeMsr(x86.IA32_GS_BASE_MSR, index);
 }
 
@@ -206,15 +221,21 @@ test "SMP assigns interactive work to the BSP and spreads background tasks" {
     try std.testing.expectEqual(@as(u8, 2), assignedCpu(43, false));
 }
 
-test "SMP IRQ affinity stays on the BSP" {
+test "SMP IRQ affinity spreads across online CPUs" {
     initialized = true;
     defer initialized = false;
+    irq_route_cursor = 0;
     cpus[0].apic_id = 7;
+    cpus[1].apic_id = 9;
+    cpus[2].apic_id = 11;
+    online_count = 3;
+    defer online_count = 1;
     try std.testing.expectEqual(@as(u32, 7), irqDestinationId());
-    try std.testing.expect(PINS_DEVICE_IRQS_TO_BSP);
+    try std.testing.expectEqual(@as(u32, 9), irqDestinationId());
+    try std.testing.expectEqual(@as(u32, 11), irqDestinationId());
+    try std.testing.expect(!PINS_DEVICE_IRQS_TO_BSP);
     try std.testing.expect(STARTS_APPLICATION_PROCESSORS);
     try std.testing.expect(SHOOTS_DOWN_REMOTE_TLB);
     try std.testing.expect(IDLES_PER_CPU);
     try std.testing.expectEqual(@as(u8, 0x70), TLB_IPI_VECTOR);
-    try std.testing.expectEqual(@as(u8, 1), onlineCpuCount());
 }

@@ -40,29 +40,18 @@ pub fn inspectFile(file: embedded_file.File) Error!Inspection {
     var ident: [std.elf.EI_NIDENT]u8 = undefined;
     if (!reader.readInto(0, &ident)) return error.InvalidElfHeader;
     if (!std.mem.eql(u8, ident[0..4], "\x7fELF")) return error.InvalidElfMagic;
+    if (ident[std.elf.EI_CLASS] != std.elf.ELFCLASS64) return error.UnsupportedElfClass;
     if (ident[std.elf.EI_DATA] != std.elf.ELFDATA2LSB) return error.UnsupportedElfEndian;
 
-    return switch (ident[std.elf.EI_CLASS]) {
-        std.elf.ELFCLASS32 => inspectTyped(
-            std.elf.Elf32_Ehdr,
-            std.elf.Elf32_Phdr,
-            std.elf.Elf32_Shdr,
-            reader,
-            file,
-            std.elf.ELFCLASS32,
-            .@"386",
-        ),
-        std.elf.ELFCLASS64 => inspectTyped(
-            std.elf.Elf64_Ehdr,
-            std.elf.Elf64_Phdr,
-            std.elf.Elf64_Shdr,
-            reader,
-            file,
-            std.elf.ELFCLASS64,
-            .X86_64,
-        ),
-        else => error.UnsupportedElfClass,
-    };
+    return inspectTyped(
+        std.elf.Elf64_Ehdr,
+        std.elf.Elf64_Phdr,
+        std.elf.Elf64_Shdr,
+        reader,
+        file,
+        std.elf.ELFCLASS64,
+        .X86_64,
+    );
 }
 
 fn inspectTyped(

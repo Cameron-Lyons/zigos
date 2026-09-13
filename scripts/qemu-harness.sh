@@ -37,7 +37,7 @@ qemu_harness_cpu_model() {
     return
   fi
 
-  printf '%s\n' "max,+x2apic,+pdpe1gb,tsc-frequency=2400000000"
+  printf '%s\n' "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lass,tsc-frequency=2400000000"
 }
 
 qemu_harness_profile_memory() {

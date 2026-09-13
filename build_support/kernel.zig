@@ -123,6 +123,7 @@ pub fn addX86_64KernelBootCheck(
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
     iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
+    iso.addFileArg(addNativeEfiStub(b, optimize).getEmittedBin());
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -225,6 +226,7 @@ pub fn addX86_64LongModeEntryCheck(
     const iso_path = iso.addOutputFileArg("x86_64-long-mode-entry.iso");
     _ = iso.addOutputDirectoryArg("x86_64-long-mode-entry-staging");
     iso.addFileArg(b.path("src/boot/grub-long-mode.cfg"));
+    iso.addFileArg(addNativeEfiStub(b, optimize).getEmittedBin());
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -547,6 +549,7 @@ pub fn addKernelArtifact(
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
     qemu_iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
+    qemu_iso.addFileArg(addNativeEfiStub(b, .ReleaseSmall).getEmittedBin());
     qemu_iso.step.dependOn(&validate_qemu_image.step);
 
     const install = b.addInstallBinFile(linked_kernel, name);
@@ -561,6 +564,24 @@ pub fn addKernelArtifact(
     };
 }
 
+pub fn addNativeEfiStub(
+    b: *std.Build,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = "bootx64",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/boot/efi_stub.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .x86_64,
+                .os_tag = .uefi,
+                .abi = .none,
+            }),
+            .optimize = optimize,
+        }),
+    });
+}
+
 fn addKernelAssemblyFiles(
     b: *std.Build,
     kernel_module: *std.Build.Module,
@@ -572,6 +593,7 @@ fn addKernelAssemblyFiles(
     kernel_module.addAssemblyFile(b.path("src/arch/x86/syscall_trap.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/syscall64.S"));
+    kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/fred64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/smp/ap_trampoline.S"));
     kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
