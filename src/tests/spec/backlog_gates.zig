@@ -317,51 +317,51 @@ pub fn indexedHotPathTablesGate() !void {
 
 pub fn firstHardwareTargetGate() !void {
     const target = &hardware_target.first_supported_target;
-    try std.testing.expectEqualStrings("intel-nuc11tnki5", target.id);
-    try std.testing.expectEqualStrings("NUC11TNKi5", target.sku);
+    try std.testing.expectEqualStrings("asus-nuc15crsu7", target.id);
+    try std.testing.expectEqualStrings("RNUC15CRSU7", target.sku);
     try std.testing.expectEqualStrings("Intel Ethernet Controller I225-LM", target.network);
     try std.testing.expect(hardware_target.coversRequiredSubsystems(target));
     try std.testing.expect(target.required_subsystems.len >= target.required_markers.len);
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_proof_metadata_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
+        hardware_target.nuc15crsu7_proof_metadata_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
     ));
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_proof_metadata_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":PROOF_MANIFEST:RECORDED",
+        hardware_target.nuc15crsu7_proof_metadata_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":PROOF_MANIFEST:RECORDED",
     ));
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_proof_metadata_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
+        hardware_target.nuc15crsu7_proof_metadata_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
     ));
-    try std.testing.expectEqual(@as(usize, 16), hardware_target.nuc11tnki5_hardware_fact_markers.len);
+    try std.testing.expectEqual(@as(usize, 16), hardware_target.nuc15crsu7_hardware_fact_markers.len);
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
-    ));
-    try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":ACPI_DMAR:OBSERVED",
+        hardware_target.nuc15crsu7_hardware_fact_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
     ));
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED",
+        hardware_target.nuc15crsu7_hardware_fact_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":ACPI_DMAR:OBSERVED",
     ));
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":NVME_WRITE_READ_COMPLETION:OBSERVED",
+        hardware_target.nuc15crsu7_hardware_fact_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED",
     ));
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":I225_LM_FRAME_INTERRUPT:OBSERVED",
+        hardware_target.nuc15crsu7_hardware_fact_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":NVME_WRITE_READ_COMPLETION:OBSERVED",
     ));
     try std.testing.expect(containsString(
-        hardware_target.nuc11tnki5_hardware_fact_markers[0..],
-        hardware_target.nuc11tnki5_marker_prefix ++ ":ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
+        hardware_target.nuc15crsu7_hardware_fact_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":I225_LM_FRAME_INTERRUPT:OBSERVED",
     ));
-    try std.testing.expectEqual(@as(usize, 8), hardware_target.nuc11tnki5_counter_markers.len);
-    for (hardware_target.nuc11tnki5_counter_markers) |counter_marker| {
-        try std.testing.expect(std.mem.startsWith(u8, counter_marker.marker_prefix, hardware_target.nuc11tnki5_marker_prefix));
+    try std.testing.expect(containsString(
+        hardware_target.nuc15crsu7_hardware_fact_markers[0..],
+        hardware_target.nuc15crsu7_marker_prefix ++ ":ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
+    ));
+    try std.testing.expectEqual(@as(usize, 8), hardware_target.nuc15crsu7_counter_markers.len);
+    for (hardware_target.nuc15crsu7_counter_markers) |counter_marker| {
+        try std.testing.expect(std.mem.startsWith(u8, counter_marker.marker_prefix, hardware_target.nuc15crsu7_marker_prefix));
         try std.testing.expect(counter_marker.minimum > 0);
     }
     try std.testing.expect(kernel_acpi.signatureMatches("RSD PTR "));
@@ -400,15 +400,15 @@ pub fn firstHardwareTargetGate() !void {
     try std.testing.expect(memory_map.hasUsableMemory());
     const nuc_smbios_table = [_]u8{
         1,   8,   1,   0,   1,   2,   0,   0,
-        'I', 'n', 't', 'e', 'l', 0,   'N', 'U',
-        'C', '1', '1', 'T', 'N', 'K', 'i', '5',
+        'A', 'S', 'U', 'S', 0,   'R', 'N', 'U',
+        'C', '1', '5', 'C', 'R', 'S', 'U', '7',
         0,   0,
     };
     try std.testing.expect(kernel_smbios.REQUIRES_SMBIOS3);
     try std.testing.expect(kernel_smbios.USES_EFI64_SYSTEM_TABLE_HANDOFF);
     try std.testing.expect(!@hasDecl(kernel_smbios, "EntryPoint"));
     try std.testing.expect(!@hasDecl(kernel_smbios, "scanBiosForEntryPoint"));
-    try std.testing.expect(kernel_smbios.tableContainsTargetSku(nuc_smbios_table[0..], kernel_smbios.NUC11TNKI5_SKU));
+    try std.testing.expect(kernel_smbios.tableContainsTargetSku(nuc_smbios_table[0..], kernel_smbios.NUC15CRSU7_SKU));
     try std.testing.expectEqual(@as(u32, 64), (kernel_nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) }).maxQueueEntries());
     try intel_i225.validateRingPlan(.{
         .rx_descriptors = 256,

@@ -74,6 +74,7 @@ fn startOne(index: u8, trampoline: Trampoline) void {
     const stack = kernel_memory.kmalloc(smp.AP_STACK_BYTES) orelse return;
     const stack_bytes: [*]u8 = @ptrCast(stack);
     const stack_top = @intFromPtr(stack_bytes) + smp.AP_STACK_BYTES;
+    bringup_cpus[index].kernel_stack_top = stack_top;
     patch(trampoline.bytes, index, stack_top);
 
     const apic_id = bringup_cpus[index].apic_id;
@@ -103,10 +104,21 @@ fn apEntry(cpu_index: u64) callconv(.c) noreturn {
     const index: u8 = @truncate(cpu_index);
     x86.enableSse();
     x86.enableXsaves();
-    x86.enableCetOnApplicationProcessor();
+    const features = @import("../arch/cpu_features.zig").detect();
+    if (features.cet_ibt and features.cet_ss) {
+        x86.enableCetOnApplicationProcessor();
+    }
+    if (features.pku) {
+        x86.enablePku();
+    }
+    if (features.lass) {
+        x86.enableLass();
+    }
+    const syscall64 = @import("interrupts/syscall64.zig");
     gdt.loadCurrent();
     idt.init();
     x2apic.enable();
+    syscall64.initApplicationProcessor(index, bringup_cpus[index].kernel_stack_top);
     smp.setCurrentCpuIndex(index);
     bringup_cpus[index].online = true;
     bringup_online_count.* += 1;

@@ -15,7 +15,6 @@ else
     };
 
 const USER_POINTER_FLOOR: usize = 0x10000;
-const USER_POINTER_CEILING_32: usize = 0xC0000000;
 pub const SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION = true;
 pub const DIRECT_STACK_RANGE_VALIDATION = true;
 
@@ -94,10 +93,6 @@ pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, ali
     if (alignment != 0 and addr % alignment != 0) return false;
     const end_exclusive = std.math.add(usize, addr, len) catch return false;
     if (end_exclusive <= addr) return false;
-
-    if (builtin.target.os.tag == .freestanding and @bitSizeOf(usize) <= 32) {
-        if (end_exclusive > USER_POINTER_CEILING_32) return false;
-    }
 
     if (memory.address_space) |address_space| {
         if (address_space.region_count == 0) {

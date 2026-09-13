@@ -4,11 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 
-TARGET_ID="intel-nuc11tnki5"
-BOARD_SKU="NUC11TNKi5"
-TARGET_PREFIX="ZIGOS:HW_TARGET:INTEL_NUC11TNKI5"
-PRODUCTION_REQUIRED_MARKERS_PATH="spec/hardware/nuc11tnki5-production-required-markers.txt"
-VERIFICATION_REQUIRED_MARKERS_PATH="spec/hardware/nuc11tnki5-required-markers.txt"
+TARGET_ID="asus-nuc15crsu7"
+BOARD_SKU="RNUC15CRSU7"
+TARGET_PREFIX="ZIGOS:HW_TARGET:ASUS_NUC15CRSU7"
+PRODUCTION_REQUIRED_MARKERS_PATH="spec/hardware/nuc15crsu7-production-required-markers.txt"
+VERIFICATION_REQUIRED_MARKERS_PATH="spec/hardware/nuc15crsu7-required-markers.txt"
 PRODUCTION_MARKER_FILE="$ROOT_DIR/$PRODUCTION_REQUIRED_MARKERS_PATH"
 VERIFICATION_MARKER_FILE="$ROOT_DIR/$VERIFICATION_REQUIRED_MARKERS_PATH"
 
@@ -22,7 +22,7 @@ MIN_CRASH_RECORD_PERSISTENCE_CYCLES=10
 MIN_UPDATE_ROLLBACK_CYCLES=10
 
 fail() {
-  printf 'NUC11TNKi5 hardware proof failed: %s\n' "$*" >&2
+  printf 'RNUC15CRSU7 hardware proof failed: %s\n' "$*" >&2
   exit 1
 }
 
@@ -36,7 +36,7 @@ path_is_contained() {
 }
 
 if [ "$#" -ne 1 ]; then
-  fail "usage: scripts/check-nuc11tnki5-hardware-proof.sh BUNDLE_DIRECTORY"
+  fail "usage: scripts/check-nuc15crsu7-hardware-proof.sh BUNDLE_DIRECTORY"
 fi
 
 PROOF_PATH="$1"
@@ -440,7 +440,7 @@ validate_cycle_manifest() {
       return 0
     }
     NR == 1 {
-      if ($0 != "format=zigos-nuc11tnki5-cycle-manifest-v1") bad = 1
+      if ($0 != "format=zigos-nuc15crsu7-cycle-manifest-v1") bad = 1
       next
     }
     {
@@ -492,7 +492,7 @@ validate_cycle_manifest() {
       -v type="$cycle_type" \
       -v cycle_index="$cycle_index" '
       BEGIN {
-        expected["format"] = "zigos-nuc11tnki5-cycle-log-v1"
+        expected["format"] = "zigos-nuc15crsu7-cycle-log-v1"
         expected["capture_nonce"] = nonce
         expected["target_id"] = target
         expected["device_id"] = device
@@ -551,7 +551,7 @@ validate_cycle_manifest() {
 write_expected_statement() {
   local output="$1"
   cat > "$output" <<EOF
-format=zigos-nuc11tnki5-capture-statement-v1
+format=zigos-nuc15crsu7-capture-statement-v1
 capture_nonce=$capture_nonce
 target_id=$TARGET_ID
 board_sku=$BOARD_SKU
@@ -618,7 +618,7 @@ if ! "$PINNED_RELEASE_VERIFIER" verify \
 fi
 
 require_completed_text_file "$PROOF_MANIFEST_PATH" "proof manifest"
-require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "format" "zigos-nuc11tnki5-proof-v2"
+require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "format" "zigos-nuc15crsu7-proof-v2"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "target_id" "$TARGET_ID"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "board_sku" "$BOARD_SKU"
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "evidence_source" "real_hardware"
@@ -677,7 +677,7 @@ require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "repo_commit" "$expect
 require_key_value "$PROOF_MANIFEST_PATH" "proof manifest" "repo_dirty_files" "0"
 
 require_completed_text_file "$DEVICE_IDENTITY_PATH" "device identity"
-require_key_value "$DEVICE_IDENTITY_PATH" "device identity" "format" "zigos-nuc11tnki5-device-identity-v1"
+require_key_value "$DEVICE_IDENTITY_PATH" "device identity" "format" "zigos-nuc15crsu7-device-identity-v1"
 require_key_value "$DEVICE_IDENTITY_PATH" "device identity" "target_id" "$TARGET_ID"
 require_key_value "$DEVICE_IDENTITY_PATH" "device identity" "board_sku" "$BOARD_SKU"
 require_key_value "$DEVICE_IDENTITY_PATH" "device identity" "device_id" "$device_id"
@@ -769,7 +769,7 @@ require_marker_before "$PRODUCTION_LOG_PATH" "production single-boot log" "ZIGOS
 require_marker_before "$VERIFICATION_LOG_PATH" "verification single-boot log" "BOOT:ROLE:verification" "ZIGOS:NATIVE:READY"
 
 require_exact_marker_in_log "$VERIFICATION_LOG_PATH" "verification single-boot log" "${TARGET_PREFIX}:EVIDENCE_SOURCE:REAL_HARDWARE"
-require_exact_marker_in_log "$VERIFICATION_LOG_PATH" "verification single-boot log" "${TARGET_PREFIX}:BOARD_SKU:NUC11TNKi5"
+require_exact_marker_in_log "$VERIFICATION_LOG_PATH" "verification single-boot log" "${TARGET_PREFIX}:BOARD_SKU:RNUC15CRSU7"
 require_exact_marker_in_log "$VERIFICATION_LOG_PATH" "verification single-boot log" "${TARGET_PREFIX}:PROOF_MANIFEST:RECORDED"
 require_exact_marker_in_log "$VERIFICATION_LOG_PATH" "verification single-boot log" "${TARGET_PREFIX}:FIRMWARE_SETTINGS:RECORDED"
 require_exact_marker_in_log "$VERIFICATION_LOG_PATH" "verification single-boot log" "${TARGET_PREFIX}:POWER_CYCLE_NOTES:RECORDED"
@@ -836,7 +836,7 @@ fi
 require_completed_text_file "$OPERATOR_METADATA_PATH" "operator metadata markers"
 for marker in \
   "${TARGET_PREFIX}:EVIDENCE_SOURCE:REAL_HARDWARE" \
-  "${TARGET_PREFIX}:BOARD_SKU:NUC11TNKi5" \
+  "${TARGET_PREFIX}:BOARD_SKU:RNUC15CRSU7" \
   "${TARGET_PREFIX}:PROOF_MANIFEST:RECORDED" \
   "${TARGET_PREFIX}:FIRMWARE_SETTINGS:RECORDED" \
   "${TARGET_PREFIX}:POWER_CYCLE_NOTES:RECORDED" \
@@ -906,4 +906,4 @@ if ! cmp -s "$expected_response" "$verifier_response"; then
   fail "external trusted verifier did not return the exact signed-response assertion for this statement digest and nonce"
 fi
 
-printf 'NUC11TNKi5 authenticated hardware proof bundle OK: %s\n' "$BUNDLE_DIR"
+printf 'RNUC15CRSU7 authenticated hardware proof bundle OK: %s\n' "$BUNDLE_DIR"

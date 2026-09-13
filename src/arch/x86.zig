@@ -135,7 +135,10 @@ pub const CR4_PCIDE: usize = 1 << 17;
 pub const CR4_OSXSAVE: usize = 1 << 18;
 pub const CR4_SMEP: usize = 1 << 20;
 pub const CR4_SMAP: usize = 1 << 21;
+pub const CR4_PKE: usize = 1 << 22;
 pub const CR4_CET: usize = 1 << 23;
+pub const CR4_LASS: usize = 1 << 27;
+pub const CR4_FRED: usize = 1 << 32;
 
 pub const XCR0_X87: u64 = 1 << 0;
 pub const XCR0_SSE: u64 = 1 << 1;
@@ -167,6 +170,13 @@ pub const IA32_U_CET_MSR: u32 = 0x6A0;
 pub const IA32_S_CET_MSR: u32 = 0x6A2;
 pub const CET_SH_STK_EN: u64 = 1 << 0;
 pub const CET_ENDBR_EN: u64 = 1 << 2;
+pub const IA32_FRED_RSP0_MSR: u32 = 0x1CC;
+pub const IA32_FRED_RSP1_MSR: u32 = 0x1CD;
+pub const IA32_FRED_RSP2_MSR: u32 = 0x1CE;
+pub const IA32_FRED_RSP3_MSR: u32 = 0x1CF;
+pub const IA32_FRED_STKLVLS_MSR: u32 = 0x1D0;
+pub const IA32_FRED_CONFIG_MSR: u32 = 0x1D4;
+pub const FRED_CONFIG_ENTRY_ALIGN: u64 = 64;
 
 pub inline fn enableNoExecute() void {
     writeMsr(EFER_MSR, readMsr(EFER_MSR) | EFER_NXE);
@@ -300,6 +310,59 @@ pub fn enableCetOnApplicationProcessor() void {
 pub fn cetEnabled() bool {
     return (readCr4() & CR4_CET) != 0 and
         (readMsr(IA32_S_CET_MSR) & CET_ENDBR_EN) != 0;
+}
+
+pub fn wrpkru(value: u32) void {
+    asm volatile (
+        \\xor %%ecx, %%ecx
+        \\xor %%edx, %%edx
+        \\.byte 0x0f, 0x01, 0xef
+        :
+        : [value] "{eax}" (value),
+        : .{ .memory = true, .ecx = true, .edx = true }
+    );
+}
+
+pub fn enablePku() void {
+    writeCr4(readCr4() | CR4_PKE);
+    wrpkru(0);
+}
+
+pub fn pkuEnabled() bool {
+    return (readCr4() & CR4_PKE) != 0;
+}
+
+pub fn enableLass() void {
+    writeCr4(readCr4() | CR4_LASS);
+}
+
+pub fn lassEnabled() bool {
+    return (readCr4() & CR4_LASS) != 0;
+}
+
+extern fn zigos_fred_entry() callconv(.c) void;
+
+pub fn enableFred(kernel_stack_top: usize) void {
+    if (kernel_stack_top == 0 or (kernel_stack_top & 0xF) != 0) unreachable;
+    const entry = @intFromPtr(&zigos_fred_entry);
+    if ((entry & (FRED_CONFIG_ENTRY_ALIGN - 1)) != 0) unreachable;
+    writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_RSP1_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_RSP2_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_RSP3_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_STKLVLS_MSR, 0);
+    writeMsr(IA32_FRED_CONFIG_MSR, entry);
+    writeCr4(readCr4() | CR4_FRED);
+}
+
+pub fn fredEnabled() bool {
+    return (readCr4() & CR4_FRED) != 0 and
+        readMsr(IA32_FRED_CONFIG_MSR) == @intFromPtr(&zigos_fred_entry);
+}
+
+pub fn setFredRsp0(kernel_stack_top: usize) void {
+    if (kernel_stack_top == 0 or (kernel_stack_top & 0xF) != 0) unreachable;
+    writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
 }
 
 pub fn writeXcr0(value: u64) void {

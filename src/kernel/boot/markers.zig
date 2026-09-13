@@ -15,9 +15,12 @@ pub const cpu_smap_enabled = "ZIGOS:CPU:SMAP:ENABLED";
 pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
 pub const cpu_pge_enabled = "ZIGOS:CPU:PGE:ENABLED";
 pub const cpu_syscall_enabled = "ZIGOS:CPU:SYSCALL:ENABLED";
+pub const cpu_fred_enabled = "ZIGOS:CPU:FRED:ENABLED";
 pub const cpu_pcid_enabled = "ZIGOS:CPU:PCID:ENABLED";
-pub const cpu_pcid_software_fallback = "ZIGOS:CPU:PCID:SOFTWARE_FLUSH";
+pub const cpu_pcid_software_fallback = "ZIGOS:CPU:PCID:SOFTWARE_FALLBACK";
 pub const cpu_pcid_ready = "ZIGOS:CPU:PCID:READY";
+pub const cpu_pku_enabled = "ZIGOS:CPU:PKU:ENABLED";
+pub const cpu_lass_enabled = "ZIGOS:CPU:LASS:ENABLED";
 pub const smp_ready = "ZIGOS:SMP:READY";
 pub const kernel_wx_enforced = "ZIGOS:KERNEL:W_X:ENFORCED";
 
@@ -37,6 +40,7 @@ pub const recovery_revoke_trust_ok = "RECOVERY:REVOKE_TRUST:OK";
 pub const recovery_pass = "RECOVERY:PASS";
 pub const recovery_fail = "RECOVERY:FAIL";
 
+pub const kernel_dataplane_userspace = "ZIGOS:KERNEL:DATAPLANE:USERSPACE";
 pub const kernel_network_deferred = "ZIGOS:KERNEL_NETWORK:DEFERRED";
 
 pub const native_bootstrap = "ZIGOS:NATIVE:BOOTSTRAP";

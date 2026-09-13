@@ -49,10 +49,10 @@ requests.
 - `spec/coverage.json` currently records 59 required requirements and marks all
   59 as `enforced`.
 - `spec/production_readiness.json` currently pins one first hardware target
-  (`intel-nuc11tnki5`) and tracks nine production-readiness workstreams: one
+  (`asus-nuc15crsu7`) and tracks nine production-readiness workstreams: one
   `prod_ready` track, three `prod_candidate` tracks, four `prototype` tracks,
   and one blocked real hardware track.
-- The secure-by-design release gate is `blocked` until the real NUC11TNKi5
+- The secure-by-design release gate is `blocked` until the real RNUC15CRSU7
   hardware proof bundle passes. Release artifacts are measured, DSSE
   in-toto/SLSA provenance is generated through a hardware-backed
   TPM/secure-enclave/HSM/KMS signing command. Customers obtain
@@ -434,14 +434,14 @@ Optional QEMU gates can be added to `verify`:
 ./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
 ```
 
-The first real-machine gate is an Intel NUC11TNKi5 proof bundle. First complete
+The first real-machine gate is an Intel RNUC15CRSU7 proof bundle. First complete
 the phase-A `release-bundle-check` ceremony described below. Once that command
 returns, freeze the authenticated release bundle and the exact 33 signed target
 files; do not run any generator again. Prepare a fresh proof skeleton bound to
 that candidate:
 
 ```bash
-scripts/prepare-nuc11tnki5-hardware-proof.sh \
+scripts/prepare-nuc15crsu7-hardware-proof.sh \
   --nonce <fresh-verifier-issued-64-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -457,7 +457,7 @@ two role-specific hardware quote/signature pairs, write the canonical capture
 statement and validate it with an external trusted verifier:
 
 ```bash
-scripts/write-nuc11tnki5-capture-statement.sh build/hardware-proofs/<fresh-name>
+scripts/write-nuc15crsu7-capture-statement.sh build/hardware-proofs/<fresh-name>
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
@@ -466,7 +466,7 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-  scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/<fresh-name>
+  scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>
 ```
 
 The same check is exposed as `./scripts/zig.sh build
@@ -497,7 +497,7 @@ that preflight, creates the candidate, verifies it before publication, then
 publishes and statefully verifies its manifest. After the candidate's exact 33
 target files and release bundle are frozen, the verify-only
 `release-security-gate` rechecks the existing bundle and seals it with the
-completed NUC11TNKi5 proof; it has no generator or signer dependency. Public
+completed RNUC15CRSU7 proof; it has no generator or signer dependency. Public
 release provenance must be signed per
 DSSE payload through `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a
 hardware-backed TPM, secure enclave, HSM, or KMS key. The signer key must be
@@ -631,7 +631,7 @@ The authenticated trust policy also carries the PQC transition state. FIPS 204
 ML-DSA is the required production signature algorithm when the policy reaches
 `required`; until a validated ML-DSA verifier is linked, that mode fails closed.
 
-The first real hardware target is Intel NUC 11 Pro Kit `NUC11TNKi5`. QEMU proof
+The first real hardware target is Intel NUC 15 Pro Mini PC `RNUC15CRSU7`. QEMU proof
 runs remain required preflight evidence, but they do not satisfy the hardware
 target gate. Real-machine proof must cover UEFI boot, ACPI, APIC/timer, GOP
 framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM networking,
@@ -639,7 +639,7 @@ suspend/resume, compositor framebuffer presentation, crash recovery,
 crash-record persistence, and update rollback across power cycles. Required
 serial markers live in the production and verification contracts under
 `spec/hardware/`. A complete proof is a directory described by
-`spec/hardware/nuc11tnki5-proof-bundle.md`, with distinct
+`spec/hardware/nuc15crsu7-proof-bundle.md`, with distinct
 `production-serial.log` and `verification-serial.log` single-boot captures,
 individually hashed cycle logs, stable identity and lifecycle sidecars, two
 role-specific quote/signature pairs, and a canonical capture statement. The

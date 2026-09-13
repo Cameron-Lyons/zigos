@@ -586,7 +586,7 @@ pub const FirstTargetHardwareProofDriverReadings = struct {
     pub fn driverCallbackProvider(self: *FirstTargetHardwareProofDriverReadings) FirstTargetDriverCallbackProvider {
         return FirstTargetDriverCallbackProvider.init(
             .{
-                .name = "nuc11tnki5-hardware-proof-driver-callbacks",
+                .name = "nuc15crsu7-hardware-proof-driver-callbacks",
                 .role = .production,
                 .reader_generation = self.facts.telemetry_reader_generation,
             },
@@ -732,7 +732,7 @@ pub const FirstTargetPlatformTelemetryProvider = struct {
     latest_readers: FirstTargetReaderSnapshot,
 
     pub const telemetry_descriptor = accelerator_scheduler.TelemetryProviderDescriptor{
-        .name = "nuc11tnki5-platform-telemetry",
+        .name = "nuc15crsu7-platform-telemetry",
         .role = .production,
     };
 
@@ -1374,7 +1374,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     );
 
     var stale_descriptor_bridge = FirstTargetProofReaderBridge.init(.{
-        .name = "nuc11tnki5-driver-reader-bridge",
+        .name = "nuc15crsu7-driver-reader-bridge",
         .role = .production,
         .reader_generation = 10,
     }, proofs);
@@ -1386,7 +1386,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     var target_mismatch_proofs = proofs;
     target_mismatch_proofs.thermal.target_id = "other-target";
     var target_mismatch_bridge = FirstTargetProofReaderBridge.init(.{
-        .name = "nuc11tnki5-driver-reader-bridge",
+        .name = "nuc15crsu7-driver-reader-bridge",
         .role = .production,
         .reader_generation = 9,
     }, target_mismatch_proofs);
@@ -1397,7 +1397,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
 
     var driver_readings = TestFirstTargetDriverReadings.fromProofs(proofs);
     var missing_thermal_driver = testFirstTargetDriverCallbackProvider(.{
-        .name = "nuc11tnki5-driver-callbacks",
+        .name = "nuc15crsu7-driver-callbacks",
         .role = .production,
         .reader_generation = 9,
     }, &driver_readings);
@@ -1408,7 +1408,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     );
 
     var missing_grid_driver = testFirstTargetDriverCallbackProvider(.{
-        .name = "nuc11tnki5-driver-callbacks",
+        .name = "nuc15crsu7-driver-callbacks",
         .role = .production,
         .reader_generation = 9,
     }, &driver_readings);
@@ -1421,7 +1421,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     var stale_battery_readings = TestFirstTargetDriverReadings.fromProofs(proofs);
     stale_battery_readings.battery.sample_sequence = 0;
     var stale_battery_driver = testFirstTargetDriverCallbackProvider(.{
-        .name = "nuc11tnki5-driver-callbacks",
+        .name = "nuc15crsu7-driver-callbacks",
         .role = .production,
         .reader_generation = 9,
     }, &stale_battery_readings);
@@ -1433,7 +1433,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     var stale_grid_readings = TestFirstTargetDriverReadings.fromProofs(proofs);
     stale_grid_readings.grid_carbon.sample_sequence = 0;
     var stale_grid_driver = testFirstTargetDriverCallbackProvider(.{
-        .name = "nuc11tnki5-driver-callbacks",
+        .name = "nuc15crsu7-driver-callbacks",
         .role = .production,
         .reader_generation = 9,
     }, &stale_grid_readings);
@@ -1443,7 +1443,7 @@ test "first target reader provider rejects invalid bridges and validates driver 
     );
 
     var driver_provider = testFirstTargetDriverCallbackProvider(.{
-        .name = "nuc11tnki5-driver-callbacks",
+        .name = "nuc15crsu7-driver-callbacks",
         .role = .production,
         .reader_generation = 9,
     }, &driver_readings);
@@ -1599,7 +1599,7 @@ test "first target telemetry provider requires complete hardware reader evidence
     const complete_readers = testFirstTargetReaderProofs(4);
     var complete_driver_readings = TestFirstTargetDriverReadings.fromProofs(complete_readers);
     var complete_driver = testFirstTargetDriverCallbackProvider(.{
-        .name = "nuc11tnki5-driver-callbacks",
+        .name = "nuc15crsu7-driver-callbacks",
         .role = .production,
         .reader_generation = 4,
     }, &complete_driver_readings);

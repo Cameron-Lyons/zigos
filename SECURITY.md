@@ -73,7 +73,7 @@ The following are release blockers:
 - Missing passing `release-security-preflight`, authenticated candidate
   creation/verification through `release-bundle-check`, or final verify-only
   `release-security-gate` evidence from the ordered ceremony in `README.md`.
-- Missing current-commit `NUC11TNKi5` real-hardware proof run with the full
+- Missing current-commit `RNUC15CRSU7` real-hardware proof run with the full
   external trust configuration and explicit fresh `-Dhardware-proof-dir`
   documented in `README.md`.
 - Release provenance not signed through a hardware-backed TPM, secure enclave,

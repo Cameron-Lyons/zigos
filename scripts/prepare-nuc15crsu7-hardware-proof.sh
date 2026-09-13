@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
-OUTPUT_DIR="build/hardware-proofs/nuc11tnki5"
+OUTPUT_DIR="build/hardware-proofs/nuc15crsu7"
 RUN_BUILD=false
 CAPTURE_NONCE="${ZIGOS_HARDWARE_PROOF_NONCE:-}"
 
@@ -16,9 +16,9 @@ is_safe_proof_output_dir() {
 
 usage() {
   cat <<'EOF'
-Usage: scripts/prepare-nuc11tnki5-hardware-proof.sh --nonce HEX [--build] [--output DIR]
+Usage: scripts/prepare-nuc15crsu7-hardware-proof.sh --nonce HEX [--build] [--output DIR]
 
-Creates the NUC11TNKi5 authenticated proof-bundle skeleton and exact 33-target
+Creates the RNUC15CRSU7 authenticated proof-bundle skeleton and exact 33-target
 production digest manifest. The bundle requires a finalized authenticated release
 manifest, separate production and verification single-boot captures, individually
 hashed cycle logs, and two role-specific quotes/signatures from the same target.
@@ -77,7 +77,7 @@ is_safe_proof_output_dir "$OUTPUT_DIR" || {
 }
 OUTPUT_PATH="$ROOT_DIR/$OUTPUT_DIR"
 OUTPUT_BASE="$ROOT_DIR/build/hardware-proofs"
-TARGET_PREFIX="ZIGOS:HW_TARGET:INTEL_NUC11TNKI5"
+TARGET_PREFIX="ZIGOS:HW_TARGET:ASUS_NUC15CRSU7"
 
 REQUIRED_ARTIFACTS=(
   "build/os.iso"
@@ -121,8 +121,8 @@ REQUIRED_CAPTURE_INPUTS=(
   "build/release-security/release-manifest.dsse.json"
   "build/release-security/release-trust-policy.dsse.json"
   "build/release-security/root-metadata.json"
-  "spec/hardware/nuc11tnki5-production-required-markers.txt"
-  "spec/hardware/nuc11tnki5-required-markers.txt"
+  "spec/hardware/nuc15crsu7-production-required-markers.txt"
+  "spec/hardware/nuc15crsu7-required-markers.txt"
 )
 
 sha256_file() {
@@ -240,7 +240,7 @@ release_trust_policy_path="$ROOT_DIR/build/release-security/release-trust-policy
 
 prepared_at_utc="$(jsonish_datetime)"
 if ! command -v jj >/dev/null 2>&1; then
-  printf 'Jujutsu (jj) is required to prepare NUC11TNKi5 proof metadata.\n' >&2
+  printf 'Jujutsu (jj) is required to prepare RNUC15CRSU7 proof metadata.\n' >&2
   exit 1
 fi
 repo_commit="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')"
@@ -248,9 +248,9 @@ repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"')"
 repo_dirty_files="$(jj -R "$ROOT_DIR" diff -r @ --name-only | wc -l | tr -d ' ')"
 
 write_new_file "$manifest_path" <<EOF
-format=zigos-nuc11tnki5-proof-v2
-target_id=intel-nuc11tnki5
-board_sku=NUC11TNKi5
+format=zigos-nuc15crsu7-proof-v2
+target_id=asus-nuc15crsu7
+board_sku=RNUC15CRSU7
 evidence_source=real_hardware
 capture_nonce=$CAPTURE_NONCE
 device_id=TODO-fill-stable-device-id
@@ -258,11 +258,11 @@ device_identity=device-identity.txt
 production_serial_log=production-serial.log
 production_boot_medium=build/os.iso
 production_boot_kernel=zig-out/bin/kernel-zigos-native.elf
-production_required_markers=spec/hardware/nuc11tnki5-production-required-markers.txt
+production_required_markers=spec/hardware/nuc15crsu7-production-required-markers.txt
 verification_serial_log=verification-serial.log
 verification_boot_medium=build/os-verification.iso
 verification_boot_kernel=zig-out/bin/kernel-zigos-native-verification.elf
-verification_required_markers=spec/hardware/nuc11tnki5-required-markers.txt
+verification_required_markers=spec/hardware/nuc15crsu7-required-markers.txt
 cycle_manifest=cycle-manifest.txt
 firmware_settings=firmware-settings.txt
 power_cycle_notes=power-cycle-notes.txt
@@ -291,9 +291,9 @@ repo_dirty_files=$repo_dirty_files
 EOF
 
 write_new_file "$device_identity_path" <<'EOF'
-format=zigos-nuc11tnki5-device-identity-v1
-target_id=intel-nuc11tnki5
-board_sku=NUC11TNKi5
+format=zigos-nuc15crsu7-device-identity-v1
+target_id=asus-nuc15crsu7
+board_sku=RNUC15CRSU7
 device_id=TODO-fill-same-stable-device-id-as-proof-manifest
 smbios_system_uuid=TODO-fill-canonical-SMBIOS-UUID
 baseboard_serial=TODO-fill-baseboard-serial
@@ -301,8 +301,8 @@ tpm_ek_public_sha256=TODO-fill-64-lowercase-hex-EK-public-key-digest
 EOF
 
 write_new_file "$firmware_path" <<'EOF'
-target_id=intel-nuc11tnki5
-board_sku=NUC11TNKi5
+target_id=asus-nuc15crsu7
+board_sku=RNUC15CRSU7
 bios_version=TODO-fill-from-NUC-setup
 boot_mode=UEFI
 secure_boot=TODO-enabled-disabled-or-disabled-for-local-proof-media
@@ -312,7 +312,7 @@ changed_options=TODO-list-any-changed-firmware-options
 EOF
 
 write_new_file "$power_path" <<'EOF'
-target_id=intel-nuc11tnki5
+target_id=asus-nuc15crsu7
 operator=TODO-fill-operator
 started_at_utc=TODO-fill-start-time
 completed_at_utc=TODO-fill-completion-time
@@ -328,7 +328,7 @@ notes=TODO-record-observed-hangs-panics-retries-and-recovery-behavior
 EOF
 
 write_new_file "$attestation_path" <<'EOF'
-target_id=intel-nuc11tnki5
+target_id=asus-nuc15crsu7
 evidence_source=real_hardware
 operator=TODO-fill-operator
 captured_at_utc=TODO-fill-attestation-capture-time
@@ -348,7 +348,7 @@ EOF
 
 write_new_file "$metadata_markers_path" <<EOF
 $TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE
-$TARGET_PREFIX:BOARD_SKU:NUC11TNKi5
+$TARGET_PREFIX:BOARD_SKU:RNUC15CRSU7
 $TARGET_PREFIX:PROOF_MANIFEST:RECORDED
 $TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED
 $TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED
@@ -356,7 +356,7 @@ $TARGET_PREFIX:ARTIFACT_DIGESTS:RECORDED
 EOF
 
 write_new_file "$cycle_manifest_path" <<'EOF'
-format=zigos-nuc11tnki5-cycle-manifest-v1
+format=zigos-nuc15crsu7-cycle-manifest-v1
 EOF
 
 write_new_file "$production_quote_path" <<'EOF'
@@ -380,13 +380,13 @@ mkdir "$OUTPUT_PATH/cycles"
   done
 } | write_new_file "$digests_path"
 
-printf 'NUC11TNKi5 authenticated proof bundle skeleton prepared under %s\n' "$OUTPUT_DIR"
+printf 'RNUC15CRSU7 authenticated proof bundle skeleton prepared under %s\n' "$OUTPUT_DIR"
 printf 'The bundle is bound to verifier-issued nonce %s.\n' "$CAPTURE_NONCE"
-printf 'Perform two separate single-boot captures on the same NUC11TNKi5:\n'
+printf 'Perform two separate single-boot captures on the same RNUC15CRSU7:\n'
 printf '  1. Boot build/os.iso and capture the production kernel output into %s/production-serial.log.\n' "$OUTPUT_DIR"
 printf '  2. Boot build/os-verification.iso and capture one verification boot into %s/verification-serial.log.\n' "$OUTPUT_DIR"
 printf 'Do not concatenate boots. Record every repeated hardware cycle as an individually hashed cycles/*.log entry in cycle-manifest.txt.\n'
 printf 'Fill TODO fields and role-specific quote/signature files, then write the canonical statement:\n'
-printf '  scripts/write-nuc11tnki5-capture-statement.sh %s\n' "$OUTPUT_DIR"
+printf '  scripts/write-nuc15crsu7-capture-statement.sh %s\n' "$OUTPUT_DIR"
 printf 'Validate with separately installed hardware/release verifiers, an externally pinned root, and external rollback state:\n'
-printf '  ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=%s ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/hardware-verifier ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<64-hex> ZIGOS_RELEASE_VERIFIER=/absolute/zigos-verify-release ZIGOS_RELEASE_VERIFIER_SHA256=<64-hex> ZIGOS_RELEASE_TRUST_ROOT=/absolute/root-metadata.json ZIGOS_RELEASE_TRUST_ROOT_SHA256=<64-hex> ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent-state.json scripts/check-nuc11tnki5-hardware-proof.sh %s\n' "$CAPTURE_NONCE" "$OUTPUT_DIR"
+printf '  ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=%s ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/hardware-verifier ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<64-hex> ZIGOS_RELEASE_VERIFIER=/absolute/zigos-verify-release ZIGOS_RELEASE_VERIFIER_SHA256=<64-hex> ZIGOS_RELEASE_TRUST_ROOT=/absolute/root-metadata.json ZIGOS_RELEASE_TRUST_ROOT_SHA256=<64-hex> ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent-state.json scripts/check-nuc15crsu7-hardware-proof.sh %s\n' "$CAPTURE_NONCE" "$OUTPUT_DIR"

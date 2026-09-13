@@ -91,6 +91,13 @@ zigos_syscall_entry:
 
 .save_and_dispatch:
     SAVE_REGISTERS
+    movq %rsp, %rdi
+    cmpq $SYSCALL_VECTOR, 136(%rsp)
+    jne .yield_with_xstate
+    call syscall_handler
+    jmp .dispatch_complete_lazy
+
+.yield_with_xstate:
     movq %rsp, %r12
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
@@ -106,24 +113,27 @@ zigos_syscall_entry:
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
-
-    cmpq $SYSCALL_VECTOR, 136(%r12)
-    jne .handle_userspace_yield
-    call syscall_handler
-    jmp .dispatch_complete
-
-.handle_userspace_yield:
     call isrHandler
-
-.dispatch_complete:
     movl $3, %eax
     xorl %edx, %edx
     # xrstors (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
     movq %r12, %rsp
+    jmp .dispatch_complete
+
+.dispatch_complete:
     cmpl $0, zigos_userspace_resume_requested(%rip)
     jne .userspace_resume
+    RESTORE_REGISTERS
+    movq 16(%rsp), %rcx
+    movq 32(%rsp), %r11
+    swapgs
+    movq 40(%rsp), %rsp
+    sysretq
 
+.dispatch_complete_lazy:
+    cmpl $0, zigos_userspace_resume_requested(%rip)
+    jne .userspace_resume
     RESTORE_REGISTERS
     movq 16(%rsp), %rcx
     movq 32(%rsp), %r11

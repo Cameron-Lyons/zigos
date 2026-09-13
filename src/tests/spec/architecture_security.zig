@@ -627,7 +627,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
             .{ .id = "spec-storage", .entry = "zigos.object.spec-storage" },
         },
     };
-    const image_bytes = userspace_loader.makeSyntheticElf32ForTest(0x4000_3000, 2, 2);
+    const image_bytes = userspace_loader.makeSyntheticElf64ForTest(0x4000_3000, 2, 2);
     storage_bundle.signature = try userspace_manifest_signing.signBundle(storage_bundle);
     _ = try catalog.registerEmbeddedArtifact(.{
         .bundle = storage_bundle,
