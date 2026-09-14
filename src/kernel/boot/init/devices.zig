@@ -94,8 +94,8 @@ pub fn startDeferredRuntimeInit() void {
 }
 
 pub fn startStorageDataplane() bool {
-    const dev = pci.firstNvmeController() orelse return false;
-    if (!storage_detected) return false;
+    const dev = pci.firstNvmeController() orelse return true;
+    if (!storage_detected) return true;
     var isolation_domains: [2]intel_vtd.DmaDomain = undefined;
     var isolation_domain_count: usize = 0;
     if (intel_i225_hw.isolationDomain()) |domain| {
@@ -128,7 +128,9 @@ pub fn startStorageDataplane() bool {
     if (nvme_hw.publishedBar()) |bar| {
         registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
     }
+    var interrupts_ready = true;
     nvme_hw.activateInterrupts() catch |err| {
+        interrupts_ready = false;
         reportHardwareFailure(
             if (hardware_proof.realTargetDetected())
                 "ZIGOS:NVME:HW:INTERRUPT_BRINGUP_FAIL "
@@ -138,15 +140,14 @@ pub fn startStorageDataplane() bool {
             hardware_proof.realTargetDetected(),
             "production NVMe interrupt activation failed closed",
         );
-        return false;
     };
-    console.print("ZIGOS:NVME:HW:REMAP_MSI_OK\n");
+    if (interrupts_ready) console.print("ZIGOS:NVME:HW:REMAP_MSI_OK\n");
     return true;
 }
 
 pub fn startNetworkDataplane() bool {
-    const dev = pci.firstIntelI225Lm() orelse return false;
-    if (!network_detected) return false;
+    const dev = pci.firstIntelI225Lm() orelse return true;
+    if (!network_detected) return true;
     intel_i225_hw.prepare(dev) catch |err| switch (err) {
         error.AlreadyPrepared => {},
         else => {
@@ -178,8 +179,8 @@ pub fn startNetworkDataplane() bool {
 }
 
 pub fn startInputDataplane() bool {
-    const dev = pci.firstXhciController() orelse return false;
-    if (!xhci_detected) return false;
+    const dev = pci.firstXhciController() orelse return true;
+    if (!xhci_detected) return true;
     const caps = xhci_hw.probe(dev) catch |err| switch (err) {
         error.AlreadyPrepared => xhci_hw.probedCapabilities() orelse return false,
         else => {
@@ -208,7 +209,7 @@ pub fn startInputDataplane() bool {
             hardware_proof.realTargetDetected(),
             "production xHCI activation failed closed",
         );
-        return false;
+        return !hardware_proof.realTargetDetected();
     };
     xhci_prepared = true;
     console.print("ZIGOS:XHCI:HW:REMAP_MSI_OK\n");

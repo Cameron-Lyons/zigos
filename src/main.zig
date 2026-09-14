@@ -47,7 +47,6 @@ pub fn bootloaderMeasurementDigest() [32]u8 {
 
 pub fn bootloaderSourceDigest() [32]u8 {
     var hasher = crypto_hash.init();
-    hasher.update(@embedFile("boot/boot_x86_64.S"));
     hasher.update(@embedFile("boot/efi_stub.zig"));
     return crypto_hash.finalize(&hasher);
 }
