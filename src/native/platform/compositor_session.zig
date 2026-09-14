@@ -7,6 +7,7 @@ const capability = @import("../kernel_api/capability.zig");
 const humane_permissions = @import("../policy/humane_permissions.zig");
 const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
+const display_driver_task = @import("../drivers/display_driver_task.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const task_runtime_service = @import("../task/task_runtime_service.zig");
 const units = @import("../core/units.zig");
@@ -32,6 +33,7 @@ pub const COMPACT_RECORD_METADATA = true;
 pub const COMPACT_SESSION_COUNT_METADATA = true;
 pub const COMPACT_REVIEW_LEASE_DURATIONS = true;
 pub const HEAP_BACKED_WINDOW_STATE_ON_FREESTANDING = true;
+pub const PRESENTS_BY_HANDLE = display_driver_task.PRESENTS_BY_HANDLE;
 pub const WINDOW_ALLOCATION_INDEX_RELOOKUPS: u8 = 0;
 pub const MODAL_REVIEWER_INDEX_RELOOKUPS: u8 = 0;
 pub const STEADY_SURFACE_PRIMARY_INDEX_LOOKUPS: u8 = 1;
@@ -42,9 +44,9 @@ pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
 pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 512;
-pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_296;
-pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_304;
-pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_304;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_424;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_432;
+pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_432;
 pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 216;
 pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_SESSION_SIZE_CEILING_BYTES
@@ -699,6 +701,7 @@ pub const Session = struct {
                 }
                 slot.surface.presentation = presentation.*;
                 slot.surface.presentation_count +|= 1;
+                _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
                 return .accepted;
             }
         }
@@ -715,6 +718,7 @@ pub const Session = struct {
         };
         self.surface_task_index.insertAbsent(surfaceTaskKey(task.id), slot_index);
         self.linkActiveSurface(surfaces, slot_index);
+        _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
         return .accepted;
     }
 
@@ -1653,6 +1657,20 @@ fn surfaceSlotId(slot: *const SurfaceSlot) u64 {
 
 fn surfaceTaskKey(task_id: u64) u64 {
     return indexed_arena.nonZeroKey(task_id);
+}
+
+fn scanoutFromPresentation(presentation: *const abi.SurfacePresentation) display_driver_task.Scanout {
+    const object_id = if (presentation.buffer_object_id != 0) presentation.buffer_object_id else presentation.surface_id;
+    const bytes: u32 = if (presentation.buffer_bytes != 0)
+        presentation.buffer_bytes
+    else
+        @intCast(abi.SURFACE_PRESENTATION_TEXT_BYTES);
+    return .{
+        .object_id = object_id,
+        .offset = presentation.buffer_offset,
+        .bytes = bytes,
+        .revision = presentation.revision,
+    };
 }
 
 fn taskBundleKey(task_id: u64, bundle_id: []const u8) u64 {
@@ -2752,4 +2770,29 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
     }
     try std.testing.expectEqual(@as(usize, MAX_PRESENTED_SURFACES - 2), active_count);
     try std.testing.expectEqual(restored.active_surface_tail, previous);
+}
+
+test "compositor presents by shared-memory handle without a pixel copy" {
+    display_driver_task.reset();
+    var runtime = task_runtime.Runtime.init();
+    const app_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 91 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 91,
+        .local_only = true,
+    });
+    var session = Session.init();
+    var presentation = std.mem.zeroes(abi.SurfacePresentation);
+    presentation.surface_id = 91;
+    presentation.revision = 3;
+    presentation.interaction_hash = 0xB0FF;
+    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
+    presentation.buffer_object_id = 42;
+    presentation.buffer_bytes = 4096;
+    try std.testing.expect(presentation.presentsByHandle());
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
+    try std.testing.expectEqual(@as(u64, 42), display_driver_task.activeScanout().object_id);
+    try std.testing.expectEqual(@as(u64, 3), display_driver_task.activeScanout().revision);
+    display_driver_task.reset();
 }

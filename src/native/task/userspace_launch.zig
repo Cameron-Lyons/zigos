@@ -15,6 +15,26 @@ else
 pub const Error = userspace_boot_registry.Error || userspace_loader.Error || package_service.Error;
 pub const REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL: u8 = 0;
 
+pub const SINGLE_KERNEL_CONTRACT_LAUNCH = true;
+
+pub fn launchFromKernel(
+    catalog: *userspace_loader.Catalog,
+    runtime_ptr: *task_runtime.Runtime,
+    bundle_id: []const u8,
+    request: userspace_loader.LaunchRequest,
+    schedule_task: anytype,
+) Error!*task_runtime.TaskRecord {
+    try ensureRegisteredBundle(catalog, bundle_id, "register-kernel");
+    return launchDirectImage(
+        catalog,
+        runtime_ptr,
+        bundle_id,
+        request,
+        schedule_task,
+        "launch-kernel",
+    );
+}
+
 pub fn launchRegisteredDirect(
     catalog: *userspace_loader.Catalog,
     runtime_ptr: *task_runtime.Runtime,
@@ -22,15 +42,7 @@ pub fn launchRegisteredDirect(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!*task_runtime.TaskRecord {
-    try ensureRegisteredBundle(catalog, bundle_id, "register-direct");
-    return launchDirectImage(
-        catalog,
-        runtime_ptr,
-        bundle_id,
-        request,
-        schedule_task,
-        "launch-direct",
-    );
+    return launchFromKernel(catalog, runtime_ptr, bundle_id, request, schedule_task);
 }
 
 pub fn launchRegisteredKernel(

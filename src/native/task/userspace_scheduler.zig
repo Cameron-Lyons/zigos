@@ -12,6 +12,8 @@ const userspace_loader = @import("userspace_loader.zig");
 const userspace_flags = @import("userspace_flags.zig");
 const smp = @import("../../kernel/smp.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
+const table_backing = @import("../core/table_backing.zig");
+const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const root = @import("root");
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
@@ -228,15 +230,9 @@ pub const Scheduler = struct {
     runtime_ptr: ?*task_runtime.Runtime = null,
     capability_table_ptr: ?*const capability.CapabilityTable = null,
     slots: SchedulerSlotArena = SchedulerSlotArena.init(),
-    ready_heads: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{
-        [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT
-    } ** MAX_SCHEDULER_CPUS,
-    ready_tails: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{
-        [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT
-    } ** MAX_SCHEDULER_CPUS,
-    ready_counts: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{
-        [_]QueueSlotIndex{0} ** RESOURCE_CLASS_COUNT
-    } ** MAX_SCHEDULER_CPUS,
+    ready_heads: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
+    ready_tails: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
+    ready_counts: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{0} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
     ready_task_count: QueueSlotIndex = 0,
     accelerator_claim_backing: AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) null else AcceleratorClaimBacking.init(),
     accelerator_claim_heads: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
@@ -281,6 +277,9 @@ pub const Scheduler = struct {
         for (&self.accelerator_claim_tails) |*tail| tail.* = QUEUE_NO_INDEX;
         for (&self.accelerator_deadline_heads) |*head| head.* = QUEUE_NO_INDEX;
         for (&self.accelerator_deadline_tails) |*tail| tail.* = QUEUE_NO_INDEX;
+        if (comptime !heap_backed_accelerator_claims) {
+            self.accelerator_claim_backing.initializeAllocated();
+        }
         self.next_accelerator_claim_id = 1;
         self.resource_state = .{};
         self.resource_telemetry_source = .synthetic;
@@ -299,8 +298,7 @@ pub const Scheduler = struct {
     fn ensureAcceleratorClaimBacking(self: *Scheduler) ?*AcceleratorClaimBacking {
         if (self.acceleratorClaimBacking()) |backing| return backing;
         if (comptime heap_backed_accelerator_claims) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(AcceleratorClaimBacking)) orelse return null;
-            const backing: *AcceleratorClaimBacking = @ptrCast(@alignCast(allocation));
+            const backing = table_backing.alloc(AcceleratorClaimBacking) orelse return null;
             backing.initializeAllocated();
             self.accelerator_claim_backing = backing;
             return backing;
@@ -311,8 +309,7 @@ pub const Scheduler = struct {
     fn releaseAcceleratorClaimBacking(self: *Scheduler) void {
         if (comptime heap_backed_accelerator_claims) {
             if (self.accelerator_claim_backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
+                table_backing.free(AcceleratorClaimBacking, backing);
                 self.accelerator_claim_backing = null;
             }
         }
@@ -350,11 +347,7 @@ pub const Scheduler = struct {
     pub fn reset(self: *Scheduler) void {
         const executor = self.executor;
         self.deinit();
-        if (comptime builtin.target.os.tag == .freestanding) {
-            self.initializeAllocated(executor);
-        } else {
-            self.* = Scheduler.init(executor);
-        }
+        self.initializeAllocated(executor);
     }
 
     pub fn bind(
@@ -644,6 +637,7 @@ pub const Scheduler = struct {
         const catalog = self.catalog_ptr orelse return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
         const capability_table = self.capability_table_ptr orelse return .unavailable;
+        _ = xhci_driver_task.dispatchForTask(task.id);
         return self.executor.executeTask(catalog, runtime, capability_table, task, mapping_handle, now_ticks);
     }
 

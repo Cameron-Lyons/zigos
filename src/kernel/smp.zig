@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const event_wake = @import("event_wake.zig");
 const config = @import("config.zig");
 const apic = @import("platform/apic.zig");
 const x2apic = @import("interrupts/x2apic.zig");
@@ -184,6 +185,7 @@ pub fn handleTlbIpi() void {
 }
 
 pub fn setCurrentCpuIndex(index: u8) void {
+    event_wake.bindCpu(index);
     if (builtin.target.os.tag != .freestanding) return;
     const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
     if (gs_base >= 4096) {

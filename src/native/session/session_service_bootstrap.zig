@@ -4,6 +4,7 @@ const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const accelerator_driver_task = @import("../drivers/accelerator_driver_task.zig");
+const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
@@ -650,6 +651,7 @@ fn activateDrivers(
         "zigos.system.compositor",
         56,
     ) orelse return false;
+    xhci_driver_task.bindTaskId(service_bindings.bindingFor(.compositor_ui_session).task_id);
     const input_driver = attachBootstrapDriver(
         env,
         state,

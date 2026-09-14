@@ -224,9 +224,16 @@ pub const SurfacePresentation = extern struct {
     model_kind: u8,
     state_flags: u8,
     text: [SURFACE_PRESENTATION_TEXT_BYTES]u8,
+    buffer_object_id: u64,
+    buffer_offset: u32,
+    buffer_bytes: u32,
 
     pub fn textSlice(self: *const SurfacePresentation) []const u8 {
         return self.text[0..@min(self.text_length, self.text.len)];
+    }
+
+    pub fn presentsByHandle(self: *const SurfacePresentation) bool {
+        return self.buffer_object_id != 0 and self.buffer_bytes != 0;
     }
 };
 
@@ -337,6 +344,9 @@ pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) 
     if (model == .none) return false;
     const flags: SurfaceStateFlags = @bitCast(presentation.state_flags);
     if (flags._reserved != 0) return false;
+    if (presentation.presentsByHandle()) {
+        if (presentation.buffer_bytes == 0) return false;
+    }
     for (presentation.text[0..presentation.text_length]) |byte| {
         if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
     }
@@ -357,7 +367,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(InputEventDescriptor));
     try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputRecvResponse));
-    try std.testing.expectEqual(@as(usize, 552), @sizeOf(SurfacePresentation));
+    try std.testing.expectEqual(@as(usize, 568), @sizeOf(SurfacePresentation));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(DeviceDescriptor));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));

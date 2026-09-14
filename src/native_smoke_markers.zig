@@ -439,7 +439,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.cpu_pge_enabled,
         boot_markers.cpu_syscall_enabled,
         boot_markers.cpu_pcid_ready,
-    boot_markers.smp_ready,
+        boot_markers.smp_ready,
         boot_markers.kernel_wx_enforced,
         boot_markers.boot_core_ready,
         boot_markers.userspace_artifacts_ready,

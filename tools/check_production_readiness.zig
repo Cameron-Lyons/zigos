@@ -83,7 +83,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
 const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "BOOT:ROLE:verification",
     "ZIGOS:CPU:PGE:ENABLED",
-    "ZIGOS:CPU:SYSCALL:ENABLED",
+    "ZIGOS:CPU:FRED:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
@@ -124,7 +124,7 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "BOOT:PROFILE:zigos_native",
     "BOOT:ROLE:production",
     "ZIGOS:CPU:PGE:ENABLED",
-    "ZIGOS:CPU:SYSCALL:ENABLED",
+    "ZIGOS:CPU:FRED:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "BOOT:CORE_READY",
     "ZIGOS:KERNEL_NETWORK:DEFERRED",
@@ -1505,7 +1505,7 @@ fn validateNuc11tnki5KernelProofSources(
         "-c /dev/kvm",
         "QEMU_HARNESS_COMMAND+=(-accel",
         "printf '%s\\n' \"host\"",
-        "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lass,tsc-frequency=2400000000",
+        "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lkgs,+lass,tsc-frequency=2400000000",
     };
     for (required_accelerated_qemu_snippets) |snippet| {
         if (std.mem.indexOf(u8, qemu_harness_source, snippet) == null) {
@@ -1895,6 +1895,7 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_syscall_configuration_snippets = [_][]const u8{
+        "FRED_ONLY_TRAPS",
         "USER_STAR_BASE_SELECTOR",
         "SYSCALL_RFLAGS_MASK",
         "IA32_GS_BASE_MSR",
@@ -1903,6 +1904,9 @@ fn validateNuc11tnki5KernelProofSources(
         "IA32_LSTAR_MSR",
         "IA32_FMASK_MSR",
         "EFER_SCE",
+        "enableFred",
+        "setFredRsp0",
+        "fredEnabled",
         "setKernelStack",
         "syscallExtensionEnabled",
     };

@@ -49,7 +49,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
     const bundle_id = try userspace_boot_registry.bundleIdForServiceClass(request.entry.class);
     const bootstrap_rights = rightsForGrant(request.entry.bootstrap_grants, .service_task_authority) orelse return error.MissingBootstrapGrant;
     const service_task_id, const service_authority_capability_id = if (request.controller_task_id == 0) blk: {
-        const service_task = try userspace_launch.launchRegisteredDirect(
+        const service_task = try userspace_launch.launchFromKernel(
             request.catalog,
             request.kernel_port.kernel.runtime,
             bundle_id,

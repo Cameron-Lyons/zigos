@@ -56,6 +56,9 @@ pub const State = struct {
             .input_overflow = self.flags.input_overflow,
         });
         @memcpy(out.text[0..self.text_length], self.textSlice());
+        out.buffer_object_id = surface_id;
+        out.buffer_offset = 0;
+        out.buffer_bytes = TEXT_CAPACITY;
         return out;
     }
 
@@ -220,7 +223,9 @@ test "UI surface state serializes a canonical bounded presentation" {
 
     const presentation = state.presentation(91);
     try std.testing.expect(abi.isCanonicalSurfacePresentation(&presentation));
+    try std.testing.expect(presentation.presentsByHandle());
     try std.testing.expectEqual(@as(u64, 91), presentation.surface_id);
+    try std.testing.expectEqual(@as(u64, 91), presentation.buffer_object_id);
     try std.testing.expectEqual(state.revision, presentation.revision);
     try std.testing.expectEqual(state.interaction_hash, presentation.interaction_hash);
     try std.testing.expectEqualStrings("x\n", presentation.textSlice());

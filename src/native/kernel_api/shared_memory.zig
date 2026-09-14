@@ -6,6 +6,7 @@ const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const userspace_layout = @import("../core/userspace_layout.zig");
+const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
@@ -25,6 +26,14 @@ pub const OBJECT_TASK_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT;
 pub const MMU_OBJECT_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT + 3;
 pub const MMU_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const SEALS_IPC_RINGS = true;
+pub const REGISTERS_DEMAND_PAGED_MAPPINGS = true;
+pub const MappedObjectHook = *const fn (virt_start: u64, size_bytes: u64, writable: bool, physical_base: u64, copy_on_write: bool) bool;
+
+var mapped_object_hook: ?MappedObjectHook = null;
+
+pub fn setMappedObjectHook(hook: MappedObjectHook) void {
+    mapped_object_hook = hook;
+}
 const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PER_OBJECT;
 const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
 const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MMU_OBJECT_MAPPING_SCAN_BOUND;
@@ -114,6 +123,20 @@ pub const Object = struct {
     }
 };
 
+fn registerDemandMapping(object: *const Object, mapping: FreestandingMappingDescriptor) void {
+    const hook = mapped_object_hook orelse return;
+    const virt = mapping.virtual_base;
+    const size = mapping.size_bytes;
+    if (size == 0) return;
+    _ = hook(
+        virt,
+        size,
+        !object.isSealed(),
+        mapping.physical_base,
+        object.isSealed() or object.isRing(),
+    );
+}
+
 pub const MappingDescriptor = struct {
     object_id: ids.SharedMemoryId,
     task_id: ids.TaskId,
@@ -162,9 +185,9 @@ pub const Error = error{
     SizeZero,
     StaleMappingDescriptor,
     TableFull,
-        SharedMemoryNotFound,
-        ObjectSealed,
-    };
+    SharedMemoryNotFound,
+    ObjectSealed,
+};
 
 const MmuMappingKind = enum(u8) {
     task,
@@ -469,8 +492,7 @@ pub const Table = struct {
     pub fn deinit(self: *Table) void {
         if (comptime heap_backed_table) {
             if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
+                table_backing.free(TableBacking, backing);
                 self.backing = null;
             }
         } else {
@@ -491,8 +513,7 @@ pub const Table = struct {
     fn ensureBacking(self: *Table) error{OutOfMemory}!*TableBacking {
         if (self.backingPtr()) |backing| return backing;
         if (comptime heap_backed_table) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(TableBacking)) orelse return error.OutOfMemory;
-            const backing: *TableBacking = @ptrCast(@alignCast(allocation));
+            const backing = table_backing.alloc(TableBacking) orelse return error.OutOfMemory;
             backing.initializeAllocated();
             self.backing = backing;
             return backing;
@@ -599,12 +620,13 @@ pub const Table = struct {
         if (!backing.mapping_index.append(task_id.raw(), edge_index)) return error.TableFull;
         object.mapped_task_ids[object.mapping_count] = task_id;
         object.mapping_count += 1;
-        _ = backing.mmu.mapTask(object, task_id) catch |err| {
+        const mapping = backing.mmu.mapTask(object, task_id) catch |err| {
             object.mapping_count -= 1;
             object.mapped_task_ids[object.mapping_count] = ids.TaskId.zero;
             _ = backing.mapping_index.remove(task_id.raw(), mappingEdgeIndex(object_slot_index, object.mapping_count));
             return err;
         };
+        registerDemandMapping(object, mapping);
     }
 
     pub fn unmap(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!bool {

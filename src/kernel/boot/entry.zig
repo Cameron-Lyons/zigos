@@ -51,7 +51,7 @@ pub fn kernelMain() void {
     const hardware_lass = features.lass;
     const software_lass_fallback = !hardware_lass and software_cpu_fallback;
     const hardware_fred = features.fred and features.lkgs;
-    const software_fred_fallback = !hardware_fred and software_cpu_fallback;
+    const qemu_inventory_boot = software_cpu_fallback;
     var required_features = features;
     if (software_process_context_fallback) {
         required_features.pcid = true;
@@ -71,7 +71,7 @@ pub fn kernelMain() void {
     if (software_lass_fallback) {
         required_features.lass = true;
     }
-    if (software_fred_fallback) {
+    if (qemu_inventory_boot and !hardware_fred) {
         required_features.fred = true;
         required_features.lkgs = true;
     }
@@ -114,9 +114,10 @@ pub fn kernelMain() void {
     hardware_proof.captureEarlyBootEvidence();
 
     init_core.init();
-    common.printBootMarker(boot_markers.cpu_syscall_enabled);
     if (hardware_fred) {
         common.printBootMarker(boot_markers.cpu_fred_enabled);
+    } else {
+        common.printBootMarker(boot_markers.cpu_syscall_enabled);
     }
     init_devices.init();
     console.print("Delegating device dataplanes to userspace driver claims.\n");

@@ -104,6 +104,13 @@ const session_bootstrap = @import("session/session_bootstrap.zig");
 const session_manager_boot_flow = @import("session/session_manager_boot_flow.zig");
 const service_bootstrap = @import("session/service_bootstrap.zig");
 const session_service_bootstrap = @import("session/session_service_bootstrap.zig");
+const event_wake = @import("../kernel/event_wake.zig");
+const table_backing = @import("core/table_backing.zig");
+const ipc_ring = @import("kernel_api/ipc_ring.zig");
+const demand_paging = @import("../kernel/memory/demand_paging.zig");
+const xhci_driver_task = @import("drivers/xhci_driver_task.zig");
+const display_driver_task = @import("drivers/display_driver_task.zig");
+const display_hw = @import("../kernel/drivers/display_hw.zig");
 
 const ProbeArenaSlot = struct { in_use: bool = false };
 fn probeArenaKey(_: *const ProbeArenaSlot) u64 {
@@ -387,6 +394,11 @@ pub const indexed_hot_path_tables = .{
         .avoids_endpoint_primary_index_lookups = endpoint.ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION == 0,
         .avoids_endpoint_id_collision_probes = endpoint.ENDPOINT_ID_COLLISION_PROBES_PER_INSERT == 0,
         .retires_task_owned_endpoints = @hasDecl(endpoint.Table, "retireTask"),
+        .heap_backs_queues_on_all_targets = endpoint.HEAP_BACKS_QUEUES_ON_ALL_TARGETS,
+        .prefers_sealed_ring_dataplane = endpoint.PREFERS_SEALED_RING_DATAPLANE and
+            ipc_ring.DATA_PLANE_USES_SEALED_RINGS and
+            endpoint.AUTO_ATTACHES_DATA_RINGS and
+            @hasDecl(endpoint.Table, "attachDataRing"),
     },
     .shared_memory = .{
         .uses_generational_object_ids = @hasDecl(shared_memory.ObjectArena, "getByHandle"),
@@ -518,6 +530,7 @@ pub const indexed_hot_path_tables = .{
     },
     .userspace_launch = .{
         .avoids_registered_launch_manifest_signing = userspace_launch.REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL == 0,
+        .uses_single_kernel_contract_launch = userspace_launch.SINGLE_KERNEL_CONTRACT_LAUNCH,
     },
     .task_runtime = .{
         .initializes_allocated_state_in_place = task_runtime.IN_PLACE_RUNTIME_STATE_INITIALIZATION and
@@ -1655,6 +1668,8 @@ pub const indexed_hot_path_tables = .{
             service_catalog.service_catalog_indexing.hash_probes_per_query == 0,
         .uses_published_contract_class_index = service_catalog.service_catalog_indexing.uses_published_contract_class_index and
             service_catalog.service_catalog_indexing.total_slot_bytes == service_catalog.SERVICE_CLASS_COUNT * 3,
+        .uses_single_bootstrap_launch_mode = service_catalog.SINGLE_BOOTSTRAP_LAUNCH_MODE and
+            userspace_launch.SINGLE_KERNEL_CONTRACT_LAUNCH,
     },
     .supervisor = .{
         .uses_service_arena = supervisor.supervisor_indexing.uses_service_arena,
@@ -1779,6 +1794,8 @@ pub const indexed_hot_path_tables = .{
         .requires_fred = cpu_baseline.REQUIRES_FRED and
             @hasField(cpu_baseline.Features, "fred") and
             @hasField(cpu_baseline.Features, "lkgs"),
+        .requires_hardware_fred_in_production = cpu_baseline.PRODUCTION_REQUIRES_HARDWARE_FRED,
+        .uses_fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,
     },
     .runtime_pages = .{
         .uses_2m_pages = virtual_layout.USES_RUNTIME_2M_PAGES,
@@ -1797,4 +1814,24 @@ pub const indexed_hot_path_tables = .{
         .measures_endpoint_rtt = std.mem.eql(u8, benchmark_cases.SLO_ENDPOINT_RTT, "slo.endpoint_rtt"),
         .measures_focused_input = std.mem.eql(u8, benchmark_cases.SLO_FOCUSED_INPUT, "slo.focused_input"),
     },
+};
+
+pub const native_2026 = .{
+    .interrupt_driven_idle = event_wake.INTERRUPT_DRIVEN_IDLE and event_wake.WAKES_PER_CPU,
+    .unified_table_backing = table_backing.HEAP_BACKS_ON_ALL_TARGETS and table_backing.UNIFIED_ALLOCATOR,
+    .ring_default_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and endpoint.PREFERS_SEALED_RING_DATAPLANE and endpoint.AUTO_ATTACHES_DATA_RINGS,
+    .present_by_handle = compositor_session.PRESENTS_BY_HANDLE and display_driver_task.PRESENTS_BY_HANDLE,
+    .userspace_xhci_dataplane = xhci_driver_task.USERSPACE_XHCI_DATAPLANE and
+        xhci_driver_task.KERNEL_LATCHES_ONLY and
+        xhci_driver_task.DISPATCHES_FROM_BOUND_TASK,
+    .single_bootstrap_launch_mode = service_catalog.SINGLE_BOOTSTRAP_LAUNCH_MODE and
+        userspace_launch.SINGLE_KERNEL_CONTRACT_LAUNCH,
+    .demand_pages_user_objects = demand_paging.DEMAND_PAGES_USER_OBJECTS and
+        demand_paging.REGISTERS_MAPPED_OBJECTS and
+        demand_paging.COPIES_ON_WRITE and
+        shared_memory.REGISTERS_DEMAND_PAGED_MAPPINGS,
+    .production_requires_hardware_fred = cpu_baseline.PRODUCTION_REQUIRES_HARDWARE_FRED,
+    .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,
+    .arc_scanout_by_handle = display_hw.PROGRAMS_SCANOUT_HANDLE and display_driver_task.ARC_SCANOUT_PREFERRED,
+    .drops_gop_copies = !display_hw.COPIES_GOP_PIXELS,
 };
