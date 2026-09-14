@@ -506,6 +506,9 @@ pub const SessionManager = struct {
         }
         stack_watermark.reportPeak();
         userspace_executor.reportTrapStackPeak();
+        if (self.storageServicePtr().checkpoint_enabled) {
+            self.native_store.checkpoint();
+        }
         const checkpoint_clean = self.reportFinalCheckpointState();
         if (comptime !include_verification_evidence) {
             if (!checkpoint_clean) {
