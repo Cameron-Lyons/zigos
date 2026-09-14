@@ -23,6 +23,7 @@ var network_detected = false;
 var storage_detected = false;
 var xhci_detected = false;
 var xhci_prepared = false;
+var graphics_started = false;
 
 pub const kernel_boundary_role = data_plane_boundary.kernel_boundary_role;
 pub const publishes_device_data_planes = data_plane_boundary.publishes_device_data_planes;
@@ -49,6 +50,7 @@ pub fn init() void {
     storage_detected = false;
     xhci_detected = false;
     xhci_prepared = false;
+    graphics_started = false;
     hardware_proof.capturePlatformFirmwareEvidence();
     const ecam_allocation = hardware_proof.pciEcamAllocation() orelse
         @panic("ACPI MCFG is required for PCIe discovery");
@@ -94,6 +96,7 @@ pub fn startDeferredRuntimeInit() void {
 }
 
 pub fn startStorageDataplane() bool {
+    if (nvme_hw.attached()) return true;
     const dev = pci.firstNvmeController() orelse return true;
     if (!storage_detected) return true;
     var isolation_domains: [2]intel_vtd.DmaDomain = undefined;
@@ -146,6 +149,7 @@ pub fn startStorageDataplane() bool {
 }
 
 pub fn startNetworkDataplane() bool {
+    if (intel_i225_hw.attached()) return true;
     const dev = pci.firstIntelI225Lm() orelse return true;
     if (!network_detected) return true;
     intel_i225_hw.prepare(dev) catch |err| switch (err) {
@@ -179,6 +183,7 @@ pub fn startNetworkDataplane() bool {
 }
 
 pub fn startInputDataplane() bool {
+    if (xhci_prepared) return true;
     const dev = pci.firstXhciController() orelse return true;
     if (!xhci_detected) return true;
     const caps = xhci_hw.probe(dev) catch |err| switch (err) {
@@ -218,11 +223,13 @@ pub fn startInputDataplane() bool {
 }
 
 pub fn startGraphicsDataplane() bool {
+    if (graphics_started) return true;
     const device_id = if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev|
         pciDeviceId(dev)
     else
         0xC0DE_9001;
     registerFramebufferWindow(device_id);
+    graphics_started = true;
     return true;
 }
 

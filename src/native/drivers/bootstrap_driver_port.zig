@@ -380,11 +380,11 @@ pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
 pub fn activateNetworkDeviceForTask(device_id: u64, service_id: u64, task_id: u64) bool {
     if (!networkPublicationMatchesTargetI225(device_id)) return false;
     if (publicationForActivation(NetworkPublication, &published_network, device_id, service_id)) |publication| {
+        if (builtin.target.os.tag == .freestanding and !kernel_device_start.startNetworkDataplane()) return false;
         if (publication.network_device == null) {
             const activator = publication.activator orelse return false;
             publication.network_device = activator(device_id) orelse return false;
         }
-        if (builtin.target.os.tag == .freestanding and !kernel_device_start.startNetworkDataplane()) return false;
         if (!kernel_network_claim.recordDriverClaim(device_id, service_id)) return false;
         if (!network_driver_task.activateDeviceForTask(publication.network_device.?, service_id, task_id)) {
             _ = kernel_network_claim.clearDriverClaim(service_id);
@@ -400,11 +400,9 @@ pub fn activateDeviceDataPlane(device_class: driver_service.DeviceClass, device_
     if (!supportsGenericDeviceDataPlane(device_class)) return false;
     if (publicationForActivation(DeviceDataPlanePublication, &published_device_planes[deviceClassIndex(device_class)], device_id, service_id)) |publication| {
         if (publication.device_class != device_class) return false;
-        if (builtin.target.os.tag == .freestanding and device_class == .usb_controller) {
-            if (!kernel_device_start.startInputDataplane()) return false;
-        }
-        if (builtin.target.os.tag == .freestanding and device_class == .graphics_adapter) {
-            if (!kernel_device_start.startGraphicsDataplane()) return false;
+        if (builtin.target.os.tag == .freestanding) {
+            if (device_class == .usb_controller and !kernel_device_start.startInputDataplane()) return false;
+            if (device_class == .graphics_adapter and !kernel_device_start.startGraphicsDataplane()) return false;
         }
         publication.active_service_id = service_id;
         return true;
@@ -422,11 +420,11 @@ pub fn activateStorageBackend(
     kernel_port: ?*component_port.KernelPort,
 ) bool {
     if (publicationForActivation(StoragePublication, &published_storage, device_id, service_id)) |publication| {
+        if (builtin.target.os.tag == .freestanding and !kernel_device_start.startStorageDataplane()) return false;
         if (publication.backend == null) {
             const activator = publication.activator orelse return false;
             publication.backend = activator(device_id) orelse return false;
         }
-        if (builtin.target.os.tag == .freestanding and !kernel_device_start.startStorageDataplane()) return false;
         if (kernel_port) |bound_kernel_port| {
             if (!establishStorageControllerSession(
                 publication,
