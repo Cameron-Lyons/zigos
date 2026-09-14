@@ -64,7 +64,7 @@ pub const NativePayloadLength = u8;
 pub const ObjectSharePayloadLength = u16;
 pub const CAPTURED_PACKET_SIZE_CEILING_BYTES: usize = 272;
 pub const PACKET_CAPTURE_SIZE_CEILING_BYTES: usize = 4_840;
-pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 81_000;
+pub const HOST_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 17_000;
 pub const FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = 128;
 pub const NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_NATIVE_TRANSPORT_SERVICE_SIZE_CEILING_BYTES
@@ -1844,8 +1844,11 @@ test "compact capture metadata preserves maximum native frames" {
     try std.testing.expectEqual(@as(usize, 4_832), transport_packet_capture_layout.freestanding_resident_savings_bytes);
     try std.testing.expect(transport_endpoint_table_layout.heap_backs_table_on_freestanding);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), transport_endpoint_table_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 8_976), transport_endpoint_table_layout.freestanding_backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 8_968), transport_endpoint_table_layout.freestanding_resident_savings_bytes);
+    try std.testing.expectEqual(@as(usize, endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES), transport_endpoint_table_layout.freestanding_backing_size_bytes);
+    try std.testing.expectEqual(
+        endpoint.FREESTANDING_TABLE_SIZE_CEILING_BYTES - @sizeOf(?*endpoint.Table),
+        transport_endpoint_table_layout.freestanding_resident_savings_bytes,
+    );
 
     var transport_capture = TransportPacketCapture{};
     defer transport_capture.deinit();

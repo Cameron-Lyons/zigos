@@ -133,8 +133,9 @@ pub const BootstrapTiming = struct {
     tick: u64,
 };
 
+pub const SINGLE_BOOTSTRAP_LAUNCH_MODE = true;
+
 pub const BootstrapLaunchMode = enum(u8) {
-    native_direct,
     kernel_contract,
 };
 
@@ -298,7 +299,7 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "restartable native session and task coordinator",
         .service_bootstrap = .{
-            .mode = .native_direct,
+            .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 50_000,
                 .memory_bytes = mebibytes(8),
@@ -426,7 +427,7 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "task-scoped permission review service for reviewed grants and denials",
         .service_bootstrap = .{
-            .mode = .native_direct,
+            .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 10_000,
                 .memory_bytes = kibibytes(512),
@@ -873,7 +874,7 @@ pub const ordered_service_contracts = blk: {
         var progressed = false;
         for (catalog, 0..) |entry, index| {
             const launch = entry.service_bootstrap orelse continue;
-            if (launch.mode != .kernel_contract or used[index]) continue;
+            if (isSessionNucleusClass(entry.class) or used[index]) continue;
             if (!dependenciesSatisfied(entry, derived[0..count_out])) continue;
 
             derived[count_out] = .{
@@ -1183,20 +1184,21 @@ fn descriptorFromEntry(entry: ServiceCatalogEntry) ServiceDescriptor {
     };
 }
 
+fn isSessionNucleusClass(class: ServiceClass) bool {
+    return class == .session_manager or class == .permission_review_ui;
+}
+
 fn kernelBootstrapCount() usize {
     comptime var count: usize = 0;
     inline for (catalog) |entry| {
-        if (entry.service_bootstrap) |launch| {
-            if (launch.mode == .kernel_contract) count += 1;
-        }
+        if (entry.service_bootstrap != null and !isSessionNucleusClass(entry.class)) count += 1;
     }
     return count;
 }
 
 fn isKernelBootstrapClass(class: ServiceClass) bool {
     const entry = entryForClass(class) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    return launch.mode == .kernel_contract;
+    return entry.service_bootstrap != null and !isSessionNucleusClass(class);
 }
 
 fn dependenciesSatisfied(entry: ServiceCatalogEntry, ordered: []const ServiceContract) bool {
@@ -1280,7 +1282,13 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expect(allowsDriverClass(.media_print_helpers, .audio_print_io));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .compositor_policy));
-    try std.testing.expectEqual(BootstrapLaunchMode.native_direct, bootstrapLaunchForClass(.session_manager).?.mode);
+    try std.testing.expectEqual(BootstrapLaunchMode.kernel_contract, bootstrapLaunchForClass(.session_manager).?.mode);
+    try std.testing.expect(SINGLE_BOOTSTRAP_LAUNCH_MODE);
+    for (catalog) |entry| {
+        if (entry.service_bootstrap) |launch| {
+            try std.testing.expectEqual(BootstrapLaunchMode.kernel_contract, launch.mode);
+        }
+    }
     try std.testing.expectEqual(BootstrapOwnerKey.storage_service, bootstrapOwnerKeyForClass(.storage_object).?);
     try std.testing.expectEqual(BootstrapServiceRecordKey.storage_service, bootstrapServiceRecordKeyForClass(.storage_object).?);
     try std.testing.expectEqual(component_abi_schema.InterfaceId.object_workspace, serviceContractForClass(.storage_object).?.interface_id);
@@ -1316,7 +1324,7 @@ test "default service catalog keeps native services userspace restartable and ze
         }
 
         if (entry.service_bootstrap) |launch| {
-            if (launch.mode == .kernel_contract) {
+            if (entry.published_native_service) {
                 try std.testing.expect(entry.userspace_image != null);
                 try std.testing.expect(launch.grants.len != 0);
                 try std.testing.expectEqual(BootstrapGrantKind.service_task_authority, launch.grants[0]);

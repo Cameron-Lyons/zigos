@@ -760,6 +760,15 @@ pub fn writeOwnedUserRange(
     }
 }
 
+pub fn copyOwnedUserPageFromPhysical(
+    space: *const UserAddressSpace,
+    virtual_start: u32,
+    physical_base: u64,
+) UserWriteError!void {
+    const source = bytesAtPhysical(@intCast(physical_base));
+    return writeOwnedUserRange(space, virtual_start, source[0..PAGE_SIZE]);
+}
+
 fn releaseOwnedHierarchy(pml4: *PageDirectory) void {
     for (pml4) |*pml4_entry| {
         if (!entryPresent(pml4_entry.*) or entryOwner(pml4_entry.*) != TABLE_OWNER_USER_PRIVATE) continue;

@@ -312,15 +312,10 @@ pub fn cetEnabled() bool {
         (readMsr(IA32_S_CET_MSR) & CET_ENDBR_EN) != 0;
 }
 
+extern fn x86_wrpkru(value: u32) callconv(.c) void;
+
 pub fn wrpkru(value: u32) void {
-    asm volatile (
-        \\xor %%ecx, %%ecx
-        \\xor %%edx, %%edx
-        \\.byte 0x0f, 0x01, 0xef
-        :
-        : [value] "{eax}" (value),
-        : .{ .memory = true, .ecx = true, .edx = true }
-    );
+    x86_wrpkru(value);
 }
 
 pub fn enablePku() void {

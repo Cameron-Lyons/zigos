@@ -10,6 +10,9 @@ const units = @import("../core/units.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const demand_paging = @import("../../kernel/memory/demand_paging.zig");
+const shared_memory = @import("../kernel_api/shared_memory.zig");
+const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
@@ -154,6 +157,9 @@ else
                 return error.OutOfMemory;
             }
             pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: u32, _: []const u8) UserWriteError!void {
+                return error.PageNotOwned;
+            }
+            pub fn copyOwnedUserPageFromPhysical(_: *const UserAddressSpace, _: u32, _: u64) UserWriteError!void {
                 return error.PageNotOwned;
             }
             pub fn ownedUserPageIsExecutable(_: *const UserAddressSpace, _: u32) ?bool {
@@ -478,8 +484,7 @@ pub const Executor = struct {
     fn ensureMappingArena(self: *Executor) error{OutOfMemory}!*MappingArena {
         if (self.mappingArena()) |mappings| return mappings;
         if (comptime heap_backed_mappings) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(MappingArena)) orelse return error.OutOfMemory;
-            const mappings: *MappingArena = @ptrCast(@alignCast(allocation));
+            const mappings = table_backing.alloc(MappingArena) orelse return error.OutOfMemory;
             initializeMappingArena(mappings);
             self.mappings = mappings;
             return mappings;
@@ -490,14 +495,14 @@ pub const Executor = struct {
     fn releaseMappingArena(self: *Executor) void {
         if (comptime heap_backed_mappings) {
             if (self.mappings) |mappings| {
-                @memset(std.mem.asBytes(mappings), 0);
-                kernel_memory.kfree(@ptrCast(mappings));
+                table_backing.free(MappingArena, mappings);
                 self.mappings = null;
             }
         }
     }
 
     pub fn init(self: *Executor) void {
+        shared_memory.setMappedObjectHook(registerMappedObject);
         if (builtin.target.os.tag != .freestanding) return;
         registered_executor = self;
         if (self.initialized) return;
@@ -1512,6 +1517,13 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     };
     const error_code = std.math.cast(u32, frame.err_code) orelse
         native_util.impossibleByInvariant("userspace page-fault code exceeds its ABI width");
+    const not_present = (error_code & 0x1) == 0;
+    const write_fault = (error_code & 0x2) != 0;
+    if (not_present) {
+        if (mapping.address_space) |*space| {
+            if (demand_paging.resolveAndMap(space, faulting_address, write_fault)) return;
+        }
+    }
     @call(.never_inline, recordUserPageFault, .{
         executor,
         executor.active_task_id,
@@ -1618,10 +1630,30 @@ fn mapZeroedRegion(
 ) MaterializationError!void {
     const virtual_address = std.math.cast(u32, virtual_address_raw) orelse return error.InvalidRange;
     const size_bytes = std.math.cast(u32, size_bytes_raw) orelse return error.InvalidRange;
-    try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
+    if (access.execute) {
+        try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
+            .writable = access.write,
+            .executable = access.execute,
+        });
+        return;
+    }
+    const region_end = std.math.add(u32, virtual_address, size_bytes) catch return error.InvalidRange;
+    if (!demand_paging.registerForSpace(space, .{
+        .virt_start = virtual_address,
+        .virt_end_exclusive = region_end,
         .writable = access.write,
-        .executable = access.execute,
-    });
+        .kind = if (access.write) .anonymous_zero else .object_cow,
+    })) return error.OutOfMemory;
+}
+
+fn registerMappedObject(virt_start: u64, size_bytes: u64, writable: bool, physical_base: u64, copy_on_write: bool) bool {
+    return demand_paging.registerRange(
+        virt_start,
+        size_bytes,
+        writable,
+        if (copy_on_write) .object_cow else .object_physical,
+        physical_base,
+    );
 }
 
 fn enterUserspace(executor: *const Executor) u32 {

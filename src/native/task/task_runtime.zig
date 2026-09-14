@@ -11,6 +11,7 @@ const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const std = @import("std");
 const units = @import("../core/units.zig");
+const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
@@ -322,9 +323,7 @@ pub const Runtime = struct {
     fn ensureTaskColdRecords(self: *Runtime) error{NoSpaceLeft}!*TaskColdRecords {
         if (self.taskColdRecords()) |records| return records;
         if (comptime heap_backed_task_cold) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(TaskColdRecords)) orelse return error.NoSpaceLeft;
-            const records: *TaskColdRecords = @ptrCast(@alignCast(allocation));
-            @memset(std.mem.asBytes(records), 0);
+            const records = table_backing.alloc(TaskColdRecords) orelse return error.NoSpaceLeft;
             self.task_cold = records;
             return records;
         }
@@ -345,8 +344,7 @@ pub const Runtime = struct {
     fn releaseTaskColdRecords(self: *Runtime) void {
         if (comptime heap_backed_task_cold) {
             if (self.task_cold) |records| {
-                @memset(std.mem.asBytes(records), 0);
-                kernel_memory.kfree(@ptrCast(records));
+                table_backing.free(TaskColdRecords, records);
                 self.task_cold = null;
             }
         } else {
@@ -367,9 +365,7 @@ pub const Runtime = struct {
     fn ensureAddressSpaceArena(self: *Runtime) error{NoSpaceLeft}!*model.AddressSpaceArena {
         if (self.addressSpaceArena()) |arena| return arena;
         if (comptime heap_backed_address_spaces) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(model.AddressSpaceArena)) orelse return error.NoSpaceLeft;
-            const arena: *model.AddressSpaceArena = @ptrCast(@alignCast(allocation));
-            @memset(std.mem.asBytes(arena), 0);
+            const arena = table_backing.alloc(model.AddressSpaceArena) orelse return error.NoSpaceLeft;
             arena.free_head = indexed_arena.reusableNoIndex(MAX_TASKS);
             self.address_spaces = arena;
             return arena;
@@ -380,8 +376,7 @@ pub const Runtime = struct {
     fn releaseAddressSpaceArena(self: *Runtime) void {
         if (comptime heap_backed_address_spaces) {
             if (self.address_spaces) |arena| {
-                @memset(std.mem.asBytes(arena), 0);
-                kernel_memory.kfree(@ptrCast(arena));
+                table_backing.free(model.AddressSpaceArena, arena);
                 self.address_spaces = null;
             }
         } else {

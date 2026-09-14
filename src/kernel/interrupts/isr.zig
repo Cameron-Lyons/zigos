@@ -10,6 +10,7 @@ const intel_i225_hw = @import("../drivers/intel_i225_hw.zig");
 const nvme_hw = @import("../drivers/nvme_hw.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
 const smp = @import("../smp.zig");
+const event_wake = @import("../event_wake.zig");
 
 const GateHandler = *const fn () callconv(.c) void;
 
@@ -268,19 +269,24 @@ fn doubleFaultInterrupt(frame: *InterruptFrame) void {
 
 fn timerInterrupt(frame: *InterruptFrame) void {
     timer.handleInterrupt();
+    event_wake.raise(.timer);
+    event_wake.raise(.scheduler);
     if (timer_preemption) |hook| hook(frame);
 }
 
 fn i225Interrupt(_: *InterruptFrame) void {
     intel_i225_hw.handleInterrupt();
+    event_wake.raise(.network);
 }
 
 fn nvmeInterrupt(_: *InterruptFrame) void {
     nvme_hw.handleInterrupt();
+    event_wake.raise(.nvme);
 }
 
 fn xhciInterrupt(_: *InterruptFrame) void {
     xhci_hw.handleInterrupt();
+    event_wake.raise(.xhci);
 }
 
 fn tlbIpiInterrupt(_: *InterruptFrame) void {

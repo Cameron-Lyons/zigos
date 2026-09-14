@@ -284,16 +284,19 @@ pub const SessionManager = struct {
         const service = bootstrap_driver_port.servicePendingNetworkFrames(NETWORK_RECEIVE_SERVICE_BUDGET);
         if (service.frames_queued != 0) {
             const task_id = bootstrap_driver_port.activeNetworkTaskId();
-            if (task_id != 0 and self.runtime_context.constructed) {
-                _ = self.runtime_context.userspaceScheduler().?.wakeTask(
-                    task_id,
-                    .external_event,
-                    now_ticks,
-                    now_ticks +% 1,
-                );
-            }
+            _ = self.wakeUserspaceTask(task_id, now_ticks);
         }
         return service.frames_queued;
+    }
+
+    pub fn wakeUserspaceTask(self: *SessionManager, task_id: u64, now_ticks: u64) bool {
+        if (task_id == 0 or !self.runtime_context.constructed) return false;
+        return self.runtime_context.userspaceScheduler().?.wakeTask(
+            task_id,
+            .external_event,
+            now_ticks,
+            now_ticks +% 1,
+        );
     }
 
     pub fn bindHardwareInput(self: *SessionManager, source: input_router_mod.HardwareReportSource) void {
@@ -899,9 +902,9 @@ fn launchNativeBootstrapService(
     class: service_catalog.ServiceClass,
 ) BootstrapError!*task_runtime.TaskRecord {
     const launch = service_catalog.bootstrapLaunchForClass(class) orelse return error.MissingBootstrapLaunch;
-    if (launch.mode != .native_direct) return error.MissingBootstrapLaunch;
+    if (service_catalog.entryForClass(class).?.published_native_service) return error.MissingBootstrapLaunch;
     const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingUserspaceImage;
-    return userspace_launch.launchRegisteredDirect(
+    return userspace_launch.launchFromKernel(
         self.userspaceCatalogPtr(),
         self.runtimePtr(),
         bundle_id,

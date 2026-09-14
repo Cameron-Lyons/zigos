@@ -49,6 +49,8 @@ pub const REQUIRES_CET = true;
 pub const REQUIRES_PKU = true;
 pub const REQUIRES_LASS = true;
 pub const REQUIRES_FRED = true;
+pub const PRODUCTION_REQUIRES_HARDWARE_FRED = true;
+pub const FRED_ONLY_TRAPS = true;
 
 pub const Features = struct {
     cpuid: bool = false,
