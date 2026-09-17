@@ -95,6 +95,9 @@ zigos_fred_entry:
     movq %rsp, %r12
     cmpq $USER_CODE_SELECTOR, FRAME_CS(%r12)
     jne .fred_interrupt_dispatch
+    movq %cr0, %rax
+    testq $8, %rax
+    jnz .fred_interrupt_dispatch
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -105,12 +108,14 @@ zigos_fred_entry:
     movq %rax, 520(%rsp)
     movl $3, %eax
     xorl %edx, %edx
+    # xsaves (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
     call isrHandler
     movl $3, %eax
     xorl %edx, %edx
+    # xrstors (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
     movq %r12, %rsp
     jmp .fred_complete
@@ -138,6 +143,9 @@ zigos_fred_entry:
     pushq $USERSPACE_YIELD_VECTOR
     SAVE_REGISTERS
     movq %rsp, %r12
+    movq %cr0, %rax
+    testq $8, %rax
+    jnz .fred_interrupt_dispatch
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -148,16 +156,21 @@ zigos_fred_entry:
     movq %rax, 520(%rsp)
     movl $3, %eax
     xorl %edx, %edx
+    # xsaves (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
     call isrHandler
     movl $3, %eax
     xorl %edx, %edx
+    # xrstors (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
     movq %r12, %rsp
 
 .fred_complete:
+    movq %cr0, %rax
+    orq $8, %rax
+    movq %rax, %cr0
     cmpl $0, zigos_userspace_resume_requested(%rip)
     jne .fred_userspace_resume
     RESTORE_REGISTERS

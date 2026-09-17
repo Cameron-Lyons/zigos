@@ -432,9 +432,9 @@ fn ensureChildTable(
 
 pub fn mapBorrowedPhysicalUserRange(
     space: *UserAddressSpace,
-    virtual_start: u32,
+    virtual_start: usize,
     physical_start: u64,
-    size_bytes: u32,
+    size_bytes: usize,
     permissions: UserPermissions,
 ) UserMapError!void {
     if (pageOffset(virtual_start) != 0 or size_bytes == 0) return error.InvalidRange;
@@ -443,13 +443,13 @@ pub fn mapBorrowedPhysicalUserRange(
     if (pageOffset(physical_address) != 0) return error.InvalidRange;
     if (permissions.writable and permissions.executable) return error.WritableExecutable;
     if (permissions.executable) return error.WritableExecutable;
-    if (size_bytes > MAX_U32 - (PAGE_SIZE - 1)) return error.AddressOverflow;
 
-    const mapped_size = (size_bytes + PAGE_SIZE - 1) & ~PAGE_OFFSET_MASK;
-    if (virtual_start > MAX_U32 - mapped_size) return error.AddressOverflow;
+    const mapped_size = std.mem.alignForward(usize, size_bytes, PAGE_SIZE);
+    const mapped_end = std.math.add(usize, virtual_start, mapped_size) catch return error.AddressOverflow;
+    if (mapped_end > 0x0000_8000_0000_0000) return error.InvalidRange;
     if (!table64.physicalAddressFits(physical_address + (mapped_size - PAGE_SIZE))) return error.InvalidRange;
 
-    var offset: u32 = 0;
+    var offset: usize = 0;
     while (offset < mapped_size) : (offset += PAGE_SIZE) {
         try validateOwnedMappingSlot(space, virtual_start + offset);
     }
@@ -608,7 +608,7 @@ pub fn createUserAddressSpace() UserAddressSpaceCreateError!UserAddressSpace {
     };
 }
 
-fn ensureOwnedLeaf(space: *UserAddressSpace, virtual_address: u32) UserMapError!*PageTableEntry {
+fn ensureOwnedLeaf(space: *UserAddressSpace, virtual_address: usize) UserMapError!*PageTableEntry {
     const address: usize = virtual_address;
     const pdpt = try ensureChildTable(space.directory, tableIndex(address, PML4_SHIFT), true, TABLE_OWNER_USER_PRIVATE);
     const page_directory = try ensureChildTable(pdpt, tableIndex(address, PDPT_SHIFT), true, TABLE_OWNER_USER_PRIVATE);
@@ -616,14 +616,14 @@ fn ensureOwnedLeaf(space: *UserAddressSpace, virtual_address: u32) UserMapError!
     return &page_table[tableIndex(address, PAGE_TABLE_SHIFT)];
 }
 
-fn ensureOwnedDirectorySlot(space: *UserAddressSpace, virtual_address: u32) UserMapError!*PageTableEntry {
+fn ensureOwnedDirectorySlot(space: *UserAddressSpace, virtual_address: usize) UserMapError!*PageTableEntry {
     const address: usize = virtual_address;
     const pdpt = try ensureChildTable(space.directory, tableIndex(address, PML4_SHIFT), true, TABLE_OWNER_USER_PRIVATE);
     const page_directory = try ensureChildTable(pdpt, tableIndex(address, PDPT_SHIFT), true, TABLE_OWNER_USER_PRIVATE);
     return &page_directory[tableIndex(address, PAGE_DIRECTORY_SHIFT)];
 }
 
-fn directorySlotFreeForHugePage(space: *const UserAddressSpace, virtual_address: u32) bool {
+fn directorySlotFreeForHugePage(space: *const UserAddressSpace, virtual_address: usize) bool {
     const address: usize = virtual_address;
     const pml4_entry = space.directory[tableIndex(address, PML4_SHIFT)];
     if (!entryPresent(pml4_entry)) return true;
@@ -637,7 +637,7 @@ fn directorySlotFreeForHugePage(space: *const UserAddressSpace, virtual_address:
 
 fn mapOwnedUserHugePage(
     space: *UserAddressSpace,
-    virtual_address: u32,
+    virtual_address: usize,
     permissions: UserPermissions,
 ) UserMapError!void {
     const directory_entry = try ensureOwnedDirectorySlot(space, virtual_address);
@@ -655,7 +655,7 @@ fn mapOwnedUserHugePage(
 
 const LARGE_2M_FRAME_COUNT: u32 = @intCast(LARGE_2M_PAGE_SIZE / PAGE_SIZE);
 
-fn validateOwnedMappingSlot(space: *const UserAddressSpace, virtual_address: u32) UserMapError!void {
+fn validateOwnedMappingSlot(space: *const UserAddressSpace, virtual_address: usize) UserMapError!void {
     const address: usize = virtual_address;
     const pml4_entry = space.directory[tableIndex(address, PML4_SHIFT)];
     if (!entryPresent(pml4_entry)) return;
@@ -680,18 +680,18 @@ fn validateOwnedMappingSlot(space: *const UserAddressSpace, virtual_address: u32
 
 pub fn mapOwnedUserRange(
     space: *UserAddressSpace,
-    virtual_start: u32,
-    size_bytes: u32,
+    virtual_start: usize,
+    size_bytes: usize,
     permissions: UserPermissions,
 ) UserMapError!void {
     if (pageOffset(virtual_start) != 0 or size_bytes == 0) return error.InvalidRange;
     if (permissions.writable and permissions.executable) return error.WritableExecutable;
-    if (size_bytes > MAX_U32 - (PAGE_SIZE - 1)) return error.AddressOverflow;
 
-    const mapped_size = (size_bytes + PAGE_SIZE - 1) & ~PAGE_OFFSET_MASK;
-    if (virtual_start > MAX_U32 - mapped_size) return error.AddressOverflow;
+    const mapped_size = std.mem.alignForward(usize, size_bytes, PAGE_SIZE);
+    const mapped_end = std.math.add(usize, virtual_start, mapped_size) catch return error.AddressOverflow;
+    if (mapped_end > 0x0000_8000_0000_0000) return error.InvalidRange;
 
-    var offset: u32 = 0;
+    var offset: usize = 0;
     while (offset < mapped_size) : (offset += PAGE_SIZE) {
         try validateOwnedMappingSlot(space, virtual_start + offset);
     }
@@ -702,7 +702,7 @@ pub fn mapOwnedUserRange(
         const remaining = mapped_size - offset;
         if (USES_RUNTIME_2M_PAGES and
             remaining >= LARGE_2M_PAGE_SIZE and
-            (virtual_address & @as(u32, @intCast(LARGE_2M_PAGE_SIZE - 1))) == 0 and
+            (virtual_address & @as(usize, @intCast(LARGE_2M_PAGE_SIZE - 1))) == 0 and
             directorySlotFreeForHugePage(space, virtual_address))
         {
             try mapOwnedUserHugePage(space, virtual_address, permissions);
@@ -727,7 +727,7 @@ pub fn mapOwnedUserRange(
     }
 }
 
-pub fn ownedUserPageIsExecutable(space: *const UserAddressSpace, virtual_address: u32) ?bool {
+pub fn ownedUserPageIsExecutable(space: *const UserAddressSpace, virtual_address: usize) ?bool {
     const entry = lookupLeaf(space.directory, virtual_address) orelse return null;
     if (!entryPresent(entry.*) or entryOwner(entry.*) != PAGE_OWNER_USER_PRIVATE) return null;
     if ((entry.* & ENTRY_USER) == 0) return null;
@@ -736,16 +736,15 @@ pub fn ownedUserPageIsExecutable(space: *const UserAddressSpace, virtual_address
 
 pub fn writeOwnedUserRange(
     space: *const UserAddressSpace,
-    virtual_start: u32,
+    virtual_start: usize,
     source: []const u8,
 ) UserWriteError!void {
     if (source.len == 0) return;
-    const byte_count = std.math.cast(u32, source.len) orelse return error.AddressOverflow;
-    if (virtual_start > MAX_U32 - byte_count) return error.AddressOverflow;
+    _ = std.math.add(usize, virtual_start, source.len) catch return error.AddressOverflow;
 
     var copied: usize = 0;
     while (copied < source.len) {
-        const virtual_address = virtual_start + @as(u32, @intCast(copied));
+        const virtual_address = virtual_start + copied;
         const entry = lookupLeaf(space.directory, virtual_address) orelse return error.PageNotOwned;
         if (!entryPresent(entry.*) or entryOwner(entry.*) != PAGE_OWNER_USER_PRIVATE) {
             return error.PageNotOwned;
@@ -762,7 +761,7 @@ pub fn writeOwnedUserRange(
 
 pub fn copyOwnedUserPageFromPhysical(
     space: *const UserAddressSpace,
-    virtual_start: u32,
+    virtual_start: usize,
     physical_base: u64,
 ) UserWriteError!void {
     const source = bytesAtPhysical(@intCast(physical_base));

@@ -3,6 +3,8 @@ const std = @import("std");
 
 pub const PRESENTS_BY_HANDLE = true;
 pub const ARC_SCANOUT_PREFERRED = true;
+pub const USERSPACE_GOP_DATAPLANE = true;
+pub const KERNEL_LATCHES_ONLY = true;
 
 const display_hw = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/drivers/display_hw.zig")

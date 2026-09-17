@@ -129,6 +129,9 @@ isr_common_stub:
     movq FRAME_CS(%r12), %rax
     cmpq $USER_CODE_SELECTOR, %rax
     jne .skip_xstate
+    movq %cr0, %rax
+    testq $8, %rax
+    jnz .skip_xstate
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -163,7 +166,7 @@ isr_common_stub:
     jne .invalid_interrupt_return
     orq $SELECTOR_RPL_MASK, FRAME_USER_SS(%r12)
     movq FRAME_USER_RSP(%r12), %rax
-    shrq $32, %rax
+    shrq $47, %rax
     jne .invalid_interrupt_return
 
     movl $USER_DATA_SELECTOR, %eax
@@ -181,7 +184,7 @@ isr_common_stub:
 
 .validate_common_return:
     movq FRAME_RIP(%r12), %rax
-    shrq $32, %rax
+    shrq $47, %rax
     jne .invalid_interrupt_return
     movq FRAME_RFLAGS(%r12), %rax
     testq $RFLAGS_RESERVED, %rax
@@ -195,6 +198,8 @@ isr_common_stub:
     call zigos_handle_invalid_interrupt_return
 
 .isr_dispatch_complete:
+    cmpq %rsp, %r12
+    je .skip_xrstors
     movq FRAME_CS(%r12), %rax
     cmpq $USER_CODE_SELECTOR, %rax
     jne .skip_xrstors
@@ -204,6 +209,13 @@ isr_common_stub:
     .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
 .skip_xrstors:
     movq %r12, %rsp
+    movq FRAME_CS(%r12), %rax
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .after_lazy_ts
+    movq %cr0, %rax
+    orq $8, %rax
+    movq %rax, %cr0
+.after_lazy_ts:
     cmpl $0, zigos_userspace_resume_requested(%rip)
     jne .userspace_resume
 

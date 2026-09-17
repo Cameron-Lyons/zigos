@@ -124,8 +124,10 @@ pub inline fn loadIdt(descriptor: *const anyopaque) void {
 
 pub const CR0_EM: usize = 1 << 2;
 pub const CR0_MP: usize = 1 << 1;
+pub const CR0_TS: usize = 1 << 3;
 pub const CR0_WP: usize = 1 << 16;
 pub const CR0_PG: usize = 1 << 31;
+pub const LAZY_XSAVES = true;
 
 pub const CR4_PGE: usize = 1 << 7;
 pub const CR4_OSFXSR: usize = 1 << 9;
@@ -201,6 +203,18 @@ pub inline fn writeCr0(value: usize) void {
         :
         : [value] "r" (value),
         : .{ .memory = true });
+}
+
+pub inline fn taskSwitched() bool {
+    return (readCr0() & CR0_TS) != 0;
+}
+
+pub inline fn setTaskSwitched() void {
+    writeCr0(readCr0() | CR0_TS);
+}
+
+pub inline fn clearTaskSwitched() void {
+    writeCr0(readCr0() & ~CR0_TS);
 }
 
 pub inline fn readCr3() usize {

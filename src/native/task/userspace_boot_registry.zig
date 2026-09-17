@@ -6,10 +6,11 @@ const service_catalog = @import("../session/service_catalog.zig");
 const std = @import("std");
 const task_runtime = @import("task_runtime.zig");
 const archive_index = @import("userspace_archive_index.zig");
+const production_registry = @import("userspace_registry.zig");
 const role_registry = if (archive_index.includes_verification_images)
     @import("userspace_verification_registry.zig")
 else
-    @import("userspace_registry.zig");
+    production_registry;
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
 const console = if (builtin.target.os.tag == .freestanding)
@@ -61,7 +62,7 @@ pub fn registerAll(catalog: *userspace_loader.Catalog) Error!void {
         try validateGeneratedArtifact(artifact);
         const components = [_]manifest.ExecutionComponentDecl{.{ .id = spec.componentLabel(), .entry = spec.entryName() }};
         const bundle = try bundleForSpec(&spec, &components);
-        const executable_image = try executableImageFromArtifact(artifact);
+        const executable_image = try executableImageFromArtifact(artifact, spec.bundleId());
         _ = catalog.registerBuildValidatedArtifact(.{
             .bundle = bundle,
             .component_class = componentClassForSpec(&spec),
@@ -122,14 +123,14 @@ fn componentClassForSpec(spec: *const role_registry.ImageSpec) task_runtime.Comp
     };
 }
 
-fn executableImageFromArtifact(artifact: anytype) Error!task_runtime.ExecutableImageSpec {
+fn executableImageFromArtifact(artifact: anytype, bundle_id: []const u8) Error!task_runtime.ExecutableImageSpec {
     if (artifact.segment_count > task_runtime.MAX_EXECUTABLE_SEGMENTS) {
         return error.GeneratedArtifactSegmentCountInvalid;
     }
     var executable_image = task_runtime.ExecutableImageSpec{
         .entry_point = artifact.entry_point,
         .bootstrap_mailbox_address = artifact.bootstrap_mailbox_address,
-        .stack_top = artifact.stack_top,
+        .stack_top = production_registry.stackTopForBundle(bundle_id),
         .stack_size_bytes = std.math.cast(task_runtime.UserStackByteLength, artifact.stack_size_bytes) orelse
             return error.GeneratedArtifactByteLengthInvalid,
         .file_size_bytes = std.math.cast(task_runtime.UserImageByteLength, artifact.file_size_bytes) orelse
@@ -190,7 +191,7 @@ test "boot registry rejects invalid generated executable metadata" {
     try std.testing.expect(archive_index.artifacts.len > 0);
 
     try validateGeneratedArtifact(archive_index.artifacts[0]);
-    _ = try executableImageFromArtifact(archive_index.artifacts[0]);
+    _ = try executableImageFromArtifact(archive_index.artifacts[0], active_boot_image_specs[0].bundleId());
 
     var too_many_segments = archive_index.artifacts[0];
     too_many_segments.segment_count = task_runtime.MAX_EXECUTABLE_SEGMENTS + 1;
@@ -200,6 +201,6 @@ test "boot registry rejects invalid generated executable metadata" {
     );
     try std.testing.expectError(
         error.GeneratedArtifactSegmentCountInvalid,
-        executableImageFromArtifact(too_many_segments),
+        executableImageFromArtifact(too_many_segments, active_boot_image_specs[0].bundleId()),
     );
 }

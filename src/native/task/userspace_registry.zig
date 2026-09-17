@@ -6,6 +6,7 @@ const manifest = @import("../policy/manifest.zig");
 const native_util = @import("../core/util.zig");
 const service_catalog = @import("../session/service_catalog.zig");
 const userspace_mailbox = @import("userspace_bootstrap_mailbox.zig");
+const userspace_layout = @import("../core/userspace_layout.zig");
 const userspace_flags = @import("userspace_flags.zig");
 
 pub const FLAG_SYSTEM_BUNDLE = userspace_flags.FLAG_SYSTEM_BUNDLE;
@@ -40,6 +41,18 @@ pub const RuntimeUpdateChannel = u2;
 pub const RuntimeComponentClass = u2;
 pub const RuntimePublisher = u1;
 pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 64;
+pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 6;
+pub const COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP = true;
+pub const SHARES_GROUP_PAGE_TABLES = true;
+
+pub const AddressSpaceGroup = enum(u8) {
+    session,
+    drivers,
+    store,
+    notes,
+    privacy,
+    apps,
+};
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
@@ -384,6 +397,9 @@ comptime {
     if (production_boot_image_specs.len != 24) {
         @compileError("production userspace catalog must contain exactly 24 images");
     }
+    if (std.meta.fields(AddressSpaceGroup).len != PRODUCTION_ADDRESS_SPACE_COUNT) {
+        @compileError("production address-space groups must match the 2026 process count");
+    }
     for (production_boot_image_specs) |spec| {
         if ((spec.contractFlags() & (FLAG_MMU_PROOF_PROBE | FLAG_NX_PROOF_PROBE)) != 0) {
             @compileError("production userspace catalog cannot enable MMU verification probes");
@@ -452,6 +468,75 @@ fn indexInCatalog(
 pub fn productionContractFor(bundle_id: []const u8) ?ContractSpec {
     const spec = findProduction(bundle_id) orelse return null;
     return contractForSpec(spec);
+}
+
+pub fn addressSpaceGroupForServiceClass(class: contract.ServiceClass) ?AddressSpaceGroup {
+    return switch (class) {
+        .session_manager,
+        .policy_mediation,
+        .permission_review_ui,
+        .attention_broker,
+        .task_lifecycle,
+        .service_registry,
+        => .session,
+        .network_stack, .compositor_ui_session => .drivers,
+        .storage_object,
+        .package_install_update,
+        .indexing_search,
+        .sync_replication,
+        .object_resilience,
+        => .store,
+        .secret_vault,
+        .secure_pasteboard,
+        .sensitive_capture,
+        .personal_context,
+        => .privacy,
+        .media_print_helpers => .apps,
+        .task_runtime => null,
+    };
+}
+
+pub fn addressSpaceGroupForBundle(bundle_id: []const u8) ?AddressSpaceGroup {
+    for (production_build_image_specs) |spec| {
+        if (!std.mem.eql(u8, spec.image.bundleId(), bundle_id)) continue;
+        if (spec.service_class) |class| return addressSpaceGroupForServiceClass(class);
+        return standaloneAddressSpaceGroup(bundle_id);
+    }
+    return null;
+}
+
+fn standaloneAddressSpaceGroup(bundle_id: []const u8) ?AddressSpaceGroup {
+    if (std.mem.eql(u8, bundle_id, "zigos.system.workspace-storage") or
+        std.mem.eql(u8, bundle_id, "app.sync"))
+        return .store;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.storage-driver")) return .drivers;
+    if (std.mem.eql(u8, bundle_id, "app.notes")) return .notes;
+    if (std.mem.eql(u8, bundle_id, "app.viewer")) return .apps;
+    if (std.mem.eql(u8, bundle_id, "app.capture")) return .privacy;
+    return null;
+}
+
+pub fn imageSlotInGroup(bundle_id: []const u8) ?u8 {
+    const group = addressSpaceGroupForBundle(bundle_id) orelse return null;
+    var slot: u8 = 0;
+    for (production_build_image_specs) |spec| {
+        const spec_id = spec.image.bundleId();
+        const spec_group = addressSpaceGroupForBundle(spec_id) orelse continue;
+        if (spec_group != group) continue;
+        if (std.mem.eql(u8, spec_id, bundle_id)) return slot;
+        slot += 1;
+    }
+    return null;
+}
+
+pub fn imageBaseForBundle(bundle_id: []const u8) u64 {
+    const slot = imageSlotInGroup(bundle_id) orelse return userspace_layout.image_start;
+    return userspace_layout.imageBaseForSlot(slot);
+}
+
+pub fn stackTopForBundle(bundle_id: []const u8) u64 {
+    const slot = imageSlotInGroup(bundle_id) orelse return userspace_layout.default_stack_top;
+    return userspace_layout.stackTopForSlot(slot);
 }
 
 pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
@@ -639,6 +724,26 @@ test "compact runtime manifest declarations preserve populated and empty collect
 
 test "production userspace registry contains exactly the production boot catalog" {
     try std.testing.expectEqual(@as(usize, 24), production_boot_image_specs.len);
+    try std.testing.expectEqual(@as(usize, 6), PRODUCTION_ADDRESS_SPACE_COUNT);
+    try std.testing.expect(COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP);
+    try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
+    try std.testing.expectEqual(AddressSpaceGroup.store, addressSpaceGroupForServiceClass(.storage_object).?);
+    try std.testing.expectEqual(AddressSpaceGroup.session, addressSpaceGroupForServiceClass(.policy_mediation).?);
+    try std.testing.expectEqual(AddressSpaceGroup.notes, addressSpaceGroupForBundle("app.notes").?);
+    try std.testing.expectEqual(AddressSpaceGroup.drivers, addressSpaceGroupForBundle("zigos.system.storage-driver").?);
+
+    var occupied = [_]u16{0} ** PRODUCTION_ADDRESS_SPACE_COUNT;
+    for (production_build_image_specs) |spec| {
+        const bundle_id = spec.image.bundleId();
+        const group = addressSpaceGroupForBundle(bundle_id) orelse return error.MissingAddressSpaceGroup;
+        const slot = imageSlotInGroup(bundle_id) orelse return error.MissingImageSlot;
+        const bit: u16 = @as(u16, 1) << @as(u4, @intCast(slot));
+        const occupied_index = @intFromEnum(group);
+        try std.testing.expect(occupied[occupied_index] & bit == 0);
+        occupied[occupied_index] |= bit;
+        try std.testing.expectEqual(userspace_layout.imageBaseForSlot(slot), imageBaseForBundle(bundle_id));
+        try std.testing.expectEqual(userspace_layout.stackTopForSlot(slot), stackTopForBundle(bundle_id));
+    }
 
     for (production_boot_image_specs) |spec| {
         const production_spec = findProduction(spec.bundleId()) orelse return error.MissingProductionImage;

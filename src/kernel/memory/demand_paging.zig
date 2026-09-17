@@ -15,8 +15,8 @@ pub const Kind = enum(u8) {
 };
 
 pub const Region = struct {
-    virt_start: u32 = 0,
-    virt_end_exclusive: u32 = 0,
+    virt_start: u64 = 0,
+    virt_end_exclusive: u64 = 0,
     writable: bool = false,
     kind: Kind = .anonymous_zero,
     physical_base: u64 = 0,
@@ -44,12 +44,11 @@ pub fn registerForSpace(space: anytype, region: Region) bool {
 }
 
 pub fn registerRange(virt_start: u64, size_bytes: u64, writable: bool, kind: Kind, physical_base: u64) bool {
-    const start = std.math.cast(u32, virt_start) orelse return false;
-    const size = std.math.cast(u32, size_bytes) orelse return false;
-    if (size == 0 or start > std.math.maxInt(u32) - size) return false;
+    if (size_bytes == 0) return false;
+    const end = std.math.add(u64, virt_start, size_bytes) catch return false;
     return register(.{
-        .virt_start = start,
-        .virt_end_exclusive = start + size,
+        .virt_start = virt_start,
+        .virt_end_exclusive = end,
         .writable = writable,
         .kind = kind,
         .physical_base = physical_base,
@@ -73,16 +72,16 @@ pub fn unregisterSpace(space: anytype) void {
     region_count = write;
 }
 
-pub fn regionFor(fault_address: u32) ?*Region {
+pub fn regionFor(fault_address: u64) ?*Region {
     return regionForSpaceId(0, fault_address);
 }
 
-pub fn resolve(fault_address: u32, write: bool) bool {
+pub fn resolve(fault_address: u64, write: bool) bool {
     const region = regionFor(fault_address) orelse return false;
     return !write or region.writable or region.kind == .object_cow;
 }
 
-pub fn resolveAndMap(space: anytype, fault_address: u32, write: bool) bool {
+pub fn resolveAndMap(space: anytype, fault_address: u64, write: bool) bool {
     const region = regionForSpaceId(spaceIdOf(space), fault_address) orelse return false;
     if (write and !region.writable and region.kind != .object_cow) return false;
     if (comptime builtin.target.os.tag != .freestanding) return true;
@@ -104,7 +103,7 @@ fn registerInSpace(space_id: usize, region: Region) bool {
     return true;
 }
 
-fn regionForSpaceId(space_id: usize, fault_address: u32) ?*Region {
+fn regionForSpaceId(space_id: usize, fault_address: u64) ?*Region {
     var index: u8 = 0;
     while (index < region_count) : (index += 1) {
         const slot = &regions[index];
@@ -114,9 +113,9 @@ fn regionForSpaceId(space_id: usize, fault_address: u32) ?*Region {
     return null;
 }
 
-fn mapOnePage(space: anytype, region: *const Region, fault_address: u32, write: bool) bool {
+fn mapOnePage(space: anytype, region: *const Region, fault_address: u64, write: bool) bool {
     const paging = @import("paging64.zig");
-    const page_start = fault_address & ~@as(u32, 0xFFF);
+    const page_start = fault_address & ~@as(u64, 0xFFF);
     const writable = region.writable or (write and region.kind == .object_cow);
     const permissions = paging.UserPermissions{
         .writable = writable,
@@ -127,7 +126,7 @@ fn mapOnePage(space: anytype, region: *const Region, fault_address: u32, write: 
     const offset = page_start - region.virt_start;
     switch (region.kind) {
         .anonymous_zero => {
-            paging.mapOwnedUserRange(space, page_start, 0x1000, permissions) catch |err| switch (err) {
+            paging.mapOwnedUserRange(space, @intCast(page_start), 0x1000, permissions) catch |err| switch (err) {
                 error.AlreadyMapped => {},
                 else => return false,
             };
@@ -135,7 +134,7 @@ fn mapOnePage(space: anytype, region: *const Region, fault_address: u32, write: 
         .object_physical => {
             paging.mapBorrowedPhysicalUserRange(
                 space,
-                page_start,
+                @intCast(page_start),
                 region.physical_base + offset,
                 0x1000,
                 permissions,
@@ -145,14 +144,14 @@ fn mapOnePage(space: anytype, region: *const Region, fault_address: u32, write: 
             };
         },
         .object_cow => {
-            paging.mapOwnedUserRange(space, page_start, 0x1000, permissions) catch |err| switch (err) {
+            paging.mapOwnedUserRange(space, @intCast(page_start), 0x1000, permissions) catch |err| switch (err) {
                 error.AlreadyMapped => {},
                 else => return false,
             };
             if (region.physical_base != 0) {
                 paging.copyOwnedUserPageFromPhysical(
                     space,
-                    page_start,
+                    @intCast(page_start),
                     region.physical_base + offset,
                 ) catch return false;
             }
@@ -189,19 +188,19 @@ test "demand paging keeps per-space stack regions" {
     var first: u8 = 1;
     var second: u8 = 2;
     try std.testing.expect(registerForSpace(&first, .{
-        .virt_start = 0xB000_0000,
-        .virt_end_exclusive = 0xB000_1000,
+        .virt_start = 0x0000_007F_0000_0000,
+        .virt_end_exclusive = 0x0000_007F_0000_1000,
         .writable = true,
         .kind = .anonymous_zero,
     }));
     try std.testing.expect(registerForSpace(&second, .{
-        .virt_start = 0xB000_0000,
-        .virt_end_exclusive = 0xB000_1000,
+        .virt_start = 0x0000_007F_0000_0000,
+        .virt_end_exclusive = 0x0000_007F_0000_1000,
         .writable = false,
         .kind = .object_cow,
     }));
-    try std.testing.expect(resolveAndMap(&first, 0xB000_0004, true));
-    try std.testing.expect(resolveAndMap(&second, 0xB000_0004, false));
+    try std.testing.expect(resolveAndMap(&first, 0x0000_007F_0000_0004, true));
+    try std.testing.expect(resolveAndMap(&second, 0x0000_007F_0000_0004, false));
     reset();
 }
 
@@ -229,16 +228,16 @@ test "demand paging unregisters retired spaces" {
     var iteration: usize = 0;
     while (iteration < MAX_REGIONS + 1) : (iteration += 1) {
         try std.testing.expect(registerForSpace(&space, .{
-            .virt_start = 0xB000_0000,
-            .virt_end_exclusive = 0xB000_1000,
+            .virt_start = 0x0000_007F_0000_0000,
+            .virt_end_exclusive = 0x0000_007F_0000_1000,
             .writable = true,
             .kind = .anonymous_zero,
         }));
         unregisterSpace(&space);
     }
     try std.testing.expect(registerForSpace(&space, .{
-        .virt_start = 0xB000_0000,
-        .virt_end_exclusive = 0xB000_1000,
+        .virt_start = 0x0000_007F_0000_0000,
+        .virt_end_exclusive = 0x0000_007F_0000_1000,
         .writable = true,
         .kind = .anonymous_zero,
     }));
