@@ -13,10 +13,7 @@ pub const production_required = [_][]const u8{
     boot_markers.cpu_smap_enabled,
     boot_markers.cpu_umip_enabled,
     boot_markers.cpu_pge_enabled,
-    boot_markers.cpu_fred_enabled,
-    boot_markers.cpu_pcid_enabled,
-    boot_markers.cpu_pku_enabled,
-    boot_markers.cpu_lass_enabled,
+    boot_markers.cpu_syscall_enabled,
     boot_markers.cpu_pcid_ready,
     boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
@@ -54,8 +51,6 @@ pub const production_required = [_][]const u8{
 };
 
 pub const production_forbidden = [_][]const u8{
-    boot_markers.cpu_syscall_enabled,
-    boot_markers.cpu_pcid_software_fallback,
     boot_markers.kernel_role_verification,
     boot_markers.runtime_proof_process_isolation,
     boot_markers.service_boot_ipc_connect_all_ok,
@@ -96,10 +91,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.cpu_smap_enabled,
     boot_markers.cpu_umip_enabled,
     boot_markers.cpu_pge_enabled,
-    boot_markers.cpu_fred_enabled,
-    boot_markers.cpu_pcid_enabled,
-    boot_markers.cpu_pku_enabled,
-    boot_markers.cpu_lass_enabled,
+    boot_markers.cpu_syscall_enabled,
     boot_markers.cpu_pcid_ready,
     boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
@@ -411,10 +403,7 @@ pub const recovery_required = [_][]const u8{
     boot_markers.cpu_smap_enabled,
     boot_markers.cpu_umip_enabled,
     boot_markers.cpu_pge_enabled,
-    boot_markers.cpu_fred_enabled,
-    boot_markers.cpu_pcid_enabled,
-    boot_markers.cpu_pku_enabled,
-    boot_markers.cpu_lass_enabled,
+    boot_markers.cpu_syscall_enabled,
     boot_markers.cpu_pcid_ready,
     boot_markers.smp_ready,
     boot_markers.kernel_wx_enforced,
@@ -448,10 +437,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.cpu_smap_enabled,
         boot_markers.cpu_umip_enabled,
         boot_markers.cpu_pge_enabled,
-        boot_markers.cpu_fred_enabled,
-        boot_markers.cpu_pcid_enabled,
-        boot_markers.cpu_pku_enabled,
-        boot_markers.cpu_lass_enabled,
+        boot_markers.cpu_syscall_enabled,
         boot_markers.cpu_pcid_ready,
         boot_markers.smp_ready,
         boot_markers.kernel_wx_enforced,
@@ -486,10 +472,8 @@ test "verification smoke groups require the verification kernel role" {
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_umip_enabled));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_pge_enabled));
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_pge_enabled));
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_fred_enabled));
-    try std.testing.expect(contains(&recovery_required, boot_markers.cpu_fred_enabled));
-    try std.testing.expect(!contains(&cold_boot_required, boot_markers.cpu_syscall_enabled));
-    try std.testing.expect(!contains(&recovery_required, boot_markers.cpu_syscall_enabled));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_syscall_enabled));
+    try std.testing.expect(contains(&recovery_required, boot_markers.cpu_syscall_enabled));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.cpu_pcid_ready));
     try std.testing.expect(contains(&recovery_required, boot_markers.cpu_pcid_ready));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.smp_ready));

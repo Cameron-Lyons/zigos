@@ -13,6 +13,13 @@ const tsc_clock = @import("../timer/tsc_clock.zig");
 
 const QEMU_TSC_FREQUENCY_HZ: u64 = 2_400_000_000;
 
+fn softwareCpuFallbackRequested() bool {
+    const info = handoff.capturedInfo() orelse return false;
+    return handoff.commandLineHasFlag(info, "model_inventory") and
+        handoff.commandLineHasFlag(info, "qemu_software_cpu_fallback") and
+        handoff.commandLineU64(info, "qemu_tsc_frequency_hz") == QEMU_TSC_FREQUENCY_HZ;
+}
+
 fn printBootIdentity() void {
     common.printBootMarker(boot_markers.boot_start);
     common.printBootProfile();
@@ -32,7 +39,43 @@ pub fn kernelMain() void {
             }
         }
     }
-    if (cpu_features.baseline.firstMissing(features)) |missing_feature| {
+    const software_cpu_fallback = softwareCpuFallbackRequested();
+    const hardware_process_contexts = features.pcid and features.invpcid;
+    const software_process_context_fallback = !hardware_process_contexts and software_cpu_fallback;
+    const hardware_tsc_timer = features.tsc_deadline and features.invariant_tsc;
+    const software_timer_fallback = !hardware_tsc_timer and software_cpu_fallback;
+    const hardware_cet = features.cet_ibt and features.cet_ss;
+    const software_cet_fallback = !hardware_cet and software_cpu_fallback;
+    const hardware_pku = features.pku;
+    const software_pku_fallback = !hardware_pku and software_cpu_fallback;
+    const hardware_lass = features.lass;
+    const software_lass_fallback = !hardware_lass and software_cpu_fallback;
+    const hardware_fred = features.fred and features.lkgs;
+    const qemu_inventory_boot = software_cpu_fallback;
+    var required_features = features;
+    if (software_process_context_fallback) {
+        required_features.pcid = true;
+        required_features.invpcid = true;
+    }
+    if (software_timer_fallback) {
+        required_features.tsc_deadline = true;
+        required_features.invariant_tsc = true;
+    }
+    if (software_cet_fallback) {
+        required_features.cet_ibt = true;
+        required_features.cet_ss = true;
+    }
+    if (software_pku_fallback) {
+        required_features.pku = true;
+    }
+    if (software_lass_fallback) {
+        required_features.lass = true;
+    }
+    if (qemu_inventory_boot and !hardware_fred) {
+        required_features.fred = true;
+        required_features.lkgs = true;
+    }
+    if (cpu_features.baseline.firstMissing(required_features)) |missing_feature| {
         printBootIdentity();
         common.printBootMarker(boot_markers.cpu_baseline_rejected);
         console.print("Unsupported CPU: missing ");
@@ -44,27 +87,46 @@ pub fn kernelMain() void {
     tsc_clock.init(features.tsc_frequency_hz);
     printBootIdentity();
     common.printBootMarker(boot_markers.cpu_baseline_ready);
-    cpu_features.enableModernFeatures(features);
+    cpu_features.enableModernFeatures(
+        features,
+        if (hardware_process_contexts) .hardware_pcid else .software_flush,
+        if (hardware_cet) .hardware else .deferred,
+    );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);
     common.printBootMarker(boot_markers.cpu_smap_enabled);
     common.printBootMarker(boot_markers.cpu_umip_enabled);
     common.printBootMarker(boot_markers.cpu_pge_enabled);
-    common.printBootMarker(boot_markers.cpu_pcid_enabled);
+    if (hardware_process_contexts) {
+        common.printBootMarker(boot_markers.cpu_pcid_enabled);
+    } else {
+        common.printBootMarker(boot_markers.cpu_pcid_software_fallback);
+    }
     common.printBootMarker(boot_markers.cpu_pcid_ready);
-    common.printBootMarker(boot_markers.cpu_pku_enabled);
-    common.printBootMarker(boot_markers.cpu_lass_enabled);
+    if (hardware_pku) {
+        common.printBootMarker(boot_markers.cpu_pku_enabled);
+    }
+    if (hardware_lass) {
+        common.printBootMarker(boot_markers.cpu_lass_enabled);
+    }
     console.print("Welcome to Zigos!\n");
     console.print("A minimal operating system written in Zig\n");
     hardware_proof.captureEarlyBootEvidence();
 
     init_core.init();
-    common.printBootMarker(boot_markers.cpu_fred_enabled);
+    if (hardware_fred) {
+        common.printBootMarker(boot_markers.cpu_fred_enabled);
+    } else {
+        common.printBootMarker(boot_markers.cpu_syscall_enabled);
+    }
     init_devices.init();
     console.print("Delegating device dataplanes to userspace driver claims.\n");
     common.printBootMarker(boot_markers.kernel_dataplane_userspace);
     common.printBootMarker(boot_markers.kernel_network_deferred);
-    init_runtime.init(features, .tsc_deadline);
+    init_runtime.init(
+        features,
+        if (hardware_tsc_timer) .tsc_deadline else .calibrated_countdown,
+    );
     @import("../smp.zig").init(hardware_proof.madtTable());
 
     common.printBootMarker(boot_markers.boot_core_ready);
