@@ -4,6 +4,7 @@
 .extern isrHandler
 .extern syscall_handler
 .extern zigos_userspace_resume_requested
+.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 
 .equ SYSCALL_CALL_YIELD, 0
@@ -176,7 +177,12 @@ zigos_fred_entry:
     orq $8, %rax
     movq %rax, %cr0
     cmpl $0, zigos_userspace_resume_requested(%rip)
-    jne .fred_userspace_resume
+    je .fred_erets
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    je .fred_erets
+    jmp .fred_userspace_resume
+
+.fred_erets:
     RESTORE_REGISTERS
     addq $56, %rsp
     .byte 0xf2, 0x0f, 0x01, 0xca

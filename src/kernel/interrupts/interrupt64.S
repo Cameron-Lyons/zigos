@@ -2,6 +2,7 @@
 
 .extern isrHandler
 .extern zigos_userspace_resume_requested
+.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 .extern zigos_handle_invalid_interrupt_return
 
@@ -221,8 +222,15 @@ isr_common_stub:
     movq %rax, %cr0
 .after_lazy_ts:
     cmpl $0, zigos_userspace_resume_requested(%rip)
-    jne .userspace_resume
+    je .interrupt_return
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    je .interrupt_return
+    movq FRAME_CS(%r12), %rax
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .interrupt_return
+    jmp .userspace_resume
 
+.interrupt_return:
     RESTORE_REGISTERS
     addq $16, %rsp
     iretq
