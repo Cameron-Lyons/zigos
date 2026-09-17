@@ -12,6 +12,7 @@ const storage = @import("storage_tests.zig");
 const sync = @import("sync_tests.zig");
 const task = @import("task_tests.zig");
 const tools = @import("tools_tests.zig");
+const efi_elf = @import("../../boot/efi_elf.zig");
 
 test "native host root imports domain test suites" {
     std.testing.refAllDecls(core);
@@ -26,4 +27,5 @@ test "native host root imports domain test suites" {
     std.testing.refAllDecls(sync);
     std.testing.refAllDecls(task);
     std.testing.refAllDecls(tools);
+    std.testing.refAllDecls(efi_elf);
 }

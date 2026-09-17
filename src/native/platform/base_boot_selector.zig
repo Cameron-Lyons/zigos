@@ -6,6 +6,7 @@ const immutable_base = @import("immutable_base.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("../storage/storage_service.zig");
+const storage_volume = @import("../storage/storage_volume.zig");
 const volume_backend = @import("../storage/volume/backend.zig");
 
 pub const sector_lba: u64 = 1792;
@@ -417,9 +418,7 @@ fn decodeSlotByte(value: u8) Error!u8 {
 
 fn readRootVolumeSector(buffer: *[sector_size]u8) bool {
     if (builtin.target.os.tag != .freestanding) return false;
-    const root = @import("root");
-    if (!@hasDecl(root, "storage_volume")) return false;
-    const root_volume = root.storage_volume.defaultVolume();
+    const root_volume = storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= sector_lba) return false;
     return root_volume.attached_backend_read(sector_lba, buffer.ptr, buffer.len);
@@ -427,9 +426,7 @@ fn readRootVolumeSector(buffer: *[sector_size]u8) bool {
 
 fn writeRootVolumeSector(buffer: *const [sector_size]u8) bool {
     if (builtin.target.os.tag != .freestanding) return false;
-    const root = @import("root");
-    if (!@hasDecl(root, "storage_volume")) return false;
-    const root_volume = root.storage_volume.defaultVolume();
+    const root_volume = storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     if (root_volume.attached_backend_sector_count <= sector_lba) return false;
     return volume_backend.writeAttachedDurableRange(root_volume, sector_lba, buffer[0..]);

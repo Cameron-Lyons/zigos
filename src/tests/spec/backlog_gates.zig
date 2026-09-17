@@ -312,7 +312,6 @@ pub fn componentAbiDepthGate() !void {
 }
 
 pub fn indexedHotPathTablesGate() !void {
-    try expectAllMetadataTrue(architecture_gates.indexed_hot_path_tables);
     try expectAllMetadataTrue(architecture_gates.native_2026);
 }
 

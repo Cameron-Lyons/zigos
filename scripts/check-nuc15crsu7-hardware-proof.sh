@@ -149,30 +149,12 @@ REQUIRED_ARTIFACT_DIGEST_PATHS=(
   "spec/release_security/threat_model.json"
   "spec/release_security/vulnerability_disclosure.json"
   "zig-out/bin/kernel-zigos-native.elf"
-  "zig-out/bin/userspace-attention-broker.elf"
-  "zig-out/bin/userspace-capture.elf"
-  "zig-out/bin/userspace-compositor.elf"
-  "zig-out/bin/userspace-indexing-search.elf"
-  "zig-out/bin/userspace-media-print.elf"
-  "zig-out/bin/userspace-network-stack.elf"
+  "zig-out/bin/userspace-apps.elf"
+  "zig-out/bin/userspace-drivers.elf"
   "zig-out/bin/userspace-notes.elf"
-  "zig-out/bin/userspace-object-resilience.elf"
-  "zig-out/bin/userspace-package-service.elf"
-  "zig-out/bin/userspace-permission-review.elf"
-  "zig-out/bin/userspace-personal-context.elf"
-  "zig-out/bin/userspace-policy-mediation.elf"
-  "zig-out/bin/userspace-secret-vault.elf"
-  "zig-out/bin/userspace-secure-pasteboard.elf"
-  "zig-out/bin/userspace-sensitive-capture.elf"
-  "zig-out/bin/userspace-service-registry.elf"
-  "zig-out/bin/userspace-session-manager.elf"
-  "zig-out/bin/userspace-storage-driver.elf"
-  "zig-out/bin/userspace-storage-object.elf"
-  "zig-out/bin/userspace-sync-service.elf"
-  "zig-out/bin/userspace-sync.elf"
-  "zig-out/bin/userspace-task-lifecycle.elf"
-  "zig-out/bin/userspace-viewer.elf"
-  "zig-out/bin/userspace-workspace-storage.elf"
+  "zig-out/bin/userspace-privacy.elf"
+  "zig-out/bin/userspace-session.elf"
+  "zig-out/bin/userspace-store.elf"
 )
 
 PRODUCTION_FORBIDDEN_MARKERS=(
@@ -388,7 +370,7 @@ require_digest_manifest_format() {
   printf '%s\n' "${REQUIRED_ARTIFACT_DIGEST_PATHS[@]}" | LC_ALL=C sort > "$expected_paths"
   awk 'NF != 0 { print $2 }' "$ARTIFACT_DIGESTS_PATH" | LC_ALL=C sort > "$actual_paths"
   if ! cmp -s "$expected_paths" "$actual_paths"; then
-    fail "artifact digest file must contain exactly the 33 production targets and no verification or legacy trust artifacts"
+    fail "artifact digest file must contain exactly the 15 production targets and no verification or legacy trust artifacts"
   fi
 }
 

@@ -37,7 +37,7 @@ if ! command -v mcopy >/dev/null 2>&1; then
 fi
 
 rm -rf "$STAGING_DIR"
-mkdir -p "$STAGING_DIR" "$(dirname "$OUTPUT_ISO")"
+mkdir -p "$STAGING_DIR/EFI/BOOT" "$STAGING_DIR/boot" "$(dirname "$OUTPUT_ISO")"
 
 ESP_IMAGE="$STAGING_DIR/esp.img"
 dd if=/dev/zero of="$ESP_IMAGE" bs=1M count=40 status=none
@@ -46,6 +46,9 @@ mmd -i "$ESP_IMAGE" ::/EFI ::/EFI/BOOT ::/boot
 mcopy -i "$ESP_IMAGE" "$EFI_STUB_PATH" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$ESP_IMAGE" "$KERNEL_PATH" ::/boot/kernel.elf
 mcopy -i "$ESP_IMAGE" "$CMDLINE_PATH" ::/boot/cmdline.txt
+cp "$EFI_STUB_PATH" "$STAGING_DIR/EFI/BOOT/BOOTX64.EFI"
+cp "$KERNEL_PATH" "$STAGING_DIR/boot/kernel.elf"
+cp "$CMDLINE_PATH" "$STAGING_DIR/boot/cmdline.txt"
 
 xorriso -as mkisofs \
   -R -J \

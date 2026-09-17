@@ -43,7 +43,10 @@ pub fn specCount() usize {
 }
 
 pub fn find(bundle_id: []const u8) ?*const role_registry.ImageSpec {
-    return role_registry.findForRole(bundle_id);
+    if (role_registry.findForRole(bundle_id)) |spec| return spec;
+    const canonical = production_registry.canonicalProductionBundleId(bundle_id);
+    if (std.mem.eql(u8, canonical, bundle_id)) return null;
+    return role_registry.findForRole(canonical);
 }
 
 pub fn specAt(index: usize) ?*const role_registry.ImageSpec {
@@ -165,18 +168,18 @@ test "boot registry definitions are unique and preload a userspace catalog" {
 
     try std.testing.expectEqual(archive_index.artifacts.len, specCount());
     try std.testing.expectEqual(specCount(), catalog.imageCount());
-    try std.testing.expect(find("zigos.system.session-manager") != null);
+    try std.testing.expect(find("zigos.system.session") != null);
     try std.testing.expect(find("app.notes") != null);
     try std.testing.expectEqualStrings(
-        "zigos.system.storage-object",
+        "zigos.system.store",
         try bundleIdForServiceClass(.storage_object),
     );
-    try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager") != null);
-    try std.testing.expect(catalog.findByBundleId("app.capture") != null);
-    try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.embedsElf());
-    try std.testing.expect(catalog.findByBundleId("app.capture").?.embedsElf());
-    try std.testing.expect(catalog.findByBundleId("zigos.system.session-manager").?.hasTypedContract());
-    try std.testing.expect(catalog.findByBundleId("app.capture").?.hasTypedContract());
+    try std.testing.expect(catalog.findByBundleId("zigos.system.session") != null);
+    try std.testing.expect(catalog.findByBundleId("app.notes") != null);
+    try std.testing.expect(catalog.findByBundleId("zigos.system.session").?.embedsElf());
+    try std.testing.expect(catalog.findByBundleId("app.notes").?.embedsElf());
+    try std.testing.expect(catalog.findByBundleId("zigos.system.session").?.hasTypedContract());
+    try std.testing.expect(catalog.findByBundleId("app.notes").?.hasTypedContract());
     for (active_boot_image_specs) |spec| {
         try std.testing.expect(catalog.findByBundleId(spec.bundleId()).?.bundle_signed);
     }

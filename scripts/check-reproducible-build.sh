@@ -69,30 +69,12 @@ REQUIRED_RELEASE_ARTIFACTS=(
 )
 
 PRODUCTION_USERSPACE_ARTIFACTS=(
-  "zig-out/bin/userspace-attention-broker.elf"
-  "zig-out/bin/userspace-capture.elf"
-  "zig-out/bin/userspace-compositor.elf"
-  "zig-out/bin/userspace-indexing-search.elf"
-  "zig-out/bin/userspace-media-print.elf"
-  "zig-out/bin/userspace-network-stack.elf"
+  "zig-out/bin/userspace-apps.elf"
+  "zig-out/bin/userspace-drivers.elf"
   "zig-out/bin/userspace-notes.elf"
-  "zig-out/bin/userspace-object-resilience.elf"
-  "zig-out/bin/userspace-package-service.elf"
-  "zig-out/bin/userspace-permission-review.elf"
-  "zig-out/bin/userspace-personal-context.elf"
-  "zig-out/bin/userspace-policy-mediation.elf"
-  "zig-out/bin/userspace-secret-vault.elf"
-  "zig-out/bin/userspace-secure-pasteboard.elf"
-  "zig-out/bin/userspace-sensitive-capture.elf"
-  "zig-out/bin/userspace-service-registry.elf"
-  "zig-out/bin/userspace-session-manager.elf"
-  "zig-out/bin/userspace-storage-driver.elf"
-  "zig-out/bin/userspace-storage-object.elf"
-  "zig-out/bin/userspace-sync-service.elf"
-  "zig-out/bin/userspace-sync.elf"
-  "zig-out/bin/userspace-task-lifecycle.elf"
-  "zig-out/bin/userspace-viewer.elf"
-  "zig-out/bin/userspace-workspace-storage.elf"
+  "zig-out/bin/userspace-privacy.elf"
+  "zig-out/bin/userspace-session.elf"
+  "zig-out/bin/userspace-store.elf"
 )
 
 json_escape() {
@@ -156,12 +138,12 @@ validate_release_catalog() {
     printf 'Reproducible-build catalog must contain exactly 9 fixed production artifacts.\n' >&2
     return 1
   fi
-  if [ "${#PRODUCTION_USERSPACE_ARTIFACTS[@]}" -ne 24 ]; then
-    printf 'Reproducible-build catalog must contain exactly 24 production userspace artifacts.\n' >&2
+  if [ "${#PRODUCTION_USERSPACE_ARTIFACTS[@]}" -ne 6 ]; then
+    printf 'Reproducible-build catalog must contain exactly 6 production userspace artifacts.\n' >&2
     return 1
   fi
-  if [ "${#artifacts[@]}" -ne 33 ]; then
-    printf 'Reproducible-build catalog must contain exactly 33 production artifacts.\n' >&2
+  if [ "${#artifacts[@]}" -ne 15 ]; then
+    printf 'Reproducible-build catalog must contain exactly 15 production artifacts.\n' >&2
     return 1
   fi
 

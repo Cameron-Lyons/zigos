@@ -13,13 +13,22 @@ if [ ! -s "$IMAGE_PATH" ]; then
   exit 1
 fi
 
-header="$(dd if="$IMAGE_PATH" bs=2 count=1 status=none | od -An -tx1)"
+hex_bytes() {
+  local skip="$1"
+  local count="$2"
+  dd if="$IMAGE_PATH" bs=1 skip="$skip" count="$count" status=none |
+    od -An -tx1 |
+    tr -s '[:space:]' ' ' |
+    sed 's/^ //;s/ $//'
+}
+
+header="$(hex_bytes 0 2)"
 if ! grep -Fq "4d 5a" <<<"$header"; then
   echo "EFI image is missing an MZ header: $IMAGE_PATH" >&2
   exit 1
 fi
 
-pe_offset_hex="$(dd if="$IMAGE_PATH" bs=1 skip=60 count=4 status=none | od -An -tx1)"
+pe_offset_hex="$(hex_bytes 60 4)"
 pe_offset=0
 index=0
 for byte in $pe_offset_hex; do
@@ -28,7 +37,7 @@ for byte in $pe_offset_hex; do
   index=$((index + 1))
 done
 
-pe_magic="$(dd if="$IMAGE_PATH" bs=1 skip="$pe_offset" count=4 status=none | od -An -tx1)"
+pe_magic="$(hex_bytes "$pe_offset" 4)"
 if ! grep -Fq "50 45 00 00" <<<"$pe_magic"; then
   echo "EFI image is missing a PE/COFF header: $IMAGE_PATH" >&2
   exit 1

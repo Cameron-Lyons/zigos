@@ -456,6 +456,8 @@ test "compositor display framebuffer renders windows switching recovery and perm
     @memcpy(presentation.text[0..11], "hello world");
     presentation.text_length = 11;
     presentation.cursor = 11;
+    presentation.buffer_object_id = 31;
+    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
     _ = try session.presentSurface(app_task, &presentation);
     try display.renderSession(&session);
     try expectDisplayContains(&display, "surface_state model=notes revision=2");

@@ -187,11 +187,7 @@ fn expectRootKernelCallerDenied(
             .service_port = true,
         },
     };
-    const result = syscall_surface.dispatch(
-        kernel_port,
-        0,
-        tick,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(kernel_port, 0, tick, request.header.operation, @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointCreateResponse),
     );

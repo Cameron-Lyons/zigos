@@ -42,6 +42,7 @@ pub const BUILDS_WORKSPACE_INDEXES_DURING_REPLAY = true;
 pub const SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD = true;
 pub const USES_INCREMENTAL_LIVE_INDEX = volume_layout.USES_INCREMENTAL_LIVE_INDEX;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = volume_layout.USES_CHECKPOINT_ONLY_COLD_LOAD;
+pub const COMPACTS_IN_BACKGROUND = volume_layout.COMPACTS_IN_BACKGROUND;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 const SignerTextPool = [SIGNER_TEXT_POOL_BYTES]u8;

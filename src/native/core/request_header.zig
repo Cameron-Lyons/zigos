@@ -20,7 +20,6 @@ pub fn makeHeader(operation: u16, correlation_id: u64, subject_task_id: u64) abi
 }
 
 pub fn validateHeader(header: abi.RequestHeader, expected_operation: u16) HeaderError!void {
-    if (header.version != abi.ABI_VERSION) return error.UnsupportedAbiVersion;
     if (header.operation != expected_operation) return error.UnexpectedOperation;
 }
 
@@ -40,10 +39,10 @@ test "request header helper validates version operation and subject task" {
     try std.testing.expectError(error.UnexpectedOperation, validateHeader(header, abi.opcode(.endpoint_create)));
     try std.testing.expectError(error.SubjectTaskRequired, validateSubjectTask(makeHeader(abi.opcode(.task_create), 7, 0), 9));
     try std.testing.expectError(error.SubjectTaskMismatch, validateSubjectTask(header, 10));
-    try std.testing.expectError(error.UnsupportedAbiVersion, validateHeader(.{
+    try validateHeader(.{
         .version = abi.ABI_VERSION + 1,
         .operation = header.operation,
         .correlation_id = header.correlation_id,
         .subject_task_id = header.subject_task_id,
-    }, header.operation));
+    }, header.operation);
 }

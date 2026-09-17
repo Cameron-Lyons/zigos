@@ -12,6 +12,11 @@ const TimeQueryRequest = extern struct {
     authority_capability_id: u64,
 };
 
+const WaitRequest = extern struct {
+    header: abi.RequestHeader,
+    authority_capability_id: u64,
+};
+
 const ResourceQueryRequest = extern struct {
     header: abi.RequestHeader,
     authority_capability_id: u64,
@@ -72,7 +77,13 @@ const SurfacePresentRequest = struct {
     header: abi.RequestHeader,
     presentation_capability_id: u64,
     presenter_task_id: u64,
-    presentation: abi.SurfacePresentation,
+    surface_id: u64,
+    fence: u64,
+    buffer_object_id: u64,
+    buffer_offset: u32,
+    buffer_bytes: u32,
+    model_kind: u8,
+    _reserved: [7]u8 = [_]u8{0} ** 7,
 };
 
 const INPUT_EVENTS_PER_DISPATCH: usize = 8;
@@ -111,6 +122,7 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
         }
 
         extern fn syscall3_asm(
+            opcode: usize,
             request_addr: usize,
             response_addr: usize,
             response_len: usize,
@@ -124,13 +136,13 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
         extern fn zigos_probe_nx(target: usize) callconv(.c) void;
         extern fn zigos_probe_gp() callconv(.c) void;
 
-        fn call(request_addr: usize, response_addr: usize, response_len: usize) struct {
+        fn call(opcode: abi.NativeOperation, request_addr: usize, response_addr: usize, response_len: usize) struct {
             status: abi.SyscallStatus,
             bytes_written: u32,
             denial_reason: abi.DenialReason,
         } {
             var outcome = Outcome{ .status = @intFromEnum(abi.SyscallStatus.internal_error), .bytes_written = 0, .denial_reason = 0 };
-            _ = syscall3_asm(request_addr, response_addr, response_len, &outcome);
+            _ = syscall3_asm(@intFromEnum(opcode), request_addr, response_addr, response_len, &outcome);
             return .{
                 .status = @enumFromInt(outcome.status),
                 .bytes_written = outcome.bytes_written,
@@ -142,11 +154,12 @@ else
     struct {
         fn zigos_probe_gp() void {}
 
-        fn call(_: usize, _: usize, _: usize) struct {
+        fn call(opcode: abi.NativeOperation, _: usize, _: usize, _: usize) struct {
             status: abi.SyscallStatus,
             bytes_written: u32,
             denial_reason: abi.DenialReason,
         } {
+            _ = opcode;
             return .{ .status = .unavailable, .bytes_written = 0, .denial_reason = .none };
         }
     };
@@ -390,6 +403,7 @@ fn runGeneralProtectionIsolationProbe() void {
 fn invalidSyscallPointerStatus() abi.SyscallStatus {
     var response = abi.TimeQueryResponse{ .now_ticks = 0 };
     return freestanding_syscall.call(
+        .time_query,
         mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR,
         @intFromPtr(&response),
         @sizeOf(abi.TimeQueryResponse),
@@ -405,6 +419,18 @@ fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.Resource
     if (trapCall(&request, &response) != .success) return false;
     mask.time_query = true;
     return true;
+}
+
+fn parkUntilEvent() void {
+    const authority = zigos_userspace_bootstrap.authority_capability_id;
+    const task_id = zigos_userspace_bootstrap.task_id;
+    if (authority == 0 or task_id == 0) return;
+    var response = std.mem.zeroes(abi.BoolResponse);
+    var request = WaitRequest{
+        .header = makeHeader(.wait, nextCorrelationId(), task_id),
+        .authority_capability_id = authority,
+    };
+    _ = trapCall(&request, &response);
 }
 
 fn queryResource(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
@@ -447,6 +473,7 @@ fn endpointCreate(
         .flags = flags,
     };
     const result = freestanding_syscall.call(
+        .endpoint_create,
         @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(@TypeOf(response)),
@@ -531,7 +558,12 @@ fn surfacePresent(
         .header = makeHeader(.surface_present, nextCorrelationId(), task_id),
         .presentation_capability_id = presentation_capability_id,
         .presenter_task_id = task_id,
-        .presentation = presentation,
+        .surface_id = presentation.surface_id,
+        .fence = presentation.revision,
+        .buffer_object_id = presentation.buffer_object_id,
+        .buffer_offset = presentation.buffer_offset,
+        .buffer_bytes = presentation.buffer_bytes,
+        .model_kind = presentation.model_kind,
     };
     const status = trapCall(&request, &response);
     return .{
@@ -626,7 +658,10 @@ fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime con
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
             const input = drainFocusedInput();
             _ = presentUiState(&zigos_userspace_bootstrap, &ui_state);
-            break :wait if (input.exhausted) .wait_for_event else .runnable;
+            break :wait if (input.exhausted) blk: {
+                parkUntilEvent();
+                break :blk .wait_for_event;
+            } else .runnable;
         } else .runnable;
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
@@ -665,6 +700,7 @@ fn yieldCounter(value: u32, disposition: mailbox.YieldDisposition, ui_revision: 
 
 fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
     return freestanding_syscall.call(
+        @enumFromInt(request.header.operation),
         @intFromPtr(request),
         @intFromPtr(response),
         @sizeOf(@TypeOf(response.*)),
@@ -672,7 +708,7 @@ fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
 }
 
 fn trapCallNoResponse(request: anytype) abi.SyscallStatus {
-    return freestanding_syscall.call(@intFromPtr(request), 0, 0).status;
+    return freestanding_syscall.call(@enumFromInt(request.header.operation), @intFromPtr(request), 0, 0).status;
 }
 
 fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {

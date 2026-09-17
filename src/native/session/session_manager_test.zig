@@ -116,9 +116,9 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expect(review_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_service_task.runsAsUserspaceProcess());
-    try std.testing.expectEqualStrings("zigos.system.session-manager", session_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.session", session_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.drivers", storage_driver_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.store", storage_service_task.launchBundleIdSlice());
     try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(session_task.id, 0) == null);
     const review_surface_capability_id = session_manager.system().surfacePresentationCapabilityForTask(review_task.id, 0).?;
     const review_surface_capability = try session_manager.system().capabilityTablePtr().requireUsable(review_surface_capability_id, 0);
@@ -291,10 +291,10 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expect(notes_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_service_task.runsAsUserspaceProcess());
-    try std.testing.expectEqualStrings("zigos.system.session-manager", session_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.session", session_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("app.notes", notes_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.drivers", storage_driver_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.store", storage_service_task.launchBundleIdSlice());
     try std.testing.expectEqual(storage_driver_task.id, driver_directory.findByClass(.storage_controller).?.owner_task_id);
     try std.testing.expect(storage_driver_task.id != storage_service_task.id);
     const notes_review = compositor.findWindowForTaskBundleConst(notes_task.id, "app.notes").?;

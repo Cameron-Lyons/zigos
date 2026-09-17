@@ -1,22 +1,18 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const object_store = @import("object_store.zig");
-const root = @import("root");
 const common = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/common.zig")
 else
     struct {
         pub fn printBootMarker(_: []const u8) void {}
     };
-const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
-    root.storage_volume
-else
-    @import("storage_volume.zig");
+const storage_volume = @import("storage_volume.zig");
 const workspace = @import("workspace.zig");
 
 const MAX_CHECKPOINT_ATTEMPTS: u8 = 2;
 
-const shares_root_volume = builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume");
+const shares_root_volume = builtin.target.os.tag == .freestanding;
 const CheckpointVolume = if (shares_root_volume) void else storage_volume.Volume;
 
 pub const CheckpointStore = struct {

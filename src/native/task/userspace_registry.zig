@@ -44,6 +44,7 @@ pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 64;
 pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 6;
 pub const COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP = true;
 pub const SHARES_GROUP_PAGE_TABLES = true;
+pub const USES_PKU_WITHIN_GROUP = true;
 
 pub const AddressSpaceGroup = enum(u8) {
     session,
@@ -249,33 +250,44 @@ pub fn standaloneBuildImageSpec(comptime spec: StandaloneImageSpec) BuildImageSp
 }
 
 pub const production_build_image_specs = [_]BuildImageSpec{
-    serviceBuildImageSpec(.session_manager, .session_manager),
-    serviceBuildImageSpec(.permission_review_ui, .service_component),
-    serviceBuildImageSpec(.service_registry, .service_component),
     standaloneBuildImageSpec(.{
-        .bundle_id = "zigos.system.workspace-storage",
-        .artifact_name = "userspace-workspace-storage.elf",
-        .display_name = "Workspace Storage",
-        .label = "workspace-storage",
+        .bundle_id = "zigos.system.session",
+        .artifact_name = "userspace-session.elf",
+        .source_path = "src/userspace/service_main.zig",
+        .display_name = "Session",
+        .label = "session",
+        .entry = "zigos.session.manager",
+        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.session_manager)},
+        .component_class = .session_manager,
+        .role_tag = 0xA101,
+        .heartbeat_increment = 1,
+        .contract_flags = FLAG_SYSTEM_BUNDLE,
+    }),
+    standaloneBuildImageSpec(.{
+        .bundle_id = "zigos.system.drivers",
+        .artifact_name = "userspace-drivers.elf",
+        .source_path = "src/userspace/service_main.zig",
+        .display_name = "Drivers",
+        .label = "drivers",
+        .entry = "zigos.driver.storage",
+        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.network_policy)},
+        .component_class = .service_component,
+        .role_tag = 0xA10D,
+        .heartbeat_increment = 13,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY | FLAG_NETWORK_BOUNDARY,
+    }),
+    standaloneBuildImageSpec(.{
+        .bundle_id = "zigos.system.store",
+        .artifact_name = "userspace-store.elf",
+        .source_path = "src/userspace/service_main.zig",
+        .display_name = "Object Store",
+        .label = "store",
         .entry = "zigos.bootstrap.workspace",
+        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
         .component_class = .service_component,
         .role_tag = 0xA103,
         .heartbeat_increment = 3,
         .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_STORAGE_BOUNDARY,
-    }),
-    standaloneBuildImageSpec(.{
-        .bundle_id = "app.viewer",
-        .artifact_name = "userspace-viewer.elf",
-        .display_name = "Viewer",
-        .publisher = .development,
-        .label = "viewer",
-        .entry = "app.viewer",
-        .provided_interfaces = &.{.{ .name = "zigos.viewer.document" }},
-        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
-        .assets = &.{.{ .path = "assets/viewer/icon.svg", .content_type = "image/svg+xml" }},
-        .role_tag = 0xA106,
-        .heartbeat_increment = 6,
-        .contract_flags = FLAG_OWNS_UI_SURFACE,
     }),
     standaloneBuildImageSpec(.{
         .bundle_id = "app.notes",
@@ -293,59 +305,32 @@ pub const production_build_image_specs = [_]BuildImageSpec{
         .contract_flags = FLAG_OWNS_UI_SURFACE,
     }),
     standaloneBuildImageSpec(.{
-        .bundle_id = "app.sync",
-        .artifact_name = "userspace-sync.elf",
-        .display_name = "Sync",
-        .publisher = .development,
-        .label = "sync",
-        .entry = "app.sync",
-        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.sync_replication)},
-        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
-        .assets = &.{.{ .path = "assets/sync/icon.svg", .content_type = "image/svg+xml" }},
-        .role_tag = 0xA108,
-        .heartbeat_increment = 8,
-        .contract_flags = FLAG_BACKGROUND_ELIGIBLE,
+        .bundle_id = "zigos.system.privacy",
+        .artifact_name = "userspace-privacy.elf",
+        .source_path = "src/userspace/service_main.zig",
+        .display_name = "Privacy",
+        .label = "privacy",
+        .entry = "zigos.secret.vault",
+        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.secret_vault)},
+        .component_class = .service_component,
+        .role_tag = 0xA115,
+        .heartbeat_increment = 21,
+        .contract_flags = FLAG_SYSTEM_BUNDLE,
     }),
     standaloneBuildImageSpec(.{
-        .bundle_id = "app.capture",
-        .artifact_name = "userspace-capture.elf",
-        .display_name = "Capture",
+        .bundle_id = "zigos.system.apps",
+        .artifact_name = "userspace-apps.elf",
+        .display_name = "Apps",
         .publisher = .development,
-        .label = "capture",
-        .entry = "app.capture",
-        .provided_interfaces = &.{.{ .name = "zigos.capture.session" }},
-        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.media_print)},
-        .assets = &.{.{ .path = "assets/capture/icon.svg", .content_type = "image/svg+xml" }},
-        .role_tag = 0xA109,
-        .heartbeat_increment = 9,
+        .label = "apps",
+        .entry = "app.viewer",
+        .provided_interfaces = &.{.{ .name = "zigos.viewer.document" }},
+        .consumed_interfaces = &.{component_abi_schema.interfaceDecl(.object_workspace)},
+        .assets = &.{.{ .path = "assets/viewer/icon.svg", .content_type = "image/svg+xml" }},
+        .role_tag = 0xA106,
+        .heartbeat_increment = 6,
         .contract_flags = FLAG_OWNS_UI_SURFACE,
     }),
-    serviceBuildImageSpec(.policy_mediation, .service_component),
-    serviceBuildImageSpec(.network_stack, .service_component),
-    serviceBuildImageSpec(.storage_object, .service_component),
-    standaloneBuildImageSpec(.{
-        .bundle_id = "zigos.system.storage-driver",
-        .artifact_name = "userspace-storage-driver.elf",
-        .display_name = "Storage Driver",
-        .label = "storage-driver",
-        .entry = "zigos.driver.storage",
-        .component_class = .service_component,
-        .role_tag = 0xA10D,
-        .heartbeat_increment = 13,
-        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY,
-    }),
-    serviceBuildImageSpec(.package_install_update, .service_component),
-    serviceBuildImageSpec(.compositor_ui_session, .service_component),
-    serviceBuildImageSpec(.indexing_search, .service_component),
-    serviceBuildImageSpec(.personal_context, .service_component),
-    serviceBuildImageSpec(.sync_replication, .service_component),
-    serviceBuildImageSpec(.media_print_helpers, .service_component),
-    serviceBuildImageSpec(.attention_broker, .service_component),
-    serviceBuildImageSpec(.task_lifecycle, .service_component),
-    serviceBuildImageSpec(.sensitive_capture, .service_component),
-    serviceBuildImageSpec(.secure_pasteboard, .service_component),
-    serviceBuildImageSpec(.object_resilience, .service_component),
-    serviceBuildImageSpec(.secret_vault, .service_component),
 };
 
 pub const production_boot_image_specs = runtimeImageSpecs(production_build_image_specs);
@@ -394,8 +379,8 @@ fn optionalManifestDecls(comptime Decl: type, decl: ?*const [1]Decl) []const Dec
 pub const role_boot_image_specs = production_boot_image_specs;
 
 comptime {
-    if (production_boot_image_specs.len != 24) {
-        @compileError("production userspace catalog must contain exactly 24 images");
+    if (production_boot_image_specs.len != 6) {
+        @compileError("production userspace catalog must contain exactly 6 images");
     }
     if (std.meta.fields(AddressSpaceGroup).len != PRODUCTION_ADDRESS_SPACE_COUNT) {
         @compileError("production address-space groups must match the 2026 process count");
@@ -502,17 +487,39 @@ pub fn addressSpaceGroupForBundle(bundle_id: []const u8) ?AddressSpaceGroup {
         if (spec.service_class) |class| return addressSpaceGroupForServiceClass(class);
         return standaloneAddressSpaceGroup(bundle_id);
     }
-    return null;
+    return standaloneAddressSpaceGroup(bundle_id);
+}
+
+pub fn canonicalProductionBundleId(bundle_id: []const u8) []const u8 {
+    const group = addressSpaceGroupForBundle(bundle_id) orelse return bundle_id;
+    return production_boot_image_specs[@intFromEnum(group)].bundleId();
 }
 
 fn standaloneAddressSpaceGroup(bundle_id: []const u8) ?AddressSpaceGroup {
-    if (std.mem.eql(u8, bundle_id, "zigos.system.workspace-storage") or
+    if (std.mem.eql(u8, bundle_id, "zigos.system.store") or
+        std.mem.eql(u8, bundle_id, "zigos.system.workspace-storage") or
+        std.mem.eql(u8, bundle_id, "zigos.system.storage-object") or
+        std.mem.eql(u8, bundle_id, "zigos.system.sync-service") or
         std.mem.eql(u8, bundle_id, "app.sync"))
         return .store;
-    if (std.mem.eql(u8, bundle_id, "zigos.system.storage-driver")) return .drivers;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.drivers") or
+        std.mem.eql(u8, bundle_id, "zigos.system.storage-driver") or
+        std.mem.eql(u8, bundle_id, "zigos.system.network-stack") or
+        std.mem.eql(u8, bundle_id, "zigos.system.compositor"))
+        return .drivers;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.session") or
+        std.mem.eql(u8, bundle_id, "zigos.system.session-manager") or
+        std.mem.eql(u8, bundle_id, "zigos.system.service-registry"))
+        return .session;
     if (std.mem.eql(u8, bundle_id, "app.notes")) return .notes;
-    if (std.mem.eql(u8, bundle_id, "app.viewer")) return .apps;
-    if (std.mem.eql(u8, bundle_id, "app.capture")) return .privacy;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.privacy") or
+        std.mem.eql(u8, bundle_id, "zigos.system.secret-vault") or
+        std.mem.eql(u8, bundle_id, "app.capture"))
+        return .privacy;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.apps") or
+        std.mem.eql(u8, bundle_id, "zigos.system.media-print") or
+        std.mem.eql(u8, bundle_id, "app.viewer"))
+        return .apps;
     return null;
 }
 
@@ -537,6 +544,11 @@ pub fn imageBaseForBundle(bundle_id: []const u8) u64 {
 pub fn stackTopForBundle(bundle_id: []const u8) u64 {
     const slot = imageSlotInGroup(bundle_id) orelse return userspace_layout.default_stack_top;
     return userspace_layout.stackTopForSlot(slot);
+}
+
+pub fn protectionKeyForBundle(bundle_id: []const u8) u4 {
+    const slot = imageSlotInGroup(bundle_id) orelse return 1;
+    return @intCast((slot % 15) + 1);
 }
 
 pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
@@ -584,9 +596,11 @@ fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const
 
 fn buildServiceClassSlots() ServiceClassSlots {
     var slots = emptyServiceClassSlots();
-    for (production_build_image_specs, 0..) |spec, spec_index| {
-        const class = spec.service_class orelse continue;
-        setServiceClassSlot(&slots, class, spec_index);
+    inline for (std.meta.fields(contract.ServiceClass)) |field| {
+        const class: contract.ServiceClass = @enumFromInt(field.value);
+        if (addressSpaceGroupForServiceClass(class)) |group| {
+            setServiceClassSlot(&slots, class, @intFromEnum(group));
+        }
     }
     return slots;
 }
@@ -677,60 +691,62 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(findByServiceClass(.task_runtime) == null);
 }
 
-test "core platform services use the parameterized userspace service entrypoint" {
+test "core platform services share six address-space images" {
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.storage_object).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.storage, buildImageByServiceClass(.storage_object).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.sync_replication).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.sync, buildImageByServiceClass(.sync_replication).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.network_stack).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.network, buildImageByServiceClass(.network_stack).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.package_install_update).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.package, buildImageByServiceClass(.package_install_update).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.compositor_ui_session).?.source_path);
-    try std.testing.expectEqual(userspace_mailbox.ServiceKind.compositor, buildImageByServiceClass(.compositor_ui_session).?.service_kind);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.attention_broker).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.task_lifecycle).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.sensitive_capture).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.secure_pasteboard).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.object_resilience).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.secret_vault).?.source_path);
-    try std.testing.expectEqualStrings("src/userspace/component_main.zig", buildImageByServiceClass(.policy_mediation).?.source_path);
+    try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.policy_mediation).?.source_path);
+    try std.testing.expectEqualStrings("zigos.system.store", findByServiceClass(.storage_object).?.bundleId());
+    try std.testing.expectEqualStrings("zigos.system.drivers", findByServiceClass(.network_stack).?.bundleId());
+    try std.testing.expectEqualStrings("zigos.system.session", findByServiceClass(.policy_mediation).?.bundleId());
+    try std.testing.expectEqualStrings("zigos.system.privacy", findByServiceClass(.secret_vault).?.bundleId());
 }
 
 test "compact runtime manifest declarations preserve populated and empty collections" {
-    const viewer = findProduction("app.viewer") orelse return error.MissingViewerImage;
-    try std.testing.expectEqualStrings("app.viewer", viewer.bundleId());
-    try std.testing.expectEqualStrings("Viewer", viewer.displayName());
-    try std.testing.expectEqualStrings("viewer", viewer.componentLabel());
-    try std.testing.expectEqualStrings("app.viewer", viewer.entryName());
-    try std.testing.expectEqual(Publisher.development, viewer.publisher());
-    try std.testing.expectEqual(manifest.UpdateChannel.stable, viewer.updateChannel());
-    try std.testing.expectEqual(ComponentClass.app_component, viewer.componentClass());
-    try std.testing.expectEqual(@as(u32, 0xA106), viewer.roleTag());
-    try std.testing.expectEqual(@as(u32, 6), viewer.heartbeatIncrement());
-    try std.testing.expectEqual(@as(u32, FLAG_OWNS_UI_SURFACE), viewer.contractFlags());
-    try std.testing.expectEqual(@as(usize, 1), viewer.providedInterfaces().len);
-    try std.testing.expectEqualStrings("zigos.viewer.document", viewer.providedInterfaces()[0].name);
-    try std.testing.expectEqual(@as(usize, 1), viewer.consumedInterfaces().len);
-    try std.testing.expectEqualStrings("zigos.object.workspace", viewer.consumedInterfaces()[0].name);
-    try std.testing.expectEqual(@as(usize, 1), viewer.assets().len);
-    try std.testing.expectEqualStrings("assets/viewer/icon.svg", viewer.assets()[0].path);
+    const notes = findProduction("app.notes") orelse return error.MissingNotesImage;
+    try std.testing.expectEqualStrings("app.notes", notes.bundleId());
+    try std.testing.expectEqualStrings("Notes", notes.displayName());
+    try std.testing.expectEqualStrings("notes", notes.componentLabel());
+    try std.testing.expectEqualStrings("app.notes", notes.entryName());
+    try std.testing.expectEqual(Publisher.development, notes.publisher());
+    try std.testing.expectEqual(manifest.UpdateChannel.beta, notes.updateChannel());
+    try std.testing.expectEqual(ComponentClass.app_component, notes.componentClass());
+    try std.testing.expectEqual(@as(u32, 0xA107), notes.roleTag());
+    try std.testing.expectEqual(@as(u32, 7), notes.heartbeatIncrement());
+    try std.testing.expectEqual(@as(u32, FLAG_OWNS_UI_SURFACE), notes.contractFlags());
+    try std.testing.expectEqual(@as(usize, 1), notes.providedInterfaces().len);
+    try std.testing.expectEqualStrings("zigos.workspace.document", notes.providedInterfaces()[0].name);
+    try std.testing.expectEqual(@as(usize, 1), notes.consumedInterfaces().len);
+    try std.testing.expectEqualStrings("zigos.object.workspace", notes.consumedInterfaces()[0].name);
+    try std.testing.expectEqual(@as(usize, 1), notes.assets().len);
+    try std.testing.expectEqualStrings("assets/notes/icon.svg", notes.assets()[0].path);
 
     const network_service = findByServiceClass(.network_stack) orelse return error.MissingNetworkServiceImage;
+    try std.testing.expectEqualStrings("zigos.system.drivers", network_service.bundleId());
     try std.testing.expectEqual(@as(usize, 1), network_service.providedInterfaces().len);
-    try std.testing.expectEqual(@as(usize, 0), network_service.consumedInterfaces().len);
-    try std.testing.expectEqual(@as(usize, 0), network_service.assets().len);
 }
 
 test "production userspace registry contains exactly the production boot catalog" {
-    try std.testing.expectEqual(@as(usize, 24), production_boot_image_specs.len);
+    try std.testing.expectEqual(@as(usize, 6), production_boot_image_specs.len);
     try std.testing.expectEqual(@as(usize, 6), PRODUCTION_ADDRESS_SPACE_COUNT);
     try std.testing.expect(COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP);
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
+    try std.testing.expect(USES_PKU_WITHIN_GROUP);
     try std.testing.expectEqual(AddressSpaceGroup.store, addressSpaceGroupForServiceClass(.storage_object).?);
     try std.testing.expectEqual(AddressSpaceGroup.session, addressSpaceGroupForServiceClass(.policy_mediation).?);
     try std.testing.expectEqual(AddressSpaceGroup.notes, addressSpaceGroupForBundle("app.notes").?);
-    try std.testing.expectEqual(AddressSpaceGroup.drivers, addressSpaceGroupForBundle("zigos.system.storage-driver").?);
+    try std.testing.expectEqual(AddressSpaceGroup.drivers, addressSpaceGroupForBundle("zigos.system.drivers").?);
+    try std.testing.expectEqualStrings("zigos.system.apps", canonicalProductionBundleId("app.viewer"));
+    try std.testing.expectEqualStrings("zigos.system.store", canonicalProductionBundleId("app.sync"));
+    try std.testing.expectEqualStrings("zigos.system.privacy", canonicalProductionBundleId("app.capture"));
 
     var occupied = [_]u16{0} ** PRODUCTION_ADDRESS_SPACE_COUNT;
     for (production_build_image_specs) |spec| {
@@ -743,6 +759,7 @@ test "production userspace registry contains exactly the production boot catalog
         occupied[occupied_index] |= bit;
         try std.testing.expectEqual(userspace_layout.imageBaseForSlot(slot), imageBaseForBundle(bundle_id));
         try std.testing.expectEqual(userspace_layout.stackTopForSlot(slot), stackTopForBundle(bundle_id));
+        try std.testing.expectEqual(@as(u4, @intCast((slot % 15) + 1)), protectionKeyForBundle(bundle_id));
     }
 
     for (production_boot_image_specs) |spec| {

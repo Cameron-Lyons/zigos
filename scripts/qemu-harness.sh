@@ -24,6 +24,29 @@ qemu_harness_accelerator() {
   fi
 }
 
+qemu_harness_adapt_tcg_cpu_model() {
+  local model="${1:?CPU model required}"
+  local qemu_binary
+  local help=""
+
+  qemu_binary="$(qemu_harness_binary)"
+  help="$("$qemu_binary" -device max-x86_64-cpu,help 2>&1 || true)"
+  if [ -z "$help" ]; then
+    printf '%s\n' "$model"
+    return
+  fi
+
+  if ! grep -Fq '  cet=<bool>' <<<"$help"; then
+    if grep -Fq '  cet-ibt=<bool>' <<<"$help"; then
+      model="${model/+cet,/+cet-ibt,+cet-ss,}"
+    fi
+  fi
+  if ! grep -Fq '  lass=<bool>' <<<"$help"; then
+    model="${model/+lass,/}"
+  fi
+  printf '%s\n' "$model"
+}
+
 qemu_harness_cpu_model() {
   local accelerator
   if [ -n "${QEMU_CPU_MODEL:-}" ]; then
@@ -37,7 +60,8 @@ qemu_harness_cpu_model() {
     return
   fi
 
-    printf '%s\n' "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lkgs,+lass,tsc-frequency=2400000000"
+  qemu_harness_adapt_tcg_cpu_model \
+    "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lkgs,+lass,tsc-frequency=2400000000"
 }
 
 qemu_harness_profile_memory() {

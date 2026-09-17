@@ -24,9 +24,7 @@ pub fn run() noreturn {
 
         if (pending.xhci or pending.timer) {
             const bound_task_id = xhci_driver_task.boundTaskId();
-            if (bound_task_id == 0) {
-                _ = xhci_driver_task.dispatch();
-            } else {
+            if (bound_task_id != 0) {
                 _ = session_manager.wakeUserspaceTask(bound_task_id, now_ticks);
             }
         }

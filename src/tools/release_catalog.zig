@@ -13,30 +13,12 @@ pub const production_base_target_paths = [_][]const u8{
 };
 
 pub const production_userspace_target_paths = [_][]const u8{
-    "zig-out/bin/userspace-attention-broker.elf",
-    "zig-out/bin/userspace-capture.elf",
-    "zig-out/bin/userspace-compositor.elf",
-    "zig-out/bin/userspace-indexing-search.elf",
-    "zig-out/bin/userspace-media-print.elf",
-    "zig-out/bin/userspace-network-stack.elf",
+    "zig-out/bin/userspace-apps.elf",
+    "zig-out/bin/userspace-drivers.elf",
     "zig-out/bin/userspace-notes.elf",
-    "zig-out/bin/userspace-object-resilience.elf",
-    "zig-out/bin/userspace-package-service.elf",
-    "zig-out/bin/userspace-permission-review.elf",
-    "zig-out/bin/userspace-personal-context.elf",
-    "zig-out/bin/userspace-policy-mediation.elf",
-    "zig-out/bin/userspace-secret-vault.elf",
-    "zig-out/bin/userspace-secure-pasteboard.elf",
-    "zig-out/bin/userspace-sensitive-capture.elf",
-    "zig-out/bin/userspace-service-registry.elf",
-    "zig-out/bin/userspace-session-manager.elf",
-    "zig-out/bin/userspace-storage-driver.elf",
-    "zig-out/bin/userspace-storage-object.elf",
-    "zig-out/bin/userspace-sync-service.elf",
-    "zig-out/bin/userspace-sync.elf",
-    "zig-out/bin/userspace-task-lifecycle.elf",
-    "zig-out/bin/userspace-viewer.elf",
-    "zig-out/bin/userspace-workspace-storage.elf",
+    "zig-out/bin/userspace-privacy.elf",
+    "zig-out/bin/userspace-session.elf",
+    "zig-out/bin/userspace-store.elf",
 };
 
 pub const production_target_paths = sortedConcatenation(
@@ -231,11 +213,11 @@ comptime {
     if (production_base_target_paths.len != 9) {
         @compileError("production release catalog must contain exactly nine fixed targets");
     }
-    if (production_userspace_target_paths.len != 24) {
-        @compileError("production release catalog must contain exactly 24 userspace targets");
+    if (production_userspace_target_paths.len != 6) {
+        @compileError("production release catalog must contain exactly 6 userspace targets");
     }
-    if (production_target_paths.len != 33) {
-        @compileError("production release catalog must contain exactly 33 targets");
+    if (production_target_paths.len != 15) {
+        @compileError("production release catalog must contain exactly 15 targets");
     }
     if (release_evidence_names.len != 10) {
         @compileError("release evidence catalog must contain exactly ten files");
@@ -263,7 +245,7 @@ test "production targets are an exact order-independent set" {
     var permuted = production_target_paths;
     std.mem.swap([]const u8, &permuted[0], &permuted[permuted.len - 1]);
     try requireExactProductionTargets(&permuted);
-    try std.testing.expectEqual(@as(usize, 33), productionTargetPaths().len);
+    try std.testing.expectEqual(@as(usize, 15), productionTargetPaths().len);
     try std.testing.expect(!isProductionTarget("zig-out/bin/zigos-sign"));
     try std.testing.expect(!isProductionTarget("spec/release_security/release_keyring.json"));
     try std.testing.expect(!isProductionTarget("spec/release_security/revoked_release_keys.json"));
@@ -324,7 +306,7 @@ test "relative path validation rejects traversal aliases and metacharacters" {
     const safe = [_][]const u8{
         "build/os.iso",
         "spec/release_security/release_artifacts.json",
-        "zig-out/bin/userspace-sync.elf",
+        "zig-out/bin/userspace-store.elf",
     };
     for (safe) |path| try std.testing.expect(isSafeRelativePath(path));
 

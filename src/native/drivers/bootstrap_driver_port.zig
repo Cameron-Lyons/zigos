@@ -11,7 +11,7 @@ const network_driver_task = @import("network_driver_task.zig");
 const storage_driver_task = @import("storage_driver_task.zig");
 const xhci_driver_task = @import("xhci_driver_task.zig");
 const display_driver_task = @import("display_driver_task.zig");
-const root = @import("root");
+const storage_volume = @import("../storage/storage_volume.zig");
 const kernel_device_start = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/init/devices.zig")
 else
@@ -58,11 +58,6 @@ else
             return true;
         }
     };
-const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
-    root.storage_volume
-else
-    @import("../storage/storage_volume.zig");
-
 const nvme_dma_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
         extern fn zigosStorageBootstrapNvmeDmaWindow(

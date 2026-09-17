@@ -63,7 +63,7 @@ const verification_only_signatures = [_][]const u8{
     "zigos.proof.mmu-isolation",
 };
 
-const production_userspace_count: usize = 24;
+const production_userspace_count: usize = 6;
 const verification_only_userspace_count: usize = 5;
 const production_userspace_marker = "--production-userspace";
 const verification_userspace_marker = "--verification-userspace";

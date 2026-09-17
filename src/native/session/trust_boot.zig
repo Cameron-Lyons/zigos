@@ -15,6 +15,7 @@ const native_service_registry = @import("../services/service_registry.zig");
 const typed_component_abi = @import("../services/typed_component_abi.zig");
 const native_store_mount = @import("native_store_mount.zig");
 const principal = @import("../core/principal.zig");
+const storage_volume = @import("../storage/storage_volume.zig");
 const service_catalog = @import("service_catalog.zig");
 const service_graph_builder_mod = @import("service_graph_builder.zig");
 const session_bootstrap = @import("session_bootstrap.zig");
@@ -1109,9 +1110,7 @@ fn storeDirectMeasuredBootSummary(storage_service_id: u64, summary: measured_boo
 fn readDirectMeasuredBootSector(storage_service_id: u64, buffer: *[direct_measured_boot_sector_size]u8) bool {
     if (bootstrap_driver_port.activeStorageRead(storage_service_id, direct_measured_boot_lba, buffer[0..])) return true;
 
-    const root = @import("root");
-    if (!@hasDecl(root, "storage_volume")) return false;
-    const root_volume = root.storage_volume.defaultVolume();
+    const root_volume = storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     return root_volume.attached_backend_read(direct_measured_boot_lba, buffer.ptr, buffer.len);
 }
@@ -1121,9 +1120,7 @@ fn writeDirectMeasuredBootSector(storage_service_id: u64, buffer: *const [direct
         return bootstrap_driver_port.activeStorageFlush(storage_service_id);
     }
 
-    const root = @import("root");
-    if (!@hasDecl(root, "storage_volume")) return false;
-    const root_volume = root.storage_volume.defaultVolume();
+    const root_volume = storage_volume.defaultVolume();
     if (!root_volume.hasAttachedDevice()) return false;
     return volume_backend.writeAttachedDurableRange(root_volume, direct_measured_boot_lba, buffer[0..]);
 }

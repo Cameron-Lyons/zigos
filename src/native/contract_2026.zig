@@ -2,6 +2,7 @@ const endpoint = @import("kernel_api/endpoint.zig");
 const ipc_ring = @import("kernel_api/ipc_ring.zig");
 const syscall_surface = @import("kernel_api/syscall_surface.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
+const abi = @import("core/abi.zig");
 const display_driver_task = @import("drivers/display_driver_task.zig");
 const network_driver_task = @import("drivers/network_driver_task.zig");
 const storage_driver_task = @import("drivers/storage_driver_task.zig");
@@ -23,6 +24,7 @@ pub const Floor = struct {
     lazy_xsaves: bool,
     register_fred_syscalls: bool,
     rings_only_ipc: bool,
+    wait_plus_rings: bool,
     userspace_nvme_dataplane: bool,
     userspace_i225_dataplane: bool,
     userspace_xhci_dataplane: bool,
@@ -44,6 +46,7 @@ pub const floor: Floor = .{
         endpoint.RINGS_ONLY_DATAPLANE and
         endpoint.AUTO_ATTACHES_DATA_RINGS and
         shared_memory.SEALS_IPC_RINGS,
+    .wait_plus_rings = abi.WAIT_PLUS_SEALED_RINGS and @hasField(abi.NativeOperation, "wait"),
     .userspace_nvme_dataplane = storage_driver_task.USERSPACE_NVME_DATAPLANE and
         storage_driver_task.KERNEL_LATCHES_ONLY and
         storage_driver_task.DISPATCHES_FROM_BOUND_TASK,
@@ -58,9 +61,12 @@ pub const floor: Floor = .{
     .six_address_spaces = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT == 6 and
         userspace_registry.COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP and
         userspace_registry.SHARES_GROUP_PAGE_TABLES and
-        userspace_executor.SHARES_GROUP_PAGE_TABLES,
+        userspace_registry.USES_PKU_WITHIN_GROUP and
+        userspace_executor.SHARES_GROUP_PAGE_TABLES and
+        userspace_executor.USES_PKU_WITHIN_SHARED_TABLES,
     .checkpoint_only_cold_load = storage_volume.USES_INCREMENTAL_LIVE_INDEX and
-        storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD,
+        storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD and
+        storage_volume.COMPACTS_IN_BACKGROUND,
     .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,
 };
 

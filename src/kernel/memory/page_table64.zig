@@ -15,6 +15,8 @@ pub const CACHE_DISABLE: u64 = 1 << 4;
 pub const LARGE_PAGE: u64 = 1 << 7;
 pub const GLOBAL: u64 = 1 << 8;
 pub const NO_EXECUTE: u64 = 1 << 63;
+pub const PROTECTION_KEY_SHIFT: u6 = 59;
+pub const PROTECTION_KEY_MASK: u64 = 0xF << PROTECTION_KEY_SHIFT;
 
 const OWNER_SHIFT = 9;
 const OWNER_MASK: u64 = 0x7 << OWNER_SHIFT;
@@ -62,6 +64,14 @@ pub fn withExecutePermission(entry: Entry, executable: bool) Entry {
     return if (executable) entry & ~NO_EXECUTE else entry | NO_EXECUTE;
 }
 
+pub fn protectionKey(entry: Entry) u4 {
+    return @truncate((entry & PROTECTION_KEY_MASK) >> PROTECTION_KEY_SHIFT);
+}
+
+pub fn withProtectionKey(entry: Entry, key: u4) Entry {
+    return (entry & ~PROTECTION_KEY_MASK) | (@as(u64, key) << PROTECTION_KEY_SHIFT);
+}
+
 pub fn make(physical_address: usize, flags: u64, entry_owner: u3) Entry {
     return (@as(u64, physical_address) & ADDRESS_MASK) |
         flags |
@@ -76,6 +86,14 @@ test "four-level entry preserves address flags and software owner" {
     try std.testing.expect((entry & WRITABLE) != 0);
     try std.testing.expect((entry & USER) != 0);
     try std.testing.expect(!isExecutable(entry));
+}
+
+test "protection keys occupy PTE bits 62:59" {
+    const entry = withProtectionKey(make(0x4000, PRESENT | USER | NO_EXECUTE, 1), 9);
+    try std.testing.expectEqual(@as(u4, 9), protectionKey(entry));
+    try std.testing.expectEqual(@as(usize, 0x4000), address(entry));
+    try std.testing.expect(!isExecutable(entry));
+    try std.testing.expectEqual(@as(u4, 0), protectionKey(withProtectionKey(entry, 0)));
 }
 
 test "execute permission is the inverse of the hardware NX bit" {

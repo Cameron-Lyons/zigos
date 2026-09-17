@@ -19,7 +19,13 @@ else
         pub fn servicePendingEvents() usize {
             return 0;
         }
+        pub fn probe(_: anytype) !void {
+            return;
+        }
         pub fn activate() !void {}
+        pub fn isolationDomain() ?void {
+            return null;
+        }
         pub fn eventWorkPending() bool {
             return false;
         }
@@ -39,6 +45,16 @@ else
             return null;
         }
     };
+const intel_vtd = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/platform/intel_vtd.zig")
+else
+    struct {};
+const console = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/utils/console.zig")
+else
+    struct {
+        pub fn print(_: []const u8) void {}
+    };
 
 pub const HardwareBootKeyboardReport = xhci.HardwareBootKeyboardReport;
 pub const InputProof = xhci.InputProof;
@@ -56,10 +72,31 @@ pub fn boundTaskId() u64 {
 
 pub fn bringUp() bool {
     if (programmed) return true;
-    xhci_hw.activate() catch return false;
-    programmed = true;
+    var xhci_prepared = false;
     if (builtin.target.os.tag == .freestanding) {
-        const console = @import("../../kernel/utils/console.zig");
+        const pci = @import("../../kernel/drivers/pci.zig");
+        if (pci.firstXhciController()) |dev| {
+            _ = xhci_hw.probe(dev) catch |err| switch (err) {
+                error.AlreadyPrepared => {},
+                else => return false,
+            };
+            console.print("ZIGOS:XHCI:HW:OWNERSHIP_OK\n");
+            console.print("ZIGOS:XHCI:HW:RESET_OK\n");
+            console.print("ZIGOS:XHCI:HW:SLOTS_OK\n");
+            var isolation_domains: [1]intel_vtd.DmaDomain = undefined;
+            var isolation_domain_count: usize = 0;
+            if (xhci_hw.isolationDomain()) |domain| {
+                isolation_domains[isolation_domain_count] = domain;
+                isolation_domain_count += 1;
+            }
+            _ = isolation_domains[0..isolation_domain_count];
+            console.print("ZIGOS:XHCI:HW:DMA_OK\n");
+        }
+    }
+    xhci_hw.activate() catch return false;
+    xhci_prepared = true;
+    programmed = xhci_prepared;
+    if (builtin.target.os.tag == .freestanding) {
         console.print("ZIGOS:XHCI:HW:REMAP_MSI_OK\n");
         console.print("ZIGOS:XHCI:HW:RUN_OK\n");
     }

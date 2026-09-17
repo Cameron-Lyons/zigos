@@ -18,6 +18,7 @@ const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
 
 pub const SHARES_GROUP_PAGE_TABLES = userspace_registry.SHARES_GROUP_PAGE_TABLES;
+pub const USES_PKU_WITHIN_SHARED_TABLES = true;
 const GROUP_SPACE_COUNT = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT;
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
@@ -35,6 +36,8 @@ else
 
         pub fn allowSupervisorUserMemory() void {}
         pub fn forbidSupervisorUserMemory() void {}
+        pub fn allowUserProtectionKey(_: u4) void {}
+        pub fn wrpkru(_: u32) void {}
     };
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -112,6 +115,7 @@ else
                 executable: bool = false,
                 write_through: bool = false,
                 cache_disabled: bool = false,
+                protection_key: u4 = 0,
             };
             pub const UserAddressSpace = struct {
                 directory: *PageDirectory,
@@ -357,7 +361,8 @@ const MappingState = enum(u8) {
 
 const MappingLaunchPolicy = packed struct(u32) {
     contract_flags: u16 = 0,
-    heartbeat_increment: u16 = 1,
+    heartbeat_increment: u12 = 1,
+    protection_key: u4 = 0,
 };
 
 const MappingDispatchMetadata = struct {
@@ -374,6 +379,10 @@ const MappingDispatchMetadata = struct {
 
     fn heartbeatIncrement(self: MappingDispatchMetadata) u32 {
         return self.launch_policy.heartbeat_increment;
+    }
+
+    fn protectionKey(self: MappingDispatchMetadata) u4 {
+        return self.launch_policy.protection_key;
     }
 };
 
@@ -455,6 +464,11 @@ var registered_executor: ?*Executor = null;
 pub fn activeTaskId() u64 {
     const executor = registered_executor orelse return 0;
     return executor.activeTaskId();
+}
+
+pub fn requestEventWait() void {
+    const executor = registered_executor orelse return;
+    executor.last_yield_disposition = .wait_for_event;
 }
 
 pub const Executor = struct {
@@ -927,6 +941,7 @@ pub const Executor = struct {
             image.bootstrap_mailbox_address,
             image.contract_flags,
             image.heartbeat_increment,
+            userspace_registry.protectionKeyForBundle(image.bundleIdSlice()),
         );
         if (self.findMappingWithHandle(address_space.id)) |resolution| {
             if (resolution.entry.state != .live) return error.AddressSpaceRetiring;
@@ -959,9 +974,9 @@ pub const Executor = struct {
                     const image_regions = entry.image_regions.?;
                     image_regions.ranges[image_regions.count] = .{ .start = @intCast(region.virtual_address), .size = region.size_bytes };
                     image_regions.count += 1;
-                    try mapLoadRegion(&entry.address_space.?, region, image.elf_file);
+                    try mapLoadRegion(&entry.address_space.?, region, image.elf_file, dispatch_metadata.protectionKey());
                 },
-                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, @as(usize, region.size_bytes), region.access),
+                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, @as(usize, region.size_bytes), region.access, dispatch_metadata.protectionKey()),
             }
         }
 
@@ -1145,12 +1160,13 @@ fn prepareMappingDispatchMetadata(
     bootstrap_mailbox_address: u64,
     contract_flags: u32,
     heartbeat_increment: u32,
+    protection_key: u4,
 ) MaterializationError!MappingDispatchMetadata {
     if (owner_task_id == 0) return error.AddressSpaceOwnerInvalid;
     if (image_id == 0 or address_space_image_id != image_id) return error.AddressSpaceImageMismatch;
     const initial_stack_pointer = std.math.sub(u64, stack_pointer, 16) catch return error.InitialContextInvalid;
     const compact_contract_flags = std.math.cast(u16, contract_flags) orelse return error.LaunchPolicyInvalid;
-    const compact_heartbeat_increment = std.math.cast(u16, heartbeat_increment) orelse return error.LaunchPolicyInvalid;
+    const compact_heartbeat_increment = std.math.cast(u12, heartbeat_increment) orelse return error.LaunchPolicyInvalid;
     if (compact_heartbeat_increment == 0) return error.LaunchPolicyInvalid;
     if (entry_point < userspace_layout.image_start or
         entry_point >= userspace_layout.image_end_exclusive)
@@ -1171,6 +1187,7 @@ fn prepareMappingDispatchMetadata(
         .launch_policy = .{
             .contract_flags = compact_contract_flags,
             .heartbeat_increment = compact_heartbeat_increment,
+            .protection_key = protection_key,
         },
     };
 }
@@ -1262,6 +1279,7 @@ fn prepareBootstrapMailboxUpdate(
 
 fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
     freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+    x86.allowUserProtectionKey(mapping.dispatch_metadata.protectionKey());
     writeBootstrapMailbox(mailbox_update);
 }
 
@@ -1676,6 +1694,7 @@ fn mapLoadRegion(
     space: *freestanding.paging.UserAddressSpace,
     region: task_runtime.AddressSpaceRegionRecord,
     elf_file: embedded_file.File,
+    protection_key: u4,
 ) MaterializationError!void {
     const virtual_address = region.virtual_address;
     const size_bytes = region.size_bytes;
@@ -1687,6 +1706,7 @@ fn mapLoadRegion(
     try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), @intCast(size_bytes), .{
         .writable = region.access.write,
         .executable = region.access.execute,
+        .protection_key = protection_key,
     });
 
     var source_offset = start;
@@ -1706,6 +1726,7 @@ fn mapZeroedRegion(
     virtual_address_raw: u64,
     size_bytes_raw: usize,
     access: task_runtime.SegmentAccess,
+    protection_key: u4,
 ) MaterializationError!void {
     const virtual_address = virtual_address_raw;
     const size_bytes = size_bytes_raw;
@@ -1713,6 +1734,7 @@ fn mapZeroedRegion(
         try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), size_bytes, .{
             .writable = access.write,
             .executable = access.execute,
+            .protection_key = protection_key,
         });
         return;
     }
@@ -1722,6 +1744,7 @@ fn mapZeroedRegion(
         .virt_end_exclusive = region_end,
         .writable = access.write,
         .kind = if (access.write) .anonymous_zero else .object_cow,
+        .protection_key = protection_key,
     })) return error.OutOfMemory;
 }
 
@@ -1825,6 +1848,7 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
         0x4000_3000,
         userspace_flags.FLAG_NX_PROOF_PROBE,
         9,
+        3,
     );
     try std.testing.expectEqual(@as(u64, 40), metadata.owner_task_id);
     try std.testing.expectEqual(@as(u64, 41), metadata.image_id);
@@ -1833,6 +1857,7 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
     try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
     try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contractFlags());
     try std.testing.expectEqual(@as(u32, 9), metadata.heartbeatIncrement());
+    try std.testing.expectEqual(@as(u4, 3), metadata.protectionKey());
     try std.testing.expectEqual(MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES, @sizeOf(MappingDispatchMetadata));
     try std.testing.expect(@sizeOf(MappingEntry) <= MAPPING_ENTRY_SIZE_CEILING_BYTES);
     try std.testing.expect(@sizeOf(MappingArena) <= MAPPING_ARENA_SIZE_CEILING_BYTES);
@@ -1840,35 +1865,35 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
 
     try std.testing.expectError(
         error.AddressSpaceOwnerInvalid,
-        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.AddressSpaceImageMismatch,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, @as(u32, std.math.maxInt(u16)) + 1, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, @as(u32, std.math.maxInt(u16)) + 1, 1, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 0),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 0, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, @as(u32, std.math.maxInt(u16)) + 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, @as(u32, std.math.maxInt(u12)) + 1, 1),
     );
 }
 
@@ -2415,5 +2440,6 @@ test "userspace exception containment excludes system-fatal and dedicated vector
 
 test "production address-space groups share page tables" {
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
+    try std.testing.expect(USES_PKU_WITHIN_SHARED_TABLES);
     try std.testing.expectEqual(@as(usize, 6), GROUP_SPACE_COUNT);
 }

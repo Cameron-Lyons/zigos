@@ -10,6 +10,8 @@ const units = @import("../core/units.zig");
 const userspace_executor = @import("userspace_executor.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_flags = @import("userspace_flags.zig");
+const manifest = @import("../policy/manifest.zig");
+const service_catalog = @import("../session/service_catalog.zig");
 const smp = @import("../../kernel/smp.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 const table_backing = @import("../core/table_backing.zig");
@@ -31,6 +33,7 @@ else
 const DISPATCH_CPU_TICK_COST: u64 = 1_000;
 pub const RESOURCE_CLASS_COUNT: usize = std.meta.fields(accelerator_scheduler.ResourceClass).len;
 pub const ENGINE_COUNT: usize = std.meta.fields(accelerator_scheduler.Engine).len;
+pub const UNIFIED_RUNQUEUE = true;
 pub const MAX_ACCELERATOR_CLAIMS: usize = task_runtime.MAX_TASKS;
 const EMERGENCY_DEADLINE_DELTA_TICKS: u64 = 1_000;
 const FOREGROUND_DEADLINE_DELTA_TICKS: u64 = 5_000;
@@ -1444,7 +1447,6 @@ fn deriveDispatchRequest(task: *const task_runtime.TaskRecord) accelerator_sched
         .foreground_interactive => request.wants_gpu = task.ui_surface_id != null,
         .background_light => {
             request.estimated_energy_milliwatt_hours = estimatedDispatchEnergyMilliwattHours(task);
-            request.defer_for_low_carbon_power = true;
         },
         .media_export => {
             request.wants_gpu = true;
@@ -1453,7 +1455,6 @@ fn deriveDispatchRequest(task: *const task_runtime.TaskRecord) accelerator_sched
         .batch_compute => {
             request.wants_npu = true;
             request.estimated_energy_milliwatt_hours = estimatedDispatchEnergyMilliwattHours(task);
-            request.defer_for_low_carbon_power = true;
         },
     }
     return request;
@@ -1567,6 +1568,13 @@ fn taskUiPresentationEligible(
     catalog: *userspace_loader.Catalog,
     task: *const task_runtime.TaskRecord,
 ) bool {
+    if (task.ui_surface_id != null and manifest.isApplicationBundle(task.launchBundleIdSlice())) return true;
+    const components = task.executionComponents();
+    if (components.len != 0) {
+        if (service_catalog.contractFlagsForComponentLabel(components[0].labelSlice())) |flags| {
+            return contractOwnsUiSurface(flags);
+        }
+    }
     const image = catalog.findById(task.launch.image_id) orelse return false;
     return contractOwnsUiSurface(image.contract_flags);
 }
@@ -2638,7 +2646,7 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDispatchCount(.npu));
 }
 
-test "userspace scheduler derives low-carbon deferral for batch tasks" {
+test "userspace scheduler does not defer batch tasks for carbon intensity" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
@@ -2659,35 +2667,12 @@ test "userspace scheduler derives low-carbon deferral for batch tasks" {
         null,
     );
     try std.testing.expect(scheduler.registerTask(task.id));
-    const initial_slot = scheduler.slots.getConst(task.id).?;
-    try std.testing.expect(initial_slot.dispatch_request.defer_for_low_carbon_power);
-    try std.testing.expect(initial_slot.dispatch_request.estimated_energy_milliwatt_hours != 0);
 
     try std.testing.expect(!scheduler.runNext(1));
-    const delayed_slot = scheduler.slots.getConst(task.id).?;
-    try std.testing.expectEqual(@as(u64, 0), delayed_slot.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), delayed_slot.delayed_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.carbon_aware_delay, delayed_slot.last_dispatch_reason);
-    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
-
-    try std.testing.expect(!scheduler.runNext(1));
-    const same_tick_slot = scheduler.slots.getConst(task.id).?;
-    try std.testing.expectEqual(@as(u64, 0), same_tick_slot.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), same_tick_slot.delayed_dispatch_count);
-    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
-
-    scheduler.configureResourceTelemetry(.{
-        .source = .hardware,
-        .observed_tick = 2,
-        .grid_carbon_intensity_grams_per_kwh = 180,
-        .npu_available = true,
-        .hardware_evidence = completeTestHardwareEvidence(),
-    });
-    try std.testing.expect(!scheduler.runNext(2));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, dispatched_slot.last_dispatch_engine);
-    try std.testing.expectEqual(@as(u64, 1), scheduler.engineDispatchCount(.npu));
+    try std.testing.expectEqual(@as(u64, 0), dispatched_slot.delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, dispatched_slot.last_dispatch_engine);
 }
 
 test "userspace scheduler applies thermal and battery decisions to live dispatch" {

@@ -10,6 +10,7 @@ pub const MAX_CAPABILITIES: usize = 128;
 pub const MAX_TARGET_GENERATIONS: usize = 128;
 pub const TARGET_GENERATION_INDEX_CAPACITY: usize = MAX_TARGET_GENERATIONS * 2;
 pub const MAX_GRANT_PLAN_ENTRIES: usize = 16;
+pub const MINT_IS_FREE_LIST_POP = true;
 pub const CapabilitySlotIndex = indexed_arena.ReusableIndex(MAX_CAPABILITIES);
 pub const COMPACT_GRANT_METADATA = true;
 pub const TARGET_GENERATION_OWNS_CAPABILITY_CHAINS = true;

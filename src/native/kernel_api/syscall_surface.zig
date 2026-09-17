@@ -77,6 +77,7 @@ pub fn dispatch(
     port: *component_port.KernelPort,
     caller_task_id: u64,
     now_ticks: u64,
+    opcode: u16,
     request_addr: usize,
     response_addr: usize,
     response_len: usize,
@@ -93,41 +94,9 @@ pub fn dispatch(
         now_ticks,
     );
     const memory = syscall_dispatch.UserMemoryContext.init(port, caller_task_id);
-    const header = syscall_dispatch.readRequest(abi.RequestHeader, memory, request_addr) orelse return syscall_dispatch.explainedFailure(
-        .invalid_request_pointer,
-        .invalid_target,
-        "syscall-dispatch",
-        "request-header",
-        caller_task_id,
-        0,
-        null,
-        0,
-        now_ticks,
-    );
-    if (header.version != abi.ABI_VERSION) return syscall_dispatch.explainedFailure(
-        .unsupported_abi_version,
-        .unsupported_operation,
-        "syscall-dispatch",
-        "native-abi-version",
-        caller_task_id,
-        0,
-        null,
-        header.version,
-        now_ticks,
-    );
-    if (header.subject_task_id == 0 or header.subject_task_id != caller_task_id) return syscall_dispatch.explainedFailure(
-        .denied,
-        .scope_violation,
-        "syscall-dispatch",
-        "matching-subject-task",
-        caller_task_id,
-        0,
-        .task,
-        header.subject_task_id,
-        now_ticks,
-    );
-
-    const descriptor = syscallDescriptorFromOpcode(header.operation) orelse return syscall_dispatch.explainedFailure(
+    port.syscall_caller_task_id = caller_task_id;
+    defer port.syscall_caller_task_id = 0;
+    const descriptor = syscallDescriptorFromOpcode(opcode) orelse return syscall_dispatch.explainedFailure(
         .unsupported_operation,
         .unsupported_operation,
         "unsupported-operation",
@@ -135,7 +104,7 @@ pub fn dispatch(
         caller_task_id,
         0,
         null,
-        header.operation,
+        opcode,
         now_ticks,
     );
 
@@ -146,6 +115,21 @@ pub fn dispatch(
         caller_task_id,
         now_ticks,
     );
+}
+
+fn dispatchRequest(
+    port: *component_port.KernelPort,
+    caller_task_id: u64,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) DispatchResult {
+    const opcode = if (request_addr < 0x10000)
+        abi.opcode(.time_query)
+    else
+        @as(*const abi.RequestHeader, @ptrFromInt(request_addr)).operation;
+    return dispatch(port, caller_task_id, now_ticks, opcode, request_addr, response_addr, response_len);
 }
 
 fn syscallDescriptorFromOpcode(opcode: u16) ?*const SyscallDescriptor {
@@ -194,6 +178,9 @@ test "syscall descriptor table covers every native operation with ABI metadata" 
     try std.testing.expectEqual(@sizeOf(component_port.SurfacePresentRequest), syscallDescriptorFor(.surface_present).?.request_size);
     try std.testing.expectEqual(@sizeOf(abi.BoolResponse), syscallDescriptorFor(.surface_present).?.response_size);
     try std.testing.expectEqual(capability.CapabilityRight.surface_present, syscallDescriptorFor(.surface_present).?.required_right);
+    try std.testing.expectEqual(@sizeOf(component_port.WaitRequest), syscallDescriptorFor(.wait).?.request_size);
+    try std.testing.expectEqual(@sizeOf(abi.BoolResponse), syscallDescriptorFor(.wait).?.response_size);
+    try std.testing.expectEqual(capability.CapabilityRight.time_query, syscallDescriptorFor(.wait).?.required_right);
     try std.testing.expect(switch (syscallDescriptorFor(.device_describe).?.target_kind) {
         .fixed => |kind| kind == .device,
         else => false,
@@ -326,7 +313,7 @@ test "syscall surface dispatches typed task creation requests" {
         },
     };
 
-    const result = dispatch(
+    const result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         5,
@@ -355,7 +342,7 @@ test "syscall surface explains preflight request failures" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
-    const result = dispatch(
+    const result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         5,
@@ -420,7 +407,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
     };
     test_kernel.runtime.allowHostPointerSyscallsForTask(app_task.task_id);
 
-    const result = dispatch(
+    const result = dispatchRequest(
         &test_kernel.port,
         app_task.task_id,
         8,
@@ -438,7 +425,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
     try test_kernel.endpoints.connect(peer.id, ids.endpoint(created.endpoint.endpoint_id));
     try test_kernel.endpoints.send(peer.id, ids.task(test_kernel.session_task_id), 91, "hello", null, false);
 
-    const short_response = dispatch(
+    const short_response = dispatchRequest(
         &test_kernel.port,
         app_task.task_id,
         9,
@@ -451,7 +438,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
 
     var short_payload: [4]u8 = undefined;
     request.payload_out = &short_payload;
-    const short_payload_result = dispatch(
+    const short_payload_result = dispatchRequest(
         &test_kernel.port,
         app_task.task_id,
         10,
@@ -464,7 +451,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
 
     request.payload_out = &payload;
     response = std.mem.zeroes(abi.EndpointRecvResponse);
-    const received = dispatch(
+    const received = dispatchRequest(
         &test_kernel.port,
         app_task.task_id,
         11,
@@ -527,7 +514,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
         .receiver_task_id = app_task.id,
     };
     var response = std.mem.zeroes(abi.InputRecvResponse);
-    const delivered = dispatch(
+    const delivered = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         40,
@@ -542,7 +529,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
     try std.testing.expectEqual(@as(u8, 'x'), response.event.text);
 
     response = std.mem.zeroes(abi.InputRecvResponse);
-    const empty = dispatch(
+    const empty = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         41,
@@ -559,7 +546,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
         .input_capability_id = test_kernel.authority_capability_id,
         .receiver_task_id = app_task.id,
     };
-    const denied = dispatch(
+    const denied = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         42,
@@ -583,7 +570,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
         .slot_id = 2,
     };
     response = std.mem.zeroes(abi.InputRecvResponse);
-    const foreign = dispatch(
+    const foreign = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         43,
@@ -633,19 +620,23 @@ test "syscall surface copies bounded presentations through task-scoped authority
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = 12;
     presentation.revision = 3;
-    presentation.interaction_hash = 0x1234;
+    presentation.interaction_hash = 3;
     presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
-    @memcpy(presentation.text[0..5], "hello");
-    presentation.text_length = 5;
-    presentation.cursor = 5;
+    presentation.buffer_object_id = 12;
+    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
     const request = component_port.SurfacePresentRequest{
         .header = component_port.makeHeader(.surface_present, 95, app_task.id),
         .presentation_capability_id = presentation_capability.id,
         .presenter_task_id = app_task.id,
-        .presentation = presentation,
+        .surface_id = presentation.surface_id,
+        .fence = presentation.revision,
+        .buffer_object_id = presentation.buffer_object_id,
+        .buffer_offset = presentation.buffer_offset,
+        .buffer_bytes = presentation.buffer_bytes,
+        .model_kind = presentation.model_kind,
     };
     var response = std.mem.zeroes(abi.BoolResponse);
-    const presented = dispatch(
+    const presented = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         50,
@@ -657,11 +648,12 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(@as(u8, 1), response.value);
     try std.testing.expectEqual(@as(usize, 1), receiver.calls);
     try std.testing.expectEqual(app_task.id, receiver.last_task_id);
-    try std.testing.expectEqualStrings("hello", receiver.last_presentation.textSlice());
+    try std.testing.expect(receiver.last_presentation.presentsByHandle());
+    try std.testing.expectEqual(@as(u64, 12), receiver.last_presentation.buffer_object_id);
 
     receiver.status = .duplicate;
     response = std.mem.zeroes(abi.BoolResponse);
-    const duplicate = dispatch(
+    const duplicate = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         51,
@@ -673,7 +665,7 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(@as(u8, 1), response.value);
 
     receiver.status = .stale;
-    const stale = dispatch(
+    const stale = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         52,
@@ -685,7 +677,7 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(abi.DenialReason.invalid_target, stale.denial_reason);
 
     receiver.status = .full;
-    const full = dispatch(
+    const full = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         53,
@@ -699,9 +691,9 @@ test "syscall surface copies bounded presentations through task-scoped authority
     receiver.status = .accepted;
 
     var foreign_surface = request;
-    foreign_surface.presentation.surface_id = 13;
+    foreign_surface.surface_id = 13;
     response = std.mem.zeroes(abi.BoolResponse);
-    const denied = dispatch(
+    const denied = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         54,
@@ -714,8 +706,8 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(@as(usize, 4), receiver.calls);
 
     var malformed = request;
-    malformed.presentation.text[malformed.presentation.text.len - 1] = 1;
-    const rejected = dispatch(
+    malformed.buffer_object_id = 0;
+    const rejected = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         55,
@@ -728,7 +720,7 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(@as(usize, 4), receiver.calls);
 
     test_kernel.kernel.clearSurfacePresentationReceiver();
-    const unavailable = dispatch(
+    const unavailable = dispatchRequest(
         &test_kernel.port,
         app_task.id,
         56,
@@ -762,7 +754,7 @@ test "syscall surface denies task creation without signed userspace launch prove
         },
     };
 
-    const result = dispatch(
+    const result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         9,
@@ -803,7 +795,7 @@ test "syscall surface denies task creation without signed userspace launch prove
             .userspace_image = &unsigned_image,
         },
     };
-    const unsigned_result = dispatch(
+    const unsigned_result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -826,14 +818,14 @@ test "syscall surface rejects unsupported native operations" {
         .correlation_id = 91,
         .subject_task_id = test_kernel.session_task_id,
     };
-    const result = dispatch(&test_kernel.port, test_kernel.session_task_id, 9, @intFromPtr(&request), 0, 0);
+    const result = dispatchRequest(&test_kernel.port, test_kernel.session_task_id, 9, @intFromPtr(&request), 0, 0);
 
     try std.testing.expectEqual(abi.SyscallStatus.unsupported_operation, result.status);
     try std.testing.expectEqual(abi.DenialReason.unsupported_operation, result.denial_reason);
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
 }
 
-test "syscall surface rejects unsupported ABI versions before trusted port entry" {
+test "syscall surface ignores request-header ABI version because the ABI is bound at spawn" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
@@ -843,7 +835,7 @@ test "syscall surface rejects unsupported ABI versions before trusted port entry
     };
     request.header.version = abi.ABI_VERSION + 1;
     var response = std.mem.zeroes(abi.TimeQueryResponse);
-    const result = dispatch(
+    const result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         9,
@@ -852,23 +844,21 @@ test "syscall surface rejects unsupported ABI versions before trusted port entry
         @sizeOf(abi.TimeQueryResponse),
     );
 
-    try std.testing.expectEqual(abi.SyscallStatus.unsupported_abi_version, result.status);
-    try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
-    try std.testing.expect(!test_kernel.port.syscall_header_prevalidated);
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
 }
 
 test "syscall surface rejects invalid request and response pointer ranges" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
-    const low_request = dispatch(&test_kernel.port, test_kernel.session_task_id, 9, 0x1000, 0, 0);
+    const low_request = dispatchRequest(&test_kernel.port, test_kernel.session_task_id, 9, 0x1000, 0, 0);
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, low_request.status);
 
     const request = component_port.TimeQueryRequest{
         .header = component_port.makeHeader(.time_query, 92, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
     };
-    const bad_response = dispatch(
+    const bad_response = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         9,
@@ -879,7 +869,7 @@ test "syscall surface rejects invalid request and response pointer ranges" {
     try std.testing.expectEqual(abi.SyscallStatus.invalid_response_buffer, bad_response.status);
 }
 
-test "syscall surface rejects spoofed subject task ids" {
+test "syscall surface binds the caller from the trap, not the request header" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
@@ -909,7 +899,7 @@ test "syscall surface rejects spoofed subject task ids" {
         },
     };
 
-    const result = dispatch(
+    const result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -918,12 +908,11 @@ test "syscall surface rejects spoofed subject task ids" {
         @sizeOf(abi.TaskDescriptor),
     );
 
-    try std.testing.expectEqual(abi.SyscallStatus.denied, result.status);
-    try std.testing.expectEqual(abi.DenialReason.scope_violation, result.denial_reason);
-    try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+    try std.testing.expect(response.task_id != 0);
 
     var zero_caller_response = std.mem.zeroes(abi.TaskDescriptor);
-    const zero_caller_result = dispatch(
+    const zero_caller_result = dispatchRequest(
         &test_kernel.port,
         0,
         10,
@@ -940,7 +929,7 @@ test "syscall surface rejects spoofed subject task ids" {
         .request = request.request,
     };
     var zero_subject_response = std.mem.zeroes(abi.TaskDescriptor);
-    const zero_subject_result = dispatch(
+    const zero_subject_result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -948,8 +937,8 @@ test "syscall surface rejects spoofed subject task ids" {
         @intFromPtr(&zero_subject_response),
         @sizeOf(abi.TaskDescriptor),
     );
-    try std.testing.expectEqual(abi.SyscallStatus.denied, zero_subject_result.status);
-    try std.testing.expectEqual(abi.DenialReason.scope_violation, zero_subject_result.denial_reason);
+    try std.testing.expectEqual(abi.SyscallStatus.success, zero_subject_result.status);
+    try std.testing.expect(zero_subject_response.task_id != 0);
 }
 
 test "syscall surface validates and bounds embedded user buffers" {
@@ -974,7 +963,7 @@ test "syscall surface validates and bounds embedded user buffers" {
             .userspace_image = bad_image_ptr,
         },
     };
-    const bad_image = dispatch(
+    const bad_image = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -1010,7 +999,7 @@ test "syscall surface validates and bounds embedded user buffers" {
             .userspace_image = &valid_image,
         },
     };
-    const bad_source = dispatch(
+    const bad_source = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -1023,7 +1012,7 @@ test "syscall surface validates and bounds embedded user buffers" {
     const oversized_source = [_]u8{'x'} ** (task_runtime.MAX_TASK_SOURCE_IDENTITY_BYTES + 1);
     var oversized_source_request = bad_source_request;
     oversized_source_request.request.launch.source_identity = &oversized_source;
-    const oversized_identity = dispatch(
+    const oversized_identity = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -1039,7 +1028,7 @@ test "syscall surface validates and bounds embedded user buffers" {
         .endpoint_capability_id = test_kernel.authority_capability_id,
         .payload = oversized_payload[0..],
     };
-    const oversized = dispatch(
+    const oversized = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -1055,7 +1044,7 @@ test "syscall surface validates and bounds embedded user buffers" {
         .endpoint_capability_id = test_kernel.authority_capability_id,
         .payload = invalid_payload_ptr[0..1],
     };
-    const invalid_payload = dispatch(
+    const invalid_payload = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         10,
@@ -1139,7 +1128,7 @@ test "syscall surface dispatches typed PCI device broker requests" {
         .device_capability_id = device_capability.id,
     };
     var describe_response = std.mem.zeroes(abi.DeviceDescriptor);
-    const describe_result = dispatch(
+    const describe_result = dispatchRequest(
         &test_kernel.port,
         test_kernel.session_task_id,
         12,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const x86 = @import("../../arch/x86.zig");
 const handoff = @import("../boot/handoff.zig");
 const early_console = @import("../utils/console.zig");
@@ -69,6 +70,7 @@ pub const UserPermissions = struct {
     executable: bool = false,
     write_through: bool = false,
     cache_disabled: bool = false,
+    protection_key: u4 = 0,
 };
 
 pub const UserMapError = error{
@@ -649,7 +651,10 @@ fn mapOwnedUserHugePage(
     if (permissions.writable) flags |= PAGE_WRITABLE;
     if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
     if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
-    const entry_flags = table64.withExecutePermission(leafFlags(flags, false), permissions.executable) | ENTRY_LARGE_PAGE;
+    const entry_flags = table64.withProtectionKey(
+        table64.withExecutePermission(leafFlags(flags, false), permissions.executable) | ENTRY_LARGE_PAGE,
+        permissions.protection_key,
+    );
     directory_entry.* = tableEntry(@intCast(run.base), entry_flags, PAGE_OWNER_USER_PRIVATE);
 }
 
@@ -719,7 +724,10 @@ pub fn mapOwnedUserRange(
         if (permissions.writable) flags |= PAGE_WRITABLE;
         if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
         if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
-        const entry_flags = table64.withExecutePermission(leafFlags(flags, false), permissions.executable);
+        const entry_flags = table64.withProtectionKey(
+            table64.withExecutePermission(leafFlags(flags, false), permissions.executable),
+            permissions.protection_key,
+        );
         page_entry.* = tableEntry(@intCast(page_phys), entry_flags, PAGE_OWNER_USER_PRIVATE);
         offset += PAGE_SIZE;
     }
@@ -905,6 +913,9 @@ pub fn switchToUserAddressSpace(space: *const UserAddressSpace) void {
 
 pub fn switchToKernelAddressSpace() void {
     switchAddressSpace(kernelPageDirectory(), kernel_switch_cr3);
+    if (builtin.target.os.tag == .freestanding) {
+        x86.wrpkru(0);
+    }
 }
 
 fn initializeKernelHierarchy() void {

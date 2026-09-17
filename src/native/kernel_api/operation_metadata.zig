@@ -371,6 +371,17 @@ pub const operations = [_]Descriptor{
         .required_right = .device_use,
         .target_kind = .{ .fixed = .device },
     },
+    .{
+        .operation = .wait,
+        .binding = .{
+            .request_type_name = "WaitRequest",
+            .response_type_name = "BoolResponse",
+            .handler_name = "dispatchWait",
+            .port_method_name = "wait",
+        },
+        .domain = .task,
+        .required_right = .time_query,
+    },
 };
 
 pub fn declarationFor(comptime operation: abi.NativeOperation) Descriptor {

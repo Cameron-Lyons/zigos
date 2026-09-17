@@ -340,11 +340,7 @@ fn syscallEndpointSend(
         .attached_capability_id = attached_capability_id,
         .move_attached_capability = move_attached_capability,
     };
-    const result = syscall_surface.dispatch(
-        port,
-        caller_task_id,
-        now_ticks,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(port, caller_task_id, now_ticks, request.header.operation, @intFromPtr(&request),
         0,
         0,
     );
@@ -366,11 +362,7 @@ fn syscallEndpointRecv(
         .payload_out = &received.payload,
         .attached_capability_out = &received.attached_capability,
     };
-    const result = syscall_surface.dispatch(
-        port,
-        caller_task_id,
-        now_ticks,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(port, caller_task_id, now_ticks, request.header.operation, @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointRecvResponse),
     );
@@ -387,7 +379,7 @@ pub fn userspaceCreateWorkspaceRoundTripProof() !void {
 
     const storage_task = harness.runtime.find(harness.storage_task_id).?;
     try std.testing.expect(storage_task.runsAsUserspaceProcess());
-    try std.testing.expectEqualStrings("zigos.system.storage-object", storage_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.store", storage_task.launchBundleIdSlice());
 
     const owner = principal.PrincipalId{ .kind = .user, .serial = 77 };
     var client = Client{
