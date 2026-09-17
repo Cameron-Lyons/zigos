@@ -332,6 +332,19 @@ pub fn wrpkru(value: u32) void {
     x86_wrpkru(value);
 }
 
+pub fn pkruAllowKeys(key: u4) u32 {
+    var value: u32 = 0xFFFF_FFFC;
+    if (key != 0) {
+        const shift: u5 = @as(u5, key) * 2;
+        value &= ~(@as(u32, 0b11) << shift);
+    }
+    return value;
+}
+
+pub fn allowUserProtectionKey(key: u4) void {
+    wrpkru(pkruAllowKeys(key));
+}
+
 pub fn enablePku() void {
     writeCr4(readCr4() | CR4_PKE);
     wrpkru(0);

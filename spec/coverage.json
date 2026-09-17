@@ -78,6 +78,17 @@
     "20. One-sentence summary"
   ],
   "one_sentence_summary": "Zigos is a capability-based, local-first, multi-device operating system with an immutable core, versioned object storage, strong sandboxing, explicit identity, and first-class support for modern accelerators.",
+  "floor_2026": [
+    "kernel_tcb_forbids_product_imports",
+    "wait_plus_sealed_rings",
+    "userspace_nvme_dataplane",
+    "userspace_i225_dataplane",
+    "userspace_xhci_dataplane",
+    "userspace_gop_dataplane",
+    "six_address_spaces_pku",
+    "efi_only_production_boot",
+    "checkpoint_only_cold_load"
+  ],
   "sections": [
     {
       "id": "1",
@@ -1096,7 +1107,7 @@
         },
         {
           "file": "src/native/kernel_api/syscall_surface.zig",
-          "name": "syscall surface rejects spoofed subject task ids"
+          "name": "syscall surface binds the caller from the trap, not the request header"
         },
         {
           "file": "src/kernel/boot/init/data_plane_boundary.zig",

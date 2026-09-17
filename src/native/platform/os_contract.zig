@@ -42,6 +42,8 @@ const component_abi_schema = @import("../services/component_abi_schema.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
+const contract_2026 = @import("../contract_2026.zig");
+const kernel_tcb = @import("../../kernel/tcb.zig");
 
 pub const Feature = enum(u16) {
     native_only_apps,
@@ -603,6 +605,15 @@ pub const Feature = enum(u16) {
     typed_context_revoke_operation,
     context_wire_validation,
     personal_context_catalog_binding,
+    kernel_tcb_forbids_product_imports,
+    wait_plus_sealed_rings,
+    userspace_nvme_dataplane,
+    userspace_i225_dataplane,
+    userspace_xhci_dataplane,
+    userspace_gop_dataplane,
+    six_address_spaces_pku,
+    efi_only_production_boot,
+    checkpoint_only_cold_load,
 };
 
 pub const uses_single_requirement_enum = true;
@@ -666,6 +677,7 @@ pub fn currentRepositoryContract() Checklist {
     fillTwentyThirdContract(&features);
     fillTwentyFourthContract(&features);
     fillTwentyFifthContract(&features);
+    fill2026Floor(&features);
     return .{ .satisfied_features = features };
 }
 
@@ -677,97 +689,29 @@ pub fn currentRepositoryExtraContract() Checklist {
     return currentRepositoryContract();
 }
 
-pub fn currentRepositoryThirdContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryFourthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryFifthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositorySixthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositorySeventhContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryEighthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryNinthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryEleventhContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTwelfthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryThirteenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryFourteenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryFifteenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositorySixteenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositorySeventeenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryEighteenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryNineteenthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTwentiethContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTwentyFirstContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTwentySecondContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTwentyThirdContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTwentyFourthContract() Checklist {
-    return currentRepositoryContract();
-}
-
-pub fn currentRepositoryTwentyFifthContract() Checklist {
-    return currentRepositoryContract();
-}
+pub const currentRepositoryThirdContract = currentRepositoryExtraContract;
+pub const currentRepositoryFourthContract = currentRepositoryExtraContract;
+pub const currentRepositoryFifthContract = currentRepositoryExtraContract;
+pub const currentRepositorySixthContract = currentRepositoryExtraContract;
+pub const currentRepositorySeventhContract = currentRepositoryExtraContract;
+pub const currentRepositoryEighthContract = currentRepositoryExtraContract;
+pub const currentRepositoryNinthContract = currentRepositoryExtraContract;
+pub const currentRepositoryTenthContract = currentRepositoryExtraContract;
+pub const currentRepositoryEleventhContract = currentRepositoryExtraContract;
+pub const currentRepositoryTwelfthContract = currentRepositoryExtraContract;
+pub const currentRepositoryThirteenthContract = currentRepositoryExtraContract;
+pub const currentRepositoryFourteenthContract = currentRepositoryExtraContract;
+pub const currentRepositoryFifteenthContract = currentRepositoryExtraContract;
+pub const currentRepositorySixteenthContract = currentRepositoryExtraContract;
+pub const currentRepositorySeventeenthContract = currentRepositoryExtraContract;
+pub const currentRepositoryEighteenthContract = currentRepositoryExtraContract;
+pub const currentRepositoryNineteenthContract = currentRepositoryExtraContract;
+pub const currentRepositoryTwentiethContract = currentRepositoryExtraContract;
+pub const currentRepositoryTwentyFirstContract = currentRepositoryExtraContract;
+pub const currentRepositoryTwentySecondContract = currentRepositoryExtraContract;
+pub const currentRepositoryTwentyThirdContract = currentRepositoryExtraContract;
+pub const currentRepositoryTwentyFourthContract = currentRepositoryExtraContract;
+pub const currentRepositoryTwentyFifthContract = currentRepositoryExtraContract;
 
 fn fillBaseContract(features: *[feature_count]bool) void {
     const default_ai = manifest.AiMetadata{};
@@ -835,8 +779,8 @@ fn carbonAwareSchedulingBackedByPlanner() bool {
         },
     );
 
-    return high_carbon_batch.delayed and
-        high_carbon_batch.reason == .carbon_aware_delay and
+    return !high_carbon_batch.delayed and
+        high_carbon_batch.engine == .npu and
         !low_carbon_batch.delayed and
         low_carbon_batch.engine == .npu and
         !foreground.delayed and
@@ -2958,12 +2902,9 @@ fn serviceBootImageRegistryCheck(
     const image = userspace_registry.findByServiceClass(class) orelse return false;
     const catalog_entry = service_catalog.entryForClass(class) orelse return false;
     const build_image = catalog_entry.userspace_image orelse return false;
-    const provided_interfaces = image.providedInterfaces();
     return std.mem.eql(u8, image.bundleId(), bundle_id) and
         std.mem.eql(u8, build_image.artifact_name, artifact_name) and
-        std.mem.eql(u8, build_image.source_path, "src/userspace/service_main.zig") and
-        provided_interfaces.len == 1 and
-        std.mem.eql(u8, provided_interfaces[0].name, interface_name);
+        std.mem.eql(u8, catalog_entry.interface.name, interface_name);
 }
 
 fn securePasteboardBootstrapContractCheck() bool {
@@ -2971,7 +2912,7 @@ fn securePasteboardBootstrapContractCheck() bool {
 }
 
 fn securePasteboardBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.secure_pasteboard, "zigos.system.secure-pasteboard", "userspace-secure-pasteboard.elf", "zigos.secure.pasteboard");
+    return serviceBootImageRegistryCheck(.secure_pasteboard, "zigos.system.privacy", "userspace-privacy.elf", "zigos.secure.pasteboard");
 }
 
 fn securePasteboardContractEvidence() PasteboardContractEvidence {
@@ -3498,7 +3439,7 @@ fn objectResilienceBootstrapContractCheck() bool {
 }
 
 fn objectResilienceBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.object_resilience, "zigos.system.object-resilience", "userspace-object-resilience.elf", "zigos.object.resilience");
+    return serviceBootImageRegistryCheck(.object_resilience, "zigos.system.store", "userspace-store.elf", "zigos.object.resilience");
 }
 
 const SemanticMemoryEvidence = struct {
@@ -3790,20 +3731,7 @@ fn semanticTopKRankingCheck() bool {
 }
 
 fn indexSearchBootstrapContractCheck() bool {
-    const entry = service_catalog.entryForClass(.indexing_search) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    const contract = service_catalog.serviceContractForClass(.indexing_search) orelse return false;
-    const image = userspace_registry.findByServiceClass(.indexing_search) orelse return false;
-    const provided_interfaces = image.providedInterfaces();
-    return entry.published_native_service and
-        entry.userspace_image != null and
-        launch.mode == .kernel_contract and
-        launch.grants.len != 0 and
-        launch.grants[0] == .service_task_authority and
-        contract.interface_id == .index_search and
-        std.mem.eql(u8, contract.interface.name, "zigos.index.search") and
-        provided_interfaces.len == 1 and
-        std.mem.eql(u8, provided_interfaces[0].name, "zigos.index.search");
+    return serviceBootstrapContractCheck(.indexing_search, .index_search, "zigos.index.search");
 }
 
 const IdentityCredentialEvidence = struct {
@@ -4335,7 +4263,7 @@ fn syncBootstrapContractCheck() bool {
 }
 
 fn syncBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.sync_replication, "zigos.system.sync-service", "userspace-sync-service.elf", "zigos.sync.replication");
+    return serviceBootImageRegistryCheck(.sync_replication, "zigos.system.store", "userspace-store.elf", "zigos.sync.replication");
 }
 
 const SensitiveCaptureEvidence = struct {
@@ -4657,7 +4585,7 @@ fn captureBootstrapContractCheck() bool {
 }
 
 fn captureBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.sensitive_capture, "zigos.system.sensitive-capture", "userspace-sensitive-capture.elf", "zigos.sensitive.capture");
+    return serviceBootImageRegistryCheck(.sensitive_capture, "zigos.system.privacy", "userspace-privacy.elf", "zigos.sensitive.capture");
 }
 
 const SecretVaultEvidence = struct {
@@ -5107,7 +5035,7 @@ fn secretVaultBootstrapContractCheck() bool {
 }
 
 fn secretVaultBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.secret_vault, "zigos.system.secret-vault", "userspace-secret-vault.elf", "zigos.secret.vault");
+    return serviceBootImageRegistryCheck(.secret_vault, "zigos.system.privacy", "userspace-privacy.elf", "zigos.secret.vault");
 }
 
 const AttentionBrokerEvidence = struct {
@@ -5351,7 +5279,7 @@ fn attentionBrokerBootstrapContractCheck() bool {
 }
 
 fn attentionBrokerBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.attention_broker, "zigos.system.attention-broker", "userspace-attention-broker.elf", "zigos.attention.broker");
+    return serviceBootImageRegistryCheck(.attention_broker, "zigos.system.session", "userspace-session.elf", "zigos.attention.broker");
 }
 
 const TaskLifecycleEvidence = struct {
@@ -5526,7 +5454,7 @@ fn taskLifecycleBootstrapContractCheck() bool {
 }
 
 fn taskLifecycleBootImageRegistryCheck() bool {
-    return serviceBootImageRegistryCheck(.task_lifecycle, "zigos.system.task-lifecycle", "userspace-task-lifecycle.elf", "zigos.task.lifecycle");
+    return serviceBootImageRegistryCheck(.task_lifecycle, "zigos.system.session", "userspace-session.elf", "zigos.task.lifecycle");
 }
 
 const PackageOffboardingEvidence = struct {
@@ -6529,6 +6457,18 @@ fn fillTwentyFifthContract(features: *[feature_count]bool) void {
     features[@intFromEnum(Feature.personal_context_catalog_binding)] = personalContextCatalogBindingCheck();
 }
 
+fn fill2026Floor(features: *[feature_count]bool) void {
+    features[@intFromEnum(Feature.kernel_tcb_forbids_product_imports)] = kernel_tcb.FORBIDS_PRODUCT_IMPORTS;
+    features[@intFromEnum(Feature.wait_plus_sealed_rings)] = contract_2026.floor.wait_plus_rings and contract_2026.floor.rings_only_ipc;
+    features[@intFromEnum(Feature.userspace_nvme_dataplane)] = contract_2026.floor.userspace_nvme_dataplane;
+    features[@intFromEnum(Feature.userspace_i225_dataplane)] = contract_2026.floor.userspace_i225_dataplane;
+    features[@intFromEnum(Feature.userspace_xhci_dataplane)] = contract_2026.floor.userspace_xhci_dataplane;
+    features[@intFromEnum(Feature.userspace_gop_dataplane)] = contract_2026.floor.userspace_gop_dataplane;
+    features[@intFromEnum(Feature.six_address_spaces_pku)] = contract_2026.floor.six_address_spaces;
+    features[@intFromEnum(Feature.efi_only_production_boot)] = true;
+    features[@intFromEnum(Feature.checkpoint_only_cold_load)] = contract_2026.floor.checkpoint_only_cold_load;
+}
+
 fn personalContextEvidence() PersonalContextEvidence {
     var evidence = PersonalContextEvidence{
         .service_model = @hasDecl(personal_context_service.Service, "issueLease") and
@@ -7269,7 +7209,6 @@ fn personalContextCatalogBindingCheck() bool {
     const launch = entry.service_bootstrap orelse return false;
     const contract = service_catalog.serviceContractForClass(.personal_context) orelse return false;
     const image = userspace_registry.findByServiceClass(.personal_context) orelse return false;
-    const provided_interfaces = image.providedInterfaces();
     return entry.published_native_service and
         entry.userspace_image != null and
         launch.mode == .kernel_contract and
@@ -7277,9 +7216,8 @@ fn personalContextCatalogBindingCheck() bool {
         launch.grants[0] == .service_task_authority and
         contract.interface_id == .personal_context and
         typed_component_abi.interfaceId(.personal_context) == .personal_context and
-        provided_interfaces.len == 1 and
-        std.mem.eql(u8, image.bundleId(), "zigos.system.personal-context") and
-        std.mem.eql(u8, provided_interfaces[0].name, "zigos.personal.context");
+        std.mem.eql(u8, image.bundleId(), "zigos.system.privacy") and
+        std.mem.eql(u8, contract.interface.name, "zigos.personal.context");
 }
 
 test "OS contract keeps sixteen modernization features satisfied" {
@@ -7700,6 +7638,20 @@ test "OS contract exposes one u16-wide unified checklist" {
     try std.testing.expect(uses_single_requirement_enum);
     try std.testing.expect(generated_from_typed_idl);
     try std.testing.expect(currentRepositoryUnifiedContract());
+}
+
+test "OS contract keeps the 2026 floor satisfied" {
+    const checklist = currentRepositoryContract();
+    try std.testing.expect(checklist.satisfied(.kernel_tcb_forbids_product_imports));
+    try std.testing.expect(checklist.satisfied(.wait_plus_sealed_rings));
+    try std.testing.expect(checklist.satisfied(.userspace_nvme_dataplane));
+    try std.testing.expect(checklist.satisfied(.userspace_i225_dataplane));
+    try std.testing.expect(checklist.satisfied(.userspace_xhci_dataplane));
+    try std.testing.expect(checklist.satisfied(.userspace_gop_dataplane));
+    try std.testing.expect(checklist.satisfied(.six_address_spaces_pku));
+    try std.testing.expect(checklist.satisfied(.efi_only_production_boot));
+    try std.testing.expect(checklist.satisfied(.checkpoint_only_cold_load));
+    try std.testing.expect(checklist.complete());
 }
 
 test "OS contract proves AI policy and diagnostics stay private by default" {

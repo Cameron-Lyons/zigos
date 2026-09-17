@@ -19,6 +19,7 @@ const intel_i225_hw = if (builtin.target.os.tag == .freestanding)
 else
     struct {
         pub fn activate() !void {}
+        pub fn prepare(_: anytype) !void {}
         pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
             return null;
         }
@@ -718,6 +719,15 @@ pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
 
 pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task_id: u64) bool {
     if (service_id == 0) return false;
+    if (builtin.target.os.tag == .freestanding) {
+        const pci = @import("../../kernel/drivers/pci.zig");
+        if (pci.firstIntelI225Lm()) |dev| {
+            intel_i225_hw.prepare(dev) catch |err| switch (err) {
+                error.AlreadyPrepared => {},
+                else => return false,
+            };
+        }
+    }
     if (intel_i225_hw.publishedBar() != null) {
         intel_i225_hw.activate() catch return false;
         if (builtin.target.os.tag == .freestanding) {

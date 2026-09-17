@@ -272,6 +272,7 @@ pub fn main(init: std.process.Init) !void {
     try validateBenchmarkEnvironmentGate(allocator, io, &errors);
     try validateSyntheticUserspaceImageMarkers(allocator, io, &errors);
     try validateEventLedgerRollover(allocator, io, &errors);
+    try validateKernelTcbImports(allocator, io, &errors);
 
     if (errors.items.len > 0) {
         common.printErrors(errors.items);
@@ -290,6 +291,106 @@ pub fn main(init: std.process.Init) !void {
         "Production readiness OK: {d} tracks, {d} requirement references\n",
         .{ tracks.len, requirement_refs },
     );
+}
+
+fn validateKernelTcbImports(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const tcb_path = "src/kernel/tcb.zig";
+    const tcb_source = try readRequiredSource(allocator, io, errors, tcb_path) orelse return;
+    const required_tcb_snippets = [_][]const u8{
+        "pub const FORBIDS_PRODUCT_IMPORTS = true",
+        "pub const KERNEL_PORT_REQUIRES_PUBLISHED_GS = true",
+        "pub const IDLE_NEVER_SERVICES_DEVICE_QUEUES = true",
+        "native/storage/",
+        "native/sync/",
+        "native/policy/",
+        "native/services/",
+        "native/demo/",
+        "native/platform/compositor",
+    };
+    for (required_tcb_snippets) |snippet| {
+        if (std.mem.indexOf(u8, tcb_source, snippet) == null) {
+            try common.addError(errors, allocator, "kernel TCB contract must retain snippet: {s}", .{snippet});
+        }
+    }
+
+    const native_profile_path = "src/kernel/boot/profiles/zigos_native.zig";
+    const native_profile_source = try readRequiredSource(allocator, io, errors, native_profile_path) orelse return;
+    if (std.mem.indexOf(u8, native_profile_source, "_ = xhci_driver_task.dispatch();") != null) {
+        try common.addError(errors, allocator, "native idle loop must not service xHCI from the kernel", .{});
+    }
+
+    try walkKernelTcbDir(allocator, io, errors, "src/kernel");
+}
+
+fn walkKernelTcbDir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+        try common.addError(errors, allocator, "kernel TCB scan could not open {s}: {s}", .{ path, @errorName(err) });
+        return;
+    };
+    defer dir.close(io);
+
+    var iterator = dir.iterate();
+    while (iterator.next(io) catch |err| {
+        try common.addError(errors, allocator, "kernel TCB scan failed in {s}: {s}", .{ path, @errorName(err) });
+        return;
+    }) |entry| {
+        const child = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, entry.name });
+        switch (entry.kind) {
+            .directory => {
+                if (kernelTcbDirIsExcluded(child)) continue;
+                try walkKernelTcbDir(allocator, io, errors, child);
+            },
+            .file => {
+                if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+                if (kernelTcbFileIsExcluded(child)) continue;
+                try scanKernelTcbFile(allocator, io, errors, child);
+            },
+            else => {},
+        }
+    }
+}
+
+fn kernelTcbDirIsExcluded(path: []const u8) bool {
+    return std.mem.eql(u8, path, "src/kernel/boot/benchmark");
+}
+
+fn kernelTcbFileIsExcluded(path: []const u8) bool {
+    return std.mem.eql(u8, path, "src/kernel/tcb.zig") or
+        std.mem.eql(u8, path, "src/kernel/boot/recovery_suite.zig") or
+        std.mem.eql(u8, path, "src/kernel/boot/profiles/recovery.zig") or
+        std.mem.eql(u8, path, "src/kernel/boot/profiles/benchmark.zig");
+}
+
+fn scanKernelTcbFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+) !void {
+    const source = try common.readFileAlloc(allocator, io, path, common.source_file_max_bytes);
+    const forbidden_prefixes = [_][]const u8{
+        "native/storage/",
+        "native/sync/",
+        "native/policy/",
+        "native/services/",
+        "native/demo/",
+        "native/platform/compositor",
+        "native/platform/rendered_shell",
+        "native/platform/os_contract",
+    };
+    for (forbidden_prefixes) |prefix| {
+        if (std.mem.indexOf(u8, source, prefix) == null) continue;
+        try common.addError(errors, allocator, "kernel TCB forbids product import {s} in {s}", .{ prefix, path });
+    }
 }
 
 fn validateEventLedgerRollover(
@@ -1218,15 +1319,7 @@ fn validateNuc11tnki5KernelProofSources(
         "pci.firstNvmeController()",
         ".nvme_pci_inventory",
         "pci.firstXhciController()",
-        "xhci_hw.probe(dev)",
         "device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false)",
-        "ZIGOS:XHCI:HW:OWNERSHIP_OK",
-        "ZIGOS:XHCI:HW:RESET_OK",
-        "ZIGOS:XHCI:HW:SLOTS_OK",
-        "xhci_hw.isolationDomain()",
-        "isolation_domains[0..isolation_domain_count]",
-        "ZIGOS:XHCI:HW:DMA_OK",
-        "xhci_prepared = true",
     };
     for (required_boot_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
@@ -1234,9 +1327,18 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_xhci_driver_task_snippets = [_][]const u8{
+        "xhci_hw.probe(dev)",
+        "ZIGOS:XHCI:HW:OWNERSHIP_OK",
+        "ZIGOS:XHCI:HW:RESET_OK",
+        "ZIGOS:XHCI:HW:SLOTS_OK",
+        "xhci_hw.isolationDomain()",
+        "isolation_domains[0..isolation_domain_count]",
+        "ZIGOS:XHCI:HW:DMA_OK",
+        "xhci_prepared = true",
         "xhci_hw.activate()",
         "ZIGOS:XHCI:HW:REMAP_MSI_OK",
         "ZIGOS:XHCI:HW:RUN_OK",
+        "KERNEL_LATCHES_ONLY",
     };
     for (required_xhci_driver_task_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_driver_task_source, snippet) == null) {
@@ -1477,7 +1579,7 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_one_shot_scheduler_snippets = [_][]const u8{
         "timer.synchronize()",
-        "xhci_driver_task.dispatch()",
+        "xhci_driver_task.boundTaskId()",
         "session_manager.bindHardwareInput",
         "pollHardwareKeyboardReport",
         "xhci_driver_task.pollKeyboardReport()",
@@ -1498,16 +1600,25 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_emulator_countdown_timer_snippets = [_][]const u8{
-        "X2APIC_TIMER_INITIAL_COUNT_MSR",
-        "X2APIC_TIMER_CURRENT_COUNT_MSR",
-        "X2APIC_TIMER_DIVIDE_CONFIG_MSR",
-        "X2APIC_TIMER_MODE_PERIODIC",
-        "initCalibratedCountdownTimer",
-        "calibrated_countdown",
+        "TICKLESS_TSC_DEADLINE",
+        "X2APIC_TIMER_MODE_TSC_DEADLINE",
+        "IA32_TSC_DEADLINE_MSR",
+        "armSchedulerTick",
+        "disarmSchedulerTick",
     };
     for (required_emulator_countdown_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, timer_source, snippet) == null) {
-            try common.addError(errors, allocator, "QEMU software emulation must retain its isolated x2APIC countdown path: {s}", .{snippet});
+            try common.addError(errors, allocator, "tickless TSC-deadline timer must retain snippet: {s}", .{snippet});
+        }
+    }
+    const retired_emulator_countdown_timer_snippets = [_][]const u8{
+        "calibrated_countdown",
+        "initCalibratedCountdownTimer",
+        "X2APIC_TIMER_MODE_PERIODIC",
+    };
+    for (retired_emulator_countdown_timer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, timer_source, snippet) != null) {
+            try common.addError(errors, allocator, "tickless timer must not restore the QEMU countdown path: {s}", .{snippet});
         }
     }
     const required_accelerated_qemu_snippets = [_][]const u8{
@@ -1527,6 +1638,8 @@ fn validateNuc11tnki5KernelProofSources(
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
         "qemu_iso.addFileArg(boot_kernel)",
+        "scripts/build-efi-iso.sh",
+        "scripts/check-efi-image.sh",
     };
     for (required_compact_kernel_boot_snippets) |snippet| {
         if (std.mem.indexOf(u8, kernel_build_source, snippet) == null) {
@@ -1536,8 +1649,8 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, kernel_build_source, "const boot_kernel = if") != null) {
         try common.addError(errors, allocator, "debug stripping must apply to every kernel boot profile", .{});
     }
-    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
-        try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
+    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") != null) {
+        try common.addError(errors, allocator, "QEMU boot configuration must not request the retired software-emulator CPU fallback", .{});
     }
     if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
         try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
@@ -1733,9 +1846,6 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
-        "ProcessContextMode",
-        "hardware_pcid",
-        "software_flush",
         "CR4_PGE",
         "globalPagesEnabled",
         "CR4_SMEP",
@@ -1748,7 +1858,6 @@ fn validateNuc11tnki5KernelProofSources(
         "xsavesEnabled",
         "enableCet",
         "cetEnabled",
-        "CetMode",
         "enablePku",
         "enableLass",
     };
@@ -1757,54 +1866,48 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "modern CPU feature enablement must retain snippet: {s}", .{snippet});
         }
     }
+    const retired_cpu_feature_fallback_snippets = [_][]const u8{
+        "ProcessContextMode",
+        "software_flush",
+        "CetMode",
+        ".deferred",
+    };
+    for (retired_cpu_feature_fallback_snippets) |snippet| {
+        if (std.mem.indexOf(u8, cpu_features_source, snippet) != null) {
+            try common.addError(errors, allocator, "modern CPU feature enablement must not restore ISA fallbacks: {s}", .{snippet});
+        }
+    }
     const required_boot_process_context_snippets = [_][]const u8{
-        "softwareCpuFallbackRequested",
         "model_inventory",
-        "qemu_software_cpu_fallback",
         "qemu_tsc_frequency_hz",
-        "hardware_process_contexts",
         "cpu_pcid_enabled",
-        "cpu_pcid_software_fallback",
         "cpu_pcid_ready",
         "cpu_pge_enabled",
         "cpu_smep_enabled",
         "cpu_smap_enabled",
         "cpu_umip_enabled",
-        "cpu_syscall_enabled",
         "cpu_fred_enabled",
         "cpu_pku_enabled",
         "cpu_lass_enabled",
+        "enableModernFeatures(features)",
     };
     for (required_boot_process_context_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "CPU boot process-context gate must retain snippet: {s}", .{snippet});
         }
     }
-    const required_boot_timer_snippets = [_][]const u8{
+    const retired_boot_fallback_snippets = [_][]const u8{
         "softwareCpuFallbackRequested",
         "qemu_software_cpu_fallback",
-        "software_cpu_fallback",
-        "hardware_tsc_timer",
-        "software_timer_fallback",
-        "required_features.tsc_deadline = true",
-        "required_features.invariant_tsc = true",
-        ".tsc_deadline else .calibrated_countdown",
-    };
-    for (required_boot_timer_snippets) |snippet| {
-        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
-            try common.addError(errors, allocator, "CPU boot timer gate must retain snippet: {s}", .{snippet});
-        }
-    }
-    const required_boot_cet_snippets = [_][]const u8{
-        "hardware_cet",
-        "software_cet_fallback",
-        "required_features.cet_ibt = true",
-        "required_features.cet_ss = true",
+        "cpu_pcid_software_fallback",
+        "cpu_syscall_enabled",
+        "software_flush",
         ".deferred",
+        "calibrated_countdown",
     };
-    for (required_boot_cet_snippets) |snippet| {
-        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
-            try common.addError(errors, allocator, "CPU boot CET gate must retain snippet: {s}", .{snippet});
+    for (retired_boot_fallback_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_entry_source, snippet) != null) {
+            try common.addError(errors, allocator, "CPU boot must not restore ISA compatibility fallbacks: {s}", .{snippet});
         }
     }
     const required_pcid_allocator_snippets = [_][]const u8{
@@ -1906,23 +2009,30 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_syscall_configuration_snippets = [_][]const u8{
         "FRED_ONLY_TRAPS",
-        "USER_STAR_BASE_SELECTOR",
-        "SYSCALL_RFLAGS_MASK",
         "IA32_GS_BASE_MSR",
         "IA32_KERNEL_GS_BASE_MSR",
-        "IA32_STAR_MSR",
-        "IA32_LSTAR_MSR",
-        "IA32_FMASK_MSR",
-        "EFER_SCE",
         "enableFred",
         "setFredRsp0",
         "fredEnabled",
         "setKernelStack",
-        "syscallExtensionEnabled",
+        "setActiveTaskId",
+        "currentActiveTaskId",
+        "setKernelPort",
     };
     for (required_syscall_configuration_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_source, snippet) == null) {
-            try common.addError(errors, allocator, "native x86-64 syscall configuration must retain snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "native x86-64 FRED syscall configuration must retain snippet: {s}", .{snippet});
+        }
+    }
+    const retired_syscall_configuration_snippets = [_][]const u8{
+        "USER_STAR_BASE_SELECTOR",
+        "IA32_STAR_MSR",
+        "IA32_LSTAR_MSR",
+        "syscallExtensionEnabled",
+    };
+    for (retired_syscall_configuration_snippets) |snippet| {
+        if (std.mem.indexOf(u8, syscall_source, snippet) != null) {
+            try common.addError(errors, allocator, "native x86-64 FRED syscall configuration must not restore SYSCALL MSRs: {s}", .{snippet});
         }
     }
     const required_fred_entry_snippets = [_][]const u8{
@@ -1940,20 +2050,22 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_syscall_entry_snippets = [_][]const u8{
-        "zigos_syscall_entry",
-        "swapgs",
-        "CPU_KERNEL_STACK_TOP",
-        "CPU_USER_STACK_POINTER",
-        "xsaves",
-        "xrstors",
-        "endbr64",
-        "sysretq",
-        "call syscall_handler",
-        "call isrHandler",
+        "zigos_syscall_benchmark_user_start",
+        "syscall",
     };
     for (required_syscall_entry_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_entry_source, snippet) == null) {
-            try common.addError(errors, allocator, "native x86-64 syscall entry must retain snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "native x86-64 FRED userspace entry must retain snippet: {s}", .{snippet});
+        }
+    }
+    const retired_syscall_entry_snippets = [_][]const u8{
+        "zigos_syscall_entry",
+        "swapgs",
+        "sysretq",
+    };
+    for (retired_syscall_entry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, syscall_entry_source, snippet) != null) {
+            try common.addError(errors, allocator, "native x86-64 FRED entry must not restore SYSCALL/SWAPGS: {s}", .{snippet});
         }
     }
     const required_sysret_gdt_snippets = [_][]const u8{
@@ -2120,6 +2232,8 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const INPUT_EVENTS_PER_DISPATCH: usize = 8" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput()" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = ".wait_for_event" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn parkUntilEvent()" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "makeHeader(.wait" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "recordInputEvent" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "publishUiState" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
@@ -3263,7 +3377,7 @@ fn validateStorageModernOnlyTrack(
     const checkpoint_source_path = "src/native/storage/storage_service_checkpoint.zig";
     const checkpoint_source = try readRequiredSource(allocator, io, errors, checkpoint_source_path) orelse return;
     const shared_root_volume_snippets = [_][]const u8{
-        "const shares_root_volume = builtin.target.os.tag == .freestanding and @hasDecl(root, \"storage_volume\")",
+        "const shares_root_volume = builtin.target.os.tag == .freestanding",
         "const CheckpointVolume = if (shares_root_volume) void else storage_volume.Volume",
         "return storage_volume.defaultVolume()",
         "if (comptime !shares_root_volume)",
@@ -3708,7 +3822,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 5",
+        "pub const ABI_VERSION: u16 = 6",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -4128,7 +4242,7 @@ fn validateNativeOnlyLaunchTrack(
         "validateGeneratedArtifact(artifact)",
         "bundle.signature = try userspace_manifest_signing.signBundle(bundle)",
         "catalog.registerBuildValidatedArtifact",
-        "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session-manager\").?.embedsElf())",
+        "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session\").?.embedsElf())",
     };
     for (required_boot_registry_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_registry_source, snippet) == null) {

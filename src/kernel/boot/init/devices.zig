@@ -2,11 +2,7 @@ const std = @import("std");
 const console = @import("../../utils/console.zig");
 const config = @import("../../config.zig");
 const first_target_telemetry = @import("../../drivers/first_target_telemetry.zig");
-const intel_i225_hw = @import("../../drivers/intel_i225_hw.zig");
 const pci = @import("../../drivers/pci.zig");
-const nvme_hw = @import("../../drivers/nvme_hw.zig");
-const xhci_hw = @import("../../drivers/xhci_hw.zig");
-const intel_vtd = @import("../../platform/intel_vtd.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
 const device_broker = @import("../../../native/kernel_api/device_broker.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
@@ -22,7 +18,6 @@ const PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER: u8 = 0x07;
 var network_detected = false;
 var storage_detected = false;
 var xhci_detected = false;
-var xhci_prepared = false;
 var graphics_started = false;
 
 pub const kernel_boundary_role = data_plane_boundary.kernel_boundary_role;
@@ -49,7 +44,6 @@ pub fn init() void {
     network_detected = false;
     storage_detected = false;
     xhci_detected = false;
-    xhci_prepared = false;
     graphics_started = false;
     hardware_proof.capturePlatformFirmwareEvidence();
     const ecam_allocation = hardware_proof.pciEcamAllocation() orelse
@@ -96,107 +90,15 @@ pub fn startDeferredRuntimeInit() void {
 }
 
 pub fn startStorageDataplane() bool {
-    if (nvme_hw.attached()) return true;
-    const dev = pci.firstNvmeController() orelse return true;
-    if (!storage_detected) return true;
-    var isolation_domains: [2]intel_vtd.DmaDomain = undefined;
-    var isolation_domain_count: usize = 0;
-    if (intel_i225_hw.isolationDomain()) |domain| {
-        isolation_domains[isolation_domain_count] = domain;
-        isolation_domain_count += 1;
-    }
-    if (xhci_hw.isolationDomain()) |domain| {
-        isolation_domains[isolation_domain_count] = domain;
-        isolation_domain_count += 1;
-    }
-    var vtd_summary = if (hardware_proof.realTargetDetected())
-        hardware_proof.vtdSummary() orelse @panic("validated VT-d firmware is required on the production target")
-    else
-        null;
-    const vtd_summary_ptr = if (vtd_summary) |*summary| summary else null;
-    const fault_proof = nvme_hw.probeAndReport(
-        dev,
-        vtd_summary_ptr,
-        isolation_domains[0..isolation_domain_count],
-    ) catch |err| {
-        reportHardwareFailure(
-            "ZIGOS:NVME:HW:BRINGUP_FAIL ",
-            err,
-            hardware_proof.realTargetDetected(),
-            "production NVMe bring-up failed closed",
-        );
-        return false;
-    };
-    if (fault_proof) |proof| hardware_proof.recordVtdIsolationProof(proof);
-    if (nvme_hw.publishedBar()) |bar| {
-        registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
-    }
-    var interrupts_ready = true;
-    nvme_hw.activateInterrupts() catch |err| {
-        interrupts_ready = false;
-        reportHardwareFailure(
-            if (hardware_proof.realTargetDetected())
-                "ZIGOS:NVME:HW:INTERRUPT_BRINGUP_FAIL "
-            else
-                "ZIGOS:NVME:HW:INTERRUPT_UNAVAILABLE ",
-            err,
-            hardware_proof.realTargetDetected(),
-            "production NVMe interrupt activation failed closed",
-        );
-    };
-    if (interrupts_ready) console.print("ZIGOS:NVME:HW:REMAP_MSI_OK\n");
-    return true;
+    return storage_detected or pci.firstNvmeController() != null;
 }
 
 pub fn startNetworkDataplane() bool {
-    if (intel_i225_hw.attached()) return true;
-    const dev = pci.firstIntelI225Lm() orelse return true;
-    if (!network_detected) return true;
-    intel_i225_hw.prepare(dev) catch |err| switch (err) {
-        error.AlreadyPrepared => {},
-        else => {
-            reportHardwareFailure(
-                "ZIGOS:I225:HW:BRINGUP_FAIL ",
-                err,
-                hardware_proof.realTargetDetected(),
-                "production I225-LM preparation failed closed",
-            );
-            return false;
-        },
-    };
-    if (intel_i225_hw.publishedBar()) |bar| {
-        registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
-    }
-    return true;
+    return network_detected or pci.firstIntelI225Lm() != null;
 }
 
 pub fn startInputDataplane() bool {
-    if (xhci_prepared) return true;
-    const dev = pci.firstXhciController() orelse return true;
-    if (!xhci_detected) return true;
-    const caps = xhci_hw.probe(dev) catch |err| switch (err) {
-        error.AlreadyPrepared => xhci_hw.probedCapabilities() orelse return false,
-        else => {
-            reportHardwareFailure(
-                "ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ",
-                err,
-                hardware_proof.realTargetDetected(),
-                "production xHCI capability probe failed closed",
-            );
-            return false;
-        },
-    };
-    _ = caps;
-    console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_OK\n");
-    console.print("ZIGOS:XHCI:HW:OWNERSHIP_OK\n");
-    console.print("ZIGOS:XHCI:HW:RESET_OK\n");
-    console.print("ZIGOS:XHCI:HW:SLOTS_OK\n");
-    console.print("ZIGOS:XHCI:HW:DMA_OK\n");
-    if (xhci_hw.publishedBar()) |bar| {
-        registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
-    }
-    xhci_prepared = true;
-    return true;
+    return xhci_detected or pci.firstXhciController() != null;
 }
 
 pub fn startGraphicsDataplane() bool {

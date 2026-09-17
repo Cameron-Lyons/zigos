@@ -459,6 +459,13 @@ pub const SessionManager = struct {
 
     fn taskOwnsUiSurface(self: *SessionManager, task: *const task_runtime.TaskRecord) bool {
         if (task.state != .active or task.ui_surface_id == null or task.ui_surface_id.? == 0) return false;
+        if (manifest.isApplicationBundle(task.launchBundleIdSlice())) return true;
+        const components = task.executionComponents();
+        if (components.len != 0) {
+            if (service_catalog.contractFlagsForComponentLabel(components[0].labelSlice())) |flags| {
+                return (flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
+            }
+        }
         const image = self.userspaceCatalogPtr().findById(task.launch.image_id) orelse return false;
         return (image.contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
     }
@@ -904,6 +911,7 @@ fn launchNativeBootstrapService(
     const launch = service_catalog.bootstrapLaunchForClass(class) orelse return error.MissingBootstrapLaunch;
     if (service_catalog.entryForClass(class).?.published_native_service) return error.MissingBootstrapLaunch;
     const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingUserspaceImage;
+    const catalog_image = service_catalog.imageForClass(class) orelse return error.MissingUserspaceImage;
     return userspace_launch.launchFromKernel(
         self.userspaceCatalogPtr(),
         self.runtimePtr(),
@@ -913,6 +921,7 @@ fn launchNativeBootstrapService(
             .budget = launch.budget,
             .ui_surface_id = launch.ui_surface_id,
             .local_only = true,
+            .component_label = catalog_image.label,
         },
         self.userspaceSchedulerPtr(),
     ) catch |err| {

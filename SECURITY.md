@@ -79,7 +79,7 @@ The following are release blockers:
 - Release provenance not signed through a hardware-backed TPM, secure enclave,
   HSM, or KMS key delegated by the independently pinned,
   threshold-authenticated trust policy.
-- Customer verification bundle missing the exact signed 33-target manifest,
+- Customer verification bundle missing the exact signed 15-target manifest,
   root consistency evidence, signed trust policy, artifact digests, SPDX SBOM,
   DSSE in-toto/SLSA provenance, or reproducible-build evidence.
 - Release verification performed without an independently distributed,
@@ -91,7 +91,7 @@ The following are release blockers:
 - Pinned root metadata missing `minimumPolicyVersion`, or its authenticated
   trust policy missing `minimumReleaseSequence`, for first-use rollback floors.
 - Candidate generation, finalization, or verification performed while an
-  untrusted concurrent writer can replace the release bundle or any of its 33
+  untrusted concurrent writer can replace the release bundle or any of its 15
   signed target files; authenticated inputs must remain private and quiescent
   or be staged read-only.
 - Treating any locally computed commitment as a production FIPS 204 ML-DSA

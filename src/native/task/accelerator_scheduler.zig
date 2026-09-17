@@ -362,7 +362,6 @@ pub const Decision = struct {
 pub const MAX_ENGINE_CLAIMS: usize = 16;
 const ENGINE_COUNT: usize = std.meta.fields(Engine).len;
 const CLAIM_INDEX_CAPACITY: usize = MAX_ENGINE_CLAIMS * 2;
-const HIGH_CARBON_GRID_GRAMS_PER_KWH: u16 = 450;
 
 pub const EngineAvailability = struct {
     gpu: bool = true,
@@ -820,12 +819,6 @@ pub fn planWithState(state: SystemState, availability: EngineAvailability, reque
             decision.reason = .memory_bandwidth;
             return decision;
         }
-        if (shouldDelayForLowCarbonPower(state, request)) {
-            decision.delayed = true;
-            decision.degraded = true;
-            decision.reason = .carbon_aware_delay;
-            return decision;
-        }
     }
 
     switch (request.class) {
@@ -976,14 +969,6 @@ fn sampleFromLivePlatformCounters(observed_tick: u64, counters: LivePlatformCoun
     };
 }
 
-fn shouldDelayForLowCarbonPower(state: SystemState, request: Request) bool {
-    if (!request.defer_for_low_carbon_power) return false;
-    if (request.class == .foreground_interactive) return false;
-    if (request.estimated_energy_milliwatt_hours == 0) return false;
-    if (state.grid_carbon_intensity_grams_per_kwh == 0) return false;
-    return state.grid_carbon_intensity_grams_per_kwh >= HIGH_CARBON_GRID_GRAMS_PER_KWH;
-}
-
 fn thermalPressureFromMilliCelsius(value: u32) ThermalPressure {
     if (value >= 90_000) return .critical;
     if (value >= 75_000) return .elevated;
@@ -1095,7 +1080,7 @@ test "accelerator scheduler uses cpu and memory bandwidth accounting signals" {
     try std.testing.expect(!emergency.degraded);
 }
 
-test "accelerator scheduler delays deferrable work for lower carbon power windows" {
+test "accelerator scheduler does not delay CPU dispatch for carbon intensity" {
     var controller = Controller.init();
     controller.configure(.{
         .grid_carbon_intensity_grams_per_kwh = 620,
@@ -1110,10 +1095,8 @@ test "accelerator scheduler delays deferrable work for lower carbon power window
         .estimated_energy_milliwatt_hours = 2_000,
         .defer_for_low_carbon_power = true,
     });
-    try std.testing.expect(deferrable_batch.delayed);
-    try std.testing.expect(deferrable_batch.degraded);
-    try std.testing.expectEqual(DecisionReason.carbon_aware_delay, deferrable_batch.reason);
-    try std.testing.expectEqual(Engine.cpu, deferrable_batch.engine);
+    try std.testing.expect(!deferrable_batch.delayed);
+    try std.testing.expectEqual(Engine.npu, deferrable_batch.engine);
 
     const foreground = controller.plan(.{
         .class = .foreground_interactive,

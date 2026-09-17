@@ -20,6 +20,7 @@ pub const Region = struct {
     writable: bool = false,
     kind: Kind = .anonymous_zero,
     physical_base: u64 = 0,
+    protection_key: u4 = 0,
 };
 
 const SpaceRegion = struct {
@@ -132,6 +133,7 @@ fn mapOnePage(space: anytype, region: *const Region, fault_address: u64, write: 
         .executable = false,
         .write_through = false,
         .cache_disabled = region.kind == .object_physical,
+        .protection_key = region.protection_key,
     };
     const offset = page_start - region.virt_start;
     switch (region.kind) {

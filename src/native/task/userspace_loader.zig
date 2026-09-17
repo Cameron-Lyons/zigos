@@ -13,6 +13,7 @@ const task_runtime_launch = @import("task_runtime_launch.zig");
 const units = @import("../core/units.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_manifest_signing = @import("userspace_manifest_signing.zig");
+const userspace_registry = @import("userspace_registry.zig");
 
 pub const MAX_IMAGES: usize = 32;
 pub const DERIVES_IMAGE_IDS_FROM_ARENA_COUNT = true;
@@ -116,6 +117,7 @@ pub const LaunchRequest = struct {
     budget: task_runtime.ResourceBudget,
     ui_surface_id: ?u64 = null,
     local_only: bool = true,
+    component_label: []const u8 = "",
     source_identity: []const u8 = "",
     release_transparency_sequence: u64 = 0,
     release_transparency_root: crypto_hash.Digest = crypto_hash.zero_digest,
@@ -268,6 +270,13 @@ pub const Catalog = struct {
         return &slot.image;
     }
 
+    pub fn resolveLaunchImage(self: *Catalog, bundle_id: []const u8) ?*const ImageRecord {
+        if (self.findByBundleId(bundle_id)) |image| return image;
+        const canonical = userspace_registry.canonicalProductionBundleId(bundle_id);
+        if (std.mem.eql(u8, canonical, bundle_id)) return null;
+        return self.findByBundleId(canonical);
+    }
+
     pub fn findById(self: *Catalog, image_id: u64) ?*const ImageRecord {
         if (image_id == 0) return null;
         const slot = self.images.getConst(image_id) orelse return null;
@@ -284,8 +293,8 @@ pub const Catalog = struct {
         bundle_id: []const u8,
         request: LaunchRequest,
     ) Error!*task_runtime.TaskRecord {
-        const image = self.findByBundleId(bundle_id) orelse return error.ImageNotFound;
-        return runtime.createTask(taskCreateRequest(image, request));
+        const image = self.resolveLaunchImage(bundle_id) orelse return error.ImageNotFound;
+        return runtime.createTask(taskCreateRequest(image, request, bundle_id));
     }
 
     pub fn launchViaKernel(
@@ -294,7 +303,7 @@ pub const Catalog = struct {
         bundle_id: []const u8,
         request: LaunchRequest,
     ) Error!abi.TaskDescriptor {
-        const image = self.findByBundleId(bundle_id) orelse return error.ImageNotFound;
+        const image = self.resolveLaunchImage(bundle_id) orelse return error.ImageNotFound;
         return authority.port.taskCreate(.{
             .header = component_port.makeHeader(
                 .task_create,
@@ -302,7 +311,7 @@ pub const Catalog = struct {
                 authority.controller_task_id,
             ),
             .authority_capability_id = authority.authority_capability_id,
-            .request = taskCreateRequest(image, request),
+            .request = taskCreateRequest(image, request, bundle_id),
         }, authority.now_ticks);
     }
 
@@ -387,16 +396,16 @@ fn imageSlotMatchesBundleId(bundle_id: []const u8, slot: *const ImageSlot) bool 
     return std.mem.eql(u8, slot.image.bundleIdSlice(), bundle_id);
 }
 
-fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest) task_runtime.TaskCreateRequest {
+fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest, bundle_id: []const u8) task_runtime.TaskCreateRequest {
     return .{
         .owner = request.owner,
-        .component_class = image.component_class,
+        .component_class = if (manifest.isApplicationBundle(bundle_id)) .app_component else image.component_class,
         .budget = request.budget,
         .ui_surface_id = request.ui_surface_id,
         .local_only = request.local_only,
         .initial_component = .{
             .substrate = image.substrate,
-            .label = image.labelSlice(),
+            .label = if (request.component_label.len != 0) request.component_label else image.labelSlice(),
             .entry = image.entrySlice(),
         },
         .launch = .{
@@ -404,7 +413,7 @@ fn taskCreateRequest(image: *const ImageRecord, request: LaunchRequest) task_run
             .image_id = image.id,
             .component_abi_version = image.component_abi_version,
             .signed = image.bundle_signed,
-            .bundle_id = image.bundleIdSlice(),
+            .bundle_id = bundle_id,
             .source_identity = request.source_identity,
             .release_transparency_sequence = request.release_transparency_sequence,
             .release_transparency_root = request.release_transparency_root,

@@ -21,6 +21,8 @@ const smp = @import("../smp.zig");
 pub const SECTOR_BYTES: usize = 512;
 pub const INTERRUPT_VECTOR = nvme_interrupt.INTERRUPT_VECTOR;
 pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
+pub const BOOTSTRAP_BOUNCE_ONLY = true;
+pub const RUNTIME_IO_FORBIDDEN_AFTER_CLAIM = true;
 const PAGE_SIZE: u32 = 4096;
 
 const IO_PIPELINE_DEPTH: usize = nvme_pipeline.DEPTH;

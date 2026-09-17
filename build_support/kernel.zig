@@ -113,17 +113,18 @@ pub fn addX86_64KernelBootCheck(
     const linked_kernel = link.addOutputFileArg("kernel-x86_64-core-boot.elf");
     link.addFileArg(kernel_object.getEmittedBin());
 
+    const efi_stub = addNativeEfiStub(b, optimize);
     const validate_image = b.addSystemCommand(&.{"bash"});
-    validate_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
-    validate_image.addFileArg(linked_kernel);
+    validate_image.addFileArg(b.path("scripts/check-efi-image.sh"));
+    validate_image.addFileArg(efi_stub.getEmittedBin());
 
     const iso = b.addSystemCommand(&.{"bash"});
-    iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
+    iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
     iso.addFileArg(linked_kernel);
+    iso.addFileArg(efi_stub.getEmittedBin());
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
-    iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
-    iso.addFileArg(addNativeEfiStub(b, optimize).getEmittedBin());
+    iso.addFileArg(b.path("src/boot/cmdline.txt"));
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -539,17 +540,18 @@ pub fn addKernelArtifact(
     const boot_kernel = boot_link.addOutputFileArg(b.fmt("{s}.boot", .{name}));
     boot_link.addFileArg(kernel_object.getEmittedBin());
 
+    const efi_stub = addNativeEfiStub(b, .ReleaseSmall);
     const validate_qemu_image = b.addSystemCommand(&.{"bash"});
-    validate_qemu_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
-    validate_qemu_image.addFileArg(boot_kernel);
+    validate_qemu_image.addFileArg(b.path("scripts/check-efi-image.sh"));
+    validate_qemu_image.addFileArg(efi_stub.getEmittedBin());
 
     const qemu_iso = b.addSystemCommand(&.{"bash"});
-    qemu_iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
+    qemu_iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
     qemu_iso.addFileArg(boot_kernel);
+    qemu_iso.addFileArg(efi_stub.getEmittedBin());
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
-    qemu_iso.addFileArg(b.path("src/boot/grub-x86_64-qemu.cfg"));
-    qemu_iso.addFileArg(addNativeEfiStub(b, .ReleaseSmall).getEmittedBin());
+    qemu_iso.addFileArg(b.path("src/boot/cmdline.txt"));
     qemu_iso.step.dependOn(&validate_qemu_image.step);
 
     const install = b.addInstallBinFile(linked_kernel, name);

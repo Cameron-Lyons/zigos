@@ -37,7 +37,7 @@ pub fn run(
             .correlation_id = 1,
             .now_ticks = 1,
         },
-        "zigos.system.workspace-storage",
+        "zigos.system.store",
         .{
             .owner = state.ids.storage_service,
             .budget = .{

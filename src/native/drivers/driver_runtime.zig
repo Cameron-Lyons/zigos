@@ -6,11 +6,7 @@ const driver_service = @import("driver_service.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
-const root = @import("root");
-const storage_volume = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
-    root.storage_volume
-else
-    @import("../storage/storage_volume.zig");
+const storage_volume = @import("../storage/storage_volume.zig");
 const native_util = @import("../core/util.zig");
 const units = @import("../core/units.zig");
 

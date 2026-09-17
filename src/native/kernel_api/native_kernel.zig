@@ -15,6 +15,7 @@ const principal = @import("../core/principal.zig");
 const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
+const userspace_executor = @import("../task/userspace_executor.zig");
 
 pub const EndpointCreateResult = struct {
     endpoint: abi.EndpointDescriptor,
@@ -611,6 +612,12 @@ pub const Kernel = struct {
     pub fn timeQuery(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!u64 {
         _ = try self.authorizeOperation(.time_query, context, now_ticks, .{});
         return now_ticks;
+    }
+
+    pub fn wait(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!bool {
+        _ = try self.authorizeOperation(.wait, context, now_ticks, .{});
+        userspace_executor.requestEventWait();
+        return true;
     }
 
     pub fn resourceQuery(
@@ -1301,6 +1308,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     try std.testing.expectEqual(session_task.id, self_accounting.task_id);
 
     try std.testing.expectEqual(@as(u64, 10), try kernel.timeQuery(testContext(.time_query, authority_capability.id, .none), 10));
+    try std.testing.expect(try kernel.wait(testContext(.wait, authority_capability.id, .none), 10));
 }
 
 test "native kernel descriptor authorization enforces request task scope" {

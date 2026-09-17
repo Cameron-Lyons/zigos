@@ -70,11 +70,7 @@ pub fn createBootedServiceTask(
             .userspace_image = &image,
         },
     };
-    const result = syscall_surface.dispatch(
-        kernel_port,
-        session_task_id,
-        tick,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(kernel_port, session_task_id, tick, request.header.operation, @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.TaskDescriptor),
     );
@@ -122,11 +118,7 @@ pub fn createBootedProbeTask(
             .userspace_image = &image,
         },
     };
-    const result = syscall_surface.dispatch(
-        kernel_port,
-        session_task_id,
-        tick,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(kernel_port, session_task_id, tick, request.header.operation, @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.TaskDescriptor),
     );
@@ -147,7 +139,7 @@ pub fn resourceQuery(
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
-    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.ResourceDescriptor));
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.ResourceDescriptor));
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     return response;
 }
@@ -165,7 +157,7 @@ pub fn accountingQuery(
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
-    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.AccountingDescriptor));
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.AccountingDescriptor));
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     return response;
 }
@@ -237,7 +229,7 @@ pub fn endpointCreateResultIntoWithFlags(
         .label = label,
         .flags = flags,
     };
-    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.EndpointCreateResponse));
+    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.EndpointCreateResponse));
 }
 
 pub fn expectEndpointConnect(
@@ -255,7 +247,7 @@ pub fn expectEndpointConnect(
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
         .peer_endpoint_id = peer_endpoint_id,
     };
-    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointDescriptor));
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointDescriptor));
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     return response;
 }
@@ -272,7 +264,7 @@ pub fn expectEndpointSend(
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
     };
-    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), 0, 0);
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), 0, 0);
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
 }
 
@@ -291,7 +283,7 @@ pub fn expectEndpointRecv(
         .payload_out = &received.payload,
         .attached_capability_out = &received.attached_capability,
     };
-    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointRecvResponse));
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointRecvResponse));
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     received.present = response.present;
     received.has_attached_capability = response.has_attached_capability;
@@ -340,7 +332,7 @@ pub fn sharedMemoryCreateResultInto(
         .owner_task_id = owner_task_id,
         .size_bytes = size_bytes,
     };
-    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.SharedMemoryCreateResponse));
+    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.SharedMemoryCreateResponse));
 }
 
 pub fn expectSharedMemoryMap(
@@ -390,7 +382,7 @@ pub fn sharedMemoryMapResultInto(
         .shared_memory_capability_id = shared_memory_capability_id,
         .task_id = task_id,
     };
-    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.SharedMemoryDescriptor));
+    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.SharedMemoryDescriptor));
 }
 
 pub fn expectSharedMemoryRevoke(
@@ -404,7 +396,7 @@ pub fn expectSharedMemoryRevoke(
         .header = component_port.makeHeader(.shared_memory_revoke, tick, caller_task_id),
         .shared_memory_capability_id = shared_memory_capability_id,
     };
-    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.SharedMemoryDescriptor));
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.SharedMemoryDescriptor));
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     return response;
 }
@@ -442,7 +434,7 @@ pub fn deviceDescribeResultInto(
         .header = component_port.makeHeader(.device_describe, tick, caller_task_id),
         .device_capability_id = device_capability_id,
     };
-    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.DeviceDescriptor));
+    return syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.DeviceDescriptor));
 }
 
 pub fn findServiceAuthority(

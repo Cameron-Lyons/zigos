@@ -210,30 +210,12 @@ REQUIRED_RELEASE_ARTIFACTS=(
 )
 
 PRODUCTION_USERSPACE_ARTIFACTS=(
-  "zig-out/bin/userspace-session-manager.elf"
-  "zig-out/bin/userspace-permission-review.elf"
-  "zig-out/bin/userspace-service-registry.elf"
-  "zig-out/bin/userspace-workspace-storage.elf"
-  "zig-out/bin/userspace-viewer.elf"
+  "zig-out/bin/userspace-apps.elf"
+  "zig-out/bin/userspace-drivers.elf"
   "zig-out/bin/userspace-notes.elf"
-  "zig-out/bin/userspace-sync.elf"
-  "zig-out/bin/userspace-capture.elf"
-  "zig-out/bin/userspace-policy-mediation.elf"
-  "zig-out/bin/userspace-network-stack.elf"
-  "zig-out/bin/userspace-storage-object.elf"
-  "zig-out/bin/userspace-storage-driver.elf"
-  "zig-out/bin/userspace-package-service.elf"
-  "zig-out/bin/userspace-compositor.elf"
-  "zig-out/bin/userspace-indexing-search.elf"
-  "zig-out/bin/userspace-personal-context.elf"
-  "zig-out/bin/userspace-sync-service.elf"
-  "zig-out/bin/userspace-media-print.elf"
-  "zig-out/bin/userspace-attention-broker.elf"
-  "zig-out/bin/userspace-task-lifecycle.elf"
-  "zig-out/bin/userspace-sensitive-capture.elf"
-  "zig-out/bin/userspace-secure-pasteboard.elf"
-  "zig-out/bin/userspace-object-resilience.elf"
-  "zig-out/bin/userspace-secret-vault.elf"
+  "zig-out/bin/userspace-privacy.elf"
+  "zig-out/bin/userspace-session.elf"
+  "zig-out/bin/userspace-store.elf"
 )
 
 is_forbidden_release_artifact() {
@@ -315,9 +297,9 @@ if [ "$missing_required_artifacts" -ne 0 ]; then
 fi
 
 if [ "${#REQUIRED_RELEASE_ARTIFACTS[@]}" -ne 9 ] ||
-   [ "${#PRODUCTION_USERSPACE_ARTIFACTS[@]}" -ne 24 ] ||
-   [ "${#artifact_files[@]}" -ne 33 ]; then
-  fail_release_generation "production release catalog must contain exactly 9 fixed targets and 24 userspace targets"
+   [ "${#PRODUCTION_USERSPACE_ARTIFACTS[@]}" -ne 6 ] ||
+   [ "${#artifact_files[@]}" -ne 15 ]; then
+  fail_release_generation "production release catalog must contain exactly 9 fixed targets and 6 userspace targets"
 fi
 
 if [ "${#artifact_files[@]}" -eq 0 ]; then
@@ -335,7 +317,7 @@ while IFS= read -r file; do
   artifact_files+=("$file")
 done < "$sorted_artifacts"
 rm -f -- "$sorted_artifacts"
-if [ "${#artifact_files[@]}" -ne 33 ]; then
+if [ "${#artifact_files[@]}" -ne 15 ]; then
   fail_release_generation "production release catalog contains a duplicate or missing target"
 fi
 
@@ -460,7 +442,7 @@ cat > "$WORK_PATH/customer-verification-policy.json" <<EOF
   "required_manifest_payload_type": "application/vnd.zigos.release-manifest.v1+json",
   "required_trust_policy_payload_type": "application/vnd.zigos.release-trust-policy.v1+json",
   "require_hardware_backed_release_key": true,
-  "exact_target_count": 33,
+  "exact_target_count": 15,
   "exact_evidence_count": 10,
   "verification_steps": [
     "Copy the independently obtained zigos-verify-release executable into private staging, compare that exact copy with its independently distributed SHA-256 pin, and execute only the matched copy.",
@@ -468,7 +450,7 @@ cat > "$WORK_PATH/customer-verification-policy.json" <<EOF
     "Before first-use acceptance, require policyVersion to meet root minimumPolicyVersion and releaseSequence to meet the authenticated policy minimumReleaseSequence.",
     "Authenticate release-trust-policy.dsse.json with the pinned root threshold before parsing its payload; reject unknown, invalid, and duplicate signer ids.",
     "Authenticate release-manifest.dsse.json with currently active, unrevoked delegated release keys before parsing its payload.",
-    "Require the authenticated policy and manifest to contain exactly 33 production targets and 10 evidence files; the signed manifest is the sole digest authority.",
+    "Require the authenticated policy and manifest to contain exactly 15 production targets and 10 evidence files; the signed manifest is the sole digest authority.",
     "Hash and size-check all targets and hash all evidence before parsing any evidence; treat artifact-digests.sha256 only as a consistency projection.",
     "Verify every DSSE signature in provenance.dsse.intoto.jsonl against the authenticated delegated policy; signatures cover the DSSE v1 pre-authentication encoding.",
     "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1, exactly one subject per signed DSSE envelope, and subject digests matching the authenticated release manifest.",

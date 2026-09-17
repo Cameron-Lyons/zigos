@@ -174,11 +174,7 @@ fn syscallEndpointCreate(
         .label = label,
         .flags = flags,
     };
-    const result = syscall_surface.dispatch(
-        port,
-        task_id,
-        now_ticks,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(port, task_id, now_ticks, request.header.operation, @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointCreateResponse),
     );
@@ -201,11 +197,7 @@ fn syscallEndpointConnect(
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
         .peer_endpoint_id = peer_endpoint_id,
     };
-    const result = syscall_surface.dispatch(
-        port,
-        task_id,
-        now_ticks,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(port, task_id, now_ticks, request.header.operation, @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointDescriptor),
     );
@@ -225,11 +217,7 @@ fn syscallEndpointSend(
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
     };
-    const result = syscall_surface.dispatch(
-        port,
-        task_id,
-        now_ticks,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(port, task_id, now_ticks, request.header.operation, @intFromPtr(&request),
         0,
         0,
     );
@@ -251,11 +239,7 @@ fn syscallEndpointRecv(
         .payload_out = &received.payload,
         .attached_capability_out = &received.attached_capability,
     };
-    const result = syscall_surface.dispatch(
-        port,
-        task_id,
-        now_ticks,
-        @intFromPtr(&request),
+    const result = syscall_surface.dispatch(port, task_id, now_ticks, request.header.operation, @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointRecvResponse),
     );
@@ -383,12 +367,12 @@ const Harness = struct {
 
 fn serviceBundle(comptime kind: ServiceKind) []const u8 {
     return switch (kind) {
-        .storage => "zigos.system.storage-object",
-        .sync => "zigos.system.sync-service",
-        .network => "zigos.system.network-stack",
-        .package => "zigos.system.package-service",
-        .compositor => "zigos.system.compositor",
-        .generic => "zigos.system.generic-service",
+        .storage => "zigos.system.store",
+        .sync => "zigos.system.store",
+        .network => "zigos.system.drivers",
+        .package => "zigos.system.store",
+        .compositor => "zigos.system.drivers",
+        .generic => "zigos.system.session",
     };
 }
 

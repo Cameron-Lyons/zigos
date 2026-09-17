@@ -69,11 +69,7 @@ pub fn proveResourceAccountingSyscalls(
         .authority_capability_id = session_authority_id,
         .task_id = probe.task_id,
     };
-    const spoofed_result = syscall_surface.dispatch(
-        kernel_port,
-        probe.task_id,
-        89,
-        @intFromPtr(&spoofed_resource_request),
+    const spoofed_result = syscall_surface.dispatch(kernel_port, probe.task_id, 89, spoofed_resource_request.header.operation, @intFromPtr(&spoofed_resource_request),
         @intFromPtr(&spoofed_resource_response),
         @sizeOf(abi.ResourceDescriptor),
     );

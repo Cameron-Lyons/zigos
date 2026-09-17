@@ -107,7 +107,7 @@
         ],
         "current_evidence": [
           "The repository pins the Zig toolchain entrypoint and keeps generated artifacts under build outputs.",
-          "The reproducible-build-check target copies the Jujutsu working-copy file list into two isolated workspaces, builds the exact 33-target production catalog independently with ReleaseFast, compares the ISO, kernel, seven policy manifests, and 24 userspace-image digests, and records repo_vcs=jj, repository, Jujutsu change ID, commit ID, dirty workspace count, toolchain, optimize mode, and result metadata under build/release-security. The independently distributed host verifier is outside the OS target catalog."
+          "The reproducible-build-check target copies the Jujutsu working-copy file list into two isolated workspaces, builds the exact 15-target production catalog independently with ReleaseFast, compares the ISO, kernel, seven policy manifests, and 6 userspace-image digests, and records repo_vcs=jj, repository, Jujutsu change ID, commit ID, dirty workspace count, toolchain, optimize mode, and result metadata under build/release-security. The independently distributed host verifier is outside the OS target catalog."
         ],
         "open_gaps": [],
         "graduation_criteria": [
@@ -142,16 +142,16 @@
         ],
         "current_evidence": [
           "Userspace archives, boot measurements, signed bundle state, and launch provenance are modeled and tested.",
-          "The release-sbom-provenance and reproducible-build targets emit the exact ten-file evidence catalog for the exact 33-target production catalog; the finalizer privately candidate-verifies before atomically publishing release-manifest.dsse.json as the sole signed digest authority, then performs full stateful verification and withdraws the marker on failure. The vulnerability disclosure dry run stays outside the exact bundle under build/release-audit.",
+          "The release-sbom-provenance and reproducible-build targets emit the exact ten-file evidence catalog for the exact 15-target production catalog; the finalizer privately candidate-verifies before atomically publishing release-manifest.dsse.json as the sole signed digest authority, then performs full stateful verification and withdraws the marker on failure. The vulnerability disclosure dry run stays outside the exact bundle under build/release-audit.",
           "Public generation requires an absolute out-of-band root metadata file and independently supplied lowercase SHA-256 pin, a root-threshold-signed release-trust-policy.dsse.json, an independently distributed verifier with an external SHA-256 pin, an external hardware-backed signing command, and a derived release key id. Static preview signatures, self-authenticating bundled verifiers, and bundle-selected keyrings are not accepted.",
           "The zigos-verify-release customer CLI verifies the root pin, root threshold and release-manifest signatures before parsing their payloads; applies root minimumPolicyVersion and policy minimumReleaseSequence first-use floors; enforces the exact target and evidence sets; applies policy-authenticated revocations and expiry; validates signed SLSA source identity, ReleaseFast mode, measurements, SPDX version, and reproducibility; and serializes persistent rollback/equivocation state outside the bundle and artifact root.",
           "The release-security checker derives all production target and evidence expectations from src/tools/release_catalog.zig, requires the authenticated trust interfaces, and rejects missing, duplicate, unexpected, unsafe, verification-only, or legacy trust artifacts. Candidate inputs remain private and quiescent through verification. Root rotation is deliberately manual: a changed root requires an explicit out-of-band re-pin and state migration."
         ],
         "open_gaps": [],
         "graduation_criteria": [
-          "Generate SPDX SBOMs plus DSSE-wrapped in-toto/SLSA provenance attestations for the production kernel, 24 userspace images, policy manifests, and ISO.",
+          "Generate SPDX SBOMs plus DSSE-wrapped in-toto/SLSA provenance attestations for the production kernel, 6 userspace images, policy manifests, and ISO.",
           "Sign each DSSE PAE payload with a hardware-backed TPM, secure enclave, HSM, or KMS release key, publish a root-threshold-signed trust policy and release-key-signed exact manifest, and fail release if the external trust root, independently pinned verifier, signer, sequence, or expiry is absent or invalid.",
-          "Keep zigos-verify-release validating the out-of-band root pin, first-use minimumPolicyVersion and minimumReleaseSequence checkpoints, threshold policy signature, release-manifest signature before parsing, exact 33 targets and ten evidence files, signed SLSA identity, zero dirty workspace evidence, revocation and validity, reproducibility, persistent rollback/equivocation state, post-quantum policy, and required ML-DSA coverage for every public release."
+          "Keep zigos-verify-release validating the out-of-band root pin, first-use minimumPolicyVersion and minimumReleaseSequence checkpoints, threshold policy signature, release-manifest signature before parsing, exact 15 targets and ten evidence files, signed SLSA identity, zero dirty workspace evidence, revocation and validity, reproducibility, persistent rollback/equivocation state, post-quantum policy, and required ML-DSA coverage for every public release."
         ],
         "verification_commands": [
           "./scripts/zig.sh build release-security-preflight",

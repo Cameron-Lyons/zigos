@@ -1879,6 +1879,8 @@ fn testSurfacePresentation(surface_id: u64, interaction_hash: u64) abi.SurfacePr
     presentation.revision = 1;
     presentation.interaction_hash = interaction_hash;
     presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
+    presentation.buffer_object_id = surface_id;
+    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
     return presentation;
 }
 
@@ -2603,6 +2605,8 @@ test "compositor session owns bounded monotonic surface presentations" {
     @memcpy(presentation.text[0..5], "draft");
     presentation.text_length = 5;
     presentation.cursor = 5;
+    presentation.buffer_object_id = 71;
+    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
     presentation.state_flags = @bitCast(abi.SurfaceStateFlags{ .dirty = true });
 
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));

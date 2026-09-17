@@ -1,8 +1,10 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 5;
+pub const ABI_VERSION: u16 = 6;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
 pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
+pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
+pub const WAIT_PLUS_SEALED_RINGS = true;
 
 pub const NativeOperation = enum(u16) {
     task_create = 0x100,
@@ -27,6 +29,7 @@ pub const NativeOperation = enum(u16) {
     device_mmio_window,
     input_recv,
     surface_present,
+    wait,
 };
 
 pub const PolicyOperation = enum(u16) {
@@ -339,14 +342,12 @@ pub fn surfaceModelKind(raw: u8) ?SurfaceModelKind {
 
 pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) bool {
     if (presentation.surface_id == 0 or presentation.revision == 0 or presentation.interaction_hash == 0) return false;
+    if (!presentation.presentsByHandle()) return false;
     if (presentation.text_length > presentation.text.len or presentation.cursor > presentation.text_length) return false;
     const model = surfaceModelKind(presentation.model_kind) orelse return false;
     if (model == .none) return false;
     const flags: SurfaceStateFlags = @bitCast(presentation.state_flags);
     if (flags._reserved != 0) return false;
-    if (presentation.presentsByHandle()) {
-        if (presentation.buffer_bytes == 0) return false;
-    }
     for (presentation.text[0..presentation.text_length]) |byte| {
         if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
     }
@@ -360,7 +361,10 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 5), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 6), ABI_VERSION);
+    try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
+    try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
+    try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));
     try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
@@ -387,10 +391,9 @@ test "native abi operation ids stay in a dedicated namespace" {
     presentation.revision = 1;
     presentation.interaction_hash = 2;
     presentation.model_kind = @intFromEnum(SurfaceModelKind.notes);
-    presentation.text[0] = 'x';
-    presentation.text_length = 1;
-    presentation.cursor = 1;
+    presentation.buffer_object_id = 9;
+    presentation.buffer_bytes = SURFACE_PRESENTATION_TEXT_BYTES;
     try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
-    presentation.text[presentation.text.len - 1] = 1;
+    presentation.buffer_object_id = 0;
     try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
 }
