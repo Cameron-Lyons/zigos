@@ -131,9 +131,8 @@ isr_common_stub:
     movq FRAME_CS(%r12), %rax
     cmpq $USER_CODE_SELECTOR, %rax
     jne .skip_xstate
-    movq %cr0, %rax
-    testq $8, %rax
-    jnz .skip_xstate
+    # Restored user state remains live even when TS was re-armed on return.
+    clts
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -214,22 +213,17 @@ isr_common_stub:
     movq %r12, %rsp
     movq FRAME_CS(%r12), %rax
     cmpq $USER_CODE_SELECTOR, %rax
-    jne .after_lazy_ts
+    jne .interrupt_return
+    cmpl $0, zigos_userspace_resume_requested(%rip)
+    je .interrupt_lazy_ts
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    jne .userspace_resume
+.interrupt_lazy_ts:
     cmpq $7, FRAME_INT_NO(%r12)
-    je .after_lazy_ts
+    je .interrupt_return
     movq %cr0, %rax
     orq $8, %rax
     movq %rax, %cr0
-.after_lazy_ts:
-    cmpl $0, zigos_userspace_resume_requested(%rip)
-    je .interrupt_return
-    cmpq $0, zigos_userspace_resume_eip(%rip)
-    je .interrupt_return
-    movq FRAME_CS(%r12), %rax
-    cmpq $USER_CODE_SELECTOR, %rax
-    jne .interrupt_return
-    jmp .userspace_resume
-
 .interrupt_return:
     RESTORE_REGISTERS
     addq $16, %rsp

@@ -444,10 +444,10 @@ pub fn mapBorrowedPhysicalUserRange(
     if (permissions.writable and permissions.executable) return error.WritableExecutable;
     if (permissions.executable) return error.WritableExecutable;
 
-    const mapped_size = std.mem.alignForward(usize, size_bytes, PAGE_SIZE);
-    const mapped_end = std.math.add(usize, virtual_start, mapped_size) catch return error.AddressOverflow;
-    if (mapped_end > 0x0000_8000_0000_0000) return error.InvalidRange;
-    if (!table64.physicalAddressFits(physical_address + (mapped_size - PAGE_SIZE))) return error.InvalidRange;
+    const mapped_size = try checkedUserMappedSize(virtual_start, size_bytes);
+    const physical_last_page = std.math.add(usize, physical_address, mapped_size - PAGE_SIZE) catch
+        return error.AddressOverflow;
+    if (!table64.physicalAddressFits(physical_last_page)) return error.InvalidRange;
 
     var offset: usize = 0;
     while (offset < mapped_size) : (offset += PAGE_SIZE) {
@@ -687,9 +687,7 @@ pub fn mapOwnedUserRange(
     if (pageOffset(virtual_start) != 0 or size_bytes == 0) return error.InvalidRange;
     if (permissions.writable and permissions.executable) return error.WritableExecutable;
 
-    const mapped_size = std.mem.alignForward(usize, size_bytes, PAGE_SIZE);
-    const mapped_end = std.math.add(usize, virtual_start, mapped_size) catch return error.AddressOverflow;
-    if (mapped_end > 0x0000_8000_0000_0000) return error.InvalidRange;
+    const mapped_size = try checkedUserMappedSize(virtual_start, size_bytes);
 
     var offset: usize = 0;
     while (offset < mapped_size) : (offset += PAGE_SIZE) {
@@ -725,6 +723,23 @@ pub fn mapOwnedUserRange(
         page_entry.* = tableEntry(@intCast(page_phys), entry_flags, PAGE_OWNER_USER_PRIVATE);
         offset += PAGE_SIZE;
     }
+}
+
+fn checkedUserMappedSize(virtual_start: usize, size_bytes: usize) UserMapError!usize {
+    if (pageOffset(virtual_start) != 0 or size_bytes == 0) return error.InvalidRange;
+    const padded_size = std.math.add(usize, size_bytes, PAGE_SIZE - 1) catch return error.AddressOverflow;
+    const mapped_size = padded_size & ~@as(usize, PAGE_SIZE - 1);
+    const mapped_end = std.math.add(usize, virtual_start, mapped_size) catch return error.AddressOverflow;
+    if (mapped_end > 0x0000_8000_0000_0000) return error.InvalidRange;
+    return mapped_size;
+}
+
+test "user mapping bounds reject alignment overflow and noncanonical ranges" {
+    try std.testing.expectError(error.AddressOverflow, checkedUserMappedSize(0x4000_0000, std.math.maxInt(usize)));
+    try std.testing.expectError(error.InvalidRange, checkedUserMappedSize(0x0000_8000_0000_0000, PAGE_SIZE));
+    try std.testing.expectError(error.InvalidRange, checkedUserMappedSize(0x4000_0000, 0));
+    try std.testing.expectEqual(@as(usize, PAGE_SIZE * 2), try checkedUserMappedSize(0x4000_0000, PAGE_SIZE + 1));
+    try std.testing.expectEqual(@as(usize, PAGE_SIZE), try checkedUserMappedSize(0x0000_7fff_ffff_f000, PAGE_SIZE));
 }
 
 pub fn ownedUserPageIsExecutable(space: *const UserAddressSpace, virtual_address: usize) ?bool {
