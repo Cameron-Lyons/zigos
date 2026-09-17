@@ -1497,27 +1497,18 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "native scheduler loop must retain one-shot idle deadline control: {s}", .{snippet});
         }
     }
-    const retired_emulator_cpu_snippets = [_][]const u8{
-        "qemu_software_cpu_fallback",
-        "softwareCpuFallbackRequested",
-        "ProcessContextMode",
-        "software_flush",
-        "CetMode",
-        ".deferred",
+    const required_emulator_countdown_timer_snippets = [_][]const u8{
+        "X2APIC_TIMER_INITIAL_COUNT_MSR",
+        "X2APIC_TIMER_CURRENT_COUNT_MSR",
+        "X2APIC_TIMER_DIVIDE_CONFIG_MSR",
+        "X2APIC_TIMER_MODE_PERIODIC",
+        "initCalibratedCountdownTimer",
         "calibrated_countdown",
-        "cpu_pcid_software_fallback",
-        "cpu_syscall_enabled",
     };
-    for (retired_emulator_cpu_snippets) |snippet| {
-        if (std.mem.indexOf(u8, boot_entry_source, snippet) != null or
-            std.mem.indexOf(u8, cpu_features_source, snippet) != null or
-            std.mem.indexOf(u8, qemu_grub_source, snippet) != null)
-        {
-            try common.addError(errors, allocator, "boot must not restore emulator CPU compatibility: {s}", .{snippet});
+    for (required_emulator_countdown_timer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, timer_source, snippet) == null) {
+            try common.addError(errors, allocator, "QEMU software emulation must retain its isolated x2APIC countdown path: {s}", .{snippet});
         }
-    }
-    if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
-        try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
     }
     const required_accelerated_qemu_snippets = [_][]const u8{
         "qemu_harness_accelerator",
@@ -1545,8 +1536,8 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, kernel_build_source, "const boot_kernel = if") != null) {
         try common.addError(errors, allocator, "debug stripping must apply to every kernel boot profile", .{});
     }
-    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") != null) {
-        try common.addError(errors, allocator, "QEMU boot configuration must not request the software-emulator CPU fallback", .{});
+    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
+        try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
     }
     if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
         try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
@@ -1742,6 +1733,9 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
+        "ProcessContextMode",
+        "hardware_pcid",
+        "software_flush",
         "CR4_PGE",
         "globalPagesEnabled",
         "CR4_SMEP",
@@ -1754,6 +1748,7 @@ fn validateNuc11tnki5KernelProofSources(
         "xsavesEnabled",
         "enableCet",
         "cetEnabled",
+        "CetMode",
         "enablePku",
         "enableLass",
     };
@@ -1763,18 +1758,22 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_process_context_snippets = [_][]const u8{
+        "softwareCpuFallbackRequested",
         "model_inventory",
+        "qemu_software_cpu_fallback",
         "qemu_tsc_frequency_hz",
+        "hardware_process_contexts",
         "cpu_pcid_enabled",
+        "cpu_pcid_software_fallback",
         "cpu_pcid_ready",
         "cpu_pge_enabled",
         "cpu_smep_enabled",
         "cpu_smap_enabled",
         "cpu_umip_enabled",
+        "cpu_syscall_enabled",
         "cpu_fred_enabled",
         "cpu_pku_enabled",
         "cpu_lass_enabled",
-        "enableModernFeatures",
     };
     for (required_boot_process_context_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
@@ -1782,8 +1781,14 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_timer_snippets = [_][]const u8{
-        "tsc_clock.init",
-        ".tsc_deadline",
+        "softwareCpuFallbackRequested",
+        "qemu_software_cpu_fallback",
+        "software_cpu_fallback",
+        "hardware_tsc_timer",
+        "software_timer_fallback",
+        "required_features.tsc_deadline = true",
+        "required_features.invariant_tsc = true",
+        ".tsc_deadline else .calibrated_countdown",
     };
     for (required_boot_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
@@ -1791,8 +1796,11 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_cet_snippets = [_][]const u8{
-        "enableModernFeatures",
-        "cpu_features.enableModernFeatures(features)",
+        "hardware_cet",
+        "software_cet_fallback",
+        "required_features.cet_ibt = true",
+        "required_features.cet_ss = true",
+        ".deferred",
     };
     for (required_boot_cet_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
@@ -1898,33 +1906,26 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_syscall_configuration_snippets = [_][]const u8{
         "FRED_ONLY_TRAPS",
+        "USER_STAR_BASE_SELECTOR",
+        "SYSCALL_RFLAGS_MASK",
         "IA32_GS_BASE_MSR",
         "IA32_KERNEL_GS_BASE_MSR",
+        "IA32_STAR_MSR",
+        "IA32_LSTAR_MSR",
+        "IA32_FMASK_MSR",
+        "EFER_SCE",
         "enableFred",
         "setFredRsp0",
         "fredEnabled",
         "setKernelStack",
+        "syscallExtensionEnabled",
     };
     for (required_syscall_configuration_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_source, snippet) == null) {
             try common.addError(errors, allocator, "native x86-64 syscall configuration must retain snippet: {s}", .{snippet});
         }
     }
-    const retired_syscall_msr_snippets = [_][]const u8{
-        "IA32_STAR_MSR",
-        "IA32_LSTAR_MSR",
-        "IA32_FMASK_MSR",
-        "EFER_SCE",
-        "syscallExtensionEnabled",
-        "USER_STAR_BASE_SELECTOR",
-        "SYSCALL_RFLAGS_MASK",
-    };
-    for (retired_syscall_msr_snippets) |snippet| {
-        if (std.mem.indexOf(u8, syscall_source, snippet) != null) {
-            try common.addError(errors, allocator, "FRED-only traps must not program SYSCALL MSRs: {s}", .{snippet});
-        }
-    }
-    const required_syscall_entry_snippets = [_][]const u8{
+    const required_fred_entry_snippets = [_][]const u8{
         "zigos_fred_entry",
         "FRED_EVENT_TYPE_SYSCALL",
         "xsaves",
@@ -1933,21 +1934,26 @@ fn validateNuc11tnki5KernelProofSources(
         "call isrHandler",
         "0xf2, 0x0f, 0x01, 0xca",
     };
-    for (required_syscall_entry_snippets) |snippet| {
+    for (required_fred_entry_snippets) |snippet| {
         if (std.mem.indexOf(u8, fred_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "native x86-64 FRED entry must retain snippet: {s}", .{snippet});
         }
     }
-    const retired_sysret_entry_snippets = [_][]const u8{
+    const required_syscall_entry_snippets = [_][]const u8{
         "zigos_syscall_entry",
         "swapgs",
+        "CPU_KERNEL_STACK_TOP",
+        "CPU_USER_STACK_POINTER",
+        "xsaves",
+        "xrstors",
+        "endbr64",
         "sysretq",
+        "call syscall_handler",
+        "call isrHandler",
     };
-    for (retired_sysret_entry_snippets) |snippet| {
-        if (std.mem.indexOf(u8, syscall_entry_source, snippet) != null or
-            std.mem.indexOf(u8, fred_entry_source, snippet) != null)
-        {
-            try common.addError(errors, allocator, "FRED-only traps must not restore SYSCALL/SYSRET entry: {s}", .{snippet});
+    for (required_syscall_entry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, syscall_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "native x86-64 syscall entry must retain snippet: {s}", .{snippet});
         }
     }
     const required_sysret_gdt_snippets = [_][]const u8{
@@ -1958,7 +1964,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_sysret_gdt_snippets) |snippet| {
         if (std.mem.indexOf(u8, gdt_source, snippet) == null) {
-            try common.addError(errors, allocator, "user code/data GDT ordering must retain snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "SYSRET-compatible GDT ordering must retain snippet: {s}", .{snippet});
         }
     }
     const required_userspace_syscall_snippets = [_][]const u8{
