@@ -13,6 +13,9 @@ const nvme_completion = @import("../../kernel/drivers/nvme_completion.zig");
 const nvme_prp = @import("../../kernel/drivers/nvme_prp.zig");
 const nvme_timing = @import("../../kernel/drivers/nvme_timing.zig");
 const network_driver_task = @import("../../native/drivers/network_driver_task.zig");
+const storage_driver_task = @import("../../native/drivers/storage_driver_task.zig");
+const xhci_driver_task = @import("../../native/drivers/xhci_driver_task.zig");
+const display_driver_task = @import("../../native/drivers/display_driver_task.zig");
 
 test "driver host tests import native driver modules" {
     std.testing.refAllDecls(accelerator_driver_task);
@@ -27,6 +30,9 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(nvme_prp);
     std.testing.refAllDecls(nvme_timing);
     std.testing.refAllDecls(network_driver_task);
+    std.testing.refAllDecls(storage_driver_task);
+    std.testing.refAllDecls(xhci_driver_task);
+    std.testing.refAllDecls(display_driver_task);
 }
 
 test "interrupt context tracks nested entry" {

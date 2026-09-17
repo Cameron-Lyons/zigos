@@ -19,6 +19,7 @@ else
         pub fn servicePendingEvents() usize {
             return 0;
         }
+        pub fn activate() !void {}
         pub fn eventWorkPending() bool {
             return false;
         }
@@ -43,6 +44,7 @@ pub const HardwareBootKeyboardReport = xhci.HardwareBootKeyboardReport;
 pub const InputProof = xhci.InputProof;
 
 var bound_task_id: u64 = 0;
+var programmed = false;
 
 pub fn bindTaskId(task_id: u64) void {
     bound_task_id = task_id;
@@ -52,7 +54,20 @@ pub fn boundTaskId() u64 {
     return bound_task_id;
 }
 
+pub fn bringUp() bool {
+    if (programmed) return true;
+    xhci_hw.activate() catch return false;
+    programmed = true;
+    if (builtin.target.os.tag == .freestanding) {
+        const console = @import("../../kernel/utils/console.zig");
+        console.print("ZIGOS:XHCI:HW:REMAP_MSI_OK\n");
+        console.print("ZIGOS:XHCI:HW:RUN_OK\n");
+    }
+    return true;
+}
+
 pub fn dispatch() usize {
+    _ = bringUp();
     return xhci_hw.servicePendingEvents();
 }
 
@@ -92,6 +107,7 @@ pub fn controllerDeviceId() ?u64 {
 test "xhci driver task dispatches only for the bound task" {
     const std = @import("std");
     bindTaskId(0);
+    programmed = false;
     try std.testing.expectEqual(@as(usize, 0), dispatchForTask(7));
     bindTaskId(7);
     try std.testing.expectEqual(@as(usize, 0), dispatchForTask(8));
@@ -99,4 +115,5 @@ test "xhci driver task dispatches only for the bound task" {
     try std.testing.expect(KERNEL_LATCHES_ONLY);
     try std.testing.expect(DISPATCHES_FROM_BOUND_TASK);
     bindTaskId(0);
+    programmed = false;
 }

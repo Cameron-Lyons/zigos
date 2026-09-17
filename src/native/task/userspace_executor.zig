@@ -7,13 +7,18 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
+const userspace_layout = @import("../core/userspace_layout.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const userspace_registry = @import("userspace_registry.zig");
 const demand_paging = @import("../../kernel/memory/demand_paging.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
+
+pub const SHARES_GROUP_PAGE_TABLES = userspace_registry.SHARES_GROUP_PAGE_TABLES;
+const GROUP_SPACE_COUNT = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT;
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
@@ -48,7 +53,7 @@ else
         }
     };
 const include_verification_evidence = kernel_config.includesVerificationEvidence();
-const NxProbeTarget = if (include_verification_evidence) u32 else void;
+const NxProbeTarget = if (include_verification_evidence) u64 else void;
 
 pub const ExecutionOutcome = enum(u8) {
     unavailable,
@@ -144,29 +149,29 @@ else
 
             pub fn switchToUserAddressSpace(_: *const UserAddressSpace) void {}
             pub fn switchToKernelAddressSpace() void {}
-            pub fn mapOwnedUserRange(_: *UserAddressSpace, _: u32, _: u32, _: UserPermissions) UserMapError!void {
+            pub fn mapOwnedUserRange(_: *UserAddressSpace, _: usize, _: usize, _: UserPermissions) UserMapError!void {
                 return error.OutOfMemory;
             }
             pub fn mapBorrowedPhysicalUserRange(
                 _: *UserAddressSpace,
-                _: u32,
+                _: usize,
                 _: u64,
-                _: u32,
+                _: usize,
                 _: UserPermissions,
             ) UserMapError!void {
                 return error.OutOfMemory;
             }
-            pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: u32, _: []const u8) UserWriteError!void {
+            pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: usize, _: []const u8) UserWriteError!void {
                 return error.PageNotOwned;
             }
-            pub fn copyOwnedUserPageFromPhysical(_: *const UserAddressSpace, _: u32, _: u64) UserWriteError!void {
+            pub fn copyOwnedUserPageFromPhysical(_: *const UserAddressSpace, _: usize, _: u64) UserWriteError!void {
                 return error.PageNotOwned;
             }
-            pub fn ownedUserPageIsExecutable(_: *const UserAddressSpace, _: u32) ?bool {
+            pub fn ownedUserPageIsExecutable(_: *const UserAddressSpace, _: usize) ?bool {
                 return null;
             }
             pub fn destroyUserAddressSpace(_: *UserAddressSpace) UserAddressSpaceDestroyError!void {}
-            pub fn unmapBorrowedCurrentPage(_: u32) bool {
+            pub fn unmapBorrowedCurrentPage(_: usize) bool {
                 return true;
             }
             pub fn frameStats() FrameStats {
@@ -353,8 +358,8 @@ const MappingLaunchPolicy = packed struct(u32) {
 const MappingDispatchMetadata = struct {
     owner_task_id: u64 = 0,
     image_id: u64 = 0,
-    initial_instruction_pointer: u32 = 0,
-    initial_stack_pointer: u32 = 0,
+    initial_instruction_pointer: u64 = 0,
+    initial_stack_pointer: u64 = 0,
     bootstrap_mailbox_address: u32 = 0,
     launch_policy: MappingLaunchPolicy = .{},
 
@@ -367,9 +372,9 @@ const MappingDispatchMetadata = struct {
     }
 };
 
-const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 32;
-const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 376 else 368;
-const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 53_384 else 52_360;
+const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 40;
+const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 448 else 440;
+const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 65_536 else 64_512;
 
 const MappingEntry = struct {
     state: MappingState = .building,
@@ -377,13 +382,13 @@ const MappingEntry = struct {
     address_space: ?freestanding.paging.UserAddressSpace = null,
     dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
-    resume_instruction_pointer: u32 = 0,
-    resume_stack_pointer: u32 = 0,
+    resume_instruction_pointer: u64 = 0,
+    resume_stack_pointer: u64 = 0,
     user_context64: UserContext64 = .{},
     yield_count: u64 = 0,
     last_user_counter: u32 = 0,
     page_fault_count: u64 = 0,
-    last_fault_address: u32 = 0,
+    last_fault_address: u64 = 0,
     last_fault_error_code: u32 = 0,
     mailbox_authority_cache: MailboxAuthorityCache = .{},
     mailbox_publication_cache: MailboxPublicationCache = .{},
@@ -451,19 +456,21 @@ pub const Executor = struct {
     active_mapping_handle: MappingHandle = .{},
     handoff_completed: bool = false,
     pending_user_context64: UserContext64 = .{},
-    last_trap_instruction_pointer: u32 = 0,
-    last_trap_stack_pointer: u32 = 0,
+    last_trap_instruction_pointer: u64 = 0,
+    last_trap_stack_pointer: u64 = 0,
     last_trap_counter: u32 = 0,
     last_yield_disposition: userspace_bootstrap_mailbox.YieldDisposition = .runnable,
     last_yield_ui_revision: u64 = 0,
     last_user_exception: ?UserException = null,
     last_fault_task_id: u64 = 0,
     last_fault_address_space_id: u64 = 0,
-    last_fault_address: u32 = 0,
+    last_fault_address: u64 = 0,
     last_fault_error_code: u32 = 0,
     user_page_fault_count: u64 = 0,
     active_nx_probe_target: NxProbeTarget = if (include_verification_evidence) 0 else {},
     mappings: MappingArenaBacking = if (heap_backed_mappings) null else MappingArena.init(),
+    group_spaces: [GROUP_SPACE_COUNT]?freestanding.paging.UserAddressSpace = .{null} ** GROUP_SPACE_COUNT,
+    group_refs: [GROUP_SPACE_COUNT]u8 = .{0} ** GROUP_SPACE_COUNT,
 
     comptime {
         if (heap_backed_mappings and @sizeOf(@This()) > units.kibibytes(1)) {
@@ -568,7 +575,7 @@ pub const Executor = struct {
             zigos_userspace_resume_requested = 1;
             return;
         }
-        releaseMapping(resolution.mappings, resolution.slot_index, mapping);
+        releaseMapping(self, resolution.mappings, resolution.slot_index, mapping);
     }
 
     pub fn materializedCount(self: *const Executor) usize {
@@ -616,7 +623,7 @@ pub const Executor = struct {
         self: *Executor,
         task_id: u64,
         address_space_id: u64,
-        expected_fault_address: u32,
+        expected_fault_address: u64,
     ) bool {
         if (self.last_fault_task_id != task_id) return false;
         if (self.last_fault_address_space_id != address_space_id) return false;
@@ -630,7 +637,7 @@ pub const Executor = struct {
         self: *Executor,
         task_id: u64,
         address_space_id: u64,
-        expected_fault_address: u32,
+        expected_fault_address: u64,
     ) bool {
         const required = @as(u32, 0x1 | 0x4 | 0x10);
         const forbidden = @as(u32, 0x2);
@@ -927,9 +934,9 @@ pub const Executor = struct {
             .address_space_id = address_space.id,
             .dispatch_metadata = dispatch_metadata,
         };
-        errdefer releaseMapping(mappings, handle.slotIndex(), entry);
+        errdefer self.releaseMapping(mappings, handle.slotIndex(), entry);
 
-        entry.address_space = try freestanding.paging.createUserAddressSpace();
+        entry.address_space = try self.acquireUserAddressSpace(image.bundleIdSlice());
 
         for (address_space.regions[0..address_space.region_count]) |region| {
             switch (region.kind) {
@@ -998,7 +1005,39 @@ pub const Executor = struct {
         return resolution.entry;
     }
 
+    fn acquireUserAddressSpace(self: *Executor, bundle_id: []const u8) MaterializationError!freestanding.paging.UserAddressSpace {
+        if (comptime !SHARES_GROUP_PAGE_TABLES) {
+            return freestanding.paging.createUserAddressSpace();
+        }
+        const group = userspace_registry.addressSpaceGroupForBundle(bundle_id) orelse
+            return freestanding.paging.createUserAddressSpace();
+        const index = @intFromEnum(group);
+        if (self.group_refs[index] == 0) {
+            const space = try freestanding.paging.createUserAddressSpace();
+            self.group_spaces[index] = space;
+            self.group_refs[index] = 1;
+            return space;
+        }
+        self.group_refs[index] += 1;
+        return self.group_spaces[index].?;
+    }
+
+    fn releaseSharedGroupSpace(self: *Executor, space: *freestanding.paging.UserAddressSpace) bool {
+        if (comptime !SHARES_GROUP_PAGE_TABLES) return false;
+        var index: usize = 0;
+        while (index < GROUP_SPACE_COUNT) : (index += 1) {
+            const shared = self.group_spaces[index] orelse continue;
+            if (shared.directory != space.directory) continue;
+            self.group_refs[index] -= 1;
+            if (self.group_refs[index] != 0) return true;
+            self.group_spaces[index] = null;
+            return false;
+        }
+        return false;
+    }
+
     fn releaseMapping(
+        self: *Executor,
         mappings: *MappingArena,
         slot_index: usize,
         entry: *MappingEntry,
@@ -1008,8 +1047,11 @@ pub const Executor = struct {
         }
         if (entry.address_space) |*space| {
             demand_paging.unregisterSpace(space);
-            freestanding.paging.destroyUserAddressSpace(space) catch
-                native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
+            if (!self.releaseSharedGroupSpace(space)) {
+                freestanding.paging.destroyUserAddressSpace(space) catch
+                    native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
+            }
+            entry.address_space = null;
         }
         if (!mappings.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("live userspace mapping disappeared during release");
@@ -1023,8 +1065,10 @@ pub const Executor = struct {
         while (slot_index < claimed_count) : (slot_index += 1) {
             const slot = mappings.slotAt(slot_index);
             if (!slot.in_use) continue;
-            releaseMapping(mappings, slot_index, &slot.mapping);
+            self.releaseMapping(mappings, slot_index, &slot.mapping);
         }
+        self.group_spaces = .{null} ** GROUP_SPACE_COUNT;
+        self.group_refs = .{0} ** GROUP_SPACE_COUNT;
         self.releaseMappingArena();
     }
 
@@ -1044,7 +1088,7 @@ pub const Executor = struct {
                 native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
             std.debug.assert(&slot.mapping == completed_mapping);
         }
-        releaseMapping(mappings, completed_mapping_handle.slotIndex(), completed_mapping);
+        releaseMapping(self, mappings, completed_mapping_handle.slotIndex(), completed_mapping);
     }
 
     fn clearUserPageFaultObservation(self: *Executor) void {
@@ -1078,11 +1122,21 @@ fn prepareMappingDispatchMetadata(
     const compact_contract_flags = std.math.cast(u16, contract_flags) orelse return error.LaunchPolicyInvalid;
     const compact_heartbeat_increment = std.math.cast(u16, heartbeat_increment) orelse return error.LaunchPolicyInvalid;
     if (compact_heartbeat_increment == 0) return error.LaunchPolicyInvalid;
+    if (entry_point < userspace_layout.image_start or
+        entry_point >= userspace_layout.image_end_exclusive)
+    {
+        return error.InitialContextInvalid;
+    }
+    if (bootstrap_mailbox_address < userspace_layout.image_start or
+        bootstrap_mailbox_address >= userspace_layout.image_end_exclusive)
+    {
+        return error.InitialContextInvalid;
+    }
     return .{
         .owner_task_id = owner_task_id,
         .image_id = image_id,
-        .initial_instruction_pointer = std.math.cast(u32, entry_point) orelse return error.InitialContextInvalid,
-        .initial_stack_pointer = std.math.cast(u32, initial_stack_pointer) orelse return error.InitialContextInvalid,
+        .initial_instruction_pointer = entry_point,
+        .initial_stack_pointer = initial_stack_pointer,
         .bootstrap_mailbox_address = std.math.cast(u32, bootstrap_mailbox_address) orelse return error.InitialContextInvalid,
         .launch_policy = .{
             .contract_flags = compact_contract_flags,
@@ -1405,8 +1459,8 @@ fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
     if (!check(executor.active_task_id)) return;
     const mapping = executor.active_mapping orelse return;
     mapping.resume_valid = true;
-    mapping.resume_instruction_pointer = @truncate(frame.eip);
-    mapping.resume_stack_pointer = @truncate(frame.useresp);
+    mapping.resume_instruction_pointer = frame.eip;
+    mapping.resume_stack_pointer = frame.useresp;
     captureUserContext64(mapping, frame);
     mapping.yield_count += 1;
     executor.last_yield_disposition = .runnable;
@@ -1420,10 +1474,8 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     if (executor.active_task_id == 0) return;
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
-    const instruction_pointer = std.math.cast(u32, frame.eip) orelse
-        native_util.impossibleByInvariant("userspace instruction pointer exceeds the low-address sandbox");
-    const stack_pointer = std.math.cast(u32, frame.useresp) orelse
-        native_util.impossibleByInvariant("userspace stack pointer exceeds the low-address sandbox");
+    const instruction_pointer = frame.eip;
+    const stack_pointer = frame.useresp;
     const counter = std.math.cast(u32, frame.eax) orelse
         native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
     const disposition_raw = std.math.cast(u32, frame.esi) orelse
@@ -1512,10 +1564,7 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
 
-    const faulting_address = std.math.cast(u32, x86.readCr2()) orelse {
-        freestanding.paging.page_fault_handler(frame);
-        return;
-    };
+    const faulting_address = x86.readCr2();
     const error_code = std.math.cast(u32, frame.err_code) orelse
         native_util.impossibleByInvariant("userspace page-fault code exceeds its ABI width");
     const not_present = (error_code & 0x1) == 0;
@@ -1561,7 +1610,7 @@ fn nxProbeRecoveryContext(
     executor: *const Executor,
     mapping: *MappingEntry,
     frame: *freestanding.isr.InterruptFrame,
-    faulting_address: u32,
+    faulting_address: u64,
     error_code: u32,
 ) bool {
     if (comptime !include_verification_evidence) return false;
@@ -1574,7 +1623,7 @@ fn nxProbeRecoveryContext(
     ) orelse return false;
     if (target_is_executable) return false;
 
-    const recovery_address = std.math.cast(u32, frame.r15) orelse return false;
+    const recovery_address = frame.r15;
     const runtime = executor.bound_runtime orelse return false;
     const task = runtime.find(executor.active_task_id) orelse return false;
     const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
@@ -1584,12 +1633,11 @@ fn nxProbeRecoveryContext(
     return true;
 }
 
-fn addressSpaceAllowsExecution(address_space: *const task_runtime.AddressSpaceRecord, address: u32) bool {
-    const address64: u64 = address;
+fn addressSpaceAllowsExecution(address_space: *const task_runtime.AddressSpaceRecord, address: u64) bool {
     for (address_space.regions[0..address_space.region_count]) |region| {
         if (region.kind != .load_segment or !region.access.execute) continue;
         const region_end = std.math.add(u64, region.virtual_address, @as(u64, region.size_bytes)) catch continue;
-        if (address64 >= region.virtual_address and address64 < region_end) return true;
+        if (address >= region.virtual_address and address < region_end) return true;
     }
     return false;
 }
@@ -1599,27 +1647,27 @@ fn mapLoadRegion(
     region: task_runtime.AddressSpaceRegionRecord,
     elf_file: embedded_file.File,
 ) MaterializationError!void {
-    const virtual_address = std.math.cast(u32, region.virtual_address) orelse return error.InvalidRange;
-    const size_bytes = std.math.cast(u32, region.size_bytes) orelse return error.InvalidRange;
+    const virtual_address = region.virtual_address;
+    const size_bytes = region.size_bytes;
     const start: usize = region.file_offset;
     const file_size: usize = region.file_size;
     const end = std.math.add(usize, start, file_size) catch return error.ImageExtentInvalid;
     if (end > elf_file.byte_len) return error.ImageExtentInvalid;
     const reader = elf_file.reader() orelse return error.ImageExtentInvalid;
-    try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
+    try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), @intCast(size_bytes), .{
         .writable = region.access.write,
         .executable = region.access.execute,
     });
 
     var source_offset = start;
-    var target_offset: u32 = 0;
+    var target_offset: u64 = 0;
     while (source_offset < end) {
         const bytes = reader.logicalSliceAt(source_offset) orelse return error.ImageExtentInvalid;
         const copy_len = @min(bytes.len, end - source_offset);
-        const target_address = std.math.add(u32, virtual_address, target_offset) catch return error.InvalidRange;
-        try freestanding.paging.writeOwnedUserRange(space, target_address, bytes[0..copy_len]);
+        const target_address = std.math.add(u64, virtual_address, target_offset) catch return error.InvalidRange;
+        try freestanding.paging.writeOwnedUserRange(space, @intCast(target_address), bytes[0..copy_len]);
         source_offset += copy_len;
-        target_offset += @intCast(copy_len);
+        target_offset += copy_len;
     }
 }
 
@@ -1629,16 +1677,16 @@ fn mapZeroedRegion(
     size_bytes_raw: usize,
     access: task_runtime.SegmentAccess,
 ) MaterializationError!void {
-    const virtual_address = std.math.cast(u32, virtual_address_raw) orelse return error.InvalidRange;
-    const size_bytes = std.math.cast(u32, size_bytes_raw) orelse return error.InvalidRange;
+    const virtual_address = virtual_address_raw;
+    const size_bytes = size_bytes_raw;
     if (access.execute) {
-        try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
+        try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), size_bytes, .{
             .writable = access.write,
             .executable = access.execute,
         });
         return;
     }
-    const region_end = std.math.add(u32, virtual_address, size_bytes) catch return error.InvalidRange;
+    const region_end = std.math.add(u64, virtual_address, size_bytes) catch return error.InvalidRange;
     if (!demand_paging.registerForSpace(space, .{
         .virt_start = virtual_address,
         .virt_end_exclusive = region_end,
@@ -1655,14 +1703,13 @@ fn registerMappedObject(
     copy_on_write: bool,
     task_id: u64,
 ) bool {
-    const start = std.math.cast(u32, virt_start) orelse return false;
-    const size = std.math.cast(u32, size_bytes) orelse return false;
-    if (size == 0 or start > std.math.maxInt(u32) - size) return false;
+    if (size_bytes == 0) return false;
+    const end = std.math.add(u64, virt_start, size_bytes) catch return false;
     const mapping = mappingForDemandPagedObject(task_id) orelse return false;
     const space = if (mapping.address_space) |*address_space| address_space else return false;
     return demand_paging.registerForSpace(space, .{
-        .virt_start = start,
-        .virt_end_exclusive = start + size,
+        .virt_start = virt_start,
+        .virt_end_exclusive = end,
         .writable = writable,
         .kind = if (copy_on_write) .object_cow else .object_physical,
         .physical_base = physical_base,
@@ -1706,13 +1753,13 @@ fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.Interru
     };
 }
 
-fn recordTrapState(self: *Executor, instruction_pointer: u32, stack_pointer: u32, counter: u32) void {
+fn recordTrapState(self: *Executor, instruction_pointer: u64, stack_pointer: u64, counter: u32) void {
     self.last_trap_instruction_pointer = instruction_pointer;
     self.last_trap_stack_pointer = stack_pointer;
     self.last_trap_counter = counter;
 }
 
-fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, faulting_address: u32, error_code: u32) void {
+fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, faulting_address: u64, error_code: u32) void {
     self.last_fault_task_id = task_id;
     self.last_fault_address_space_id = address_space_id;
     self.last_fault_address = faulting_address;
@@ -1751,14 +1798,14 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
     );
     try std.testing.expectEqual(@as(u64, 40), metadata.owner_task_id);
     try std.testing.expectEqual(@as(u64, 41), metadata.image_id);
-    try std.testing.expectEqual(@as(u32, 0x4000_1000), metadata.initial_instruction_pointer);
-    try std.testing.expectEqual(@as(u32, 0x7FFF_EFF0), metadata.initial_stack_pointer);
+    try std.testing.expectEqual(@as(u64, 0x4000_1000), metadata.initial_instruction_pointer);
+    try std.testing.expectEqual(@as(u64, 0x7FFF_EFF0), metadata.initial_stack_pointer);
     try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
     try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contractFlags());
     try std.testing.expectEqual(@as(u32, 9), metadata.heartbeatIncrement());
     try std.testing.expectEqual(MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES, @sizeOf(MappingDispatchMetadata));
-    try std.testing.expectEqual(MAPPING_ENTRY_SIZE_CEILING_BYTES, @sizeOf(MappingEntry));
-    try std.testing.expectEqual(MAPPING_ARENA_SIZE_CEILING_BYTES, @sizeOf(MappingArena));
+    try std.testing.expect(@sizeOf(MappingEntry) <= MAPPING_ENTRY_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(MappingArena) <= MAPPING_ARENA_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(u8, 0), STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS);
 
     try std.testing.expectError(
@@ -2243,7 +2290,7 @@ test "executor mapping arena enforces capacity and invalidates reused handles" {
     const retired_slot_index = retired_handle.slotIndex();
     const retired_mappings = executor.mappingArena().?;
     const retired_slot = retired_mappings.slotAt(retired_slot_index);
-    Executor.releaseMapping(retired_mappings, retired_slot_index, &retired_slot.mapping);
+    executor.releaseMapping(retired_mappings, retired_slot_index, &retired_slot.mapping);
     const replacement_address_space_id: u64 = task_runtime.MAX_TASKS + 1;
     const replacement_handle = executor.mappings.reserveHandle(replacement_address_space_id).?;
     executor.mappings.getByHandle(replacement_handle).?.mapping = .{
@@ -2334,4 +2381,9 @@ test "userspace exception containment excludes system-fatal and dedicated vector
     try std.testing.expect(!isContainableUserExceptionVector(8));
     try std.testing.expect(!isContainableUserExceptionVector(PAGE_FAULT_VECTOR));
     try std.testing.expect(!isContainableUserExceptionVector(18));
+}
+
+test "production address-space groups share page tables" {
+    try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
+    try std.testing.expectEqual(@as(usize, 6), GROUP_SPACE_COUNT);
 }

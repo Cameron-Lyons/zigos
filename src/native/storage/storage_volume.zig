@@ -41,6 +41,7 @@ pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
 pub const BUILDS_WORKSPACE_INDEXES_DURING_REPLAY = true;
 pub const SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD = true;
 pub const USES_INCREMENTAL_LIVE_INDEX = volume_layout.USES_INCREMENTAL_LIVE_INDEX;
+pub const USES_CHECKPOINT_ONLY_COLD_LOAD = volume_layout.USES_CHECKPOINT_ONLY_COLD_LOAD;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 const SignerTextPool = [SIGNER_TEXT_POOL_BYTES]u8;
@@ -960,6 +961,13 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     self.workspace_state_hashes.reset();
     if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
     if (root.log_segment_count > max_log_segments) return error.CorruptImage;
+    if (USES_CHECKPOINT_ONLY_COLD_LOAD and
+        root.generation != 0 and
+        root.compacted_generation == root.generation and
+        root.log_record_count != 1)
+    {
+        return error.CorruptImage;
+    }
 
     var reader = CursorReader{ .buffer = log };
     var replayed_id_bounds = ReplayIdBounds{};

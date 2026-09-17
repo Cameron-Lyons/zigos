@@ -2,7 +2,6 @@ const std = @import("std");
 const native_modules = @import("native_modules.zig");
 const production_registry = @import("../src/native/task/userspace_registry.zig");
 const verification_registry = @import("../src/native/task/userspace_verification_registry.zig");
-const userspace_layout = @import("../src/native/core/userspace_layout.zig");
 const bootloader_source_path = "src/boot/efi_stub.zig";
 
 pub const production_artifact_count = production_registry.production_build_image_specs.len;
@@ -197,12 +196,85 @@ fn addUserspaceCompile(
     module.addOptions("build_options", options);
     module.addImport("userspace_runtime", userspace_modules.runtime);
 
+    const image_base = production_registry.imageBaseForBundle(spec.bundleId());
     const artifact = b.addExecutable(.{
         .name = artifact_name,
         .root_module = module,
     });
     artifact.link_z_max_page_size = 1;
-    artifact.image_base = userspace_layout.image_start;
-    artifact.setLinkerScript(b.path("src/userspace/linker.ld"));
+    artifact.image_base = image_base;
+    artifact.setLinkerScript(addUserspaceLinkerScript(b, artifact_name, image_base));
     return artifact;
+}
+
+fn addUserspaceLinkerScript(
+    b: *std.Build,
+    artifact_name: []const u8,
+    image_base: u64,
+) std.Build.LazyPath {
+    const script = b.fmt(
+        \\ENTRY(_start)
+        \\
+        \\PHDRS
+        \\{{
+        \\    text PT_LOAD FLAGS(5);
+        \\    rodata PT_LOAD FLAGS(4);
+        \\    data PT_LOAD FLAGS(6);
+        \\}}
+        \\
+        \\SECTIONS
+        \\{{
+        \\    . = 0x{x};
+        \\
+        \\    . = ALIGN(4K);
+        \\    .text :
+        \\    {{
+        \\        *(.text)
+        \\        *(.text.*)
+        \\    }} :text
+        \\
+        \\    . = ALIGN(4K);
+        \\    .rodata :
+        \\    {{
+        \\        KEEP(*(.zigos_userspace_role_identity))
+        \\        *(.rodata)
+        \\        *(.rodata.*)
+        \\        *(.eh_frame_hdr)
+        \\        *(.eh_frame_hdr.*)
+        \\        *(.eh_frame)
+        \\        *(.eh_frame.*)
+        \\    }} :rodata
+        \\
+        \\    . = ALIGN(4K);
+        \\    . = ALIGN(4K);
+        \\    .zigos_userspace_bootstrap :
+        \\    {{
+        \\        KEEP(*(.zigos_userspace_bootstrap))
+        \\    }} :data
+        \\
+        \\    . = ALIGN(4K);
+        \\    .data :
+        \\    {{
+        \\        *(.data)
+        \\        *(.data.*)
+        \\    }} :data
+        \\
+        \\    . = ALIGN(4K);
+        \\    .bss :
+        \\    {{
+        \\        *(COMMON)
+        \\        *(.bss)
+        \\        *(.bss.*)
+        \\    }} :data
+        \\
+        \\    /DISCARD/ :
+        \\    {{
+        \\        *(.comment)
+        \\        *(.note.GNU-stack)
+        \\    }}
+        \\}}
+        \\
+    , .{image_base});
+    const write = b.addWriteFiles();
+    return write.add(b.fmt("{s}.ld", .{artifact_name}), script);
 }

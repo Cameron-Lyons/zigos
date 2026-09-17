@@ -18,6 +18,7 @@ const units = @import("../core/units.zig");
 pub const DispatchResult = syscall_dispatch.DispatchResult;
 pub const UserMemoryAccess = syscall_dispatch.UserMemoryAccess;
 pub const validateAddressSpaceRange = syscall_dispatch.validateAddressSpaceRange;
+pub const REGISTER_FRED_SYSCALLS = true;
 
 const DispatchHandler = *const fn (
     port: *component_port.KernelPort,
