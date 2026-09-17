@@ -1829,6 +1829,8 @@ pub const native_2026 = .{
     .demand_pages_user_objects = demand_paging.DEMAND_PAGES_USER_OBJECTS and
         demand_paging.REGISTERS_MAPPED_OBJECTS and
         demand_paging.COPIES_ON_WRITE and
+        demand_paging.ISOLATES_REGIONS_BY_SPACE and
+        demand_paging.RELEASES_REGIONS_WITH_SPACE and
         shared_memory.REGISTERS_DEMAND_PAGED_MAPPINGS,
     .production_requires_hardware_fred = cpu_baseline.PRODUCTION_REQUIRES_HARDWARE_FRED,
     .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,

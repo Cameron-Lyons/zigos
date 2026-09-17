@@ -4,6 +4,8 @@ const std = @import("std");
 pub const DEMAND_PAGES_USER_OBJECTS = true;
 pub const REGISTERS_MAPPED_OBJECTS = true;
 pub const COPIES_ON_WRITE = true;
+pub const ISOLATES_REGIONS_BY_SPACE = true;
+pub const RELEASES_REGIONS_WITH_SPACE = true;
 pub const MAX_REGIONS: usize = 128;
 
 pub const Kind = enum(u8) {
@@ -54,6 +56,23 @@ pub fn registerRange(virt_start: u64, size_bytes: u64, writable: bool, kind: Kin
     });
 }
 
+pub fn unregisterSpace(space: anytype) void {
+    if (comptime !RELEASES_REGIONS_WITH_SPACE) return;
+    const space_id = spaceIdOf(space);
+    if (space_id == 0) return;
+    var write: u8 = 0;
+    var read: u8 = 0;
+    while (read < region_count) : (read += 1) {
+        if (regions[read].space_id == space_id) continue;
+        regions[write] = regions[read];
+        write += 1;
+    }
+    if (write < region_count) {
+        @memset(regions[write..region_count], .{});
+    }
+    region_count = write;
+}
+
 pub fn regionFor(fault_address: u32) ?*Region {
     return regionForSpaceId(0, fault_address);
 }
@@ -87,14 +106,12 @@ fn registerInSpace(space_id: usize, region: Region) bool {
 
 fn regionForSpaceId(space_id: usize, fault_address: u32) ?*Region {
     var index: u8 = 0;
-    var global_match: ?*Region = null;
     while (index < region_count) : (index += 1) {
         const slot = &regions[index];
         if (fault_address < slot.region.virt_start or fault_address >= slot.region.virt_end_exclusive) continue;
         if (slot.space_id == space_id) return &slot.region;
-        if (slot.space_id == 0) global_match = &slot.region;
     }
-    return global_match;
+    return null;
 }
 
 fn mapOnePage(space: anytype, region: *const Region, fault_address: u32, write: bool) bool {
@@ -185,5 +202,46 @@ test "demand paging keeps per-space stack regions" {
     }));
     try std.testing.expect(resolveAndMap(&first, 0xB000_0004, true));
     try std.testing.expect(resolveAndMap(&second, 0xB000_0004, false));
+    reset();
+}
+
+test "demand paging does not map another space's objects" {
+    reset();
+    var owner: u8 = 1;
+    var stranger: u8 = 2;
+    try std.testing.expect(registerForSpace(&owner, .{
+        .virt_start = 0x7000_0000,
+        .virt_end_exclusive = 0x7000_1000,
+        .writable = true,
+        .kind = .object_physical,
+        .physical_base = 0x2000,
+    }));
+    try std.testing.expect(registerRange(0x7000_0000, 0x1000, true, .object_physical, 0x2000));
+    try std.testing.expect(!resolveAndMap(&stranger, 0x7000_0000, false));
+    try std.testing.expect(resolveAndMap(&owner, 0x7000_0000, false));
+    try std.testing.expect(ISOLATES_REGIONS_BY_SPACE);
+    reset();
+}
+
+test "demand paging unregisters retired spaces" {
+    reset();
+    var space: u8 = 1;
+    var iteration: usize = 0;
+    while (iteration < MAX_REGIONS + 1) : (iteration += 1) {
+        try std.testing.expect(registerForSpace(&space, .{
+            .virt_start = 0xB000_0000,
+            .virt_end_exclusive = 0xB000_1000,
+            .writable = true,
+            .kind = .anonymous_zero,
+        }));
+        unregisterSpace(&space);
+    }
+    try std.testing.expect(registerForSpace(&space, .{
+        .virt_start = 0xB000_0000,
+        .virt_end_exclusive = 0xB000_1000,
+        .writable = true,
+        .kind = .anonymous_zero,
+    }));
+    try std.testing.expect(RELEASES_REGIONS_WITH_SPACE);
     reset();
 }
