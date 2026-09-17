@@ -1007,6 +1007,7 @@ pub const Executor = struct {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
         if (entry.address_space) |*space| {
+            demand_paging.unregisterSpace(space);
             freestanding.paging.destroyUserAddressSpace(space) catch
                 native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
         }
@@ -1646,14 +1647,36 @@ fn mapZeroedRegion(
     })) return error.OutOfMemory;
 }
 
-fn registerMappedObject(virt_start: u64, size_bytes: u64, writable: bool, physical_base: u64, copy_on_write: bool) bool {
-    return demand_paging.registerRange(
-        virt_start,
-        size_bytes,
-        writable,
-        if (copy_on_write) .object_cow else .object_physical,
-        physical_base,
-    );
+fn registerMappedObject(
+    virt_start: u64,
+    size_bytes: u64,
+    writable: bool,
+    physical_base: u64,
+    copy_on_write: bool,
+    task_id: u64,
+) bool {
+    const start = std.math.cast(u32, virt_start) orelse return false;
+    const size = std.math.cast(u32, size_bytes) orelse return false;
+    if (size == 0 or start > std.math.maxInt(u32) - size) return false;
+    const mapping = mappingForDemandPagedObject(task_id) orelse return false;
+    const space = if (mapping.address_space) |*address_space| address_space else return false;
+    return demand_paging.registerForSpace(space, .{
+        .virt_start = start,
+        .virt_end_exclusive = start + size,
+        .writable = writable,
+        .kind = if (copy_on_write) .object_cow else .object_physical,
+        .physical_base = physical_base,
+    });
+}
+
+fn mappingForDemandPagedObject(task_id: u64) ?*MappingEntry {
+    const executor = registered_executor orelse return null;
+    if (executor.active_mapping) |mapping| {
+        if (mapping.dispatch_metadata.owner_task_id == task_id) return mapping;
+    }
+    const runtime = executor.bound_runtime orelse return null;
+    const task = runtime.findConst(task_id) orelse return null;
+    return executor.findMapping(task.address_space_id);
 }
 
 fn enterUserspace(executor: *const Executor) u32 {

@@ -27,7 +27,14 @@ pub const MMU_OBJECT_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT + 3;
 pub const MMU_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const SEALS_IPC_RINGS = true;
 pub const REGISTERS_DEMAND_PAGED_MAPPINGS = true;
-pub const MappedObjectHook = *const fn (virt_start: u64, size_bytes: u64, writable: bool, physical_base: u64, copy_on_write: bool) bool;
+pub const MappedObjectHook = *const fn (
+    virt_start: u64,
+    size_bytes: u64,
+    writable: bool,
+    physical_base: u64,
+    copy_on_write: bool,
+    task_id: u64,
+) bool;
 
 var mapped_object_hook: ?MappedObjectHook = null;
 
@@ -134,6 +141,7 @@ fn registerDemandMapping(object: *const Object, mapping: FreestandingMappingDesc
         !object.isSealed(),
         mapping.physical_base,
         object.isSealed() or object.isRing(),
+        mapping.task_id.raw(),
     );
 }
 
