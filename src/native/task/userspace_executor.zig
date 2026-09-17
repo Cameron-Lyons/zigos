@@ -341,7 +341,10 @@ extern fn zigos_enter_userspace(context: usize, reserved: usize) callconv(.c) u3
 
 pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
     if (builtin.target.os.tag != .freestanding) return 0;
-    return zigos_enter_userspace(@intFromPtr(context), 0);
+    const result = zigos_enter_userspace(@intFromPtr(context), 0);
+    zigos_userspace_resume_eip = 0;
+    zigos_userspace_resume_esp = 0;
+    return result;
 }
 
 const MappingState = enum(u8) {

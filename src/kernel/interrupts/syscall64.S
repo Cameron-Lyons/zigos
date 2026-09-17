@@ -3,6 +3,7 @@
 .extern isrHandler
 .extern syscall_handler
 .extern zigos_userspace_resume_requested
+.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 
 .equ SYSCALL_CALL_YIELD, 0
@@ -124,17 +125,19 @@ zigos_syscall_entry:
 
 .dispatch_complete:
     cmpl $0, zigos_userspace_resume_requested(%rip)
-    jne .userspace_resume
-    RESTORE_REGISTERS
-    movq 16(%rsp), %rcx
-    movq 32(%rsp), %r11
-    swapgs
-    movq 40(%rsp), %rsp
-    sysretq
+    je .syscall_return
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    je .syscall_return
+    jmp .userspace_resume
 
 .dispatch_complete_lazy:
     cmpl $0, zigos_userspace_resume_requested(%rip)
-    jne .userspace_resume
+    je .syscall_return
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    je .syscall_return
+    jmp .userspace_resume
+
+.syscall_return:
     RESTORE_REGISTERS
     movq 16(%rsp), %rcx
     movq 32(%rsp), %r11
