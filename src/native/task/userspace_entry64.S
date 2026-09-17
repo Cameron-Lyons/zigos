@@ -54,6 +54,8 @@ zigos_enter_userspace:
 .global zigos_resume_from_userspace_interrupt
 .type zigos_resume_from_userspace_interrupt, @function
 zigos_resume_from_userspace_interrupt:
+    # The scheduler executes kernel FP/SIMD code after this non-IRET return.
+    clts
     movq zigos_userspace_resume_esp(%rip), %rsp
     jmp *zigos_userspace_resume_eip(%rip)
 

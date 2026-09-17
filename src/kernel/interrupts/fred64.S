@@ -27,6 +27,7 @@
 .equ XSAVE_ALIGN_SLACK, 64
 .equ XCOMP_BV, 0x8000000000000003
 .equ FRAME_CS, 160
+.equ FRAME_INT_NO, 136
 
 .macro SAVE_REGISTERS
     pushq %rax
@@ -96,9 +97,9 @@ zigos_fred_entry:
     movq %rsp, %r12
     cmpq $USER_CODE_SELECTOR, FRAME_CS(%r12)
     jne .fred_interrupt_dispatch
-    movq %cr0, %rax
-    testq $8, %rax
-    jnz .fred_interrupt_dispatch
+    # TS only says the next FP instruction must trap; the registers can still
+    # contain live user state restored on the preceding return.
+    clts
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -147,9 +148,7 @@ zigos_fred_entry:
     pushq $USERSPACE_YIELD_VECTOR
     SAVE_REGISTERS
     movq %rsp, %r12
-    movq %cr0, %rax
-    testq $8, %rax
-    jnz .fred_interrupt_dispatch
+    clts
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -173,16 +172,22 @@ zigos_fred_entry:
     movq %r12, %rsp
 
 .fred_complete:
+    # A kernel interrupt must finish its interrupted kernel operation, even if
+    # task retirement has requested a later userspace-to-scheduler handoff.
+    cmpq $USER_CODE_SELECTOR, FRAME_CS(%rsp)
+    jne .fred_return
+    cmpl $0, zigos_userspace_resume_requested(%rip)
+    je .fred_lazy_ts
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    jne .fred_userspace_resume
+.fred_lazy_ts:
+    # Re-arming TS on #NM would fault forever on the same user instruction.
+    cmpq $7, FRAME_INT_NO(%rsp)
+    je .fred_return
     movq %cr0, %rax
     orq $8, %rax
     movq %rax, %cr0
-    cmpl $0, zigos_userspace_resume_requested(%rip)
-    je .fred_erets
-    cmpq $0, zigos_userspace_resume_eip(%rip)
-    je .fred_erets
-    jmp .fred_userspace_resume
-
-.fred_erets:
+.fred_return:
     RESTORE_REGISTERS
     addq $56, %rsp
     .byte 0xf2, 0x0f, 0x01, 0xca
