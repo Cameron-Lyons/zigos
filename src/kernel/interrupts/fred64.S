@@ -112,6 +112,7 @@ zigos_fred_entry:
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
+    clts
     call isrHandler
     movl $3, %eax
     xorl %edx, %edx
@@ -122,6 +123,7 @@ zigos_fred_entry:
 
 .fred_interrupt_dispatch:
     movq %r12, %rdi
+    clts
     call isrHandler
     jmp .fred_complete
 
@@ -133,6 +135,7 @@ zigos_fred_entry:
     pushq $SYSCALL_VECTOR
     SAVE_REGISTERS
     movq %rsp, %rdi
+    clts
     call syscall_handler
     jmp .fred_complete
 
@@ -160,6 +163,7 @@ zigos_fred_entry:
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
+    clts
     call isrHandler
     movl $3, %eax
     xorl %edx, %edx

@@ -13,6 +13,7 @@
 .equ USER_DATA_SELECTOR, 0x1b
 .equ USER_CODE_SELECTOR, 0x23
 .equ SELECTOR_RPL_MASK, 0x3
+.equ FRAME_INT_NO, 136
 .equ FRAME_RIP, 152
 .equ FRAME_CS, 160
 .equ FRAME_RFLAGS, 168
@@ -152,6 +153,7 @@ isr_common_stub:
     movq %r12, %rdi
 
 .isr_enter:
+    clts
     call isrHandler
 
     movq FRAME_CS(%r12), %rax
@@ -212,6 +214,8 @@ isr_common_stub:
     movq FRAME_CS(%r12), %rax
     cmpq $USER_CODE_SELECTOR, %rax
     jne .after_lazy_ts
+    cmpq $7, FRAME_INT_NO(%r12)
+    je .after_lazy_ts
     movq %cr0, %rax
     orq $8, %rax
     movq %rax, %cr0

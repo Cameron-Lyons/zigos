@@ -168,14 +168,13 @@ pub export fn isrHandler(regs: *Registers) void {
     interrupt_context.enter();
     defer interrupt_context.leave();
     const vector = interruptVector(regs);
+    if (vector == DEVICE_NOT_AVAILABLE_VECTOR) {
+        x86.clearTaskSwitched();
+        return;
+    }
     if (handlerForVector(vector)) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
-        return;
-    }
-
-    if (vector == DEVICE_NOT_AVAILABLE_VECTOR) {
-        x86.clearTaskSwitched();
         return;
     }
 
