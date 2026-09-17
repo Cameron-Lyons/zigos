@@ -62,7 +62,17 @@ pub fn unregisterSpace(space: anytype) void {
     var write: u8 = 0;
     var read: u8 = 0;
     while (read < region_count) : (read += 1) {
-        if (regions[read].space_id == space_id) continue;
+        if (regions[read].space_id == space_id) {
+            if (comptime builtin.target.os.tag == .freestanding) {
+                const region = regions[read].region;
+                @import("paging64.zig").releaseUserRange(
+                    space,
+                    @intCast(region.virt_start),
+                    @intCast(region.virt_end_exclusive - region.virt_start),
+                ) catch @panic("invalid retired demand-paging range");
+            }
+            continue;
+        }
         regions[write] = regions[read];
         write += 1;
     }

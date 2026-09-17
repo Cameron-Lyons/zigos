@@ -152,6 +152,8 @@ else
             pub fn mapOwnedUserRange(_: *UserAddressSpace, _: usize, _: usize, _: UserPermissions) UserMapError!void {
                 return error.OutOfMemory;
             }
+            pub fn validateUserRangeAvailable(_: *const UserAddressSpace, _: usize, _: usize) UserMapError!void {}
+            pub fn releaseUserRange(_: *const UserAddressSpace, _: usize, _: usize) UserMapError!void {}
             pub fn mapBorrowedPhysicalUserRange(
                 _: *UserAddressSpace,
                 _: usize,
@@ -376,13 +378,20 @@ const MappingDispatchMetadata = struct {
 };
 
 const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 40;
-const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 448 else 440;
-const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 65_536 else 64_512;
+const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 456 else 448;
+const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 66_560 else 65_536;
+
+const MappedImageRegions = struct {
+    const Range = struct { start: usize = 0, size: usize = 0 };
+    ranges: [task_runtime.MAX_EXECUTABLE_SEGMENTS]Range = [_]Range{.{}} ** task_runtime.MAX_EXECUTABLE_SEGMENTS,
+    count: usize = 0,
+};
 
 const MappingEntry = struct {
     state: MappingState = .building,
     address_space_id: u64 = 0,
     address_space: ?freestanding.paging.UserAddressSpace = null,
+    image_regions: ?*MappedImageRegions = null,
     dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
     resume_instruction_pointer: u64 = 0,
@@ -940,10 +949,18 @@ pub const Executor = struct {
         errdefer self.releaseMapping(mappings, handle.slotIndex(), entry);
 
         entry.address_space = try self.acquireUserAddressSpace(image.bundleIdSlice());
+        entry.image_regions = table_backing.alloc(MappedImageRegions) orelse return error.OutOfMemory;
 
         for (address_space.regions[0..address_space.region_count]) |region| {
             switch (region.kind) {
-                .load_segment => try mapLoadRegion(&entry.address_space.?, region, image.elf_file),
+                .load_segment => {
+                    // Reject a collision before claiming ownership for rollback.
+                    try freestanding.paging.validateUserRangeAvailable(&entry.address_space.?, @intCast(region.virtual_address), region.size_bytes);
+                    const image_regions = entry.image_regions.?;
+                    image_regions.ranges[image_regions.count] = .{ .start = @intCast(region.virtual_address), .size = region.size_bytes };
+                    image_regions.count += 1;
+                    try mapLoadRegion(&entry.address_space.?, region, image.elf_file);
+                },
                 .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, @as(usize, region.size_bytes), region.access),
             }
         }
@@ -1050,11 +1067,21 @@ pub const Executor = struct {
         }
         if (entry.address_space) |*space| {
             demand_paging.unregisterSpace(space);
+            if (entry.image_regions) |image_regions| {
+                for (image_regions.ranges[0..image_regions.count]) |range| {
+                    freestanding.paging.releaseUserRange(space, range.start, range.size) catch
+                        native_util.impossibleByInvariant("invalid retired image mapping range");
+                }
+            }
             if (!self.releaseSharedGroupSpace(space)) {
                 freestanding.paging.destroyUserAddressSpace(space) catch
                     native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
             }
             entry.address_space = null;
+        }
+        if (entry.image_regions) |image_regions| {
+            table_backing.free(MappedImageRegions, image_regions);
+            entry.image_regions = null;
         }
         if (!mappings.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("live userspace mapping disappeared during release");
