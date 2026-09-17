@@ -67,6 +67,7 @@ zigos_syscall_entry:
     movq %gs:CPU_KERNEL_STACK_TOP, %rsp
     testq %rsp, %rsp
     jz .invalid_kernel_stack
+    clts
 
     pushq $USER_DATA_SELECTOR
     pushq %gs:CPU_USER_STACK_POINTER
