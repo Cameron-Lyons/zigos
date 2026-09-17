@@ -14,6 +14,15 @@ const kernel_memory = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/memory/memory.zig")
 else
     struct {};
+const intel_i225_hw = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/drivers/intel_i225_hw.zig")
+else
+    struct {
+        pub fn activate() !void {}
+        pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
+            return null;
+        }
+    };
 
 pub const ReceiveStatus = enum(u8) {
     empty = 0,
@@ -49,6 +58,8 @@ pub const COMPACT_NETWORK_TELEMETRY = true;
 pub const DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT = true;
 pub const HEAP_BACKED_PEER_LINK_DIRECTORY_ON_FREESTANDING = true;
 pub const DRAINS_FULL_RECEIVE_QUEUE_WITHOUT_COPY = true;
+pub const USERSPACE_I225_DATAPLANE = true;
+pub const KERNEL_LATCHES_ONLY = true;
 pub const NetworkTelemetryCount = u32;
 pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 32 else 2_080;
 const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
@@ -707,6 +718,15 @@ pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
 
 pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task_id: u64) bool {
     if (service_id == 0) return false;
+    if (intel_i225_hw.publishedBar() != null) {
+        intel_i225_hw.activate() catch return false;
+        if (builtin.target.os.tag == .freestanding) {
+            const console = @import("../../kernel/utils/console.zig");
+            console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
+            console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
+            console.print("ZIGOS:I225:HW:REMAP_MSI_OK\n");
+        }
+    }
     const queue = ensureReceiveQueue() orelse return false;
     resetReceiveQueue(queue);
     active_device = device;

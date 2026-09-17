@@ -167,18 +167,6 @@ pub fn startNetworkDataplane() bool {
     if (intel_i225_hw.publishedBar()) |bar| {
         registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
     }
-    intel_i225_hw.activate() catch |err| {
-        reportHardwareFailure(
-            "ZIGOS:I225:HW:BRINGUP_FAIL ",
-            err,
-            hardware_proof.realTargetDetected(),
-            "production I225-LM activation failed closed",
-        );
-        return false;
-    };
-    console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
-    console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
-    console.print("ZIGOS:I225:HW:REMAP_MSI_OK\n");
     return true;
 }
 
@@ -207,18 +195,7 @@ pub fn startInputDataplane() bool {
     if (xhci_hw.publishedBar()) |bar| {
         registerDeviceMmio(pciDeviceId(dev), bar.physical_base, bar.length);
     }
-    xhci_hw.activate() catch |err| {
-        reportHardwareFailure(
-            "ZIGOS:XHCI:HW:ACTIVATION_FAIL ",
-            err,
-            hardware_proof.realTargetDetected(),
-            "production xHCI activation failed closed",
-        );
-        return !hardware_proof.realTargetDetected();
-    };
     xhci_prepared = true;
-    console.print("ZIGOS:XHCI:HW:REMAP_MSI_OK\n");
-    console.print("ZIGOS:XHCI:HW:RUN_OK\n");
     return true;
 }
 

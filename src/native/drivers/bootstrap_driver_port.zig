@@ -8,6 +8,9 @@ const dataplane_handoff = @import("dataplane_handoff.zig");
 const device_inventory = @import("device_inventory.zig");
 const driver_service = @import("driver_service.zig");
 const network_driver_task = @import("network_driver_task.zig");
+const storage_driver_task = @import("storage_driver_task.zig");
+const xhci_driver_task = @import("xhci_driver_task.zig");
+const display_driver_task = @import("display_driver_task.zig");
 const root = @import("root");
 const kernel_device_start = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/init/devices.zig")
@@ -401,7 +404,11 @@ pub fn activateDeviceDataPlane(device_class: driver_service.DeviceClass, device_
     if (publicationForActivation(DeviceDataPlanePublication, &published_device_planes[deviceClassIndex(device_class)], device_id, service_id)) |publication| {
         if (publication.device_class != device_class) return false;
         if (builtin.target.os.tag == .freestanding) {
-            if (device_class == .usb_controller and !kernel_device_start.startInputDataplane()) return false;
+            if (device_class == .usb_controller) {
+                if (!kernel_device_start.startInputDataplane()) return false;
+                xhci_driver_task.bindTaskId(service_id);
+                if (!xhci_driver_task.bringUp()) return false;
+            }
             if (device_class == .graphics_adapter and !kernel_device_start.startGraphicsDataplane()) return false;
         }
         publication.active_service_id = service_id;
@@ -420,12 +427,14 @@ pub fn activateStorageBackend(
     kernel_port: ?*component_port.KernelPort,
 ) bool {
     if (publicationForActivation(StoragePublication, &published_storage, device_id, service_id)) |publication| {
-        if (builtin.target.os.tag == .freestanding and !kernel_device_start.startStorageDataplane()) return false;
+        storage_driver_task.bindTaskId(owner_task_id);
+        if (builtin.target.os.tag == .freestanding and !storage_driver_task.bringUpForTask(owner_task_id)) return false;
         if (publication.backend == null) {
             const activator = publication.activator orelse return false;
             publication.backend = activator(device_id) orelse return false;
         }
         if (kernel_port) |bound_kernel_port| {
+            storage_driver_task.bindTaskId(owner_task_id);
             if (!establishStorageControllerSession(
                 publication,
                 service_id,

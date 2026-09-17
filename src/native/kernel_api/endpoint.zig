@@ -1,10 +1,18 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const table_backing = @import("../core/table_backing.zig");
 const ipc_ring = @import("ipc_ring.zig");
+const x86 = if (builtin.target.os.tag == .freestanding)
+    @import("../../arch/x86.zig")
+else
+    struct {
+        pub fn allowSupervisorUserMemory() void {}
+        pub fn forbidSupervisorUserMemory() void {}
+    };
 
 pub const MAX_ENDPOINTS: usize = 64;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
@@ -68,6 +76,7 @@ const EndpointQueue = [MAX_ENDPOINT_QUEUE]Message;
 pub const HEAP_BACKS_QUEUES_ON_ALL_TARGETS = table_backing.HEAP_BACKS_ON_ALL_TARGETS;
 pub const PREFERS_SEALED_RING_DATAPLANE = ipc_ring.DATA_PLANE_USES_SEALED_RINGS;
 pub const AUTO_ATTACHES_DATA_RINGS = true;
+pub const RINGS_ONLY_DATAPLANE = true;
 pub const DEFAULT_DATA_RING_CAPACITY: u32 = 1024;
 const DataRingStorage = [ipc_ring.HEADER_BYTES + DEFAULT_DATA_RING_CAPACITY]u8;
 const heap_backed_endpoint_queues = HEAP_BACKS_QUEUES_ON_ALL_TARGETS;
@@ -240,7 +249,10 @@ pub const Table = struct {
         if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
 
         var queued_payload = payload;
-        if (peer.data_ring.len != 0 and payload.len != 0) {
+        if (payload.len != 0) {
+            if (peer.data_ring.len == 0) return error.RingCorrupt;
+            x86.allowSupervisorUserMemory();
+            defer x86.forbidSupervisorUserMemory();
             ipc_ring.push(peer.data_ring, payload) catch |err| switch (err) {
                 error.RingFull => return error.RingFull,
                 error.RingTooSmall, error.RingCorrupt, error.RingEmpty, error.PayloadTooLarge => return error.RingCorrupt,

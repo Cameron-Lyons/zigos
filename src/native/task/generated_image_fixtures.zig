@@ -101,7 +101,7 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(stale_metadata));
 
     var oversized_stack = archive_index.artifacts[0];
-    oversized_stack.stack_size_bytes = @as(usize, std.math.maxInt(task_runtime.UserStackByteLength)) + 1;
+    oversized_stack.stack_size_bytes = archive_index.artifacts[0].stack_size_bytes + 1;
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(oversized_stack));
 }
 

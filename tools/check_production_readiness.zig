@@ -823,6 +823,7 @@ fn validateNuc11tnki5KernelProofSources(
     const interrupt_stubs_path = "src/kernel/interrupts/interrupt64.S";
     const syscall_path = "src/kernel/interrupts/syscall64.zig";
     const syscall_entry_path = "src/kernel/interrupts/syscall64.S";
+    const fred_entry_path = "src/kernel/interrupts/fred64.S";
     const userspace_syscall_path = "src/arch/x86/syscall_trap.S";
     const gdt_path = "src/kernel/interrupts/gdt64.zig";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
@@ -855,6 +856,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_ui_state_path = "src/userspace/ui_surface_state.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
     const input_driver_task_path = "src/native/drivers/input_driver_task.zig";
+    const xhci_driver_task_path = "src/native/drivers/xhci_driver_task.zig";
     const input_router_path = "src/native/platform/input_router.zig";
     const console_path = "src/kernel/utils/console.zig";
     const legacy_vga_path = "src/kernel/drivers/vga.zig";
@@ -1107,6 +1109,7 @@ fn validateNuc11tnki5KernelProofSources(
     const interrupt_stubs_source = try common.readFileAlloc(allocator, io, interrupt_stubs_path, common.source_file_max_bytes);
     const syscall_source = try common.readFileAlloc(allocator, io, syscall_path, common.source_file_max_bytes);
     const syscall_entry_source = try common.readFileAlloc(allocator, io, syscall_entry_path, common.source_file_max_bytes);
+    const fred_entry_source = try common.readFileAlloc(allocator, io, fred_entry_path, common.source_file_max_bytes);
     const userspace_syscall_source = try common.readFileAlloc(allocator, io, userspace_syscall_path, common.source_file_max_bytes);
     const gdt_source = try common.readFileAlloc(allocator, io, gdt_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
@@ -1141,6 +1144,7 @@ fn validateNuc11tnki5KernelProofSources(
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const xhci_hw_source = try common.readFileAlloc(allocator, io, xhci_hw_path, common.source_file_max_bytes);
+    const xhci_driver_task_source = try common.readFileAlloc(allocator, io, xhci_driver_task_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
     const pci_source = try common.readFileAlloc(allocator, io, pci_path, common.source_file_max_bytes);
@@ -1223,13 +1227,20 @@ fn validateNuc11tnki5KernelProofSources(
         "isolation_domains[0..isolation_domain_count]",
         "ZIGOS:XHCI:HW:DMA_OK",
         "xhci_prepared = true",
-        "xhci_hw.activate()",
-        "ZIGOS:XHCI:HW:REMAP_MSI_OK",
-        "ZIGOS:XHCI:HW:RUN_OK",
     };
     for (required_boot_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, devices_source, snippet) == null) {
             try common.addError(errors, allocator, "RNUC15CRSU7 boot device inventory source must capture target-specific PCI snippet: {s}", .{snippet});
+        }
+    }
+    const required_xhci_driver_task_snippets = [_][]const u8{
+        "xhci_hw.activate()",
+        "ZIGOS:XHCI:HW:REMAP_MSI_OK",
+        "ZIGOS:XHCI:HW:RUN_OK",
+    };
+    for (required_xhci_driver_task_snippets) |snippet| {
+        if (std.mem.indexOf(u8, xhci_driver_task_source, snippet) == null) {
+            try common.addError(errors, allocator, "RNUC15CRSU7 xHCI userspace driver task must capture dataplane snippet: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, devices_source, "device_inventory.registerDetected(.input_device, xhci_device_id, .xhci_inventory, false)") != null) {
@@ -1466,21 +1477,20 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_one_shot_scheduler_snippets = [_][]const u8{
         "timer.synchronize()",
-        "xhci_hw.servicePendingEvents()",
+        "xhci_driver_task.dispatch()",
         "session_manager.bindHardwareInput",
         "pollHardwareKeyboardReport",
-        "xhci_hw.pollKeyboardReport()",
+        "xhci_driver_task.pollKeyboardReport()",
         "hardwareInputProof",
-        "xhci_hw.inputProof()",
+        "xhci_driver_task.inputProof()",
         "session_manager.servicePendingInputWork(now_ticks)",
-        "xhci_hw.eventWorkPending()",
-        "xhci_hw.lifecyclePending()",
+        "xhci_driver_task.lifecyclePending()",
         "userspaceSchedulerHasReadyTasks",
         "timer.armSchedulerTick()",
         "timer.disarmSchedulerTick()",
         "x86.cli()",
         "x86.sti()",
-        "x86.hlt()",
+        "smp.idle()",
     };
     for (required_one_shot_scheduler_snippets) |snippet| {
         if (std.mem.indexOf(u8, native_profile_source, snippet) == null) {
@@ -1913,6 +1923,20 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_syscall_configuration_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_source, snippet) == null) {
             try common.addError(errors, allocator, "native x86-64 syscall configuration must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_fred_entry_snippets = [_][]const u8{
+        "zigos_fred_entry",
+        "FRED_EVENT_TYPE_SYSCALL",
+        "xsaves",
+        "xrstors",
+        "call syscall_handler",
+        "call isrHandler",
+        "0xf2, 0x0f, 0x01, 0xca",
+    };
+    for (required_fred_entry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, fred_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "native x86-64 FRED entry must retain snippet: {s}", .{snippet});
         }
     }
     const required_syscall_entry_snippets = [_][]const u8{
@@ -3746,8 +3770,8 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = endpoint_path, .source = endpoint_source, .snippet = "pub fn initializeAllocated(self: *Table) void" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint_mod.Table else endpoint_mod.Table" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(endpoint_mod.Table)) orelse return error.NoSpaceLeft" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "kernel_memory.kfree(@ptrCast(table))" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const table = table_backing.alloc(endpoint_mod.Table) orelse return error.NoSpaceLeft" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "table_backing.free(endpoint_mod.Table, table)" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.kernel_context.ensureEndpointTable() catch" },
     };
     for (endpoint_table_storage_snippets) |required| {
@@ -3766,8 +3790,8 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_ux_path, .source = native_ux_source, .snippet = "pub fn initializeAllocated(self: *Controller) void" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "pub const HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING = true" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const ReviewUxControllerBacking = if (heap_backed_review_ux_controller) ?*native_ux.Controller else native_ux.Controller" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(native_ux.Controller)) orelse return error.NoSpaceLeft" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "kernel_memory.kfree(@ptrCast(controller))" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const controller = table_backing.alloc(native_ux.Controller) orelse return error.NoSpaceLeft" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "table_backing.free(native_ux.Controller, controller)" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.recovery_context.releaseReviewUxController()" },
         .{ .path = booted_evidence_path, .source = booted_evidence_source, .snippet = "manager.reviewUxControllerPtr() catch" },
     };
@@ -3786,9 +3810,10 @@ fn validateUserspaceDriverDataPathTrack(
     }{
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "pub fn copyUserSlice(" },
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user slice copies enforce source and destination bounds" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer)" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "if (request.payload.len != 0 and !dispatch.validateUserRange(" },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks)" },
+        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "ipc_ring.push(peer.data_ring, payload)" },
+        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "x86.allowSupervisorUserMemory()" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
     };
     for (protected_endpoint_send_snippets) |required| {

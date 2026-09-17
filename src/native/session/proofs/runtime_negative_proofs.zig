@@ -151,6 +151,7 @@ pub fn runFreestandingAndPrint(
     scheduler: *userspace_scheduler.Scheduler,
 ) bool {
     if (builtin.target.os.tag != .freestanding) return true;
+    if (!sharedDirectoryRangeReclamation()) return false;
     const launched = catalog.launchDirect(runtime, MMU_PROOF_BUNDLE_ID, .{
         .owner = app(60),
         .budget = budget(),
@@ -242,6 +243,34 @@ pub fn runFreestandingAndPrint(
     }
 
     return false;
+}
+
+fn sharedDirectoryRangeReclamation() bool {
+    if (builtin.target.os.tag != .freestanding) return true;
+    var space = paging.createUserAddressSpace() catch return false;
+    defer paging.destroyUserAddressSpace(&space) catch unreachable;
+    const retired_start = 0x4000_0000;
+    const survivor_start = 0x4200_0000;
+    const huge_bytes = 0x20_0000;
+    paging.mapOwnedUserRange(&space, retired_start, huge_bytes, .{ .writable = true }) catch return false;
+    paging.mapOwnedUserRange(&space, survivor_start, 0x1000, .{ .writable = true }) catch return false;
+    const before = paging.frameStats().allocated;
+
+    // Partial huge-page retirement must reject without deleting either peer.
+    if (paging.releaseUserRange(&space, retired_start, 0x1000)) |_| {
+        return false;
+    } else |err| {
+        if (err != error.InvalidRange) return false;
+    }
+    if (paging.frameStats().allocated != before) return false;
+
+    paging.releaseUserRange(&space, retired_start, huge_bytes) catch return false;
+    if (paging.frameStats().allocated + huge_bytes / 0x1000 != before) return false;
+    if (paging.ownedUserPageIsExecutable(&space, retired_start) != null) return false;
+    if (paging.ownedUserPageIsExecutable(&space, survivor_start) == null) return false;
+    // A rehost must be able to reuse the retired image's virtual addresses.
+    paging.mapOwnedUserRange(&space, retired_start, huge_bytes, .{ .writable = true }) catch return false;
+    return paging.frameStats().allocated == before;
 }
 
 fn userGeneralProtectionFaultIsContained(

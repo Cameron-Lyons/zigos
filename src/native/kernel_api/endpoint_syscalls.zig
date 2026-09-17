@@ -43,9 +43,17 @@ pub fn dispatchEndpointSend(
 ) dispatch.DispatchResult {
     _ = response_len;
     _ = response_addr;
-    var request = dispatch.readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
-    request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer) orelse return dispatch.invalidRequest();
+    const request = dispatch.readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    if (request.payload.len > endpoint.MAX_MESSAGE_BYTES) return dispatch.invalidRequest();
+    if (request.payload.len != 0 and !dispatch.validateUserRange(
+        memory,
+        @intFromPtr(request.payload.ptr),
+        request.payload.len,
+        1,
+        .read,
+    )) {
+        return dispatch.invalidRequest();
+    }
     component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.success();
 }

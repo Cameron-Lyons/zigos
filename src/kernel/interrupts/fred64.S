@@ -4,6 +4,7 @@
 .extern isrHandler
 .extern syscall_handler
 .extern zigos_userspace_resume_requested
+.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 
 .equ SYSCALL_CALL_YIELD, 0
@@ -26,6 +27,7 @@
 .equ XSAVE_ALIGN_SLACK, 64
 .equ XCOMP_BV, 0x8000000000000003
 .equ FRAME_CS, 160
+.equ FRAME_INT_NO, 136
 
 .macro SAVE_REGISTERS
     pushq %rax
@@ -95,6 +97,9 @@ zigos_fred_entry:
     movq %rsp, %r12
     cmpq $USER_CODE_SELECTOR, FRAME_CS(%r12)
     jne .fred_interrupt_dispatch
+    # TS only says the next FP instruction must trap; the registers can still
+    # contain live user state restored on the preceding return.
+    clts
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -105,18 +110,22 @@ zigos_fred_entry:
     movq %rax, 520(%rsp)
     movl $3, %eax
     xorl %edx, %edx
+    # xsaves (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
+    clts
     call isrHandler
     movl $3, %eax
     xorl %edx, %edx
+    # xrstors (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
     movq %r12, %rsp
     jmp .fred_complete
 
 .fred_interrupt_dispatch:
     movq %r12, %rdi
+    clts
     call isrHandler
     jmp .fred_complete
 
@@ -128,6 +137,7 @@ zigos_fred_entry:
     pushq $SYSCALL_VECTOR
     SAVE_REGISTERS
     movq %rsp, %rdi
+    clts
     call syscall_handler
     jmp .fred_complete
 
@@ -138,6 +148,7 @@ zigos_fred_entry:
     pushq $USERSPACE_YIELD_VECTOR
     SAVE_REGISTERS
     movq %rsp, %r12
+    clts
     subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
     andq $-64, %rsp
     leaq 512(%rsp), %rdi
@@ -148,18 +159,35 @@ zigos_fred_entry:
     movq %rax, 520(%rsp)
     movl $3, %eax
     xorl %edx, %edx
+    # xsaves (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
     movq %r12, %rdi
+    clts
     call isrHandler
     movl $3, %eax
     xorl %edx, %edx
+    # xrstors (%rsp)
     .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
     movq %r12, %rsp
 
 .fred_complete:
+    # A kernel interrupt must finish its interrupted kernel operation, even if
+    # task retirement has requested a later userspace-to-scheduler handoff.
+    cmpq $USER_CODE_SELECTOR, FRAME_CS(%rsp)
+    jne .fred_return
     cmpl $0, zigos_userspace_resume_requested(%rip)
+    je .fred_lazy_ts
+    cmpq $0, zigos_userspace_resume_eip(%rip)
     jne .fred_userspace_resume
+.fred_lazy_ts:
+    # Re-arming TS on #NM would fault forever on the same user instruction.
+    cmpq $7, FRAME_INT_NO(%rsp)
+    je .fred_return
+    movq %cr0, %rax
+    orq $8, %rax
+    movq %rax, %cr0
+.fred_return:
     RESTORE_REGISTERS
     addq $56, %rsp
     .byte 0xf2, 0x0f, 0x01, 0xca
