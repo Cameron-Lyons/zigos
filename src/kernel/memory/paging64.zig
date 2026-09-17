@@ -734,6 +734,66 @@ fn checkedUserMappedSize(virtual_start: usize, size_bytes: usize) UserMapError!u
     return mapped_size;
 }
 
+pub fn validateUserRangeAvailable(space: *const UserAddressSpace, virtual_start: usize, size_bytes: usize) UserMapError!void {
+    const size = try checkedUserMappedSize(virtual_start, size_bytes);
+    var offset: usize = 0;
+    while (offset < size) : (offset += PAGE_SIZE) {
+        try validateOwnedMappingSlot(space, virtual_start + offset);
+    }
+}
+
+/// Reclaim one task's pages without destroying the page tables its group shares.
+/// Callers must own the entire range, including any huge leaves it contains.
+pub fn releaseUserRange(space: *const UserAddressSpace, virtual_start: usize, size_bytes: usize) UserMapError!void {
+    const size = try checkedUserMappedSize(virtual_start, size_bytes);
+    const end = virtual_start + size;
+    var address = virtual_start;
+    // Validate first: a rejected range must leave all mappings intact.
+    while (address < end) {
+        const entry = lookupLeaf(space.directory, address) orelse {
+            address += PAGE_SIZE;
+            continue;
+        };
+        if (!entryPresent(entry.*)) {
+            address += PAGE_SIZE;
+            continue;
+        }
+        if ((entry.* & ENTRY_USER) == 0) return error.KernelMappingCollision;
+        const leaf_size: usize = if (table64.isLargePage(entry.*)) @intCast(LARGE_2M_PAGE_SIZE) else PAGE_SIZE;
+        if (address % leaf_size != 0 or end - address < leaf_size) return error.InvalidRange;
+        address += leaf_size;
+    }
+
+    acquireFrameLock();
+    defer releaseFrameLock();
+    address = virtual_start;
+    while (address < end) {
+        const entry = lookupLeaf(space.directory, address) orelse {
+            address += PAGE_SIZE;
+            continue;
+        };
+        if (!entryPresent(entry.*)) {
+            address += PAGE_SIZE;
+            continue;
+        }
+        const old = entry.*;
+        const leaf_size: usize = if (table64.isLargePage(old)) @intCast(LARGE_2M_PAGE_SIZE) else PAGE_SIZE;
+        entry.* = 0;
+        // Cached translations must disappear before their frames can be reused.
+        if (process_context_identifiers_enabled) {
+            x86.invalidatePcid(space.pcid);
+            if (remote_pcid_shootdown) |shootdown| shootdown(space.pcid);
+        } else if (space.directory == getCurrentPageDirectory()) {
+            invalidate_page(address);
+        }
+        if (entryOwner(old) == PAGE_OWNER_USER_PRIVATE) {
+            releasePhysicalFramesLocked(@intCast(entryAddress(old)), @intCast(leaf_size / PAGE_SIZE)) catch
+                haltWithMessage("Corrupt retired user-range accounting!\n");
+        }
+        address += leaf_size;
+    }
+}
+
 test "user mapping bounds reject alignment overflow and noncanonical ranges" {
     try std.testing.expectError(error.AddressOverflow, checkedUserMappedSize(0x4000_0000, std.math.maxInt(usize)));
     try std.testing.expectError(error.InvalidRange, checkedUserMappedSize(0x0000_8000_0000_0000, PAGE_SIZE));
