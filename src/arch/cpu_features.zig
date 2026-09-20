@@ -65,14 +65,35 @@ pub fn detect() baseline.Features {
     return baseline.decode(registers);
 }
 
-pub fn enableModernFeatures(features: baseline.Features) void {
-    if (!baseline.isSupported(features)) unreachable;
-    if (!features.pcid or !features.invpcid) unreachable;
-    if (!features.xsave or !features.xsaves) unreachable;
-    if (!features.cet_ibt or !features.cet_ss) unreachable;
-    if (!features.pku or !features.lass) unreachable;
-    if (!features.fred or !features.lkgs) unreachable;
+pub const ProcessContextMode = enum {
+    hardware_pcid,
+    software_flush,
+};
 
+pub const CetMode = enum {
+    hardware,
+    deferred,
+};
+
+pub fn enableModernFeatures(
+    features: baseline.Features,
+    process_context_mode: ProcessContextMode,
+    cet_mode: CetMode,
+) void {
+    var required_features = features;
+    if (process_context_mode == .software_flush) {
+        required_features.pcid = true;
+        required_features.invpcid = true;
+    }
+    if (cet_mode == .deferred) {
+        required_features.cet_ibt = true;
+        required_features.cet_ss = true;
+    }
+    required_features.pku = true;
+    required_features.lass = true;
+    required_features.fred = true;
+    required_features.lkgs = true;
+    if (!baseline.isSupported(required_features)) unreachable;
     x86.enableNoExecute();
     if (!x86.noExecuteEnabled()) unreachable;
     var cr4 = x86.readCr4();
@@ -83,15 +104,25 @@ pub fn enableModernFeatures(features: baseline.Features) void {
     x86.writeCr4(cr4);
     if (!x86.globalPagesEnabled()) unreachable;
     if (!x86.supervisorAccessPreventionEnabled()) unreachable;
-
-    x86.enableProcessContextIdentifiers();
-    if (!x86.processContextIdentifiersEnabled()) unreachable;
+    if (process_context_mode == .hardware_pcid) {
+        if (!features.pcid or !features.invpcid) unreachable;
+        x86.enableProcessContextIdentifiers();
+        if (!x86.processContextIdentifiersEnabled()) unreachable;
+    }
+    if (!features.xsave or !features.xsaves) unreachable;
     x86.enableXsaves();
     if (!x86.xsavesEnabled()) unreachable;
-    x86.enableCet();
-    if (!x86.cetEnabled()) unreachable;
-    x86.enablePku();
-    if (!x86.pkuEnabled()) unreachable;
-    x86.enableLass();
-    if (!x86.lassEnabled()) unreachable;
+    if (cet_mode == .hardware) {
+        if (!features.cet_ibt or !features.cet_ss) unreachable;
+        x86.enableCet();
+        if (!x86.cetEnabled()) unreachable;
+    }
+    if (features.pku) {
+        x86.enablePku();
+        if (!x86.pkuEnabled()) unreachable;
+    }
+    if (features.lass) {
+        x86.enableLass();
+        if (!x86.lassEnabled()) unreachable;
+    }
 }

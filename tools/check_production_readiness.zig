@@ -1605,20 +1605,16 @@ fn validateNuc11tnki5KernelProofSources(
         "IA32_TSC_DEADLINE_MSR",
         "armSchedulerTick",
         "disarmSchedulerTick",
+        "X2APIC_TIMER_INITIAL_COUNT_MSR",
+        "X2APIC_TIMER_CURRENT_COUNT_MSR",
+        "X2APIC_TIMER_DIVIDE_CONFIG_MSR",
+        "X2APIC_TIMER_MODE_PERIODIC",
+        "initCalibratedCountdownTimer",
+        "calibrated_countdown",
     };
     for (required_emulator_countdown_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, timer_source, snippet) == null) {
             try common.addError(errors, allocator, "tickless TSC-deadline timer must retain snippet: {s}", .{snippet});
-        }
-    }
-    const retired_emulator_countdown_timer_snippets = [_][]const u8{
-        "calibrated_countdown",
-        "initCalibratedCountdownTimer",
-        "X2APIC_TIMER_MODE_PERIODIC",
-    };
-    for (retired_emulator_countdown_timer_snippets) |snippet| {
-        if (std.mem.indexOf(u8, timer_source, snippet) != null) {
-            try common.addError(errors, allocator, "tickless timer must not restore the QEMU countdown path: {s}", .{snippet});
         }
     }
     const required_accelerated_qemu_snippets = [_][]const u8{
@@ -1640,6 +1636,7 @@ fn validateNuc11tnki5KernelProofSources(
         "qemu_iso.addFileArg(boot_kernel)",
         "scripts/build-efi-iso.sh",
         "scripts/check-efi-image.sh",
+        "src/boot/cmdline-qemu.txt",
     };
     for (required_compact_kernel_boot_snippets) |snippet| {
         if (std.mem.indexOf(u8, kernel_build_source, snippet) == null) {
@@ -1649,8 +1646,8 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, kernel_build_source, "const boot_kernel = if") != null) {
         try common.addError(errors, allocator, "debug stripping must apply to every kernel boot profile", .{});
     }
-    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") != null) {
-        try common.addError(errors, allocator, "QEMU boot configuration must not request the retired software-emulator CPU fallback", .{});
+    if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
+        try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
     }
     if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
         try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
@@ -1846,6 +1843,9 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
+        "ProcessContextMode",
+        "software_flush",
+        "CetMode",
         "CR4_PGE",
         "globalPagesEnabled",
         "CR4_SMEP",
@@ -1866,48 +1866,54 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "modern CPU feature enablement must retain snippet: {s}", .{snippet});
         }
     }
-    const retired_cpu_feature_fallback_snippets = [_][]const u8{
-        "ProcessContextMode",
-        "software_flush",
-        "CetMode",
-        ".deferred",
-    };
-    for (retired_cpu_feature_fallback_snippets) |snippet| {
-        if (std.mem.indexOf(u8, cpu_features_source, snippet) != null) {
-            try common.addError(errors, allocator, "modern CPU feature enablement must not restore ISA fallbacks: {s}", .{snippet});
-        }
-    }
     const required_boot_process_context_snippets = [_][]const u8{
+        "softwareCpuFallbackRequested",
         "model_inventory",
+        "qemu_software_cpu_fallback",
         "qemu_tsc_frequency_hz",
+        "hardware_process_contexts",
         "cpu_pcid_enabled",
+        "cpu_pcid_software_fallback",
         "cpu_pcid_ready",
         "cpu_pge_enabled",
         "cpu_smep_enabled",
         "cpu_smap_enabled",
         "cpu_umip_enabled",
+        "cpu_syscall_enabled",
         "cpu_fred_enabled",
         "cpu_pku_enabled",
         "cpu_lass_enabled",
-        "enableModernFeatures(features)",
     };
     for (required_boot_process_context_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "CPU boot process-context gate must retain snippet: {s}", .{snippet});
         }
     }
-    const retired_boot_fallback_snippets = [_][]const u8{
+    const required_boot_timer_snippets = [_][]const u8{
         "softwareCpuFallbackRequested",
         "qemu_software_cpu_fallback",
-        "cpu_pcid_software_fallback",
-        "cpu_syscall_enabled",
-        "software_flush",
-        ".deferred",
-        "calibrated_countdown",
+        "software_cpu_fallback",
+        "hardware_tsc_timer",
+        "software_timer_fallback",
+        "required_features.tsc_deadline = true",
+        "required_features.invariant_tsc = true",
+        ".tsc_deadline else .calibrated_countdown",
     };
-    for (retired_boot_fallback_snippets) |snippet| {
-        if (std.mem.indexOf(u8, boot_entry_source, snippet) != null) {
-            try common.addError(errors, allocator, "CPU boot must not restore ISA compatibility fallbacks: {s}", .{snippet});
+    for (required_boot_timer_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "CPU boot timer gate must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_boot_cet_snippets = [_][]const u8{
+        "hardware_cet",
+        "software_cet_fallback",
+        "required_features.cet_ibt = true",
+        "required_features.cet_ss = true",
+        ".deferred",
+    };
+    for (required_boot_cet_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "CPU boot CET gate must retain snippet: {s}", .{snippet});
         }
     }
     const required_pcid_allocator_snippets = [_][]const u8{

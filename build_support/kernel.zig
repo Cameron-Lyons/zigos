@@ -124,7 +124,7 @@ pub fn addX86_64KernelBootCheck(
     iso.addFileArg(efi_stub.getEmittedBin());
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
-    iso.addFileArg(b.path("src/boot/cmdline.txt"));
+    iso.addFileArg(b.path("src/boot/cmdline-qemu.txt"));
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -551,7 +551,7 @@ pub fn addKernelArtifact(
     qemu_iso.addFileArg(efi_stub.getEmittedBin());
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
-    qemu_iso.addFileArg(b.path("src/boot/cmdline.txt"));
+    qemu_iso.addFileArg(b.path("src/boot/cmdline-qemu.txt"));
     qemu_iso.step.dependOn(&validate_qemu_image.step);
 
     const install = b.addInstallBinFile(linked_kernel, name);
