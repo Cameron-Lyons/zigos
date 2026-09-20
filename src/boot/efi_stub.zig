@@ -13,7 +13,7 @@ const HANDOFF_PAGES: usize = 8;
 const MMAP_ENTRY_CAP: usize = 256;
 const CMDLINE_CAP: usize = 256;
 const RSDP_CAP: usize = 64;
-const MAX_BELOW_4G: usize = 0xFFFFF000;
+const HANDOFF_MAX_ADDRESS: usize = 128 * 1024 * 1024;
 
 pub fn main() uefi.Status {
     const system_table = uefi.system_table;
@@ -44,7 +44,7 @@ pub fn main() uefi.Status {
     efi_elf.load(kernel_bytes, image);
 
     const handoff_pages = boot.allocatePages(
-        .{ .max_address = @ptrFromInt(MAX_BELOW_4G) },
+        .{ .max_address = @ptrFromInt(HANDOFF_MAX_ADDRESS) },
         .loader_data,
         HANDOFF_PAGES,
     ) catch return .out_of_resources;
