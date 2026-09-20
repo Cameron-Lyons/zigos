@@ -83,8 +83,19 @@ fn loadCommandLine(
     root: *uefi.protocol.File,
     buffer: []u8,
 ) []const u8 {
-    if (utf16LoadOptions(loaded, buffer)) |cmdline| return cmdline;
-    const file_bytes = readFile(root, &CMDLINE_PATH, buffer.len) catch return &.{};
+    var file_buf: [CMDLINE_CAP]u8 = undefined;
+    const file_cmdline = loadCommandLineFile(root, &file_buf) orelse &.{};
+    const load_options = utf16LoadOptions(loaded, buffer) orelse &.{};
+    const chosen = efi_handoff.preferredCommandLine(file_cmdline, load_options);
+    if (chosen.len == 0) return &.{};
+    if (chosen.ptr == buffer.ptr) return chosen;
+    const copied = @min(chosen.len, buffer.len);
+    @memcpy(buffer[0..copied], chosen[0..copied]);
+    return buffer[0..copied];
+}
+
+fn loadCommandLineFile(root: *uefi.protocol.File, buffer: []u8) ?[]const u8 {
+    const file_bytes = readFile(root, &CMDLINE_PATH, buffer.len) catch return null;
     var len = file_bytes.len;
     while (len > 0 and (file_bytes[len - 1] == 0 or file_bytes[len - 1] == '\n' or file_bytes[len - 1] == '\r')) {
         len -= 1;
@@ -189,7 +200,6 @@ fn enterKernel(entry: u64, info_addr: u32) noreturn {
         :
         : [info] "r" (@as(u64, info_addr)),
           [entry] "r" (entry),
-        : .{ .rdi = true, .memory = true }
-    );
+        : .{ .rdi = true, .memory = true });
     unreachable;
 }
