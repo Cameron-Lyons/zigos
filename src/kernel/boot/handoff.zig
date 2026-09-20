@@ -445,6 +445,10 @@ test "Multiboot2 physical extents reject target-usize and 4 GiB wrap" {
 
 test "command line parsing requires exact flags and unique integer keys" {
     try std.testing.expect(commandLineHasFlagBytes("model_inventory qemu_tsc_frequency_hz=2400000000", "model_inventory"));
+    try std.testing.expect(commandLineHasFlagBytes(
+        "model_inventory qemu_software_cpu_fallback qemu_tsc_frequency_hz=2400000000",
+        "qemu_software_cpu_fallback",
+    ));
     try std.testing.expect(!commandLineHasFlagBytes("not_model_inventory", "model_inventory"));
     try std.testing.expectEqual(
         @as(?u64, 2_400_000_000),

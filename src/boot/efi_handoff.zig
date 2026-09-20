@@ -89,6 +89,11 @@ pub fn rgbFromMasks(red_pos: u8, green_pos: u8, blue_pos: u8) [FRAMEBUFFER_RGB_B
     return .{ red_pos, 8, green_pos, 8, blue_pos, 8 };
 }
 
+pub fn preferredCommandLine(file_cmdline: []const u8, load_options: []const u8) []const u8 {
+    if (file_cmdline.len != 0) return file_cmdline;
+    return load_options;
+}
+
 pub fn encodedSize(request: Request) usize {
     var size: usize = INFO_HEADER_BYTES;
     if (request.cmdline.len != 0) {
@@ -171,6 +176,21 @@ fn writeTagHeader(buffer: []u8, offset: *usize, tag_type: u32, tag_size: usize) 
 
 fn alignTag(value: usize) usize {
     return std.mem.alignForward(usize, value, TAG_ALIGNMENT);
+}
+
+test "EFI command line prefers the ESP file over LoadedImage options" {
+    try std.testing.expectEqualStrings(
+        "model_inventory qemu_software_cpu_fallback qemu_tsc_frequency_hz=2400000000",
+        preferredCommandLine(
+            "model_inventory qemu_software_cpu_fallback qemu_tsc_frequency_hz=2400000000",
+            "UEFI QEMU QEMU CD-ROM",
+        ),
+    );
+    try std.testing.expectEqualStrings(
+        "UEFI QEMU QEMU CD-ROM",
+        preferredCommandLine(&.{}, "UEFI QEMU QEMU CD-ROM"),
+    );
+    try std.testing.expectEqualStrings(&.{}, preferredCommandLine(&.{}, &.{}));
 }
 
 test "EFI memory types become Multiboot2 map kinds" {

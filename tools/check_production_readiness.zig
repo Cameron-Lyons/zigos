@@ -1672,6 +1672,9 @@ fn validateNuc11tnki5KernelProofSources(
         "efi_handoff.encode",
         "enterKernel",
         "KERNEL_PATH",
+        "CMDLINE_PATH",
+        "preferredCommandLine",
+        "loadCommandLineFile",
     };
     for (required_efi_stub_snippets) |snippet| {
         if (std.mem.indexOf(u8, efi_stub_source, snippet) == null) {
@@ -1684,6 +1687,7 @@ fn validateNuc11tnki5KernelProofSources(
         "EXITS_BOOT_SERVICES",
         "TAG_ACPI_NEW",
         "TAG_EFI64_SYSTEM_TABLE",
+        "preferredCommandLine",
     };
     for (required_efi_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, efi_handoff_source, snippet) == null) {
@@ -2015,11 +2019,18 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_syscall_configuration_snippets = [_][]const u8{
         "FRED_ONLY_TRAPS",
+        "USER_STAR_BASE_SELECTOR",
+        "SYSCALL_RFLAGS_MASK",
         "IA32_GS_BASE_MSR",
         "IA32_KERNEL_GS_BASE_MSR",
+        "IA32_STAR_MSR",
+        "IA32_LSTAR_MSR",
+        "IA32_FMASK_MSR",
+        "EFER_SCE",
         "enableFred",
         "setFredRsp0",
         "fredEnabled",
+        "syscallExtensionEnabled",
         "setKernelStack",
         "setActiveTaskId",
         "currentActiveTaskId",
@@ -2027,18 +2038,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_syscall_configuration_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_source, snippet) == null) {
-            try common.addError(errors, allocator, "native x86-64 FRED syscall configuration must retain snippet: {s}", .{snippet});
-        }
-    }
-    const retired_syscall_configuration_snippets = [_][]const u8{
-        "USER_STAR_BASE_SELECTOR",
-        "IA32_STAR_MSR",
-        "IA32_LSTAR_MSR",
-        "syscallExtensionEnabled",
-    };
-    for (retired_syscall_configuration_snippets) |snippet| {
-        if (std.mem.indexOf(u8, syscall_source, snippet) != null) {
-            try common.addError(errors, allocator, "native x86-64 FRED syscall configuration must not restore SYSCALL MSRs: {s}", .{snippet});
+            try common.addError(errors, allocator, "native x86-64 syscall configuration must retain snippet: {s}", .{snippet});
         }
     }
     const required_fred_entry_snippets = [_][]const u8{
@@ -2056,22 +2056,22 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_syscall_entry_snippets = [_][]const u8{
+        "zigos_syscall_entry",
+        "swapgs",
+        "CPU_KERNEL_STACK_TOP",
+        "CPU_USER_STACK_POINTER",
+        "xsaves",
+        "xrstors",
+        "endbr64",
+        "sysretq",
+        "call syscall_handler",
+        "call isrHandler",
         "zigos_syscall_benchmark_user_start",
         "syscall",
     };
     for (required_syscall_entry_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_entry_source, snippet) == null) {
-            try common.addError(errors, allocator, "native x86-64 FRED userspace entry must retain snippet: {s}", .{snippet});
-        }
-    }
-    const retired_syscall_entry_snippets = [_][]const u8{
-        "zigos_syscall_entry",
-        "swapgs",
-        "sysretq",
-    };
-    for (retired_syscall_entry_snippets) |snippet| {
-        if (std.mem.indexOf(u8, syscall_entry_source, snippet) != null) {
-            try common.addError(errors, allocator, "native x86-64 FRED entry must not restore SYSCALL/SWAPGS: {s}", .{snippet});
+            try common.addError(errors, allocator, "native x86-64 syscall entry must retain snippet: {s}", .{snippet});
         }
     }
     const required_sysret_gdt_snippets = [_][]const u8{
