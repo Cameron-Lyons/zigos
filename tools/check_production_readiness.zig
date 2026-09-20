@@ -1675,6 +1675,8 @@ fn validateNuc11tnki5KernelProofSources(
         "CMDLINE_PATH",
         "preferredCommandLine",
         "loadCommandLineFile",
+        "HANDOFF_MAX_ADDRESS",
+        "128 * 1024 * 1024",
     };
     for (required_efi_stub_snippets) |snippet| {
         if (std.mem.indexOf(u8, efi_stub_source, snippet) == null) {
@@ -2270,6 +2272,8 @@ fn validateNuc11tnki5KernelProofSources(
         "capturedAcpi2Rsdp",
         "efi64SystemTableAddress",
         "zigos_multiboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC",
+        "BOOT_IDENTITY_BYTES",
+        "128 * 1024 * 1024",
     };
     for (required_boot_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, handoff_source, snippet) == null) {
