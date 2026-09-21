@@ -94,7 +94,9 @@ pub fn startStorageDataplane() bool {
 }
 
 pub fn startNetworkDataplane() bool {
-    return network_detected or pci.firstIntelI225Lm() != null;
+    return network_detected or
+        pci.firstIntelI225Lm() != null or
+        device_inventory.modelDeviceInventoryEnabled();
 }
 
 pub fn startInputDataplane() bool {

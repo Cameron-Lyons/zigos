@@ -683,17 +683,18 @@ pub const SessionManager = struct {
         const runtime = self.runtimePtr();
         const compositor_task = runtime.find(compositor_task_id) orelse return false;
         if (builtin.target.os.tag == .freestanding) {
-            _ = self.userspaceSchedulerPtr().wakeTask(compositor_task_id, .external_event, 0, 1);
             var attempts: usize = 0;
             const dispatch_budget = runtime.taskSlotCapacity() * 8;
             while (attempts < dispatch_budget and
-                !self.currentUserspaceSurfacePresentationReady(compositor_task)) : (attempts += 1)
+                !self.currentUserspaceSurfacePresentationReady(runtime.find(compositor_task_id) orelse compositor_task)) : (attempts += 1)
             {
+                _ = self.userspaceSchedulerPtr().wakeTask(compositor_task_id, .external_event, @intCast(attempts), @intCast(attempts + 1));
                 if (!self.userspaceSchedulerPtr().hasReadyTasks()) break;
                 _ = self.runUserspaceScheduler(@intCast(attempts + 1));
             }
-            if (!self.proveUserspaceSurfacePresentation(compositor_task)) {
-                self.printSurfacePresentationTelemetry(compositor_task.id);
+            const presented_task = runtime.find(compositor_task_id) orelse compositor_task;
+            if (!self.proveUserspaceSurfacePresentation(presented_task)) {
+                self.printSurfacePresentationTelemetry(compositor_task_id);
                 return false;
             }
         }

@@ -1163,7 +1163,7 @@ fn addressSpaceCr3(directory_physical: frame_allocator.PhysicalAddress, pcid: pc
 }
 
 fn switchAddressSpace(directory: *PageDirectory, switch_cr3: usize) void {
-    if (directory == current_page_directory) return;
+    if (directory == current_page_directory and x86.readCr3() == switch_cr3) return;
     x86.writeCr3(switch_cr3);
     current_page_directory = directory;
 }

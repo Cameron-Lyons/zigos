@@ -462,20 +462,30 @@ pub const TrustBoot = struct {
         if (builtin.target.os.tag != .freestanding) return true;
 
         const root = @import("root");
-        if (!@hasDecl(root, "production_artifact_manifest")) return false;
+        if (!@hasDecl(root, "production_artifact_manifest")) {
+            return failGeneratedArtifactManifest("missing_generated_manifest");
+        }
         var generated_manifest: measured_boot.BuildArtifactManifest = undefined;
-        measured_boot.buildArtifactManifestFromGeneratedInto(&generated_manifest, root.production_artifact_manifest) catch return false;
-        if (!measured_boot.verifyBuildArtifactManifest(&generated_manifest)) return false;
+        measured_boot.buildArtifactManifestFromGeneratedInto(&generated_manifest, root.production_artifact_manifest) catch {
+            return failGeneratedArtifactManifest("generated_manifest_invalid");
+        };
+        if (!measured_boot.verifyBuildArtifactManifest(&generated_manifest)) {
+            return failGeneratedArtifactManifest("generated_manifest_untrusted");
+        }
 
-        const bootloader_source_digest = bootloaderSourceDigest() catch return false;
+        const bootloader_source_digest = bootloaderSourceDigest() catch {
+            return failGeneratedArtifactManifest("bootloader_source_digest");
+        };
         if (!measured_boot.buildArtifactDigestMatches(
             &generated_manifest,
             .bootloader_source,
             buildBootloaderSourceLabel(),
             &bootloader_source_digest,
-        )) return false;
+        )) return failGeneratedArtifactManifest("bootloader_source_mismatch");
 
-        const bootloader_measurement_digest = bootloaderProvidedMeasurementDigest() catch return false;
+        const bootloader_measurement_digest = bootloaderProvidedMeasurementDigest() catch {
+            return failGeneratedArtifactManifest("bootloader_measurement_digest");
+        };
         if (smokeFaultModeIs("tampered_bootloader_measurement")) {
             var tampered_measurement_digest = bootloader_measurement_digest;
             tampered_measurement_digest[0] ^= 0x7B;
@@ -484,7 +494,7 @@ pub const TrustBoot = struct {
                 .bootloader_measurement,
                 build_bootloader_measurement_label,
                 &tampered_measurement_digest,
-            )) return false;
+            )) return failGeneratedArtifactManifest("tampered_measurement_accepted");
             common.printBootMarker(boot_markers.platform_bootloader_measurement_tamper_rejected);
             return false;
         }
@@ -493,17 +503,23 @@ pub const TrustBoot = struct {
             .bootloader_measurement,
             build_bootloader_measurement_label,
             &bootloader_measurement_digest,
-        )) return false;
+        )) return failGeneratedArtifactManifest("bootloader_measurement_mismatch");
 
         var userspace_artifact_count: usize = 0;
         for (generated_manifest.entries[0..generated_manifest.entry_count]) |entry| {
             if (entry.kind != .userspace_image) continue;
-            const image = self.userspace_catalog.findByBundleId(entry.labelSlice()) orelse return false;
-            if (!image.bundle_signed) return false;
-            if (!std.mem.eql(u8, &image.file_sha256, &entry.digest)) return false;
+            const image = self.userspace_catalog.findByBundleId(entry.labelSlice()) orelse {
+                return failGeneratedArtifactManifest("userspace_image_missing");
+            };
+            if (!image.bundle_signed) return failGeneratedArtifactManifest("userspace_image_unsigned");
+            if (!std.mem.eql(u8, &image.file_sha256, &entry.digest)) {
+                return failGeneratedArtifactManifest("userspace_image_digest_mismatch");
+            }
             userspace_artifact_count += 1;
         }
-        if (userspace_artifact_count != self.userspace_catalog.imageCount()) return false;
+        if (userspace_artifact_count != self.userspace_catalog.imageCount()) {
+            return failGeneratedArtifactManifest("userspace_image_count_mismatch");
+        }
 
         if (print_markers) {
             common.printBootMarker(boot_markers.platform_bootloader_measurement_provided);
@@ -827,6 +843,13 @@ fn emulatorProvidedBootloaderMeasurementDigest() crypto_hash.Digest {
     crypto_hash.updateBytes(&hasher, "bootloader", "efi");
     crypto_hash.updateBytes(&hasher, "entry", buildBootloaderSourceLabel());
     return crypto_hash.finalize(&hasher);
+}
+
+fn failGeneratedArtifactManifest(reason: []const u8) bool {
+    common.printBootMarker("ZIGOS:PLATFORM:ARTIFACT_MANIFEST:FAIL");
+    console.print(reason);
+    console.print("\n");
+    return false;
 }
 
 fn buildBootloaderSourceLabel() []const u8 {
