@@ -315,18 +315,20 @@ const FRAME_CACHE_CPUS: usize = 8;
 const FRAME_CACHE_DEPTH: u8 = 16;
 var general_frame_cache: [FRAME_CACHE_CPUS][FRAME_CACHE_DEPTH]frame_allocator.PhysicalAddress = undefined;
 var general_frame_cache_len: [FRAME_CACHE_CPUS]u8 = [_]u8{0} ** FRAME_CACHE_CPUS;
+var general_frame_cache_total: u8 = 0;
 
 fn frameCacheCpu() u8 {
-    if (builtin.target.os.tag != .freestanding) return 0;
-    const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
-    if (gs_base < 4096) return @truncate(gs_base);
-    const cpu_index: *const usize = @ptrFromInt(gs_base + 16);
-    const index: u8 = @truncate(cpu_index.*);
+    if (comptime builtin.target.os.tag != .freestanding) return 0;
+    // CpuState.cpu_index lives at GS+16.
+    const index = asm volatile ("movq %%gs:16, %[out]"
+        : [out] "=r" (-> usize),
+    );
     if (index >= FRAME_CACHE_CPUS) return 0;
-    return index;
+    return @truncate(index);
 }
 
 fn cachedFrame(base: frame_allocator.PhysicalAddress) bool {
+    if (general_frame_cache_total == 0) return false;
     for (&general_frame_cache, 0..) |*cache, cpu_index| {
         var index: u8 = 0;
         while (index < general_frame_cache_len[cpu_index]) : (index += 1) {
@@ -340,6 +342,7 @@ fn takeCachedFrameLocked() ?frame_allocator.PhysicalAddress {
     const cpu = frameCacheCpu();
     if (general_frame_cache_len[cpu] == 0) return null;
     general_frame_cache_len[cpu] -= 1;
+    general_frame_cache_total -= 1;
     return general_frame_cache[cpu][general_frame_cache_len[cpu]];
 }
 
@@ -348,6 +351,7 @@ fn stashCachedFrameLocked(base: frame_allocator.PhysicalAddress) bool {
     if (general_frame_cache_len[cpu] >= FRAME_CACHE_DEPTH) return false;
     general_frame_cache[cpu][general_frame_cache_len[cpu]] = base;
     general_frame_cache_len[cpu] += 1;
+    general_frame_cache_total += 1;
     return true;
 }
 
@@ -359,6 +363,7 @@ fn flushFrameCachesLocked() void {
         }
         general_frame_cache_len[cpu_index] = 0;
     }
+    general_frame_cache_total = 0;
 }
 
 pub fn allocGeneralFrame() ?frame_allocator.PhysicalAddress {
