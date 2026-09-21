@@ -99,10 +99,36 @@ pub fn resolveAndMap(space: anytype, fault_address: u64, write: bool) bool {
     return mapOnePage(space, region, fault_address, write);
 }
 
+pub fn regionOverlapsSpace(space: anytype, virt_start: u64, virt_end_exclusive: u64) bool {
+    if (virt_end_exclusive <= virt_start) return false;
+    const space_id = spaceIdOf(space);
+    var index: u8 = 0;
+    while (index < region_count) : (index += 1) {
+        const slot = &regions[index];
+        if (slot.space_id != space_id) continue;
+        if (virt_end_exclusive <= slot.region.virt_start) continue;
+        if (virt_start >= slot.region.virt_end_exclusive) continue;
+        return true;
+    }
+    return false;
+}
+
 fn spaceIdOf(space: anytype) usize {
     return switch (@typeInfo(@TypeOf(space))) {
-        .pointer => @intFromPtr(space),
+        .pointer => |pointer| blk: {
+            if (comptime hasDirectoryField(pointer.child)) {
+                break :blk @intFromPtr(space.directory);
+            }
+            break :blk @intFromPtr(space);
+        },
         else => 0,
+    };
+}
+
+fn hasDirectoryField(comptime Child: type) bool {
+    return switch (@typeInfo(Child)) {
+        .@"struct" => @hasField(Child, "directory"),
+        else => false,
     };
 }
 
@@ -231,6 +257,23 @@ test "demand paging does not map another space's objects" {
     try std.testing.expect(!resolveAndMap(&stranger, 0x7000_0000, false));
     try std.testing.expect(resolveAndMap(&owner, 0x7000_0000, false));
     try std.testing.expect(ISOLATES_REGIONS_BY_SPACE);
+    reset();
+}
+
+test "demand paging identifies spaces by shared page directory" {
+    reset();
+    const Directory = struct { dummy: u8 = 0 };
+    var directory = Directory{};
+    var first = struct { directory: *Directory }{ .directory = &directory };
+    var second = struct { directory: *Directory }{ .directory = &directory };
+    try std.testing.expect(registerForSpace(&first, .{
+        .virt_start = 0x0000_007F_FFFF_0000,
+        .virt_end_exclusive = 0x0000_007F_FFFF_1000,
+        .writable = true,
+        .kind = .anonymous_zero,
+    }));
+    try std.testing.expect(regionOverlapsSpace(&second, 0x0000_007F_FFFF_0000, 0x0000_007F_FFFF_1000));
+    try std.testing.expect(!regionOverlapsSpace(&second, 0x0000_007F_FFFE_0000, 0x0000_007F_FFFE_1000));
     reset();
 }
 
