@@ -7,7 +7,6 @@
 .extern zigos_resume_from_userspace_interrupt
 
 .equ SYSCALL_CALL_YIELD, 0
-.equ SYSCALL_CALL_DISPATCH, 1
 .equ SYSCALL_VECTOR, 128
 .equ USERSPACE_YIELD_VECTOR, 129
 .equ USER_DATA_SELECTOR, 0x1b
@@ -78,11 +77,7 @@ zigos_syscall_entry:
 
     cmpq $SYSCALL_CALL_YIELD, %rax
     je .yield_entry
-    cmpq $SYSCALL_CALL_DISPATCH, %rax
-    je .dispatch_entry
-    xorq %rdi, %rdi
-
-.dispatch_entry:
+    # %rax is the native operation. %rdi stays the request pointer, matching FRED.
     pushq $SYSCALL_VECTOR
     jmp .save_and_dispatch
 

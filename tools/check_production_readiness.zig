@@ -2077,6 +2077,9 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "native x86-64 syscall entry must retain snippet: {s}", .{snippet});
         }
     }
+    if (std.mem.indexOf(u8, syscall_entry_source, "xorq %rdi") != null) {
+        try common.addError(errors, allocator, "legacy syscall entry must keep the userspace request pointer in %rdi", .{});
+    }
     const required_sysret_gdt_snippets = [_][]const u8{
         "USER_DATA_SEG: u16 = 0x18",
         "USER_CODE_SEG: u16 = 0x20",
