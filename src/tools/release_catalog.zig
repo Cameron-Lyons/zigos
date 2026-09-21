@@ -14,7 +14,9 @@ pub const production_base_target_paths = [_][]const u8{
 
 pub const production_userspace_target_paths = [_][]const u8{
     "zig-out/bin/userspace-apps.elf",
+    "zig-out/bin/userspace-display.elf",
     "zig-out/bin/userspace-drivers.elf",
+    "zig-out/bin/userspace-network.elf",
     "zig-out/bin/userspace-notes.elf",
     "zig-out/bin/userspace-privacy.elf",
     "zig-out/bin/userspace-session.elf",
@@ -213,11 +215,11 @@ comptime {
     if (production_base_target_paths.len != 9) {
         @compileError("production release catalog must contain exactly nine fixed targets");
     }
-    if (production_userspace_target_paths.len != 6) {
-        @compileError("production release catalog must contain exactly 6 userspace targets");
+    if (production_userspace_target_paths.len != 8) {
+        @compileError("production release catalog must contain exactly 8 userspace targets");
     }
-    if (production_target_paths.len != 15) {
-        @compileError("production release catalog must contain exactly 15 targets");
+    if (production_target_paths.len != 17) {
+        @compileError("production release catalog must contain exactly 17 targets");
     }
     if (release_evidence_names.len != 10) {
         @compileError("release evidence catalog must contain exactly ten files");
@@ -245,7 +247,7 @@ test "production targets are an exact order-independent set" {
     var permuted = production_target_paths;
     std.mem.swap([]const u8, &permuted[0], &permuted[permuted.len - 1]);
     try requireExactProductionTargets(&permuted);
-    try std.testing.expectEqual(@as(usize, 15), productionTargetPaths().len);
+    try std.testing.expectEqual(@as(usize, 17), productionTargetPaths().len);
     try std.testing.expect(!isProductionTarget("zig-out/bin/zigos-sign"));
     try std.testing.expect(!isProductionTarget("spec/release_security/release_keyring.json"));
     try std.testing.expect(!isProductionTarget("spec/release_security/revoked_release_keys.json"));

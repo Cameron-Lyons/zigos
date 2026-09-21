@@ -1,4 +1,12 @@
+const builtin = @import("builtin");
 const std = @import("std");
+const x86 = if (builtin.target.os.tag == .freestanding)
+    @import("../../arch/x86.zig")
+else
+    struct {
+        pub fn allowSupervisorUserMemory() void {}
+        pub fn forbidSupervisorUserMemory() void {}
+    };
 const abi = @import("../core/abi.zig");
 const capability = @import("capability.zig");
 const endpoint = @import("endpoint.zig");
@@ -270,6 +278,8 @@ pub const KernelPort = struct {
         );
         if (received) |message| {
             if (message.attached_capability) |attached| {
+                x86.allowSupervisorUserMemory();
+                defer x86.forbidSupervisorUserMemory();
                 request.attached_capability_out.* = attached;
             }
             return message;

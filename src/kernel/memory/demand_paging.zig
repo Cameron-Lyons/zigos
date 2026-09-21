@@ -135,17 +135,45 @@ fn hasDirectoryField(comptime Child: type) bool {
 fn registerInSpace(space_id: usize, region: Region) bool {
     if (region.virt_end_exclusive <= region.virt_start) return false;
     if (region_count >= MAX_REGIONS) return false;
-    regions[region_count] = .{ .space_id = space_id, .region = region };
+    const slot = SpaceRegion{ .space_id = space_id, .region = region };
+    var index: u8 = 0;
+    while (index < region_count and regionPrecedes(regions[index], slot)) : (index += 1) {}
+    var shift = region_count;
+    while (shift > index) : (shift -= 1) {
+        regions[shift] = regions[shift - 1];
+    }
+    regions[index] = slot;
     region_count += 1;
     return true;
 }
 
+fn regionPrecedes(left: SpaceRegion, right: SpaceRegion) bool {
+    if (left.space_id != right.space_id) return left.space_id < right.space_id;
+    if (left.region.virt_start != right.region.virt_start) return left.region.virt_start < right.region.virt_start;
+    return left.region.virt_end_exclusive < right.region.virt_end_exclusive;
+}
+
 fn regionForSpaceId(space_id: usize, fault_address: u64) ?*Region {
-    var index: u8 = 0;
-    while (index < region_count) : (index += 1) {
+    var lo: u8 = 0;
+    var hi: u8 = region_count;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const slot = &regions[mid];
+        const starts_at_or_before = slot.space_id < space_id or
+            (slot.space_id == space_id and slot.region.virt_start <= fault_address);
+        if (starts_at_or_before) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    var index: usize = lo;
+    while (index > 0) {
+        index -= 1;
         const slot = &regions[index];
-        if (fault_address < slot.region.virt_start or fault_address >= slot.region.virt_end_exclusive) continue;
-        if (slot.space_id == space_id) return &slot.region;
+        if (slot.space_id != space_id) break;
+        if (fault_address < slot.region.virt_end_exclusive) return &slot.region;
     }
     return null;
 }
@@ -196,6 +224,28 @@ fn mapOnePage(space: anytype, region: *const Region, fault_address: u64, write: 
         },
     }
     return true;
+}
+
+test "demand paging resolves the containing region when ranges overlap" {
+    reset();
+    try std.testing.expect(register(.{
+        .virt_start = 0x5000_0000,
+        .virt_end_exclusive = 0x5000_3000,
+        .writable = true,
+        .kind = .anonymous_zero,
+    }));
+    try std.testing.expect(register(.{
+        .virt_start = 0x5000_1000,
+        .virt_end_exclusive = 0x5000_1800,
+        .writable = false,
+        .kind = .object_physical,
+        .physical_base = 0x8000,
+    }));
+    const inner = regionFor(0x5000_1400) orelse return error.MissingRegion;
+    try std.testing.expectEqual(Kind.object_physical, inner.kind);
+    const outer = regionFor(0x5000_2000) orelse return error.MissingRegion;
+    try std.testing.expectEqual(Kind.anonymous_zero, outer.kind);
+    reset();
 }
 
 test "demand paging registers object-backed regions" {

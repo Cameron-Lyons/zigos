@@ -333,7 +333,7 @@ pub fn build(b: *std.Build) void {
     release_sbom_cmd.step.dependOn(&iso_cmd.step);
     release_sbom_cmd.step.dependOn(kernel_role_check_step);
     release_sbom_cmd.step.dependOn(userspace_images.production_step);
-    const release_sbom_step = b.step("release-sbom-provenance", "Generate the eight generator-side evidence files for the exact 15-target release catalog");
+    const release_sbom_step = b.step("release-sbom-provenance", "Generate the eight generator-side evidence files for the exact 17-target release catalog");
     release_sbom_step.dependOn(&release_sbom_cmd.step);
 
     const reproducible_build_cmd = b.addSystemCommand(&.{

@@ -211,7 +211,9 @@ REQUIRED_RELEASE_ARTIFACTS=(
 
 PRODUCTION_USERSPACE_ARTIFACTS=(
   "zig-out/bin/userspace-apps.elf"
+  "zig-out/bin/userspace-display.elf"
   "zig-out/bin/userspace-drivers.elf"
+  "zig-out/bin/userspace-network.elf"
   "zig-out/bin/userspace-notes.elf"
   "zig-out/bin/userspace-privacy.elf"
   "zig-out/bin/userspace-session.elf"
@@ -297,9 +299,9 @@ if [ "$missing_required_artifacts" -ne 0 ]; then
 fi
 
 if [ "${#REQUIRED_RELEASE_ARTIFACTS[@]}" -ne 9 ] ||
-   [ "${#PRODUCTION_USERSPACE_ARTIFACTS[@]}" -ne 6 ] ||
-   [ "${#artifact_files[@]}" -ne 15 ]; then
-  fail_release_generation "production release catalog must contain exactly 9 fixed targets and 6 userspace targets"
+   [ "${#PRODUCTION_USERSPACE_ARTIFACTS[@]}" -ne 8 ] ||
+   [ "${#artifact_files[@]}" -ne 17 ]; then
+  fail_release_generation "production release catalog must contain exactly 9 fixed targets and 8 userspace targets"
 fi
 
 if [ "${#artifact_files[@]}" -eq 0 ]; then
@@ -317,7 +319,7 @@ while IFS= read -r file; do
   artifact_files+=("$file")
 done < "$sorted_artifacts"
 rm -f -- "$sorted_artifacts"
-if [ "${#artifact_files[@]}" -ne 15 ]; then
+if [ "${#artifact_files[@]}" -ne 17 ]; then
   fail_release_generation "production release catalog contains a duplicate or missing target"
 fi
 
@@ -450,7 +452,7 @@ cat > "$WORK_PATH/customer-verification-policy.json" <<EOF
     "Before first-use acceptance, require policyVersion to meet root minimumPolicyVersion and releaseSequence to meet the authenticated policy minimumReleaseSequence.",
     "Authenticate release-trust-policy.dsse.json with the pinned root threshold before parsing its payload; reject unknown, invalid, and duplicate signer ids.",
     "Authenticate release-manifest.dsse.json with currently active, unrevoked delegated release keys before parsing its payload.",
-    "Require the authenticated policy and manifest to contain exactly 15 production targets and 10 evidence files; the signed manifest is the sole digest authority.",
+    "Require the authenticated policy and manifest to contain exactly 17 production targets and 10 evidence files; the signed manifest is the sole digest authority.",
     "Hash and size-check all targets and hash all evidence before parsing any evidence; treat artifact-digests.sha256 only as a consistency projection.",
     "Verify every DSSE signature in provenance.dsse.intoto.jsonl against the authenticated delegated policy; signatures cover the DSSE v1 pre-authentication encoding.",
     "Verify each decoded in-toto Statement has predicateType https://slsa.dev/provenance/v1, exactly one subject per signed DSSE envelope, and subject digests matching the authenticated release manifest.",

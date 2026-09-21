@@ -41,14 +41,17 @@ pub const RuntimeUpdateChannel = u2;
 pub const RuntimeComponentClass = u2;
 pub const RuntimePublisher = u1;
 pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 64;
-pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 6;
+pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 8;
 pub const COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP = true;
 pub const SHARES_GROUP_PAGE_TABLES = true;
 pub const USES_PKU_WITHIN_GROUP = true;
+pub const DRIVERS_USE_DISTINCT_ADDRESS_SPACES = true;
 
 pub const AddressSpaceGroup = enum(u8) {
     session,
-    drivers,
+    storage_driver,
+    network_driver,
+    display_driver,
     store,
     notes,
     privacy,
@@ -267,14 +270,39 @@ pub const production_build_image_specs = [_]BuildImageSpec{
         .bundle_id = "zigos.system.drivers",
         .artifact_name = "userspace-drivers.elf",
         .source_path = "src/userspace/service_main.zig",
-        .display_name = "Drivers",
+        .display_name = "Storage Driver",
         .label = "drivers",
         .entry = "zigos.driver.storage",
-        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.network_policy)},
         .component_class = .service_component,
         .role_tag = 0xA10D,
         .heartbeat_increment = 13,
-        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_OWNS_UI_SURFACE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY | FLAG_NETWORK_BOUNDARY,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY,
+    }),
+    standaloneBuildImageSpec(.{
+        .bundle_id = "zigos.system.network",
+        .artifact_name = "userspace-network.elf",
+        .source_path = "src/userspace/service_main.zig",
+        .display_name = "Network Driver",
+        .label = "network",
+        .entry = "zigos.service.network.policy",
+        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.network_policy)},
+        .component_class = .service_component,
+        .role_tag = 0xA10B,
+        .heartbeat_increment = 11,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_NETWORK_BOUNDARY,
+    }),
+    standaloneBuildImageSpec(.{
+        .bundle_id = "zigos.system.display",
+        .artifact_name = "userspace-display.elf",
+        .source_path = "src/userspace/service_main.zig",
+        .display_name = "Display Driver",
+        .label = "display",
+        .entry = "zigos.ui.session",
+        .provided_interfaces = &.{component_abi_schema.interfaceDecl(.ui_session)},
+        .component_class = .service_component,
+        .role_tag = 0xA10F,
+        .heartbeat_increment = 15,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_OWNS_UI_SURFACE | FLAG_DRIVER_BOUNDARY,
     }),
     standaloneBuildImageSpec(.{
         .bundle_id = "zigos.system.store",
@@ -379,8 +407,8 @@ fn optionalManifestDecls(comptime Decl: type, decl: ?*const [1]Decl) []const Dec
 pub const role_boot_image_specs = production_boot_image_specs;
 
 comptime {
-    if (production_boot_image_specs.len != 6) {
-        @compileError("production userspace catalog must contain exactly 6 images");
+    if (production_boot_image_specs.len != PRODUCTION_ADDRESS_SPACE_COUNT) {
+        @compileError("production userspace catalog must contain one image per address space");
     }
     if (std.meta.fields(AddressSpaceGroup).len != PRODUCTION_ADDRESS_SPACE_COUNT) {
         @compileError("production address-space groups must match the 2026 process count");
@@ -464,7 +492,8 @@ pub fn addressSpaceGroupForServiceClass(class: contract.ServiceClass) ?AddressSp
         .task_lifecycle,
         .service_registry,
         => .session,
-        .network_stack, .compositor_ui_session => .drivers,
+        .network_stack => .network_driver,
+        .compositor_ui_session => .display_driver,
         .storage_object,
         .package_install_update,
         .indexing_search,
@@ -503,10 +532,14 @@ fn standaloneAddressSpaceGroup(bundle_id: []const u8) ?AddressSpaceGroup {
         std.mem.eql(u8, bundle_id, "app.sync"))
         return .store;
     if (std.mem.eql(u8, bundle_id, "zigos.system.drivers") or
-        std.mem.eql(u8, bundle_id, "zigos.system.storage-driver") or
-        std.mem.eql(u8, bundle_id, "zigos.system.network-stack") or
+        std.mem.eql(u8, bundle_id, "zigos.system.storage-driver"))
+        return .storage_driver;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.network") or
+        std.mem.eql(u8, bundle_id, "zigos.system.network-stack"))
+        return .network_driver;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.display") or
         std.mem.eql(u8, bundle_id, "zigos.system.compositor"))
-        return .drivers;
+        return .display_driver;
     if (std.mem.eql(u8, bundle_id, "zigos.system.session") or
         std.mem.eql(u8, bundle_id, "zigos.system.session-manager") or
         std.mem.eql(u8, bundle_id, "zigos.system.service-registry"))
@@ -691,7 +724,7 @@ test "userspace registry definitions stay unique and keep typed contract metadat
     try std.testing.expect(findByServiceClass(.task_runtime) == null);
 }
 
-test "core platform services share six address-space images" {
+test "core platform services share address-space images" {
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.storage_object).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.sync_replication).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.network_stack).?.source_path);
@@ -705,7 +738,8 @@ test "core platform services share six address-space images" {
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.secret_vault).?.source_path);
     try std.testing.expectEqualStrings("src/userspace/service_main.zig", buildImageByServiceClass(.policy_mediation).?.source_path);
     try std.testing.expectEqualStrings("zigos.system.store", findByServiceClass(.storage_object).?.bundleId());
-    try std.testing.expectEqualStrings("zigos.system.drivers", findByServiceClass(.network_stack).?.bundleId());
+    try std.testing.expectEqualStrings("zigos.system.network", findByServiceClass(.network_stack).?.bundleId());
+    try std.testing.expectEqualStrings("zigos.system.display", findByServiceClass(.compositor_ui_session).?.bundleId());
     try std.testing.expectEqualStrings("zigos.system.session", findByServiceClass(.policy_mediation).?.bundleId());
     try std.testing.expectEqualStrings("zigos.system.privacy", findByServiceClass(.secret_vault).?.bundleId());
 }
@@ -730,20 +764,24 @@ test "compact runtime manifest declarations preserve populated and empty collect
     try std.testing.expectEqualStrings("assets/notes/icon.svg", notes.assets()[0].path);
 
     const network_service = findByServiceClass(.network_stack) orelse return error.MissingNetworkServiceImage;
-    try std.testing.expectEqualStrings("zigos.system.drivers", network_service.bundleId());
+    try std.testing.expectEqualStrings("zigos.system.network", network_service.bundleId());
     try std.testing.expectEqual(@as(usize, 1), network_service.providedInterfaces().len);
 }
 
 test "production userspace registry contains exactly the production boot catalog" {
-    try std.testing.expectEqual(@as(usize, 6), production_boot_image_specs.len);
-    try std.testing.expectEqual(@as(usize, 6), PRODUCTION_ADDRESS_SPACE_COUNT);
+    try std.testing.expectEqual(@as(usize, 8), production_boot_image_specs.len);
+    try std.testing.expectEqual(@as(usize, 8), PRODUCTION_ADDRESS_SPACE_COUNT);
+    try std.testing.expect(DRIVERS_USE_DISTINCT_ADDRESS_SPACES);
     try std.testing.expect(COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP);
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
     try std.testing.expect(USES_PKU_WITHIN_GROUP);
     try std.testing.expectEqual(AddressSpaceGroup.store, addressSpaceGroupForServiceClass(.storage_object).?);
     try std.testing.expectEqual(AddressSpaceGroup.session, addressSpaceGroupForServiceClass(.policy_mediation).?);
     try std.testing.expectEqual(AddressSpaceGroup.notes, addressSpaceGroupForBundle("app.notes").?);
-    try std.testing.expectEqual(AddressSpaceGroup.drivers, addressSpaceGroupForBundle("zigos.system.drivers").?);
+    try std.testing.expectEqual(AddressSpaceGroup.storage_driver, addressSpaceGroupForBundle("zigos.system.drivers").?);
+    try std.testing.expectEqual(AddressSpaceGroup.network_driver, addressSpaceGroupForBundle("zigos.system.network").?);
+    try std.testing.expectEqual(AddressSpaceGroup.display_driver, addressSpaceGroupForBundle("zigos.system.display").?);
+    try std.testing.expect(addressSpaceGroupForServiceClass(.network_stack) != addressSpaceGroupForServiceClass(.compositor_ui_session));
     try std.testing.expectEqualStrings("zigos.system.apps", canonicalProductionBundleId("app.viewer"));
     try std.testing.expectEqualStrings("zigos.system.store", canonicalProductionBundleId("app.sync"));
     try std.testing.expectEqualStrings("zigos.system.privacy", canonicalProductionBundleId("app.capture"));

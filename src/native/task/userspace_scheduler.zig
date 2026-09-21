@@ -133,6 +133,26 @@ pub const TaskDispatchStats = struct {
     last_dispatch_zero_copy: bool,
 };
 
+const DispatchAccounting = struct {
+    event_wait_count: u64 = 0,
+    ui_state_update_count: u64 = 0,
+    last_ui_state_revision: u64 = 0,
+    last_wake_tick: u64 = 0,
+    wake_event_count: u64 = 0,
+    cpu_ticks_consumed: u64 = 0,
+    memory_bandwidth_consumed_units: usize = 0,
+    missed_deadline_count: u64 = 0,
+    last_dispatch_engine: accelerator_scheduler.Engine = .cpu,
+    last_dispatch_reason: accelerator_scheduler.DecisionReason = .normal,
+    last_dispatch_degraded: bool = false,
+    last_dispatch_zero_copy: bool = false,
+    last_policy_delay_tick: u64 = 0,
+    delayed_dispatch_count: u64 = 0,
+    denied_dispatch_count: u64 = 0,
+};
+
+const DispatchAccountingStorage = [task_runtime.MAX_TASKS]DispatchAccounting;
+
 const Slot = struct {
     in_use: bool = false,
     task_id: u64 = 0,
@@ -143,30 +163,15 @@ const Slot = struct {
     prev_ready_index: QueueSlotIndex = QUEUE_NO_INDEX,
     next_ready_index: QueueSlotIndex = QUEUE_NO_INDEX,
     dispatch_count: u64 = 0,
-    event_wait_count: u64 = 0,
-    ui_state_update_count: u64 = 0,
-    last_ui_state_revision: u64 = 0,
     owns_ui_surface: bool = false,
     last_dispatch_tick: u64 = 0,
-    last_wake_tick: u64 = 0,
-    wake_event_count: u64 = 0,
-    cpu_ticks_consumed: u64 = 0,
     cpu_budget_remaining_ticks: u64 = 0,
-    memory_bandwidth_consumed_units: usize = 0,
     deadline_tick: u64 = 0,
-    missed_deadline_count: u64 = 0,
     dispatch_request: accelerator_scheduler.Request = .{ .class = .foreground_interactive },
     dispatch_request_configured: bool = false,
     require_accelerator: bool = false,
     pending_accelerator_claim_id: u64 = 0,
     pending_accelerator_engine: accelerator_scheduler.Engine = .cpu,
-    last_dispatch_engine: accelerator_scheduler.Engine = .cpu,
-    last_dispatch_reason: accelerator_scheduler.DecisionReason = .normal,
-    last_dispatch_degraded: bool = false,
-    last_dispatch_zero_copy: bool = false,
-    last_policy_delay_tick: u64 = 0,
-    delayed_dispatch_count: u64 = 0,
-    denied_dispatch_count: u64 = 0,
 
     comptime {
         if (@sizeOf(@This()) > SCHEDULER_SLOT_SIZE_CEILING_BYTES) {
@@ -194,7 +199,8 @@ const SchedulerSlotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, task_run
 const AcceleratorClaimArena = indexed_arena.IndexedArenaWithKey(u64, AcceleratorClaimSlot, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2, acceleratorClaimSlotId);
 const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2);
 const heap_backed_accelerator_claims = builtin.target.os.tag == .freestanding;
-pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 208;
+pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 176;
+pub const DISPATCH_ACCOUNTING_IS_COLD = true;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
 pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
 pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_800 else 46_680;
@@ -233,6 +239,7 @@ pub const Scheduler = struct {
     runtime_ptr: ?*task_runtime.Runtime = null,
     capability_table_ptr: ?*const capability.CapabilityTable = null,
     slots: SchedulerSlotArena = SchedulerSlotArena.init(),
+    dispatch_accounting: ?*DispatchAccountingStorage = null,
     ready_heads: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
     ready_tails: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
     ready_counts: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{0} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
@@ -345,6 +352,7 @@ pub const Scheduler = struct {
         self.runtime_ptr = null;
         self.capability_table_ptr = null;
         self.releaseAcceleratorClaimBacking();
+        self.releaseDispatchAccounting();
     }
 
     pub fn reset(self: *Scheduler) void {
@@ -433,8 +441,8 @@ pub const Scheduler = struct {
         slot.owns_ui_surface = owns_ui_surface;
         slot.cpu_budget_remaining_ticks = task.budget.cpu_time_ticks;
         slot.deadline_tick = deadlineFromNow(slot.resource_class, 0);
-        slot.last_wake_tick = 0;
-        slot.wake_event_count = 1;
+        self.accountingStorage()[slot_index] = .{};
+        self.accountingStorage()[slot_index].wake_event_count = 1;
         return self.enqueueReadyIndex(slot_index, slot.resource_class);
     }
 
@@ -485,8 +493,9 @@ pub const Scheduler = struct {
         if (!slot.task_handle.eql(task_handle)) slot.mapping_handle = .{};
         slot.task_handle = task_handle;
         slot.resource_class = task.resourceClass();
-        slot.last_wake_tick = now_ticks;
-        slot.wake_event_count += 1;
+        const accounting = self.accountingForSlot(slot);
+        accounting.last_wake_tick = now_ticks;
+        accounting.wake_event_count += 1;
         slot.deadline_tick = if (deadline_tick != 0) deadline_tick else deadlineFromNow(slot.resource_class, now_ticks);
         if (slot.cpu_budget_remaining_ticks == 0 and task.budget.cpu_time_ticks != 0) {
             slot.cpu_budget_remaining_ticks = task.budget.cpu_time_ticks;
@@ -515,27 +524,63 @@ pub const Scheduler = struct {
 
     pub fn taskDispatchStats(self: *const Scheduler, task_id: u64) ?TaskDispatchStats {
         const slot = self.slots.getConst(task_id) orelse return null;
+        const accounting = self.accountingForSlotConst(slot);
         return .{
             .task_id = slot.task_id,
             .resource_class = slot.resource_class,
             .queued_ready = slot.queued_ready,
             .dispatch_count = slot.dispatch_count,
-            .event_wait_count = slot.event_wait_count,
-            .ui_state_update_count = slot.ui_state_update_count,
-            .last_ui_state_revision = slot.last_ui_state_revision,
-            .delayed_dispatch_count = slot.delayed_dispatch_count,
-            .denied_dispatch_count = slot.denied_dispatch_count,
-            .missed_deadline_count = slot.missed_deadline_count,
+            .event_wait_count = accounting.event_wait_count,
+            .ui_state_update_count = accounting.ui_state_update_count,
+            .last_ui_state_revision = accounting.last_ui_state_revision,
+            .delayed_dispatch_count = accounting.delayed_dispatch_count,
+            .denied_dispatch_count = accounting.denied_dispatch_count,
+            .missed_deadline_count = accounting.missed_deadline_count,
             .last_dispatch_tick = slot.last_dispatch_tick,
-            .last_wake_tick = slot.last_wake_tick,
-            .wake_event_count = slot.wake_event_count,
-            .cpu_ticks_consumed = slot.cpu_ticks_consumed,
-            .memory_bandwidth_consumed_units = slot.memory_bandwidth_consumed_units,
-            .last_dispatch_engine = slot.last_dispatch_engine,
-            .last_dispatch_reason = slot.last_dispatch_reason,
-            .last_dispatch_degraded = slot.last_dispatch_degraded,
-            .last_dispatch_zero_copy = slot.last_dispatch_zero_copy,
+            .last_wake_tick = accounting.last_wake_tick,
+            .wake_event_count = accounting.wake_event_count,
+            .cpu_ticks_consumed = accounting.cpu_ticks_consumed,
+            .memory_bandwidth_consumed_units = accounting.memory_bandwidth_consumed_units,
+            .last_dispatch_engine = accounting.last_dispatch_engine,
+            .last_dispatch_reason = accounting.last_dispatch_reason,
+            .last_dispatch_degraded = accounting.last_dispatch_degraded,
+            .last_dispatch_zero_copy = accounting.last_dispatch_zero_copy,
         };
+    }
+
+    fn accountingStorage(self: *Scheduler) *DispatchAccountingStorage {
+        if (self.dispatch_accounting) |storage| return storage;
+        const storage = table_backing.alloc(DispatchAccountingStorage) orelse
+            native_util.impossibleByInvariant("dispatch accounting storage is available");
+        self.dispatch_accounting = storage;
+        return storage;
+    }
+
+    fn releaseDispatchAccounting(self: *Scheduler) void {
+        if (self.dispatch_accounting) |storage| {
+            table_backing.free(DispatchAccountingStorage, storage);
+            self.dispatch_accounting = null;
+        }
+    }
+
+    pub fn accountingForSlot(self: *Scheduler, slot: *const Slot) *DispatchAccounting {
+        return &self.accountingStorage()[self.accountingIndex(slot)];
+    }
+
+    fn accountingForSlotConst(self: *const Scheduler, slot: *const Slot) *const DispatchAccounting {
+        const storage = self.dispatch_accounting orelse
+            native_util.impossibleByInvariant("dispatch accounting is allocated with its scheduler slot");
+        return &storage[self.accountingIndex(slot)];
+    }
+
+    pub fn taskDispatchAccounting(self: *const Scheduler, task_id: u64) ?*const DispatchAccounting {
+        const slot = self.slots.getConst(task_id) orelse return null;
+        return self.accountingForSlotConst(slot);
+    }
+
+    fn accountingIndex(self: *const Scheduler, slot: *const Slot) usize {
+        const base = @intFromPtr(&self.slots.slots[0]);
+        return (@intFromPtr(slot) - base) / @sizeOf(Slot);
     }
 
     pub fn enqueueAcceleratorClaim(self: *Scheduler, request: AcceleratorClaimRequest) ?u64 {
@@ -676,10 +721,11 @@ pub const Scheduler = struct {
 
             const dispatch_request = self.dispatchRequestFor(slot, task);
             const decision = self.planTaskDispatch(dispatch_request);
-            slot.last_dispatch_engine = decision.engine;
-            slot.last_dispatch_reason = decision.reason;
-            slot.last_dispatch_degraded = decision.degraded;
-            slot.last_dispatch_zero_copy = decision.zero_copy_allowed;
+            const accounting = self.accountingForSlot(slot);
+            accounting.last_dispatch_engine = decision.engine;
+            accounting.last_dispatch_reason = decision.reason;
+            accounting.last_dispatch_degraded = decision.degraded;
+            accounting.last_dispatch_zero_copy = decision.zero_copy_allowed;
             if (decision.delayed) {
                 self.accountDispatchDelayedAt(slot, decision, now_ticks);
                 _ = self.enqueueReadyIndex(index, slot.resource_class);
@@ -707,7 +753,7 @@ pub const Scheduler = struct {
             self.last_dispatch_tick = now_ticks;
             slot.dispatch_count += 1;
             if (outcome == .wait_for_event) {
-                slot.event_wait_count += 1;
+                accounting.event_wait_count += 1;
                 if (builtin.target.os.tag == .freestanding and !self.event_wait_marker_printed) {
                     common.printBootMarker(boot_markers.userspace_scheduler_event_wait_ready);
                     self.event_wait_marker_printed = true;
@@ -716,21 +762,21 @@ pub const Scheduler = struct {
             const ui_revision = self.executor.lastYieldUiRevision();
             if (outcome.handedOff() and
                 slot.owns_ui_surface and
-                ui_revision > slot.last_ui_state_revision)
+                ui_revision > accounting.last_ui_state_revision)
             {
-                slot.last_ui_state_revision = ui_revision;
-                slot.ui_state_update_count += 1;
+                accounting.last_ui_state_revision = ui_revision;
+                accounting.ui_state_update_count += 1;
                 if (builtin.target.os.tag == .freestanding and !self.ui_state_marker_printed) {
                     common.printBootMarker(boot_markers.userspace_ui_state_ready);
                     self.ui_state_marker_printed = true;
                 }
             }
             slot.last_dispatch_tick = now_ticks;
-            slot.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
+            accounting.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
             slot.cpu_budget_remaining_ticks -|= DISPATCH_CPU_TICK_COST;
-            slot.memory_bandwidth_consumed_units = std.math.add(
+            accounting.memory_bandwidth_consumed_units = std.math.add(
                 usize,
-                slot.memory_bandwidth_consumed_units,
+                accounting.memory_bandwidth_consumed_units,
                 dispatch_memory_bandwidth_units,
             ) catch std.math.maxInt(usize);
             self.accountDispatchResources(dispatch_memory_bandwidth_units, decision);
@@ -935,7 +981,7 @@ pub const Scheduler = struct {
             if (slot_index >= self.slots.slots.len) continue;
 
             const slot = &self.slots.slots[slot_index];
-            if (!slot.in_use or slot.last_policy_delay_tick == now_ticks) continue;
+            if (!slot.in_use or self.accountingForSlot(slot).last_policy_delay_tick == now_ticks) continue;
 
             self.accountDispatchDelayedAt(slot, self.blockedResourceDecision(class), now_ticks);
             accounted = true;
@@ -1007,12 +1053,12 @@ pub const Scheduler = struct {
     }
 
     fn accountDispatchDelayed(self: *Scheduler, slot: *Slot, decision: accelerator_scheduler.Decision) void {
-        _ = self;
-        slot.delayed_dispatch_count += 1;
-        slot.last_dispatch_engine = decision.engine;
-        slot.last_dispatch_reason = decision.reason;
-        slot.last_dispatch_degraded = decision.degraded;
-        slot.last_dispatch_zero_copy = decision.zero_copy_allowed;
+        const accounting = self.accountingForSlot(slot);
+        accounting.delayed_dispatch_count += 1;
+        accounting.last_dispatch_engine = decision.engine;
+        accounting.last_dispatch_reason = decision.reason;
+        accounting.last_dispatch_degraded = decision.degraded;
+        accounting.last_dispatch_zero_copy = decision.zero_copy_allowed;
     }
 
     fn accountDispatchDelayedAt(
@@ -1021,9 +1067,10 @@ pub const Scheduler = struct {
         decision: accelerator_scheduler.Decision,
         now_ticks: u64,
     ) void {
-        if (slot.last_policy_delay_tick == now_ticks) return;
+        const accounting = self.accountingForSlot(slot);
+        if (accounting.last_policy_delay_tick == now_ticks) return;
         self.accountDispatchDelayed(slot, decision);
-        slot.last_policy_delay_tick = now_ticks;
+        self.accountingForSlot(slot).last_policy_delay_tick = now_ticks;
     }
 
     fn accountDispatchDenied(
@@ -1032,8 +1079,9 @@ pub const Scheduler = struct {
         reason: accelerator_scheduler.DecisionReason,
         engine: accelerator_scheduler.Engine,
     ) void {
-        slot.denied_dispatch_count += 1;
-        slot.last_dispatch_reason = reason;
+        const accounting = self.accountingForSlot(slot);
+        accounting.denied_dispatch_count += 1;
+        accounting.last_dispatch_reason = reason;
         self.engine_denial_counts[engineIndex(engine)] += 1;
     }
 
@@ -1110,9 +1158,8 @@ pub const Scheduler = struct {
     }
 
     fn accountDeadline(self: *Scheduler, slot: *Slot, now_ticks: u64) void {
-        _ = self;
         if (slot.deadline_tick != 0 and now_ticks > slot.deadline_tick) {
-            slot.missed_deadline_count += 1;
+            self.accountingForSlot(slot).missed_deadline_count += 1;
         }
     }
 
@@ -1123,6 +1170,7 @@ pub const Scheduler = struct {
         const task_id = slot.task_id;
         self.unlinkReadyIndex(slot_index);
         self.removeAcceleratorClaimsForTask(task_id, slot);
+        if (self.dispatch_accounting) |storage| storage[slot_index] = .{};
         return self.slots.removeIndex(slot_index);
     }
 
@@ -2014,7 +2062,7 @@ test "userspace scheduler dispatches resource ready queues by priority" {
     try std.testing.expect(scheduler.wakeTask(foreground.id, .timer, 10, 5));
     try std.testing.expect(!scheduler.runNext(10));
     try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(foreground.id).?.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(foreground.id).?.missed_deadline_count);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchAccounting(foreground.id).?.missed_deadline_count);
     try std.testing.expectEqual(@as(u64, 0), scheduler.slots.getConst(background.id).?.dispatch_count);
 }
 
@@ -2094,7 +2142,7 @@ test "userspace scheduler uses event wakeups and explicit budget refills" {
     try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
     try std.testing.expect(!scheduler.runNext(4));
     try std.testing.expectEqual(@as(u64, 2), scheduler.slots.getConst(task.id).?.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 2), scheduler.slots.getConst(task.id).?.wake_event_count);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.taskDispatchAccounting(task.id).?.wake_event_count);
 }
 
 test "userspace scheduler separates accelerator claim queues from cpu ready queues" {
@@ -2476,8 +2524,8 @@ test "userspace scheduler requires complete hardware telemetry before waking har
     try std.testing.expect(!scheduler.runNext(1));
     const denied_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 0), denied_slot.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), denied_slot.denied_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.accelerator_unavailable, denied_slot.last_dispatch_reason);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.accountingForSlot(denied_slot).denied_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.accelerator_unavailable, scheduler.accountingForSlot(denied_slot).last_dispatch_reason);
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDenialCount(.media));
     try std.testing.expectEqual(@as(usize, 0), scheduler.readyQueueDepth(.media_export));
@@ -2526,8 +2574,8 @@ test "userspace scheduler requires complete hardware telemetry before waking har
     try std.testing.expect(!scheduler.runNext(3));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.media, dispatched_slot.last_dispatch_engine);
-    try std.testing.expect(dispatched_slot.last_dispatch_zero_copy);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.media, scheduler.accountingForSlot(dispatched_slot).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(dispatched_slot).last_dispatch_zero_copy);
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDispatchCount(.media));
 }
@@ -2624,8 +2672,8 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
     try std.testing.expect(!scheduler.runNext(1));
     const delayed_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 0), delayed_slot.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), delayed_slot.delayed_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.memory_bandwidth, delayed_slot.last_dispatch_reason);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.accountingForSlot(delayed_slot).delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.memory_bandwidth, scheduler.accountingForSlot(delayed_slot).last_dispatch_reason);
     try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.batch_compute));
 
     var provider = try accelerator_scheduler.BootedPlatformTelemetryProvider.initForBootedService(3, 21, 2, .{
@@ -2642,7 +2690,7 @@ test "userspace scheduler delays on memory bandwidth before npu dispatch" {
     try std.testing.expect(!scheduler.runNext(2));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, dispatched_slot.last_dispatch_engine);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, scheduler.accountingForSlot(dispatched_slot).last_dispatch_engine);
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDispatchCount(.npu));
 }
 
@@ -2671,8 +2719,8 @@ test "userspace scheduler does not defer batch tasks for carbon intensity" {
     try std.testing.expect(!scheduler.runNext(1));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 0), dispatched_slot.delayed_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, dispatched_slot.last_dispatch_engine);
+    try std.testing.expectEqual(@as(u64, 0), scheduler.accountingForSlot(dispatched_slot).delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, scheduler.accountingForSlot(dispatched_slot).last_dispatch_engine);
 }
 
 test "userspace scheduler applies thermal and battery decisions to live dispatch" {
@@ -2718,9 +2766,9 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     try std.testing.expect(!scheduler.runNext(1));
     const foreground_slot = scheduler.slots.getConst(foreground.id).?;
     try std.testing.expectEqual(@as(u64, 1), foreground_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, foreground_slot.last_dispatch_engine);
-    try std.testing.expect(foreground_slot.last_dispatch_degraded);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, foreground_slot.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, scheduler.accountingForSlot(foreground_slot).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(foreground_slot).last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, scheduler.accountingForSlot(foreground_slot).last_dispatch_reason);
 
     const media_image = try schedulerTestUserspaceImage(false);
     const media_task = try runtime.createTask(.{
@@ -2757,9 +2805,9 @@ test "userspace scheduler applies thermal and battery decisions to live dispatch
     try std.testing.expect(!scheduler.runNext(2));
     const media_slot = scheduler.slots.getConst(media_task.id).?;
     try std.testing.expectEqual(@as(u64, 1), media_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.media, media_slot.last_dispatch_engine);
-    try std.testing.expect(media_slot.last_dispatch_degraded);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, media_slot.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.media, scheduler.accountingForSlot(media_slot).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(media_slot).last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, scheduler.accountingForSlot(media_slot).last_dispatch_reason);
 }
 
 test "userspace scheduler applies booted live telemetry across every resource class" {
@@ -2799,31 +2847,31 @@ test "userspace scheduler applies booted live telemetry across every resource cl
     try std.testing.expect(!scheduler.runNext(10));
     const critical_slot = scheduler.slots.getConst(critical.id).?;
     try std.testing.expectEqual(@as(u64, 1), critical_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.normal, critical_slot.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.normal, scheduler.accountingForSlot(critical_slot).last_dispatch_reason);
 
     try std.testing.expect(!scheduler.runNext(11));
     const foreground_slot = scheduler.slots.getConst(foreground.id).?;
     try std.testing.expectEqual(@as(u64, 1), foreground_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, foreground_slot.last_dispatch_engine);
-    try std.testing.expect(foreground_slot.last_dispatch_degraded);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, foreground_slot.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, scheduler.accountingForSlot(foreground_slot).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(foreground_slot).last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, scheduler.accountingForSlot(foreground_slot).last_dispatch_reason);
 
     try std.testing.expect(!scheduler.runNext(12));
     const media_slot = scheduler.slots.getConst(media.id).?;
     try std.testing.expectEqual(@as(u64, 1), media_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, media_slot.last_dispatch_engine);
-    try std.testing.expect(media_slot.last_dispatch_degraded);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, media_slot.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, scheduler.accountingForSlot(media_slot).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(media_slot).last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, scheduler.accountingForSlot(media_slot).last_dispatch_reason);
 
     try std.testing.expect(!scheduler.runNext(13));
     const thermally_blocked_background = scheduler.slots.getConst(background.id).?;
     const thermally_blocked_batch = scheduler.slots.getConst(batch.id).?;
     try std.testing.expectEqual(@as(u64, 0), thermally_blocked_background.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), thermally_blocked_background.delayed_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, thermally_blocked_background.last_dispatch_reason);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.accountingForSlot(thermally_blocked_background).delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, scheduler.accountingForSlot(thermally_blocked_background).last_dispatch_reason);
     try std.testing.expectEqual(@as(u64, 0), thermally_blocked_batch.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), thermally_blocked_batch.delayed_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, thermally_blocked_batch.last_dispatch_reason);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.accountingForSlot(thermally_blocked_batch).delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, scheduler.accountingForSlot(thermally_blocked_batch).last_dispatch_reason);
 
     try provider.observeLive(300, 14, .{
         .total_cpu_budget_ticks = 20_000,
@@ -2841,15 +2889,15 @@ test "userspace scheduler applies booted live telemetry across every resource cl
     try std.testing.expect(!scheduler.runNext(14));
     const privacy_limited_background = scheduler.slots.getConst(background.id).?;
     try std.testing.expectEqual(@as(u64, 1), privacy_limited_background.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, privacy_limited_background.last_dispatch_engine);
-    try std.testing.expect(privacy_limited_background.last_dispatch_degraded);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.privacy_mode, privacy_limited_background.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, scheduler.accountingForSlot(privacy_limited_background).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(privacy_limited_background).last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.privacy_mode, scheduler.accountingForSlot(privacy_limited_background).last_dispatch_reason);
 
     try std.testing.expect(!scheduler.runNext(15));
     const battery_blocked_batch = scheduler.slots.getConst(batch.id).?;
     try std.testing.expectEqual(@as(u64, 0), battery_blocked_batch.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 2), battery_blocked_batch.delayed_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, battery_blocked_batch.last_dispatch_reason);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.accountingForSlot(battery_blocked_batch).delayed_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, scheduler.accountingForSlot(battery_blocked_batch).last_dispatch_reason);
 
     try provider.observeLive(300, 16, .{
         .total_cpu_budget_ticks = 20_000,
@@ -2863,7 +2911,7 @@ test "userspace scheduler applies booted live telemetry across every resource cl
     try std.testing.expect(!scheduler.runNext(16));
     const batch_slot = scheduler.slots.getConst(batch.id).?;
     try std.testing.expectEqual(@as(u64, 1), batch_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_slot.last_dispatch_engine);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, scheduler.accountingForSlot(batch_slot).last_dispatch_engine);
 }
 
 test "userspace scheduler sustained load gate bounds background and batch starvation" {
@@ -3074,7 +3122,7 @@ test "userspace scheduler stops dispatching tasks after their cpu budget is cons
     try std.testing.expect(!scheduler.runNext(1));
     const slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), slot.dispatch_count);
-    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST, slot.cpu_ticks_consumed);
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST, scheduler.accountingForSlot(slot).cpu_ticks_consumed);
 
     try std.testing.expect(!scheduler.runNext(2));
     try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(task.id).?.dispatch_count);

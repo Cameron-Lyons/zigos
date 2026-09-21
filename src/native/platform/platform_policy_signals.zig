@@ -959,7 +959,9 @@ pub fn collectLiveCounters(
         counters.reserved_shared_memory_bytes = saturatingAdd(usize, counters.reserved_shared_memory_bytes, task.budget.shared_memory_bytes);
 
         if (scheduler.slots.getConst(task.id)) |scheduler_slot| {
-            counters.consumed_cpu_ticks = saturatingAdd(u64, counters.consumed_cpu_ticks, scheduler_slot.cpu_ticks_consumed);
+            if (scheduler.taskDispatchAccounting(task.id)) |accounting| {
+                counters.consumed_cpu_ticks = saturatingAdd(u64, counters.consumed_cpu_ticks, accounting.cpu_ticks_consumed);
+            }
             if (scheduler_slot.dispatch_request.privacy_sensitive) {
                 counters.status.privacy_sensitive_task_present = true;
             }

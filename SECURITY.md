@@ -79,7 +79,7 @@ The following are release blockers:
 - Release provenance not signed through a hardware-backed TPM, secure enclave,
   HSM, or KMS key delegated by the independently pinned,
   threshold-authenticated trust policy.
-- Customer verification bundle missing the exact signed 15-target manifest,
+- Customer verification bundle missing the exact signed 17-target manifest,
   root consistency evidence, signed trust policy, artifact digests, SPDX SBOM,
   DSSE in-toto/SLSA provenance, or reproducible-build evidence.
 - Release verification performed without an independently distributed,

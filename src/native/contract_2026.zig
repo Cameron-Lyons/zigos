@@ -58,7 +58,9 @@ pub const floor: Floor = .{
     .userspace_gop_dataplane = display_driver_task.USERSPACE_GOP_DATAPLANE and
         display_driver_task.KERNEL_LATCHES_ONLY and
         display_driver_task.PRESENTS_BY_HANDLE,
-    .six_address_spaces = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT == 6 and
+    .six_address_spaces = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT == 8 and
+        userspace_registry.DRIVERS_USE_DISTINCT_ADDRESS_SPACES and
+        userspace_registry.addressSpaceGroupForServiceClass(.network_stack) != userspace_registry.addressSpaceGroupForServiceClass(.compositor_ui_session) and
         userspace_registry.COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP and
         userspace_registry.SHARES_GROUP_PAGE_TABLES and
         userspace_registry.USES_PKU_WITHIN_GROUP and

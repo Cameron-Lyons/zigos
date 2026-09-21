@@ -13,7 +13,7 @@ pub const USER_STACK_ADDRESS_MIN: u64 = userspace_layout.stack_start;
 pub const USER_VIRTUAL_ADDRESS_MAX_EXCLUSIVE: u64 = userspace_layout.user_end_exclusive;
 pub const DEFAULT_USER_STACK_TOP: u64 = userspace_layout.default_stack_top;
 pub const DEFAULT_USER_STACK_SIZE_BYTES: u64 = userspace_layout.default_stack_size;
-pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 6;
+pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 8;
 pub const COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP = true;
 pub const ORDERED_EXECUTABLE_SEGMENTS = true;
 

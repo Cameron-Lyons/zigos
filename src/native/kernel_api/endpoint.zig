@@ -299,6 +299,8 @@ pub const Table = struct {
         const index = endpoint.queue_head;
         const message = &queue[index];
         var payload_len: usize = message.len;
+        x86.allowSupervisorUserMemory();
+        defer x86.forbidSupervisorUserMemory();
         if (endpoint.data_ring.len != 0 and message.len == 0) {
             payload_len = ipc_ring.pop(endpoint.data_ring, payload_out) catch |err| switch (err) {
                 error.RingEmpty => 0,

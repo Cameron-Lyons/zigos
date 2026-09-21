@@ -163,6 +163,7 @@ pub fn modelForBundle(comptime bundle_id: []const u8) mailbox.UiModelKind {
     if (std.mem.eql(u8, bundle_id, "app.capture")) return .capture;
     if (std.mem.eql(u8, bundle_id, "zigos.system.permission-review")) return .permission_review;
     if (std.mem.eql(u8, bundle_id, "zigos.system.compositor") or
+        std.mem.eql(u8, bundle_id, "zigos.system.display") or
         std.mem.eql(u8, bundle_id, "zigos.system.drivers")) return .compositor;
     return .generic;
 }

@@ -602,7 +602,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.network_stack).task_id,
         .network_adapter,
         .none,
-        "zigos.system.drivers",
+        "zigos.system.network",
         53,
     ) orelse return false;
     const storage_driver = attachBootstrapDriver(
@@ -634,7 +634,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .graphics_adapter,
         .none,
-        "zigos.system.drivers",
+        "zigos.system.display",
         55,
     ) orelse return false;
     const usb_driver = attachBootstrapDriver(
@@ -644,7 +644,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .usb_controller,
         .none,
-        "zigos.system.drivers",
+        "zigos.system.display",
         56,
     ) orelse return false;
     xhci_driver_task.bindTaskId(service_bindings.bindingFor(.compositor_ui_session).task_id);
@@ -655,7 +655,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .input_device,
         .none,
-        "zigos.system.drivers",
+        "zigos.system.display",
         57,
     ) orelse return false;
     const audio_driver = attachBootstrapDriver(
@@ -675,14 +675,14 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .compositor_policy,
         .none,
-        "zigos.system.drivers",
+        "zigos.system.display",
         59,
     ) orelse return false;
 
     if (bootstrap_driver_port.networkPublication() == null) {
         const published_network = bootstrap_driver_port.publishNetworkActivator(
             network_driver.device_id,
-            "zigos.system.drivers",
+            "zigos.system.network",
             BootedNetworkDataPlane.activate,
             false,
         ) catch false;
@@ -691,11 +691,11 @@ fn activateDrivers(
             return false;
         }
     }
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, graphics_driver, "zigos.system.drivers", 55)) return false;
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, usb_driver, "zigos.system.drivers", 56)) return false;
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, input_driver, "zigos.system.drivers", 57)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, graphics_driver, "zigos.system.display", 55)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, usb_driver, "zigos.system.display", 56)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, input_driver, "zigos.system.display", 57)) return false;
     if (!publishBootedDeviceDataPlane(env, state.services.media_service.id, audio_driver, "zigos.system.apps", 58)) return false;
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, compositor_policy_driver, "zigos.system.drivers", 59)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, compositor_policy_driver, "zigos.system.display", 59)) return false;
 
     const network_activation_mode = activateBootstrapDriver(env, state.services.network_service.id, network_driver, 53) orelse return false;
     const storage_activation_mode = activateBootstrapDriver(env, state.services.storage_service.id, storage_driver, 54) orelse return false;

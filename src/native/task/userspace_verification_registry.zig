@@ -73,8 +73,8 @@ comptime {
     if (verification_only_boot_image_specs.len != 5) {
         @compileError("verification-only userspace catalog must contain exactly five proof and journey images");
     }
-    if (verification_boot_image_specs.len != 11) {
-        @compileError("verification userspace catalog must contain 6 production and five proof or journey images");
+    if (verification_boot_image_specs.len != production_registry.PRODUCTION_ADDRESS_SPACE_COUNT + 5) {
+        @compileError("verification userspace catalog must contain one image per address space and five proof or journey images");
     }
 }
 
@@ -124,9 +124,9 @@ fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
 }
 
 test "verification userspace registry extends production with proof and journey images" {
-    try std.testing.expectEqual(@as(usize, 6), production_registry.production_boot_image_specs.len);
+    try std.testing.expectEqual(@as(usize, 8), production_registry.production_boot_image_specs.len);
     try std.testing.expectEqual(@as(usize, 5), verification_only_boot_image_specs.len);
-    try std.testing.expectEqual(@as(usize, 11), verification_boot_image_specs.len);
+    try std.testing.expectEqual(@as(usize, 13), verification_boot_image_specs.len);
 
     for (verification_only_boot_image_specs) |spec| {
         try std.testing.expect(production_registry.findProduction(spec.bundleId()) == null);

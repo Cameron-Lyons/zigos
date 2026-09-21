@@ -436,7 +436,7 @@ Optional QEMU gates can be added to `verify`:
 
 The first real-machine gate is an Intel RNUC15CRSU7 proof bundle. First complete
 the phase-A `release-bundle-check` ceremony described below. Once that command
-returns, freeze the authenticated release bundle and the exact 15 signed target
+returns, freeze the authenticated release bundle and the exact 17 signed target
 files; do not run any generator again. Prepare a fresh proof skeleton bound to
 that candidate:
 
@@ -494,7 +494,7 @@ fast `release-security-check` gate. A public release has two ordered phases.
 `release-security-preflight` runs every mutable audit, fixture, build, smoke,
 fault, recovery, sync, and UEFI-QEMU check. `release-bundle-check` depends on
 that preflight, creates the candidate, verifies it before publication, then
-publishes and statefully verifies its manifest. After the candidate's exact 15
+publishes and statefully verifies its manifest. After the candidate's exact 17
 target files and release bundle are frozen, the verify-only
 `release-security-gate` rechecks the existing bundle and seals it with the
 completed RNUC15CRSU7 proof; it has no generator or signer dependency. Public
@@ -525,8 +525,8 @@ pre-authentication encoding on standard input and must emit only the standard
 base64 Ed25519 signature.
 
 The `release-bundle-check` target coordinates eight generator-side evidence
-files and two independently rebuilt reproducibility files for exactly 15 OS
-targets: nine fixed production artifacts and 6 userspace images. The
+files and two independently rebuilt reproducibility files for exactly 17 OS
+targets: nine fixed production artifacts and 8 userspace images. The
 independently distributed host verifier is outside that catalog. After both
 evidence paths succeed, `release-manifest-finalize` holds a sibling ceremony
 lock, verifies a private candidate, atomically publishes the release-key-signed
@@ -557,7 +557,7 @@ Run `release-security-preflight` by itself for an early mutable-only check; the
 candidate command above always depends on it and cannot bypass it.
 
 From the start of candidate generation through final hardware sealing, the
-exact 15 target files and `build/release-security` inputs must be private,
+exact 17 target files and `build/release-security` inputs must be private,
 owner-controlled, and quiescent: no process outside the ceremony may replace
 them while they are being hashed. Prefer read-only or immutable staging for
 those inputs. The fresh hardware-proof sibling remains writable for capture;
