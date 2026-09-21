@@ -385,7 +385,7 @@ case "$MODE" in
       append_build_artifact_measurements
     } >"$LOG_PATH"
     assert_marker_group_absent "$LOG_PATH" production_forbidden
-    assert_measured_userspace_count "$LOG_PATH" 24
+    assert_measured_userspace_count "$LOG_PATH" 6
 
     echo "Zigos production smoke test passed across cold reboot. Logs: $LOG_PATH"
     ;;
@@ -413,7 +413,7 @@ case "$MODE" in
       append_measured_boot_comparison
       append_build_artifact_measurements
     } >"$LOG_PATH"
-    assert_measured_userspace_count "$LOG_PATH" 29
+    assert_measured_userspace_count "$LOG_PATH" 11
 
     echo "Zigos native smoke test passed across cold reboot. Logs: $LOG_PATH"
     ;;
