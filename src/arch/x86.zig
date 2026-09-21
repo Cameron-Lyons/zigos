@@ -329,6 +329,7 @@ pub fn cetEnabled() bool {
 extern fn x86_wrpkru(value: u32) callconv(.c) void;
 
 pub fn wrpkru(value: u32) void {
+    if (!pkuEnabled()) return;
     x86_wrpkru(value);
 }
 
