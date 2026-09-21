@@ -202,6 +202,20 @@ pub const AddressSpaceRecord = struct {
     pub fn hasMappedExecutable(self: *const AddressSpaceRecord) bool {
         return self.load_state == .executable_loaded;
     }
+
+    pub fn relocateStack(self: *AddressSpaceRecord, mapped_base: u64, size_bytes: u64) bool {
+        if (self.region_count == 0) return false;
+        const region = &self.regions[self.region_count - 1];
+        if (region.kind != .stack) return false;
+        const recorded_size = std.math.cast(u32, size_bytes) orelse return false;
+        const stack_top = std.math.add(u64, mapped_base, size_bytes) catch return false;
+        region.virtual_address = mapped_base;
+        region.size_bytes = recorded_size;
+        self.stack_size_bytes = recorded_size;
+        self.stack_top = stack_top;
+        self.stack_pointer = stack_top;
+        return true;
+    }
 };
 
 pub const ExecutionComponentSpec = struct {
