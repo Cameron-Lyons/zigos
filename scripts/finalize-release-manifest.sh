@@ -107,7 +107,9 @@ REQUIRED_RELEASE_TARGETS=(
   "spec/release_security/vulnerability_disclosure.json"
   "zig-out/bin/kernel-zigos-native.elf"
   "zig-out/bin/userspace-apps.elf"
+  "zig-out/bin/userspace-display.elf"
   "zig-out/bin/userspace-drivers.elf"
+  "zig-out/bin/userspace-network.elf"
   "zig-out/bin/userspace-notes.elf"
   "zig-out/bin/userspace-privacy.elf"
   "zig-out/bin/userspace-session.elf"
@@ -127,8 +129,8 @@ RELEASE_EVIDENCE_NAMES=(
   "sbom.spdx.json"
 )
 
-[ "${#REQUIRED_RELEASE_TARGETS[@]}" -eq 15 ] ||
-  fail_finalization "release target catalog must contain exactly 15 paths"
+[ "${#REQUIRED_RELEASE_TARGETS[@]}" -eq 17 ] ||
+  fail_finalization "release target catalog must contain exactly 17 paths"
 [ "${#RELEASE_EVIDENCE_NAMES[@]}" -eq 10 ] ||
   fail_finalization "release evidence catalog must contain exactly 10 names"
 target_unique_count="$(printf '%s\n' "${REQUIRED_RELEASE_TARGETS[@]}" | sort -u | wc -l | tr -d ' ')"

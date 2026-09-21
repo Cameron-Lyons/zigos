@@ -1,7 +1,8 @@
 const std = @import("std");
 
 pub const block_alignment: usize = 16;
-pub const free_list_class_count: usize = 2;
+pub const size_classes = [_]usize{ 32, 64, 128, 256, 512, 1024, 2048, 4096 };
+pub const free_list_class_count: usize = size_classes.len + 1;
 
 pub const BlockHeader = struct {
     size: usize,
@@ -25,7 +26,20 @@ pub const block_state_allocated: u64 = 0x4c49_5645_424c_4f43;
 pub const block_state_free: u64 = 0x4652_4545_424c_4f43;
 
 pub fn freeListIndex(size: usize, large_block_threshold: usize) usize {
-    return @intFromBool(size >= large_block_threshold);
+    _ = large_block_threshold;
+    return sizeClassIndex(size);
+}
+
+pub fn sizeClassIndex(size: usize) usize {
+    for (size_classes, 0..) |limit, index| {
+        if (size <= limit) return index;
+    }
+    return size_classes.len;
+}
+
+pub fn sizeClassBytes(index: usize) ?usize {
+    if (index >= size_classes.len) return null;
+    return size_classes[index];
 }
 
 pub fn allocationMarkerIndex(
@@ -137,11 +151,15 @@ test "heap allocation markers accept only aligned arena addresses" {
     try std.testing.expectEqual(@as(?usize, null), allocationMarkerIndex(0x2000, 0x2000, 4096, 0));
 }
 
-test "heap free-list classes separate sub-page and page-sized blocks" {
+test "heap free-list classes round small blocks onto exact size classes" {
     const page_size: usize = 4096;
 
-    try std.testing.expectEqual(@as(usize, 0), freeListIndex(page_size - 1, page_size));
-    try std.testing.expectEqual(@as(usize, 1), freeListIndex(page_size, page_size));
-    try std.testing.expectEqual(@as(usize, 1), freeListIndex(page_size * 4, page_size));
-    try std.testing.expectEqual(@as(usize, 2), free_list_class_count);
+    try std.testing.expectEqual(@as(usize, 0), freeListIndex(16, page_size));
+    try std.testing.expectEqual(@as(usize, 0), freeListIndex(32, page_size));
+    try std.testing.expectEqual(@as(usize, 1), freeListIndex(33, page_size));
+    try std.testing.expectEqual(@as(usize, 7), freeListIndex(page_size, page_size));
+    try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(page_size + 1, page_size));
+    try std.testing.expectEqual(@as(?usize, 32), sizeClassBytes(0));
+    try std.testing.expectEqual(@as(?usize, null), sizeClassBytes(size_classes.len));
+    try std.testing.expectEqual(size_classes.len + 1, free_list_class_count);
 }

@@ -172,8 +172,10 @@ pub fn kmalloc(size: usize) ?*anyopaque {
     defer unlockAllocator();
 
     const aligned_size = heap_geometry.alignSize(size, BLOCK_ALIGNMENT) orelse return null;
+    const class_index = freeListIndex(aligned_size);
+    const request_size = heap_geometry.sizeClassBytes(class_index) orelse aligned_size;
 
-    return takeFreeBlock(aligned_size);
+    return takeFreeBlock(request_size);
 }
 
 pub fn kfree(ptr: ?*anyopaque) void {

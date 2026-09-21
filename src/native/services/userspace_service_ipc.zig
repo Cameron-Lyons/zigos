@@ -369,9 +369,9 @@ fn serviceBundle(comptime kind: ServiceKind) []const u8 {
     return switch (kind) {
         .storage => "zigos.system.store",
         .sync => "zigos.system.store",
-        .network => "zigos.system.drivers",
+        .network => "zigos.system.network",
         .package => "zigos.system.store",
-        .compositor => "zigos.system.drivers",
+        .compositor => "zigos.system.display",
         .generic => "zigos.system.session",
     };
 }

@@ -445,9 +445,9 @@ pub fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(!scheduler.runNext(701));
     const foreground_slot = scheduler.slots.getConst(foreground.id).?;
     try std.testing.expectEqual(@as(u64, 1), foreground_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, foreground_slot.last_dispatch_engine);
-    try std.testing.expect(foreground_slot.last_dispatch_degraded);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, foreground_slot.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, scheduler.accountingForSlot(foreground_slot).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(foreground_slot).last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.thermal_throttle, scheduler.accountingForSlot(foreground_slot).last_dispatch_reason);
 
     const media_image = try generated_image_fixtures.appImage();
     const media = try runtime.createTask(.{
@@ -498,8 +498,8 @@ pub fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(!scheduler.runNext(702));
     const denied_media_slot = scheduler.slots.getConst(media.id).?;
     try std.testing.expectEqual(@as(u64, 0), denied_media_slot.dispatch_count);
-    try std.testing.expectEqual(@as(u64, 1), denied_media_slot.denied_dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.accelerator_unavailable, denied_media_slot.last_dispatch_reason);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.accountingForSlot(denied_media_slot).denied_dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.accelerator_unavailable, scheduler.accountingForSlot(denied_media_slot).last_dispatch_reason);
     try std.testing.expectEqual(media_denials_before + 1, scheduler.engineDenialCount(.media));
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
 
@@ -521,10 +521,10 @@ pub fn proveBootedSchedulerTelemetryProvider(
     try std.testing.expect(!scheduler.runNext(703));
     const dispatched_media_slot = scheduler.slots.getConst(media.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_media_slot.dispatch_count);
-    try std.testing.expectEqual(accelerator_scheduler.Engine.media, dispatched_media_slot.last_dispatch_engine);
-    try std.testing.expect(dispatched_media_slot.last_dispatch_zero_copy);
-    try std.testing.expect(dispatched_media_slot.last_dispatch_degraded);
-    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, dispatched_media_slot.last_dispatch_reason);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.media, scheduler.accountingForSlot(dispatched_media_slot).last_dispatch_engine);
+    try std.testing.expect(scheduler.accountingForSlot(dispatched_media_slot).last_dispatch_zero_copy);
+    try std.testing.expect(scheduler.accountingForSlot(dispatched_media_slot).last_dispatch_degraded);
+    try std.testing.expectEqual(accelerator_scheduler.DecisionReason.battery_preserve, scheduler.accountingForSlot(dispatched_media_slot).last_dispatch_reason);
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(u32, 3), provider.liveObservationCount());
     try std.testing.expectEqual(@as(u32, 3), provider.readCount());

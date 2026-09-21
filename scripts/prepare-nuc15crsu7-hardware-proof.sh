@@ -18,7 +18,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/prepare-nuc15crsu7-hardware-proof.sh --nonce HEX [--build] [--output DIR]
 
-Creates the RNUC15CRSU7 authenticated proof-bundle skeleton and exact 15-target
+Creates the RNUC15CRSU7 authenticated proof-bundle skeleton and exact 17-target
 production digest manifest. The bundle requires a finalized authenticated release
 manifest, separate production and verification single-boot captures, individually
 hashed cycle logs, and two role-specific quotes/signatures from the same target.
@@ -90,7 +90,9 @@ REQUIRED_ARTIFACTS=(
   "spec/release_security/vulnerability_disclosure.json"
   "zig-out/bin/kernel-zigos-native.elf"
   "zig-out/bin/userspace-apps.elf"
+  "zig-out/bin/userspace-display.elf"
   "zig-out/bin/userspace-drivers.elf"
+  "zig-out/bin/userspace-network.elf"
   "zig-out/bin/userspace-notes.elf"
   "zig-out/bin/userspace-privacy.elf"
   "zig-out/bin/userspace-session.elf"

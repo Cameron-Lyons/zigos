@@ -487,8 +487,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .network = .unrestricted_brokered, .driver_class = .network_adapter },
         .userspace_image = .{
-            .bundle_id = "zigos.system.drivers",
-            .artifact_name = "userspace-drivers.elf",
+            .bundle_id = "zigos.system.network",
+            .artifact_name = "userspace-network.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Network Stack",
             .label = "network-service",
@@ -585,8 +585,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .ui = .session_surface, .driver_class = .graphics_adapter },
         .userspace_image = .{
-            .bundle_id = "zigos.system.drivers",
-            .artifact_name = "userspace-drivers.elf",
+            .bundle_id = "zigos.system.display",
+            .artifact_name = "userspace-display.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Compositor Session",
             .label = "compositor-session",

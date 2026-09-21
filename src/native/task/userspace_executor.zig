@@ -2759,5 +2759,5 @@ test "userspace exception containment excludes system-fatal and dedicated vector
 test "production address-space groups share page tables" {
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
     try std.testing.expect(USES_PKU_WITHIN_SHARED_TABLES);
-    try std.testing.expectEqual(@as(usize, 6), GROUP_SPACE_COUNT);
+    try std.testing.expectEqual(@as(usize, 8), GROUP_SPACE_COUNT);
 }
