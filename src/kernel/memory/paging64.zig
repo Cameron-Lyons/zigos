@@ -842,6 +842,31 @@ pub fn writeOwnedUserRange(
     }
 }
 
+pub fn readOwnedUserRange(
+    space: *const UserAddressSpace,
+    virtual_start: usize,
+    destination: []u8,
+) UserWriteError!void {
+    if (destination.len == 0) return;
+    _ = std.math.add(usize, virtual_start, destination.len) catch return error.AddressOverflow;
+
+    var copied: usize = 0;
+    while (copied < destination.len) {
+        const virtual_address = virtual_start + copied;
+        const entry = lookupLeaf(space.directory, virtual_address) orelse return error.PageNotOwned;
+        if (!entryPresent(entry.*) or entryOwner(entry.*) != PAGE_OWNER_USER_PRIVATE) {
+            return error.PageNotOwned;
+        }
+
+        const leaf_size: usize = if (table64.isLargePage(entry.*)) @intCast(LARGE_2M_PAGE_SIZE) else PAGE_SIZE;
+        const offset_in_leaf = virtual_address & (leaf_size - 1);
+        const copy_len = @min(destination.len - copied, leaf_size - offset_in_leaf);
+        const source = bytesAtPhysical(@intCast(entryAddress(entry.*))) + offset_in_leaf;
+        @memcpy(destination[copied..][0..copy_len], source[0..copy_len]);
+        copied += copy_len;
+    }
+}
+
 pub fn copyOwnedUserPageFromPhysical(
     space: *const UserAddressSpace,
     virtual_start: usize,

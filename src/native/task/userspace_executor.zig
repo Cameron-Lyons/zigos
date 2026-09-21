@@ -170,6 +170,9 @@ else
             pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: usize, _: []const u8) UserWriteError!void {
                 return error.PageNotOwned;
             }
+            pub fn readOwnedUserRange(_: *const UserAddressSpace, _: usize, _: []u8) UserWriteError!void {
+                return error.PageNotOwned;
+            }
             pub fn copyOwnedUserPageFromPhysical(_: *const UserAddressSpace, _: usize, _: u64) UserWriteError!void {
                 return error.PageNotOwned;
             }
@@ -703,11 +706,15 @@ pub const Executor = struct {
         task_id: u64,
     ) ?userspace_bootstrap_mailbox.Mailbox {
         if (builtin.target.os.tag != .freestanding) return null;
-        if (self.active_task_id != 0 and self.active_task_id != task_id) return null;
         const task = runtime.findConst(task_id) orelse return null;
         if (task.state != .active) return null;
         const mapping = self.findMapping(task.address_space_id) orelse return null;
         if ((mapping.state != .live and mapping.state != .retire_pending) or mapping.address_space == null) return null;
+        const mailbox_address = mailboxAddressForSnapshot(mapping, catalog.findById(task.launch.image_id));
+        if (readUserspaceMailboxFromMapping(mapping, mailbox_address)) |mailbox| {
+            storeCapturedMailbox(mapping, mailbox);
+            return mailbox;
+        }
         if (mapping.mailbox_captured) {
             if (comptime builtin.target.os.tag == .freestanding) {
                 if (mapping.captured_mailbox.version == userspace_bootstrap_mailbox.VERSION) {
@@ -715,18 +722,7 @@ pub const Executor = struct {
                 }
             }
         }
-        const mailbox_address = mailboxAddressForSnapshot(mapping, catalog.findById(task.launch.image_id));
-        if (mailbox_address == 0) return null;
-
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-        defer freestanding.paging.switchToKernelAddressSpace();
-        x86.allowUserProtectionKey(mapping.dispatch_metadata.protectionKey());
-        const mailbox = readUserspaceMailbox(mailbox_address) orelse return null;
-        if (comptime builtin.target.os.tag == .freestanding) {
-            mapping.captured_mailbox = mailbox;
-        }
-        mapping.mailbox_captured = true;
-        return mailbox;
+        return null;
     }
 
     pub fn observedUserCounterStagePulse(
@@ -1342,20 +1338,32 @@ fn mailboxAddressForSnapshot(
     return 0;
 }
 
-fn readUserspaceMailbox(address: usize) ?userspace_bootstrap_mailbox.Mailbox {
+fn readUserspaceMailboxFromMapping(
+    mapping: *const MappingEntry,
+    address: usize,
+) ?userspace_bootstrap_mailbox.Mailbox {
+    if (comptime builtin.target.os.tag != .freestanding) return null;
     if (address == 0) return null;
-    x86.allowSupervisorUserMemory();
-    defer x86.forbidSupervisorUserMemory();
-    const mailbox_ptr: *const userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(address);
-    if (mailbox_ptr.version != userspace_bootstrap_mailbox.VERSION) return null;
-    return mailbox_ptr.*;
+    const space = mapping.address_space orelse return null;
+    var mailbox: userspace_bootstrap_mailbox.Mailbox = undefined;
+    freestanding.paging.readOwnedUserRange(
+        &space,
+        address,
+        std.mem.asBytes(&mailbox),
+    ) catch return null;
+    if (mailbox.version != userspace_bootstrap_mailbox.VERSION) return null;
+    return mailbox;
+}
+
+fn storeCapturedMailbox(mapping: *MappingEntry, mailbox: userspace_bootstrap_mailbox.Mailbox) void {
+    if (comptime builtin.target.os.tag != .freestanding) return;
+    mapping.captured_mailbox = mailbox;
+    mapping.mailbox_captured = true;
 }
 
 fn captureMailbox(mapping: *MappingEntry) void {
-    if (comptime builtin.target.os.tag != .freestanding) return;
-    const mailbox = readUserspaceMailbox(mapping.dispatch_metadata.bootstrap_mailbox_address) orelse return;
-    mapping.captured_mailbox = mailbox;
-    mapping.mailbox_captured = true;
+    const mailbox = readUserspaceMailboxFromMapping(mapping, mapping.dispatch_metadata.bootstrap_mailbox_address) orelse return;
+    storeCapturedMailbox(mapping, mailbox);
 }
 
 pub const MailboxAuthorityCache = struct {
@@ -1947,11 +1955,12 @@ test "mailbox snapshot uses the mapping address and rejects an invalid version" 
         .dispatch_metadata = .{ .bootstrap_mailbox_address = 0x4000_3000 },
     };
     try std.testing.expectEqual(@as(usize, 0x4000_3000), mailboxAddressForSnapshot(&mapping, null));
+    try std.testing.expect(readUserspaceMailboxFromMapping(&mapping, 0x4000_3000) == null);
 
     var mailbox = userspace_bootstrap_mailbox.Mailbox{};
-    try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, readUserspaceMailbox(@intFromPtr(&mailbox)).?.version);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, mailbox.version);
     mailbox.version = 0;
-    try std.testing.expect(readUserspaceMailbox(@intFromPtr(&mailbox)) == null);
+    try std.testing.expect(mailbox.version != userspace_bootstrap_mailbox.VERSION);
 }
 
 test "mailbox publication preserves resume state and resets first launch" {

@@ -274,7 +274,7 @@ pub const production_build_image_specs = [_]BuildImageSpec{
         .component_class = .service_component,
         .role_tag = 0xA10D,
         .heartbeat_increment = 13,
-        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY | FLAG_NETWORK_BOUNDARY,
+        .contract_flags = FLAG_SYSTEM_BUNDLE | FLAG_OWNS_UI_SURFACE | FLAG_DRIVER_BOUNDARY | FLAG_STORAGE_BOUNDARY | FLAG_NETWORK_BOUNDARY,
     }),
     standaloneBuildImageSpec(.{
         .bundle_id = "zigos.system.store",
