@@ -748,7 +748,23 @@ pub const SessionManager = struct {
             runtime,
             task_id,
         ) orelse {
-            console.print("ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing\n");
+            var miss_buffer: [96]u8 = undefined;
+            const line = std.fmt.bufPrint(
+                &miss_buffer,
+                "ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing reason={s} task={d}\n",
+                .{
+                    self.runtime_context.userspace_executor.bootstrapMailboxSnapshotMissReason(
+                        self.userspaceCatalogPtr(),
+                        runtime,
+                        task_id,
+                    ),
+                    task_id,
+                },
+            ) catch {
+                console.print("ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing\n");
+                return;
+            };
+            console.print(line);
             return;
         };
         const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(task_id);

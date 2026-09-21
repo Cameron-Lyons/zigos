@@ -705,24 +705,54 @@ pub const Executor = struct {
         runtime: *const task_runtime.Runtime,
         task_id: u64,
     ) ?userspace_bootstrap_mailbox.Mailbox {
-        if (builtin.target.os.tag != .freestanding) return null;
-        const task = runtime.findConst(task_id) orelse return null;
-        if (task.state != .active) return null;
-        const mapping = self.findMapping(task.address_space_id) orelse return null;
-        if ((mapping.state != .live and mapping.state != .retire_pending) or mapping.address_space == null) return null;
+        return switch (self.inspectBootstrapMailbox(catalog, runtime, task_id)) {
+            .ready => |mailbox| mailbox,
+            .miss => null,
+        };
+    }
+
+    pub fn bootstrapMailboxSnapshotMissReason(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *const task_runtime.Runtime,
+        task_id: u64,
+    ) []const u8 {
+        return switch (self.inspectBootstrapMailbox(catalog, runtime, task_id)) {
+            .ready => "ok",
+            .miss => |reason| @tagName(reason),
+        };
+    }
+
+    fn inspectBootstrapMailbox(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *const task_runtime.Runtime,
+        task_id: u64,
+    ) MailboxSnapshotInspection {
+        if (builtin.target.os.tag != .freestanding) return .{ .miss = .host };
+        const task = runtime.findConst(task_id) orelse return .{ .miss = .task };
+        if (task.state != .active) return .{ .miss = .inactive };
+        const mapping = self.findMapping(task.address_space_id) orelse return .{ .miss = .mapping };
+        if ((mapping.state != .live and mapping.state != .retire_pending) or mapping.address_space == null) {
+            return .{ .miss = .mapping_state };
+        }
         const mailbox_address = mailboxAddressForSnapshot(mapping, catalog.findById(task.launch.image_id));
+        if (mailbox_address == 0) return .{ .miss = .address };
         if (readUserspaceMailboxFromMapping(mapping, mailbox_address)) |mailbox| {
-            storeCapturedMailbox(mapping, mailbox);
-            return mailbox;
+            if (mailboxBelongsToTask(mailbox, task_id)) {
+                storeCapturedMailbox(mapping, mailbox);
+                return .{ .ready = mailbox };
+            }
         }
         if (mapping.mailbox_captured) {
             if (comptime builtin.target.os.tag == .freestanding) {
-                if (mapping.captured_mailbox.version == userspace_bootstrap_mailbox.VERSION) {
-                    return mapping.captured_mailbox;
-                }
+                const captured = mapping.captured_mailbox;
+                if (mailboxBelongsToTask(captured, task_id)) return .{ .ready = captured };
+                if (captured.version == userspace_bootstrap_mailbox.VERSION) return .{ .miss = .sibling };
+                return .{ .miss = .version };
             }
         }
-        return null;
+        return .{ .miss = .unread };
     }
 
     pub fn observedUserCounterStagePulse(
@@ -953,7 +983,7 @@ pub const Executor = struct {
         );
         if (self.findMappingWithHandle(address_space.id)) |resolution| {
             if (resolution.entry.state != .live) return error.AddressSpaceRetiring;
-            if (!std.meta.eql(resolution.entry.dispatch_metadata, dispatch_metadata)) {
+            if (!mappingDispatchMetadataCompatible(resolution.entry.dispatch_metadata, dispatch_metadata)) {
                 native_util.impossibleByInvariant("materialized userspace dispatch metadata changed without retirement");
             }
             return resolution;
@@ -977,14 +1007,26 @@ pub const Executor = struct {
         for (address_space.regions[0..address_space.region_count]) |region| {
             switch (region.kind) {
                 .load_segment => {
-                    // Reject a collision before claiming ownership for rollback.
-                    try freestanding.paging.validateUserRangeAvailable(&entry.address_space.?, @intCast(region.virtual_address), region.size_bytes);
+                    if (try userRangeOccupied(&entry.address_space.?, region.virtual_address, region.size_bytes)) continue;
                     const image_regions = entry.image_regions.?;
                     image_regions.ranges[image_regions.count] = .{ .start = @intCast(region.virtual_address), .size = region.size_bytes };
                     image_regions.count += 1;
                     try mapLoadRegion(&entry.address_space.?, region, image.elf_file, dispatch_metadata.protectionKey());
                 },
-                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, @as(usize, region.size_bytes), region.access, dispatch_metadata.protectionKey()),
+                .stack => {
+                    const mapped_base = try mapUniqueZeroedStack(
+                        &entry.address_space.?,
+                        region.virtual_address,
+                        @as(usize, region.size_bytes),
+                        region.access,
+                        dispatch_metadata.protectionKey(),
+                    );
+                    if (mapped_base != region.virtual_address) {
+                        const stack_top = mapped_base + region.size_bytes;
+                        entry.dispatch_metadata.initial_stack_pointer = std.math.sub(u64, stack_top, 16) catch
+                            return error.InitialContextInvalid;
+                    }
+                },
             }
         }
 
@@ -1089,14 +1131,15 @@ pub const Executor = struct {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
         if (entry.address_space) |*space| {
-            demand_paging.unregisterSpace(space);
-            if (entry.image_regions) |image_regions| {
-                for (image_regions.ranges[0..image_regions.count]) |range| {
-                    freestanding.paging.releaseUserRange(space, range.start, range.size) catch
-                        native_util.impossibleByInvariant("invalid retired image mapping range");
+            const retain_shared = self.releaseSharedGroupSpace(space);
+            if (!retain_shared) {
+                demand_paging.unregisterSpace(space);
+                if (entry.image_regions) |image_regions| {
+                    for (image_regions.ranges[0..image_regions.count]) |range| {
+                        freestanding.paging.releaseUserRange(space, range.start, range.size) catch
+                            native_util.impossibleByInvariant("invalid retired image mapping range");
+                    }
                 }
-            }
-            if (!self.releaseSharedGroupSpace(space)) {
                 freestanding.paging.destroyUserAddressSpace(space) catch
                     native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
             }
@@ -1221,6 +1264,23 @@ const BootstrapMailboxUpdate = struct {
     ui_surface_id: u64,
 };
 
+const MailboxSnapshotMiss = enum {
+    host,
+    task,
+    inactive,
+    mapping,
+    mapping_state,
+    address,
+    unread,
+    sibling,
+    version,
+};
+
+const MailboxSnapshotInspection = union(enum) {
+    ready: userspace_bootstrap_mailbox.Mailbox,
+    miss: MailboxSnapshotMiss,
+};
+
 const MailboxPublicationCache = struct {
     published_authority_generation: u64 = 0,
     initialized: bool = false,
@@ -1288,7 +1348,48 @@ fn prepareBootstrapMailboxUpdate(
 fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
     freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
     x86.allowUserProtectionKey(mapping.dispatch_metadata.protectionKey());
+    if (writeUserspaceMailboxThroughMapping(mapping, mailbox_update)) return;
     writeBootstrapMailbox(mailbox_update);
+}
+
+fn kernelPublishedMailbox(
+    update: BootstrapMailboxUpdate,
+    preserved: ?userspace_bootstrap_mailbox.Mailbox,
+) userspace_bootstrap_mailbox.Mailbox {
+    var mailbox: userspace_bootstrap_mailbox.Mailbox = preserved orelse .{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
+        .detail = update.detail,
+        .fault_code = 0,
+        ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
+        .resource_mask = 0,
+        .last_counter = 0,
+    };
+    mailbox.version = userspace_bootstrap_mailbox.VERSION;
+    mailbox.authority_capability_id = update.authorities.bootstrap_capability_id;
+    mailbox.input_capability_id = update.authorities.input_capability_id;
+    mailbox.surface_presentation_capability_id = update.authorities.surface_presentation_capability_id;
+    mailbox.ui_surface_id = update.ui_surface_id;
+    mailbox.task_id = update.task_id;
+    mailbox.service_id = update.authorities.bootstrap_service_id;
+    mailbox.heartbeat_increment = update.heartbeat_increment;
+    if (preserved == null) mailbox.detail = update.detail;
+    return mailbox;
+}
+
+fn writeUserspaceMailboxThroughMapping(mapping: *MappingEntry, prepared: ?BootstrapMailboxUpdate) bool {
+    const update = prepared orelse return true;
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const space = if (mapping.address_space) |*address_space| address_space else return false;
+    const existing = readUserspaceMailboxFromMapping(mapping, update.address);
+    const preserved = blk: {
+        const live = existing orelse break :blk null;
+        if (update.preserve_runtime_state or live.version == userspace_bootstrap_mailbox.VERSION) break :blk existing;
+        break :blk null;
+    };
+    const mailbox = kernelPublishedMailbox(update, preserved);
+    freestanding.paging.writeOwnedUserRange(space, update.address, std.mem.asBytes(&mailbox)) catch return false;
+    return true;
 }
 
 fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
@@ -1296,33 +1397,8 @@ fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
     x86.allowSupervisorUserMemory();
     defer x86.forbidSupervisorUserMemory();
     const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(update.address);
-    if (!update.preserve_runtime_state) {
-        mailbox_ptr.* = .{
-            .version = userspace_bootstrap_mailbox.VERSION,
-            .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
-            .detail = update.detail,
-            .fault_code = 0,
-            ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
-            .authority_capability_id = update.authorities.bootstrap_capability_id,
-            .input_capability_id = update.authorities.input_capability_id,
-            .surface_presentation_capability_id = update.authorities.surface_presentation_capability_id,
-            .ui_surface_id = update.ui_surface_id,
-            .task_id = update.task_id,
-            .service_id = update.authorities.bootstrap_service_id,
-            .resource_mask = 0,
-            .last_counter = 0,
-            .heartbeat_increment = update.heartbeat_increment,
-        };
-        return;
-    }
-    mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
-    mailbox_ptr.authority_capability_id = update.authorities.bootstrap_capability_id;
-    mailbox_ptr.input_capability_id = update.authorities.input_capability_id;
-    mailbox_ptr.surface_presentation_capability_id = update.authorities.surface_presentation_capability_id;
-    mailbox_ptr.ui_surface_id = update.ui_surface_id;
-    mailbox_ptr.task_id = update.task_id;
-    mailbox_ptr.service_id = update.authorities.bootstrap_service_id;
-    mailbox_ptr.heartbeat_increment = update.heartbeat_increment;
+    const preserved = if (update.preserve_runtime_state) mailbox_ptr.* else null;
+    mailbox_ptr.* = kernelPublishedMailbox(update, preserved);
 }
 
 fn mailboxAddressForSnapshot(
@@ -1363,7 +1439,18 @@ fn storeCapturedMailbox(mapping: *MappingEntry, mailbox: userspace_bootstrap_mai
 
 fn captureMailbox(mapping: *MappingEntry) void {
     const mailbox = readUserspaceMailboxFromMapping(mapping, mapping.dispatch_metadata.bootstrap_mailbox_address) orelse return;
+    if (!mailboxBelongsToTask(mailbox, mapping.dispatch_metadata.owner_task_id)) return;
     storeCapturedMailbox(mapping, mailbox);
+}
+
+fn mailboxBelongsToTask(mailbox: userspace_bootstrap_mailbox.Mailbox, task_id: u64) bool {
+    return mailbox.version == userspace_bootstrap_mailbox.VERSION and mailbox.task_id == task_id;
+}
+
+fn mappingDispatchMetadataCompatible(live: MappingDispatchMetadata, expected: MappingDispatchMetadata) bool {
+    var normalized = live;
+    normalized.initial_stack_pointer = expected.initial_stack_pointer;
+    return std.meta.eql(normalized, expected);
 }
 
 pub const MailboxAuthorityCache = struct {
@@ -1799,6 +1886,47 @@ fn mapZeroedRegion(
     })) return error.OutOfMemory;
 }
 
+const SHARED_STACK_SLOT_ATTEMPTS: usize = 32;
+
+fn userRangeOccupied(
+    space: *const freestanding.paging.UserAddressSpace,
+    virtual_address: u64,
+    size_bytes: usize,
+) MaterializationError!bool {
+    freestanding.paging.validateUserRangeAvailable(space, @intCast(virtual_address), size_bytes) catch |err| switch (err) {
+        error.AlreadyMapped => return true,
+        else => return err,
+    };
+    const end = std.math.add(u64, virtual_address, size_bytes) catch return error.InvalidRange;
+    return demand_paging.regionOverlapsSpace(space, virtual_address, end);
+}
+
+fn uniqueStackBase(preferred_base: u64, size_bytes: u64, attempt: usize) ?u64 {
+    if (attempt == 0) return preferred_base;
+    const top = userspace_layout.stackTopForSlot(attempt - 1);
+    const base = std.math.sub(u64, top, size_bytes) catch return null;
+    if (base < userspace_layout.stack_start) return null;
+    if (base == preferred_base) return null;
+    return base;
+}
+
+fn mapUniqueZeroedStack(
+    space: *freestanding.paging.UserAddressSpace,
+    preferred_base: u64,
+    size_bytes: usize,
+    access: task_runtime.SegmentAccess,
+    protection_key: u4,
+) MaterializationError!u64 {
+    var attempt: usize = 0;
+    while (attempt < SHARED_STACK_SLOT_ATTEMPTS) : (attempt += 1) {
+        const base = uniqueStackBase(preferred_base, size_bytes, attempt) orelse continue;
+        if (try userRangeOccupied(space, base, size_bytes)) continue;
+        try mapZeroedRegion(space, base, size_bytes, access, protection_key);
+        return base;
+    }
+    return error.AlreadyMapped;
+}
+
 fn registerMappedObject(
     virt_start: u64,
     size_bytes: u64,
@@ -1961,6 +2089,51 @@ test "mailbox snapshot uses the mapping address and rejects an invalid version" 
     try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, mailbox.version);
     mailbox.version = 0;
     try std.testing.expect(mailbox.version != userspace_bootstrap_mailbox.VERSION);
+}
+
+test "mailbox snapshot ignores a sibling task identity" {
+    try std.testing.expect(mailboxBelongsToTask(.{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .task_id = 7,
+    }, 7));
+    try std.testing.expect(!mailboxBelongsToTask(.{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .task_id = 8,
+    }, 7));
+    try std.testing.expect(!mailboxBelongsToTask(.{
+        .version = 0,
+        .task_id = 7,
+    }, 7));
+}
+
+test "shared-group stacks walk to the next free slot" {
+    const preferred = userspace_layout.default_stack_top - userspace_layout.default_stack_size;
+    try std.testing.expectEqual(preferred, uniqueStackBase(preferred, userspace_layout.default_stack_size, 0).?);
+    try std.testing.expect(uniqueStackBase(preferred, userspace_layout.default_stack_size, 1) == null);
+    try std.testing.expectEqual(
+        userspace_layout.stackTopForSlot(1) - userspace_layout.default_stack_size,
+        uniqueStackBase(preferred, userspace_layout.default_stack_size, 2).?,
+    );
+}
+
+test "materialized dispatch metadata may relocate a shared-group stack" {
+    const baseline = try prepareMappingDispatchMetadata(
+        40,
+        41,
+        0x4000_1000,
+        0x7FFF_F000,
+        41,
+        0x4000_3000,
+        userspace_flags.FLAG_NX_PROOF_PROBE,
+        9,
+        3,
+    );
+    var relocated = baseline;
+    relocated.initial_stack_pointer = baseline.initial_stack_pointer - userspace_layout.STACK_SLOT_STRIDE;
+    try std.testing.expect(mappingDispatchMetadataCompatible(relocated, baseline));
+    var mutated = relocated;
+    mutated.image_id = baseline.image_id + 1;
+    try std.testing.expect(!mappingDispatchMetadataCompatible(mutated, baseline));
 }
 
 test "mailbox publication preserves resume state and resets first launch" {
