@@ -15,6 +15,7 @@ const embedded_file = @import("../task/embedded_file.zig");
 const elf_image_inspector = @import("../task/elf_image_inspector.zig");
 const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
+const userspace_registry = @import("../task/userspace_registry.zig");
 const copyText = native_util.copyText;
 
 pub const production_artifact_manifest_signer = signing.SignerIdentity{
@@ -892,7 +893,7 @@ fn requiredArtifactShape(artifact_manifest: *const ArtifactManifest) bool {
 fn requiredBuildArtifactShape(manifest: *const BuildArtifactManifest) bool {
     return manifest.countKind(.bootloader_source) == 1 and
         manifest.countKind(.bootloader_measurement) == 1 and
-        manifest.countKind(.userspace_image) >= 10;
+        manifest.countKind(.userspace_image) >= userspace_registry.production_build_image_specs.len;
 }
 
 fn encodeArtifactManifest(artifact_manifest: ArtifactManifest, buffer: []u8) Error![]const u8 {

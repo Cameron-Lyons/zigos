@@ -162,7 +162,8 @@ pub fn modelForBundle(comptime bundle_id: []const u8) mailbox.UiModelKind {
     if (std.mem.eql(u8, bundle_id, "app.viewer")) return .viewer;
     if (std.mem.eql(u8, bundle_id, "app.capture")) return .capture;
     if (std.mem.eql(u8, bundle_id, "zigos.system.permission-review")) return .permission_review;
-    if (std.mem.eql(u8, bundle_id, "zigos.system.compositor")) return .compositor;
+    if (std.mem.eql(u8, bundle_id, "zigos.system.compositor") or
+        std.mem.eql(u8, bundle_id, "zigos.system.drivers")) return .compositor;
     return .generic;
 }
 
@@ -213,6 +214,7 @@ test "UI surface state selects application-specific fixed-capacity models" {
     try std.testing.expectEqual(mailbox.UiModelKind.capture, modelForBundle("app.capture"));
     try std.testing.expectEqual(mailbox.UiModelKind.permission_review, modelForBundle("zigos.system.permission-review"));
     try std.testing.expectEqual(mailbox.UiModelKind.compositor, modelForBundle("zigos.system.compositor"));
+    try std.testing.expectEqual(mailbox.UiModelKind.compositor, modelForBundle("zigos.system.drivers"));
     try std.testing.expectEqual(mailbox.UiModelKind.generic, modelForBundle("app.unknown"));
 }
 
