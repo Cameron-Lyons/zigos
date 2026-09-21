@@ -1783,6 +1783,7 @@ fn validateNuc11tnki5KernelProofSources(
         "enableFred",
         "fredEnabled",
         "pkuEnabled",
+        "if (!pkuEnabled()) return",
         "lassEnabled",
     };
     for (required_x86_pcid_snippets) |snippet| {
