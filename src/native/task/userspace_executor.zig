@@ -951,8 +951,7 @@ pub const Executor = struct {
         if (mapping.dispatch_metadata.bootstrap_mailbox_address == 0) return null;
 
         const authorities = resolveMailboxAuthoritiesCached(task, capability_table, now_ticks, &mapping.mailbox_authority_cache);
-        return prepareCachedBootstrapMailboxUpdate(
-            &mapping.mailbox_publication_cache,
+        return prepareBootstrapMailboxUpdate(
             mapping.dispatch_metadata.bootstrap_mailbox_address,
             mapping.resume_valid,
             task.component_class,
@@ -961,7 +960,6 @@ pub const Executor = struct {
             task.id,
             task.ui_surface_id orelse 0,
             authorities,
-            mapping.mailbox_authority_cache.authority_generation,
         );
     }
 
@@ -1021,11 +1019,11 @@ pub const Executor = struct {
                         region.access,
                         dispatch_metadata.protectionKey(),
                     );
-                    if (mapped_base != region.virtual_address) {
-                        const stack_top = mapped_base + region.size_bytes;
-                        entry.dispatch_metadata.initial_stack_pointer = std.math.sub(u64, stack_top, 16) catch
-                            return error.InitialContextInvalid;
-                    }
+                    const runtime = self.bound_runtime orelse return error.AddressSpaceOwnerInvalid;
+                    const live = runtime.findAddressSpace(address_space.id) orelse return error.AddressSpaceOwnerInvalid;
+                    if (!live.relocateStack(mapped_base, region.size_bytes)) return error.InitialContextInvalid;
+                    entry.dispatch_metadata.initial_stack_pointer = std.math.sub(u64, live.stack_top, 16) catch
+                        return error.InitialContextInvalid;
                 },
             }
         }
@@ -1348,8 +1346,32 @@ fn prepareBootstrapMailboxUpdate(
 fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
     freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
     x86.allowUserProtectionKey(mapping.dispatch_metadata.protectionKey());
-    if (writeUserspaceMailboxThroughMapping(mapping, mailbox_update)) return;
-    writeBootstrapMailbox(mailbox_update);
+    const update = mailboxWriteForDispatch(mapping, mailbox_update);
+    if (writeUserspaceMailboxThroughMapping(mapping, update)) return;
+    writeBootstrapMailbox(update);
+}
+
+fn mailboxWriteForDispatch(mapping: *MappingEntry, update: ?BootstrapMailboxUpdate) ?BootstrapMailboxUpdate {
+    const candidate = update orelse return null;
+    const cache = &mapping.mailbox_publication_cache;
+    const generation = mapping.mailbox_authority_cache.authority_generation;
+    if (generation == 0) native_util.impossibleByInvariant("resolved mailbox authorities require a nonzero generation");
+    const unchanged = candidate.preserve_runtime_state and
+        cache.initialized and
+        cache.published_authority_generation == generation;
+    if (unchanged and liveMailboxBelongsToTask(mapping, candidate.task_id)) return null;
+    cache.* = .{
+        .published_authority_generation = generation,
+        .initialized = true,
+    };
+    return candidate;
+}
+
+fn liveMailboxBelongsToTask(mapping: *MappingEntry, task_id: u64) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return true;
+    const mailbox = readUserspaceMailboxFromMapping(mapping, mapping.dispatch_metadata.bootstrap_mailbox_address) orelse
+        return false;
+    return mailboxBelongsToTask(mailbox, task_id);
 }
 
 fn kernelPublishedMailbox(
@@ -1382,11 +1404,7 @@ fn writeUserspaceMailboxThroughMapping(mapping: *MappingEntry, prepared: ?Bootst
     if (comptime builtin.target.os.tag != .freestanding) return false;
     const space = if (mapping.address_space) |*address_space| address_space else return false;
     const existing = readUserspaceMailboxFromMapping(mapping, update.address);
-    const preserved = blk: {
-        const live = existing orelse break :blk null;
-        if (update.preserve_runtime_state or live.version == userspace_bootstrap_mailbox.VERSION) break :blk existing;
-        break :blk null;
-    };
+    const preserved = preservedMailboxForUpdate(mapping, existing, update);
     const mailbox = kernelPublishedMailbox(update, preserved);
     freestanding.paging.writeOwnedUserRange(space, update.address, std.mem.asBytes(&mailbox)) catch return false;
     return true;
@@ -1445,6 +1463,32 @@ fn captureMailbox(mapping: *MappingEntry) void {
 
 fn mailboxBelongsToTask(mailbox: userspace_bootstrap_mailbox.Mailbox, task_id: u64) bool {
     return mailbox.version == userspace_bootstrap_mailbox.VERSION and mailbox.task_id == task_id;
+}
+
+fn preservedMailboxForUpdate(
+    mapping: *const MappingEntry,
+    existing: ?userspace_bootstrap_mailbox.Mailbox,
+    update: BootstrapMailboxUpdate,
+) ?userspace_bootstrap_mailbox.Mailbox {
+    const captured: ?userspace_bootstrap_mailbox.Mailbox = if (comptime builtin.target.os.tag == .freestanding)
+        if (mapping.mailbox_captured) mapping.captured_mailbox else null
+    else
+        null;
+    return preservedMailboxBytes(existing, captured, update);
+}
+
+fn preservedMailboxBytes(
+    existing: ?userspace_bootstrap_mailbox.Mailbox,
+    captured: ?userspace_bootstrap_mailbox.Mailbox,
+    update: BootstrapMailboxUpdate,
+) ?userspace_bootstrap_mailbox.Mailbox {
+    if (existing) |live| {
+        if (mailboxBelongsToTask(live, update.task_id)) return live;
+    }
+    if (!update.preserve_runtime_state) return null;
+    const snapshot = captured orelse return null;
+    if (!mailboxBelongsToTask(snapshot, update.task_id)) return null;
+    return snapshot;
 }
 
 fn mappingDispatchMetadataCompatible(live: MappingDispatchMetadata, expected: MappingDispatchMetadata) bool {
@@ -2089,6 +2133,41 @@ test "mailbox snapshot uses the mapping address and rejects an invalid version" 
     try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, mailbox.version);
     mailbox.version = 0;
     try std.testing.expect(mailbox.version != userspace_bootstrap_mailbox.VERSION);
+}
+
+test "shared mailbox restore keeps the dispatching task snapshot" {
+    const captured = userspace_bootstrap_mailbox.Mailbox{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady),
+        .task_id = 10,
+        .ui_state_revision = 4,
+        .ui_presented_revision = 4,
+        .ui_last_presentation_status = 0,
+    };
+    const sibling = userspace_bootstrap_mailbox.Mailbox{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.runtime_ready),
+        .task_id = 11,
+    };
+    const update = BootstrapMailboxUpdate{
+        .address = 0x4000,
+        .preserve_runtime_state = true,
+        .detail = @intFromEnum(userspace_bootstrap_mailbox.Detail.ui),
+        .heartbeat_increment = 15,
+        .authorities = .{ .bootstrap_capability_id = 101, .surface_presentation_capability_id = 104 },
+        .task_id = 10,
+        .ui_surface_id = 2,
+    };
+    const preserved = preservedMailboxBytes(sibling, captured, update).?;
+    const restored = kernelPublishedMailbox(update, preserved);
+    try std.testing.expectEqual(@as(u64, 10), restored.task_id);
+    try std.testing.expectEqual(@as(u64, 2), restored.ui_surface_id);
+    try std.testing.expectEqual(@as(u64, 101), restored.authority_capability_id);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), restored.stage);
+    try std.testing.expectEqual(@as(u64, 4), restored.ui_presented_revision);
+    var first_launch = update;
+    first_launch.preserve_runtime_state = false;
+    try std.testing.expect(preservedMailboxBytes(sibling, captured, first_launch) == null);
 }
 
 test "mailbox snapshot ignores a sibling task identity" {

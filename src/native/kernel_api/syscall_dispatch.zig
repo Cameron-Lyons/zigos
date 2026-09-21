@@ -457,4 +457,11 @@ test "user range validation resolves the terminal stack mapping directly" {
     try std.testing.expect(validateUserRange(memory, 0x30020, 0x60, 8, .write));
     try std.testing.expect(!validateUserRange(memory, 0x31FF0, 0x20, 8, .write));
     try std.testing.expect(validateUserRange(memory, 0x21020, 0x60, 8, .read));
+
+    try std.testing.expect(address_space.relocateStack(0x28000, 0x2000));
+    try std.testing.expect(validateUserRange(memory, 0x28020, 0x60, 8, .read));
+    try std.testing.expect(!validateUserRange(memory, 0x30020, 0x60, 8, .read));
+    try std.testing.expect(validateUserRange(memory, 0x21020, 0x60, 8, .read));
+    try std.testing.expectEqual(@as(u64, 0x2A000), address_space.stack_top);
+    try std.testing.expectEqual(@as(u64, 0x2A000), address_space.stack_pointer);
 }
