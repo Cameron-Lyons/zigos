@@ -195,6 +195,31 @@ const AcceleratorClaimSlot = struct {
 const SchedulerSlotArena = indexed_arena.IndexedArenaWithKey(u64, Slot, task_runtime.MAX_TASKS, task_runtime.MAX_TASKS * 2, schedulerSlotTaskId);
 const AcceleratorClaimArena = indexed_arena.IndexedArenaWithKey(u64, AcceleratorClaimSlot, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2, acceleratorClaimSlotId);
 const AcceleratorClaimTaskIndex = indexed_arena.MultimapIndex(MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS, MAX_ACCELERATOR_CLAIMS * 2);
+const ColdDispatchKind = enum(u8) {
+    none = 0,
+    completed = 1,
+    delayed = 2,
+    denied = 3,
+};
+
+const ColdDispatchNote = struct {
+    active: bool = false,
+    kind: ColdDispatchKind = .none,
+    slot_index: u16 = 0,
+    engine: accelerator_scheduler.Engine = .cpu,
+    denial_engine: accelerator_scheduler.Engine = .cpu,
+    reason: accelerator_scheduler.DecisionReason = .normal,
+    degraded: bool = false,
+    zero_copy: bool = false,
+    record_decision: bool = false,
+    wait_for_event: bool = false,
+    missed_deadline: bool = false,
+    owns_ui: bool = false,
+    bandwidth: usize = 0,
+    ui_revision: u64 = 0,
+    now_ticks: u64 = 0,
+};
+
 const heap_backed_accelerator_claims = builtin.target.os.tag == .freestanding;
 pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 176;
 pub const DISPATCH_ACCOUNTING_IS_COLD = true;
@@ -255,6 +280,7 @@ pub const Scheduler = struct {
     resource_telemetry_observed_tick: u64 = 0,
     resource_hardware_evidence_complete: bool = false,
     last_dispatch_tick: u64 = 0,
+    cold_note: ColdDispatchNote = .{},
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
     event_wait_marker_printed: bool = false,
@@ -561,11 +587,14 @@ pub const Scheduler = struct {
     }
 
     pub fn accountingForSlot(self: *Scheduler, slot: *const Slot) *DispatchAccounting {
+        self.publishColdNote();
         return &self.accountingStorage()[self.accountingIndex(slot)];
     }
 
     fn accountingForSlotConst(self: *const Scheduler, slot: *const Slot) *const DispatchAccounting {
-        const storage = self.dispatch_accounting orelse
+        const scheduler = @constCast(self);
+        scheduler.publishColdNote();
+        const storage = scheduler.dispatch_accounting orelse
             native_util.impossibleByInvariant("dispatch accounting is allocated with its scheduler slot");
         return &storage[self.accountingIndex(slot)];
     }
@@ -651,11 +680,15 @@ pub const Scheduler = struct {
     }
 
     pub fn engineDispatchCount(self: *const Scheduler, engine: accelerator_scheduler.Engine) u64 {
-        return self.engine_dispatch_counts[engineIndex(engine)];
+        const scheduler = @constCast(self);
+        scheduler.publishColdNote();
+        return scheduler.engine_dispatch_counts[engineIndex(engine)];
     }
 
     pub fn engineDenialCount(self: *const Scheduler, engine: accelerator_scheduler.Engine) u64 {
-        return self.engine_denial_counts[engineIndex(engine)];
+        const scheduler = @constCast(self);
+        scheduler.publishColdNote();
+        return scheduler.engine_denial_counts[engineIndex(engine)];
     }
 
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
@@ -711,26 +744,21 @@ pub const Scheduler = struct {
                 continue;
             }
             if (!hasDispatchBudget(slot, task)) {
-                self.accountDispatchDenied(slot, .cpu_budget, .cpu);
+                self.noteDenied(slot, .cpu_budget, .cpu, .cpu, false);
                 continue;
             }
 
             const dispatch_request = self.dispatchRequestFor(slot, task);
             const decision = self.planTaskDispatch(dispatch_request);
-            const accounting = self.accountingForSlot(slot);
-            accounting.last_dispatch_engine = decision.engine;
-            accounting.last_dispatch_reason = decision.reason;
-            accounting.last_dispatch_degraded = decision.degraded;
-            accounting.last_dispatch_zero_copy = decision.zero_copy_allowed;
             if (decision.delayed) {
-                self.accountDispatchDelayedAt(slot, decision, now_ticks);
+                _ = self.noteDelayed(slot, decision, now_ticks);
                 _ = self.enqueueReadyIndex(index, slot.resource_class);
                 self.last_dispatch_tick = now_ticks;
                 return false;
             }
             if (self.dispatchRequiresUnavailableAccelerator(slot, decision)) {
                 const requested_engine = requestedAcceleratorEngine(dispatch_request);
-                self.accountDispatchDenied(slot, decision.reason, requested_engine);
+                self.noteAcceleratorDenied(slot, decision, requested_engine);
                 self.queuePendingAcceleratorWake(
                     index,
                     slot,
@@ -743,39 +771,37 @@ pub const Scheduler = struct {
             }
 
             const dispatch_memory_bandwidth_units = memoryBandwidthUnitsFor(task);
-            self.accountDeadline(slot, now_ticks);
+            const missed_deadline = slot.deadline_tick != 0 and now_ticks > slot.deadline_tick;
             const outcome = self.executePreparedTask(task, &slot.mapping_handle, now_ticks);
             const yielded = outcome.handedOff();
             self.last_dispatch_tick = now_ticks;
             slot.dispatch_count += 1;
-            if (outcome == .wait_for_event) {
-                accounting.event_wait_count += 1;
-                if (builtin.target.os.tag == .freestanding and !self.event_wait_marker_printed) {
-                    common.printBootMarker(boot_markers.userspace_scheduler_event_wait_ready);
-                    self.event_wait_marker_printed = true;
-                }
+            if (outcome == .wait_for_event and builtin.target.os.tag == .freestanding and !self.event_wait_marker_printed) {
+                common.printBootMarker(boot_markers.userspace_scheduler_event_wait_ready);
+                self.event_wait_marker_printed = true;
             }
             const ui_revision = self.executor.lastYieldUiRevision();
             if (outcome.handedOff() and
                 slot.owns_ui_surface and
-                ui_revision > accounting.last_ui_state_revision)
+                ui_revision > self.observedUiRevision(slot) and
+                builtin.target.os.tag == .freestanding and
+                !self.ui_state_marker_printed)
             {
-                accounting.last_ui_state_revision = ui_revision;
-                accounting.ui_state_update_count += 1;
-                if (builtin.target.os.tag == .freestanding and !self.ui_state_marker_printed) {
-                    common.printBootMarker(boot_markers.userspace_ui_state_ready);
-                    self.ui_state_marker_printed = true;
-                }
+                common.printBootMarker(boot_markers.userspace_ui_state_ready);
+                self.ui_state_marker_printed = true;
             }
             slot.last_dispatch_tick = now_ticks;
-            accounting.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
             slot.cpu_budget_remaining_ticks -|= DISPATCH_CPU_TICK_COST;
-            accounting.memory_bandwidth_consumed_units = std.math.add(
-                usize,
-                accounting.memory_bandwidth_consumed_units,
+            self.resource_state.cpu_budget_ticks -|= DISPATCH_CPU_TICK_COST;
+            self.resource_state.memory_bandwidth_units -|= dispatch_memory_bandwidth_units;
+            self.noteCompleted(
+                slot,
+                decision,
+                outcome == .wait_for_event,
+                missed_deadline,
+                ui_revision,
                 dispatch_memory_bandwidth_units,
-            ) catch std.math.maxInt(usize);
-            self.accountDispatchResources(dispatch_memory_bandwidth_units, decision);
+            );
             if (outcome == .faulted) {
                 self.containUserException(runtime, task, now_ticks);
                 return true;
@@ -977,10 +1003,8 @@ pub const Scheduler = struct {
             if (slot_index >= self.slots.slots.len) continue;
 
             const slot = &self.slots.slots[slot_index];
-            if (!slot.in_use or self.accountingForSlot(slot).last_policy_delay_tick == now_ticks) continue;
-
-            self.accountDispatchDelayedAt(slot, self.blockedResourceDecision(class), now_ticks);
-            accounted = true;
+            if (!slot.in_use) continue;
+            if (self.noteDelayed(slot, self.blockedResourceDecision(class), now_ticks)) accounted = true;
         }
         return accounted;
     }
@@ -1048,6 +1072,172 @@ pub const Scheduler = struct {
         return slot.require_accelerator and decision.engine == .cpu;
     }
 
+    fn observedUiRevision(self: *const Scheduler, slot: *const Slot) u64 {
+        const index = self.accountingIndex(slot);
+        if (self.cold_note.active and self.cold_note.slot_index == index and self.cold_note.owns_ui) {
+            return self.cold_note.ui_revision;
+        }
+        const storage = self.dispatch_accounting orelse return 0;
+        return storage[index].last_ui_state_revision;
+    }
+
+    fn noteCompleted(
+        self: *Scheduler,
+        slot: *Slot,
+        decision: accelerator_scheduler.Decision,
+        wait_for_event: bool,
+        missed_deadline: bool,
+        ui_revision: u64,
+        bandwidth: usize,
+    ) void {
+        self.publishColdNote();
+        self.cold_note = .{
+            .active = true,
+            .kind = .completed,
+            .slot_index = @intCast(self.accountingIndex(slot)),
+            .engine = decision.engine,
+            .denial_engine = decision.engine,
+            .reason = decision.reason,
+            .degraded = decision.degraded,
+            .zero_copy = decision.zero_copy_allowed,
+            .wait_for_event = wait_for_event,
+            .missed_deadline = missed_deadline,
+            .owns_ui = slot.owns_ui_surface,
+            .bandwidth = bandwidth,
+            .ui_revision = ui_revision,
+        };
+    }
+
+    fn noteDenied(
+        self: *Scheduler,
+        slot: *Slot,
+        reason: accelerator_scheduler.DecisionReason,
+        engine: accelerator_scheduler.Engine,
+        denial_engine: accelerator_scheduler.Engine,
+        record_decision: bool,
+    ) void {
+        self.publishColdNote();
+        self.cold_note = .{
+            .active = true,
+            .kind = .denied,
+            .slot_index = @intCast(self.accountingIndex(slot)),
+            .engine = engine,
+            .denial_engine = denial_engine,
+            .reason = reason,
+            .record_decision = record_decision,
+        };
+    }
+
+    fn noteAcceleratorDenied(
+        self: *Scheduler,
+        slot: *Slot,
+        decision: accelerator_scheduler.Decision,
+        denial_engine: accelerator_scheduler.Engine,
+    ) void {
+        self.publishColdNote();
+        self.cold_note = .{
+            .active = true,
+            .kind = .denied,
+            .slot_index = @intCast(self.accountingIndex(slot)),
+            .engine = decision.engine,
+            .denial_engine = denial_engine,
+            .reason = decision.reason,
+            .degraded = decision.degraded,
+            .zero_copy = decision.zero_copy_allowed,
+            .record_decision = true,
+        };
+    }
+
+    fn noteDelayed(
+        self: *Scheduler,
+        slot: *Slot,
+        decision: accelerator_scheduler.Decision,
+        now_ticks: u64,
+    ) bool {
+        const slot_index: u16 = @intCast(self.accountingIndex(slot));
+        if (self.cold_note.active and
+            self.cold_note.kind == .delayed and
+            self.cold_note.slot_index == slot_index and
+            self.cold_note.now_ticks == now_ticks)
+        {
+            self.cold_note.engine = decision.engine;
+            self.cold_note.reason = decision.reason;
+            self.cold_note.degraded = decision.degraded;
+            self.cold_note.zero_copy = decision.zero_copy_allowed;
+            return false;
+        }
+        self.publishColdNote();
+        if (self.accountingStorage()[slot_index].last_policy_delay_tick == now_ticks) {
+            const accounting = &self.accountingStorage()[slot_index];
+            accounting.last_dispatch_engine = decision.engine;
+            accounting.last_dispatch_reason = decision.reason;
+            accounting.last_dispatch_degraded = decision.degraded;
+            accounting.last_dispatch_zero_copy = decision.zero_copy_allowed;
+            return false;
+        }
+        self.cold_note = .{
+            .active = true,
+            .kind = .delayed,
+            .slot_index = slot_index,
+            .engine = decision.engine,
+            .denial_engine = decision.engine,
+            .reason = decision.reason,
+            .degraded = decision.degraded,
+            .zero_copy = decision.zero_copy_allowed,
+            .now_ticks = now_ticks,
+        };
+        return true;
+    }
+
+    fn publishColdNote(self: *Scheduler) void {
+        if (!self.cold_note.active) return;
+        const note = self.cold_note;
+        self.cold_note.active = false;
+        if (note.slot_index >= self.slots.slots.len) return;
+        const slot = &self.slots.slots[note.slot_index];
+        const decision = accelerator_scheduler.Decision{
+            .class = slot.resource_class,
+            .engine = note.engine,
+            .delayed = note.kind == .delayed,
+            .degraded = note.degraded,
+            .zero_copy_allowed = note.zero_copy,
+            .reason = note.reason,
+        };
+        switch (note.kind) {
+            .none => {},
+            .delayed => self.accountDispatchDelayedAt(slot, decision, note.now_ticks),
+            .denied => {
+                if (note.record_decision) {
+                    const accounting = &self.accountingStorage()[note.slot_index];
+                    accounting.last_dispatch_engine = note.engine;
+                    accounting.last_dispatch_degraded = note.degraded;
+                    accounting.last_dispatch_zero_copy = note.zero_copy;
+                }
+                self.accountDispatchDenied(slot, note.reason, note.denial_engine);
+            },
+            .completed => {
+                const accounting = &self.accountingStorage()[note.slot_index];
+                accounting.last_dispatch_engine = note.engine;
+                accounting.last_dispatch_reason = note.reason;
+                accounting.last_dispatch_degraded = note.degraded;
+                accounting.last_dispatch_zero_copy = note.zero_copy;
+                if (note.wait_for_event) accounting.event_wait_count += 1;
+                if (note.owns_ui and note.ui_revision > accounting.last_ui_state_revision) {
+                    accounting.last_ui_state_revision = note.ui_revision;
+                    accounting.ui_state_update_count += 1;
+                }
+                if (note.missed_deadline) accounting.missed_deadline_count += 1;
+                accounting.cpu_ticks_consumed += DISPATCH_CPU_TICK_COST;
+                accounting.memory_bandwidth_consumed_units = std.math.add(
+                    usize,
+                    accounting.memory_bandwidth_consumed_units,
+                    note.bandwidth,
+                ) catch std.math.maxInt(usize);
+                self.engine_dispatch_counts[engineIndex(note.engine)] += 1;
+            },
+        }
+    }
+
     fn accountDispatchDelayed(self: *Scheduler, slot: *Slot, decision: accelerator_scheduler.Decision) void {
         const accounting = self.accountingForSlot(slot);
         accounting.delayed_dispatch_count += 1;
@@ -1079,16 +1269,6 @@ pub const Scheduler = struct {
         accounting.denied_dispatch_count += 1;
         accounting.last_dispatch_reason = reason;
         self.engine_denial_counts[engineIndex(engine)] += 1;
-    }
-
-    fn accountDispatchResources(
-        self: *Scheduler,
-        memory_bandwidth_units: usize,
-        decision: accelerator_scheduler.Decision,
-    ) void {
-        self.engine_dispatch_counts[engineIndex(decision.engine)] += 1;
-        self.resource_state.cpu_budget_ticks -|= DISPATCH_CPU_TICK_COST;
-        self.resource_state.memory_bandwidth_units -|= memory_bandwidth_units;
     }
 
     fn queuePendingAcceleratorWake(
@@ -1153,12 +1333,6 @@ pub const Scheduler = struct {
         return self.resource_telemetry_source == .hardware and self.resource_hardware_evidence_complete;
     }
 
-    fn accountDeadline(self: *Scheduler, slot: *Slot, now_ticks: u64) void {
-        if (slot.deadline_tick != 0 and now_ticks > slot.deadline_tick) {
-            self.accountingForSlot(slot).missed_deadline_count += 1;
-        }
-    }
-
     fn unregisterSlotIndex(self: *Scheduler, slot_index: usize) bool {
         if (slot_index >= self.slots.slots.len) return false;
         const slot = &self.slots.slots[slot_index];
@@ -1166,6 +1340,11 @@ pub const Scheduler = struct {
         const task_id = slot.task_id;
         self.unlinkReadyIndex(slot_index);
         self.removeAcceleratorClaimsForTask(task_id, slot);
+        if (self.cold_note.active and self.cold_note.slot_index == slot_index) {
+            self.cold_note.active = false;
+        } else {
+            self.publishColdNote();
+        }
         if (self.dispatch_accounting) |storage| storage[slot_index] = .{};
         return self.slots.removeIndex(slot_index);
     }

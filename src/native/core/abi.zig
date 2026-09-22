@@ -2,6 +2,22 @@ const std = @import("std");
 
 pub const ABI_VERSION: u16 = 7;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
+pub const REGISTER_IPC_SELECT: u64 = 1 << 31;
+pub const REGISTER_IPC_PAYLOAD_BYTES: usize = 24;
+pub const REGISTER_IPC_SLOT_NONE: u64 = 0xFF;
+pub const REGISTER_IPC_MOVE: u64 = 1 << 0;
+pub const REGISTER_IPC_CAPABILITY_ID: u64 = 1 << 1;
+
+pub fn packRegisterIpc(length: usize, move: bool, capability_id_selector: bool) u64 {
+    var bits: u64 = @as(u64, @intCast(length)) << 8;
+    if (move) bits |= REGISTER_IPC_MOVE;
+    if (capability_id_selector) bits |= REGISTER_IPC_CAPABILITY_ID;
+    return bits;
+}
+
+pub fn registerIpcLength(bits: u64) usize {
+    return @intCast((bits >> 8) & 0xFF);
+}
 pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
 pub const WAIT_PLUS_SEALED_RINGS = true;

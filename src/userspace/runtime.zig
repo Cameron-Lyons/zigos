@@ -129,6 +129,42 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
             response_len: usize,
             outcome: *Outcome,
         ) callconv(.c) usize;
+        const RegisterIpcArgs = extern struct {
+            opcode: u64,
+            endpoint_selector: u64,
+            correlation: u64,
+            attached_selector: u64,
+            packed_bits: u64,
+            word0: u64,
+            word1: u64,
+            word2: u64,
+        };
+        const RegisterIpcResult = extern struct {
+            status: u32,
+            bytes_written: u32,
+            denial_reason: u16,
+            _pad0: u16 = 0,
+            _pad1: u32 = 0,
+            attached_slot: u64,
+            correlation: u64,
+            word0: u64,
+            word1: u64,
+            word2: u64,
+        };
+
+        comptime {
+            if (@offsetOf(RegisterIpcArgs, "word2") != 56 or @sizeOf(RegisterIpcArgs) != 64) {
+                @compileError("register ipc arguments no longer match syscall_register_ipc_asm");
+            }
+            if (@offsetOf(RegisterIpcResult, "attached_slot") != 16 or
+                @offsetOf(RegisterIpcResult, "correlation") != 24 or
+                @offsetOf(RegisterIpcResult, "word2") != 48)
+            {
+                @compileError("register ipc results no longer match syscall_register_ipc_asm");
+            }
+        }
+
+        extern fn syscall_register_ipc_asm(args: *const RegisterIpcArgs, result: *RegisterIpcResult) callconv(.c) void;
         extern fn syscall_yield_asm(
             counter: u32,
             disposition: mailbox.YieldDisposition,
@@ -149,6 +185,27 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
                 .bytes_written = outcome.bytes_written,
                 .denial_reason = @enumFromInt(outcome.denial_reason),
             };
+        }
+
+        fn registerSend(endpoint_capability_id: u64, correlation_id: u64, payload: []const u8) abi.SyscallStatus {
+            var words = [3]u64{ 0, 0, 0 };
+            for (payload, 0..) |byte, index| {
+                const shift: u6 = @intCast((index % 8) * 8);
+                words[index / 8] |= @as(u64, byte) << shift;
+            }
+            var result = std.mem.zeroes(RegisterIpcResult);
+            const args = RegisterIpcArgs{
+                .opcode = abi.opcode(.endpoint_send),
+                .endpoint_selector = endpoint_capability_id,
+                .correlation = correlation_id,
+                .attached_selector = 0,
+                .packed_bits = abi.packRegisterIpc(payload.len, false, true),
+                .word0 = words[0],
+                .word1 = words[1],
+                .word2 = words[2],
+            };
+            syscall_register_ipc_asm(&args, &result);
+            return @enumFromInt(result.status);
         }
     }
 else
@@ -508,6 +565,11 @@ fn endpointConnect(
 }
 
 fn endpointSend(endpoint_capability_id: u64, payload: []const u8) bool {
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (payload.len <= abi.REGISTER_IPC_PAYLOAD_BYTES) {
+            return freestanding_syscall.registerSend(endpoint_capability_id, nextCorrelationId(), payload) == .success;
+        }
+    }
     var request = EndpointSendRequest{
         .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
         .correlation_id = nextCorrelationId(),

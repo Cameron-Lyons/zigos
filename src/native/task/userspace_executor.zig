@@ -153,6 +153,7 @@ else
             }
 
             pub fn switchToUserAddressSpace(_: *const UserAddressSpace) void {}
+            pub fn activateUserDomain(_: *const UserAddressSpace, _: u4) void {}
             pub fn switchToKernelAddressSpace() void {}
             pub fn mapOwnedUserRange(_: *UserAddressSpace, _: usize, _: usize, _: UserPermissions) UserMapError!void {
                 return error.OutOfMemory;
@@ -921,7 +922,7 @@ pub const Executor = struct {
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         zigos_userspace_resume_requested = 0;
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
 
         const rehosted = runtime.rehostTask(task_id, now_ticks) catch false;
         const deferred = rehosted and
@@ -1346,8 +1347,7 @@ fn prepareBootstrapMailboxUpdate(
 }
 
 fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
-    freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-    x86.allowUserProtectionKey(mapping.dispatch_metadata.protectionKey());
+    freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
     const update = mailboxWriteForDispatch(mapping, mailbox_update);
     if (writeUserspaceMailboxThroughMapping(mapping, update)) return;
     writeBootstrapMailbox(update);
