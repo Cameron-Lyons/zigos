@@ -9,8 +9,15 @@ const storage_service = @import("../storage/storage_service.zig");
 const storage_volume = @import("../storage/storage_volume.zig");
 const volume_backend = @import("../storage/volume/backend.zig");
 
-pub const sector_lba: u64 = 1792;
-pub const sector_size: usize = 512;
+pub const sector_size: usize = storage_volume.sector_size;
+pub const sector_lba: u64 = (1792 * 512) / sector_size;
+
+comptime {
+    if ((1792 * 512) % sector_size != 0) @compileError("base selector must stay aligned to the volume block");
+    if (sector_lba < storage_volume.required_device_sectors + 18) {
+        @compileError("base selector sector overlaps the boot volume");
+    }
+}
 pub const active_slot_line_prefix = "ZIGOS:PLATFORM:BASE_SELECTOR:ACTIVE_SLOT ";
 
 const magic = "ZBOS";
