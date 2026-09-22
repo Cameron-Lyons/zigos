@@ -48,7 +48,7 @@ pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
-pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
+pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 605_808;
 pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_624;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_RUNTIME_SIZE_CEILING_BYTES
@@ -1197,7 +1197,11 @@ pub fn grantCapabilityToTask(task: *TaskRecord, capability_id: u64) Error!void {
     }
     if (task.hasCapability(capability_id)) return;
     if (task.capability_count >= MAX_TASK_CAPABILITIES) return error.CapabilityTableFull;
-    cold.capability_ids[task.capability_count] = capability_id;
+    const stable = model.allocCspaceSlot(cold) orelse return error.CapabilityTableFull;
+    const dense: u8 = task.capability_count;
+    cold.capability_ids[dense] = capability_id;
+    cold.stable_slot_of_dense[dense] = stable;
+    cold.dense_of_stable[stable] = dense;
     task.capability_count += 1;
     advanceTaskCapabilityGeneration(task);
     appendProvenanceToTask(task, debug_contract.capabilityGrantProvenance(task.id, capability_id, 0));
@@ -1207,17 +1211,29 @@ pub fn revokeCapabilityFromTask(task: *TaskRecord, capability_id: u64) bool {
     const cold = taskCold(task);
     const index = taskCapabilityIndex(task, capability_id) orelse return false;
     const last_index = task.capability_count - 1;
-    const moved_capability_id = cold.capability_ids[last_index];
-
+    const revoked_stable = cold.stable_slot_of_dense[index];
     if (index != last_index) {
-        cold.capability_ids[index] = moved_capability_id;
+        const moved_stable = cold.stable_slot_of_dense[last_index];
+        cold.capability_ids[index] = cold.capability_ids[last_index];
+        cold.stable_slot_of_dense[index] = moved_stable;
+        cold.dense_of_stable[moved_stable] = @intCast(index);
     }
 
     task.capability_count -= 1;
     cold.capability_ids[task.capability_count] = 0;
+    cold.stable_slot_of_dense[task.capability_count] = model.CSPACE_SLOT_EMPTY;
+    if (revoked_stable != model.CSPACE_SLOT_EMPTY) cold.dense_of_stable[revoked_stable] = model.CSPACE_SLOT_EMPTY;
     advanceTaskCapabilityGeneration(task);
     appendProvenanceToTask(task, debug_contract.capabilityRevokeProvenance(task.id, capability_id, 0));
     return true;
+}
+
+pub fn capabilityIdAtCspaceSlot(task: *const TaskRecord, slot: u8) ?u64 {
+    return model.capabilityIdAtCspaceSlot(task, slot);
+}
+
+pub fn cspaceSlotForCapability(task: *const TaskRecord, capability_id: u64) ?u8 {
+    return model.cspaceSlotForCapability(task, capability_id);
 }
 
 fn advanceTaskCapabilityGeneration(task: *TaskRecord) void {
@@ -1621,6 +1637,10 @@ test "granting and revoking capabilities updates the task table" {
     try std.testing.expect(!runtime.hasCapability(task.id, 12));
     try std.testing.expect(runtime.hasCapability(task.id, 13));
     try std.testing.expectEqual(@as(u64, 13), task.capabilityIds()[1]);
+    try std.testing.expectEqual(@as(?u64, 11), model.capabilityIdAtCspaceSlot(task, 0));
+    try std.testing.expectEqual(@as(?u64, null), model.capabilityIdAtCspaceSlot(task, 1));
+    try std.testing.expectEqual(@as(?u64, 13), model.capabilityIdAtCspaceSlot(task, 2));
+    try std.testing.expectEqual(@as(?u8, 2), model.cspaceSlotForCapability(task, 13));
     try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_revoke, task.latestProvenanceEvent().?.kind);
     try std.testing.expectEqual(@as(u64, 12), task.latestProvenanceEvent().?.capability_id);
     try std.testing.expect(!try runtime.revokeCapability(task.id, 99));

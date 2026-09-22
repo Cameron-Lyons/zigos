@@ -71,6 +71,9 @@ var programmed = false;
 
 pub fn bindTaskId(task_id: u64) void {
     bound_task_id = task_id;
+    const event_wake = @import("../../kernel/event_wake.zig");
+    const smp = @import("../../kernel/smp.zig");
+    event_wake.bind(.nvme, smp.assignedCpu(task_id, false));
 }
 
 pub fn boundTaskId() u64 {

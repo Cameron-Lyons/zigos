@@ -742,6 +742,9 @@ pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task
     active_device = device;
     active_service_id = service_id;
     active_task_id = task_id;
+    const event_wake = @import("../../kernel/event_wake.zig");
+    const smp = @import("../../kernel/smp.zig");
+    event_wake.bind(.network, smp.assignedCpu(task_id, false));
     return true;
 }
 

@@ -1009,6 +1009,13 @@ pub fn switchToUserAddressSpace(space: *const UserAddressSpace) void {
     switchAddressSpace(space.directory, space.switch_cr3);
 }
 
+pub fn activateUserDomain(space: *const UserAddressSpace, protection_key: u4) void {
+    switchToUserAddressSpace(space);
+    if (builtin.target.os.tag == .freestanding) {
+        x86.allowUserProtectionKey(protection_key);
+    }
+}
+
 pub fn switchToKernelAddressSpace() void {
     switchAddressSpace(kernelPageDirectory(), kernel_switch_cr3);
     if (builtin.target.os.tag == .freestanding) {

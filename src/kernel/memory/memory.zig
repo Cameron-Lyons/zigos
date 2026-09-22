@@ -17,6 +17,11 @@ const CLASS_COUNT = heap_geometry.free_list_class_count;
 
 extern var __kernel_end: u8;
 
+const SPAN_FREE: u8 = 0;
+const SPAN_LIVE: u8 = 1;
+const SPAN_MAGAZINE: u8 = 2;
+const SPAN_CLAIMED: u8 = 3;
+
 const Span = struct {
     offset: u32 = 0,
     length: u32 = 0,
@@ -24,8 +29,7 @@ const Span = struct {
     address_next: u32 = NO_SPAN,
     address_prev: u32 = NO_SPAN,
     class_index: u8 = 0,
-    live: bool = false,
-    in_magazine: bool = false,
+    state: u8 = SPAN_FREE,
 };
 
 const SPAN_LOOKUP_SLOTS: usize = 8192;
@@ -34,6 +38,22 @@ const Magazine = struct {
     len: u8 = 0,
     slots: [MAGAZINE_DEPTH]u32 = .{NO_SPAN} ** MAGAZINE_DEPTH,
 };
+
+const CpuHeap = struct {
+    recent_span: u32 = NO_SPAN,
+    recent_payload: usize = 0,
+    classes: [CLASS_COUNT]Magazine = [_]Magazine{.{}} ** CLASS_COUNT,
+};
+
+const CpuHeapSlot = struct {
+    heap: CpuHeap align(128) = .{},
+};
+
+comptime {
+    if (@alignOf(CpuHeapSlot) < 128 or @sizeOf(CpuHeapSlot) % 128 != 0) {
+        @compileError("per-CPU heap magazines must occupy distinct cache lines");
+    }
+}
 
 var heap_base_address: usize = 0;
 var payload_base: usize = 0;
@@ -46,10 +66,8 @@ var span_used: u32 = 0;
 var recycled: u32 = NO_SPAN;
 var address_head: u32 = NO_SPAN;
 var class_heads: [CLASS_COUNT]u32 = .{NO_SPAN} ** CLASS_COUNT;
-var magazines: [MAGAZINE_CPUS][CLASS_COUNT]Magazine = [_][CLASS_COUNT]Magazine{[_]Magazine{.{}} ** CLASS_COUNT} ** MAGAZINE_CPUS;
+var cpu_heaps: [MAGAZINE_CPUS]CpuHeapSlot = [_]CpuHeapSlot{.{}} ** MAGAZINE_CPUS;
 var span_lookup: [SPAN_LOOKUP_SLOTS]u32 = .{NO_SPAN} ** SPAN_LOOKUP_SLOTS;
-var recent_span: u32 = NO_SPAN;
-var recent_payload: usize = 0;
 
 fn alignUp(addr: usize, alignment: usize) usize {
     return (addr + alignment - 1) & ~(alignment - 1);
@@ -72,6 +90,35 @@ fn currentCpu() usize {
     );
     if (index >= MAGAZINE_CPUS) return 0;
     return index;
+}
+
+fn pauseInterrupts() bool {
+    if (comptime builtin.os.tag != .freestanding) return false;
+    const x86 = @import("../../arch/x86.zig");
+    const enabled = x86.interruptsEnabled();
+    if (enabled) x86.cli();
+    return enabled;
+}
+
+fn resumeInterrupts(were_enabled: bool) void {
+    if (!were_enabled) return;
+    @import("../../arch/x86.zig").sti();
+}
+
+fn loadSpanState(id: u32) u8 {
+    return @atomicLoad(u8, &spans[id].state, .acquire);
+}
+
+fn storeSpanState(id: u32, state: u8) void {
+    @atomicStore(u8, &spans[id].state, state, .release);
+}
+
+fn claimLiveSpan(id: u32) bool {
+    return @cmpxchgStrong(u8, &spans[id].state, SPAN_LIVE, SPAN_CLAIMED, .acq_rel, .acquire) == null;
+}
+
+fn cpuHeap(cpu: usize) *CpuHeap {
+    return &cpu_heaps[cpu].heap;
 }
 
 fn lockAllocator() void {
@@ -106,10 +153,8 @@ pub fn init() void {
     recycled = NO_SPAN;
     address_head = NO_SPAN;
     class_heads = .{NO_SPAN} ** CLASS_COUNT;
-    magazines = [_][CLASS_COUNT]Magazine{[_]Magazine{.{}} ** CLASS_COUNT} ** MAGAZINE_CPUS;
+    cpu_heaps = [_]CpuHeapSlot{.{}} ** MAGAZINE_CPUS;
     span_lookup = .{NO_SPAN} ** SPAN_LOOKUP_SLOTS;
-    recent_span = NO_SPAN;
-    recent_payload = 0;
 
     const initial = createSpan(0, @intCast(payload_bytes)) orelse @panic("kernel heap span table is exhausted");
     address_head = initial;
@@ -130,6 +175,15 @@ pub fn init() void {
 
 pub fn kmalloc(size: usize) ?*anyopaque {
     if (!is_initialized or size == 0) return null;
+    const interrupts = pauseInterrupts();
+    defer resumeInterrupts(interrupts);
+    const aligned = heap_geometry.alignSize(size, GRANULE) orelse return null;
+    const class_index = heap_geometry.freeListIndex(aligned, PAGE_SIZE);
+    if (heap_geometry.sizeClassBytes(class_index)) |_| {
+        if (popMagazine(currentCpu(), class_index)) |span_id| {
+            return @ptrFromInt(payload_base + spans[span_id].offset);
+        }
+    }
     lockAllocator();
     defer unlockAllocator();
     return allocateLocked(size);
@@ -137,12 +191,18 @@ pub fn kmalloc(size: usize) ?*anyopaque {
 
 pub fn kfree(ptr: ?*anyopaque) void {
     if (ptr == null or !is_initialized) return;
+    const interrupts = pauseInterrupts();
+    defer resumeInterrupts(interrupts);
+    const payload = @intFromPtr(ptr.?);
+    const cpu = currentCpu();
+    if (recentSpan(cpu, payload)) |span_id| {
+        if (pushMagazine(cpu, span_id)) return;
+    }
     lockAllocator();
     defer unlockAllocator();
-    const payload = @intFromPtr(ptr.?);
     const span_id = spanForPayload(payload) orelse return;
-    if (!spans[span_id].live) return;
-    invalidateRecent(span_id);
+    if (!claimLiveSpan(span_id)) return;
+    invalidateRecent(cpu, span_id);
     releaseSpan(span_id);
 }
 
@@ -152,9 +212,8 @@ fn allocateLocked(size: usize) ?*anyopaque {
     const request = heap_geometry.sizeClassBytes(class_index) orelse aligned;
     const cpu = currentCpu();
     const span_id = popMagazine(cpu, class_index) orelse takeSpan(class_index, request) orelse return null;
-    spans[span_id].live = true;
-    spans[span_id].in_magazine = false;
-    noteRecent(span_id);
+    storeSpanState(span_id, SPAN_LIVE);
+    noteRecent(cpu, span_id);
     return @ptrFromInt(payload_base + spans[span_id].offset);
 }
 
@@ -162,10 +221,9 @@ fn releaseSpan(span_id: u32) void {
     const class_index: usize = spans[span_id].class_index;
     if (heap_geometry.reusableMagazineBytes(class_index, @as(usize, spans[span_id].length)) != null) {
         const cpu = currentCpu();
-        var magazine = &magazines[cpu][class_index];
+        var magazine = &cpuHeap(cpu).classes[class_index];
         if (magazine.len < MAGAZINE_DEPTH) {
-            spans[span_id].live = false;
-            spans[span_id].in_magazine = true;
+            storeSpanState(span_id, SPAN_MAGAZINE);
             magazine.slots[magazine.len] = span_id;
             magazine.len += 1;
             return;
@@ -174,13 +232,28 @@ fn releaseSpan(span_id: u32) void {
     freeSpan(span_id);
 }
 
+fn pushMagazine(cpu: usize, span_id: u32) bool {
+    const class_index: usize = spans[span_id].class_index;
+    if (heap_geometry.reusableMagazineBytes(class_index, @as(usize, spans[span_id].length)) == null) return false;
+    var magazine = &cpuHeap(cpu).classes[class_index];
+    if (magazine.len >= MAGAZINE_DEPTH) return false;
+    if (!claimLiveSpan(span_id)) return true;
+    storeSpanState(span_id, SPAN_MAGAZINE);
+    magazine.slots[magazine.len] = span_id;
+    magazine.len += 1;
+    invalidateRecent(cpu, span_id);
+    return true;
+}
+
 fn popMagazine(cpu: usize, class_index: usize) ?u32 {
     const class_bytes = heap_geometry.sizeClassBytes(class_index) orelse return null;
-    var magazine = &magazines[cpu][class_index];
+    var magazine = &cpuHeap(cpu).classes[class_index];
     if (magazine.len == 0) return null;
     magazine.len -= 1;
     const span_id = magazine.slots[magazine.len];
     if (@as(usize, spans[span_id].length) != class_bytes) @panic("kernel heap magazine span length mismatch");
+    storeSpanState(span_id, SPAN_LIVE);
+    noteRecent(cpu, span_id);
     return span_id;
 }
 
@@ -204,7 +277,7 @@ fn createSpan(offset: u32, length: u32) ?u32 {
 
 fn recycleSpan(id: u32) void {
     forgetSpan(id);
-    invalidateRecent(id);
+    for (0..MAGAZINE_CPUS) |cpu| invalidateRecent(cpu, id);
     spans[id] = .{};
     spans[id].next_free = recycled;
     recycled = id;
@@ -213,8 +286,7 @@ fn recycleSpan(id: u32) void {
 fn pushFree(id: u32) void {
     const class_index = heap_geometry.freeListIndex(spans[id].length, PAGE_SIZE);
     spans[id].class_index = @intCast(class_index);
-    spans[id].live = false;
-    spans[id].in_magazine = false;
+    storeSpanState(id, SPAN_FREE);
     spans[id].next_free = class_heads[class_index];
     class_heads[class_index] = id;
 }
@@ -292,11 +364,10 @@ fn unlinkAddress(id: u32) void {
 
 fn freeSpan(id: u32) void {
     var current = id;
-    spans[current].live = false;
-    spans[current].in_magazine = false;
+    storeSpanState(current, SPAN_FREE);
     if (spans[current].address_next != NO_SPAN) {
         const next = spans[current].address_next;
-        if (!spans[next].live and !spans[next].in_magazine) {
+        if (loadSpanState(next) == SPAN_FREE) {
             unlinkFree(next);
             spans[current].length += spans[next].length;
             unlinkAddress(next);
@@ -305,7 +376,7 @@ fn freeSpan(id: u32) void {
     }
     if (spans[current].address_prev != NO_SPAN) {
         const previous = spans[current].address_prev;
-        if (!spans[previous].live and !spans[previous].in_magazine) {
+        if (loadSpanState(previous) == SPAN_FREE) {
             unlinkFree(previous);
             spans[previous].length += spans[current].length;
             unlinkAddress(current);
@@ -316,22 +387,30 @@ fn freeSpan(id: u32) void {
     pushFree(current);
 }
 
-fn noteRecent(span_id: u32) void {
-    recent_span = span_id;
-    recent_payload = payload_base + spans[span_id].offset;
+fn noteRecent(cpu: usize, span_id: u32) void {
+    const heap = cpuHeap(cpu);
+    heap.recent_span = span_id;
+    heap.recent_payload = payload_base + spans[span_id].offset;
 }
 
-fn invalidateRecent(span_id: u32) void {
-    if (recent_span != span_id) return;
-    recent_span = NO_SPAN;
-    recent_payload = 0;
+fn invalidateRecent(cpu: usize, span_id: u32) void {
+    const heap = cpuHeap(cpu);
+    if (heap.recent_span != span_id) return;
+    heap.recent_span = NO_SPAN;
+    heap.recent_payload = 0;
+}
+
+fn recentSpan(cpu: usize, payload: usize) ?u32 {
+    const heap = cpuHeap(cpu);
+    if (heap.recent_span == NO_SPAN or payload != heap.recent_payload) return null;
+    if (payload < payload_base) return null;
+    const offset = payload - payload_base;
+    if (spans[heap.recent_span].offset != offset) return null;
+    return heap.recent_span;
 }
 
 fn spanForPayload(payload: usize) ?u32 {
-    if (recent_span != NO_SPAN and payload == recent_payload) {
-        const offset = payload - payload_base;
-        if (spans[recent_span].offset == offset) return recent_span;
-    }
+    if (recentSpan(currentCpu(), payload)) |span_id| return span_id;
     return findSpan(payload);
 }
 
@@ -392,7 +471,7 @@ fn findSpan(payload: usize) ?u32 {
 
 fn allocationIsLive(payload: usize) bool {
     const span_id = findSpan(payload) orelse return false;
-    return spans[span_id].live;
+    return loadSpanState(span_id) == SPAN_LIVE;
 }
 
 fn verifyAllocationStartGuards() void {
@@ -419,6 +498,6 @@ fn verifyOverflowSpansKeepTheirLength() void {
 
 fn liveSpanLength(payload: usize) ?u32 {
     const span_id = findSpan(payload) orelse return null;
-    if (!spans[span_id].live) return null;
+    if (loadSpanState(span_id) != SPAN_LIVE) return null;
     return spans[span_id].length;
 }

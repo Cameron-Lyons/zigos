@@ -28,6 +28,7 @@ pub const Pending = packed struct(u8) {
 
 var pending_bits: [MAX_CPUS]u8 = [_]u8{0} ** MAX_CPUS;
 var current_cpu: u8 = 0;
+var bound_cpu: [8]u8 = [_]u8{0} ** 8;
 
 pub fn bindCpu(cpu: u8) void {
     current_cpu = if (cpu < MAX_CPUS) cpu else 0;
@@ -45,8 +46,20 @@ fn currentCpu() u8 {
     return if (index < MAX_CPUS) index else current_cpu;
 }
 
+pub fn bind(kind: Kind, cpu: u8) void {
+    bound_cpu[@intFromEnum(kind)] = if (cpu < MAX_CPUS) cpu else 0;
+}
+
+pub fn boundCpu(kind: Kind) u8 {
+    return bound_cpu[@intFromEnum(kind)];
+}
+
 pub fn raise(kind: Kind) void {
-    raiseOn(currentCpu(), kind);
+    const cpu = switch (kind) {
+        .timer, .scheduler => currentCpu(),
+        .xhci, .network, .nvme => boundCpu(kind),
+    };
+    raiseOn(cpu, kind);
 }
 
 pub fn raiseOn(cpu: u8, kind: Kind) void {
@@ -99,6 +112,24 @@ test "event wake latches and drains pending work bits" {
     try std.testing.expect(pending.network);
     try std.testing.expect(!pending.nvme);
     try std.testing.expect(!any());
+}
+
+test "device notifications wake the bound driver cpu" {
+    bindCpu(1);
+    _ = takeAll();
+    bind(.nvme, 3);
+    bind(.network, 2);
+    raise(.nvme);
+    raise(.network);
+    raise(.timer);
+    try std.testing.expect(peekOn(3).nvme);
+    try std.testing.expect(!peekOn(1).nvme);
+    try std.testing.expect(peekOn(2).network);
+    try std.testing.expect(peekOn(1).timer);
+    bind(.nvme, 0);
+    bind(.network, 0);
+    bindCpu(0);
+    _ = takeAll();
 }
 
 test "event wake keeps per-cpu pending bits" {

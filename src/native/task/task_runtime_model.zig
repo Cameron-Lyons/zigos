@@ -463,9 +463,15 @@ pub const TaskCreateRequest = struct {
     userspace_image: ?*const ExecutableImageSpec = null,
 };
 
+pub const CSPACE_SLOT_EMPTY: u8 = 0xFF;
+
 pub const TaskColdRecord = struct {
     execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
     capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
+    /// Userspace name for each dense capability. Stable across revoke of a different capability.
+    stable_slot_of_dense: [MAX_TASK_CAPABILITIES]u8 = [_]u8{CSPACE_SLOT_EMPTY} ** MAX_TASK_CAPABILITIES,
+    /// Dense index for each userspace cspace slot. Empty slots stay `CSPACE_SLOT_EMPTY`.
+    dense_of_stable: [MAX_TASK_CAPABILITIES]u8 = [_]u8{CSPACE_SLOT_EMPTY} ** MAX_TASK_CAPABILITIES,
     capability_generation: u64 = 1,
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
     provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord = [_]TaskProvenanceRecord{TaskProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
@@ -649,7 +655,7 @@ test "task runtime uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 320), @sizeOf(AddressSpaceRecord));
     try std.testing.expectEqual(@as(usize, 328), @sizeOf(AddressSpaceSlot));
 
-    const expected_cold_bytes = 1_608 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
+    const expected_cold_bytes = 1_656 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
     try std.testing.expectEqual(expected_cold_bytes, @sizeOf(TaskColdRecord));
     const expected_snapshot_bytes = 48 + MAX_TASKS * (@sizeOf(TaskSlot) + expected_cold_bytes + @sizeOf(AddressSpaceSlot));
     try std.testing.expectEqual(expected_snapshot_bytes, @sizeOf(Snapshot));
@@ -752,11 +758,15 @@ pub fn zeroTaskCold() TaskColdRecord {
 pub fn resetTaskCold(dest: *TaskColdRecord) void {
     zeroBytes(std.mem.asBytes(dest));
     dest.capability_generation = 1;
+    @memset(&dest.stable_slot_of_dense, CSPACE_SLOT_EMPTY);
+    @memset(&dest.dense_of_stable, CSPACE_SLOT_EMPTY);
 }
 
 pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
     copySlots(ExecutionComponentRecord, dest.execution_components[0..task.execution_component_count], src.execution_components[0..task.execution_component_count]);
     copySlots(u64, dest.capability_ids[0..task.capability_count], src.capability_ids[0..task.capability_count]);
+    copySlots(u8, &dest.stable_slot_of_dense, &src.stable_slot_of_dense);
+    copySlots(u8, &dest.dense_of_stable, &src.dense_of_stable);
     dest.capability_generation = src.capability_generation;
     copyAuditTrailForTask(dest, src, task);
     copyProvenanceTrailForTask(dest, src, task);
@@ -815,6 +825,29 @@ pub fn copyBytes(dest: []u8, src: []const u8) void {
 
 pub fn zeroBytes(dest: []u8) void {
     @memset(dest, 0);
+}
+
+pub fn allocCspaceSlot(cold: *TaskColdRecord) ?u8 {
+    for (cold.dense_of_stable, 0..) |dense, stable| {
+        if (dense == CSPACE_SLOT_EMPTY) return @intCast(stable);
+    }
+    return null;
+}
+
+pub fn capabilityIdAtCspaceSlot(task: *const TaskRecord, slot: u8) ?u64 {
+    if (slot >= MAX_TASK_CAPABILITIES) return null;
+    const dense = taskColdConst(task).dense_of_stable[slot];
+    if (dense == CSPACE_SLOT_EMPTY or dense >= task.capability_count) return null;
+    const capability_id = taskColdConst(task).capability_ids[dense];
+    if (capability_id == 0) return null;
+    return capability_id;
+}
+
+pub fn cspaceSlotForCapability(task: *const TaskRecord, capability_id: u64) ?u8 {
+    const dense = taskCapabilityIndex(task, capability_id) orelse return null;
+    const stable = taskColdConst(task).stable_slot_of_dense[dense];
+    if (stable == CSPACE_SLOT_EMPTY) return null;
+    return stable;
 }
 
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {
