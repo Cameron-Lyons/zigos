@@ -178,7 +178,7 @@ fn expectRootKernelCallerDenied(
 ) !void {
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
     const request = component_port.EndpointCreateRequest{
-        .header = component_port.makeHeader(.endpoint_create, tick, 0),
+        .header = component_port.makeHeader(.endpoint_create, 0),
         .authority_capability_id = endpoint_capability_id,
         .owner_task_id = owner_task_id,
         .label = "kernel.data-plane.export",
@@ -187,7 +187,12 @@ fn expectRootKernelCallerDenied(
             .service_port = true,
         },
     };
-    const result = syscall_surface.dispatch(kernel_port, 0, tick, request.header.operation, @intFromPtr(&request),
+    const result = syscall_surface.dispatch(
+        kernel_port,
+        0,
+        tick,
+        request.header.operation,
+        @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointCreateResponse),
     );

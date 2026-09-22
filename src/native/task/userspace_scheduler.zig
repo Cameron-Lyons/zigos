@@ -10,12 +10,9 @@ const units = @import("../core/units.zig");
 const userspace_executor = @import("userspace_executor.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_flags = @import("userspace_flags.zig");
-const manifest = @import("../policy/manifest.zig");
-const service_catalog = @import("../session/service_catalog.zig");
 const smp = @import("../../kernel/smp.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 const table_backing = @import("../core/table_backing.zig");
-const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const root = @import("root");
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
@@ -685,7 +682,6 @@ pub const Scheduler = struct {
         const catalog = self.catalog_ptr orelse return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
         const capability_table = self.capability_table_ptr orelse return .unavailable;
-        _ = xhci_driver_task.dispatchForTask(task.id);
         return self.executor.executeTask(catalog, runtime, capability_table, task, mapping_handle, now_ticks);
     }
 
@@ -1616,15 +1612,16 @@ fn taskUiPresentationEligible(
     catalog: *userspace_loader.Catalog,
     task: *const task_runtime.TaskRecord,
 ) bool {
-    if (task.ui_surface_id != null and manifest.isApplicationBundle(task.launchBundleIdSlice())) return true;
-    const components = task.executionComponents();
-    if (components.len != 0) {
-        if (service_catalog.contractFlagsForComponentLabel(components[0].labelSlice())) |flags| {
-            return contractOwnsUiSurface(flags);
-        }
-    }
+    if (task.ui_surface_id != null and isApplicationBundle(task.launchBundleIdSlice())) return true;
     const image = catalog.findById(task.launch.image_id) orelse return false;
     return contractOwnsUiSurface(image.contract_flags);
+}
+
+fn isApplicationBundle(bundle_id: []const u8) bool {
+    if (bundle_id.len == 0) return false;
+    if (std.mem.startsWith(u8, bundle_id, "zigos.") or std.mem.startsWith(u8, bundle_id, "svc.")) return false;
+    if (std.mem.startsWith(u8, bundle_id, "compat.") or std.mem.indexOf(u8, bundle_id, ".compat.") != null) return false;
+    return true;
 }
 
 fn contractOwnsUiSurface(contract_flags: u32) bool {

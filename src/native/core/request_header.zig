@@ -11,10 +11,9 @@ pub const SubjectTaskError = error{
     SubjectTaskMismatch,
 };
 
-pub fn makeHeader(operation: u16, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
+pub fn makeHeader(operation: u16, subject_task_id: u64) abi.RequestHeader {
     return .{
         .operation = operation,
-        .correlation_id = correlation_id,
         .subject_task_id = subject_task_id,
     };
 }
@@ -30,19 +29,13 @@ pub fn validateSubjectTask(header: abi.RequestHeader, task_id: u64) SubjectTaskE
     }
 }
 
-test "request header helper validates version operation and subject task" {
-    const header = makeHeader(abi.opcode(.task_create), 7, 9);
+test "request header helper validates operation and subject task" {
+    const header = makeHeader(abi.opcode(.task_create), 9);
 
     try validateHeader(header, abi.opcode(.task_create));
     try validateSubjectTask(header, 9);
 
     try std.testing.expectError(error.UnexpectedOperation, validateHeader(header, abi.opcode(.endpoint_create)));
-    try std.testing.expectError(error.SubjectTaskRequired, validateSubjectTask(makeHeader(abi.opcode(.task_create), 7, 0), 9));
+    try std.testing.expectError(error.SubjectTaskRequired, validateSubjectTask(makeHeader(abi.opcode(.task_create), 0), 9));
     try std.testing.expectError(error.SubjectTaskMismatch, validateSubjectTask(header, 10));
-    try validateHeader(.{
-        .version = abi.ABI_VERSION + 1,
-        .operation = header.operation,
-        .correlation_id = header.correlation_id,
-        .subject_task_id = header.subject_task_id,
-    }, header.operation);
 }

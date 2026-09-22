@@ -96,7 +96,7 @@ pub fn run(
     common.printBootMarker(boot_markers.transport_task_create_ok);
 
     const storage_endpoint = kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 3, storage_task_desc.task_id),
+        .header = component_port.makeHeader(.endpoint_create, storage_task_desc.task_id),
         .authority_capability_id = storage_authority_capability_id,
         .owner_task_id = storage_task_desc.task_id,
         .label = support.bootstrap_storage_interface.name,
@@ -118,7 +118,7 @@ pub fn run(
     common.printBootMarker("ZIGOS:TRANSPORT:SERVICE_REGISTER:OK");
 
     const transport_probe_endpoint = kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 5, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.endpoint_create, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
         .owner_task_id = transport_probe_task.task_id,
         .label = "transport.probe",
@@ -126,7 +126,7 @@ pub fn run(
     }, 4) catch |err| native_util.bootProofFailure("transport checks", err);
     const storage_connection = env.service_directory.connect(typed_component_abi.interfaceId(.bootstrap_workspace)) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.endpointConnect(.{
-        .header = component_port.makeHeader(.endpoint_connect, 6, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.endpoint_connect, transport_probe_task.task_id),
         .endpoint_capability_id = transport_probe_endpoint.capability_id,
         .peer_endpoint_capability_id = storage_connection.endpoint_capability_id,
         .peer_endpoint_id = storage_connection.endpoint_id,
@@ -139,20 +139,20 @@ pub fn run(
     common.printBootMarker(boot_markers.transport_service_connect_ok);
 
     const transport_probe_shm = kernel_port.sharedMemoryCreate(.{
-        .header = component_port.makeHeader(.shared_memory_create, 7, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.shared_memory_create, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
         .owner_task_id = transport_probe_task.task_id,
         .size_bytes = shared_memory.PAGE_SIZE,
     }, 5) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.sharedMemoryMap(.{
-        .header = component_port.makeHeader(.shared_memory_map, 8, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.shared_memory_map, transport_probe_task.task_id),
         .shared_memory_capability_id = transport_probe_shm.capability_id,
         .task_id = transport_probe_task.task_id,
     }, 5) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:SHM:MAP_OK");
 
     kernel_port.endpointSend(.{
-        .header = component_port.makeHeader(.endpoint_send, 41, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.endpoint_send, transport_probe_task.task_id),
         .endpoint_capability_id = transport_probe_endpoint.capability_id,
         .payload = "workspace-open",
         .attached_capability_id = transport_probe_shm.capability_id,
@@ -161,7 +161,7 @@ pub fn run(
     var transport_probe_payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
     var transport_probe_attached = std.mem.zeroes(abi.CapabilityDescriptor);
     const transport_probe_received = kernel_port.endpointRecv(.{
-        .header = component_port.makeHeader(.endpoint_recv, 9, storage_task_desc.task_id),
+        .header = component_port.makeHeader(.endpoint_recv, storage_task_desc.task_id),
         .endpoint_capability_id = storage_endpoint.capability_id,
         .receiver_task_id = storage_task_desc.task_id,
         .payload_out = &transport_probe_payload,
@@ -175,7 +175,7 @@ pub fn run(
     }
 
     const transport_probe_resources = kernel_port.resourceQuery(.{
-        .header = component_port.makeHeader(.resource_query, 10, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.resource_query, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
         .task_id = transport_probe_task.task_id,
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
@@ -183,7 +183,7 @@ pub fn run(
         common.printBootMarker("ZIGOS:TRANSPORT:RESOURCE_QUERY:OK");
     }
     const transport_probe_accounting = kernel_port.accountingQuery(.{
-        .header = component_port.makeHeader(.accounting_query, 11, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.accounting_query, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
         .task_id = transport_probe_task.task_id,
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
@@ -191,14 +191,14 @@ pub fn run(
         common.printBootMarker("ZIGOS:TRANSPORT:ACCOUNTING_QUERY:OK");
     }
     if ((kernel_port.timeQuery(.{
-        .header = component_port.makeHeader(.time_query, 12, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.time_query, transport_probe_task.task_id),
         .authority_capability_id = transport_probe_authority_id,
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err)) == 7) {
         common.printBootMarker("ZIGOS:TRANSPORT:TIME_QUERY:OK");
     }
 
     const derivable_capability = kernel_port.capabilityMint(.{
-        .header = component_port.makeHeader(.capability_mint, 13, state.session_task.id),
+        .header = component_port.makeHeader(.capability_mint, state.session_task.id),
         .policy_capability_id = state.policy_capability.id,
         .request = .{
             .holder = env.runtime.find(transport_probe_task.task_id).?.owner,
@@ -231,14 +231,14 @@ pub fn run(
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_MINT:OK");
     _ = kernel_port.capabilityQuery(.{
-        .header = component_port.makeHeader(.capability_query, 14, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.capability_query, transport_probe_task.task_id),
         .authority_capability_id = derivable_capability.capability_id,
         .capability_id = derivable_capability.capability_id,
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_QUERY:OK");
 
     _ = kernel_port.capabilityDerive(.{
-        .header = component_port.makeHeader(.capability_derive, 15, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.capability_derive, transport_probe_task.task_id),
         .request = .{
             .parent_capability_id = derivable_capability.capability_id,
             .holder = env.runtime.find(transport_probe_task.task_id).?.owner,
@@ -262,7 +262,7 @@ pub fn run(
     }) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:CAP_DERIVE:OK");
     kernel_port.capabilityRevoke(.{
-        .header = component_port.makeHeader(.capability_revoke, 16, transport_probe_task.task_id),
+        .header = component_port.makeHeader(.capability_revoke, transport_probe_task.task_id),
         .authority_capability_id = derivable_capability.capability_id,
         .capability_id = derivable_capability.capability_id,
     }, 7) catch |err| native_util.bootProofFailure("transport checks", err);
@@ -303,7 +303,7 @@ pub fn run(
         8,
     ) catch |err| native_util.bootProofFailure("transport checks", err);
     _ = kernel_port.taskTerminate(.{
-        .header = component_port.makeHeader(.task_terminate, 19, termination_probe_task.task_id),
+        .header = component_port.makeHeader(.task_terminate, termination_probe_task.task_id),
         .task_capability_id = termination_probe_capability_id,
     }, 9) catch |err| native_util.bootProofFailure("transport checks", err);
     common.printBootMarker("ZIGOS:TRANSPORT:TASK_TERMINATE:OK");

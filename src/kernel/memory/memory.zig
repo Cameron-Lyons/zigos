@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const console = @import("../utils/console.zig");
 const heap_geometry = @import("heap_geometry.zig");
@@ -5,13 +6,45 @@ const numfmt = @import("../utils/numfmt.zig");
 const spin = @import("../utils/spin.zig");
 
 const BYTES_PER_MIB: usize = 1024 * 1024;
-const HEAP_SIZE: usize = 16 * BYTES_PER_MIB;
-const MIN_BLOCK_SIZE = heap_geometry.minimum_free_data_size;
-const BLOCK_ALIGNMENT = heap_geometry.block_alignment;
-const ALLOCATION_BITMAP_BYTES = HEAP_SIZE / BLOCK_ALIGNMENT / 8;
-
+pub const HEAP_SIZE: usize = 32 * BYTES_PER_MIB;
+const GRANULE = heap_geometry.granule;
 const PAGE_SIZE: usize = 4096;
+const MAX_SPANS: usize = 4096;
+const NO_SPAN: u32 = std.math.maxInt(u32);
+const MAGAZINE_DEPTH: usize = 8;
+pub const MAGAZINE_CPUS: usize = 8;
+const CLASS_COUNT = heap_geometry.free_list_class_count;
+
 extern var __kernel_end: u8;
+
+const Span = struct {
+    offset: u32 = 0,
+    length: u32 = 0,
+    next_free: u32 = NO_SPAN,
+    address_next: u32 = NO_SPAN,
+    address_prev: u32 = NO_SPAN,
+    class_index: u8 = 0,
+    live: bool = false,
+    in_magazine: bool = false,
+};
+
+const Magazine = struct {
+    len: u8 = 0,
+    slots: [MAGAZINE_DEPTH]usize = .{0} ** MAGAZINE_DEPTH,
+};
+
+var heap_base_address: usize = 0;
+var payload_base: usize = 0;
+var payload_bytes: usize = 0;
+var early_claimed_bytes: usize = 0;
+var is_initialized = false;
+var allocator_lock = spin.Lock.init();
+var spans: [MAX_SPANS]Span = [_]Span{.{}} ** MAX_SPANS;
+var span_used: u32 = 0;
+var recycled: u32 = NO_SPAN;
+var address_head: u32 = NO_SPAN;
+var class_heads: [CLASS_COUNT]u32 = .{NO_SPAN} ** CLASS_COUNT;
+var magazines: [MAGAZINE_CPUS][CLASS_COUNT]Magazine = [_][CLASS_COUNT]Magazine{[_]Magazine{.{}} ** CLASS_COUNT} ** MAGAZINE_CPUS;
 
 fn alignUp(addr: usize, alignment: usize) usize {
     return (addr + alignment - 1) & ~(alignment - 1);
@@ -21,16 +54,20 @@ fn heapStartAddress() usize {
     return alignUp(@intFromPtr(&__kernel_end), PAGE_SIZE);
 }
 
-const BlockHeader = heap_geometry.BlockHeader;
-const FreeLinks = heap_geometry.FreeLinks;
+pub fn getReservedMemoryEnd() usize {
+    return heapStartAddress() + HEAP_SIZE;
+}
 
-var heap_start: [*]u8 = undefined;
-
-var heap_end: [*]u8 = undefined;
-var free_lists: [heap_geometry.free_list_class_count]?*BlockHeader = .{null} ** heap_geometry.free_list_class_count;
-var early_claimed_bytes: usize = 0;
-var is_initialized = false;
-var allocator_lock = spin.Lock.init();
+fn currentCpu() usize {
+    if (comptime builtin.os.tag != .freestanding) return 0;
+    const x86 = @import("../../arch/x86.zig");
+    const gs = x86.readMsr(x86.IA32_GS_BASE_MSR);
+    if (gs == 0) return 0;
+    const cpu_index_ptr: *const usize = @ptrFromInt(gs + 16);
+    const index = cpu_index_ptr.*;
+    if (index >= MAGAZINE_CPUS) return 0;
+    return index;
+}
 
 fn lockAllocator() void {
     allocator_lock.acquire();
@@ -40,258 +77,256 @@ fn unlockAllocator() void {
     allocator_lock.release();
 }
 
-pub fn init() void {
-    const heap_base = heapStartAddress();
-    const heap_start_addr = heap_base + early_claimed_bytes;
-    heap_start = @ptrFromInt(heap_start_addr);
-    heap_end = @ptrFromInt(heap_base + HEAP_SIZE);
-    @memset(allocationBitmap(), 0);
-
-    const initial_block: *BlockHeader = @ptrFromInt(heapDataStartAddress());
-    initial_block.size = heapByteCapacity() - ALLOCATION_BITMAP_BYTES - @sizeOf(BlockHeader);
-    initial_block.state = heap_geometry.block_state_free;
-    initial_block.next = null;
-    initial_block.prev = null;
-    free_lists = .{null} ** heap_geometry.free_list_class_count;
-    freeListPush(initial_block);
-    is_initialized = true;
-    verifyAllocationStartGuards();
-
-    console.print("Memory allocator initialized!\n");
-    console.print("Heap start: 0x");
-    numfmt.printHex(@intFromPtr(heap_start));
-    console.print("\nEarly heap state: ");
-    numfmt.printDec(early_claimed_bytes);
-    console.print(" bytes\nHeap allocatable: ");
-    numfmt.printDec(initial_block.size);
-    console.print(" bytes\n");
-}
-
 pub fn claimEarly(bytes: usize, alignment: usize) ?*anyopaque {
     if (is_initialized) return null;
 
     const heap_base = heapStartAddress();
     const cursor = std.math.add(usize, heap_base, early_claimed_bytes) catch return null;
-    const minimum_heap_bytes = ALLOCATION_BITMAP_BYTES + @sizeOf(BlockHeader) + MIN_BLOCK_SIZE;
-    const claim_limit = std.math.add(usize, heap_base, HEAP_SIZE - minimum_heap_bytes) catch return null;
+    const claim_limit = std.math.add(usize, heap_base, HEAP_SIZE - GRANULE) catch return null;
     const claim = heap_geometry.claimAlignedRange(cursor, bytes, alignment, claim_limit) orelse return null;
     early_claimed_bytes = claim.end - heap_base;
     return @ptrFromInt(claim.start);
 }
 
-pub fn getReservedMemoryEnd() usize {
-    return heapStartAddress() + HEAP_SIZE;
-}
+pub fn init() void {
+    heap_base_address = heapStartAddress();
+    payload_base = alignUp(heap_base_address + early_claimed_bytes, GRANULE);
+    const heap_end = heap_base_address + HEAP_SIZE;
+    if (payload_base >= heap_end) @panic("kernel heap has no payload");
+    payload_bytes = (heap_end - payload_base) & ~(GRANULE - 1);
+    if (payload_bytes < GRANULE) @panic("kernel heap payload is smaller than one granule");
 
-fn freeListPush(block: *BlockHeader) void {
-    const index = freeListIndex(block.size);
-    const links = freeLinks(block);
-    links.prev = null;
-    links.next = free_lists[index];
-    if (free_lists[index]) |head| {
-        freeLinks(head).prev = block;
-    }
-    free_lists[index] = block;
-}
+    spans = [_]Span{.{}} ** MAX_SPANS;
+    span_used = 0;
+    recycled = NO_SPAN;
+    address_head = NO_SPAN;
+    class_heads = .{NO_SPAN} ** CLASS_COUNT;
+    magazines = [_][CLASS_COUNT]Magazine{[_]Magazine{.{}} ** CLASS_COUNT} ** MAGAZINE_CPUS;
 
-fn freeListRemove(block: *BlockHeader) void {
-    const index = freeListIndex(block.size);
-    const links = freeLinks(block);
-    if (links.prev) |prev| {
-        freeLinks(prev).next = links.next;
-    } else {
-        free_lists[index] = links.next;
-    }
-    if (links.next) |next| {
-        freeLinks(next).prev = links.prev;
-    }
-    links.* = .{ .next = null, .prev = null };
-}
+    const initial = createSpan(0, @intCast(payload_bytes)) orelse @panic("kernel heap span table is exhausted");
+    address_head = initial;
+    pushFree(initial);
+    is_initialized = true;
+    verifyAllocationStartGuards();
 
-fn freeLinks(block: *BlockHeader) *FreeLinks {
-    const block_bytes: [*]u8 = @ptrCast(block);
-    return @ptrCast(@alignCast(block_bytes + @sizeOf(BlockHeader)));
-}
-
-fn freeListIndex(size: usize) usize {
-    return heap_geometry.freeListIndex(size, PAGE_SIZE);
-}
-
-fn splitBlock(block: *BlockHeader, size: usize) void {
-    const total_size = block.size;
-    const remainder_size = heap_geometry.splitRemainder(
-        total_size,
-        size,
-        @sizeOf(BlockHeader),
-        MIN_BLOCK_SIZE,
-    ) orelse return;
-    const new_block_offset = @sizeOf(BlockHeader) + size;
-
-    const block_bytes: [*]u8 = @ptrCast(block);
-    const new_block: *BlockHeader = @ptrCast(@alignCast(block_bytes + new_block_offset));
-
-    new_block.size = remainder_size;
-    new_block.state = heap_geometry.block_state_free;
-    new_block.next = block.next;
-    new_block.prev = block;
-
-    if (block.next) |next| {
-        next.prev = new_block;
-    }
-
-    block.size = size;
-    block.next = new_block;
-    freeListPush(new_block);
-}
-
-fn takeFreeBlock(aligned_size: usize) ?*anyopaque {
-    var index = freeListIndex(aligned_size);
-    while (index < free_lists.len) : (index += 1) {
-        var current = free_lists[index];
-        while (current) |block| {
-            const next_free = freeLinks(block).next;
-            if (block.size >= aligned_size) {
-                freeListRemove(block);
-                splitBlock(block, aligned_size);
-                block.state = heap_geometry.block_state_allocated;
-
-                const data_ptr: [*]u8 = @ptrCast(block);
-                const payload: *anyopaque = @ptrCast(data_ptr + @sizeOf(BlockHeader));
-                setAllocationMarker(allocationBitIndex(@intFromPtr(payload)), true);
-                return payload;
-            }
-            current = next_free;
-        }
-    }
-    return null;
+    console.print("Memory allocator initialized!\n");
+    console.print("Heap start: 0x");
+    numfmt.printHex(payload_base);
+    console.print("\nEarly heap state: ");
+    numfmt.printDec(early_claimed_bytes);
+    console.print(" bytes\nHeap allocatable: ");
+    numfmt.printDec(payload_bytes);
+    console.print(" bytes\n");
 }
 
 pub fn kmalloc(size: usize) ?*anyopaque {
     if (!is_initialized or size == 0) return null;
     lockAllocator();
     defer unlockAllocator();
-
-    const aligned_size = heap_geometry.alignSize(size, BLOCK_ALIGNMENT) orelse return null;
-    const class_index = freeListIndex(aligned_size);
-    const request_size = heap_geometry.sizeClassBytes(class_index) orelse aligned_size;
-
-    return takeFreeBlock(request_size);
+    return allocateLocked(size);
 }
 
 pub fn kfree(ptr: ?*anyopaque) void {
     if (ptr == null or !is_initialized) return;
     lockAllocator();
     defer unlockAllocator();
+    const payload = @intFromPtr(ptr.?);
+    const span_id = findSpan(payload) orelse return;
+    if (!spans[span_id].live) return;
+    releaseSpan(span_id, payload);
+}
 
-    const payload_address = @intFromPtr(ptr.?);
-    const heap_start_address = heapDataStartAddress();
-    if (payload_address < heap_start_address + @sizeOf(BlockHeader)) return;
-    const bit_index = allocationMarkerIndex(payload_address) orelse return;
+fn allocateLocked(size: usize) ?*anyopaque {
+    const aligned = heap_geometry.alignSize(size, GRANULE) orelse return null;
+    const class_index = heap_geometry.freeListIndex(aligned, PAGE_SIZE);
+    const request = heap_geometry.sizeClassBytes(class_index) orelse aligned;
+    const cpu = currentCpu();
+    if (popMagazine(cpu, class_index)) |payload| return @ptrFromInt(payload);
+    const span_id = takeSpan(class_index, request) orelse return null;
+    spans[span_id].live = true;
+    spans[span_id].in_magazine = false;
+    return @ptrFromInt(payload_base + spans[span_id].offset);
+}
 
-    const block_address = payload_address - @sizeOf(BlockHeader);
-    const block: *BlockHeader = @ptrFromInt(block_address);
-    if (!allocationStartMarked(bit_index) or
-        block.state != heap_geometry.block_state_allocated)
-    {
+fn releaseSpan(span_id: u32, payload: usize) void {
+    const class_index = spans[span_id].class_index;
+    const cpu = currentCpu();
+    var magazine = &magazines[cpu][class_index];
+    if (magazine.len < MAGAZINE_DEPTH) {
+        spans[span_id].live = false;
+        spans[span_id].in_magazine = true;
+        magazine.slots[magazine.len] = payload;
+        magazine.len += 1;
         return;
     }
-    setAllocationMarker(bit_index, false);
-    block.state = heap_geometry.block_state_free;
+    freeSpan(span_id);
+}
 
-    if (block.next) |next| {
-        if (blockIsFree(next)) {
-            freeListRemove(next);
-            block.size += @sizeOf(BlockHeader) + next.size;
-            block.next = next.next;
-            if (next.next) |next_next| {
-                next_next.prev = block;
-            }
-            next.state = 0;
-        }
-    }
+fn popMagazine(cpu: usize, class_index: usize) ?usize {
+    var magazine = &magazines[cpu][class_index];
+    if (magazine.len == 0) return null;
+    magazine.len -= 1;
+    const payload = magazine.slots[magazine.len];
+    const span_id = findSpan(payload) orelse return null;
+    spans[span_id].in_magazine = false;
+    spans[span_id].live = true;
+    return payload;
+}
 
-    if (block.prev) |prev| {
-        if (blockIsFree(prev)) {
-            freeListRemove(prev);
-            prev.size += @sizeOf(BlockHeader) + block.size;
-            prev.next = block.next;
-            if (block.next) |next| {
-                next.prev = prev;
+fn createSpan(offset: u32, length: u32) ?u32 {
+    const id = if (recycled != NO_SPAN) recycled_id: {
+        const recycled_id = recycled;
+        recycled = spans[recycled_id].next_free;
+        break :recycled_id recycled_id;
+    } else if (span_used < MAX_SPANS) created: {
+        const created = span_used;
+        span_used += 1;
+        break :created created;
+    } else return null;
+    spans[id] = .{
+        .offset = offset,
+        .length = length,
+    };
+    return id;
+}
+
+fn recycleSpan(id: u32) void {
+    spans[id] = .{};
+    spans[id].next_free = recycled;
+    recycled = id;
+}
+
+fn pushFree(id: u32) void {
+    const class_index = heap_geometry.freeListIndex(spans[id].length, PAGE_SIZE);
+    spans[id].class_index = @intCast(class_index);
+    spans[id].live = false;
+    spans[id].in_magazine = false;
+    spans[id].next_free = class_heads[class_index];
+    class_heads[class_index] = id;
+}
+
+fn unlinkFree(id: u32) void {
+    const class_index = spans[id].class_index;
+    var previous = NO_SPAN;
+    var current = class_heads[class_index];
+    while (current != NO_SPAN) {
+        if (current == id) {
+            if (previous == NO_SPAN) {
+                class_heads[class_index] = spans[current].next_free;
+            } else {
+                spans[previous].next_free = spans[current].next_free;
             }
-            block.state = 0;
-            freeListPush(prev);
+            spans[id].next_free = NO_SPAN;
             return;
         }
+        previous = current;
+        current = spans[current].next_free;
     }
-
-    freeListPush(block);
 }
 
-fn blockIsFree(block: *const BlockHeader) bool {
-    return block.state == heap_geometry.block_state_free;
+fn takeSpan(start_class: usize, request: usize) ?u32 {
+    var class_index = start_class;
+    while (class_index < CLASS_COUNT) : (class_index += 1) {
+        var previous = NO_SPAN;
+        var current = class_heads[class_index];
+        while (current != NO_SPAN) {
+            if (spans[current].length >= request) {
+                if (previous == NO_SPAN) {
+                    class_heads[class_index] = spans[current].next_free;
+                } else {
+                    spans[previous].next_free = spans[current].next_free;
+                }
+                spans[current].next_free = NO_SPAN;
+                splitRemainder(current, @intCast(request));
+                spans[current].class_index = @intCast(start_class);
+                return current;
+            }
+            previous = current;
+            current = spans[current].next_free;
+        }
+    }
+    return null;
 }
 
-fn heapDataStartAddress() usize {
-    return @intFromPtr(heap_start) + ALLOCATION_BITMAP_BYTES;
+fn splitRemainder(id: u32, request: u32) void {
+    const length = spans[id].length;
+    const remainder = heap_geometry.splitRemainder(length, request, 0, GRANULE) orelse return;
+    const rest = createSpan(spans[id].offset + request, @intCast(remainder)) orelse return;
+    spans[id].length = request;
+    insertAfter(id, rest);
+    pushFree(rest);
 }
 
-fn heapByteCapacity() usize {
-    return @intFromPtr(heap_end) - @intFromPtr(heap_start);
+fn insertAfter(id: u32, rest: u32) void {
+    const next = spans[id].address_next;
+    spans[rest].address_prev = id;
+    spans[rest].address_next = next;
+    spans[id].address_next = rest;
+    if (next != NO_SPAN) spans[next].address_prev = rest;
 }
 
-fn heapDataCapacity() usize {
-    return heapByteCapacity() - ALLOCATION_BITMAP_BYTES;
-}
-
-fn allocationBitmap() *[ALLOCATION_BITMAP_BYTES]u8 {
-    return @ptrCast(heap_start);
-}
-
-fn allocationStartMarked(bit_index: usize) bool {
-    const mask = @as(u8, 1) << @as(u3, @truncate(bit_index));
-    return (allocationBitmap()[bit_index / 8] & mask) != 0;
-}
-
-fn setAllocationMarker(bit_index: usize, is_live: bool) void {
-    const byte = &allocationBitmap()[bit_index / 8];
-    const mask = @as(u8, 1) << @as(u3, @truncate(bit_index));
-    if (is_live) {
-        byte.* |= mask;
+fn unlinkAddress(id: u32) void {
+    const previous = spans[id].address_prev;
+    const next = spans[id].address_next;
+    if (previous == NO_SPAN) {
+        address_head = next;
     } else {
-        byte.* &= ~mask;
+        spans[previous].address_next = next;
     }
+    if (next != NO_SPAN) spans[next].address_prev = previous;
 }
 
-fn allocationMarkerIndex(payload_address: usize) ?usize {
-    return heap_geometry.allocationMarkerIndex(
-        payload_address,
-        heapDataStartAddress(),
-        heapDataCapacity(),
-        BLOCK_ALIGNMENT,
-    );
+fn freeSpan(id: u32) void {
+    var current = id;
+    spans[current].live = false;
+    spans[current].in_magazine = false;
+    if (spans[current].address_next != NO_SPAN) {
+        const next = spans[current].address_next;
+        if (!spans[next].live and !spans[next].in_magazine) {
+            unlinkFree(next);
+            spans[current].length += spans[next].length;
+            unlinkAddress(next);
+            recycleSpan(next);
+        }
+    }
+    if (spans[current].address_prev != NO_SPAN) {
+        const previous = spans[current].address_prev;
+        if (!spans[previous].live and !spans[previous].in_magazine) {
+            unlinkFree(previous);
+            spans[previous].length += spans[current].length;
+            unlinkAddress(current);
+            recycleSpan(current);
+            current = previous;
+        }
+    }
+    pushFree(current);
 }
 
-fn allocationBitIndex(payload_address: usize) usize {
-    return (payload_address - heapDataStartAddress()) / BLOCK_ALIGNMENT;
+fn findSpan(payload: usize) ?u32 {
+    if (payload < payload_base) return null;
+    const offset = payload - payload_base;
+    if (offset >= payload_bytes or offset > std.math.maxInt(u32)) return null;
+    var id = address_head;
+    while (id != NO_SPAN) {
+        if (spans[id].offset == offset) return id;
+        if (spans[id].offset > offset) return null;
+        id = spans[id].address_next;
+    }
+    return null;
+}
+
+fn allocationIsLive(payload: usize) bool {
+    const span_id = findSpan(payload) orelse return false;
+    return spans[span_id].live;
 }
 
 fn verifyAllocationStartGuards() void {
-    const allocation = kmalloc(64) orelse @panic("kernel heap allocation guard self-check failed");
-    const payload_address = @intFromPtr(allocation);
-    const bit_index = allocationBitIndex(payload_address);
-
-    kfree(@ptrFromInt(payload_address + BLOCK_ALIGNMENT));
-    if (!allocationStartMarked(bit_index)) {
-        @panic("kernel heap accepted an interior free");
-    }
-
+    const allocation = allocateLocked(64) orelse @panic("kernel heap allocation guard self-check failed");
+    const payload = @intFromPtr(allocation);
+    kfree(@ptrFromInt(payload + GRANULE));
+    if (!allocationIsLive(payload)) @panic("kernel heap accepted an interior free");
     kfree(allocation);
-    if (allocationStartMarked(bit_index)) {
-        @panic("kernel heap retained a released allocation marker");
-    }
-
+    if (allocationIsLive(payload)) @panic("kernel heap retained a released allocation marker");
     kfree(allocation);
-    if (allocationStartMarked(bit_index)) {
-        @panic("kernel heap accepted a duplicate free");
-    }
+    if (allocationIsLive(payload)) @panic("kernel heap accepted a duplicate free");
 }

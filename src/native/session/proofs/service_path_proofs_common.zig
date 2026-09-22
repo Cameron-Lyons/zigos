@@ -44,7 +44,7 @@ pub fn createBootedServiceTask(
     const image = try generated_image_fixtures.serviceImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, tick, session_task_id),
+        .header = component_port.makeHeader(.task_create, session_task_id),
         .authority_capability_id = session_authority_id,
         .request = .{
             .owner = owner,
@@ -70,7 +70,12 @@ pub fn createBootedServiceTask(
             .userspace_image = &image,
         },
     };
-    const result = syscall_surface.dispatch(kernel_port, session_task_id, tick, request.header.operation, @intFromPtr(&request),
+    const result = syscall_surface.dispatch(
+        kernel_port,
+        session_task_id,
+        tick,
+        request.header.operation,
+        @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.TaskDescriptor),
     );
@@ -92,7 +97,7 @@ pub fn createBootedProbeTask(
     const image = try generated_image_fixtures.appImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, tick, session_task_id),
+        .header = component_port.makeHeader(.task_create, session_task_id),
         .authority_capability_id = session_authority_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = owner_serial },
@@ -118,7 +123,12 @@ pub fn createBootedProbeTask(
             .userspace_image = &image,
         },
     };
-    const result = syscall_surface.dispatch(kernel_port, session_task_id, tick, request.header.operation, @intFromPtr(&request),
+    const result = syscall_surface.dispatch(
+        kernel_port,
+        session_task_id,
+        tick,
+        request.header.operation,
+        @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.TaskDescriptor),
     );
@@ -135,7 +145,7 @@ pub fn resourceQuery(
 ) !abi.ResourceDescriptor {
     var response = std.mem.zeroes(abi.ResourceDescriptor);
     const request = component_port.ResourceQueryRequest{
-        .header = component_port.makeHeader(.resource_query, tick, caller_task_id),
+        .header = component_port.makeHeader(.resource_query, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
@@ -153,7 +163,7 @@ pub fn accountingQuery(
 ) !abi.AccountingDescriptor {
     var response = std.mem.zeroes(abi.AccountingDescriptor);
     const request = component_port.AccountingQueryRequest{
-        .header = component_port.makeHeader(.accounting_query, tick, caller_task_id),
+        .header = component_port.makeHeader(.accounting_query, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
@@ -223,7 +233,7 @@ pub fn endpointCreateResultIntoWithFlags(
     response: *abi.EndpointCreateResponse,
 ) syscall_surface.DispatchResult {
     const request = component_port.EndpointCreateRequest{
-        .header = component_port.makeHeader(.endpoint_create, tick, caller_task_id),
+        .header = component_port.makeHeader(.endpoint_create, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = owner_task_id,
         .label = label,
@@ -242,7 +252,7 @@ pub fn expectEndpointConnect(
 ) !abi.EndpointDescriptor {
     var response = std.mem.zeroes(abi.EndpointDescriptor);
     const request = component_port.EndpointConnectRequest{
-        .header = component_port.makeHeader(.endpoint_connect, tick, caller_task_id),
+        .header = component_port.makeHeader(.endpoint_connect, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
         .peer_endpoint_id = peer_endpoint_id,
@@ -260,7 +270,7 @@ pub fn expectEndpointSend(
     tick: u64,
 ) !void {
     const request = component_port.EndpointSendRequest{
-        .header = component_port.makeHeader(.endpoint_send, tick, caller_task_id),
+        .header = component_port.makeHeader(.endpoint_send, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
     };
@@ -277,7 +287,7 @@ pub fn expectEndpointRecv(
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
     const request = component_port.EndpointRecvRequest{
-        .header = component_port.makeHeader(.endpoint_recv, tick, caller_task_id),
+        .header = component_port.makeHeader(.endpoint_recv, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = caller_task_id,
         .payload_out = &received.payload,
@@ -327,7 +337,7 @@ pub fn sharedMemoryCreateResultInto(
     response: *abi.SharedMemoryCreateResponse,
 ) syscall_surface.DispatchResult {
     const request = component_port.SharedMemoryCreateRequest{
-        .header = component_port.makeHeader(.shared_memory_create, tick, caller_task_id),
+        .header = component_port.makeHeader(.shared_memory_create, caller_task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = owner_task_id,
         .size_bytes = size_bytes,
@@ -378,7 +388,7 @@ pub fn sharedMemoryMapResultInto(
     response: *abi.SharedMemoryDescriptor,
 ) syscall_surface.DispatchResult {
     const request = component_port.SharedMemoryMapRequest{
-        .header = component_port.makeHeader(.shared_memory_map, tick, caller_task_id),
+        .header = component_port.makeHeader(.shared_memory_map, caller_task_id),
         .shared_memory_capability_id = shared_memory_capability_id,
         .task_id = task_id,
     };
@@ -393,7 +403,7 @@ pub fn expectSharedMemoryRevoke(
 ) !abi.SharedMemoryDescriptor {
     var response = std.mem.zeroes(abi.SharedMemoryDescriptor);
     const request = component_port.SharedMemoryRevokeRequest{
-        .header = component_port.makeHeader(.shared_memory_revoke, tick, caller_task_id),
+        .header = component_port.makeHeader(.shared_memory_revoke, caller_task_id),
         .shared_memory_capability_id = shared_memory_capability_id,
     };
     const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.SharedMemoryDescriptor));
@@ -431,7 +441,7 @@ pub fn deviceDescribeResultInto(
     response: *abi.DeviceDescriptor,
 ) syscall_surface.DispatchResult {
     const request = component_port.DeviceDescribeRequest{
-        .header = component_port.makeHeader(.device_describe, tick, caller_task_id),
+        .header = component_port.makeHeader(.device_describe, caller_task_id),
         .device_capability_id = device_capability_id,
     };
     return syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.DeviceDescriptor));

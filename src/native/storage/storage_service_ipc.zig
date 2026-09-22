@@ -334,13 +334,19 @@ fn syscallEndpointSend(
     now_ticks: u64,
 ) Error!void {
     var request = component_port.EndpointSendRequest{
-        .header = component_port.makeHeader(.endpoint_send, correlation_id, caller_task_id),
+        .header = component_port.makeHeader(.endpoint_send, caller_task_id),
+        .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
         .attached_capability_id = attached_capability_id,
         .move_attached_capability = move_attached_capability,
     };
-    const result = syscall_surface.dispatch(port, caller_task_id, now_ticks, request.header.operation, @intFromPtr(&request),
+    const result = syscall_surface.dispatch(
+        port,
+        caller_task_id,
+        now_ticks,
+        request.header.operation,
+        @intFromPtr(&request),
         0,
         0,
     );
@@ -356,13 +362,18 @@ fn syscallEndpointRecv(
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
     var request = component_port.EndpointRecvRequest{
-        .header = component_port.makeHeader(.endpoint_recv, 0, caller_task_id),
+        .header = component_port.makeHeader(.endpoint_recv, caller_task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = caller_task_id,
         .payload_out = &received.payload,
         .attached_capability_out = &received.attached_capability,
     };
-    const result = syscall_surface.dispatch(port, caller_task_id, now_ticks, request.header.operation, @intFromPtr(&request),
+    const result = syscall_surface.dispatch(
+        port,
+        caller_task_id,
+        now_ticks,
+        request.header.operation,
+        @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointRecvResponse),
     );
@@ -485,7 +496,7 @@ const UserspaceStorageHarness = struct {
         const storage_bundle_id = service_catalog.bundleIdForServiceClass(.storage_object).?;
         const storage_image = try generated_image_fixtures.storageServiceImage();
         const storage_task = try self.port.taskCreate(.{
-            .header = component_port.makeHeader(.task_create, STORAGE_TASK_CREATE_CORRELATION_ID, self.session_task_id),
+            .header = component_port.makeHeader(.task_create, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .request = .{
                 .owner = self.storage_owner,
@@ -510,7 +521,7 @@ const UserspaceStorageHarness = struct {
 
         const client_image = try generated_image_fixtures.serviceClientImage();
         const client_task = try self.port.taskCreate(.{
-            .header = component_port.makeHeader(.task_create, CLIENT_TASK_CREATE_CORRELATION_ID, self.session_task_id),
+            .header = component_port.makeHeader(.task_create, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .request = .{
                 .owner = self.client_owner,
@@ -545,7 +556,7 @@ const UserspaceStorageHarness = struct {
         self.storage.checkpoint_enabled = false;
 
         const storage_endpoint = try self.port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, STORAGE_ENDPOINT_CREATE_CORRELATION_ID, self.session_task_id),
+            .header = component_port.makeHeader(.endpoint_create, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .owner_task_id = self.storage_task_id,
             .label = "zigos.object.workspace",
@@ -558,7 +569,7 @@ const UserspaceStorageHarness = struct {
         self.storage_endpoint_capability_id = storage_endpoint.capability_id;
 
         const client_endpoint = try self.port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, CLIENT_ENDPOINT_CREATE_CORRELATION_ID, self.session_task_id),
+            .header = component_port.makeHeader(.endpoint_create, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .owner_task_id = self.client_task_id,
             .label = "storage-client",
@@ -567,7 +578,7 @@ const UserspaceStorageHarness = struct {
         self.client_endpoint_capability_id = client_endpoint.capability_id;
 
         _ = try self.port.endpointConnect(.{
-            .header = component_port.makeHeader(.endpoint_connect, ENDPOINT_CONNECT_CORRELATION_ID, self.client_task_id),
+            .header = component_port.makeHeader(.endpoint_connect, self.client_task_id),
             .endpoint_capability_id = self.client_endpoint_capability_id,
             .peer_endpoint_capability_id = self.storage_endpoint_capability_id,
             .peer_endpoint_id = storage_endpoint.endpoint.endpoint_id,

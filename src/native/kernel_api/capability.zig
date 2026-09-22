@@ -54,6 +54,7 @@ pub const TableConfig = struct {
 pub const CapabilityTargetKind = capability_rights.CapabilityTargetKind;
 pub const CapabilityTarget = capability_rights.CapabilityTarget;
 pub const CapabilityRight = capability_rights.CapabilityRight;
+pub const isKernelRight = capability_rights.isKernelRight;
 pub const CapabilityRights = capability_rights.CapabilityRights;
 pub const DIRECT_RIGHT_MASKS = capability_rights.DIRECT_RIGHT_MASKS;
 pub const bitsContainRight = capability_rights.bitsContainRight;

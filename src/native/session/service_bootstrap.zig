@@ -121,7 +121,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
     };
 
     const endpoint = try request.kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, request.entry.boot_correlation_base + 2, service_task_id),
+        .header = component_port.makeHeader(.endpoint_create, service_task_id),
         .authority_capability_id = service_authority_capability_id,
         .owner_task_id = service_task_id,
         .label = request.entry.interface.name,

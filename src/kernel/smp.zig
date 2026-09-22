@@ -58,6 +58,12 @@ else
     };
 
 pub const MAX_CPUS: usize = 8;
+
+comptime {
+    if (MAX_CPUS != @import("memory/memory.zig").MAGAZINE_CPUS) {
+        @compileError("per-CPU heap magazines must cover every scheduler CPU");
+    }
+}
 pub const TLB_IPI_VECTOR: u8 = 0x70;
 pub const AP_STACK_BYTES: usize = 16 * 1024;
 pub const STARTS_APPLICATION_PROCESSORS = true;

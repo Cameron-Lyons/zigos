@@ -288,7 +288,7 @@ test "syscall surface dispatches typed task creation requests" {
     const syscall_test_image = try generated_image_fixtures.appImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, 77, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 9 },
@@ -365,7 +365,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
 
     const empty_queue_image = try generated_image_fixtures.appImage();
     const app_task = try test_kernel.port.taskCreate(.{
-        .header = component_port.makeHeader(.task_create, 88, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 10 },
@@ -388,7 +388,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
         },
     }, 6);
     const created = try test_kernel.port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 89, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.endpoint_create, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
         .owner_task_id = app_task.task_id,
         .label = "empty-queue",
@@ -399,7 +399,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
     var payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
     var attached_capability = std.mem.zeroes(abi.CapabilityDescriptor);
     var request = component_port.EndpointRecvRequest{
-        .header = component_port.makeHeader(.endpoint_recv, 90, app_task.task_id),
+        .header = component_port.makeHeader(.endpoint_recv, app_task.task_id),
         .endpoint_capability_id = created.capability_id,
         .receiver_task_id = app_task.task_id,
         .payload_out = &payload,
@@ -509,7 +509,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
     });
 
     const request = component_port.InputRecvRequest{
-        .header = component_port.makeHeader(.input_recv, 93, app_task.id),
+        .header = component_port.makeHeader(.input_recv, app_task.id),
         .input_capability_id = input_capability.id,
         .receiver_task_id = app_task.id,
     };
@@ -542,7 +542,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
     try std.testing.expectEqual(@as(usize, 2), receiver.polls);
 
     const wrong_capability_request = component_port.InputRecvRequest{
-        .header = component_port.makeHeader(.input_recv, 94, app_task.id),
+        .header = component_port.makeHeader(.input_recv, app_task.id),
         .input_capability_id = test_kernel.authority_capability_id,
         .receiver_task_id = app_task.id,
     };
@@ -625,7 +625,7 @@ test "syscall surface copies bounded presentations through task-scoped authority
     presentation.buffer_object_id = 12;
     presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
     const request = component_port.SurfacePresentRequest{
-        .header = component_port.makeHeader(.surface_present, 95, app_task.id),
+        .header = component_port.makeHeader(.surface_present, app_task.id),
         .presentation_capability_id = presentation_capability.id,
         .presenter_task_id = app_task.id,
         .surface_id = presentation.surface_id,
@@ -739,7 +739,7 @@ test "syscall surface denies task creation without signed userspace launch prove
 
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, 91, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 12 },
@@ -773,7 +773,7 @@ test "syscall surface denies task creation without signed userspace launch prove
     const unsigned_image = try generated_image_fixtures.appImage();
     var unsigned_response = std.mem.zeroes(abi.TaskDescriptor);
     const unsigned_request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, 92, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 13 },
@@ -815,7 +815,6 @@ test "syscall surface rejects unsupported native operations" {
 
     const request = abi.RequestHeader{
         .operation = 0xFFFF,
-        .correlation_id = 91,
         .subject_task_id = test_kernel.session_task_id,
     };
     const result = dispatchRequest(&test_kernel.port, test_kernel.session_task_id, 9, @intFromPtr(&request), 0, 0);
@@ -825,15 +824,14 @@ test "syscall surface rejects unsupported native operations" {
     try std.testing.expectEqual(@as(u32, 0), result.bytes_written);
 }
 
-test "syscall surface ignores request-header ABI version because the ABI is bound at spawn" {
+test "syscall surface uses the published caller instead of the request header subject" {
     var test_kernel = TestKernel{};
     try test_kernel.init();
 
     var request = component_port.TimeQueryRequest{
-        .header = component_port.makeHeader(.time_query, 911, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.time_query, 1),
         .authority_capability_id = test_kernel.authority_capability_id,
     };
-    request.header.version = abi.ABI_VERSION + 1;
     var response = std.mem.zeroes(abi.TimeQueryResponse);
     const result = dispatchRequest(
         &test_kernel.port,
@@ -855,7 +853,7 @@ test "syscall surface rejects invalid request and response pointer ranges" {
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, low_request.status);
 
     const request = component_port.TimeQueryRequest{
-        .header = component_port.makeHeader(.time_query, 92, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.time_query, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
     };
     const bad_response = dispatchRequest(
@@ -876,7 +874,7 @@ test "syscall surface binds the caller from the trap, not the request header" {
     const spoofed_subject_image = try generated_image_fixtures.appImage();
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, 92, test_kernel.session_task_id + 1),
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id + 1),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 99 },
@@ -924,7 +922,7 @@ test "syscall surface binds the caller from the trap, not the request header" {
     try std.testing.expectEqual(abi.DenialReason.scope_violation, zero_caller_result.denial_reason);
 
     const zero_subject_request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, 93, 0),
+        .header = component_port.makeHeader(.task_create, 0),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = request.request,
     };
@@ -948,7 +946,7 @@ test "syscall surface validates and bounds embedded user buffers" {
     const bad_image_ptr: *const task_runtime.ExecutableImageSpec = @ptrFromInt(0x1000);
     var response = std.mem.zeroes(abi.TaskDescriptor);
     const bad_image_request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, 93, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 100 },
@@ -976,7 +974,7 @@ test "syscall surface validates and bounds embedded user buffers" {
     const valid_image = try generated_image_fixtures.appImage();
     const invalid_source_ptr: [*]const u8 = @ptrFromInt(0x1000);
     const bad_source_request = component_port.TaskCreateRequest{
-        .header = component_port.makeHeader(.task_create, 94, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.task_create, test_kernel.session_task_id),
         .authority_capability_id = test_kernel.authority_capability_id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 101 },
@@ -1024,7 +1022,7 @@ test "syscall surface validates and bounds embedded user buffers" {
 
     const oversized_payload = [_]u8{0xAB} ** (endpoint.MAX_MESSAGE_BYTES + 1);
     const send_request = component_port.EndpointSendRequest{
-        .header = component_port.makeHeader(.endpoint_send, 94, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.endpoint_send, test_kernel.session_task_id),
         .endpoint_capability_id = test_kernel.authority_capability_id,
         .payload = oversized_payload[0..],
     };
@@ -1040,7 +1038,7 @@ test "syscall surface validates and bounds embedded user buffers" {
 
     const invalid_payload_ptr: [*]const u8 = @ptrFromInt(0x1000);
     const invalid_payload_request = component_port.EndpointSendRequest{
-        .header = component_port.makeHeader(.endpoint_send, 95, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.endpoint_send, test_kernel.session_task_id),
         .endpoint_capability_id = test_kernel.authority_capability_id,
         .payload = invalid_payload_ptr[0..1],
     };
@@ -1124,7 +1122,7 @@ test "syscall surface dispatches typed PCI device broker requests" {
     try std.testing.expect(device_broker.publishPciController(0x1F001));
 
     const describe_request = component_port.DeviceDescribeRequest{
-        .header = component_port.makeHeader(.device_describe, 101, test_kernel.session_task_id),
+        .header = component_port.makeHeader(.device_describe, test_kernel.session_task_id),
         .device_capability_id = device_capability.id,
     };
     var describe_response = std.mem.zeroes(abi.DeviceDescriptor);

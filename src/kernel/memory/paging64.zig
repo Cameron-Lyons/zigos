@@ -97,7 +97,7 @@ pub const UserAddressSpaceCreateError = error{
     ProcessContextExhausted,
 };
 
-pub const MANAGED_PHYSICAL_BYTES: frame_allocator.PhysicalAddress = 64 * 1024 * 1024 * 1024;
+pub const MANAGED_PHYSICAL_BYTES: frame_allocator.PhysicalAddress = 512 * 1024 * 1024 * 1024;
 const LARGE_2M_PAGE_SIZE: frame_allocator.PhysicalAddress = 1 << PAGE_DIRECTORY_SHIFT;
 const LARGE_1G_PAGE_SIZE: frame_allocator.PhysicalAddress = 1 << PDPT_SHIFT;
 const PAGE_DIRECTORY_COVERAGE_BYTES = LARGE_1G_PAGE_SIZE;
@@ -1291,6 +1291,9 @@ comptime {
     {
         @compileError("bootstrap page-table storage must occupy whole page-aligned frames");
     }
+    if (@sizeOf(BootstrapPageTables) + PhysicalFrameAllocator.storage_bytes + (2 * PAGE_SIZE) >= memory.HEAP_SIZE - (8 * 1024 * 1024)) {
+        @compileError("early frame state leaves no kernel heap payload");
+    }
     if (MANAGED_PHYSICAL_BYTES > virtual_layout.PHYSICAL_WINDOW_CAPACITY_BYTES) {
         @compileError("the managed physical aperture exceeds the direct-map window");
     }
@@ -1490,10 +1493,10 @@ test "general single-frame allocation caches an exhausted high zone" {
     try std.testing.expect(!high_zone_has_free_frames);
 }
 
-test "direct hierarchy covers the full 64 GiB physical aperture" {
-    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 64 * 1024 * 1024 * 1024), MANAGED_PHYSICAL_BYTES);
-    try std.testing.expectEqual(@as(usize, 64), DIRECT_MAP_PDPT_ENTRIES);
-    try std.testing.expectEqual(@as(usize, 63), DIRECT_MAP_1G_LEAF_COUNT);
+test "direct hierarchy covers the full 512 GiB physical aperture" {
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 512 * 1024 * 1024 * 1024), MANAGED_PHYSICAL_BYTES);
+    try std.testing.expectEqual(@as(usize, 512), DIRECT_MAP_PDPT_ENTRIES);
+    try std.testing.expectEqual(@as(usize, 511), DIRECT_MAP_1G_LEAF_COUNT);
     try std.testing.expectEqual(@as(usize, 1), DIRECT_MAP_PAGE_DIRECTORY_COUNT);
     try std.testing.expectEqual(@as(usize, table64.TABLE_ENTRIES), IDENTITY_DIRECTORY_ENTRIES);
 }

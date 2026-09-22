@@ -4,29 +4,17 @@ pub const block_alignment: usize = 16;
 pub const size_classes = [_]usize{ 32, 64, 128, 256, 512, 1024, 2048, 4096 };
 pub const free_list_class_count: usize = size_classes.len + 1;
 
-pub const BlockHeader = struct {
-    size: usize,
-    state: u64,
-    next: ?*@This(),
-    prev: ?*@This(),
-};
-
-pub const FreeLinks = struct {
-    next: ?*BlockHeader,
-    prev: ?*BlockHeader,
-};
-
 pub const AlignedRange = struct {
     start: usize,
     end: usize,
 };
 
-pub const minimum_free_data_size: usize = @sizeOf(FreeLinks);
-pub const block_state_allocated: u64 = 0x4c49_5645_424c_4f43;
-pub const block_state_free: u64 = 0x4652_4545_424c_4f43;
+pub const granule: usize = 32;
+pub const payload_has_no_header = true;
+pub const minimum_free_data_size: usize = granule;
 
 pub fn freeListIndex(size: usize, large_block_threshold: usize) usize {
-    _ = large_block_threshold;
+    if (size > large_block_threshold) return size_classes.len;
     return sizeClassIndex(size);
 }
 
@@ -96,19 +84,19 @@ test "heap sizes align without overflow" {
 }
 
 test "heap block splitting accepts the exact reusable tail threshold" {
-    const header_size = @sizeOf(BlockHeader);
+    const header_size: usize = 0;
 
     try std.testing.expectEqual(
         @as(?usize, null),
-        splitRemainder(63, 16, header_size, minimum_free_data_size),
-    );
-    try std.testing.expectEqual(
-        @as(?usize, 16),
-        splitRemainder(64, 16, header_size, minimum_free_data_size),
+        splitRemainder(63, 32, header_size, minimum_free_data_size),
     );
     try std.testing.expectEqual(
         @as(?usize, 32),
-        splitRemainder(80, 16, header_size, minimum_free_data_size),
+        splitRemainder(64, 32, header_size, minimum_free_data_size),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 48),
+        splitRemainder(80, 32, header_size, minimum_free_data_size),
     );
     try std.testing.expectEqual(
         @as(?usize, null),
@@ -134,12 +122,11 @@ test "aligned prefix claims are bounded and overflow safe" {
     );
 }
 
-test "heap metadata preserves aligned payloads and holds free-list links" {
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(BlockHeader));
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(FreeLinks));
-    try std.testing.expectEqual(@as(usize, 0), @sizeOf(BlockHeader) % block_alignment);
-    try std.testing.expect(minimum_free_data_size >= @sizeOf(FreeLinks));
-    try std.testing.expect(block_alignment >= @alignOf(FreeLinks));
+test "heap metadata stays outside the payload" {
+    try std.testing.expect(payload_has_no_header);
+    try std.testing.expectEqual(@as(usize, 32), granule);
+    try std.testing.expectEqual(@as(usize, 0), granule % block_alignment);
+    try std.testing.expect(minimum_free_data_size >= granule);
 }
 
 test "heap allocation markers accept only aligned arena addresses" {
@@ -159,6 +146,7 @@ test "heap free-list classes round small blocks onto exact size classes" {
     try std.testing.expectEqual(@as(usize, 1), freeListIndex(33, page_size));
     try std.testing.expectEqual(@as(usize, 7), freeListIndex(page_size, page_size));
     try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(page_size + 1, page_size));
+    try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(128, 64));
     try std.testing.expectEqual(@as(?usize, 32), sizeClassBytes(0));
     try std.testing.expectEqual(@as(?usize, null), sizeClassBytes(size_classes.len));
     try std.testing.expectEqual(size_classes.len + 1, free_list_class_count);

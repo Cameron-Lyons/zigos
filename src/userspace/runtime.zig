@@ -53,6 +53,7 @@ const EndpointConnectRequest = extern struct {
 
 const EndpointSendRequest = struct {
     header: abi.RequestHeader,
+    correlation_id: u64 = 0,
     endpoint_capability_id: u64,
     payload: []const u8,
     attached_capability_id: ?u64 = null,
@@ -413,7 +414,7 @@ fn invalidSyscallPointerStatus() abi.SyscallStatus {
 fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = abi.TimeQueryResponse{ .now_ticks = 0 };
     var request = TimeQueryRequest{
-        .header = makeHeader(.time_query, nextCorrelationId(), task_id),
+        .header = makeHeader(.time_query, task_id),
         .authority_capability_id = authority_capability_id,
     };
     if (trapCall(&request, &response) != .success) return false;
@@ -427,7 +428,7 @@ fn parkUntilEvent() void {
     if (authority == 0 or task_id == 0) return;
     var response = std.mem.zeroes(abi.BoolResponse);
     var request = WaitRequest{
-        .header = makeHeader(.wait, nextCorrelationId(), task_id),
+        .header = makeHeader(.wait, task_id),
         .authority_capability_id = authority,
     };
     _ = trapCall(&request, &response);
@@ -436,7 +437,7 @@ fn parkUntilEvent() void {
 fn queryResource(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = std.mem.zeroes(abi.ResourceDescriptor);
     var request = ResourceQueryRequest{
-        .header = makeHeader(.resource_query, nextCorrelationId(), task_id),
+        .header = makeHeader(.resource_query, task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
@@ -448,7 +449,7 @@ fn queryResource(authority_capability_id: u64, task_id: u64, mask: *mailbox.Reso
 fn queryAccounting(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = std.mem.zeroes(abi.AccountingDescriptor);
     var request = AccountingQueryRequest{
-        .header = makeHeader(.accounting_query, nextCorrelationId(), task_id),
+        .header = makeHeader(.accounting_query, task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
@@ -466,7 +467,7 @@ fn endpointCreate(
 ) ?abi.EndpointCreateResponse {
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
     var request = EndpointCreateRequest{
-        .header = makeHeader(.endpoint_create, nextCorrelationId(), task_id),
+        .header = makeHeader(.endpoint_create, task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = task_id,
         .label = label,
@@ -496,7 +497,7 @@ fn endpointConnect(
 ) ?abi.EndpointDescriptor {
     var response = std.mem.zeroes(abi.EndpointDescriptor);
     var request = EndpointConnectRequest{
-        .header = makeHeader(.endpoint_connect, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .header = makeHeader(.endpoint_connect, zigos_userspace_bootstrap.task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
         .peer_endpoint_id = peer_endpoint_id,
@@ -508,7 +509,8 @@ fn endpointConnect(
 
 fn endpointSend(endpoint_capability_id: u64, payload: []const u8) bool {
     var request = EndpointSendRequest{
-        .header = makeHeader(.endpoint_send, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
+        .correlation_id = nextCorrelationId(),
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
     };
@@ -519,7 +521,7 @@ fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResu
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
     var request = EndpointRecvRequest{
-        .header = makeHeader(.endpoint_recv, nextCorrelationId(), task_id),
+        .header = makeHeader(.endpoint_recv, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = task_id,
         .payload_out = &received.payload,
@@ -535,7 +537,7 @@ fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResu
 fn inputRecv(input_capability_id: u64, task_id: u64) ?abi.InputRecvResponse {
     var response = std.mem.zeroes(abi.InputRecvResponse);
     var request = InputRecvRequest{
-        .header = makeHeader(.input_recv, nextCorrelationId(), task_id),
+        .header = makeHeader(.input_recv, task_id),
         .input_capability_id = input_capability_id,
         .receiver_task_id = task_id,
     };
@@ -555,7 +557,7 @@ fn surfacePresent(
 ) SurfacePresentOutcome {
     var response = std.mem.zeroes(abi.BoolResponse);
     var request = SurfacePresentRequest{
-        .header = makeHeader(.surface_present, nextCorrelationId(), task_id),
+        .header = makeHeader(.surface_present, task_id),
         .presentation_capability_id = presentation_capability_id,
         .presenter_task_id = task_id,
         .surface_id = presentation.surface_id,
@@ -711,12 +713,9 @@ fn trapCallNoResponse(request: anytype) abi.SyscallStatus {
     return freestanding_syscall.call(@enumFromInt(request.header.operation), @intFromPtr(request), 0, 0).status;
 }
 
-fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
+fn makeHeader(operation: abi.NativeOperation, subject_task_id: u64) abi.RequestHeader {
     return .{
-        .version = abi.ABI_VERSION,
         .operation = abi.opcode(operation),
-        .flags = 0,
-        .correlation_id = correlation_id,
         .subject_task_id = subject_task_id,
     };
 }

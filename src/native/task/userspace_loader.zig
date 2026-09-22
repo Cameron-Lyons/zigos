@@ -307,7 +307,6 @@ pub const Catalog = struct {
         return authority.port.taskCreate(.{
             .header = component_port.makeHeader(
                 .task_create,
-                authority.correlation_id,
                 authority.controller_task_id,
             ),
             .authority_capability_id = authority.authority_capability_id,

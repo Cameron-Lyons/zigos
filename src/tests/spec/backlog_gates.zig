@@ -1033,9 +1033,9 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expectEqual(@as(usize, 8), kernel_paging.PRECISE_IDENTITY_PAGE_TABLES);
     try std.testing.expectEqual(@as(u32, 16 * 1024 * 1024), kernel_paging.PRECISE_IDENTITY_BYTES);
     try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), kernel_paging.LOW_IDENTITY_PHYSICAL_LIMIT);
-    try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024 * 1024), kernel_paging.MANAGED_PHYSICAL_BYTES);
-    try std.testing.expectEqual(@as(usize, 64), kernel_paging.DIRECT_MAP_PDPT_ENTRIES);
-    try std.testing.expectEqual(@as(usize, 63), kernel_paging.DIRECT_MAP_1G_LEAF_COUNT);
+    try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024 * 1024), kernel_paging.MANAGED_PHYSICAL_BYTES);
+    try std.testing.expectEqual(@as(usize, 512), kernel_paging.DIRECT_MAP_PDPT_ENTRIES);
+    try std.testing.expectEqual(@as(usize, 511), kernel_paging.DIRECT_MAP_1G_LEAF_COUNT);
     try std.testing.expectEqual(@as(usize, 1), kernel_paging.DIRECT_MAP_PAGE_DIRECTORY_COUNT);
     try std.testing.expect(kernel_mmio_windows.validLayout(&kernel_mmio_windows.all));
     try std.testing.expect(

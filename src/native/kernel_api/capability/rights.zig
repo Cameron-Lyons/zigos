@@ -41,9 +41,11 @@ pub const CapabilityRight = enum(u8) {
     time_query,
     resource_query,
     accounting_query,
+    device_use,
+    process_control,
+    surface_present,
     object_read,
     object_write,
-    device_use,
     clipboard_read,
     clipboard_write,
     sensor_read,
@@ -55,8 +57,6 @@ pub const CapabilityRight = enum(u8) {
     contacts_read,
     screen_capture,
     notification_post,
-    process_control,
-    surface_present,
 
     pub inline fn mask(self: CapabilityRight) u64 {
         return @as(u64, 1) << @intCast(@intFromEnum(self));
@@ -64,6 +64,12 @@ pub const CapabilityRight = enum(u8) {
 };
 
 pub const DIRECT_RIGHT_MASKS = true;
+
+pub const first_product_right: CapabilityRight = .object_read;
+
+pub fn isKernelRight(right: CapabilityRight) bool {
+    return @intFromEnum(right) < @intFromEnum(first_product_right);
+}
 
 pub inline fn bitsContainRight(bits: u64, right: CapabilityRight) bool {
     return bits & right.mask() != 0;
@@ -89,9 +95,11 @@ const RightsBits = packed struct(u64) {
     time_query: bool = false,
     resource_query: bool = false,
     accounting_query: bool = false,
+    device_use: bool = false,
+    process_control: bool = false,
+    surface_present: bool = false,
     object_read: bool = false,
     object_write: bool = false,
-    device_use: bool = false,
     clipboard_read: bool = false,
     clipboard_write: bool = false,
     sensor_read: bool = false,
@@ -103,8 +111,6 @@ const RightsBits = packed struct(u64) {
     contacts_read: bool = false,
     screen_capture: bool = false,
     notification_post: bool = false,
-    process_control: bool = false,
-    surface_present: bool = false,
     _reserved: u29 = 0,
 };
 
