@@ -611,7 +611,7 @@ pub const Feature = enum(u16) {
     userspace_i225_dataplane,
     userspace_xhci_dataplane,
     userspace_gop_dataplane,
-    six_address_spaces_pku,
+    eight_address_spaces_pku,
     efi_only_production_boot,
     checkpoint_only_cold_load,
 };
@@ -6464,7 +6464,7 @@ fn fill2026Floor(features: *[feature_count]bool) void {
     features[@intFromEnum(Feature.userspace_i225_dataplane)] = contract_2026.floor.userspace_i225_dataplane;
     features[@intFromEnum(Feature.userspace_xhci_dataplane)] = contract_2026.floor.userspace_xhci_dataplane;
     features[@intFromEnum(Feature.userspace_gop_dataplane)] = contract_2026.floor.userspace_gop_dataplane;
-    features[@intFromEnum(Feature.six_address_spaces_pku)] = contract_2026.floor.six_address_spaces;
+    features[@intFromEnum(Feature.eight_address_spaces_pku)] = contract_2026.floor.eight_address_spaces;
     features[@intFromEnum(Feature.efi_only_production_boot)] = true;
     features[@intFromEnum(Feature.checkpoint_only_cold_load)] = contract_2026.floor.checkpoint_only_cold_load;
 }
@@ -7648,7 +7648,7 @@ test "OS contract keeps the 2026 floor satisfied" {
     try std.testing.expect(checklist.satisfied(.userspace_i225_dataplane));
     try std.testing.expect(checklist.satisfied(.userspace_xhci_dataplane));
     try std.testing.expect(checklist.satisfied(.userspace_gop_dataplane));
-    try std.testing.expect(checklist.satisfied(.six_address_spaces_pku));
+    try std.testing.expect(checklist.satisfied(.eight_address_spaces_pku));
     try std.testing.expect(checklist.satisfied(.efi_only_production_boot));
     try std.testing.expect(checklist.satisfied(.checkpoint_only_cold_load));
     try std.testing.expect(checklist.complete());

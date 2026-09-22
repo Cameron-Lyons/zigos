@@ -384,6 +384,14 @@ pub const operations = [_]Descriptor{
     },
 };
 
+comptime {
+    for (operations) |declaration| {
+        if (!capability.isKernelRight(declaration.required_right)) {
+            @compileError("syscall authorization must use a kernel right");
+        }
+    }
+}
+
 pub fn declarationFor(comptime operation: abi.NativeOperation) Descriptor {
     inline for (operations) |declaration| {
         if (declaration.operation == operation) return declaration;

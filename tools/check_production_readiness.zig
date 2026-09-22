@@ -2080,6 +2080,17 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, syscall_entry_source, "xorq %rdi") != null) {
         try common.addError(errors, allocator, "legacy syscall entry must keep the userspace request pointer in %rdi", .{});
     }
+    const scheduler_source = try common.readFileAlloc(allocator, io, "src/native/task/userspace_scheduler.zig", common.source_file_max_bytes);
+    const forbidden_scheduler_imports = [_][]const u8{
+        "policy/manifest.zig",
+        "session/service_catalog.zig",
+        "xhci_driver_task.zig",
+    };
+    for (forbidden_scheduler_imports) |snippet| {
+        if (std.mem.indexOf(u8, scheduler_source, snippet) != null) {
+            try common.addError(errors, allocator, "userspace scheduler must not import {s}", .{snippet});
+        }
+    }
     const required_sysret_gdt_snippets = [_][]const u8{
         "USER_DATA_SEG: u16 = 0x18",
         "USER_CODE_SEG: u16 = 0x20",
@@ -2235,12 +2246,12 @@ fn validateNuc11tnki5KernelProofSources(
         snippet: []const u8,
     }{
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.input_recv)" },
-        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "mailbox_ptr.input_capability_id" },
+        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "mailbox.input_capability_id = update.authorities.input_capability_id" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_disposition" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_ui_revision" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "outcome == .wait_for_event" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "executionRemainsReady(outcome)" },
-        .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "ui_revision > slot.last_ui_state_revision" },
+        .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "ui_revision > accounting.last_ui_state_revision" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const INPUT_EVENTS_PER_DISPATCH: usize = 8" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput()" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = ".wait_for_event" },
@@ -3836,7 +3847,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 6",
+        "pub const ABI_VERSION: u16 = 7",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -3940,7 +3951,7 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user slice copies enforce source and destination bounds" },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "if (request.payload.len != 0 and !dispatch.validateUserRange(" },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks)" },
-        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "ipc_ring.push(peer.data_ring, payload)" },
+        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "ipc_ring.pushRecord(peer.data_ring, record)" },
         .{ .path = endpoint_path, .source = endpoint_source, .snippet = "x86.allowSupervisorUserMemory()" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
     };

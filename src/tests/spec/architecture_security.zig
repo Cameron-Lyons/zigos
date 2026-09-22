@@ -262,7 +262,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 6), abi.ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 7), abi.ABI_VERSION);
     const storage_interface_id = typed_component_abi.interfaceIdForService(.storage_object);
     try registry.register(55, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
     const connection = try registry.connect(storage_interface_id);
@@ -604,7 +604,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     try runtime.grantCapability(session_task.id, authority.id);
 
     try std.testing.expectError(native_kernel.Error.UserspaceLaunchRequired, port.taskCreate(.{
-        .header = component_port.makeHeader(.task_create, 1, session_task.id),
+        .header = component_port.makeHeader(.task_create, session_task.id),
         .authority_capability_id = authority.id,
         .request = .{
             .owner = spec_support.service(3),
@@ -657,7 +657,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     try std.testing.expect(abi.taskFlagsHas(launched.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
     try std.testing.expect(runtime.find(launched.task_id).?.hasLoadedExecutable());
     const launched_authority = try port.capabilityDerive(.{
-        .header = component_port.makeHeader(.capability_derive, 3, session_task.id),
+        .header = component_port.makeHeader(.capability_derive, session_task.id),
         .request = .{
             .parent_capability_id = authority.id,
             .holder = runtime.find(launched.task_id).?.owner,
@@ -679,7 +679,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
     });
 
     const service_endpoint = try port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 4, launched.task_id),
+        .header = component_port.makeHeader(.endpoint_create, launched.task_id),
         .authority_capability_id = launched_authority.capability_id,
         .owner_task_id = launched.task_id,
         .label = "zigos.object.spec-storage",

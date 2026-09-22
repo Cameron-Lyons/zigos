@@ -347,7 +347,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(@as(usize, 1), session_manager.servicePendingInputWork(200));
     const input_capability_id = session_manager.system().focusedInputCapabilityForTask(review_task.id, 200).?;
     const focused_input = (try session_manager.kernelPort().?.inputRecv(.{
-        .header = component_port.makeHeader(.input_recv, 201, review_task.id),
+        .header = component_port.makeHeader(.input_recv, review_task.id),
         .input_capability_id = input_capability_id,
         .receiver_task_id = review_task.id,
     }, 201)).?;
@@ -356,7 +356,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(abi.InputEventKind.text, abi.inputEventKind(focused_input.kind).?);
     try std.testing.expectEqual(@as(u8, 'z'), focused_input.text);
     try std.testing.expect((try session_manager.kernelPort().?.inputRecv(.{
-        .header = component_port.makeHeader(.input_recv, 202, review_task.id),
+        .header = component_port.makeHeader(.input_recv, review_task.id),
         .input_capability_id = input_capability_id,
         .receiver_task_id = review_task.id,
     }, 202)) == null);

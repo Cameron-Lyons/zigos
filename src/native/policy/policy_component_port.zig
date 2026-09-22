@@ -56,8 +56,8 @@ pub const Port = struct {
     }
 };
 
-pub fn makeHeader(operation: abi.PolicyOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
-    return request_header.makeHeader(abi.policyOpcode(operation), correlation_id, subject_task_id);
+pub fn makeHeader(operation: abi.PolicyOperation, subject_task_id: u64) abi.RequestHeader {
+    return request_header.makeHeader(abi.policyOpcode(operation), subject_task_id);
 }
 
 fn validateHeader(header: abi.RequestHeader, expected: abi.PolicyOperation) Error!void {
@@ -119,7 +119,7 @@ test "policy port validates headers and forwards apply manifest requests" {
     };
 
     const summary = try port.applyManifest(.{
-        .header = makeHeader(.apply_manifest, 1, task.id),
+        .header = makeHeader(.apply_manifest, task.id),
         .task_id = task.id,
         .bundle = bundle,
         .grants = &grants,
@@ -128,7 +128,7 @@ test "policy port validates headers and forwards apply manifest requests" {
     try std.testing.expect(summary.decisionForKind(.object_access).?.allowed);
 
     try std.testing.expectError(error.UnexpectedOperation, port.applyManifest(.{
-        .header = makeHeader(.authorize_request, 2, task.id),
+        .header = makeHeader(.authorize_request, task.id),
         .task_id = task.id,
         .bundle = bundle,
         .grants = &grants,
@@ -155,7 +155,7 @@ test "policy port rejects invalid manifests before mediation" {
     bundle.requested_permissions = &.{};
 
     try std.testing.expectError(error.MissingBackgroundPermission, port.applyManifest(.{
-        .header = makeHeader(.apply_manifest, 3, task.id),
+        .header = makeHeader(.apply_manifest, task.id),
         .task_id = task.id,
         .bundle = bundle,
         .grants = &.{},

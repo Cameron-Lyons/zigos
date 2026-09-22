@@ -85,7 +85,7 @@
     "userspace_i225_dataplane",
     "userspace_xhci_dataplane",
     "userspace_gop_dataplane",
-    "six_address_spaces_pku",
+    "eight_address_spaces_pku",
     "efi_only_production_boot",
     "checkpoint_only_cold_load"
   ],

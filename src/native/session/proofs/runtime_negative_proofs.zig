@@ -334,14 +334,14 @@ pub fn processIsolationBlocksForeignSharedMemory() bool {
     runtime.grantCapability(owner.id, authority.id) catch return false;
 
     const object = port.sharedMemoryCreate(.{
-        .header = component_port.makeHeader(.shared_memory_create, 1, owner.id),
+        .header = component_port.makeHeader(.shared_memory_create, owner.id),
         .authority_capability_id = authority.id,
         .owner_task_id = owner.id,
         .size_bytes = shared_memory.PAGE_SIZE,
     }, 1) catch return false;
 
     _ = port.sharedMemoryMap(.{
-        .header = component_port.makeHeader(.shared_memory_map, 2, attacker.id),
+        .header = component_port.makeHeader(.shared_memory_map, attacker.id),
         .shared_memory_capability_id = object.capability_id,
         .task_id = attacker.id,
     }, 2) catch |err| return err == error.CapabilityNotFound or err == error.ScopeViolation or err == error.SubjectTaskMismatch;
@@ -378,7 +378,7 @@ pub fn syscallSubjectSpoofingIsRejected() bool {
     runtime.grantCapability(receiver.id, authority.id) catch return false;
 
     const receiver_endpoint = port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 1, receiver.id),
+        .header = component_port.makeHeader(.endpoint_create, receiver.id),
         .authority_capability_id = authority.id,
         .owner_task_id = receiver.id,
         .label = "receiver",
@@ -388,7 +388,7 @@ pub fn syscallSubjectSpoofingIsRejected() bool {
     var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     var attached_capability = std.mem.zeroes(abi.CapabilityDescriptor);
     _ = port.endpointRecv(.{
-        .header = component_port.makeHeader(.endpoint_recv, 2, attacker.id),
+        .header = component_port.makeHeader(.endpoint_recv, attacker.id),
         .endpoint_capability_id = receiver_endpoint.capability_id,
         .receiver_task_id = receiver.id,
         .payload_out = &payload,

@@ -23,17 +23,19 @@ pub const Region = struct {
     protection_key: u4 = 0,
 };
 
-const SpaceRegion = struct {
+const MAX_ADDRESS_SPACES: usize = 16;
+
+const SpaceSlot = struct {
     space_id: usize = 0,
-    region: Region = .{},
+    occupied: bool = false,
+    region_count: u8 = 0,
+    regions: [MAX_REGIONS]Region = [_]Region{.{}} ** MAX_REGIONS,
 };
 
-var regions: [MAX_REGIONS]SpaceRegion = [_]SpaceRegion{.{}} ** MAX_REGIONS;
-var region_count: u8 = 0;
+var spaces: [MAX_ADDRESS_SPACES]SpaceSlot = [_]SpaceSlot{.{}} ** MAX_ADDRESS_SPACES;
 
 pub fn reset() void {
-    regions = [_]SpaceRegion{.{}} ** MAX_REGIONS;
-    region_count = 0;
+    spaces = [_]SpaceSlot{.{}} ** MAX_ADDRESS_SPACES;
 }
 
 pub fn register(region: Region) bool {
@@ -60,27 +62,19 @@ pub fn unregisterSpace(space: anytype) void {
     if (comptime !RELEASES_REGIONS_WITH_SPACE) return;
     const space_id = spaceIdOf(space);
     if (space_id == 0) return;
-    var write: u8 = 0;
-    var read: u8 = 0;
-    while (read < region_count) : (read += 1) {
-        if (regions[read].space_id == space_id) {
-            if (comptime builtin.target.os.tag == .freestanding) {
-                const region = regions[read].region;
-                @import("paging64.zig").releaseUserRange(
-                    space,
-                    @intCast(region.virt_start),
-                    @intCast(region.virt_end_exclusive - region.virt_start),
-                ) catch @panic("invalid retired demand-paging range");
-            }
-            continue;
+    const slot = findSpace(space_id) orelse return;
+    if (comptime builtin.target.os.tag == .freestanding) {
+        var index: u8 = 0;
+        while (index < slot.region_count) : (index += 1) {
+            const region = slot.regions[index];
+            @import("paging64.zig").releaseUserRange(
+                space,
+                @intCast(region.virt_start),
+                @intCast(region.virt_end_exclusive - region.virt_start),
+            ) catch @panic("invalid retired demand-paging range");
         }
-        regions[write] = regions[read];
-        write += 1;
     }
-    if (write < region_count) {
-        @memset(regions[write..region_count], .{});
-    }
-    region_count = write;
+    slot.* = .{};
 }
 
 pub fn regionFor(fault_address: u64) ?*Region {
@@ -101,13 +95,12 @@ pub fn resolveAndMap(space: anytype, fault_address: u64, write: bool) bool {
 
 pub fn regionOverlapsSpace(space: anytype, virt_start: u64, virt_end_exclusive: u64) bool {
     if (virt_end_exclusive <= virt_start) return false;
-    const space_id = spaceIdOf(space);
+    const slot = findSpace(spaceIdOf(space)) orelse return false;
     var index: u8 = 0;
-    while (index < region_count) : (index += 1) {
-        const slot = &regions[index];
-        if (slot.space_id != space_id) continue;
-        if (virt_end_exclusive <= slot.region.virt_start) continue;
-        if (virt_start >= slot.region.virt_end_exclusive) continue;
+    while (index < slot.region_count) : (index += 1) {
+        const region = slot.regions[index];
+        if (virt_end_exclusive <= region.virt_start) continue;
+        if (virt_start >= region.virt_end_exclusive) continue;
         return true;
     }
     return false;
@@ -134,46 +127,56 @@ fn hasDirectoryField(comptime Child: type) bool {
 
 fn registerInSpace(space_id: usize, region: Region) bool {
     if (region.virt_end_exclusive <= region.virt_start) return false;
-    if (region_count >= MAX_REGIONS) return false;
-    const slot = SpaceRegion{ .space_id = space_id, .region = region };
+    const slot = spaceSlot(space_id) orelse return false;
+    if (slot.region_count >= MAX_REGIONS) return false;
     var index: u8 = 0;
-    while (index < region_count and regionPrecedes(regions[index], slot)) : (index += 1) {}
-    var shift = region_count;
+    while (index < slot.region_count and slot.regions[index].virt_start <= region.virt_start) : (index += 1) {}
+    var shift = slot.region_count;
     while (shift > index) : (shift -= 1) {
-        regions[shift] = regions[shift - 1];
+        slot.regions[shift] = slot.regions[shift - 1];
     }
-    regions[index] = slot;
-    region_count += 1;
+    slot.regions[index] = region;
+    slot.region_count += 1;
     return true;
 }
 
-fn regionPrecedes(left: SpaceRegion, right: SpaceRegion) bool {
-    if (left.space_id != right.space_id) return left.space_id < right.space_id;
-    if (left.region.virt_start != right.region.virt_start) return left.region.virt_start < right.region.virt_start;
-    return left.region.virt_end_exclusive < right.region.virt_end_exclusive;
+fn spaceSlot(space_id: usize) ?*SpaceSlot {
+    if (findSpace(space_id)) |slot| return slot;
+    for (spaces[0..]) |*slot| {
+        if (slot.occupied) continue;
+        slot.* = .{
+            .space_id = space_id,
+            .occupied = true,
+        };
+        return slot;
+    }
+    return null;
+}
+
+fn findSpace(space_id: usize) ?*SpaceSlot {
+    for (spaces[0..]) |*slot| {
+        if (slot.occupied and slot.space_id == space_id) return slot;
+    }
+    return null;
 }
 
 fn regionForSpaceId(space_id: usize, fault_address: u64) ?*Region {
+    const slot = findSpace(space_id) orelse return null;
     var lo: u8 = 0;
-    var hi: u8 = region_count;
+    var hi: u8 = slot.region_count;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        const slot = &regions[mid];
-        const starts_at_or_before = slot.space_id < space_id or
-            (slot.space_id == space_id and slot.region.virt_start <= fault_address);
-        if (starts_at_or_before) {
+        if (slot.regions[mid].virt_start <= fault_address) {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-
     var index: usize = lo;
     while (index > 0) {
         index -= 1;
-        const slot = &regions[index];
-        if (slot.space_id != space_id) break;
-        if (fault_address < slot.region.virt_end_exclusive) return &slot.region;
+        if (fault_address < slot.regions[index].virt_end_exclusive) return &slot.regions[index];
+        if (slot.regions[index].virt_start > fault_address) break;
     }
     return null;
 }

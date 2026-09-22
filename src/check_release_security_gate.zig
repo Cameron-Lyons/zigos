@@ -281,7 +281,6 @@ fn fuzzCapabilityMessage(input: []const u8) void {
 fn fuzzSyscallAbi(input: []const u8) void {
     var header = abi.RequestHeader{
         .operation = abi.opcode(.task_create),
-        .correlation_id = 0,
         .subject_task_id = 0,
     };
     const header_bytes = std.mem.asBytes(&header);

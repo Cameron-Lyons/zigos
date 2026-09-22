@@ -65,11 +65,16 @@ pub fn proveResourceAccountingSyscalls(
 
     var spoofed_resource_response = std.mem.zeroes(abi.ResourceDescriptor);
     const spoofed_resource_request = component_port.ResourceQueryRequest{
-        .header = component_port.makeHeader(.resource_query, 89, probe.task_id),
+        .header = component_port.makeHeader(.resource_query, probe.task_id),
         .authority_capability_id = session_authority_id,
         .task_id = probe.task_id,
     };
-    const spoofed_result = syscall_surface.dispatch(kernel_port, probe.task_id, 89, spoofed_resource_request.header.operation, @intFromPtr(&spoofed_resource_request),
+    const spoofed_result = syscall_surface.dispatch(
+        kernel_port,
+        probe.task_id,
+        89,
+        spoofed_resource_request.header.operation,
+        @intFromPtr(&spoofed_resource_request),
         @intFromPtr(&spoofed_resource_response),
         @sizeOf(abi.ResourceDescriptor),
     );

@@ -36,7 +36,7 @@ qemu_harness_adapt_tcg_cpu_model() {
     return
   fi
 
-  if ! grep -Fq '  cet=<bool>' <<<"$help"; then
+    if ! grep -Fq '  cet=<bool>' <<<"$help"; then
     if grep -Fq '  cet-ibt=<bool>' <<<"$help"; then
       model="${model/+cet,/+cet-ibt,+cet-ss,}"
     fi

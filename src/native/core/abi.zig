@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 6;
+pub const ABI_VERSION: u16 = 7;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
 pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -88,11 +88,9 @@ pub const ScopeFlags = packed struct(u32) {
 };
 
 pub const RequestHeader = extern struct {
-    version: u16 = ABI_VERSION,
     operation: u16,
-    flags: u32 = 0,
-    correlation_id: u64,
-    subject_task_id: u64,
+    flags: u16 = 0,
+    subject_task_id: u64 = 0,
 };
 
 pub const CapabilityDescriptor = extern struct {
@@ -361,7 +359,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 6), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 7), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));

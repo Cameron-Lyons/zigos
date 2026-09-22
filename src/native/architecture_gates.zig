@@ -75,7 +75,7 @@ pub const native_2026 = .{
     .wait_plus_rings = contract_2026.floor.wait_plus_rings,
     .userspace_i225_dataplane = contract_2026.floor.userspace_i225_dataplane,
     .userspace_gop_dataplane = contract_2026.floor.userspace_gop_dataplane,
-    .six_address_spaces = contract_2026.floor.six_address_spaces,
+    .eight_address_spaces = contract_2026.floor.eight_address_spaces,
     .checkpoint_only_cold_load = contract_2026.floor.checkpoint_only_cold_load,
     .generated_syscall_idl = generated_from_typed_idl and generated_syscall_operations == @typeInfo(abi.NativeOperation).@"enum".fields.len,
 };

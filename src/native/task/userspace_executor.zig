@@ -13,6 +13,7 @@ const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_registry = @import("userspace_registry.zig");
 const demand_paging = @import("../../kernel/memory/demand_paging.zig");
+const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
 const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
@@ -776,6 +777,7 @@ pub const Executor = struct {
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
+        _ = xhci_driver_task.dispatchForTask(task.id);
         if (!self.initialized) return .unavailable;
         if (self.bound_runtime != runtime) return .unavailable;
         if (debugIndexChecksEnabled()) {

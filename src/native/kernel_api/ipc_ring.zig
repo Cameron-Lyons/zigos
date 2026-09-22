@@ -2,13 +2,21 @@ const std = @import("std");
 
 pub const DATA_PLANE_USES_SEALED_RINGS = true;
 pub const MAGIC: u32 = 0x5247_4950;
-pub const HEADER_BYTES: usize = @sizeOf(Header);
+pub const SLOT_BYTES: usize = 128;
+pub const PAYLOAD_BYTES: usize = 96;
+pub const HEADER_BYTES: usize = 192;
+pub const HEAD_OFFSET: usize = 64;
+pub const TAIL_OFFSET: usize = 128;
 
-pub const Header = extern struct {
-    magic: u32 = MAGIC,
-    capacity: u32,
-    head: u32 = 0,
-    tail: u32 = 0,
+pub const Record = extern struct {
+    sender_task_id: u64 = 0,
+    correlation_id: u64 = 0,
+    attached_capability_id: u64 = 0,
+    flags: u16 = 0,
+    payload_len: u16 = 0,
+    move_attached: u8 = 0,
+    _pad: [3]u8 = .{ 0, 0, 0 },
+    bytes: [PAYLOAD_BYTES]u8 = [_]u8{0} ** PAYLOAD_BYTES,
 };
 
 pub const Error = error{
@@ -19,109 +27,110 @@ pub const Error = error{
     PayloadTooLarge,
 };
 
-pub fn minimumBytes(capacity: u32) usize {
-    return HEADER_BYTES + @as(usize, capacity);
+const Preface = extern struct {
+    magic: u32 = MAGIC,
+    slot_count: u32,
+    slot_bytes: u32 = SLOT_BYTES,
+    _reserved: u32 = 0,
+};
+
+comptime {
+    if (@sizeOf(Record) != SLOT_BYTES) @compileError("ipc ring slots must occupy one fixed record");
+    if (HEAD_OFFSET + 64 != TAIL_OFFSET) @compileError("ipc ring indexes must sit on separate cache lines");
+    if (HEADER_BYTES != TAIL_OFFSET + 64) @compileError("ipc ring slots must start on their own cache line");
 }
 
-pub fn init(buffer: []u8, capacity: u32) Error!*Header {
-    if (buffer.len < minimumBytes(capacity) or capacity == 0) return error.RingTooSmall;
-    const header: *Header = @ptrCast(@alignCast(buffer.ptr));
-    header.* = .{
+pub fn minimumBytes(slot_count: u32) usize {
+    return HEADER_BYTES + @as(usize, slot_count) * SLOT_BYTES;
+}
+
+pub fn init(buffer: []u8, capacity: u32) Error!*Preface {
+    if (capacity < SLOT_BYTES or buffer.len < HEADER_BYTES) return error.RingTooSmall;
+    const slot_count: u32 = @intCast(capacity / SLOT_BYTES);
+    if (slot_count == 0 or buffer.len < minimumBytes(slot_count)) return error.RingTooSmall;
+    const preface: *Preface = @ptrCast(@alignCast(buffer.ptr));
+    preface.* = .{
         .magic = MAGIC,
-        .capacity = capacity,
-        .head = 0,
-        .tail = 0,
+        .slot_count = slot_count,
     };
-    @memset(payload(buffer, header), 0);
-    return header;
+    @atomicStore(u32, indexPtr(buffer, HEAD_OFFSET), 0, .release);
+    @atomicStore(u32, indexPtr(buffer, TAIL_OFFSET), 0, .release);
+    @memset(buffer[HEADER_BYTES..minimumBytes(slot_count)], 0);
+    return preface;
+}
+
+pub fn queued(buffer: []u8) Error!u32 {
+    if (prefaceOf(buffer) == null) return error.RingCorrupt;
+    const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .acquire);
+    const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .acquire);
+    return head -% tail;
+}
+
+pub fn pushRecord(buffer: []u8, record: Record) Error!void {
+    const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
+    if (record.payload_len > PAYLOAD_BYTES) return error.PayloadTooLarge;
+    const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .acquire);
+    const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .monotonic);
+    if (head -% tail == preface.slot_count) return error.RingFull;
+    slotPtr(buffer, head % preface.slot_count).* = record;
+    @atomicStore(u32, indexPtr(buffer, HEAD_OFFSET), head +% 1, .release);
+}
+
+pub fn peekRecord(buffer: []u8) Error!Record {
+    const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
+    const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .acquire);
+    const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .monotonic);
+    if (head == tail) return error.RingEmpty;
+    return slotPtr(buffer, tail % preface.slot_count).*;
+}
+
+pub fn popRecord(buffer: []u8) Error!Record {
+    const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
+    const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .acquire);
+    const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .monotonic);
+    if (head == tail) return error.RingEmpty;
+    const record = slotPtr(buffer, tail % preface.slot_count).*;
+    @atomicStore(u32, indexPtr(buffer, TAIL_OFFSET), tail +% 1, .release);
+    return record;
 }
 
 pub fn push(buffer: []u8, bytes: []const u8) Error!void {
-    const header = headerOf(buffer) orelse return error.RingCorrupt;
-    if (bytes.len > header.capacity) return error.PayloadTooLarge;
-    const used = usedBytes(header);
-    const record_bytes = recordSize(bytes.len);
-    if (used + record_bytes > header.capacity) return error.RingFull;
-    writeRecord(payload(buffer, header), header.capacity, header.head, bytes);
-    header.head = wrap(header.head + record_bytes, header.capacity);
+    if (bytes.len > PAYLOAD_BYTES) return error.PayloadTooLarge;
+    var record = Record{ .payload_len = @intCast(bytes.len) };
+    if (bytes.len != 0) @memcpy(record.bytes[0..bytes.len], bytes);
+    return pushRecord(buffer, record);
 }
 
 pub fn pop(buffer: []u8, out: []u8) Error!usize {
-    const header = headerOf(buffer) orelse return error.RingCorrupt;
-    if (header.head == header.tail) return error.RingEmpty;
-    const ring = payload(buffer, header);
-    const len = readLength(ring, header.capacity, header.tail);
-    if (len > out.len) return error.PayloadTooLarge;
-    copyFromRing(ring, header.capacity, wrap(header.tail + 2, header.capacity), out[0..len]);
-    header.tail = wrap(header.tail + recordSize(len), header.capacity);
-    return len;
+    const record = try popRecord(buffer);
+    if (record.payload_len > out.len) return error.PayloadTooLarge;
+    if (record.payload_len != 0) @memcpy(out[0..record.payload_len], record.bytes[0..record.payload_len]);
+    return record.payload_len;
 }
 
-fn headerOf(buffer: []u8) ?*Header {
+fn prefaceOf(buffer: []u8) ?*Preface {
     if (buffer.len < HEADER_BYTES) return null;
-    const header: *Header = @ptrCast(@alignCast(buffer.ptr));
-    if (header.magic != MAGIC or header.capacity == 0) return null;
-    if (buffer.len < minimumBytes(header.capacity)) return null;
-    return header;
+    const preface: *Preface = @ptrCast(@alignCast(buffer.ptr));
+    if (preface.magic != MAGIC or preface.slot_count == 0 or preface.slot_bytes != SLOT_BYTES) return null;
+    if (buffer.len < minimumBytes(preface.slot_count)) return null;
+    return preface;
 }
 
-fn payload(buffer: []u8, header: *const Header) []u8 {
-    return buffer[HEADER_BYTES .. HEADER_BYTES + header.capacity];
+fn indexPtr(buffer: []u8, offset: usize) *u32 {
+    return @ptrCast(@alignCast(buffer.ptr + offset));
 }
 
-fn usedBytes(header: *const Header) u32 {
-    if (header.head >= header.tail) return header.head - header.tail;
-    return header.capacity - (header.tail - header.head);
+fn slotPtr(buffer: []u8, index: u32) *Record {
+    const offset = HEADER_BYTES + @as(usize, index) * SLOT_BYTES;
+    return @ptrCast(@alignCast(buffer.ptr + offset));
 }
 
-fn recordSize(payload_len: usize) u32 {
-    return @intCast(2 + payload_len);
-}
-
-fn wrap(index: u32, capacity: u32) u32 {
-    return if (index >= capacity) index - capacity else index;
-}
-
-fn writeRecord(ring: []u8, capacity: u32, start: u32, bytes: []const u8) void {
-    const len: u16 = @intCast(bytes.len);
-    ring[start] = @truncate(len);
-    ring[wrap(start + 1, capacity)] = @truncate(len >> 8);
-    copyToRing(ring, capacity, wrap(start + 2, capacity), bytes);
-}
-
-fn readLength(ring: []const u8, capacity: u32, start: u32) u16 {
-    const lo: u16 = ring[start];
-    const hi: u16 = ring[wrap(start + 1, capacity)];
-    return lo | (hi << 8);
-}
-
-fn copyToRing(ring: []u8, capacity: u32, start: u32, bytes: []const u8) void {
-    if (bytes.len == 0) return;
-    const cap: usize = capacity;
-    const offset: usize = start;
-    const first = @min(bytes.len, cap - offset);
-    @memcpy(ring[offset..][0..first], bytes[0..first]);
-    if (first < bytes.len) {
-        @memcpy(ring[0 .. bytes.len - first], bytes[first..]);
-    }
-}
-
-fn copyFromRing(ring: []const u8, capacity: u32, start: u32, out: []u8) void {
-    if (out.len == 0) return;
-    const cap: usize = capacity;
-    const offset: usize = start;
-    const first = @min(out.len, cap - offset);
-    @memcpy(out[0..first], ring[offset..][0..first]);
-    if (first < out.len) {
-        @memcpy(out[first..], ring[0 .. out.len - first]);
-    }
-}
-
-test "ipc ring moves payloads without a kernel endpoint queue" {
-    var storage: [HEADER_BYTES + 64]u8 = undefined;
-    _ = try init(&storage, 64);
+test "ipc ring moves fixed slots without a kernel endpoint queue" {
+    var storage: [HEADER_BYTES + SLOT_BYTES * 2]u8 align(64) = undefined;
+    _ = try init(&storage, SLOT_BYTES * 2);
     try push(&storage, "notes");
     try push(&storage, "docs");
+    try std.testing.expectError(error.RingFull, push(&storage, "more"));
     var first: [8]u8 = undefined;
     var second: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 5), try pop(&storage, &first));

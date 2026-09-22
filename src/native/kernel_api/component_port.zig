@@ -56,6 +56,7 @@ pub const EndpointConnectRequest = struct {
 
 pub const EndpointSendRequest = struct {
     header: abi.RequestHeader,
+    correlation_id: u64 = 0,
     endpoint_capability_id: u64,
     payload: []const u8,
     attached_capability_id: ?u64 = null,
@@ -256,7 +257,7 @@ pub const KernelPort = struct {
         try self.validateIncomingHeader(request.header, .endpoint_send);
         return self.kernel.endpointSend(
             self.callContext(request.header, request.endpoint_capability_id, .none),
-            request.header.correlation_id,
+            request.correlation_id,
             request.payload,
             request.attached_capability_id,
             request.move_attached_capability,
@@ -609,8 +610,8 @@ pub fn generatedWrapperFor(comptime operation: abi.NativeOperation) GeneratedWra
     @compileError("missing generated KernelPort wrapper for " ++ @tagName(operation));
 }
 
-pub fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
-    return request_header.makeHeader(abi.opcode(operation), correlation_id, subject_task_id);
+pub fn makeHeader(operation: abi.NativeOperation, subject_task_id: u64) abi.RequestHeader {
+    return request_header.makeHeader(abi.opcode(operation), subject_task_id);
 }
 
 fn validateHeader(header: abi.RequestHeader, comptime expected: abi.NativeOperation) Error!void {
@@ -684,7 +685,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
 
     const port_test_image = try generated_image_fixtures.appImage();
     const task = try invokeGenerated(.task_create, &port, .{
-        .header = makeHeader(.task_create, 77, session_task.id),
+        .header = makeHeader(.task_create, session_task.id),
         .authority_capability_id = authority_capability.id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 2 },
@@ -711,7 +712,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
     try std.testing.expect(abi.taskFlagsHas(task.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
 
     try std.testing.expectError(error.UnexpectedOperation, port.taskCreate(.{
-        .header = makeHeader(.endpoint_create, 78, session_task.id),
+        .header = makeHeader(.endpoint_create, session_task.id),
         .authority_capability_id = authority_capability.id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 3 },
@@ -726,7 +727,7 @@ test "kernel port enforces operation ids and forwards typed task create requests
         },
     }, 6));
     try std.testing.expectError(error.SubjectTaskRequired, port.taskCreate(.{
-        .header = makeHeader(.task_create, 79, 0),
+        .header = makeHeader(.task_create, 0),
         .authority_capability_id = authority_capability.id,
         .request = .{
             .owner = .{ .kind = .app, .serial = 4 },
@@ -801,13 +802,13 @@ test "kernel port validates and forwards typed device broker requests" {
     try std.testing.expect(device_broker.publishPciController(0x1F001));
 
     const descriptor = try port.deviceDescribe(.{
-        .header = makeHeader(.device_describe, 81, driver_task.id),
+        .header = makeHeader(.device_describe, driver_task.id),
         .device_capability_id = device_capability.id,
     }, 7);
     try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
 
     try std.testing.expectError(error.UnexpectedOperation, port.deviceDescribe(.{
-        .header = makeHeader(.task_create, 84, driver_task.id),
+        .header = makeHeader(.task_create, driver_task.id),
         .device_capability_id = device_capability.id,
     }, 7));
 }

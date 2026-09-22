@@ -1,5 +1,6 @@
-pub const sector_size: usize = 512;
-pub const slot_sectors: u32 = 768;
+pub const block_size: usize = 4096;
+pub const sector_size: usize = block_size;
+pub const slot_sectors: u32 = 96;
 pub const slot_count: u32 = 2;
 pub const header_sectors: u32 = 1;
 pub const payload_sectors: u32 = slot_sectors - header_sectors;
@@ -19,7 +20,7 @@ pub const data_region_bytes: usize = data_capacity_bytes / data_region_count;
 pub const alternate_data_region_offset: u32 = @intCast(data_region_bytes);
 
 pub const root_magic = "ZG4LOG1";
-pub const root_format_version: u16 = 4;
+pub const root_format_version: u16 = 5;
 pub const USES_INCREMENTAL_LIVE_INDEX = true;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = true;
 pub const COMPACTS_IN_BACKGROUND = true;
@@ -35,4 +36,4 @@ pub const log_record_checksum_offset: usize = log_record_payload_len_offset + lo
 pub const log_record_header_len: usize = log_record_checksum_offset + log_record_checksum_bytes;
 
 pub const payload_magic = "ZG4STATE";
-pub const format_version: u16 = 17;
+pub const format_version: u16 = 18;

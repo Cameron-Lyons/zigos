@@ -839,10 +839,8 @@ pub fn connectClient(
 
     var service_connect_count: usize = 0;
     for (service_contract.ordered_service_contracts, service_bindings.bindings, 0..) |entry, binding, index| {
-        const endpoint_request_id = 332 + @as(u64, @intCast(index * 2));
-        const connect_request_id = endpoint_request_id + 1;
         const client_endpoint = kernel_port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, service_client_task.id),
+            .header = component_port.makeHeader(.endpoint_create, service_client_task.id),
             .authority_capability_id = service_client_authority.id,
             .owner_task_id = service_client_task.id,
             .label = entry.interface.name,
@@ -856,7 +854,7 @@ pub fn connectClient(
             return false;
         };
         _ = kernel_port.endpointConnect(.{
-            .header = component_port.makeHeader(.endpoint_connect, connect_request_id, service_client_task.id),
+            .header = component_port.makeHeader(.endpoint_connect, service_client_task.id),
             .endpoint_capability_id = client_endpoint.capability_id,
             .peer_endpoint_capability_id = registry_connection.endpoint_capability_id,
             .peer_endpoint_id = binding.endpoint_id,

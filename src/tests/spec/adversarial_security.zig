@@ -56,21 +56,21 @@ pub fn revokedCapabilitiesFailDuringIpc() !void {
     try runtime.grantCapability(receiver.id, receiver_authority.id);
 
     const sender_endpoint = try port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 1, sender.id),
+        .header = component_port.makeHeader(.endpoint_create, sender.id),
         .authority_capability_id = sender_authority.id,
         .owner_task_id = sender.id,
         .label = "sender",
         .flags = .{ .local_only = true },
     }, 1);
     const receiver_endpoint = try port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 2, receiver.id),
+        .header = component_port.makeHeader(.endpoint_create, receiver.id),
         .authority_capability_id = receiver_authority.id,
         .owner_task_id = receiver.id,
         .label = "receiver",
         .flags = .{ .local_only = true },
     }, 1);
     _ = try port.endpointConnect(.{
-        .header = component_port.makeHeader(.endpoint_connect, 3, sender.id),
+        .header = component_port.makeHeader(.endpoint_connect, sender.id),
         .endpoint_capability_id = sender_endpoint.capability_id,
         .peer_endpoint_capability_id = receiver_endpoint.capability_id,
         .peer_endpoint_id = receiver_endpoint.endpoint.endpoint_id,
@@ -96,7 +96,7 @@ pub fn revokedCapabilitiesFailDuringIpc() !void {
     try capabilities.revokeTargetAuthority(transferable.id);
 
     try std.testing.expectError(error.CapabilityRevoked, port.endpointSend(.{
-        .header = component_port.makeHeader(.endpoint_send, 4, sender.id),
+        .header = component_port.makeHeader(.endpoint_send, sender.id),
         .endpoint_capability_id = sender_endpoint.capability_id,
         .payload = "revoked-attach",
         .attached_capability_id = stale_transfer.id,
@@ -104,7 +104,7 @@ pub fn revokedCapabilitiesFailDuringIpc() !void {
     var receive_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     var attached_capability = std.mem.zeroes(abi.CapabilityDescriptor);
     try std.testing.expect((try port.endpointRecv(.{
-        .header = component_port.makeHeader(.endpoint_recv, 5, receiver.id),
+        .header = component_port.makeHeader(.endpoint_recv, receiver.id),
         .endpoint_capability_id = receiver_endpoint.capability_id,
         .receiver_task_id = receiver.id,
         .payload_out = &receive_payload,
@@ -142,29 +142,29 @@ pub fn expiredLeasesFailAtKernelServiceBoundaries() !void {
     try runtime.grantCapability(task.id, expired.id);
 
     try std.testing.expectError(error.CapabilityRevoked, port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 1, task.id),
+        .header = component_port.makeHeader(.endpoint_create, task.id),
         .authority_capability_id = expired.id,
         .owner_task_id = task.id,
         .label = "expired",
         .flags = .{ .local_only = true },
     }, 11));
     try std.testing.expectError(error.CapabilityRevoked, port.sharedMemoryCreate(.{
-        .header = component_port.makeHeader(.shared_memory_create, 2, task.id),
+        .header = component_port.makeHeader(.shared_memory_create, task.id),
         .authority_capability_id = expired.id,
         .owner_task_id = task.id,
         .size_bytes = 128,
     }, 11));
     try std.testing.expectError(error.CapabilityRevoked, port.timeQuery(.{
-        .header = component_port.makeHeader(.time_query, 3, task.id),
+        .header = component_port.makeHeader(.time_query, task.id),
         .authority_capability_id = expired.id,
     }, 11));
     try std.testing.expectError(error.CapabilityRevoked, port.resourceQuery(.{
-        .header = component_port.makeHeader(.resource_query, 4, task.id),
+        .header = component_port.makeHeader(.resource_query, task.id),
         .authority_capability_id = expired.id,
         .task_id = task.id,
     }, 11));
     try std.testing.expectError(error.CapabilityRevoked, port.accountingQuery(.{
-        .header = component_port.makeHeader(.accounting_query, 5, task.id),
+        .header = component_port.makeHeader(.accounting_query, task.id),
         .authority_capability_id = expired.id,
         .task_id = task.id,
     }, 11));

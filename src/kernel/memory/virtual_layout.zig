@@ -2,7 +2,7 @@ const std = @import("std");
 const table64 = @import("page_table64.zig");
 
 pub const PAGE_BYTES: usize = 4096;
-pub const PHYSICAL_WINDOW_CAPACITY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+pub const PHYSICAL_WINDOW_CAPACITY_BYTES: u64 = 512 * 1024 * 1024 * 1024;
 pub const USES_RUNTIME_2M_PAGES = true;
 pub const DIRECT_MAP_USES_1G_PAGES = true;
 
