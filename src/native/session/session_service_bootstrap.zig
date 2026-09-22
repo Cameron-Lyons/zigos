@@ -30,7 +30,17 @@ else
 pub const SERVICE_CLIENT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const SERVICE_LAUNCH_CONTROLLER_TASK_INDEX_RELOOKUPS: u8 = 0;
 
+const nvme_device_lba_bytes: usize = 512;
 const storage_restart_scratch_lba: u64 = storage_volume_mod.required_device_sectors + 16;
+
+comptime {
+    if (builtin.target.os.tag == .freestanding) {
+        const nvme_hw = @import("../../kernel/drivers/nvme_hw.zig");
+        if (nvme_hw.SECTOR_BYTES != nvme_device_lba_bytes) {
+            @compileError("boot storage plane must translate NVMe LBAs from the volume block size");
+        }
+    }
+}
 const storage_restart_probe_sectors: u64 = 2;
 const booted_storage_sector_count: u64 = storage_restart_scratch_lba + storage_restart_probe_sectors;
 const booted_storage_image_bytes: usize = @as(usize, @intCast(booted_storage_sector_count)) * storage_volume_mod.sector_size;
@@ -210,6 +220,24 @@ const HostedStorageDataPlane = struct {
     }
 };
 
+fn readNvmeVolumeBlocks(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+    const device_lba = storage_volume_mod.deviceLbaForVolumeTransfer(
+        start_lba,
+        buffer_len,
+        nvme_device_lba_bytes,
+    ) orelse return false;
+    return nvme_bridge.zigosStorageBootstrapNvmeRead(device_lba, buffer_ptr, buffer_len);
+}
+
+fn writeNvmeVolumeBlocks(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+    const device_lba = storage_volume_mod.deviceLbaForVolumeTransfer(
+        start_lba,
+        buffer_len,
+        nvme_device_lba_bytes,
+    ) orelse return false;
+    return nvme_bridge.zigosStorageBootstrapNvmeWrite(device_lba, buffer_ptr, buffer_len);
+}
+
 const BootedStorageDataPlane = struct {
     fn reset() void {
         if (comptime builtin.target.os.tag != .freestanding) {
@@ -220,13 +248,16 @@ const BootedStorageDataPlane = struct {
     fn activate(device_id: u64) ?storage_volume_mod.Backend {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
         if (nvme_bridge.attached()) {
-            const nvme_sectors = nvme_bridge.sectorCount();
-
-            if (nvme_sectors < booted_storage_sector_count) return null;
+            const device_sectors = nvme_bridge.sectorCount();
+            const volume_sectors = storage_volume_mod.volumeSectorsFromDeviceSectors(
+                device_sectors,
+                nvme_device_lba_bytes,
+            ) orelse return null;
+            if (volume_sectors < booted_storage_sector_count) return null;
             return .{
-                .sector_count = nvme_sectors,
-                .read = nvme_bridge.zigosStorageBootstrapNvmeRead,
-                .write = nvme_bridge.zigosStorageBootstrapNvmeWrite,
+                .sector_count = volume_sectors,
+                .read = readNvmeVolumeBlocks,
+                .write = writeNvmeVolumeBlocks,
                 .flush = nvme_bridge.zigosStorageBootstrapNvmeFlush,
             };
         }

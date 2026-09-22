@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const block_size: usize = 4096;
 pub const sector_size: usize = block_size;
 pub const slot_sectors: u32 = 96;
@@ -37,3 +39,39 @@ pub const log_record_header_len: usize = log_record_checksum_offset + log_record
 
 pub const payload_magic = "ZG4STATE";
 pub const format_version: u16 = 18;
+
+pub fn deviceLbaForVolumeTransfer(
+    volume_lba: u64,
+    buffer_len: usize,
+    device_lba_bytes: usize,
+) ?u64 {
+    if (device_lba_bytes == 0 or sector_size % device_lba_bytes != 0) return null;
+    if (buffer_len == 0 or buffer_len % sector_size != 0) return null;
+    const scale = sector_size / device_lba_bytes;
+    return std.math.mul(u64, volume_lba, scale) catch null;
+}
+
+pub fn volumeSectorsFromDeviceSectors(device_sectors: u64, device_lba_bytes: usize) ?u64 {
+    if (device_lba_bytes == 0 or sector_size % device_lba_bytes != 0) return null;
+    return device_sectors / (sector_size / device_lba_bytes);
+}
+
+test "volume blocks map onto NVMe LBAs and partial blocks are rejected" {
+    const device_lba_bytes: usize = 512;
+    const scratch_lba = required_device_sectors + 16;
+    const scale = sector_size / device_lba_bytes;
+    const device_lba = deviceLbaForVolumeTransfer(scratch_lba, sector_size, device_lba_bytes);
+    try std.testing.expectEqual(@as(?u64, scratch_lba * scale), device_lba);
+    try std.testing.expect((device_lba orelse 0) * device_lba_bytes >= image_bytes);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        deviceLbaForVolumeTransfer(scratch_lba, sector_size / 2, device_lba_bytes),
+    );
+    try std.testing.expectEqual(@as(?u64, null), deviceLbaForVolumeTransfer(0, 0, device_lba_bytes));
+    try std.testing.expectEqual(@as(?u64, null), deviceLbaForVolumeTransfer(0, sector_size, 0));
+
+    const eight_mib_device_sectors: u64 = (8 * 1024 * 1024) / device_lba_bytes;
+    const volume_sectors = volumeSectorsFromDeviceSectors(eight_mib_device_sectors, device_lba_bytes);
+    try std.testing.expectEqual(@as(?u64, eight_mib_device_sectors / scale), volume_sectors);
+    try std.testing.expect((volume_sectors orelse 0) > scratch_lba);
+}

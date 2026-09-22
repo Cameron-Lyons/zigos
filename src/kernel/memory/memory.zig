@@ -108,6 +108,7 @@ pub fn init() void {
     pushFree(initial);
     is_initialized = true;
     verifyAllocationStartGuards();
+    verifyOverflowSpansKeepTheirLength();
 
     console.print("Memory allocator initialized!\n");
     console.print("Heap start: 0x");
@@ -149,25 +150,29 @@ fn allocateLocked(size: usize) ?*anyopaque {
 }
 
 fn releaseSpan(span_id: u32, payload: usize) void {
-    const class_index = spans[span_id].class_index;
-    const cpu = currentCpu();
-    var magazine = &magazines[cpu][class_index];
-    if (magazine.len < MAGAZINE_DEPTH) {
-        spans[span_id].live = false;
-        spans[span_id].in_magazine = true;
-        magazine.slots[magazine.len] = payload;
-        magazine.len += 1;
-        return;
+    const class_index: usize = spans[span_id].class_index;
+    if (heap_geometry.reusableMagazineBytes(class_index, @as(usize, spans[span_id].length)) != null) {
+        const cpu = currentCpu();
+        var magazine = &magazines[cpu][class_index];
+        if (magazine.len < MAGAZINE_DEPTH) {
+            spans[span_id].live = false;
+            spans[span_id].in_magazine = true;
+            magazine.slots[magazine.len] = payload;
+            magazine.len += 1;
+            return;
+        }
     }
     freeSpan(span_id);
 }
 
 fn popMagazine(cpu: usize, class_index: usize) ?usize {
+    const class_bytes = heap_geometry.sizeClassBytes(class_index) orelse return null;
     var magazine = &magazines[cpu][class_index];
     if (magazine.len == 0) return null;
     magazine.len -= 1;
     const payload = magazine.slots[magazine.len];
-    const span_id = findSpan(payload) orelse return null;
+    const span_id = findSpan(payload) orelse @panic("kernel heap magazine span is missing");
+    if (@as(usize, spans[span_id].length) != class_bytes) @panic("kernel heap magazine span length mismatch");
     spans[span_id].in_magazine = false;
     spans[span_id].live = true;
     return payload;
@@ -329,4 +334,21 @@ fn verifyAllocationStartGuards() void {
     if (allocationIsLive(payload)) @panic("kernel heap retained a released allocation marker");
     kfree(allocation);
     if (allocationIsLive(payload)) @panic("kernel heap accepted a duplicate free");
+}
+
+fn verifyOverflowSpansKeepTheirLength() void {
+    const small = allocateLocked(8 * 1024) orelse @panic("kernel heap overflow self-check failed");
+    const large = allocateLocked(16 * 1024) orelse @panic("kernel heap overflow self-check failed");
+    kfree(large);
+    kfree(small);
+    const again = allocateLocked(16 * 1024) orelse @panic("kernel heap overflow self-check failed");
+    const length = liveSpanLength(@intFromPtr(again)) orelse @panic("kernel heap overflow self-check lost the span");
+    if (length < 16 * 1024) @panic("kernel heap reused a short overflow span");
+    kfree(again);
+}
+
+fn liveSpanLength(payload: usize) ?u32 {
+    const span_id = findSpan(payload) orelse return null;
+    if (!spans[span_id].live) return null;
+    return spans[span_id].length;
 }
