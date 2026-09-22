@@ -65,11 +65,11 @@ pub fn getReservedMemoryEnd() usize {
 
 fn currentCpu() usize {
     if (comptime builtin.os.tag != .freestanding) return 0;
-    const x86 = @import("../../arch/x86.zig");
-    const gs = x86.readMsr(x86.IA32_GS_BASE_MSR);
-    if (gs == 0) return 0;
-    const cpu_index_ptr: *const usize = @ptrFromInt(gs + 16);
-    const index = cpu_index_ptr.*;
+    // CpuState.cpu_index lives at GS+16. A segment load stays on the allocate/free path;
+    // reading IA32_GS_BASE with RDMSR does not.
+    const index = asm volatile ("movq %%gs:16, %[out]"
+        : [out] "=r" (-> usize),
+    );
     if (index >= MAGAZINE_CPUS) return 0;
     return index;
 }
