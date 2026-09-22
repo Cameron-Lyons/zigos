@@ -30,6 +30,12 @@ pub fn sizeClassBytes(index: usize) ?usize {
     return size_classes[index];
 }
 
+pub fn reusableMagazineBytes(class_index: usize, span_length: usize) ?usize {
+    const class_bytes = sizeClassBytes(class_index) orelse return null;
+    if (span_length != class_bytes) return null;
+    return class_bytes;
+}
+
 pub fn allocationMarkerIndex(
     payload_address: usize,
     arena_start_address: usize,
@@ -150,4 +156,9 @@ test "heap free-list classes round small blocks onto exact size classes" {
     try std.testing.expectEqual(@as(?usize, 32), sizeClassBytes(0));
     try std.testing.expectEqual(@as(?usize, null), sizeClassBytes(size_classes.len));
     try std.testing.expectEqual(size_classes.len + 1, free_list_class_count);
+    try std.testing.expectEqual(@as(?usize, 32), reusableMagazineBytes(0, 32));
+    try std.testing.expectEqual(@as(?usize, 4096), reusableMagazineBytes(size_classes.len - 1, 4096));
+    try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len - 1, 8192));
+    try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len, 8192));
+    try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len, 16384));
 }
