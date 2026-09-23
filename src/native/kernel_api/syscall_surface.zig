@@ -498,10 +498,10 @@ test "syscall surface delivers focused input only through task-scoped authority"
         .window_id = 7,
         .task_id = app_task.id,
         .surface_id = 12,
-        .kind = @intFromEnum(abi.InputEventKind.text),
-        .text = 'x',
         .port_id = 1,
         .slot_id = 2,
+        .length = 2,
+        .bytes = abi.inputPacket(abi.InputByte.text, 'x'),
     } };
     test_kernel.kernel.bindFocusedInputReceiver(.{
         .context = &receiver,
@@ -526,7 +526,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
     try std.testing.expectEqual(@as(u8, 1), response.present);
     try std.testing.expectEqual(@as(u64, 9), response.event.sequence);
     try std.testing.expectEqual(app_task.id, response.event.task_id);
-    try std.testing.expectEqual(@as(u8, 'x'), response.event.text);
+    try std.testing.expectEqual(@as(u8, 'x'), response.event.bytes[1]);
 
     response = std.mem.zeroes(abi.InputRecvResponse);
     const empty = dispatchRequest(
@@ -564,9 +564,9 @@ test "syscall surface delivers focused input only through task-scoped authority"
         .window_id = 8,
         .task_id = app_task.id + 1,
         .surface_id = 13,
-        .kind = @intFromEnum(abi.InputEventKind.activate),
-        .text = 0,
         .port_id = 1,
+        .length = 2,
+        .bytes = abi.inputPacket(abi.InputByte.activate, 0),
         .slot_id = 2,
     };
     response = std.mem.zeroes(abi.InputRecvResponse);
@@ -620,10 +620,8 @@ test "syscall surface copies bounded presentations through task-scoped authority
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = 12;
     presentation.revision = 3;
-    presentation.interaction_hash = 3;
-    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
     presentation.buffer_object_id = 12;
-    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
+    presentation.buffer_bytes = 4096;
     const request = component_port.SurfacePresentRequest{
         .header = component_port.makeHeader(.surface_present, app_task.id),
         .presentation_capability_id = presentation_capability.id,
@@ -633,7 +631,6 @@ test "syscall surface copies bounded presentations through task-scoped authority
         .buffer_object_id = presentation.buffer_object_id,
         .buffer_offset = presentation.buffer_offset,
         .buffer_bytes = presentation.buffer_bytes,
-        .model_kind = presentation.model_kind,
     };
     var response = std.mem.zeroes(abi.BoolResponse);
     const presented = dispatchRequest(

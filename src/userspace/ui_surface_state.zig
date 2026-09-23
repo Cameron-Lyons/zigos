@@ -2,7 +2,7 @@ const std = @import("std");
 const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
 
-pub const TEXT_CAPACITY: usize = abi.SURFACE_PRESENTATION_TEXT_BYTES;
+pub const TEXT_CAPACITY: usize = 512;
 const INTERACTION_HASH_SEED: u64 = 0xcbf29ce484222325;
 const INTERACTION_HASH_PRIME: u64 = 0x100000001b3;
 
@@ -42,20 +42,6 @@ pub const State = struct {
         var out = std.mem.zeroes(abi.SurfacePresentation);
         out.surface_id = surface_id;
         out.revision = self.revision;
-        out.interaction_hash = self.interaction_hash;
-        out.commit_count = self.commit_count;
-        out.activation_count = self.activation_count;
-        out.focus_index = self.focus_index;
-        out.text_length = self.text_length;
-        out.cursor = self.cursor;
-        out.model_kind = @intFromEnum(self.model);
-        out.state_flags = @bitCast(abi.SurfaceStateFlags{
-            .dirty = self.flags.dirty,
-            .recovery_visible = self.flags.recovery_visible,
-            .active = self.flags.active,
-            .input_overflow = self.flags.input_overflow,
-        });
-        @memcpy(out.text[0..self.text_length], self.textSlice());
         out.buffer_object_id = surface_id;
         out.buffer_offset = 0;
         out.buffer_bytes = TEXT_CAPACITY;
@@ -64,21 +50,38 @@ pub const State = struct {
 
     pub fn apply(self: *State, event: abi.InputEventDescriptor) ApplyResult {
         if (event.sequence == 0 or event.sequence <= self.last_sequence) return .rejected;
-        const kind = abi.inputEventKind(event.kind) orelse return .rejected;
-        if (kind == .text and (event.text < 0x20 or event.text > 0x7e)) return .rejected;
+        if (event.length < 1 or event.length > event.bytes.len) return .rejected;
+        const op = event.bytes[0];
+        const data = if (event.length > 1) event.bytes[1] else 0;
+        if (op == abi.InputByte.text and (data < 0x20 or data > 0x7e)) return .rejected;
+        switch (op) {
+            abi.InputByte.text,
+            abi.InputByte.backspace,
+            abi.InputByte.commit_text,
+            abi.InputByte.focus_next,
+            abi.InputByte.focus_previous,
+            abi.InputByte.activate,
+            abi.InputByte.show_recovery,
+            abi.InputByte.dismiss_recovery,
+            abi.InputByte.task_switch_next,
+            abi.InputByte.task_switch_previous,
+            => {},
+            else => return .rejected,
+        }
 
         self.last_sequence = event.sequence;
         self.interaction_hash = mixEvent(self.interaction_hash, event);
-        const mutated = switch (kind) {
-            .text => self.appendText(event.text),
-            .backspace => self.backspace(),
-            .commit_text => self.commit(),
-            .focus_next => self.moveFocus(true),
-            .focus_previous => self.moveFocus(false),
-            .activate => self.activate(),
-            .show_recovery => self.setRecoveryVisible(true),
-            .dismiss_recovery => self.setRecoveryVisible(false),
-            .task_switch_next, .task_switch_previous => false,
+        const mutated = switch (op) {
+            abi.InputByte.text => self.appendText(data),
+            abi.InputByte.backspace => self.backspace(),
+            abi.InputByte.commit_text => self.commit(),
+            abi.InputByte.focus_next => self.moveFocus(true),
+            abi.InputByte.focus_previous => self.moveFocus(false),
+            abi.InputByte.activate => self.activate(),
+            abi.InputByte.show_recovery => self.setRecoveryVisible(true),
+            abi.InputByte.dismiss_recovery => self.setRecoveryVisible(false),
+            abi.InputByte.task_switch_next, abi.InputByte.task_switch_previous => false,
+            else => unreachable,
         };
         if (!mutated) return .observed;
         self.revision +|= 1;
@@ -144,19 +147,6 @@ pub const State = struct {
     }
 };
 
-comptime {
-    if (@sizeOf(mailbox.UiStateFlags) != @sizeOf(abi.SurfaceStateFlags)) {
-        @compileError("mailbox and presentation state flags must remain wire-compatible");
-    }
-    for (std.meta.fields(mailbox.UiModelKind)) |field| {
-        const surface_model = std.enums.fromInt(abi.SurfaceModelKind, field.value) orelse
-            @compileError("mailbox UI model is missing from surface presentation ABI");
-        if (!std.mem.eql(u8, field.name, @tagName(surface_model))) {
-            @compileError("mailbox and presentation UI model ordinals diverged");
-        }
-    }
-}
-
 pub fn modelForBundle(comptime bundle_id: []const u8) mailbox.UiModelKind {
     if (std.mem.startsWith(u8, bundle_id, "app.notes")) return .notes;
     if (std.mem.eql(u8, bundle_id, "app.viewer")) return .viewer;
@@ -180,8 +170,8 @@ fn focusableControlCount(model: mailbox.UiModelKind) u16 {
 }
 
 fn mixEvent(initial: u64, event: abi.InputEventDescriptor) u64 {
-    var hash = mixByte(initial, event.kind);
-    hash = mixByte(hash, event.text);
+    var hash = mixByte(initial, if (event.length > 0) event.bytes[0] else 0);
+    hash = mixByte(hash, if (event.length > 1) event.bytes[1] else 0);
     var sequence = event.sequence;
     for (0..@sizeOf(u64)) |_| {
         hash = mixByte(hash, @truncate(sequence));
@@ -194,17 +184,17 @@ fn mixByte(hash: u64, byte: u8) u64 {
     return (hash ^ byte) *% INTERACTION_HASH_PRIME;
 }
 
-fn inputEvent(sequence: u64, kind: abi.InputEventKind, text: u8) abi.InputEventDescriptor {
+fn inputEvent(sequence: u64, op: u8, data: u8) abi.InputEventDescriptor {
     return .{
         .sequence = sequence,
         .tick = sequence,
         .window_id = 1,
         .task_id = 2,
         .surface_id = 3,
-        .kind = @intFromEnum(kind),
-        .text = text,
         .port_id = 4,
         .slot_id = 5,
+        .length = 2,
+        .bytes = abi.inputPacket(op, data),
     };
 }
 
@@ -221,8 +211,8 @@ test "UI surface state selects application-specific fixed-capacity models" {
 
 test "UI surface state serializes a canonical bounded presentation" {
     var state = State.init("app.notes");
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, .text, 'x')));
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, .activate, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, abi.InputByte.text, 'x')));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, abi.InputByte.activate, 0)));
 
     const presentation = state.presentation(91);
     try std.testing.expect(abi.isCanonicalSurfacePresentation(&presentation));
@@ -230,22 +220,21 @@ test "UI surface state serializes a canonical bounded presentation" {
     try std.testing.expectEqual(@as(u64, 91), presentation.surface_id);
     try std.testing.expectEqual(@as(u64, 91), presentation.buffer_object_id);
     try std.testing.expectEqual(state.revision, presentation.revision);
-    try std.testing.expectEqual(state.interaction_hash, presentation.interaction_hash);
-    try std.testing.expectEqualStrings("x\n", presentation.textSlice());
-    try std.testing.expectEqual(abi.SurfaceModelKind.notes, abi.surfaceModelKind(presentation.model_kind).?);
-    const flags: abi.SurfaceStateFlags = @bitCast(presentation.state_flags);
-    try std.testing.expect(flags.dirty);
+    try std.testing.expectEqual(@as(u32, TEXT_CAPACITY), presentation.buffer_bytes);
+    try std.testing.expectEqualStrings("x\n", state.textSlice());
+    try std.testing.expectEqual(mailbox.UiModelKind.notes, state.model);
+    try std.testing.expect(state.flags.dirty);
 }
 
 test "Notes UI state edits and commits document text" {
     var state = State.init("app.notes");
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, .text, 'a')));
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, .text, 'b')));
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(3, .backspace, 0)));
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(4, .activate, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, abi.InputByte.text, 'a')));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, abi.InputByte.text, 'b')));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(3, abi.InputByte.backspace, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(4, abi.InputByte.activate, 0)));
     try std.testing.expectEqualStrings("a\n", state.textSlice());
     try std.testing.expect(state.flags.dirty);
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(5, .commit_text, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(5, abi.InputByte.commit_text, 0)));
     try std.testing.expect(!state.flags.dirty);
     try std.testing.expectEqual(@as(u32, 1), state.commit_count);
     try std.testing.expectEqual(@as(u32, 1), state.activation_count);
@@ -254,28 +243,28 @@ test "Notes UI state edits and commits document text" {
 
 test "Viewer and Capture UI state keep model-specific controls" {
     var viewer = State.init("app.viewer");
-    try std.testing.expectEqual(ApplyResult.mutated, viewer.apply(inputEvent(1, .focus_previous, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, viewer.apply(inputEvent(1, abi.InputByte.focus_previous, 0)));
     try std.testing.expectEqual(@as(u16, 1), viewer.focus_index);
-    try std.testing.expectEqual(ApplyResult.mutated, viewer.apply(inputEvent(2, .text, 'q')));
+    try std.testing.expectEqual(ApplyResult.mutated, viewer.apply(inputEvent(2, abi.InputByte.text, 'q')));
     try std.testing.expectEqualStrings("q", viewer.textSlice());
 
     var capture = State.init("app.capture");
-    try std.testing.expectEqual(ApplyResult.mutated, capture.apply(inputEvent(1, .activate, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, capture.apply(inputEvent(1, abi.InputByte.activate, 0)));
     try std.testing.expect(capture.flags.active);
-    try std.testing.expectEqual(ApplyResult.mutated, capture.apply(inputEvent(2, .activate, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, capture.apply(inputEvent(2, abi.InputByte.activate, 0)));
     try std.testing.expect(!capture.flags.active);
 }
 
 test "UI surface state rejects stale events and records bounded overflow once" {
     var state = State.init("app.notes");
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, .text, 'x')));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, abi.InputByte.text, 'x')));
     const revision = state.revision;
-    try std.testing.expectEqual(ApplyResult.rejected, state.apply(inputEvent(2, .text, 'y')));
+    try std.testing.expectEqual(ApplyResult.rejected, state.apply(inputEvent(2, abi.InputByte.text, 'y')));
     try std.testing.expectEqual(revision, state.revision);
 
     state.text_length = TEXT_CAPACITY;
     state.cursor = TEXT_CAPACITY;
-    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(3, .text, 'z')));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(3, abi.InputByte.text, 'z')));
     try std.testing.expect(state.flags.input_overflow);
-    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(4, .text, 'z')));
+    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(4, abi.InputByte.text, 'z')));
 }

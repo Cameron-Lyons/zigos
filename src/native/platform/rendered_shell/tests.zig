@@ -1282,7 +1282,7 @@ test "humane shell exposes object-native query history sharing capabilities and 
 
     var render_buffer: [FULL_RENDER_BUFFER_BYTES]u8 = undefined;
     const rendered = try shell.render(&render_buffer);
-    try expectContains(rendered, "object_model first_class=yes file_bridge=export-import-only");
+    try expectContains(rendered, "object_model first_class=yes");
     try expectContains(rendered, "object_query count=1 selected=92001 opened=yes capability=");
     try expectContains(rendered, "object[0] id=92001");
     try expectContains(rendered, "object_history count=1");

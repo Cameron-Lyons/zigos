@@ -353,8 +353,8 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     }, 201)).?;
     try std.testing.expectEqual(capture_review.id, focused_input.window_id);
     try std.testing.expectEqual(review_task.id, focused_input.task_id);
-    try std.testing.expectEqual(abi.InputEventKind.text, abi.inputEventKind(focused_input.kind).?);
-    try std.testing.expectEqual(@as(u8, 'z'), focused_input.text);
+    try std.testing.expectEqual(abi.InputByte.text, focused_input.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 'z'), focused_input.bytes[1]);
     try std.testing.expect((try session_manager.kernelPort().?.inputRecv(.{
         .header = component_port.makeHeader(.input_recv, review_task.id),
         .input_capability_id = input_capability_id,

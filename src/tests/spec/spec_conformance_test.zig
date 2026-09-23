@@ -78,7 +78,7 @@ test "spec 4 and 13 activate published nic and storage transports through scoped
     try runSpecCase(6);
 }
 
-test "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge" {
+test "spec 8 storage stays versioned recoverable signed and addressed by object id" {
     try runSpecCase(7);
 }
 

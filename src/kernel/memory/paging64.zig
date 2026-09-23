@@ -726,7 +726,7 @@ fn mapOwnedUserHugePage(
     if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
     const entry_flags = table64.withProtectionKey(
         table64.withExecutePermission(leafFlags(flags, false), permissions.executable) | ENTRY_LARGE_PAGE,
-        permissions.protection_key,
+        0,
     );
     directory_entry.* = tableEntry(@intCast(run.base), entry_flags, PAGE_OWNER_USER_PRIVATE);
 }
@@ -799,7 +799,7 @@ pub fn mapOwnedUserRange(
         if (permissions.cache_disabled) flags |= PAGE_CACHE_DISABLE;
         const entry_flags = table64.withProtectionKey(
             table64.withExecutePermission(leafFlags(flags, false), permissions.executable),
-            permissions.protection_key,
+            0,
         );
         page_entry.* = tableEntry(@intCast(page_phys), entry_flags, PAGE_OWNER_USER_PRIVATE);
         offset += PAGE_SIZE;
@@ -1010,17 +1010,12 @@ pub fn switchToUserAddressSpace(space: *const UserAddressSpace) void {
 }
 
 pub fn activateUserDomain(space: *const UserAddressSpace, protection_key: u4) void {
+    _ = protection_key;
     switchToUserAddressSpace(space);
-    if (builtin.target.os.tag == .freestanding) {
-        x86.allowUserProtectionKey(protection_key);
-    }
 }
 
 pub fn switchToKernelAddressSpace() void {
     switchAddressSpace(kernelPageDirectory(), kernel_switch_cr3);
-    if (builtin.target.os.tag == .freestanding) {
-        x86.wrpkru(0);
-    }
 }
 
 fn initializeKernelHierarchy() void {

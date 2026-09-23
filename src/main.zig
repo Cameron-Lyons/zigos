@@ -79,32 +79,6 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
         break :blk userspace_executor.activeTaskId();
     };
 
-    if (endpoint_syscalls.dispatchRegister(
-        port,
-        caller_task_id,
-        timer.getTicks(),
-        .{
-            .eax = frame.eax,
-            .edx = frame.edx,
-            .esi = frame.esi,
-            .r8 = frame.r8,
-            .r9 = frame.r9,
-            .r10 = frame.r10,
-            .r14 = frame.r14,
-            .r15 = frame.r15,
-        },
-    )) |reply| {
-        frame.eax = @intFromEnum(reply.status);
-        frame.edx = reply.bytes_written;
-        frame.r10 = @intFromEnum(reply.denial_reason);
-        frame.r8 = reply.attached_slot;
-        frame.edi = reply.correlation_id;
-        frame.esi = reply.word0;
-        frame.r14 = reply.word1;
-        frame.r15 = reply.word2;
-        return;
-    }
-
     const result = syscall_surface.dispatch(
         port,
         caller_task_id,

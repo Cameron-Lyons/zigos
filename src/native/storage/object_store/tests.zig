@@ -232,7 +232,6 @@ test "object store keeps immutable signed versions with stable version addresses
     try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, model.access_model);
     try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, model.sync_policy);
     try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, model.history_policy);
-    try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, model.file_bridge_policy);
     try std.testing.expect(model.typed);
     try std.testing.expect(model.signed);
     try std.testing.expect(model.versioned);

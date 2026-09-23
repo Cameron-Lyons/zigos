@@ -63,9 +63,9 @@ pub const floor: Floor = .{
         userspace_registry.addressSpaceGroupForServiceClass(.network_stack) != userspace_registry.addressSpaceGroupForServiceClass(.compositor_ui_session) and
         userspace_registry.COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP and
         userspace_registry.SHARES_GROUP_PAGE_TABLES and
-        userspace_registry.USES_PKU_WITHIN_GROUP and
+        !userspace_registry.USES_PKU_WITHIN_GROUP and
         userspace_executor.SHARES_GROUP_PAGE_TABLES and
-        userspace_executor.USES_PKU_WITHIN_SHARED_TABLES,
+        !userspace_executor.USES_PKU_WITHIN_SHARED_TABLES,
     .checkpoint_only_cold_load = storage_volume.USES_INCREMENTAL_LIVE_INDEX and
         storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD and
         storage_volume.COMPACTS_IN_BACKGROUND,

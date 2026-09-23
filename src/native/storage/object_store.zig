@@ -69,7 +69,6 @@ pub const ObjectHistoryEntry = store.ObjectHistoryEntry;
 pub const ObjectAccessModel = store.ObjectAccessModel;
 pub const ObjectSyncPolicy = store.ObjectSyncPolicy;
 pub const ObjectHistoryPolicy = store.ObjectHistoryPolicy;
-pub const FileBridgePolicy = store.FileBridgePolicy;
 pub const ObjectOperatingModel = store.ObjectOperatingModel;
 pub const ObjectRecord = store.ObjectRecord;
 pub const VersionRecord = store.VersionRecord;

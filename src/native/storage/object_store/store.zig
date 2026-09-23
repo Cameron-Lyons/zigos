@@ -297,10 +297,6 @@ pub const ObjectHistoryPolicy = enum(u8) {
     signed_version_chain,
 };
 
-pub const FileBridgePolicy = enum(u8) {
-    import_export_only,
-};
-
 pub const ObjectOperatingModel = struct {
     object_id: ids.ObjectId = ids.ObjectId.zero,
     object_type: ObjectType = .blob,
@@ -312,7 +308,6 @@ pub const ObjectOperatingModel = struct {
     access_model: ObjectAccessModel = .capability_scoped,
     sync_policy: ObjectSyncPolicy = .local_first_selective,
     history_policy: ObjectHistoryPolicy = .signed_version_chain,
-    file_bridge_policy: FileBridgePolicy = .import_export_only,
     sync_generation: u32 = 0,
     sharing_policy_generation: u32 = 0,
     has_history: bool = false,
@@ -327,7 +322,6 @@ pub const ObjectOperatingModel = struct {
             self.access_model == .capability_scoped and
             self.sync_policy == .local_first_selective and
             self.history_policy == .signed_version_chain and
-            self.file_bridge_policy == .import_export_only and
             self.has_history and
             self.has_sync_policy and
             self.has_sharing_policy and

@@ -230,7 +230,6 @@ test "object-store SDK stores signed versions and queries developer fixtures" {
     try std.testing.expect(model.isWholeOsObject());
     try std.testing.expectEqual(ObjectType.document, model.object_type);
     try std.testing.expectEqual(second.version_id, model.latest_version_id);
-    try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, model.file_bridge_policy);
 
     const handle = try client.putDocumentObject("typed-note.md", "text/markdown", "# Typed");
     const updated = try client.compareAndUpdate(handle, "# Typed\n\nNative handle");

@@ -289,33 +289,15 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         support.common.printBootMarker(boot_markers.storage_service_recovered);
     }
 
-    const bridge_view = context.storage_service_instance.bridgeResolve(.{
-        .workspace_id = notes_workspace_id,
-        .path = "documents/notes.md",
-        .access = .read,
-    }, .{
-        .task_id = context.notes_task_id,
-        .principal = context.notes_object_capability.holder,
-        .capability_id = context.notes_object_capability.id,
-        .now_ticks = 94,
-    }) catch |err| native_util.bootProofFailure("storage scenarios", err);
-    if (!bridge_view.authoritative and bridge_view.object_id == notes_object_id.raw() and
-        bridge_view.version_id == notes_entry.version_id.raw())
-    {
-        support.common.printBootMarker(boot_markers.storage_file_bridge_derived);
+    const addressed = context.storage_service_instance.object(notes_object_id) orelse {
+        native_util.bootProofFailure("storage scenarios", error.ObjectMissing);
+    };
+    if (addressed.latest_version_id.eql(notes_entry.version_id)) {
+        support.common.printBootMarker(boot_markers.storage_object_addressed);
     }
 
-    if (context.storage_service_instance.bridgeResolve(.{
-        .workspace_id = notes_workspace_id,
-        .path = "/documents/notes.md",
-        .access = .read,
-    }, .{
-        .task_id = context.notes_task_id,
-        .principal = context.notes_object_capability.holder,
-        .capability_id = context.notes_object_capability.id,
-        .now_ticks = 94,
-    })) |_| {} else |err| {
-        if (err == error.PathAuthorityRejected) {
+    if (context.storage_service_instance.resolve(notes_workspace_id, "/documents/notes.md")) |_| {} else |err| {
+        if (err == error.EntryNotFound) {
             support.common.printBootMarker(boot_markers.storage_path_authority_rejected);
         }
     }

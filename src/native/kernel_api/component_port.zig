@@ -157,8 +157,6 @@ pub const SurfacePresentRequest = struct {
     buffer_object_id: u64,
     buffer_offset: u32,
     buffer_bytes: u32,
-    model_kind: u8,
-    _reserved: [7]u8 = [_]u8{0} ** 7,
 };
 
 pub const DeviceDescribeRequest = struct {
@@ -446,8 +444,6 @@ pub const KernelPort = struct {
         var presentation = std.mem.zeroes(abi.SurfacePresentation);
         presentation.surface_id = request.surface_id;
         presentation.revision = request.fence;
-        presentation.interaction_hash = request.fence;
-        presentation.model_kind = request.model_kind;
         presentation.buffer_object_id = request.buffer_object_id;
         presentation.buffer_offset = request.buffer_offset;
         presentation.buffer_bytes = request.buffer_bytes;

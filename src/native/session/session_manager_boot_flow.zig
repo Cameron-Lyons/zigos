@@ -711,7 +711,10 @@ pub const SessionManager = struct {
         var framebuffer = compositor_display.Framebuffer.init(&storage, compositor_display.MIN_WIDTH, compositor_display.MIN_HEIGHT) catch return false;
         framebuffer.renderSession(&self.recovery_context.review_compositor_session) catch return false;
         var expected_buffer: [96]u8 = undefined;
-        const expected = std.fmt.bufPrint(&expected_buffer, "surface_state model=compositor revision={d}", .{surface.presentation.revision}) catch return false;
+        const expected = std.fmt.bufPrint(&expected_buffer, "surface_state revision={d} object={d}", .{
+            surface.presentation.revision,
+            surface.presentation.buffer_object_id,
+        }) catch return false;
         _ = framebuffer.requirePresentation(
             expected,
             self.recovery_context.review_compositor_session.visibleWindowCount(),
@@ -724,8 +727,7 @@ pub const SessionManager = struct {
         const surface_id = compositor_task.ui_surface_id orelse return false;
         const surface = self.recovery_context.review_compositor_session.surfacePresentation(surface_id) orelse return false;
         if (surface.task_id != compositor_task.id or surface.presentation.revision == 0) return false;
-        const model = abi.surfaceModelKind(surface.presentation.model_kind) orelse return false;
-        if (model != .compositor) return false;
+        if (!abi.isCanonicalSurfacePresentation(&surface.presentation)) return false;
         const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(compositor_task.id) orelse return false;
         if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
         const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(

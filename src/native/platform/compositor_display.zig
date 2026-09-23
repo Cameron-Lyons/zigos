@@ -217,20 +217,11 @@ pub const Framebuffer = struct {
         if (window.ui_surface_id) |surface_id| {
             if (session.surfacePresentation(surface_id)) |surface| {
                 const presentation = &surface.presentation;
-                const model = abi.surfaceModelKind(presentation.model_kind) orelse .none;
-                try self.drawFmt(cursor, "surface_state model={s} revision={d} focus={d} cursor={d} commits={d} activations={d}", .{
-                    @tagName(model),
+                try self.drawFmt(cursor, "surface_state revision={d} object={d} bytes={d}", .{
                     presentation.revision,
-                    presentation.focus_index,
-                    presentation.cursor,
-                    presentation.commit_count,
-                    presentation.activation_count,
+                    presentation.buffer_object_id,
+                    presentation.buffer_bytes,
                 });
-                var text: [abi.SURFACE_PRESENTATION_TEXT_BYTES]u8 = undefined;
-                for (presentation.textSlice(), 0..) |byte, index| {
-                    text[index] = if (byte == '\n') '|' else byte;
-                }
-                try self.drawText(cursor, text[0..presentation.text_length]);
             }
         }
     }
@@ -451,17 +442,11 @@ test "compositor display framebuffer renders windows switching recovery and perm
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = 31;
     presentation.revision = 2;
-    presentation.interaction_hash = 0xC0FFEE;
-    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
-    @memcpy(presentation.text[0..11], "hello world");
-    presentation.text_length = 11;
-    presentation.cursor = 11;
     presentation.buffer_object_id = 31;
-    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
+    presentation.buffer_bytes = 4096;
     _ = try session.presentSurface(app_task, &presentation);
     try display.renderSession(&session);
-    try expectDisplayContains(&display, "surface_state model=notes revision=2");
-    try expectDisplayContains(&display, "hello world");
+    try expectDisplayContains(&display, "surface_state revision=2 object=31 bytes=4096");
 
     var snapshot: compositor_session.SessionSnapshot = undefined;
     session.snapshotInto(&snapshot);
