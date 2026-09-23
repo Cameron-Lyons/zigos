@@ -44,9 +44,9 @@ pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
 pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 512;
-pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_424;
-pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_432;
-pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_432;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 24_136;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 24_144;
+pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 24_144;
 pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 216;
 pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_SESSION_SIZE_CEILING_BYTES
@@ -193,10 +193,6 @@ pub const SurfaceRecord = struct {
     task_id: u64 = 0,
     presentation_count: u64 = 0,
     presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
-
-    pub fn textSlice(self: *const SurfaceRecord) []const u8 {
-        return self.presentation.textSlice();
-    }
 };
 
 pub const Error = error{
@@ -1661,10 +1657,7 @@ fn surfaceTaskKey(task_id: u64) u64 {
 
 fn scanoutFromPresentation(presentation: *const abi.SurfacePresentation) display_driver_task.Scanout {
     const object_id = if (presentation.buffer_object_id != 0) presentation.buffer_object_id else presentation.surface_id;
-    const bytes: u32 = if (presentation.buffer_bytes != 0)
-        presentation.buffer_bytes
-    else
-        @intCast(abi.SURFACE_PRESENTATION_TEXT_BYTES);
+    const bytes: u32 = presentation.buffer_bytes;
     return .{
         .object_id = object_id,
         .offset = presentation.buffer_offset,
@@ -1873,14 +1866,12 @@ fn compositorTestBudget(endpoint_slots: u16) task_runtime.ResourceBudget {
     };
 }
 
-fn testSurfacePresentation(surface_id: u64, interaction_hash: u64) abi.SurfacePresentation {
+fn testSurfacePresentation(surface_id: u64, buffer_bytes: u64) abi.SurfacePresentation {
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = surface_id;
     presentation.revision = 1;
-    presentation.interaction_hash = interaction_hash;
-    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
     presentation.buffer_object_id = surface_id;
-    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
+    presentation.buffer_bytes = @intCast(buffer_bytes);
     return presentation;
 }
 
@@ -2600,14 +2591,8 @@ test "compositor session owns bounded monotonic surface presentations" {
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = 71;
     presentation.revision = 2;
-    presentation.interaction_hash = 0xA11CE;
-    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
-    @memcpy(presentation.text[0..5], "draft");
-    presentation.text_length = 5;
-    presentation.cursor = 5;
     presentation.buffer_object_id = 71;
-    presentation.buffer_bytes = abi.SURFACE_PRESENTATION_TEXT_BYTES;
-    presentation.state_flags = @bitCast(abi.SurfaceStateFlags{ .dirty = true });
+    presentation.buffer_bytes = 4096;
 
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(app_task, &presentation));
@@ -2616,14 +2601,12 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqual(@as(?usize, surface_slot_index), session.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_head);
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), session.active_surface_tail);
-    try std.testing.expectEqualStrings("draft", session.surfacePresentation(71).?.textSlice());
+    try std.testing.expectEqual(@as(u64, 71), session.surfacePresentation(71).?.presentation.buffer_object_id);
     try std.testing.expectEqual(@as(u64, 1), session.surfacePresentation(71).?.presentation_count);
     _ = try session.openTaskView(app_task, "Notes");
 
     presentation.revision = 3;
-    presentation.text[5] = '!';
-    presentation.text_length = 6;
-    presentation.cursor = 6;
+    presentation.buffer_bytes = 8192;
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(app_task, &presentation));
     try std.testing.expectEqual(@as(u64, 2), session.surfacePresentation(71).?.presentation_count);
 
@@ -2631,14 +2614,14 @@ test "compositor session owns bounded monotonic surface presentations" {
     session.snapshotInto(&snapshot);
     var restored = Session.init();
     try restored.restoreFromSnapshot(&snapshot);
-    try std.testing.expectEqualStrings("draft!", restored.surfacePresentation(71).?.textSlice());
+    try std.testing.expectEqual(@as(u32, 8192), restored.surfacePresentation(71).?.presentation.buffer_bytes);
     try std.testing.expectEqual(@as(?usize, surface_slot_index), restored.surface_task_index.lookup(surfaceTaskKey(app_task.id)));
     try std.testing.expectEqual(@as(u16, @intCast(surface_slot_index)), restored.active_surface_head);
 
     presentation.revision = 2;
     try std.testing.expectError(error.StalePresentation, restored.presentSurface(app_task, &presentation));
     presentation.revision = 3;
-    presentation.interaction_hash += 1;
+    presentation.buffer_offset = 16;
     try std.testing.expectError(error.PresentationConflict, restored.presentSurface(app_task, &presentation));
     const foreign_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 82 },
@@ -2790,8 +2773,6 @@ test "compositor presents by shared-memory handle without a pixel copy" {
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = 91;
     presentation.revision = 3;
-    presentation.interaction_hash = 0xB0FF;
-    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
     presentation.buffer_object_id = 42;
     presentation.buffer_bytes = 4096;
     try std.testing.expect(presentation.presentsByHandle());

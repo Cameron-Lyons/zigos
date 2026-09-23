@@ -1,26 +1,30 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 7;
+pub const ABI_VERSION: u16 = 8;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
-pub const REGISTER_IPC_SELECT: u64 = 1 << 31;
-pub const REGISTER_IPC_PAYLOAD_BYTES: usize = 24;
-pub const REGISTER_IPC_SLOT_NONE: u64 = 0xFF;
-pub const REGISTER_IPC_MOVE: u64 = 1 << 0;
-pub const REGISTER_IPC_CAPABILITY_ID: u64 = 1 << 1;
-
-pub fn packRegisterIpc(length: usize, move: bool, capability_id_selector: bool) u64 {
-    var bits: u64 = @as(u64, @intCast(length)) << 8;
-    if (move) bits |= REGISTER_IPC_MOVE;
-    if (capability_id_selector) bits |= REGISTER_IPC_CAPABILITY_ID;
-    return bits;
-}
-
-pub fn registerIpcLength(bits: u64) usize {
-    return @intCast((bits >> 8) & 0xFF);
-}
-pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
+pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
 pub const WAIT_PLUS_SEALED_RINGS = true;
+
+pub const InputByte = struct {
+    pub const text: u8 = 1;
+    pub const backspace: u8 = 2;
+    pub const commit_text: u8 = 3;
+    pub const focus_next: u8 = 4;
+    pub const focus_previous: u8 = 5;
+    pub const activate: u8 = 6;
+    pub const task_switch_next: u8 = 7;
+    pub const task_switch_previous: u8 = 8;
+    pub const show_recovery: u8 = 9;
+    pub const dismiss_recovery: u8 = 10;
+};
+
+pub fn inputPacket(op: u8, data: u8) [INPUT_PACKET_BYTES]u8 {
+    var bytes = [_]u8{0} ** INPUT_PACKET_BYTES;
+    bytes[0] = op;
+    bytes[1] = data;
+    return bytes;
+}
 
 pub const NativeOperation = enum(u16) {
     task_create = 0x100,
@@ -179,30 +183,17 @@ pub const AccountingDescriptor = extern struct {
     ui_surface_id: u64,
 };
 
-pub const InputEventKind = enum(u8) {
-    text,
-    backspace,
-    commit_text,
-    focus_next,
-    focus_previous,
-    activate,
-    task_switch_next,
-    task_switch_previous,
-    show_recovery,
-    dismiss_recovery,
-};
-
 pub const InputEventDescriptor = extern struct {
     sequence: u64,
     tick: u64,
     window_id: u64,
     task_id: u64,
     surface_id: u64,
-    kind: u8,
-    text: u8,
     port_id: u8,
     slot_id: u8,
-    _reserved: [4]u8 = [_]u8{0} ** 4,
+    length: u8,
+    _reserved: [5]u8 = [_]u8{0} ** 5,
+    bytes: [INPUT_PACKET_BYTES]u8 = [_]u8{0} ** INPUT_PACKET_BYTES,
 };
 
 pub const InputRecvResponse = extern struct {
@@ -211,43 +202,12 @@ pub const InputRecvResponse = extern struct {
     event: InputEventDescriptor,
 };
 
-pub const SurfaceModelKind = enum(u8) {
-    none,
-    notes,
-    viewer,
-    capture,
-    permission_review,
-    compositor,
-    generic,
-};
-
-pub const SurfaceStateFlags = packed struct(u8) {
-    dirty: bool = false,
-    recovery_visible: bool = false,
-    active: bool = false,
-    input_overflow: bool = false,
-    _reserved: u4 = 0,
-};
-
 pub const SurfacePresentation = extern struct {
     surface_id: u64,
     revision: u64,
-    interaction_hash: u64,
-    commit_count: u32,
-    activation_count: u32,
-    focus_index: u16,
-    text_length: u16,
-    cursor: u16,
-    model_kind: u8,
-    state_flags: u8,
-    text: [SURFACE_PRESENTATION_TEXT_BYTES]u8,
     buffer_object_id: u64,
     buffer_offset: u32,
     buffer_bytes: u32,
-
-    pub fn textSlice(self: *const SurfacePresentation) []const u8 {
-        return self.text[0..@min(self.text_length, self.text.len)];
-    }
 
     pub fn presentsByHandle(self: *const SurfacePresentation) bool {
         return self.buffer_object_id != 0 and self.buffer_bytes != 0;
@@ -346,36 +306,15 @@ pub fn serviceFlagsHas(flags: u16, mask: u16) bool {
     return (flags & mask) != 0;
 }
 
-pub fn inputEventKind(raw: u8) ?InputEventKind {
-    return std.enums.fromInt(InputEventKind, raw);
-}
-
-pub fn surfaceModelKind(raw: u8) ?SurfaceModelKind {
-    return std.enums.fromInt(SurfaceModelKind, raw);
-}
-
 pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) bool {
-    if (presentation.surface_id == 0 or presentation.revision == 0 or presentation.interaction_hash == 0) return false;
-    if (!presentation.presentsByHandle()) return false;
-    if (presentation.text_length > presentation.text.len or presentation.cursor > presentation.text_length) return false;
-    const model = surfaceModelKind(presentation.model_kind) orelse return false;
-    if (model == .none) return false;
-    const flags: SurfaceStateFlags = @bitCast(presentation.state_flags);
-    if (flags._reserved != 0) return false;
-    for (presentation.text[0..presentation.text_length]) |byte| {
-        if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
-    }
-    for (presentation.text[presentation.text_length..]) |byte| {
-        if (byte != 0) return false;
-    }
-    return true;
+    return presentation.surface_id != 0 and presentation.revision != 0 and presentation.presentsByHandle();
 }
 
 test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 7), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 8), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));
@@ -383,9 +322,9 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(InputEventDescriptor));
-    try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputRecvResponse));
-    try std.testing.expectEqual(@as(usize, 568), @sizeOf(SurfacePresentation));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputEventDescriptor));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(InputRecvResponse));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(SurfacePresentation));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(DeviceDescriptor));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
@@ -395,18 +334,15 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));
     try std.testing.expect(serviceFlagsHas(SERVICE_CONNECTION_FLAG_USERSPACE_OWNER, SERVICE_CONNECTION_FLAG_USERSPACE_OWNER));
-    try std.testing.expectEqual(InputEventKind.commit_text, inputEventKind(@intFromEnum(InputEventKind.commit_text)).?);
-    try std.testing.expect(inputEventKind(0xFF) == null);
-    try std.testing.expectEqual(SurfaceModelKind.notes, surfaceModelKind(@intFromEnum(SurfaceModelKind.notes)).?);
-    try std.testing.expect(surfaceModelKind(0xFF) == null);
+    const packet = inputPacket(InputByte.text, 'a');
+    try std.testing.expectEqual(InputByte.text, packet[0]);
+    try std.testing.expectEqual(@as(u8, 'a'), packet[1]);
 
     var presentation = std.mem.zeroes(SurfacePresentation);
     presentation.surface_id = 9;
     presentation.revision = 1;
-    presentation.interaction_hash = 2;
-    presentation.model_kind = @intFromEnum(SurfaceModelKind.notes);
     presentation.buffer_object_id = 9;
-    presentation.buffer_bytes = SURFACE_PRESENTATION_TEXT_BYTES;
+    presentation.buffer_bytes = 4096;
     try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
     presentation.buffer_object_id = 0;
     try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));

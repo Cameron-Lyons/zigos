@@ -19,7 +19,7 @@ const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
 
 pub const SHARES_GROUP_PAGE_TABLES = userspace_registry.SHARES_GROUP_PAGE_TABLES;
-pub const USES_PKU_WITHIN_SHARED_TABLES = true;
+pub const USES_PKU_WITHIN_SHARED_TABLES = false;
 const GROUP_SPACE_COUNT = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT;
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
@@ -2760,6 +2760,6 @@ test "userspace exception containment excludes system-fatal and dedicated vector
 
 test "production address-space groups share page tables" {
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
-    try std.testing.expect(USES_PKU_WITHIN_SHARED_TABLES);
+    try std.testing.expect(!USES_PKU_WITHIN_SHARED_TABLES);
     try std.testing.expectEqual(@as(usize, 8), GROUP_SPACE_COUNT);
 }

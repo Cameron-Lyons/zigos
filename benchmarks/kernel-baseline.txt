@@ -14,7 +14,7 @@ memory.heap_allocate_free 31.22 50
 memory.frame_allocate_release 37.48 50
 syscall.fast_entry_roundtrip 800.10 50
 accelerator_scheduler.claim_release 4138.79 50
-storage.file_bridge.resolve_shared_view 281.54 50
+storage.object.resolve_workspace_entry 281.54 50
 storage.workspace.commit_overlay 6592.62 50
 storage.volume.replay_segmented_log 600666.08 50
 storage.volume.compact_checkpoint 672568.00 50

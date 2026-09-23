@@ -2260,7 +2260,7 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "recordInputEvent" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "publishUiState" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
-        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = abi.SURFACE_PRESENTATION_TEXT_BYTES" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = 512" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn modelForBundle" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state edits and commits document text\"" },
     };
@@ -3847,7 +3847,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 7",
+        "pub const ABI_VERSION: u16 = 8",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -3970,7 +3970,7 @@ fn validateUserspaceDriverDataPathTrack(
         source: []const u8,
         snippet: []const u8,
     }{
-        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512" },
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true" },
         .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SurfacePresentation = ex" ++ "tern struct" },
         .{ .path = component_port_path, .source = component_port_source, .snippet = "pub fn surfacePresent(" },
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.surface_present" },

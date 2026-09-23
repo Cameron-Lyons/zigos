@@ -54,7 +54,6 @@ pub fn kernelMain() void {
     const hardware_cet = features.cet_ibt and features.cet_ss;
     const software_cet_fallback = !hardware_cet and software_cpu_fallback;
     const hardware_pku = features.pku;
-    const software_pku_fallback = !hardware_pku and software_cpu_fallback;
     const hardware_lass = features.lass;
     const software_lass_fallback = !hardware_lass and software_cpu_fallback;
     const hardware_fred = features.fred and features.lkgs;
@@ -71,9 +70,6 @@ pub fn kernelMain() void {
     if (software_cet_fallback) {
         required_features.cet_ibt = true;
         required_features.cet_ss = true;
-    }
-    if (software_pku_fallback) {
-        required_features.pku = true;
     }
     if (software_lass_fallback) {
         required_features.lass = true;

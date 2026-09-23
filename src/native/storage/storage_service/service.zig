@@ -2,7 +2,6 @@ const std = @import("std");
 const abi = @import("../../core/abi.zig");
 const capability = @import("../../kernel_api/capability.zig");
 const debug_contract = @import("../../security/debug_contract.zig");
-const file_bridge = @import("../file_bridge.zig");
 const object_store = @import("../object_store.zig");
 const checkpoint_support = @import("../storage_service_checkpoint.zig");
 const ids = @import("../../core/ids.zig");
@@ -38,7 +37,18 @@ pub const SharedPayloadError = object_store.Error || shared_memory.Error || erro
 
 pub const AuthorityContext = service_authority.Context;
 
-pub const AuthorityError = file_bridge.Error;
+pub const Access = enum(u8) {
+    read,
+    write,
+};
+
+pub const AuthorityError = error{
+    CapabilityRequired,
+    CapabilityNotFound,
+    CapabilityRevoked,
+    PermissionDenied,
+    WorkspaceScopeViolation,
+};
 
 pub const SharedWorkspaceGrant = struct {
     grant: workspace.ShareGrant,
@@ -309,32 +319,6 @@ pub const StorageCore = struct {
 
     pub fn findSnapshot(self: *Service, workspace_id: anytype, label: []const u8) ?*workspace.SnapshotRecord {
         return self.workspaces.findSnapshotByLabel(workspaceId(workspace_id), label);
-    }
-
-    pub fn bridge(self: *Service) ?file_bridge.Bridge {
-        const capability_table = self.capability_table orelse return null;
-        return file_bridge.Bridge.init(self, capability_table, bridgeResolveEntry, bridgeHasVersion);
-    }
-
-    pub fn bridgeResolve(
-        self: *StorageCore,
-        request: file_bridge.ResolveRequest,
-        authority: AuthorityContext,
-    ) file_bridge.Error!file_bridge.View {
-        const capability_table = self.capability_table orelse return error.CapabilityRequired;
-        var port = StoragePort.init(self, capability_table);
-        return port.resolve(authority, request) catch |err| switch (err) {
-            error.CapabilityNotFound => return error.CapabilityNotFound,
-            error.CapabilityRequired => return error.CapabilityRequired,
-            error.CapabilityRevoked => return error.CapabilityRevoked,
-            error.ObjectMissing => return error.ObjectMissing,
-            error.PathAuthorityRejected => return error.PathAuthorityRejected,
-            error.PathSyntaxInvalid => return error.PathSyntaxInvalid,
-            error.PathTooLong => return error.PathTooLong,
-            error.PermissionDenied => return error.PermissionDenied,
-            error.WorkspaceScopeViolation => return error.WorkspaceScopeViolation,
-            else => return error.PathNotFound,
-        };
     }
 
     pub fn object(self: *const Service, object_id: anytype) ?*const object_store.ObjectRecord {
@@ -766,34 +750,21 @@ pub const StoragePort = struct {
         return self.core.objectOperatingModel(object_id);
     }
 
-    pub fn resolve(self: *StoragePort, authority: AuthorityContext, request: file_bridge.ResolveRequest) (AuthorityError || workspace.Error)!file_bridge.View {
-        const workspace_id = ids.workspace(request.workspace_id);
-        const path = try file_bridge.validateBridgePath(request.path);
-        const storage_authority = try self.requireStorageAuthority(authority, workspace_id, request.access);
-        const scoped_entry = if (storage_authority.target.kind == .workspace)
-            try self.requireGrantScopeForResolve(authority, request, path)
-        else
-            null;
-        var bridge = file_bridge.Bridge.init(self.core, self.capability_table, bridgeResolveEntry, bridgeHasVersion);
-        return bridge.resolveAuthorized(request.workspace_id, path, request.access, storage_authority, scoped_entry);
-    }
-
-    fn requireGrantScopeForResolve(
-        self: *const StoragePort,
+    pub fn openEntry(
+        self: *StoragePort,
         authority: AuthorityContext,
-        request: file_bridge.ResolveRequest,
-        path: file_bridge.ValidatedPath,
-    ) (AuthorityError || workspace.Error)!?*const workspace.Entry {
-        const workspace_id = ids.workspace(request.workspace_id);
-        const record = self.core.findWorkspaceRecordConst(workspace_id) orelse return error.WorkspaceNotFound;
-        if (record.owner.eql(authority.principal)) return null;
-
-        const entry = try record.resolveBorrowedWithPathHash(path.bytes, path.hash);
-        if (!record.hasAccess(.{
+        workspace_id: u64,
+        path: []const u8,
+        access: Access,
+    ) (AuthorityError || workspace.Error)!workspace.Entry {
+        const id = ids.workspace(workspace_id);
+        _ = try self.requireStorageAuthority(authority, id, access);
+        const entry = try self.core.resolve(id, path);
+        if (!self.core.workspaceHasAccess(id, .{
             .principal_id = authority.principal,
             .object_id = entry.object_id,
             .path = entry.pathSlice(),
-            .wants_write = request.access == .write,
+            .wants_write = access == .write,
             .network_scope = .local_only,
             .now_ticks = authority.now_ticks,
         })) return error.PermissionDenied;
@@ -804,7 +775,7 @@ pub const StoragePort = struct {
         self: *const StoragePort,
         authority_context: AuthorityContext,
         object_id: ids.ObjectId,
-        access: file_bridge.AccessMode,
+        access: Access,
     ) AuthorityError!*const capability.Capability {
         const authority = try self.requireStorageAuthority(authority_context, null, access);
         if (authority.target.kind == .object and authority.target.id != object_id.raw()) return error.PermissionDenied;
@@ -816,7 +787,7 @@ pub const StoragePort = struct {
         self: *const StoragePort,
         authority_context: AuthorityContext,
         workspace_id: ?ids.WorkspaceId,
-        access: file_bridge.AccessMode,
+        access: Access,
     ) AuthorityError!*const capability.Capability {
         const required_right: capability.CapabilityRight = if (access == .write) .object_write else .object_read;
         const authority = try self.requireUsableStorageCapability(authority_context, required_right);
@@ -1056,16 +1027,6 @@ fn writeStorageTrace(
             0,
         );
     }
-}
-
-fn bridgeResolveEntry(context: *const anyopaque, workspace_id: u64, path: file_bridge.ValidatedPath) workspace.Error!*const workspace.Entry {
-    const service: *const StorageCore = @ptrCast(@alignCast(context));
-    return service.resolveBorrowedWithPathHash(ids.workspace(workspace_id), path.bytes, path.hash);
-}
-
-fn bridgeHasVersion(context: *const anyopaque, version_id: u64) bool {
-    const service: *const StorageCore = @ptrCast(@alignCast(context));
-    return service.version(ids.version(version_id)) != null;
 }
 
 fn workspaceId(value: anytype) ids.WorkspaceId {

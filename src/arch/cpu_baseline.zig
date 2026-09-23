@@ -46,7 +46,7 @@ pub const Registers = struct {
 
 pub const REQUIRES_XSAVES = true;
 pub const REQUIRES_CET = true;
-pub const REQUIRES_PKU = true;
+pub const REQUIRES_PKU = false;
 pub const REQUIRES_LASS = true;
 pub const REQUIRES_FRED = true;
 pub const PRODUCTION_REQUIRES_HARDWARE_FRED = true;
@@ -178,7 +178,6 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.xsaves) return .xsaves;
     if (!features.cet_ibt) return .cet_ibt;
     if (!features.cet_ss) return .cet_ss;
-    if (!features.pku) return .pku;
     if (!features.lass) return .lass;
     if (!features.fred) return .fred;
     if (!features.lkgs) return .lkgs;
@@ -310,7 +309,7 @@ test "baseline rejects every missing required feature" {
     try std.testing.expectEqual(MissingFeature.pcid, firstMissing(missing_pcid).?);
     var missing_pku = completeFeatures();
     missing_pku.pku = false;
-    try std.testing.expectEqual(MissingFeature.pku, firstMissing(missing_pku).?);
+    try std.testing.expect(firstMissing(missing_pku) == null);
     var missing_lass = completeFeatures();
     missing_lass.lass = false;
     try std.testing.expectEqual(MissingFeature.lass, firstMissing(missing_lass).?);

@@ -34,7 +34,6 @@ const userspace_scheduler = @import("../../../native/task/userspace_scheduler.zi
 const network_policy = @import("../../../native/sync/network_policy.zig");
 const sync_service = @import("../../../native/sync/sync_service.zig");
 const workspace = @import("../../../native/storage/workspace.zig");
-const file_bridge = @import("../../../native/storage/file_bridge.zig");
 const object_store = @import("../../../native/storage/object_store.zig");
 const storage_service = @import("../../../native/storage/storage_service.zig");
 const storage_volume = @import("../../../native/storage/storage_volume.zig");
@@ -1443,15 +1442,9 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
 }
 
 fn benchmarkFileBridgeResolve(iteration: u32) u64 {
-    const path = "documents/plan.md";
-    var authority = file_bridge_context.authority;
-    authority.now_ticks = 30 + iteration;
-    const view = file_bridge_context.storage.bridgeResolve(.{
-        .workspace_id = file_bridge_context.workspace_id,
-        .path = path,
-        .access = .read,
-    }, authority) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return view.object_id + view.version_id + path.len + @intFromBool(view.readable);
+    const entry = file_bridge_context.storage.resolve(ids.workspace(file_bridge_context.workspace_id), "documents/plan.md") catch |err|
+        benchmark_reporting.benchStepFailure("benchmark suite", err);
+    return entry.object_id.raw() + entry.version_id.raw() + iteration;
 }
 
 fn benchmarkWorkspaceCommitOverlay(iteration: u32) align(4096) u64 {

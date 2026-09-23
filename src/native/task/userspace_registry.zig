@@ -44,7 +44,7 @@ pub const IMAGE_SPEC_SIZE_CEILING_BYTES: usize = 64;
 pub const PRODUCTION_ADDRESS_SPACE_COUNT: usize = 8;
 pub const COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP = true;
 pub const SHARES_GROUP_PAGE_TABLES = true;
-pub const USES_PKU_WITHIN_GROUP = true;
+pub const USES_PKU_WITHIN_GROUP = false;
 pub const DRIVERS_USE_DISTINCT_ADDRESS_SPACES = true;
 
 pub const AddressSpaceGroup = enum(u8) {
@@ -580,8 +580,8 @@ pub fn stackTopForBundle(bundle_id: []const u8) u64 {
 }
 
 pub fn protectionKeyForBundle(bundle_id: []const u8) u4 {
-    const slot = imageSlotInGroup(bundle_id) orelse return 1;
-    return @intCast((slot % 15) + 1);
+    _ = bundle_id;
+    return 0;
 }
 
 pub fn findByServiceClass(class: contract.ServiceClass) ?*const ImageSpec {
@@ -774,7 +774,7 @@ test "production userspace registry contains exactly the production boot catalog
     try std.testing.expect(DRIVERS_USE_DISTINCT_ADDRESS_SPACES);
     try std.testing.expect(COLOCATES_SERVICES_BY_ADDRESS_SPACE_GROUP);
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
-    try std.testing.expect(USES_PKU_WITHIN_GROUP);
+    try std.testing.expect(!USES_PKU_WITHIN_GROUP);
     try std.testing.expectEqual(AddressSpaceGroup.store, addressSpaceGroupForServiceClass(.storage_object).?);
     try std.testing.expectEqual(AddressSpaceGroup.session, addressSpaceGroupForServiceClass(.policy_mediation).?);
     try std.testing.expectEqual(AddressSpaceGroup.notes, addressSpaceGroupForBundle("app.notes").?);
@@ -797,7 +797,7 @@ test "production userspace registry contains exactly the production boot catalog
         occupied[occupied_index] |= bit;
         try std.testing.expectEqual(userspace_layout.imageBaseForSlot(slot), imageBaseForBundle(bundle_id));
         try std.testing.expectEqual(userspace_layout.stackTopForSlot(slot), stackTopForBundle(bundle_id));
-        try std.testing.expectEqual(@as(u4, @intCast((slot % 15) + 1)), protectionKeyForBundle(bundle_id));
+        try std.testing.expectEqual(@as(u4, 0), protectionKeyForBundle(bundle_id));
     }
 
     for (production_boot_image_specs) |spec| {

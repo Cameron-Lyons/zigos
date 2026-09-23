@@ -83,8 +83,6 @@ const SurfacePresentRequest = struct {
     buffer_object_id: u64,
     buffer_offset: u32,
     buffer_bytes: u32,
-    model_kind: u8,
-    _reserved: [7]u8 = [_]u8{0} ** 7,
 };
 
 const INPUT_EVENTS_PER_DISPATCH: usize = 8;
@@ -129,42 +127,6 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
             response_len: usize,
             outcome: *Outcome,
         ) callconv(.c) usize;
-        const RegisterIpcArgs = extern struct {
-            opcode: u64,
-            endpoint_selector: u64,
-            correlation: u64,
-            attached_selector: u64,
-            packed_bits: u64,
-            word0: u64,
-            word1: u64,
-            word2: u64,
-        };
-        const RegisterIpcResult = extern struct {
-            status: u32,
-            bytes_written: u32,
-            denial_reason: u16,
-            _pad0: u16 = 0,
-            _pad1: u32 = 0,
-            attached_slot: u64,
-            correlation: u64,
-            word0: u64,
-            word1: u64,
-            word2: u64,
-        };
-
-        comptime {
-            if (@offsetOf(RegisterIpcArgs, "word2") != 56 or @sizeOf(RegisterIpcArgs) != 64) {
-                @compileError("register ipc arguments no longer match syscall_register_ipc_asm");
-            }
-            if (@offsetOf(RegisterIpcResult, "attached_slot") != 16 or
-                @offsetOf(RegisterIpcResult, "correlation") != 24 or
-                @offsetOf(RegisterIpcResult, "word2") != 48)
-            {
-                @compileError("register ipc results no longer match syscall_register_ipc_asm");
-            }
-        }
-
-        extern fn syscall_register_ipc_asm(args: *const RegisterIpcArgs, result: *RegisterIpcResult) callconv(.c) void;
         extern fn syscall_yield_asm(
             counter: u32,
             disposition: mailbox.YieldDisposition,
@@ -187,26 +149,6 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
             };
         }
 
-        fn registerSend(endpoint_capability_id: u64, correlation_id: u64, payload: []const u8) abi.SyscallStatus {
-            var words = [3]u64{ 0, 0, 0 };
-            for (payload, 0..) |byte, index| {
-                const shift: u6 = @intCast((index % 8) * 8);
-                words[index / 8] |= @as(u64, byte) << shift;
-            }
-            var result = std.mem.zeroes(RegisterIpcResult);
-            const args = RegisterIpcArgs{
-                .opcode = abi.opcode(.endpoint_send),
-                .endpoint_selector = endpoint_capability_id,
-                .correlation = correlation_id,
-                .attached_selector = 0,
-                .packed_bits = abi.packRegisterIpc(payload.len, false, true),
-                .word0 = words[0],
-                .word1 = words[1],
-                .word2 = words[2],
-            };
-            syscall_register_ipc_asm(&args, &result);
-            return @enumFromInt(result.status);
-        }
     }
 else
     struct {
@@ -565,11 +507,6 @@ fn endpointConnect(
 }
 
 fn endpointSend(endpoint_capability_id: u64, payload: []const u8) bool {
-    if (comptime builtin.target.os.tag == .freestanding) {
-        if (payload.len <= abi.REGISTER_IPC_PAYLOAD_BYTES) {
-            return freestanding_syscall.registerSend(endpoint_capability_id, nextCorrelationId(), payload) == .success;
-        }
-    }
     var request = EndpointSendRequest{
         .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
         .correlation_id = nextCorrelationId(),
@@ -627,7 +564,6 @@ fn surfacePresent(
         .buffer_object_id = presentation.buffer_object_id,
         .buffer_offset = presentation.buffer_offset,
         .buffer_bytes = presentation.buffer_bytes,
-        .model_kind = presentation.model_kind,
     };
     const status = trapCall(&request, &response);
     return .{
@@ -676,8 +612,8 @@ fn applyInputEvent(
     state.last_input_sequence = event.sequence;
     state.last_input_window_id = event.window_id;
     state.last_input_surface_id = event.surface_id;
-    state.last_input_kind = event.kind;
-    state.last_input_text = event.text;
+    state.last_input_kind = if (event.length > 0) event.bytes[0] else 0;
+    state.last_input_text = if (event.length > 1) event.bytes[1] else 0;
     state.last_input_port_id = event.port_id;
     state.last_input_slot_id = event.slot_id;
     publishUiState(state, surface);
@@ -812,10 +748,10 @@ test "focused input telemetry rejects foreign events and records valid semantic 
         .window_id = 12,
         .task_id = 41,
         .surface_id = 13,
-        .kind = @intFromEnum(abi.InputEventKind.text),
-        .text = 'x',
         .port_id = 2,
         .slot_id = 3,
+        .length = 2,
+        .bytes = abi.inputPacket(abi.InputByte.text, 'x'),
     };
     try std.testing.expect(applyInputEvent(&state, &surface, event));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
@@ -829,7 +765,7 @@ test "focused input telemetry rejects foreign events and records valid semantic 
     foreign.task_id = 42;
     try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
     foreign.task_id = 41;
-    foreign.kind = 0xFF;
+    foreign.length = 0;
     try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
 }

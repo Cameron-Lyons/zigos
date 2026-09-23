@@ -441,7 +441,7 @@ pub const HumaneShell = struct {
             yesNo(self.state.package_removed),
             self.state.package_removed_revision_count,
         });
-        try appendFmt(buffer, &used, "object_model first_class=yes file_bridge=export-import-only\n", .{});
+        try appendFmt(buffer, &used, "object_model first_class=yes\n", .{});
         try appendFmt(buffer, &used, "object_query count={d} selected={d} opened={s} capability={d} shared={s}\n", .{
             self.state.object_query_count,
             self.state.selected_object_id,

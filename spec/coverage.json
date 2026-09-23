@@ -134,8 +134,8 @@
           "name": "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diagnostics structured"
         },
         {
-          "file": "src/native/storage/file_bridge.zig",
-          "name": "file bridge is derived, permission-aware, and non-authoritative"
+          "file": "src/tests/spec/drivers_storage_sync.zig",
+          "name": "objects are addressed by id and absolute paths are not authority"
         }
       ],
       "requirements": [
@@ -156,7 +156,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
+          "name": "spec 8 storage stays versioned recoverable signed and addressed by object id"
         },
         {
           "file": "src/native/task/task_runtime.zig",
@@ -356,7 +356,7 @@
       "tests": [
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
+          "name": "spec 8 storage stays versioned recoverable signed and addressed by object id"
         },
         {
           "file": "src/native/storage/object_store/tests.zig",
@@ -367,8 +367,8 @@
           "name": "workspace transactions, snapshot restore, delete recovery, and signed export import work"
         },
         {
-          "file": "src/native/storage/file_bridge.zig",
-          "name": "file bridge is derived, permission-aware, and non-authoritative"
+          "file": "src/tests/spec/drivers_storage_sync.zig",
+          "name": "objects are addressed by id and absolute paths are not authority"
         }
       ],
       "requirements": [
@@ -837,7 +837,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
+          "name": "spec 8 storage stays versioned recoverable signed and addressed by object id"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -1461,12 +1461,13 @@
     "REQ-FILE-BRIDGE": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/storage/file_bridge.zig"
+        "src/native/storage/storage_service/service.zig",
+        "src/native/storage/object_store/store.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/file_bridge.zig",
-          "name": "file bridge is derived, permission-aware, and non-authoritative"
+          "file": "src/tests/spec/drivers_storage_sync.zig",
+          "name": "objects are addressed by id and absolute paths are not authority"
         }
       ]
     },
