@@ -114,6 +114,15 @@ paths. `./scripts/zig.sh build frame-allocator-benchmark` measures these paths o
 the host, including failed allocations in an exhausted physical range. These
 microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
 
+The kernel heap uses two-level size-class bitmaps to select a fitting block
+without scanning free lists. Class rounding uses 16-byte units for small
+requests and less than 1/32 of the requested size for larger ones. Splitting
+and adjacent-block coalescing keep free space reusable. The allocator core
+borrows an aligned arena independently of boot and locking, allowing host tests
+to check payload preservation, exact live-allocation markers, invalid frees,
+and fragmented traces. `./scripts/zig.sh build heap-allocator-benchmark` measures
+ordinary reuse and allocation under fragmentation, including exhaustion.
+
 ## Design Decisions
 
 - Native-only userspace is the platform model. Apps are signed typed components

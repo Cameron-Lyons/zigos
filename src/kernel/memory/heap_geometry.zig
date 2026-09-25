@@ -1,7 +1,14 @@
 const std = @import("std");
 
 pub const block_alignment: usize = 16;
-pub const free_list_class_count: usize = 2;
+pub const maximum_heap_bytes: usize = 16 * 1024 * 1024;
+pub const second_level_bits = 5;
+pub const second_level_count = 1 << second_level_bits;
+const linear_limit = block_alignment * second_level_count;
+const linear_limit_log2 = std.math.log2_int(usize, linear_limit);
+pub const first_level_count = std.math.log2_int(usize, maximum_heap_bytes) - linear_limit_log2 + 2;
+
+pub const SizeClass = struct { first: u5, second: u5 };
 
 pub const BlockHeader = struct {
     size: usize,
@@ -24,8 +31,26 @@ pub const minimum_free_data_size: usize = @sizeOf(FreeLinks);
 pub const block_state_allocated: u64 = 0x4c49_5645_424c_4f43;
 pub const block_state_free: u64 = 0x4652_4545_424c_4f43;
 
-pub fn freeListIndex(size: usize, large_block_threshold: usize) usize {
-    return @intFromBool(size >= large_block_threshold);
+// Free blocks map down to their containing class. Requests round up to a
+// class boundary so every block in the selected class is large enough.
+pub fn sizeClass(size: usize) SizeClass {
+    std.debug.assert(size >= minimum_free_data_size and size <= maximum_heap_bytes);
+    if (size < linear_limit) return .{ .first = 0, .second = @intCast(size / block_alignment) };
+    const exponent = std.math.log2_int(usize, size);
+    return .{
+        .first = @intCast(exponent - linear_limit_log2 + 1),
+        .second = @intCast((size >> (exponent - second_level_bits)) - second_level_count),
+    };
+}
+
+pub fn allocationSize(size: usize) ?usize {
+    if (size == 0 or size > maximum_heap_bytes) return null;
+    const alignment = if (size < linear_limit)
+        block_alignment
+    else
+        @as(usize, 1) << (std.math.log2_int(usize, size) - second_level_bits);
+    const rounded = alignSize(size, alignment) orelse return null;
+    return if (rounded <= maximum_heap_bytes) rounded else null;
 }
 
 pub fn allocationMarkerIndex(
@@ -137,11 +162,27 @@ test "heap allocation markers accept only aligned arena addresses" {
     try std.testing.expectEqual(@as(?usize, null), allocationMarkerIndex(0x2000, 0x2000, 4096, 0));
 }
 
-test "heap free-list classes separate sub-page and page-sized blocks" {
-    const page_size: usize = 4096;
+test "heap size classes round requests up without unbounded internal fragmentation" {
+    try std.testing.expect(allocationSize(0) == null);
+    try std.testing.expect(allocationSize(maximum_heap_bytes + 1) == null);
+    try std.testing.expect(allocationSize(std.math.maxInt(usize)) == null);
+    try std.testing.expectEqual(@as(?usize, 16), allocationSize(1));
+    try std.testing.expectEqual(@as(?usize, 528), allocationSize(513));
+    try std.testing.expectEqual(@as(?usize, 4224), allocationSize(4097));
+    try std.testing.expectEqual(@as(?usize, maximum_heap_bytes), allocationSize(maximum_heap_bytes));
 
-    try std.testing.expectEqual(@as(usize, 0), freeListIndex(page_size - 1, page_size));
-    try std.testing.expectEqual(@as(usize, 1), freeListIndex(page_size, page_size));
-    try std.testing.expectEqual(@as(usize, 1), freeListIndex(page_size * 4, page_size));
-    try std.testing.expectEqual(@as(usize, 2), free_list_class_count);
+    var size: usize = block_alignment;
+    while (size <= maximum_heap_bytes) : (size += block_alignment) {
+        const rounded = allocationSize(size).?;
+        try std.testing.expect(rounded >= size);
+        try std.testing.expectEqual(@as(usize, 0), rounded % block_alignment);
+        try std.testing.expect(rounded - size <= @max(block_alignment - 1, size / second_level_count));
+        const class = sizeClass(rounded);
+        try std.testing.expect(class.first < first_level_count);
+        if (rounded > block_alignment) {
+            const preceding = sizeClass(rounded - block_alignment);
+            try std.testing.expect(preceding.first < class.first or
+                (preceding.first == class.first and preceding.second < class.second));
+        }
+    }
 }
