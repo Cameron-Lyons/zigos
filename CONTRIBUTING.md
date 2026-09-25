@@ -39,6 +39,7 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build uefi-qemu-test` | You touched the production ISO, GRUB, or UEFI handoff. |
 | `./scripts/zig.sh build uefi-verification-qemu-test` | You touched the verification ISO or first-hardware-target proof media. |
 | `./scripts/zig.sh build benchmark` | You touched performance-sensitive kernel or native-service paths. |
+| `./scripts/zig.sh build frame-allocator-benchmark` | Measure physical-page allocator reuse, sparse-memory searches, contiguous runs, and bounded exhaustion on the host without QEMU. Uses ReleaseFast and reports the median of five samples. |
 
 ## Build And Cleanup Commands
 

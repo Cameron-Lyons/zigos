@@ -5,6 +5,24 @@ pub const BenchmarkGate = struct {
     tests: *std.Build.Step.Run,
 };
 
+pub fn addFrameAllocatorBenchmark(b: *std.Build) void {
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/benchmark_frame_allocator.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    module.addImport("frame_allocator", b.createModule(.{
+        .root_source_file = b.path("src/kernel/memory/frame_allocator.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    }));
+    const executable = b.addExecutable(.{ .name = "benchmark-frame-allocator", .root_module = module });
+    const run = b.addRunArtifact(executable);
+    run.has_side_effects = true;
+    const step = b.step("frame-allocator-benchmark", "Measure host physical-page allocation under reuse, sparse memory, and zone exhaustion");
+    step.dependOn(&run.step);
+}
+
 pub fn addBenchmarkGate(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,

@@ -104,6 +104,16 @@ machine-readable requirement coverage, and QEMU proof profiles validate boot,
 smoke, recovery, storage durability, driver restart, and benchmark paths against
 observable boot markers.
 
+Physical memory allocation uses a two-level availability index above its
+ownership bitmap to skip fully reserved or allocated regions. The index adds
+33,280 bytes for the 64 GiB managed aperture; total allocator metadata remains
+below 3 MiB. Single-page reuse probes the allocation cursor directly, while
+sparse page and contiguous-run searches skip empty regions. DMA address bounds,
+immutable firmware reservations, and transactional release checks apply to both
+paths. `./scripts/zig.sh build frame-allocator-benchmark` measures these paths on
+the host, including failed allocations in an exhausted physical range. These
+microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
+
 ## Design Decisions
 
 - Native-only userspace is the platform model. Apps are signed typed components
