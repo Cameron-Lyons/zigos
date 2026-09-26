@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const file_bridge = @import("../../native/storage/file_bridge.zig");
+const document_save_test = @import("../../native/storage/document_save_test.zig");
 const object_store = @import("../../native/storage/object_store.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
 const storage_service_ipc = @import("../../native/storage/storage_service_ipc.zig");
@@ -11,6 +12,7 @@ const workspace_test = @import("../../native/storage/workspace_test.zig");
 
 test "storage host tests import native storage modules" {
     std.testing.refAllDecls(file_bridge);
+    std.testing.refAllDecls(document_save_test);
     std.testing.refAllDecls(object_store);
     std.testing.refAllDecls(storage_service);
     std.testing.refAllDecls(storage_service_ipc);

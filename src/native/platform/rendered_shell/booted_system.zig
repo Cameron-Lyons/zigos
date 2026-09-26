@@ -552,6 +552,8 @@ pub const BootedSystem = struct {
             .diagnostics_rejected => "diagnostics require explicit local consent",
             .recovery_missing => "no recoverable checkpoint is available",
             .invalid_request => "input could not be handled",
+            .storage_unavailable => "your changes have not been saved",
+            .document_conflict => "the document changed since you opened it",
         };
     }
 
@@ -569,6 +571,8 @@ pub const BootedSystem = struct {
             .diagnostics_rejected => "remote diagnostics export is blocked without consent",
             .recovery_missing => "runtime or compositor checkpoint is missing",
             .invalid_request => "input mapping is invalid for this shell",
+            .storage_unavailable => "storage could not confirm the write",
+            .document_conflict => "another edit replaced the open version",
         };
     }
 
@@ -586,6 +590,8 @@ pub const BootedSystem = struct {
             .diagnostics_rejected => "keep diagnostics local or opt in",
             .recovery_missing => "complete a checkpointed action first",
             .invalid_request => "send a supported input event",
+            .storage_unavailable => "keep this draft open and retry saving",
+            .document_conflict => "keep your draft and review the latest document",
         };
     }
 };

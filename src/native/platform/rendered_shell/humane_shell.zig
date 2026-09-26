@@ -1,4 +1,5 @@
 const std = @import("std");
+const document_save = @import("../../storage/document_save.zig");
 const capability = @import("../../kernel_api/capability.zig");
 const compositor_session = @import("../compositor_session.zig");
 const denial_explanation = @import("../../policy/denial_explanation.zig");
@@ -90,6 +91,8 @@ pub const HumaneShellStatus = enum(u8) {
     diagnostics_rejected,
     recovery_missing,
     invalid_request,
+    storage_unavailable,
+    document_conflict,
 };
 
 pub const HumaneShellRequest = struct {
@@ -273,6 +276,7 @@ pub const HumaneShell = struct {
     accessibility: AccessibilityProfile,
     checkpoint_store: *HumaneShellCheckpointStore,
     state: HumaneShellState = .{},
+    document_saver: document_save.Session = .{},
 
     pub fn init(
         runtime_service: *task_runtime_service.Service,
@@ -599,6 +603,7 @@ pub const HumaneShell = struct {
         if (!self.state.workspace_opened) return error.WorkspaceRequired;
         const entry = try task_launch.openConfiguredDocument(self.ux, self.storage, self.config, task.id);
         try self.loadDocumentEntry(entry);
+        self.document_saver = .{};
         _ = try self.dispatchCompositor(.{
             .operation = .open_view,
             .view_type = .document_view,
@@ -613,35 +618,22 @@ pub const HumaneShell = struct {
     fn editDocument(self: *HumaneShell, text: []const u8, tick: u64) !void {
         const task = try self.requireTask();
         if (!self.state.document_opened) return error.DocumentRequired;
-        if (text.len == 0) return error.TextInputRequired;
         if (text.len > MAX_SHELL_TEXT_INPUT_BYTES) return error.TextInputTooLarge;
 
-        const entry = try self.storage.resolve(ids.workspace(self.config.workspace_id), self.config.document_path);
-        const latest = self.storage.latestVersion(entry.object_id) orelse return error.ObjectMissing;
-        const edited = try self.storage.putVersion(.{
-            .preferred_object_id = entry.object_id,
-            .object_type = .document,
+        const edited = try self.document_saver.save(self.storage, .{
+            .workspace_id = self.config.workspace_id,
+            .path = self.config.document_path,
+            .expected_version_id = self.state.document_version_id,
             .payload = text,
-            .metadata = try object_store.signMetadata(
-                self.config.document_edit_signer,
-                self.config.document_path,
-                "text/markdown",
-                .document,
-                text,
-                tick,
-            ),
-            .parent_version_id = latest.id,
+            .signer = self.config.document_edit_signer,
+            .tick = tick,
         });
-        try self.storage.beginTransaction(ids.workspace(self.config.workspace_id));
-        errdefer self.storage.abortTransaction(ids.workspace(self.config.workspace_id)) catch {};
-        try self.storage.stagePut(ids.workspace(self.config.workspace_id), self.config.document_path, edited.object_id, edited.version_id, .document);
-        _ = try self.storage.commit(ids.workspace(self.config.workspace_id), tick);
 
         self.copyDocumentText(text);
-        self.state.document_previous_version_id = latest.id.raw();
-        self.state.document_version_id = edited.version_id.raw();
-        self.state.selected_object_id = edited.object_id.raw();
-        self.state.selected_version_id = edited.version_id.raw();
+        self.state.document_previous_version_id = edited.previous_version_id;
+        self.state.document_version_id = edited.version_id;
+        self.state.selected_object_id = edited.object_id;
+        self.state.selected_version_id = edited.version_id;
         self.state.object_opened = true;
         self.state.object_history_count = 0;
         self.state.object_conflict_reviewed = false;
@@ -1226,6 +1218,15 @@ pub fn statusForError(err: anyerror) HumaneShellStatus {
         error.DiagnosticsConsentBypass,
         => .diagnostics_rejected,
         error.RecoveryStateMissing => .recovery_missing,
+        error.DocumentChanged, error.PendingDocumentSave => .document_conflict,
+        error.NoBackingDevice,
+        error.CheckpointDeferred,
+        error.CheckpointPending,
+        error.CorruptImage,
+        error.DurabilityBarrierFailed,
+        error.ImageTooSmall,
+        error.NoSpaceLeft,
+        => .storage_unavailable,
         else => .invalid_request,
     };
 }

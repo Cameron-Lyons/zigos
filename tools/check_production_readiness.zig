@@ -1937,7 +1937,7 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = abi.SURFACE_PRESENTATION_TEXT_BYTES" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn modelForBundle" },
-        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state edits and commits document text\"" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state requests a save without claiming durability\"" },
     };
     for (required_userspace_input_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {

@@ -102,7 +102,8 @@ pub const State = struct {
 
     fn commit(self: *State) bool {
         self.commit_count +|= 1;
-        self.flags.dirty = false;
+        // This requests a save. Only a durable storage acknowledgement may
+        // clear dirty state; surface presentation is not a persistence receipt.
         return true;
     }
 
@@ -229,7 +230,7 @@ test "UI surface state serializes a canonical bounded presentation" {
     try std.testing.expect(flags.dirty);
 }
 
-test "Notes UI state edits and commits document text" {
+test "Notes UI state requests a save without claiming durability" {
     var state = State.init("app.notes");
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, .text, 'a')));
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, .text, 'b')));
@@ -238,7 +239,7 @@ test "Notes UI state edits and commits document text" {
     try std.testing.expectEqualStrings("a\n", state.textSlice());
     try std.testing.expect(state.flags.dirty);
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(5, .commit_text, 0)));
-    try std.testing.expect(!state.flags.dirty);
+    try std.testing.expect(state.flags.dirty);
     try std.testing.expectEqual(@as(u32, 1), state.commit_count);
     try std.testing.expectEqual(@as(u32, 1), state.activation_count);
     try std.testing.expectEqual(@as(u64, 6), state.revision);

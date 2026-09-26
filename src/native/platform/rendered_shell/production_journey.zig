@@ -1,4 +1,5 @@
 const std = @import("std");
+const document_save = @import("../../storage/document_save.zig");
 const boot_markers = @import("../../../kernel/boot/markers.zig");
 const compositor_session = @import("../compositor_session.zig");
 const event_ledger = @import("../event_ledger.zig");
@@ -50,6 +51,8 @@ pub const ProductionJourneyStatus = enum(u8) {
     compositor_rejected = 5,
     recovery_missing = 6,
     invalid_request = 7,
+    storage_unavailable = 8,
+    document_conflict = 9,
 };
 
 pub const ProductionJourneyConfig = struct {
@@ -140,6 +143,7 @@ pub const ProductionJourneyService = struct {
     workspace_opened: bool = false,
     document_opened: bool = false,
     document_edited: bool = false,
+    document_saver: document_save.Session = .{},
     document_object_id: u64 = 0,
     document_previous_version_id: u64 = 0,
     document_version_id: u64 = 0,
@@ -443,7 +447,8 @@ pub const ProductionJourneyService = struct {
         const entry = try task_launch.openConfiguredDocument(self.ux, self.storage, self.config, task.id);
         self.document_object_id = entry.object_id.raw();
         self.document_version_id = entry.version_id.raw();
-        self.document_payload_bytes = if (self.storage.latestVersion(entry.object_id)) |version|
+        self.document_saver = .{};
+        self.document_payload_bytes = if (self.storage.version(entry.version_id)) |version|
             if (self.storage.versionBlob(version)) |blob| blob.payloadLen() else 0
         else
             0;
@@ -462,38 +467,24 @@ pub const ProductionJourneyService = struct {
     fn editDocument(self: *ProductionJourneyService, tick: u64) !void {
         const task = try self.requireTask();
         if (!self.document_opened) return error.DocumentRequired;
-        if (self.config.edit_payload.len == 0) return error.DocumentEditRequired;
 
-        const workspace_id = ids.workspace(self.config.workspace_id);
-        const entry = try self.storage.resolve(workspace_id, self.config.document_path);
-        const latest = self.storage.latestVersion(entry.object_id) orelse return error.ObjectMissing;
-        const edited = try self.storage.putVersion(.{
-            .preferred_object_id = entry.object_id,
-            .object_type = .document,
+        const edited = try self.document_saver.save(self.storage, .{
+            .workspace_id = self.config.workspace_id,
+            .path = self.config.document_path,
+            .expected_version_id = self.document_version_id,
             .payload = self.config.edit_payload,
-            .metadata = try object_store.signMetadata(
-                self.config.user_signer,
-                self.config.document_path,
-                "text/markdown",
-                .document,
-                self.config.edit_payload,
-                tick,
-            ),
-            .parent_version_id = latest.id,
+            .signer = self.config.user_signer,
+            .tick = tick,
         });
-        try self.storage.beginTransaction(workspace_id);
-        errdefer self.storage.abortTransaction(workspace_id) catch {};
-        try self.storage.stagePut(workspace_id, self.config.document_path, edited.object_id, edited.version_id, .document);
-        _ = try self.storage.commit(workspace_id, tick);
 
         _ = try self.ux.editDocument(self.config.workspace_id, task.id, self.config.user, self.config.document_path);
-        self.document_object_id = edited.object_id.raw();
-        self.document_previous_version_id = latest.id.raw();
-        self.document_version_id = edited.version_id.raw();
+        self.document_object_id = edited.object_id;
+        self.document_previous_version_id = edited.previous_version_id;
+        self.document_version_id = edited.version_id;
         self.document_payload_bytes = self.config.edit_payload.len;
         self.document_edited = true;
         self.synced = false;
-        self.marker_edit_saved = self.document_edited and self.document_previous_version_id != 0 and self.document_payload_bytes != 0;
+        self.marker_edit_saved = self.document_edited and self.document_previous_version_id != 0;
         try self.recordPendingTaskFlows(tick);
     }
 
@@ -893,6 +884,15 @@ fn statusForProductionJourneyError(err: anyerror) ProductionJourneyStatus {
         => .invalid_order,
         error.CompositorRejected => .compositor_rejected,
         error.RecoveryStateMissing => .recovery_missing,
+        error.DocumentChanged, error.PendingDocumentSave => .document_conflict,
+        error.NoBackingDevice,
+        error.CheckpointDeferred,
+        error.CheckpointPending,
+        error.CorruptImage,
+        error.DurabilityBarrierFailed,
+        error.ImageTooSmall,
+        error.NoSpaceLeft,
+        => .storage_unavailable,
         error.EntryNotFound,
         error.PathTooLong,
         error.ShareRejected,

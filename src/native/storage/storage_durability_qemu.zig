@@ -6,6 +6,7 @@ const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("storage_service.zig");
+const document_save = @import("document_save.zig");
 const storage_volume = @import("storage_volume.zig");
 const volume_backend = @import("volume/backend.zig");
 
@@ -62,10 +63,20 @@ pub fn run(storage: *storage_service.Service) bool {
 fn checkpointBaseline(storage: *storage_service.Service) bool {
     if (storage.loaded_from_volume) return false;
     const workspace_id = ensureWorkspace(storage) catch return false;
-    _ = putDocument(storage, baseline_object_id, "baseline", baseline_payload, null, 10) catch return false;
+    _ = putDocument(storage, baseline_object_id, "baseline", "new document", null, 10) catch return false;
     if (!putPath(storage, workspace_id, baseline_path, baseline_object_id, 10)) return false;
-    storage.checkpoint();
-    if (!storage.checkpoint_store.checkpointHealthy()) return false;
+    const entry = storage.resolve(workspace_id, baseline_path) catch return false;
+    var editor = document_save.Session{};
+    const receipt = editor.save(storage, .{
+        .workspace_id = workspace_id,
+        .path = baseline_path,
+        .expected_version_id = entry.version_id.raw(),
+        .payload = baseline_payload,
+        .signer = signer,
+        .tick = 11,
+    }) catch return false;
+    if (receipt.checkpoint_generation == 0 or storage.pendingCheckpointMutations()) return false;
+    common.printBootMarker(boot_markers.storage_durability_document_save_acked);
     if (!storePhase(.baseline_checkpointed)) return false;
     common.printBootMarker(boot_markers.storage_durability_baseline_checkpointed);
     return true;
@@ -74,6 +85,7 @@ fn checkpointBaseline(storage: *storage_service.Service) bool {
 fn stageInterruptedWrite(storage: *storage_service.Service) bool {
     if (!storage.loaded_from_volume) return false;
     const workspace_id = validateBaseline(storage) catch return false;
+    common.printBootMarker(boot_markers.storage_durability_document_reopened);
     _ = putDocument(storage, interrupted_object_id, "interrupted", interrupted_payload, null, 20) catch return false;
     if (!putPath(storage, workspace_id, interrupted_path, interrupted_object_id, 20)) return false;
     if (!storePhase(.dirty_write_staged)) return false;
@@ -90,8 +102,7 @@ fn recoverInterruptedBootAndCheckpointFinal(storage: *storage_service.Service) b
 
     _ = putDocument(storage, final_object_id, "final", final_payload, null, 30) catch return false;
     if (!putPath(storage, workspace_id, final_path, final_object_id, 30)) return false;
-    storage.checkpoint();
-    if (!storage.checkpoint_store.checkpointHealthy()) return false;
+    _ = storage.checkpointDurable() catch return false;
     if (!storePhase(.final_checkpointed)) return false;
     common.printBootMarker(boot_markers.storage_durability_final_checkpointed);
     return true;

@@ -16,6 +16,7 @@ const principal = @import("../../core/principal.zig");
 const public_store = @import("../../services/public_store.zig");
 const signing = @import("../../core/signing.zig");
 const storage_service = @import("../../storage/storage_service.zig");
+const storage_volume = @import("../../storage/storage_volume.zig");
 const sync_service = @import("../../sync/sync_service.zig");
 const task_runtime = @import("../../task/task_runtime.zig");
 const task_runtime_service = @import("../../task/task_runtime_service.zig");
@@ -64,6 +65,42 @@ fn expectContains(haystack: []const u8, needle: []const u8) !void {
 fn expectNotContains(haystack: []const u8, needle: []const u8) !void {
     if (std.mem.indexOf(u8, haystack, needle) != null) return error.UnexpectedSubstringPresent;
 }
+
+const DocumentDisk = struct {
+    var image: []u8 = &.{};
+    var fail_flush: bool = false;
+
+    fn init() !void {
+        image = try std.testing.allocator.alloc(u8, storage_volume.image_bytes);
+        @memset(image, 0);
+        fail_flush = false;
+        storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush });
+    }
+
+    fn deinit() void {
+        storage_volume.clearAttachedBackend();
+        std.testing.allocator.free(image);
+        image = &.{};
+    }
+
+    fn read(lba: u64, out: [*]u8, len: usize) callconv(.c) bool {
+        const offset: usize = @intCast(lba * storage_volume.sector_size);
+        if (offset > image.len or len > image.len - offset) return false;
+        @memcpy(out[0..len], image[offset..][0..len]);
+        return true;
+    }
+
+    fn write(lba: u64, bytes: [*]const u8, len: usize) callconv(.c) bool {
+        const offset: usize = @intCast(lba * storage_volume.sector_size);
+        if (offset > image.len or len > image.len - offset) return false;
+        @memcpy(image[offset..][0..len], bytes[0..len]);
+        return true;
+    }
+
+    fn flush() callconv(.c) bool {
+        return !fail_flush;
+    }
+};
 
 fn seedShellWorkspace(storage: *storage_service.Service, owner: principal.PrincipalId, path: []const u8) !u64 {
     const signer_identity = signing.SignerIdentity{
@@ -379,6 +416,8 @@ test "rendered demo journey drives install sync permission update recovery and r
 }
 
 test "production journey service rejects premature controls then routes lifecycle policy device trust and recovery through service ports" {
+    try DocumentDisk.init();
+    defer DocumentDisk.deinit();
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
     defer storage_checkpoint_store.resetPersistent();
@@ -633,6 +672,12 @@ test "production journey service rejects premature controls then routes lifecycl
 
     const before_edit = try storage.resolve(workspace_id, document_path);
     try std.testing.expectEqual(ProductionJourneyStatus.invalid_order, journey.dispatch(.{ .control = .sync_workspace, .tick = 26 }).status);
+    DocumentDisk.fail_flush = true;
+    try std.testing.expectEqual(ProductionJourneyStatus.storage_unavailable, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
+    try std.testing.expect(!journey.document_edited);
+    try std.testing.expectEqual(before_edit.version_id.raw(), journey.document_version_id);
+    try expectNotContains(try journey.renderMarkerContract(&marker_buffer), boot_markers.notes_daily_driver_edit_saved_ok);
+    DocumentDisk.fail_flush = false;
     try std.testing.expectEqual(ProductionJourneyStatus.ok, journey.dispatch(.{ .control = .edit_document, .tick = 26 }).status);
     const edited_markers = try journey.renderMarkerContract(&marker_buffer);
     try expectContains(edited_markers, boot_markers.notes_daily_driver_edit_saved_ok);
@@ -1290,6 +1335,8 @@ test "humane shell exposes object-native query history sharing capabilities and 
 }
 
 test "booted rendered system runs input loop compositor prompts task switching recovery and readable errors" {
+    try DocumentDisk.init();
+    defer DocumentDisk.deinit();
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
     defer storage_checkpoint_store.resetPersistent();
@@ -1466,20 +1513,37 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try std.testing.expectEqual(booted_system.BootPhase.running, dismissed.phase);
     const text_before = shell.documentTextSlice().len;
     try std.testing.expect(system.dispatchKeyboardEvent(.{ .kind = .text, .text = 'X' }, 23).accepted);
-    const rejected_empty_edit = system.dispatchInput(.{ .kind = .text_input, .tick = 24 });
-    try std.testing.expect(!rejected_empty_edit.accepted);
-    try std.testing.expectEqual(HumaneShellStatus.invalid_order, rejected_empty_edit.status);
+    const rejected_edit = system.dispatchInput(.{
+        .kind = .text_input,
+        .tick = 24,
+        .text = &([_]u8{'x'} ** (humane_shell.MAX_SHELL_TEXT_INPUT_BYTES + 1)),
+    });
+    try std.testing.expect(!rejected_edit.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.invalid_request, rejected_edit.status);
     const staged_rendered = try system.render(&render_buffer);
     try expectContains(staged_rendered, "hardware_text staged_bytes=");
     try expectContains(staged_rendered, "dirty=yes commit=Ctrl+Enter");
+    DocumentDisk.fail_flush = true;
+    const failed_save = system.dispatchKeyboardEvent(.{ .kind = .commit_text }, 25);
+    try std.testing.expect(!failed_save.accepted);
+    try std.testing.expectEqual(HumaneShellStatus.storage_unavailable, failed_save.status);
+    try std.testing.expect(system.hardware_text_dirty);
+    try std.testing.expectEqual(text_before, shell.documentTextSlice().len);
+    try std.testing.expect(!shell.state.document_edited);
+    const pending_count = storage.versionCount();
+    DocumentDisk.fail_flush = false;
     const committed = system.dispatchKeyboardEvent(.{ .kind = .commit_text }, 25);
     try std.testing.expect(committed.accepted);
+    try std.testing.expectEqual(pending_count, storage.versionCount());
+    try std.testing.expect(!system.hardware_text_dirty);
     try std.testing.expectEqual(text_before + 1, shell.documentTextSlice().len);
     try std.testing.expectEqual(@as(u8, 'X'), shell.documentTextSlice()[text_before]);
     try std.testing.expect(system.dispatchKeyboardEvent(.{ .kind = .focus_next }, 26).accepted);
 }
 
 test "booted notes docs loop edits shares syncs reviews rollback recovery and removes package" {
+    try DocumentDisk.init();
+    defer DocumentDisk.deinit();
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();
     defer storage_checkpoint_store.resetPersistent();

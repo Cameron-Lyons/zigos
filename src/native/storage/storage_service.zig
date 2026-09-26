@@ -4,6 +4,7 @@ const service = @import("storage_service/service.zig");
 pub const api = service;
 
 pub const CheckpointStore = service.CheckpointStore;
+pub const DurabilityError = service.DurabilityError;
 
 pub const SharedPayloadTransfer = service.SharedPayloadTransfer;
 pub const SharedPayloadReadTransfer = service.SharedPayloadReadTransfer;

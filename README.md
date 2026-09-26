@@ -32,6 +32,13 @@ requests.
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised
   together by the rendered-shell production journey.
+- Document saves in that journey acknowledge success only after a device
+  checkpoint completes. Write failures keep the editor's draft pending; retries
+  reuse its version, and stale editors cannot replace a newer document version.
+  Isolated userspace app persistence still needs its service endpoint path.
+- Diagnostic ledger format v4 writes its header once and reconstructs sequence
+  numbers from retained events, avoiding a second immutable version per append.
+  Older diagnostic ledger formats are rejected.
 - Native boot requests a 32-bit firmware graphics mode and presents the active
   compositor-owned surface as a bounded text desktop. Changed cells alone are
   rasterized after the first frame; idle sessions perform no display polling.
