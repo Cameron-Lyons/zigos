@@ -553,6 +553,9 @@ const InputDrain = struct {
 };
 
 fn drainFocusedInput(comptime saves_documents: bool) InputDrain {
+    if (comptime saves_documents) {
+        if (!document_state.canEdit(zigos_userspace_bootstrap.document, &ui_state)) return .{};
+    }
     const input_capability_id = zigos_userspace_bootstrap.input_capability_id;
     const task_id = zigos_userspace_bootstrap.task_id;
     if (input_capability_id == 0 or task_id == 0) return .{};
@@ -764,6 +767,11 @@ test "Notes input snapshots a save before processing subsequent typing" {
     var state = mailbox.Mailbox{
         .task_id = 2,
         .document = .{ .endpoint_capability_id = 10, .service_endpoint_id = 11, .object_id = 12, .version_id = 13 },
+    };
+    document_state = .{
+        .binding = state.document,
+        .client = .{ .service_endpoint_id = 11, .object_id = 12, .version_id = 13 },
+        .opened = true,
     };
     var event = std.mem.zeroes(abi.InputEventDescriptor);
     event.sequence = 1;

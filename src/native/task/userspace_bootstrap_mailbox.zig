@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 pub const MAILBOX_RESERVED_BYTES: usize = 3;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
@@ -61,7 +61,9 @@ pub const UiStateFlags = packed struct(u8) {
     recovery_visible: bool = false,
     active: bool = false,
     input_overflow: bool = false,
-    _reserved: u4 = 0,
+    loading: bool = false,
+    load_failed: bool = false,
+    _reserved: u2 = 0,
 };
 
 pub fn yieldDisposition(raw: u32) ?YieldDisposition {

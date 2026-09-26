@@ -39,8 +39,11 @@ requests.
   and a native storage backend, with host tests for durable receipts, retry,
   backpressure, revocation, and object/path scope. The Notes event loop captures
   Ctrl+Enter snapshots, sends bounded batches, and waits for durable receipts.
-  Loading the document and provisioning its channel in a running session, plus
-  moving the storage core into its userspace service, remain open.
+  The same channel loads one immutable version in bounded chunks before Notes
+  accepts queued input. Loads reject changed revisions, revoked access,
+  oversized documents, and text the current renderer cannot represent, while
+  preserving an existing draft. Provisioning the channel in a running session
+  and moving the storage core into its userspace service remain open.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.
@@ -161,7 +164,7 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
-  Native ABI v7 uses bounded endpoint payloads and a 56-byte receive header
+  Native ABI v8 uses bounded endpoint payloads and a 56-byte receive header
   carrying the kernel-recorded sender endpoint. Services explicitly address
   replies to connected clients; stale or unrelated endpoint handles are
   rejected before publishing a reply or moving a capability. Receive buffers

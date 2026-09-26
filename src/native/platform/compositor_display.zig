@@ -218,6 +218,9 @@ pub const Framebuffer = struct {
             if (session.surfacePresentation(surface_id)) |surface| {
                 const presentation = &surface.presentation;
                 const model = abi.surfaceModelKind(presentation.model_kind) orelse .none;
+                const flags: abi.SurfaceStateFlags = @bitCast(presentation.state_flags);
+                if (flags.loading) try self.drawText(cursor, "Opening document...");
+                if (flags.load_failed) try self.drawText(cursor, "Unable to open document. Your draft is unchanged.");
                 try self.drawFmt(cursor, "surface_state model={s} revision={d} focus={d} cursor={d} commits={d} activations={d}", .{
                     @tagName(model),
                     presentation.revision,
@@ -460,6 +463,17 @@ test "compositor display framebuffer renders windows switching recovery and perm
     try display.renderSession(&session);
     try expectDisplayContains(&display, "surface_state model=notes revision=2");
     try expectDisplayContains(&display, "hello world");
+
+    presentation.revision += 1;
+    presentation.state_flags = @bitCast(abi.SurfaceStateFlags{ .loading = true });
+    _ = try session.presentSurface(app_task, &presentation);
+    try display.renderSession(&session);
+    try expectDisplayContains(&display, "Opening document...");
+    presentation.revision += 1;
+    presentation.state_flags = @bitCast(abi.SurfaceStateFlags{ .load_failed = true });
+    _ = try session.presentSurface(app_task, &presentation);
+    try display.renderSession(&session);
+    try expectDisplayContains(&display, "Unable to open document. Your draft is unchanged.");
 
     var snapshot: compositor_session.SessionSnapshot = undefined;
     session.snapshotInto(&snapshot);

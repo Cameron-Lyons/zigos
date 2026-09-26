@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 7;
+pub const ABI_VERSION: u16 = 8;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
 pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
 
@@ -211,7 +211,9 @@ pub const SurfaceStateFlags = packed struct(u8) {
     recovery_visible: bool = false,
     active: bool = false,
     input_overflow: bool = false,
-    _reserved: u4 = 0,
+    loading: bool = false,
+    load_failed: bool = false,
+    _reserved: u2 = 0,
 };
 
 pub const SurfacePresentation = extern struct {
@@ -339,6 +341,8 @@ pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) 
     if (model == .none) return false;
     const flags: SurfaceStateFlags = @bitCast(presentation.state_flags);
     if (flags._reserved != 0) return false;
+    if ((flags.loading or flags.load_failed) and model != .notes) return false;
+    if (flags.loading and flags.load_failed) return false;
     for (presentation.text[0..presentation.text_length]) |byte| {
         if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
     }
@@ -352,7 +356,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 7), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 8), ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));

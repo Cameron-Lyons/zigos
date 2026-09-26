@@ -183,6 +183,119 @@ test "document IPC saves a full bounded draft durably through client syscalls" {
     try std.testing.expectEqual(fixture.client.version_id, (try fixture.device.service.resolve(fixture.device.workspace_id, durable.path)).version_id.raw());
 }
 
+test "document IPC loads bounded immutable versions and empty documents before saving" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    var full: [protocol.MAX_DOCUMENT_BYTES]u8 = undefined;
+    for (&full, 0..) |*byte, index| byte.* = @intCast('a' + index % 26);
+    for ([_][]const u8{ &full, "" }) |text| {
+        try fixture.client.start(text);
+        try fixture.submit();
+        _ = try fixture.receive(true);
+        try fixture.client.open();
+        var frames: usize = 0;
+        while (fixture.client.phase != .loaded and frames < 8) : (frames += 1) {
+            try fixture.submit();
+            _ = try fixture.receive(true);
+        }
+        try std.testing.expectEqual(.loaded, fixture.client.phase);
+        try std.testing.expectEqualStrings(text, fixture.client.finishOpen().?);
+        try std.testing.expect(fixture.client.finishOpen() == null);
+    }
+}
+
+test "document IPC rejects a version change or revoked read midway through loading" {
+    const full = [_]u8{'a'} ** protocol.MAX_DOCUMENT_BYTES;
+    for ([_]bool{ false, true }) |revoke| {
+        const fixture = try Fixture.init();
+        defer fixture.deinit();
+        try fixture.client.start(&full);
+        try fixture.submit();
+        _ = try fixture.receive(true);
+        try fixture.client.open();
+        try fixture.submit();
+        _ = try fixture.receive(true);
+        try std.testing.expect(fixture.client.finishOpen() == null);
+        if (revoke) {
+            try fixture.capabilities.revokeGrant(fixture.write_capability);
+        } else {
+            var other_editor = @import("document_save.zig").Session{};
+            _ = try other_editor.save(&fixture.device.service, .{
+                .workspace_id = fixture.device.workspace_id,
+                .path = durable.path,
+                .expected_version_id = fixture.client.version_id,
+                .payload = "changed while loading",
+                .signer = durable.signer,
+                .tick = 10,
+            });
+        }
+        try fixture.submit();
+        _ = try fixture.receive(true);
+        try std.testing.expectEqual(if (revoke) protocol.Status.permission_denied else protocol.Status.document_changed, fixture.client.last_status.?);
+        try std.testing.expect(fixture.client.finishOpen() == null);
+    }
+}
+
+test "document IPC loads read-only shares but refuses hidden reads and oversized documents" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.device.service.shareWorkspace(fixture.device.workspace_id, try (workspace.ShareGrant{
+        .principal_id = fixture.server.binding.authority.principal,
+        .can_read = true,
+        .can_write = false,
+        .expires_at_ticks = 100,
+        .network_scope = .local_only,
+    }).withObjectScope(ids.object(900), durable.path));
+    try fixture.client.open();
+    try fixture.submit();
+    _ = try fixture.receive(true);
+    try std.testing.expectEqualStrings("original", fixture.client.finishOpen().?);
+    try fixture.client.start("forbidden write");
+    var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    try fixture.send((try fixture.client.nextFrame(&bytes)).?, fixture.client.request_id);
+    fixture.client.sent();
+    _ = try fixture.server.runOnce(10);
+    _ = try fixture.receive(true);
+    try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
+
+    fixture.client = .{ .service_endpoint_id = fixture.server_endpoint_id, .object_id = 900, .version_id = fixture.device.original_version_id };
+    try fixture.device.service.shareWorkspace(fixture.device.workspace_id, try (workspace.ShareGrant{
+        .principal_id = fixture.server.binding.authority.principal,
+        .can_read = false,
+        .can_write = true,
+        .expires_at_ticks = 100,
+        .network_scope = .local_only,
+    }).withObjectScope(ids.object(900), durable.path));
+    try fixture.client.open();
+    try fixture.submit();
+    _ = try fixture.receive(true);
+    try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
+
+    try fixture.device.service.shareWorkspace(fixture.device.workspace_id, try (workspace.ShareGrant{
+        .principal_id = fixture.server.binding.authority.principal,
+        .can_read = true,
+        .can_write = true,
+        .expires_at_ticks = 100,
+        .network_scope = .local_only,
+    }).withObjectScope(ids.object(900), durable.path));
+    var other_editor = @import("document_save.zig").Session{};
+    const oversized = [_]u8{'x'} ** (protocol.MAX_DOCUMENT_BYTES + 1);
+    const saved = try other_editor.save(&fixture.device.service, .{
+        .workspace_id = fixture.device.workspace_id,
+        .path = durable.path,
+        .expected_version_id = fixture.device.original_version_id,
+        .payload = &oversized,
+        .signer = durable.signer,
+        .tick = 10,
+    });
+    fixture.client = .{ .service_endpoint_id = fixture.server_endpoint_id, .object_id = 900, .version_id = saved.version_id };
+    try fixture.client.open();
+    try fixture.submit();
+    _ = try fixture.receive(true);
+    try std.testing.expectEqual(protocol.Status.too_large, fixture.client.last_status.?);
+    try std.testing.expect(fixture.client.finishOpen() == null);
+}
+
 test "document IPC retries failed barriers and lost receipts without another version" {
     const fixture = try Fixture.init();
     defer fixture.deinit();

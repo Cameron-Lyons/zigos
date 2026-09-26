@@ -3,9 +3,10 @@ const std = @import("std");
 pub const MAX_DOCUMENT_BYTES: usize = 512;
 pub const MAX_FRAME_BYTES: usize = 96;
 pub const CHUNK_BYTES: usize = MAX_FRAME_BYTES - 20;
+pub const READ_CHUNK_BYTES: usize = MAX_FRAME_BYTES - 32;
 pub const Digest = [32]u8;
 const MAGIC: u32 = 0x434f445a;
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 pub const Status = enum(u16) {
     saved,
@@ -18,6 +19,7 @@ pub const Status = enum(u16) {
     document_changed,
     durability_failed,
     storage_failed,
+    too_large,
 };
 
 pub const Begin = struct {
@@ -44,6 +46,8 @@ pub const Body = union(enum(u8)) {
     chunk: struct { offset: u16, bytes: []const u8 } = 2,
     commit: void = 3,
     receipt: Receipt = 4,
+    read: struct { version_id: u64, offset: u16 } = 5,
+    read_data: struct { version_id: u64, total_length: u16, offset: u16, bytes: []const u8 } = 6,
 };
 
 pub const Frame = struct { request_id: u64, body: Body };
@@ -88,6 +92,21 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
             put(u64, out[44..], receipt.checkpoint_generation);
             break :blk 52;
         },
+        .read => |read| blk: {
+            if (read.version_id == 0 or read.offset >= MAX_DOCUMENT_BYTES) return error.MalformedFrame;
+            put(u64, out[16..], read.version_id);
+            put(u16, out[24..], read.offset);
+            break :blk 26;
+        },
+        .read_data => |read| blk: {
+            if (!canonicalReadData(read.version_id, read.total_length, read.offset, read.bytes.len)) return error.MalformedFrame;
+            put(u64, out[16..], read.version_id);
+            put(u16, out[24..], read.total_length);
+            put(u16, out[26..], read.offset);
+            put(u16, out[28..], @intCast(read.bytes.len));
+            @memcpy(out[32..][0..read.bytes.len], read.bytes);
+            break :blk 32 + read.bytes.len;
+        },
     };
     return out[0..length];
 }
@@ -130,6 +149,22 @@ pub fn decode(bytes: []const u8) Error!Frame {
             if (!canonicalReceipt(receipt)) return error.MalformedFrame;
             break :blk .{ .receipt = receipt };
         },
+        .read => blk: {
+            if (bytes.len != 26) return error.MalformedFrame;
+            const version_id = get(u64, bytes[16..]);
+            const offset = get(u16, bytes[24..]);
+            if (version_id == 0 or offset >= MAX_DOCUMENT_BYTES) return error.MalformedFrame;
+            break :blk .{ .read = .{ .version_id = version_id, .offset = offset } };
+        },
+        .read_data => blk: {
+            if (bytes.len < 32 or get(u16, bytes[30..]) != 0) return error.MalformedFrame;
+            const version_id = get(u64, bytes[16..]);
+            const total_length = get(u16, bytes[24..]);
+            const offset = get(u16, bytes[26..]);
+            const length = get(u16, bytes[28..]);
+            if (bytes.len != 32 + @as(usize, length) or !canonicalReadData(version_id, total_length, offset, length)) return error.MalformedFrame;
+            break :blk .{ .read_data = .{ .version_id = version_id, .total_length = total_length, .offset = offset, .bytes = bytes[32..] } };
+        },
     };
     return .{ .request_id = request_id, .body = body };
 }
@@ -138,6 +173,12 @@ fn canonicalReceipt(receipt: Receipt) bool {
     if (receipt.status == .saved) return receipt.object_id != 0 and receipt.previous_version_id != 0 and
         receipt.version_id != 0 and receipt.version_id != receipt.previous_version_id and receipt.checkpoint_generation != 0;
     return receipt.object_id == 0 and receipt.previous_version_id == 0 and receipt.version_id == 0 and receipt.checkpoint_generation == 0;
+}
+
+fn canonicalReadData(version_id: u64, total_length: u16, offset: u16, length: usize) bool {
+    if (version_id == 0 or total_length > MAX_DOCUMENT_BYTES or offset > total_length) return false;
+    if (total_length == 0) return offset == 0 and length == 0;
+    return offset < total_length and length == @min(READ_CHUNK_BYTES, total_length - offset);
 }
 
 fn put(comptime T: type, out: []u8, value: T) void {
@@ -171,6 +212,9 @@ test "document protocol mutation decoding roundtrips only canonical frames" {
         .{ .request_id = 1, .body = .{ .commit = {} } },
         .{ .request_id = 1, .body = .{ .receipt = .{ .status = .saved, .object_id = 4, .previous_version_id = 5, .version_id = 6, .checkpoint_generation = 3 } } },
         .{ .request_id = 1, .body = .{ .receipt = .{ .status = .permission_denied } } },
+        .{ .request_id = 1, .body = .{ .read = .{ .version_id = 5, .offset = 0 } } },
+        .{ .request_id = 1, .body = .{ .read_data = .{ .version_id = 5, .total_length = 4, .offset = 0, .bytes = "text" } } },
+        .{ .request_id = 1, .body = .{ .read_data = .{ .version_id = 5, .total_length = 0, .offset = 0, .bytes = "" } } },
     };
     for (seeds) |seed| {
         var original: [MAX_FRAME_BYTES]u8 = undefined;

@@ -54,6 +54,8 @@ pub const State = struct {
             .recovery_visible = self.flags.recovery_visible,
             .active = self.flags.active,
             .input_overflow = self.flags.input_overflow,
+            .loading = self.flags.loading,
+            .load_failed = self.flags.load_failed,
         });
         @memcpy(out.text[0..self.text_length], self.textSlice());
         return out;
@@ -110,6 +112,34 @@ pub const State = struct {
     pub fn acknowledgeSavedText(self: *State, saved_text: []const u8) bool {
         if (self.model != .notes or !self.flags.dirty or !std.mem.eql(u8, self.textSlice(), saved_text)) return false;
         self.flags.dirty = false;
+        self.revision +|= 1;
+        return true;
+    }
+
+    pub fn beginDocumentLoad(self: *State) void {
+        self.flags.loading = true;
+        self.flags.load_failed = false;
+        self.revision +|= 1;
+    }
+
+    pub fn failDocumentLoad(self: *State) void {
+        if (self.flags.load_failed) return;
+        self.flags.loading = false;
+        self.flags.load_failed = true;
+        self.revision +|= 1;
+    }
+
+    pub fn loadDocument(self: *State, text: []const u8) bool {
+        if (self.model != .notes or self.flags.dirty or text.len > self.text.len) return false;
+        // The current text presentation accepts printable ASCII and newlines.
+        // Refuse unsupported content without truncating or changing its bytes.
+        for (text) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
+        @memset(&self.text, 0);
+        @memcpy(self.text[0..text.len], text);
+        self.text_length = @intCast(text.len);
+        self.cursor = self.text_length;
+        self.flags.loading = false;
+        self.flags.load_failed = false;
         self.revision +|= 1;
         return true;
     }
