@@ -128,6 +128,11 @@ pub const Error = task_runtime.Error || capability.Error || device_broker.Error 
     SurfacePresentationUnavailable,
 };
 
+pub const EndpointWakeSink = struct {
+    context: *anyopaque,
+    wake: *const fn (context: *anyopaque, receiver_task_id: u64, now_ticks: u64) void,
+};
+
 pub const Kernel = struct {
     policy_authority: principal.PrincipalId,
     runtime: *task_runtime.Runtime,
@@ -136,6 +141,7 @@ pub const Kernel = struct {
     shared_memory_table: *shared_memory.Table,
     focused_input_receiver: ?FocusedInputReceiver = null,
     surface_presentation_receiver: ?SurfacePresentationReceiver = null,
+    endpoint_wake_sink: ?EndpointWakeSink = null,
     pub fn init(
         policy_authority: principal.PrincipalId,
         runtime: *task_runtime.Runtime,
@@ -154,6 +160,14 @@ pub const Kernel = struct {
 
     pub fn bindFocusedInputReceiver(self: *Kernel, receiver: FocusedInputReceiver) void {
         self.focused_input_receiver = receiver;
+    }
+
+    pub fn bindEndpointWakeSink(self: *Kernel, sink: EndpointWakeSink) void {
+        self.endpoint_wake_sink = sink;
+    }
+
+    pub fn clearEndpointWakeSink(self: *Kernel) void {
+        self.endpoint_wake_sink = null;
     }
 
     pub fn clearFocusedInputReceiver(self: *Kernel) void {
@@ -284,7 +298,7 @@ pub const Kernel = struct {
             }
         }
 
-        if (reply_endpoint_id != 0) {
+        const receiver_task_id = if (reply_endpoint_id != 0)
             try self.endpoint_table.reply(
                 ids.endpoint(endpoint_capability.target.id),
                 ids.endpoint(reply_endpoint_id),
@@ -293,8 +307,8 @@ pub const Kernel = struct {
                 payload,
                 if (attached_capability_id) |id| ids.capability(id) else null,
                 move_attached_capability,
-            );
-        } else {
+            )
+        else
             try self.endpoint_table.send(
                 ids.endpoint(endpoint_capability.target.id),
                 ids.task(endpoint_capability.scope.task_id orelse 0),
@@ -303,9 +317,11 @@ pub const Kernel = struct {
                 if (attached_capability_id) |id| ids.capability(id) else null,
                 move_attached_capability,
             );
-        }
         if (move_source_task) |source_task| {
             _ = task_runtime.revokeCapabilityFromTask(source_task, attached_capability_id.?);
+        }
+        if (self.endpoint_wake_sink) |sink| {
+            sink.wake(sink.context, receiver_task_id.raw(), now_ticks);
         }
     }
 
@@ -1192,6 +1208,23 @@ test "self-target capability mutations reuse the authorized task" {
     try std.testing.expect(!task.hasCapability(derived.capability_id));
 }
 
+const TestEndpointWakeProbe = struct {
+    tasks: [16]u64 = undefined,
+    count: usize = 0,
+    move_source: ?*const task_runtime.TaskRecord = null,
+    moved_capability_id: u64 = 0,
+    source_retained_capability_at_wake: bool = false,
+
+    fn wake(context: *anyopaque, receiver_task_id: u64, _: u64) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.tasks[self.count] = receiver_task_id;
+        self.count += 1;
+        if (self.move_source) |source| {
+            self.source_retained_capability_at_wake = source.hasCapability(self.moved_capability_id);
+        }
+    }
+};
+
 test "native kernel creates tasks endpoints and shared memory without owning service discovery" {
     var harness = TestKernelHarness{};
     var kernel = harness.kernel();
@@ -1276,6 +1309,8 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     const shared_result = try kernel.sharedMemoryCreate(testContext(.shared_memory_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, shared_memory.PAGE_SIZE, 9);
     var send_context = testContext(.endpoint_send, app_endpoint.capability_id, .none);
     send_context.caller_task_id = app_task_desc.task_id;
+    var wake_probe = TestEndpointWakeProbe{};
+    kernel.bindEndpointWakeSink(.{ .context = &wake_probe, .wake = TestEndpointWakeProbe.wake });
     try kernel.endpointSend(send_context, 11, "sync-open", 0, shared_result.capability_id, false, 9);
     const other_endpoint = try kernel.endpointCreate(testContext(.endpoint_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, "app.second-request", .{
         .local_only = true,
@@ -1284,6 +1319,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     var other_context = testContext(.endpoint_send, other_endpoint.capability_id, .none);
     other_context.caller_task_id = app_task_desc.task_id;
     try kernel.endpointSend(other_context, 11, "second request", 0, null, false, 9);
+    try std.testing.expectEqualSlices(u64, &.{ service_task_desc.task_id, service_task_desc.task_id }, wake_probe.tasks[0..wake_probe.count]);
     var received_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, &received_payload, 10)).?;
     try std.testing.expectEqualStrings("sync-open", received_payload[0..received.message.payload_len]);
@@ -1295,16 +1331,21 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     const service_task = harness.runtime.find(service_task_desc.task_id).?;
     const copied_capability_id = received.attached_capability.?.capability_id;
     try std.testing.expect(service_task.hasCapability(copied_capability_id));
+    wake_probe.move_source = service_task;
+    wake_probe.moved_capability_id = copied_capability_id;
     var move_context = testContext(.endpoint_send, service_endpoint.capability_id, .none);
     move_context.caller_task_id = service_task.id;
     // A denied reply must not consume an attached capability or fall back to
     // the first connected client. Even clients in one task have distinct routes.
     try std.testing.expectError(error.ScopeViolation, kernel.endpointSend(move_context, 12, "invalid", service_endpoint.endpoint.endpoint_id, copied_capability_id, true, 10));
+    try std.testing.expectEqual(@as(usize, 2), wake_probe.count);
     try std.testing.expect(service_task.hasCapability(copied_capability_id));
     try kernel.endpointSend(move_context, 11, "second reply", other_request.message.sender_endpoint_id, null, false, 10);
     try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(ids.endpoint(app_endpoint.endpoint.endpoint_id))).queued_messages);
     try kernel.endpointSend(move_context, 12, "move-back", received.message.sender_endpoint_id, copied_capability_id, true, 10);
     try std.testing.expect(!service_task.hasCapability(copied_capability_id));
+    try std.testing.expect(!wake_probe.source_retained_capability_at_wake);
+    try std.testing.expectEqualSlices(u64, &.{ app_task_desc.task_id, app_task_desc.task_id }, wake_probe.tasks[2..wake_probe.count]);
 
     var moved_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     var moved_receive_context = testContext(.endpoint_recv, app_endpoint.capability_id, .none);
@@ -1336,6 +1377,12 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     try std.testing.expectEqual(session_task.id, self_accounting.task_id);
 
     try std.testing.expectEqual(@as(u64, 10), try kernel.timeQuery(testContext(.time_query, authority_capability.id, .none), 10));
+    for (0..endpoint.MAX_ENDPOINT_QUEUE) |index| {
+        try kernel.endpointSend(send_context, index, "pending", 0, null, false, 11);
+    }
+    const wake_count = wake_probe.count;
+    try std.testing.expectError(error.QueueFull, kernel.endpointSend(send_context, 99, "overflow", 0, null, false, 11));
+    try std.testing.expectEqual(wake_count, wake_probe.count);
 }
 
 test "native kernel descriptor authorization enforces request task scope" {

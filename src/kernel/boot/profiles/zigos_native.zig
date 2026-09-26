@@ -14,6 +14,7 @@ const boot_markers = @import("../markers.zig");
 
 var recorded_input_report_count: u64 = 0;
 var reported_scanout = false;
+var reported_idle = false;
 
 pub fn run() noreturn {
     framebuffer_hw.init() catch |err| {
@@ -59,6 +60,10 @@ pub fn run() noreturn {
             timer.armSchedulerTick();
         } else {
             timer.disarmSchedulerTick();
+            if (!reported_idle) {
+                common.printBootMarker(boot_markers.userspace_scheduler_idle);
+                reported_idle = true;
+            }
         }
         x86.sti();
         x86.hlt();

@@ -4,6 +4,8 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
+const endpoint = @import("../kernel_api/endpoint.zig");
+const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
@@ -187,7 +189,7 @@ const heap_backed_accelerator_claims = builtin.target.os.tag == .freestanding;
 pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 208;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
 pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
-pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_544 else 46_424;
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_552 else 46_432;
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
@@ -222,6 +224,7 @@ pub const Scheduler = struct {
     catalog_ptr: ?*userspace_loader.Catalog = null,
     runtime_ptr: ?*task_runtime.Runtime = null,
     capability_table_ptr: ?*const capability.CapabilityTable = null,
+    endpoint_table_ptr: ?*const endpoint.Table = null,
     slots: SchedulerSlotArena = SchedulerSlotArena.init(),
     ready_heads: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
     ready_tails: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
@@ -325,6 +328,7 @@ pub const Scheduler = struct {
         self.catalog_ptr = null;
         self.runtime_ptr = null;
         self.capability_table_ptr = null;
+        self.endpoint_table_ptr = null;
         self.releaseAcceleratorClaimBacking();
     }
 
@@ -444,8 +448,18 @@ pub const Scheduler = struct {
 
     pub fn parkTaskUntilEvent(self: *Scheduler, task_id: u64) bool {
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
+        if (self.hasPendingIpc(task_id)) return false;
         self.unlinkReadyIndex(slot_index);
         return true;
+    }
+
+    pub fn bindEndpointTable(self: *Scheduler, table: *const endpoint.Table) void {
+        self.endpoint_table_ptr = table;
+    }
+
+    fn hasPendingIpc(self: *const Scheduler, task_id: u64) bool {
+        const table = self.endpoint_table_ptr orelse return false;
+        return table.hasPendingForTask(ids.task(task_id));
     }
 
     pub fn wakeTask(
@@ -459,6 +473,7 @@ pub const Scheduler = struct {
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
+        if (task.state != .active) return false;
         const task_handle = runtime.taskHandleForResolved(task);
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         const slot = &self.slots.slots[slot_index];
@@ -724,7 +739,9 @@ pub const Scheduler = struct {
                 slot.resource_class = updated_task.resourceClass();
                 if (!slot.dispatch_request_configured) slot.dispatch_request = deriveDispatchRequest(updated_task);
                 slot.deadline_tick = deadlineAfterDispatch(slot.resource_class, now_ticks);
-                if (executionRemainsReady(outcome)) {
+                if (executionRemainsReady(outcome) or
+                    (outcome == .wait_for_event and self.hasPendingIpc(task_id)))
+                {
                     _ = self.enqueueReadyIndex(index, slot.resource_class);
                 }
             } else {

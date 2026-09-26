@@ -631,7 +631,7 @@ fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime con
             const input = drainFocusedInput();
             _ = presentUiState(&zigos_userspace_bootstrap, &ui_state);
             break :wait if (input.exhausted) .wait_for_event else .runnable;
-        } else .runnable;
+        } else .wait_for_event;
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
     }

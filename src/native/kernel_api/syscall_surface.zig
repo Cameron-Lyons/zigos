@@ -435,7 +435,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
 
     const peer = try test_kernel.endpoints.create(ids.task(test_kernel.session_task_id), "receive-peer", .{ .local_only = true });
     try test_kernel.endpoints.connect(peer.id, ids.endpoint(created.endpoint.endpoint_id));
-    try test_kernel.endpoints.send(peer.id, ids.task(test_kernel.session_task_id), 91, "hello", null, false);
+    _ = try test_kernel.endpoints.send(peer.id, ids.task(test_kernel.session_task_id), 91, "hello", null, false);
 
     const short_response = dispatch(
         &test_kernel.port,

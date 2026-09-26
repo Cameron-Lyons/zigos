@@ -124,6 +124,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
         self.input_router.deinit();
         self.runtime_context.releaseUserspaceScheduler();
@@ -1035,12 +1036,22 @@ fn prepareKernelInterface(
         &self.runtime_context.runtime_service,
         &self.service_graph_builder.driver_runtime,
     );
+    self.userspaceSchedulerPtr().bindEndpointTable(self.kernel_context.endpointTable().?);
+    kernel_port.kernel.bindEndpointWakeSink(.{
+        .context = self.userspaceSchedulerPtr(),
+        .wake = wakeEndpointReceiver,
+    });
     publishRootKernelPort(kernel_port);
     self.executeUserspaceProbe(session_task_id);
     common.printBootMarker(boot_markers.transport_native_kernel_ready);
     common.printBootMarker(boot_markers.transport_no_root);
     common.printBootMarker(boot_markers.transport_component_abi_ready);
     return kernel_port;
+}
+
+fn wakeEndpointReceiver(context: *anyopaque, receiver_task_id: u64, now_ticks: u64) void {
+    const scheduler: *userspace_scheduler.Scheduler = @ptrCast(@alignCast(context));
+    _ = scheduler.wakeTask(receiver_task_id, .ipc_message, now_ticks, 0);
 }
 
 fn publishRootKernelPort(port: anytype) void {

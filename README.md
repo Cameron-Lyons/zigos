@@ -161,8 +161,11 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   replies to connected clients; stale or unrelated endpoint handles are
   rejected before publishing a reply or moving a capability. Receive buffers
   are validated before dequeue, and undersized outputs leave messages queued.
-  It also
-  defines a task-scoped, fixed-size surface
+  Successful sends wake only the destination owner after publishing the message
+  and completing any capability move. Idle services park instead of generating
+  heartbeat work; a task with queued endpoint messages stays runnable. Production
+  smoke tests require the scheduler to reach idle and stop its periodic tick.
+  The ABI also defines a task-scoped, fixed-size surface
   presentation that is copied into compositor-owned storage with monotonic
   revision checks. UI
   processes coalesce each bounded input drain into one revision submission,

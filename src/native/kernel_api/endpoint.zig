@@ -221,14 +221,14 @@ pub const Table = struct {
         payload: []const u8,
         attached_capability_id: ?ids.CapabilityId,
         move_attached_capability: bool,
-    ) Error!void {
+    ) Error!ids.TaskId {
         if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
 
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         const peer_endpoint_id = endpoint.peer_endpoint_id;
         if (peer_endpoint_id.isZero()) return error.PeerNotConnected;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
-        try enqueue(endpoint, peer, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+        return enqueue(endpoint, peer, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
     }
 
     // Services have no implicit peer. The kernel supplies the sender endpoint
@@ -243,13 +243,13 @@ pub const Table = struct {
         payload: []const u8,
         attached_capability_id: ?ids.CapabilityId,
         move_attached_capability: bool,
-    ) Error!void {
+    ) Error!ids.TaskId {
         if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
         const service = self.find(endpoint_id) orelse return error.EndpointNotFound;
         const client = self.find(reply_endpoint_id) orelse return error.EndpointNotFound;
         if (!service.flags.service_port or client.flags.service_port or
             !client.peer_endpoint_id.eql(service.id)) return error.ScopeViolation;
-        try enqueue(service, client, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+        return enqueue(service, client, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
     }
 
     fn enqueue(
@@ -260,7 +260,7 @@ pub const Table = struct {
         payload: []const u8,
         attached_capability_id: ?ids.CapabilityId,
         move_attached_capability: bool,
-    ) Error!void {
+    ) Error!ids.TaskId {
         if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
 
         const queue = try ensureEndpointQueue(peer);
@@ -278,6 +278,7 @@ pub const Table = struct {
         queue[insert_index].len = @intCast(payload.len);
         @memcpy(queue[insert_index].bytes[0..payload.len], payload);
         peer.queue_len += 1;
+        return peer.owner_task_id;
     }
 
     pub fn recvInto(
@@ -323,6 +324,15 @@ pub const Table = struct {
 
     pub fn activeForTask(self: *const Table, task_id: ids.TaskId) u16 {
         return @intCast(self.owner_index.count(task_id.raw()));
+    }
+
+    // Only visit this owner's endpoints when deciding whether it can sleep.
+    pub fn hasPendingForTask(self: *const Table, task_id: ids.TaskId) bool {
+        var slot_index = self.owner_index.head(task_id.raw());
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.owner_index.next(slot_index)) {
+            if (self.arena.slots[slot_index].endpoint.queue_len != 0) return true;
+        }
+        return false;
     }
 
     pub fn activeCount(self: *const Table) usize {
@@ -460,7 +470,7 @@ test "endpoints connect and exchange queued messages" {
     const right = try table.create(ids.task(11), "right", .{ .local_only = true });
     try table.connect(left.id, right.id);
 
-    try table.send(left.id, ids.task(10), 77, "hello", null, false);
+    _ = try table.send(left.id, ids.task(10), 77, "hello", null, false);
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try table.recvInto(right.id, &payload)).?;
 
@@ -477,7 +487,7 @@ test "queued endpoint messages own their payload" {
     try table.connect(left.id, right.id);
 
     var source = [_]u8{ 'o', 'r', 'i', 'g', 'i', 'n', 'a', 'l' };
-    try table.send(left.id, ids.task(10), 78, &source, null, false);
+    _ = try table.send(left.id, ids.task(10), 78, &source, null, false);
     @memset(&source, 'x');
 
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
@@ -490,7 +500,7 @@ test "endpoint table reset clears live queues and reuses capacity" {
     const left = try table.create(ids.task(20), "left", .{});
     const right = try table.create(ids.task(21), "right", .{});
     try table.connect(left.id, right.id);
-    try table.send(left.id, ids.task(20), 88, "queued", null, false);
+    _ = try table.send(left.id, ids.task(20), 88, "queued", null, false);
     try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(right.id)).queued_messages);
 
     table.reset();
@@ -504,7 +514,7 @@ test "endpoint descriptors track peer links and queue depth" {
     const left = try table.create(ids.task(10), "left", .{});
     const right = try table.create(ids.task(11), "right", .{ .service_port = true });
     try table.connect(left.id, right.id);
-    try table.send(left.id, ids.task(10), 1, "ok", ids.capability(99), true);
+    _ = try table.send(left.id, ids.task(10), 1, "ok", ids.capability(99), true);
 
     const descriptor = try table.descriptor(right.id);
     try std.testing.expectEqual(@as(u64, 0), descriptor.peer_endpoint_id);
@@ -554,8 +564,8 @@ test "retiring task endpoints clears queues and surviving peer links" {
 
     try table.connect(client_a.id, service.id);
     try table.connect(client_b.id, service.id);
-    try table.send(client_a.id, ids.task(10), 1, "queued-a", null, false);
-    try table.send(client_b.id, ids.task(11), 2, "queued-b", null, false);
+    _ = try table.send(client_a.id, ids.task(10), 1, "queued-a", null, false);
+    _ = try table.send(client_b.id, ids.task(11), 2, "queued-b", null, false);
     try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(service.id)).queued_messages);
 
     const retired = table.retireTask(ids.task(12));
@@ -581,7 +591,7 @@ test "service ports accept multiple client connections without blocking later bi
 
     try table.connect(client_a.id, service.id);
     try table.connect(client_b.id, service.id);
-    try table.send(client_b.id, ids.task(11), 77, "ping", null, false);
+    _ = try table.send(client_b.id, ids.task(11), 77, "ping", null, false);
 
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try table.recvInto(service.id, &payload)).?;
@@ -594,7 +604,7 @@ test "endpoint receive keeps a message queued when the caller buffer is too smal
     const left = try table.create(ids.task(10), "left", .{});
     const right = try table.create(ids.task(11), "right", .{});
     try table.connect(left.id, right.id);
-    try table.send(left.id, ids.task(10), 9, "hello", null, false);
+    _ = try table.send(left.id, ids.task(10), 9, "hello", null, false);
 
     var short_payload: [4]u8 = undefined;
     try std.testing.expectError(error.ReceiveBufferTooSmall, table.recvInto(right.id, &short_payload));
@@ -614,17 +624,17 @@ test "service replies route by request endpoint across clients and out of order"
     const service = try table.create(ids.task(12), "service", .{ .service_port = true });
     try table.connect(first.id, service.id);
     try table.connect(service.id, second.id);
-    try table.send(first.id, first.owner_task_id, 7, "first request", null, false);
-    try table.send(second.id, second.owner_task_id, 7, "second request", null, false);
+    _ = try table.send(first.id, first.owner_task_id, 7, "first request", null, false);
+    _ = try table.send(second.id, second.owner_task_id, 7, "second request", null, false);
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const a = (try table.recvInto(service.id, &payload)).?;
     const b = (try table.recvInto(service.id, &payload)).?;
     try std.testing.expectEqual(first.id, a.sender_endpoint_id);
     try std.testing.expectEqual(second.id, b.sender_endpoint_id);
     try std.testing.expectError(error.PeerNotConnected, table.send(service.id, service.owner_task_id, 7, "ambiguous", null, false));
-    try table.reply(service.id, b.sender_endpoint_id, service.owner_task_id, b.correlation_id, "second reply", null, false);
+    _ = try table.reply(service.id, b.sender_endpoint_id, service.owner_task_id, b.correlation_id, "second reply", null, false);
     try std.testing.expect((try table.recvInto(first.id, &payload)) == null);
-    try table.reply(service.id, a.sender_endpoint_id, service.owner_task_id, a.correlation_id, "first reply", null, false);
+    _ = try table.reply(service.id, a.sender_endpoint_id, service.owner_task_id, a.correlation_id, "first reply", null, false);
     const received_b = (try table.recvInto(second.id, &payload)).?;
     try std.testing.expectEqualStrings("second reply", payload[0..received_b.len]);
     try std.testing.expectEqual(service.id, received_b.sender_endpoint_id);
@@ -653,7 +663,7 @@ test "delayed service replies reject retired client handles after slot reuse" {
     const client = try table.create(ids.task(10), "client", .{});
     const service = try table.create(ids.task(12), "service", .{ .service_port = true });
     try table.connect(client.id, service.id);
-    try table.send(client.id, client.owner_task_id, 1, "request", null, false);
+    _ = try table.send(client.id, client.owner_task_id, 1, "request", null, false);
     _ = table.retireTask(client.owner_task_id);
     const replacement = try table.create(client.owner_task_id, "replacement", .{});
     try table.connect(replacement.id, service.id);
@@ -672,9 +682,29 @@ test "a full reply queue never redirects a service response to another client" {
     try table.connect(first.id, service.id);
     try table.connect(second.id, service.id);
     for (0..MAX_ENDPOINT_QUEUE) |sequence| {
-        try table.reply(service.id, second.id, service.owner_task_id, sequence, "reply", null, false);
+        _ = try table.reply(service.id, second.id, service.owner_task_id, sequence, "reply", null, false);
     }
     try std.testing.expectError(error.QueueFull, table.reply(service.id, second.id, service.owner_task_id, 99, "overflow", null, false));
     try std.testing.expectEqual(@as(u16, MAX_ENDPOINT_QUEUE), (try table.descriptor(second.id)).queued_messages);
     try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(first.id)).queued_messages);
+}
+
+test "endpoint readiness follows queued ownership through drains and retirement" {
+    var table = Table.init();
+    const client = try table.create(ids.task(10), "client", .{});
+    const service = try table.create(ids.task(20), "service", .{ .service_port = true });
+    _ = try table.create(service.owner_task_id, "empty service endpoint", .{});
+    try table.connect(client.id, service.id);
+    try std.testing.expect(!table.hasPendingForTask(service.owner_task_id));
+    try std.testing.expectEqual(service.owner_task_id, try table.send(client.id, client.owner_task_id, 1, "request", null, false));
+    try std.testing.expect(table.hasPendingForTask(service.owner_task_id));
+    try std.testing.expect(!table.hasPendingForTask(client.owner_task_id));
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    _ = try table.recvInto(service.id, &payload);
+    try std.testing.expect(!table.hasPendingForTask(service.owner_task_id));
+    try std.testing.expectEqual(client.owner_task_id, try table.reply(service.id, client.id, service.owner_task_id, 1, "reply", null, false));
+    try std.testing.expect(table.hasPendingForTask(client.owner_task_id));
+    _ = table.retireTask(client.owner_task_id);
+    _ = try table.create(client.owner_task_id, "replacement", .{});
+    try std.testing.expect(!table.hasPendingForTask(client.owner_task_id));
 }

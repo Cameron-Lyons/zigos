@@ -46,6 +46,7 @@ pub const userspace_exec_probe_ok = "ZIGOS:USERSPACE:EXEC_PROBE:OK";
 pub const userspace_resume_ok = "ZIGOS:USERSPACE:RESUME:OK";
 pub const userspace_scheduler_active = "ZIGOS:USERSPACE:SCHEDULER:ACTIVE";
 pub const userspace_scheduler_event_wait_ready = "ZIGOS:USERSPACE:SCHEDULER:EVENT_WAIT:READY";
+pub const userspace_scheduler_idle = "ZIGOS:USERSPACE:SCHEDULER:IDLE";
 pub const userspace_ui_state_ready = "ZIGOS:USERSPACE:UI_STATE:READY";
 pub const storage_checkpoint_final_clean = "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false";
 

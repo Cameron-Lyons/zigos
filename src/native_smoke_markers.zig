@@ -47,6 +47,7 @@ pub const production_required = [_][]const u8{
     boot_markers.task_session_ready,
     boot_markers.native_ready,
     boot_markers.compositor_scanout_presented,
+    boot_markers.userspace_scheduler_idle,
 };
 
 pub const production_forbidden = [_][]const u8{
@@ -444,6 +445,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.platform_artifact_manifest_verified,
         boot_markers.platform_measured_boot_verified_root,
         boot_markers.native_ready,
+        boot_markers.userspace_scheduler_idle,
     };
     for (required) |marker| {
         try std.testing.expect(contains(&production_required, marker));

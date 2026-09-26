@@ -645,7 +645,7 @@ pub const NativeTransportService = struct {
             sequence,
             &signed_frame,
         );
-        try (try self.endpointTable()).send(
+        _ = try (try self.endpointTable()).send(
             connection.source_endpoint_id,
             ids.task(connection.source_task_id),
             signed_frame.packet.session_id,

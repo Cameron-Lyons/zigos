@@ -64,6 +64,7 @@ pub const KernelContext = struct {
     }
 
     pub fn resetPort(self: *KernelContext) void {
+        if (self.kernel_port_ready) self.kernel_instance.clearEndpointWakeSink();
         self.kernel_port_ready = false;
     }
 

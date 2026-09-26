@@ -196,6 +196,93 @@ test "steady runtime polling stays idle before session construction" {
     try std.testing.expect(!manager.runtime_context.constructed);
 }
 
+test "session IPC wakes only its receiver and cannot park over pending messages" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const sender = session_manager.testing.findTask("session-manager").?;
+    const receiver = session_manager.testing.findTask("workspace-storage").?;
+    const unrelated = session_manager.testing.findTask("network-service").?;
+    const scheduler = manager.userspaceSchedulerPtr();
+    const port = manager.kernelPort().?;
+    const authority_id = for (sender.capabilityIds()) |capability_id| {
+        const grant = manager.capabilityTablePtr().query(capability_id) orelse continue;
+        if (grant.rights.has(.endpoint_create)) break capability_id;
+    } else return error.MissingEndpointAuthority;
+    const client = try port.endpointCreate(.{
+        .header = component_port.makeHeader(.endpoint_create, 1, sender.id),
+        .authority_capability_id = authority_id,
+        .owner_task_id = sender.id,
+        .label = "wake-client",
+        .flags = .{ .local_only = true },
+    }, 0);
+    const server = try port.endpointCreate(.{
+        .header = component_port.makeHeader(.endpoint_create, 2, sender.id),
+        .authority_capability_id = authority_id,
+        .owner_task_id = receiver.id,
+        .label = "wake-server",
+        .flags = .{ .local_only = true, .service_port = true },
+    }, 0);
+    _ = try port.endpointConnect(.{
+        .header = component_port.makeHeader(.endpoint_connect, 3, sender.id),
+        .endpoint_capability_id = client.capability_id,
+        .peer_endpoint_capability_id = server.capability_id,
+        .peer_endpoint_id = server.endpoint.endpoint_id,
+    }, 0);
+    try std.testing.expect(scheduler.parkTaskUntilEvent(sender.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(receiver.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(unrelated.id));
+    const ready_before = scheduler.readyQueueDepth(receiver.resourceClass());
+    const wakes_before = scheduler.taskDispatchStats(receiver.id).?.wake_event_count;
+    for (0..2) |index| {
+        try port.endpointSend(.{
+            .header = component_port.makeHeader(.endpoint_send, index, sender.id),
+            .endpoint_capability_id = client.capability_id,
+            .payload = "request",
+        }, 1);
+    }
+    try std.testing.expectEqual(ready_before + 1, scheduler.readyQueueDepth(receiver.resourceClass()));
+    try std.testing.expectEqual(wakes_before + 2, scheduler.taskDispatchStats(receiver.id).?.wake_event_count);
+    try std.testing.expect(!scheduler.taskDispatchStats(sender.id).?.queued_ready);
+    try std.testing.expect(!scheduler.taskDispatchStats(unrelated.id).?.queued_ready);
+    try std.testing.expect(!scheduler.parkTaskUntilEvent(receiver.id));
+    var payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    var attached: abi.CapabilityDescriptor = undefined;
+    for (0..2) |index| {
+        const message = (try port.endpointRecv(.{
+            .header = component_port.makeHeader(.endpoint_recv, 4, receiver.id),
+            .endpoint_capability_id = server.capability_id,
+            .receiver_task_id = receiver.id,
+            .payload_out = &payload,
+            .attached_capability_out = &attached,
+        }, 2)).?;
+        try std.testing.expectEqual(@as(u64, index), message.message.correlation_id);
+        if (index == 0) try std.testing.expect(!scheduler.parkTaskUntilEvent(receiver.id));
+    }
+    try std.testing.expect(scheduler.parkTaskUntilEvent(receiver.id));
+    try port.endpointSend(.{
+        .header = component_port.makeHeader(.endpoint_send, 0, receiver.id),
+        .endpoint_capability_id = server.capability_id,
+        .payload = "reply",
+        .reply_endpoint_id = client.endpoint.endpoint_id,
+    }, 3);
+    try std.testing.expect(scheduler.taskDispatchStats(sender.id).?.queued_ready);
+    try std.testing.expect(!scheduler.taskDispatchStats(receiver.id).?.queued_ready);
+    try std.testing.expect(!scheduler.taskDispatchStats(unrelated.id).?.queued_ready);
+    try std.testing.expect(!scheduler.parkTaskUntilEvent(sender.id));
+
+    try std.testing.expect(try manager.runtimePtr().suspendTask(receiver.id, 4));
+    const wakes_while_suspended = scheduler.taskDispatchStats(receiver.id).?.wake_event_count;
+    try port.endpointSend(.{
+        .header = component_port.makeHeader(.endpoint_send, 5, sender.id),
+        .endpoint_capability_id = client.capability_id,
+        .payload = "pending while suspended",
+    }, 4);
+    try std.testing.expect(!scheduler.taskDispatchStats(receiver.id).?.queued_ready);
+    try std.testing.expectEqual(wakes_while_suspended, scheduler.taskDispatchStats(receiver.id).?.wake_event_count);
+}
+
 test "bootstrap scenario world wires storage sync recovery and policy flows explicitly" {
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();
