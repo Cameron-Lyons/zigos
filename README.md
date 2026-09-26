@@ -177,7 +177,9 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   releases a consumed move while leaving copied grants with their sender.
   Endpoint and shared-memory creation unwind unpublished objects if ownership
   grants fail, restoring owner budgets and frame reservations. Failed single
-  grants preserve capacity for future capability targets.
+  grants preserve capacity for future capability targets. Removing the last
+  grant to a target also releases its metadata; revoked sibling grants retain
+  their epoch until they are removed.
   Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.

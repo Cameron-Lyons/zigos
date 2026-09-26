@@ -401,9 +401,11 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         pub fn revokeTargetAuthorityResolved(self: *Self, capability_id: u64, resolved: ResolvedCapability) Error!void {
             const slot = self.resolvedSlot(resolved, capability_id) orelse return error.CapabilityNotFound;
             const target_generation_index = slot.target_generation_index;
-            self.removeSlot(resolved.slot_index);
             const target_generation = self.targetGenerationAtMut(target_generation_index);
-            target_generation.generation += 1;
+            // Keep the epoch while any sibling grant (including a revoked
+            // grant) survives. Removing the last grant releases this entry.
+            if (target_generation.capability_count > 1) target_generation.generation += 1;
+            self.removeSlot(resolved.slot_index);
         }
 
         pub fn retireTaskAuthority(self: *Self, task_id: u64, held_capability_ids: []const u64) usize {
@@ -822,10 +824,19 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
             slot.target_previous = table_capability_no_index;
             slot.target_next = table_capability_no_index;
             target_generation.capability_count -= 1;
-            if (target_generation.capability_count == 0 and
-                (target_generation.capability_head != table_capability_no_index or target_generation.capability_tail != table_capability_no_index))
-            {
-                native_util.impossibleByInvariant("empty target generation has no capability links");
+            if (target_generation.capability_count == 0) {
+                if (target_generation.capability_head != table_capability_no_index or target_generation.capability_tail != table_capability_no_index) {
+                    native_util.impossibleByInvariant("empty target generation has no capability links");
+                }
+                // No stored capability can reference this epoch anymore.
+                // Stale external handles remain invalid through slot generations.
+                if (self.cached_target_key == targetKey(target_generation.target)) {
+                    self.cached_target_key = 0;
+                    self.cached_target_generation_index = 0;
+                }
+                if (!self.target_generations.removeIndex(slot.target_generation_index)) {
+                    native_util.impossibleByInvariant("the last capability releases its indexed target generation");
+                }
             }
         }
 
@@ -958,9 +969,104 @@ test "single grants avoid batch plans and retain transactional rollback" {
     try std.testing.expect(table.query(minted.id) == null);
 }
 
+test "retired capability targets do not impose a lifetime allocation limit" {
+    const SmallTable = CapabilityTableWith(.{
+        .max_capabilities = 4,
+        .max_target_generations = 2,
+        .target_generation_index_capacity = 4,
+    });
+    var table = SmallTable.init();
+    var request = emptyGrantPlanEntry().request;
+    request.lease.expires_at_ticks = 1000;
+    const retained = try table.mintSingle(request);
+    const baseline_target = request.target;
+    for (0..256) |index| {
+        request.target.id = 100 + index;
+        const transient = try table.mintSingle(request);
+        const old_view = table.resolve(transient.id).?;
+        switch (index % 4) {
+            0 => try table.revokeGrant(transient.id),
+            1 => try table.revokeTargetAuthority(transient.id),
+            2 => try std.testing.expectEqual(@as(usize, 1), table.retireTargetAuthority(request.target)),
+            3 => table.rollbackSingleGrant(transient.id),
+            else => unreachable,
+        }
+        try std.testing.expectEqual(@as(usize, 1), table.target_generations.countInUse());
+        try std.testing.expect(table.query(transient.id) == null);
+        // The cached target slot can be reused for a different target, and an
+        // old resolved capability must never revoke its replacement.
+        request.target.id += 1000;
+        const replacement = try table.mintSingle(request);
+        try std.testing.expectError(error.CapabilityNotFound, table.revokeTargetAuthorityResolved(transient.id, old_view));
+        _ = try table.requireUsable(replacement.id, 1);
+        _ = try table.requireUsable(retained.id, 1);
+        try table.revokeGrant(replacement.id);
+        try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    }
+    try table.revokeGrant(retained.id);
+    try std.testing.expectEqual(@as(usize, 0), table.target_generations.countInUse());
+    request.target = baseline_target;
+    const reopened = try table.mintSingle(request);
+    try std.testing.expect(table.query(retained.id) == null);
+    _ = try table.requireUsable(reopened.id, 1);
+}
+
+test "target reclamation keeps revoked siblings invalid while new grants survive" {
+    const SmallTable = CapabilityTableWith(.{
+        .max_capabilities = 4,
+        .max_target_generations = 1,
+        .target_generation_index_capacity = 2,
+    });
+    var table = SmallTable.init();
+    var request = emptyGrantPlanEntry().request;
+    request.lease.expires_at_ticks = 1000;
+    const parent = try table.mintSingle(request);
+    const sibling = try table.mintSingle(request);
+    try table.revokeTargetAuthority(parent.id);
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(sibling.id, 1));
+    const fresh = try table.mintSingle(request);
+    try std.testing.expect(fresh.revocation_generation > sibling.revocation_generation);
+    try std.testing.expectError(error.CapabilityRevoked, table.requireUsable(sibling.id, 1));
+    _ = try table.requireUsable(fresh.id, 1);
+    try table.revokeGrant(sibling.id);
+    try std.testing.expectEqual(@as(usize, 1), table.target_generations.countInUse());
+    _ = try table.requireUsable(fresh.id, 1);
+    try table.revokeTargetAuthority(fresh.id);
+    try std.testing.expectEqual(@as(usize, 0), table.target_generations.countInUse());
+    const reopened = try table.mintSingle(request);
+    _ = try table.requireUsable(reopened.id, 1);
+    try std.testing.expect(table.query(sibling.id) == null);
+    try std.testing.expect(table.query(fresh.id) == null);
+}
+
+test "batch grant rollback releases target slots for later unrelated targets" {
+    const SmallTable = CapabilityTableWith(.{
+        .max_capabilities = 4,
+        .max_target_generations = 2,
+        .target_generation_index_capacity = 4,
+    });
+    var table = SmallTable.init();
+    var request = emptyGrantPlanEntry().request;
+    request.lease.expires_at_ticks = 1000;
+    for (0..128) |index| {
+        var plan = GrantPlan{};
+        request.target.id = 2 * index + 1;
+        try plan.addMint(0, request);
+        request.target.id += 1;
+        try plan.addMint(0, request);
+        var granted: [2]Capability = undefined;
+        _ = try table.applyGrantPlan(&plan, &granted);
+        for (granted) |grant| _ = try table.requireUsable(grant.id, 1);
+        table.rollbackGrant(&granted);
+        try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+        try std.testing.expectEqual(@as(usize, 0), table.target_generations.countInUse());
+        for (granted) |grant| try std.testing.expect(table.query(grant.id) == null);
+    }
+}
+
 test "failed single grants preserve target and capability capacity" {
     const SmallTable = CapabilityTableWith(.{
-        .max_capabilities = 2,
+        .max_capabilities = 3,
         .max_target_generations = 2,
         .target_generation_index_capacity = 4,
     });
@@ -968,28 +1074,30 @@ test "failed single grants preserve target and capability capacity" {
     var request = emptyGrantPlanEntry().request;
     const first = try table.mintSingle(request);
     const second = try table.mintSingle(request);
+    const third = try table.mintSingle(request);
     const generation = table.mutationGeneration();
     const initial_target = request.target;
     for (2..32) |target_id| {
         request.target.id = target_id;
         try std.testing.expectError(error.TableFull, table.mintSingle(request));
         try std.testing.expectEqual(@as(usize, 1), table.target_generations.countInUse());
-        try std.testing.expectEqual(@as(usize, 2), table.activeCount());
+        try std.testing.expectEqual(@as(usize, 3), table.activeCount());
         try std.testing.expectEqual(generation, table.mutationGeneration());
     }
     try table.revokeGrant(second.id);
     request.target.id = 50;
     const replacement = try table.mintSingle(request);
     try std.testing.expect(table.query(second.id) == null);
-    try table.revokeGrant(replacement.id);
+    try table.revokeGrant(third.id);
     const before_failure = table.mutationGeneration();
     request.target.id = 51;
     try std.testing.expectError(error.TargetTableFull, table.mintSingle(request));
-    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expectEqual(@as(usize, 2), table.activeCount());
     try std.testing.expectEqual(before_failure, table.mutationGeneration());
     request.target = initial_target;
     _ = try table.mintSingle(request);
     try std.testing.expect(table.query(first.id) != null);
+    try std.testing.expect(table.query(replacement.id) != null);
 }
 
 test "capability table omits redundant holder index state" {
