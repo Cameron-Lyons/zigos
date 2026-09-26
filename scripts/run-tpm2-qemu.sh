@@ -89,14 +89,16 @@ run_boot() {
       echo "TPM2 vault result mismatch for $name" >&2
       return 1
     fi
-    local expected_identity=1
-    if [[ "$sealing_marker" == *:WRONG_DEVICE ]]; then expected_identity=0; fi
-    if [ "$(grep -c '^ZIGOS:TPM2:IDENTITY:' "$log" || true)" -ne "$expected_identity" ] ||
-      { [ "$expected_identity" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:IDENTITY:SIGNED' "$log"; }; then
-      cat "$log" >&2
-      echo "TPM2 identity result mismatch for $name" >&2
-      return 1
-    fi
+    local expected_proofs=1 proof
+    if [[ "$sealing_marker" == *:WRONG_DEVICE ]]; then expected_proofs=0; fi
+    for proof in IDENTITY:SIGNED KEYGEN:DISTINCT; do
+      if [ "$(grep -c "^ZIGOS:TPM2:${proof%%:*}:" "$log" || true)" -ne "$expected_proofs" ] ||
+        { [ "$expected_proofs" -eq 1 ] && ! grep -Fxq "ZIGOS:TPM2:$proof" "$log"; }; then
+        cat "$log" >&2
+        echo "TPM2 $proof result mismatch for $name" >&2
+        return 1
+      fi
+    done
   else
     bash "$SCRIPT_DIR/check-production-boot-log.sh" "$log"
   fi

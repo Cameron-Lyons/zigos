@@ -3180,6 +3180,8 @@ fn validateSecretVaultHardwareProviderBoundary(
         "secret.hardware_provider_used = true",
         "secret.resident_material = !hardware_backed",
         "secret.material = .{ .sealed = blob }",
+        "pub fn generateSigningKey",
+        "try self.hardware_provider.generateSigningKey(&binding, &blob)",
         "pub fn restoreSealed",
         "try self.hardware_provider.open(&binding, blob, &scratch)",
         "secret.resident_material = false",
@@ -3203,13 +3205,13 @@ fn validateSecretVaultHardwareProviderBoundary(
     }
 
     const adapter_source = try readRequiredSource(allocator, io, errors, "src/native/platform/tpm2_secret_provider.zig") orelse return;
-    for ([_][]const u8{ "self.client.seal(", "self.client.unseal(", "authorization: *const tpm.Key", "std.crypto.secureZero(u8, &key)", "sealing.encrypt(", "envelope.open(" }) |snippet| {
+    for ([_][]const u8{ "self.client.seal(", "self.client.unseal(", "authorization: *const tpm.Key", "std.crypto.secureZero(u8, &key)", "std.crypto.secureZero(u8, &seed)", "self.io.random(&seed)", "sealing.encrypt(", "envelope.open(" }) |snippet| {
         if (std.mem.indexOf(u8, adapter_source, snippet) == null) {
             try common.addError(errors, allocator, "Secret vault TPM adapter must retain operation: {s}", .{snippet});
         }
     }
     const sealing_source = try readRequiredSource(allocator, io, errors, "src/native/platform/secret_sealing.zig") orelse return;
-    for ([_][]const u8{ "XChaCha20Poly1305", "sealFn: ?*const fn", "openFn: ?*const fn", "errdefer std.crypto.secureZero(u8, out)", "Aead.decrypt(" }) |snippet| {
+    for ([_][]const u8{ "XChaCha20Poly1305", "operations: ?*const Operations", "seal: *const fn", "open: *const fn", "generateSigningKey: ?*const fn", "errdefer std.crypto.secureZero(u8, out)", "Aead.decrypt(" }) |snippet| {
         if (std.mem.indexOf(u8, sealing_source, snippet) == null) {
             try common.addError(errors, allocator, "Secret vault sealing boundary must retain operation: {s}", .{snippet});
         }
@@ -3218,6 +3220,10 @@ fn validateSecretVaultHardwareProviderBoundary(
     const service_path = "src/native/services/secret_vault_service.zig";
     const service_source = try readRequiredSource(allocator, io, errors, service_path) orelse return;
     const service_snippets = [_][]const u8{
+        "pub const GenerateSigningKeyRequest",
+        "self.store.generateSigningKey(request.owner, request.label)",
+        ".operation = .generate_signing_key",
+        "self.store.secrets[slot_index] = unused_slot",
         "service.attachHardwareProvider(testHardwareProvider())",
         "expiry_service.attachHardwareProvider(testHardwareProvider())",
         "export_service.attachHardwareProvider(testHardwareProvider())",

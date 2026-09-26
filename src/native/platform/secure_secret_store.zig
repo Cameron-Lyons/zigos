@@ -19,7 +19,7 @@ pub const COMPACT_SECRET_METADATA = true;
 pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true;
 pub const DIRECT_HANDLE_LOOKUP = true;
 pub const OVERWRITES_RESERVED_HANDLE_SLOTS = true;
-pub const STORE_SIZE_CEILING_BYTES: usize = 14_800;
+pub const STORE_SIZE_CEILING_BYTES: usize = 14_792;
 
 pub const SecretRecord = struct {
     id: u64,
@@ -153,6 +153,31 @@ pub const Store = struct {
             @memcpy(secret.material.raw.bytes[0..raw.len], raw);
         }
 
+        self.secret_count += 1;
+        return secret;
+    }
+
+    // Generate a nonexportable signing key without accepting or returning its
+    // seed. The provider must finish before the next dense slot is published.
+    pub fn generateSigningKey(self: *Store, owner: principal.PrincipalId, label: []const u8) Error!*const SecretRecord {
+        if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
+        const slot_index = self.countSecrets();
+        if (slot_index >= MAX_SECRETS) return error.SecretTableFull;
+        const binding = materialBinding(owner, label, false);
+        var blob = SealedBlob{};
+        try self.hardware_provider.generateSigningKey(&binding, &blob);
+        const secret = &self.secrets[slot_index];
+        std.debug.assert(secret.id == 0);
+        secret.id = @intCast(slot_index + 1);
+        secret.owner = owner;
+        secret.hardware_backed = true;
+        secret.hardware_provider_used = true;
+        secret.exportable = false;
+        secret.resident_material = false;
+        secret.label_len = @intCast(native_util.copyTextExact(&secret.label, label) catch unreachable);
+        secret.sealed_digest_present = true;
+        std.crypto.hash.sha2.Sha256.hash(blob.slice(), &secret.sealed_digest, .{});
+        secret.material = .{ .sealed = blob };
         self.secret_count += 1;
         return secret;
     }
@@ -595,7 +620,7 @@ test "failed providers leave no imported record and erase partial or oversized r
         }
     };
     var store = Store.init();
-    store.attachHardwareProvider(.{ .sealFn = BadProvider.seal, .openFn = BadProvider.open });
+    store.attachHardwareProvider(.{ .operations = &.{ .seal = BadProvider.seal, .open = BadProvider.open } });
     const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
     try std.testing.expectError(error.HardwareOperationFailed, store.importSecret(owner, "key", "raw", true, false));
     try std.testing.expectEqual(@as(u8, 0), store.secret_count);
@@ -607,8 +632,66 @@ test "failed providers leave no imported record and erase partial or oversized r
     var out: Value = @splat(0xaa);
     try std.testing.expectError(error.HardwareOperationFailed, store.hardware_provider.open(&binding, "blob", &out));
     try std.testing.expect(std.mem.allEqual(u8, &out, 0));
-    store.hardware_provider.openFn = BadProvider.oversized;
+    store.hardware_provider.operations = &.{ .seal = BadProvider.seal, .open = BadProvider.oversized };
     out = @splat(0xaa);
     try std.testing.expectError(error.InvalidSealedSecret, store.hardware_provider.open(&binding, "blob", &out));
     try std.testing.expect(std.mem.allEqual(u8, &out, 0));
+}
+
+test "signing key generation publishes only sealed nonexportable distinct keys and survives restore" {
+    const signing = @import("../core/signing.zig");
+    var generator = @import("../../tests/fixtures/secret_provider.zig").KeyGenerator{};
+    var store = Store.init();
+    store.attachHardwareProvider(generator.provider());
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 450 };
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 451 };
+    const context = ExportContext{ .holder = holder, .task_id = 20 };
+    const digest: sealing.Binding = @splat(0x91);
+    const first = try store.generateSigningKey(owner, "identity key");
+    try std.testing.expect(first.hardware_backed and first.hardware_provider_used and first.sealed_digest_present);
+    try std.testing.expect(!first.exportable and !first.resident_material);
+    const handle = try store.lendHandle(first.id, holder, context.task_id, true);
+    const signature = try store.signDigest(handle.id, context, &digest);
+    try std.testing.expect(signing.verify(signature, &digest));
+    var raw: Value = @splat(0xaa);
+    try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id, context, &raw));
+    try std.testing.expect(std.mem.allEqual(u8, &raw, 0));
+    const second = try store.generateSigningKey(owner, "identity key");
+    const second_handle = try store.lendHandle(second.id, holder, context.task_id, false);
+    const second_signature = try store.signDigest(second_handle.id, context, &digest);
+    try std.testing.expect(signing.verify(second_signature, &digest));
+    try std.testing.expect(!std.mem.eql(u8, signature.publicKeySlice(), second_signature.publicKeySlice()));
+    try std.testing.expect(!std.mem.eql(u8, first.sealedBlob().?, second.sealedBlob().?));
+    var restored = Store.init();
+    restored.attachHardwareProvider(generator.provider());
+    const recovered = try restored.restoreSealed(owner, "identity key", first.sealedBlob().?, false);
+    try std.testing.expect(restored.describeHandle(handle.id) == null);
+    const recovered_handle = try restored.lendHandle(recovered.id, holder, context.task_id, false);
+    const recovered_signature = try restored.signDigest(recovered_handle.id, context, &digest);
+    try std.testing.expectEqualSlices(u8, signature.publicKeySlice(), recovered_signature.publicKeySlice());
+    try std.testing.expectEqualSlices(u8, signature.valueSlice(), recovered_signature.valueSlice());
+}
+
+test "signing key generation rejects invalid labels capacity and failed providers before publication" {
+    var generator = @import("../../tests/fixtures/secret_provider.zig").KeyGenerator{};
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 452 };
+    try std.testing.expectError(error.HardwareProviderUnavailable, store.generateSigningKey(owner, "key"));
+    store.attachHardwareProvider(generator.provider());
+    try std.testing.expectError(error.LabelTooLong, store.generateSigningKey(owner, "x" ** (MAX_LABEL_BYTES + 1)));
+    try std.testing.expectEqual(@as(u8, 0), generator.calls);
+    const before = store;
+    generator.result = .fail;
+    try std.testing.expectError(error.HardwareOperationFailed, store.generateSigningKey(owner, "key"));
+    try std.testing.expectEqualDeep(before, store);
+    generator.result = .wrong_size;
+    try std.testing.expectError(error.InvalidSealedSecret, store.generateSigningKey(owner, "key"));
+    try std.testing.expectEqualDeep(before, store);
+    generator.result = .valid;
+    for (0..MAX_SECRETS) |_| _ = try store.generateSigningKey(owner, "key");
+    const full = store;
+    const calls = generator.calls;
+    try std.testing.expectError(error.SecretTableFull, store.generateSigningKey(owner, "key"));
+    try std.testing.expectEqual(calls, generator.calls);
+    try std.testing.expectEqualDeep(full, store);
 }

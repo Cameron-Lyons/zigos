@@ -35,10 +35,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     const restored = found.len == 1;
     var payload: [32 + @import("../../platform/secret_sealing.zig").MAX_BLOB_BYTES]u8 = undefined;
     var payload_len: usize = 0;
-    var seed: [32]u8 = undefined;
-    defer std.crypto.secureZero(u8, &seed);
-    defer io.known_key = null;
-    var secret: *secrets.SecretRecord = undefined;
+    var secret: *const secrets.SecretRecord = undefined;
     if (restored) {
         const version = storage.latestVersion(found[0].object_id) orelse return error.MissingVaultProof;
         const bytes = try storage.versionPayload(version);
@@ -54,21 +51,15 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             return;
         };
     } else {
-        try io.random(&seed);
-        io.known_key = &seed;
-        secret = try service.importSecret(&policies, subjects, .{
+        secret = try service.generateSigningKey(&policies, subjects, .{
             .owner = owner,
             .task_id = 4,
             .label = label,
-            .raw = &seed,
             .now_ticks = 1,
         }, null);
         const blob = secret.sealedBlob() orelse return error.MissingVaultBlob;
-        if (std.mem.indexOf(u8, blob, &seed) != null) return error.PlaintextVaultBlob;
         @memcpy(payload[32..][0..blob.len], blob);
         payload_len = 32 + blob.len;
-        io.known_key = null;
-        std.crypto.secureZero(u8, &seed);
     }
     if (secret.resident_material) return error.ResidentVaultMaterial;
     const handle = try service.lendHandle(&policies, subjects, .{
@@ -107,6 +98,40 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             if (err != error.InvalidSealedSecret or service.store.secret_count != 1) return error.BadVaultBindingDenial;
         }
     }
+    // Generate again with identical owner/label and require a different public
+    // key. The first key must remain usable after generating its sibling.
+    const fresh_secret = try service.generateSigningKey(&policies, subjects, .{
+        .owner = owner,
+        .task_id = 4,
+        .label = label,
+        .now_ticks = 4,
+    }, null);
+    const fresh_handle = try service.lendHandle(&policies, subjects, .{
+        .owner = owner,
+        .holder = app,
+        .task_id = 5,
+        .secret_id = fresh_secret.id,
+        .expires_at_ticks = 10,
+        .now_ticks = 4,
+    }, null);
+    var fresh_request = request;
+    fresh_request.handle_id = fresh_handle.id;
+    fresh_request.now_ticks = 4;
+    const fresh_signature = try service.signDigest(&policies, subjects, fresh_request, null);
+    if (!signing.verify(fresh_signature, &fresh_request.digest) or
+        std.mem.eql(u8, fresh_signature.publicKeySlice(), signature.publicKeySlice())) return error.ReusedGeneratedKey;
+    const original_signature = try service.signDigest(&policies, subjects, request, null);
+    if (!std.mem.eql(u8, original_signature.valueSlice(), signature.valueSlice())) return error.ReplacedGeneratedKey;
+    try service.revoke(.{
+        .subject = owner,
+        .task_id = 4,
+        .handle_id = fresh_handle.id,
+        .secret_id = fresh_secret.id,
+        .expected_holder = app,
+        .expected_holder_task_id = 5,
+        .now_ticks = 4,
+    }, null);
+    console.print("ZIGOS:TPM2:KEYGEN:DISTINCT\n");
     // Exercise the full 96-byte envelope and export through caller-owned storage.
     var portable: secrets.Value = undefined;
     defer std.crypto.secureZero(u8, &portable);

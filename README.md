@@ -78,7 +78,12 @@ requests.
   placeholders. A TPM adapter wraps fresh data keys and protects up to 96 bytes
   per secret with XChaCha20-Poly1305, binding owner, label, and export policy.
   Hardware-backed secrets remain encrypted in the store, including exportable
-  ones. Explicit recovery buffers are erased on failure. The vault can sign a
+  ones. The vault can also generate nonexportable Ed25519 keys: the TPM adapter
+  obtains each seed from the kernel CSPRNG, seals it, and erases it before returning
+  ciphertext. Policy denial, unavailable generation, and provider failures publish
+  no secret; an audit failure rolls back the unpublished record. Immutable provider
+  operation tables keep sealing and opening paired and reduce resident state.
+  Explicit recovery buffers are erased on failure. The vault can sign a
   digest through a leased handle without granting raw export; signing checks the
   holder, task, current policy, expiry, and revocation. Ed25519 signing runs in
   software after an authorized unseal. Restoring a sealed record
@@ -87,8 +92,8 @@ requests.
   carry handles instead of credential seeds. Each vault operation checks current
   vault policy, and assertions also recheck credential policy. Assertion signatures
   bind counters and security claims, and recovery approvals bind the registered
-  threshold, replacement key, and
-  credential generation. Origin validation accepts canonical HTTPS DNS origins
+  threshold, replacement key, and credential generation. Origin validation
+  accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. Production authorization
   provisioning, durable identity/vault indexing, trusted unlock issuance, and
   userspace request dispatch remain open.
@@ -96,7 +101,8 @@ requests.
   creation, recovery from the native disk after restarting the VM and swtpm,
   repeated handle cleanup, bad authorization, private-blob tampering, response
   HMAC tampering, and refusal by a replacement TPM. The same guest test persists
-  a vault signing key, checks its public key after reboot, rejects altered owner,
+  a vault-generated signing key, checks its public key after reboot, proves another
+  generation with the same label yields a distinct key, rejects altered owner,
   label, and export policy, and verifies signing leases and 96-byte secret export.
   Cold and reboot cases also register an identity against that recovered key,
   verify a vault-backed assertion, and reject counter tampering, expired leases,

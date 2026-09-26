@@ -21,27 +21,43 @@ pub const Blob = struct {
 // The owner keeps the context alive and serializes calls until detaching it.
 // There is deliberately no default sealing implementation or digest fallback.
 pub const Provider = struct {
+    pub const Operations = struct {
+        seal: *const fn (?*anyopaque, *const Binding, []const u8, *Blob) Error!void,
+        open: *const fn (?*anyopaque, *const Binding, []const u8, *Value) Error!usize,
+        generateSigningKey: ?*const fn (?*anyopaque, *const Binding, *Blob) Error!void = null,
+    };
+
     context: ?*anyopaque = null,
-    sealFn: ?*const fn (?*anyopaque, *const Binding, []const u8, *Blob) Error!void = null,
-    openFn: ?*const fn (?*anyopaque, *const Binding, []const u8, *Value) Error!usize = null,
+    operations: ?*const Operations = null,
 
     pub fn seal(self: Provider, binding: *const Binding, raw: []const u8, out: *Blob) Error!void {
         out.* = .{};
         errdefer out.* = .{};
         if (raw.len > MAX_VALUE_BYTES) return error.SecretTooLarge;
-        if (self.openFn == null) return error.HardwareProviderUnavailable;
-        const call = self.sealFn orelse return error.HardwareProviderUnavailable;
-        try call(self.context, binding, raw, out);
+        const ops = self.operations orelse return error.HardwareProviderUnavailable;
+        try ops.seal(self.context, binding, raw, out);
         if (out.len == 0 or out.len > out.bytes.len) return error.InvalidSealedSecret;
+    }
+
+    // Only the backend sees the new Ed25519 seed. Callers receive ciphertext;
+    // there is no import, software, or deterministic generation fallback.
+    pub fn generateSigningKey(self: Provider, binding: *const Binding, out: *Blob) Error!void {
+        out.* = .{};
+        errdefer out.* = .{};
+        const ops = self.operations orelse return error.HardwareProviderUnavailable;
+        const generate = ops.generateSigningKey orelse return error.HardwareProviderUnavailable;
+        try generate(self.context, binding, out);
+        if (out.len == 0 or out.len > out.bytes.len) return error.InvalidSealedSecret;
+        const envelope = try Envelope.parse(out.slice());
+        if (envelope.ciphertext.len != std.crypto.sign.Ed25519.KeyPair.seed_length) return error.InvalidSealedSecret;
     }
 
     pub fn open(self: Provider, binding: *const Binding, blob: []const u8, out: *Value) Error!usize {
         std.crypto.secureZero(u8, out);
         errdefer std.crypto.secureZero(u8, out);
         if (blob.len == 0 or blob.len > MAX_BLOB_BYTES) return error.InvalidSealedSecret;
-        if (self.sealFn == null) return error.HardwareProviderUnavailable;
-        const call = self.openFn orelse return error.HardwareProviderUnavailable;
-        const len = try call(self.context, binding, blob, out);
+        const ops = self.operations orelse return error.HardwareProviderUnavailable;
+        const len = try ops.open(self.context, binding, blob, out);
         if (len > out.len) return error.InvalidSealedSecret;
         std.crypto.secureZero(u8, out[len..]);
         return len;
@@ -132,4 +148,29 @@ test "sealed envelopes reject framing overflow and incomplete authentication fie
     blob.bytes[4] = 0xff;
     blob.bytes[5] = 0xff;
     try std.testing.expectError(error.InvalidSealedSecret, Envelope.parse(blob.slice()));
+}
+
+test "signing key generation rejects unavailable malformed and failed providers without output" {
+    const fixture = @import("../../tests/fixtures/secret_provider.zig");
+    var generator = fixture.KeyGenerator{};
+    const binding: Binding = @splat(0x81);
+    var blob = Blob{};
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(Provider));
+    for ([_]Provider{ .{}, fixture.provider() }) |unavailable| {
+        blob.bytes = @splat(0xaa);
+        blob.len = 32;
+        try std.testing.expectError(error.HardwareProviderUnavailable, unavailable.generateSigningKey(&binding, &blob));
+        try std.testing.expectEqualDeep(Blob{}, blob);
+    }
+    inline for (.{ .fail, .empty, .oversized, .malformed, .wrong_size }) |failure| {
+        generator.result = failure;
+        blob.bytes = @splat(0xaa);
+        blob.len = 32;
+        const expected = if (failure == .fail) error.HardwareOperationFailed else error.InvalidSealedSecret;
+        try std.testing.expectError(expected, generator.provider().generateSigningKey(&binding, &blob));
+        try std.testing.expectEqualDeep(Blob{}, blob);
+    }
+    generator.result = .valid;
+    try generator.provider().generateSigningKey(&binding, &blob);
+    try std.testing.expectEqual(@as(usize, 32), (try Envelope.parse(blob.slice())).ciphertext.len);
 }

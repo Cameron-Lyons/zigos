@@ -12,7 +12,7 @@ pub const BOUNDED_HANDLE_SCAN = true;
 pub const RECLAIMS_TERMINAL_HANDLES = true;
 pub const COMPACT_ACTIVE_HANDLE_COUNT_METADATA = true;
 pub const DIRECT_HANDLE_LOOKUP = true;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 17_288;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 17_280;
 
 comptime {
     if (MAX_HANDLES > std.math.maxInt(u8)) {
@@ -40,6 +40,13 @@ pub const ImportRequest = struct {
     exportable: bool = false,
     now_ticks: u64,
     detail: []const u8 = "",
+};
+
+pub const GenerateSigningKeyRequest = struct {
+    owner: principal.PrincipalId,
+    task_id: u64,
+    label: []const u8,
+    now_ticks: u64,
 };
 
 pub const LendRequest = struct {
@@ -163,6 +170,37 @@ pub const Service = struct {
             request.exportable,
         );
         try recordImport(ledger, request, secret.id, true);
+        return secret;
+    }
+
+    pub fn generateSigningKey(
+        self: *Service,
+        policies: *const policy_object.Directory,
+        subjects: policy_object.SubjectSet,
+        request: GenerateSigningKeyRequest,
+        ledger: ?*event_ledger.Ledger,
+    ) Error!*const secure_secret_store.SecretRecord {
+        const decision = policies.secretVaultDecision(subjects, .{
+            .operation = .generate_signing_key,
+            .hardware_backed = true,
+        });
+        if (!decision.allowed) {
+            try recordGeneration(ledger, request, 0, false);
+            return error.PolicyDenied;
+        }
+        errdefer recordGeneration(ledger, request, 0, false) catch {};
+        if (request.label.len > secure_secret_store.MAX_LABEL_BYTES) return error.LabelTooLong;
+        const slot_index = self.store.secret_count;
+        if (slot_index >= secure_secret_store.MAX_SECRETS) return error.SecretTableFull;
+        // Serialized service calls keep this slot private until the audit has
+        // succeeded. Roll back on audit failure without consuming a secret id.
+        const unused_slot = self.store.secrets[slot_index];
+        const secret = try self.store.generateSigningKey(request.owner, request.label);
+        errdefer {
+            self.store.secrets[slot_index] = unused_slot;
+            self.store.secret_count = slot_index;
+        }
+        try recordGeneration(ledger, request, secret.id, true);
         return secret;
     }
 
@@ -460,6 +498,10 @@ pub const Service = struct {
         return handle_id;
     }
 };
+
+fn recordGeneration(ledger: ?*event_ledger.Ledger, request: GenerateSigningKeyRequest, secret_id: u64, allowed: bool) event_ledger.Error!void {
+    if (ledger) |log| try log.recordSecretVault(request.owner, request.task_id, secret_id, 0, allowed, true, false, false, false, request.now_ticks, "generate signing key");
+}
 
 fn recordImport(
     ledger: ?*event_ledger.Ledger,
@@ -1187,4 +1229,104 @@ test "vault hardware policy uses stored custody when lending a software secret" 
         .now_ticks = 1,
     }, null));
     try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
+}
+
+test "signing key generation checks policy before provider use audits and denies export" {
+    const signing = @import("../core/signing.zig");
+    var generator = @import("../../tests/fixtures/secret_provider.zig").KeyGenerator{};
+    var service = Service.init();
+    service.attachHardwareProvider(generator.provider());
+    var ledger = event_ledger.Ledger.init();
+    var policies = policy_object.Directory.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 930 };
+    const subjects = policy_object.SubjectSet{ .user_id = owner.serial };
+    const request = GenerateSigningKeyRequest{ .owner = owner, .task_id = 40, .label = "identity", .now_ticks = 2 };
+    const policy_key = signing.SignerIdentity{ .label = "generation policy", .seed = @splat(0x53) };
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = owner.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 931 },
+        .label = "generation policy",
+        .secret_vault_allowed = false,
+        .require_hardware_backed_secrets = true,
+        .deny_secret_raw_export = true,
+    }, policy_key);
+    try std.testing.expect(!@hasField(GenerateSigningKeyRequest, "raw"));
+    try std.testing.expect(!@hasField(GenerateSigningKeyRequest, "exportable"));
+    try std.testing.expect(!@hasField(GenerateSigningKeyRequest, "hardware_backed"));
+    try std.testing.expectError(error.PolicyDenied, service.generateSigningKey(&policies, subjects, request, &ledger));
+    try std.testing.expectEqual(@as(u8, 0), generator.calls);
+    try std.testing.expectEqual(@as(u8, 0), service.store.secret_count);
+    try std.testing.expect(!ledger.latestKind(.secret_vault).?.allowed);
+    policies = policy_object.Directory.init();
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = owner.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 931 },
+        .label = "generation policy",
+        .secret_vault_allowed = true,
+        .require_hardware_backed_secrets = true,
+        .deny_secret_raw_export = true,
+    }, policy_key);
+    const secret = try service.generateSigningKey(&policies, subjects, request, &ledger);
+    const event = ledger.latestKind(.secret_vault).?;
+    try std.testing.expect(event.allowed and event.subject.eql(owner));
+    try std.testing.expectEqual(secret.id, event.related_id);
+    try std.testing.expectEqual(request.task_id, event.task_id);
+    try std.testing.expectEqual(@as(u32, 1), event.detail_code);
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 932 };
+    const handle = try service.lendHandle(&policies, subjects, .{
+        .owner = owner,
+        .holder = holder,
+        .task_id = 41,
+        .secret_id = secret.id,
+        .expires_at_ticks = 10,
+        .now_ticks = 3,
+    }, &ledger);
+    const digest: [32]u8 = @splat(0x61);
+    const signature = try service.signDigest(&policies, subjects, .{
+        .holder = holder,
+        .task_id = 41,
+        .handle_id = handle.id,
+        .digest = digest,
+        .now_ticks = 4,
+    }, &ledger);
+    try std.testing.expect(signing.verify(signature, &digest));
+    var out: secure_secret_store.Value = @splat(0xaa);
+    // Empty policy still cannot grant export of a generated signing key.
+    policies = policy_object.Directory.init();
+    try std.testing.expectError(error.RawExportDenied, service.exportRaw(&policies, subjects, .{
+        .holder = holder,
+        .task_id = 41,
+        .handle_id = handle.id,
+        .now_ticks = 4,
+    }, &ledger, &out));
+    try std.testing.expect(std.mem.allEqual(u8, &out, 0));
+    generator.result = .fail;
+    const before = service;
+    try std.testing.expectError(error.HardwareOperationFailed, service.generateSigningKey(&policies, subjects, request, &ledger));
+    try std.testing.expectEqualDeep(before, service);
+    try std.testing.expect(!ledger.latestKind(.secret_vault).?.allowed);
+}
+
+test "signing key generation rolls back unpublished state when the audit cannot persist" {
+    const storage_service = @import("../storage/storage_service.zig");
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 933 };
+    var checkpoint = storage_service.CheckpointStore{};
+    var storage = storage_service.Service.initWithStore(934, 935, owner, &checkpoint);
+    var ledger = event_ledger.Ledger.init();
+    // A missing diagnostics workspace forces the real persistence path to fail.
+    ledger.storage = &storage;
+    ledger.workspace_id = 99;
+    var generator = @import("../../tests/fixtures/secret_provider.zig").KeyGenerator{};
+    var service = Service.init();
+    service.attachHardwareProvider(generator.provider());
+    const policies = policy_object.Directory.init();
+    const request = GenerateSigningKeyRequest{ .owner = owner, .task_id = 40, .label = "identity", .now_ticks = 2 };
+    const before = service;
+    try std.testing.expectError(error.WorkspaceNotFound, service.generateSigningKey(&policies, .{}, request, &ledger));
+    try std.testing.expectEqualDeep(before, service);
+    try std.testing.expectEqual(@as(u8, 1), generator.calls);
+    const secret = try service.generateSigningKey(&policies, .{}, request, null);
+    try std.testing.expectEqual(@as(u64, 1), secret.id);
 }
