@@ -164,6 +164,11 @@ pub fn build(b: *std.Build) void {
     zigos_native_production_smoke_step.dependOn(&zigos_native_production_smoke_cmd.step);
     zigos_native_production_smoke_step.dependOn(kernel_role_check_step);
 
+    const tpm2_qemu_cmd = qemu_build.addTpm2QemuCommand(b, kernels.zigos_native, userspace_images);
+    const tpm2_qemu_step = b.step("tpm2-qemu-test", "Validate TPM2 CRB discovery and commands with a disposable swtpm across reboot and unsupported-device boots");
+    tpm2_qemu_step.dependOn(&tpm2_qemu_cmd.step);
+    tpm2_qemu_step.dependOn(kernel_role_check_step);
+
     const zigos_native_smoke_test_cmd = qemu_build.addNativeSmokeCommand(
         b,
         kernels.zigos_native_verification,

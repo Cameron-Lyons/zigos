@@ -57,6 +57,19 @@ requests.
   Each boot publishes a fresh public 128-bit instance identifier; seed material
   stays private. This supplies randomness for identity provisioning, while
   durable user keys and a real hardware-sealing backend remain open.
+- A TPM 2.0 CRB driver discovers one checksum-validated ACPI TPM2 table and
+  probes the real device with family and manufacturer queries. It supports the
+  direct CRB start method, locality 0, and command/response buffers contained in
+  one device page. Bounds checks, monotonic deadlines, bounded cancellation,
+  locality handoff, and a permanent failure latch constrain device faults.
+  Unsupported start methods, RAM buffers, and FIFO devices remain unavailable.
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-qemu-test` requires swtpm
+  (or `SWTPM_BIN`) and checks a CRB cold boot and emulator restart, plus FIFO and
+  absent-device boots. It uses disposable emulator state and a separate test
+  disk. This establishes command transport; sealed objects, key recovery, and
+  production identity provisioning remain unimplemented. Interface definitions
+  follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
+  and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
 - Task checkpoints restore execution metadata without restoring saved capability
   attachments. Matching live tasks retain their current grants; removed or
   replaced tasks retire their endpoints, queued capability moves, shared memory,

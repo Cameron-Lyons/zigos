@@ -1,4 +1,5 @@
 const std = @import("std");
+const tpm2_crb_test = @import("../../kernel/platform/tpm2_crb_test.zig");
 
 const accelerator_driver_task = @import("../../native/drivers/accelerator_driver_task.zig");
 const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
@@ -14,6 +15,7 @@ const nvme_timing = @import("../../kernel/drivers/nvme_timing.zig");
 const network_driver_task = @import("../../native/drivers/network_driver_task.zig");
 
 test "driver host tests import native driver modules" {
+    std.testing.refAllDecls(tpm2_crb_test);
     std.testing.refAllDecls(accelerator_driver_task);
     std.testing.refAllDecls(bootstrap_driver_port);
     std.testing.refAllDecls(device_inventory);

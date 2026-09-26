@@ -115,6 +115,19 @@ pub fn addNativeSmokeCommand(
     return command;
 }
 
+pub fn addTpm2QemuCommand(
+    b: *std.Build,
+    kernel: shared.KernelArtifact,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Step.Run {
+    const command = addKernelBootCommand(b, kernel, &.{
+        "scripts/run-tpm2-qemu.sh",
+        kernel.output_path,
+    });
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
+    return command;
+}
+
 pub fn addNativeFaultSmokeCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,

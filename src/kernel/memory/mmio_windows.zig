@@ -37,6 +37,11 @@ pub const xhci = Region{
     .bytes = PAGE_BYTES,
 };
 
+pub const tpm_crb = Region{
+    .base = virtual_layout.device_memory.base + 0x1300_0000,
+    .bytes = PAGE_BYTES,
+};
+
 pub const acpi_root = Region{
     .base = virtual_layout.device_memory.base + 0x2000_0000,
     .bytes = 0x101_000,
@@ -58,6 +63,7 @@ pub const all = [_]Region{
     pci_ecam,
     intel_i225,
     xhci,
+    tpm_crb,
     acpi_root,
     acpi_entry,
     intel_vtd,

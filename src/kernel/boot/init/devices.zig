@@ -64,6 +64,18 @@ pub fn init() void {
         @panic("PCI message-signaled interrupt quiescence failed before VT-d handoff");
     }
 
+    if (hardware_proof.tpmDiscovery()) |discovery| {
+        if (@import("../../platform/tpm2_hw.zig").initialize(discovery)) |_| {
+            console.print("ZIGOS:TPM2:CRB_READY\n");
+        } else |err| {
+            console.print("ZIGOS:TPM2:UNAVAILABLE ");
+            console.print(@errorName(err));
+            console.print("\n");
+        }
+    } else {
+        console.print("ZIGOS:TPM2:UNAVAILABLE NoSupportedDevice\n");
+    }
+
     capturePciInventory();
     hardware_proof.capturePciEvidence();
     const model_via_cmdline = if (handoff.capturedInfo()) |info|
