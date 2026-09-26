@@ -32,6 +32,11 @@ requests.
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised
   together by the rendered-shell production journey.
+- Native boot requests a 32-bit firmware graphics mode and presents the active
+  compositor-owned surface as a bounded text desktop. Changed cells alone are
+  rasterized after the first frame; idle sessions perform no display polling.
+  This bootstrap display uses a supervisor-only uncached mapping, reserves its
+  physical storage, and does not yet provide GPU acceleration or modesetting.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
@@ -39,8 +44,8 @@ requests.
 - The driver model treats storage, network, USB controllers, GPU/display,
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA
-  buffers. Kernel device code is limited to bootstrap inventory shims and the
-  storage bootstrap broker needed to hand early block devices to userspace.
+  buffers. The prototype retains bootstrap inventory shims, the storage
+  bootstrap broker, and firmware framebuffer presentation in the kernel.
 - The driver restart proof now checks that storage I/O works before restart,
   the storage driver has a programmed DMA domain and brokered DMA buffer, stale
   authority/DMA/port access is rejected after a process-generation change, a
@@ -82,7 +87,8 @@ archive, measured against a production artifact manifest, and loaded by the
 native task runtime.
 
 The kernel owns low-level platform concerns: boot setup, interrupts, timers,
-memory protection, bootstrap console/inventory shims, typed syscall dispatch,
+memory protection, bootstrap console/inventory shims, firmware framebuffer
+presentation, typed syscall dispatch,
 and data-plane exclusion boundaries for devices and subsystems. Storage,
 network, USB, GPU/display, media/print, input, and compositor-facing device
 policy live as restartable userspace driver/service claims behind IOMMU DMA

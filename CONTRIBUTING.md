@@ -32,7 +32,7 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build release-security-preflight` | You need every mutable public-release audit, fixture, build, smoke, fault, recovery, sync, and UEFI-QEMU gate before freezing a candidate. |
 | `./scripts/zig.sh build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-security-gate` | You set the external hardware-proof environment and need to reverify and seal an already frozen candidate without regenerating or signing artifacts. |
 | `./scripts/zig.sh build spec-conformance` | You need spec coverage, native spec tests, the two-boot native smoke path, and the recovery QEMU proof. |
-| `./scripts/zig.sh build zigos-native-production-smoke-test` | You need the focused production boot contract without verification workloads. |
+| `./scripts/zig.sh build zigos-native-production-smoke-test` | You need production cold boots, persistence, and firmware framebuffer scanout. |
 | `./scripts/zig.sh build zigos-native-smoke-test` | You need production boot coverage plus the verification cold-reboot and negative-smoke suite. |
 | `./scripts/zig.sh build driver-restart-qemu-test` | You touched userspace driver restart, broker rebinding, or crash recovery paths. |
 | `./scripts/zig.sh build recovery-qemu-test` | You touched recovery-mode boot, repair, or break-glass flows. |

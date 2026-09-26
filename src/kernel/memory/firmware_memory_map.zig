@@ -50,7 +50,7 @@ pub fn reserveLiveHandoffRanges(
     info_address: u32,
     info: handoff.Info,
 ) Error!void {
-    var runs: [3]frame_allocator.FrameRun = undefined;
+    var runs: [4]frame_allocator.FrameRun = undefined;
     var run_count: usize = 0;
 
     runs[run_count] = try liveRangeRun(
@@ -78,6 +78,17 @@ pub fn reserveLiveHandoffRanges(
             std.math.cast(usize, info.cmdline_length) orelse return error.InvalidHandoffRange,
         );
         run_count += 1;
+    }
+
+    // Firmware may describe scanout storage as usable RAM. It remains owned by
+    // the display even when its format is unsupported by our renderer.
+    if (info.hasFramebuffer()) {
+        const bytes = @as(u64, info.framebuffer_pitch) * info.framebuffer_height;
+        const end = std.math.add(u64, info.framebuffer_addr, bytes) catch return error.InvalidHandoffRange;
+        if (touchedPageRun(memory_bytes, page_size, info.framebuffer_addr, bytes, end)) |run| {
+            runs[run_count] = run;
+            run_count += 1;
+        }
     }
 
     for (runs[0..run_count]) |run| {
@@ -303,6 +314,27 @@ test "live Multiboot information map and command-line pages stay reserved" {
     try std.testing.expect(allocator.isReserved(6 * TEST_PAGE_SIZE));
     try std.testing.expect(allocator.isReserved(7 * TEST_PAGE_SIZE));
     try std.testing.expectEqual(@as(u32, 5), allocator.stats().reserved);
+}
+
+test "firmware framebuffer storage is reserved across touched pages" {
+    const memory_bytes = 16 * TEST_PAGE_SIZE;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    var info = testInfo(1 << 6, 3 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, 0);
+    info.flags |= 1 << 12;
+    info.framebuffer_addr = 8 * TEST_PAGE_SIZE + 128;
+    info.framebuffer_pitch = TEST_PAGE_SIZE;
+    info.framebuffer_height = 2;
+    try reserveLiveHandoffRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, TEST_PAGE_SIZE, info);
+    for (8..11) |index| try std.testing.expect(allocator.isReserved(index * TEST_PAGE_SIZE));
+    try std.testing.expect(!allocator.isReserved(7 * TEST_PAGE_SIZE));
+    try std.testing.expect(!allocator.isReserved(11 * TEST_PAGE_SIZE));
+
+    allocator.reset();
+    info.framebuffer_addr = std.math.maxInt(u64) - 127;
+    try std.testing.expectError(error.InvalidHandoffRange, reserveLiveHandoffRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, TEST_PAGE_SIZE, info));
+    try std.testing.expectEqual(@as(u32, 16), allocator.stats().free);
 }
 
 test "live Multiboot reservations are rejected after allocation begins" {

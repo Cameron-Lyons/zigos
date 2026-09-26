@@ -46,6 +46,7 @@ pub const production_required = [_][]const u8{
     boot_markers.storage_checkpoint_final_clean,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
+    boot_markers.compositor_scanout_presented,
 };
 
 pub const production_forbidden = [_][]const u8{

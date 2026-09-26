@@ -3,6 +3,7 @@ const std = @import("std");
 const attestation_service = @import("../../native/platform/attestation_service.zig");
 const base_boot_selector = @import("../../native/platform/base_boot_selector.zig");
 const compositor_display = @import("../../native/platform/compositor_display.zig");
+const compositor_view = @import("../../native/platform/compositor_view.zig");
 const compositor_session = @import("../../native/platform/compositor_session.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
 const event_ledger_test = @import("../../native/platform/event_ledger_test.zig");
@@ -21,6 +22,7 @@ test "platform host tests import native platform modules" {
     std.testing.refAllDecls(attestation_service);
     std.testing.refAllDecls(base_boot_selector);
     std.testing.refAllDecls(compositor_display);
+    std.testing.refAllDecls(compositor_view);
     std.testing.refAllDecls(compositor_session);
     std.testing.refAllDecls(event_ledger);
     std.testing.refAllDecls(event_ledger_test);

@@ -67,6 +67,7 @@ pub const compositor_input_router_ready = "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY";
 pub const userspace_input_abi_ready = "ZIGOS:USERSPACE:INPUT_ABI:READY";
 pub const userspace_surface_presentation_ready = "ZIGOS:USERSPACE:SURFACE_PRESENTATION:READY";
 pub const compositor_framebuffer_presented = "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED";
+pub const compositor_scanout_presented = "ZIGOS:COMPOSITOR:SCANOUT:PRESENTED";
 pub const compositor_permission_review_rendered = "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED";
 
 pub const transport_native_kernel_ready = "ZIGOS:TRANSPORT:NATIVE_KERNEL:READY";

@@ -28,6 +28,12 @@ pub const PixelMask = struct {
 };
 
 const RGBX8888_MASK = PixelMask{
+    .red = 0x0000_00FF,
+    .green = 0x0000_FF00,
+    .blue = 0x00FF_0000,
+    .reserved = 0xFF00_0000,
+};
+const BGRX8888_MASK = PixelMask{
     .red = 0x00FF_0000,
     .green = 0x0000_FF00,
     .blue = 0x0000_00FF,
@@ -53,6 +59,22 @@ pub const Info = struct {
     format: PixelFormat,
     pixel_mask: PixelMask = RGBX8888_MASK,
     buffer_bytes: u64,
+
+    pub fn colorMask(self: Info) PixelMask {
+        return switch (self.format) {
+            .rgbx8888 => RGBX8888_MASK,
+            .bgrx8888 => BGRX8888_MASK,
+            .bitmask => self.pixel_mask,
+        };
+    }
+
+    // Input is 0xRRGGBB; reserved bits stay zero. Call after validate().
+    pub fn encodeColor(self: Info, rgb: u24) u32 {
+        const mask = self.colorMask();
+        return encodeChannel(@truncate(rgb >> 16), mask.red) |
+            encodeChannel(@truncate(rgb >> 8), mask.green) |
+            encodeChannel(@truncate(rgb), mask.blue);
+    }
 
     pub fn bytesPerPixel(self: Info) Error!u8 {
         return switch (self.format) {
@@ -129,12 +151,14 @@ pub const ScanoutProof = struct {
 pub fn validate(info: ?Info) Error!Info {
     const framebuffer = info orelse return error.MissingFramebuffer;
     if (framebuffer.physical_address == 0) return error.InvalidAddress;
+    if (framebuffer.physical_address % 4 != 0) return error.InvalidAddress;
     if (framebuffer.width == 0 or framebuffer.height == 0) return error.InvalidResolution;
     if (framebuffer.width > MAX_LINEAR_DIMENSION_PIXELS or framebuffer.height > MAX_LINEAR_DIMENSION_PIXELS) return error.InvalidResolution;
     if (framebuffer.pixels_per_scan_line < framebuffer.width) return error.InvalidStride;
 
     const minimum_bytes = try framebuffer.minimumBufferBytes();
     if (framebuffer.buffer_bytes < minimum_bytes) return error.BufferTooSmall;
+    _ = std.math.add(u64, framebuffer.physical_address, framebuffer.buffer_bytes) catch return error.InvalidAddress;
     return framebuffer;
 }
 
@@ -192,14 +216,25 @@ pub fn withHardwareScanoutEvidence(
 }
 
 fn valid32BitColorMask(mask: PixelMask) bool {
-    const combined = mask.red | mask.green | mask.blue | mask.reserved;
     const overlaps = ((mask.red & mask.green) |
         (mask.red & mask.blue) |
         (mask.red & mask.reserved) |
         (mask.green & mask.blue) |
         (mask.green & mask.reserved) |
         (mask.blue & mask.reserved)) != 0;
-    return combined != 0 and !overlaps;
+    return contiguousChannel(mask.red) and contiguousChannel(mask.green) and contiguousChannel(mask.blue) and !overlaps;
+}
+
+fn contiguousChannel(mask: u32) bool {
+    if (mask == 0) return false;
+    const shifted = mask >> @intCast(@ctz(mask));
+    return shifted & (shifted +% 1) == 0;
+}
+
+fn encodeChannel(value: u8, mask: u32) u32 {
+    const shift: u5 = @intCast(@ctz(mask));
+    const maximum = mask >> shift;
+    return @as(u32, @intCast((@as(u64, value) * maximum + 127) / 255)) << shift;
 }
 
 fn scanoutDigest(info: Info, sample: []const u8) u64 {
