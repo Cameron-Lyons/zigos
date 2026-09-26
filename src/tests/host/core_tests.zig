@@ -17,6 +17,7 @@ const native_smoke_markers = @import("../../native_smoke_markers.zig");
 const native_util = @import("../../native/core/util.zig");
 const principal = @import("../../native/core/principal.zig");
 const request_header = @import("../../native/core/request_header.zig");
+const secure_random = @import("../../native/core/secure_random.zig");
 const signing = @import("../../native/core/signing.zig");
 
 test "core host tests import native core modules" {
@@ -38,4 +39,5 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(principal);
     std.testing.refAllDecls(request_header);
     std.testing.refAllDecls(signing);
+    std.testing.refAllDecls(secure_random);
 }

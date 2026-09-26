@@ -50,6 +50,13 @@ requests.
   the Notes ELF through document load, modeled keyboard input, a durable save,
   and channel teardown. Connecting this opener to the interactive launcher and
   moving the storage core into its userspace service remain open.
+- Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
+  checks instruction availability and success, bounds retries, rejects a stuck
+  source, erases temporary seed buffers, and stops boot if seeding fails. Runtime
+  requests are capped at 4 KiB and require reseeding after 1 MiB of output.
+  Each boot publishes a fresh public 128-bit instance identifier; seed material
+  stays private. This supplies randomness for identity provisioning, while
+  durable user keys and a real hardware-sealing backend remain open.
 - Task checkpoints restore execution metadata without restoring saved capability
   attachments. Matching live tasks retain their current grants; removed or
   replaced tasks retire their endpoints, queued capability moves, shared memory,
@@ -256,7 +263,7 @@ Use the pinned toolchain and repo entrypoints:
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
-- A CPU with CPUID, SSE2, long mode, NX, SMEP, SMAP, and UMIP. Zigos rejects
+- A CPU with CPUID, SSE2, long mode, NX, SMEP, SMAP, UMIP, and RDSEED. Zigos rejects
   older x86 CPUs instead of weakening its security contract. GRUB Multiboot2
   enters the bootstrap in 32-bit protected mode; the bootstrap immediately
   installs four-level paging and enters the x86-64 Zig kernel.

@@ -7,6 +7,7 @@ const leaf1_ecx_x2apic: u32 = 1 << 21;
 const leaf1_ecx_tsc_deadline: u32 = 1 << 24;
 const leaf7_ebx_smep: u32 = 1 << 7;
 const leaf7_ebx_invpcid: u32 = 1 << 10;
+const leaf7_ebx_rdseed: u32 = 1 << 18;
 const leaf7_ebx_smap: u32 = 1 << 20;
 const leaf7_ecx_umip: u32 = 1 << 2;
 const extended1_edx_syscall: u32 = 1 << 11;
@@ -44,6 +45,7 @@ pub const Features = struct {
     pge: bool = false,
     pcid: bool = false,
     invpcid: bool = false,
+    rdseed: bool = false,
     x2apic: bool = false,
     pages_1g: bool = false,
     tsc_deadline: bool = false,
@@ -66,6 +68,7 @@ pub const MissingFeature = enum {
     x2apic,
     pages_1g,
     tsc,
+    rdseed,
 };
 
 pub fn decode(registers: Registers) Features {
@@ -80,6 +83,7 @@ pub fn decode(registers: Registers) Features {
         features.tsc_deadline = (registers.leaf1_ecx & leaf1_ecx_tsc_deadline) != 0;
     }
     if (registers.max_basic_leaf >= 7) {
+        features.rdseed = (registers.leaf7_ebx & leaf7_ebx_rdseed) != 0;
         features.smep = (registers.leaf7_ebx & leaf7_ebx_smep) != 0;
         features.invpcid = (registers.leaf7_ebx & leaf7_ebx_invpcid) != 0;
         features.smap = (registers.leaf7_ebx & leaf7_ebx_smap) != 0;
@@ -128,6 +132,7 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.x2apic) return .x2apic;
     if (!features.pages_1g) return .pages_1g;
     if (!features.tsc_deadline or !features.invariant_tsc or features.tsc_frequency_hz == 0) return .tsc;
+    if (!features.rdseed) return .rdseed;
     return null;
 }
 
@@ -144,7 +149,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
         .leaf15_eax = 2,
         .leaf15_ebx = 200,
         .leaf15_ecx = 24_000_000,
-        .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_invpcid | leaf7_ebx_smap,
+        .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_invpcid | leaf7_ebx_smap | leaf7_ebx_rdseed,
         .leaf7_ecx = leaf7_ecx_umip,
         .max_extended_leaf = 0x8000_0007,
         .extended1_edx = extended1_edx_syscall | extended1_edx_nx | extended1_edx_pages_1g | extended1_edx_long_mode,
@@ -152,6 +157,7 @@ test "decode recognizes the modern x86-64-capable baseline" {
     });
 
     try std.testing.expect(isSupported(features));
+    try std.testing.expect(features.rdseed);
     try std.testing.expect(features.pcid);
     try std.testing.expect(features.invpcid);
     try std.testing.expect(features.pge);
@@ -164,7 +170,7 @@ test "decode ignores registers outside advertised CPUID ranges" {
     const features = decode(.{
         .cpuid_available = true,
         .leaf1_edx = leaf1_edx_sse2,
-        .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_smap,
+        .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_smap | leaf7_ebx_rdseed,
         .leaf7_ecx = leaf7_ecx_umip,
         .extended1_edx = extended1_edx_nx | extended1_edx_long_mode,
     });
@@ -178,6 +184,7 @@ test "decode ignores registers outside advertised CPUID ranges" {
     try std.testing.expect(!features.smap);
     try std.testing.expect(!features.umip);
     try std.testing.expect(!features.pge);
+    try std.testing.expect(!features.rdseed);
     try std.testing.expect(!features.pcid);
     try std.testing.expect(!features.invpcid);
     try std.testing.expect(!features.x2apic);
@@ -205,6 +212,7 @@ test "baseline rejects every missing required feature" {
         .tsc_deadline = true,
         .invariant_tsc = true,
         .tsc_frequency_hz = 2_400_000_000,
+        .rdseed = true,
     };
     try std.testing.expectEqual(MissingFeature.cpuid, firstMissing(.{}).?);
     try std.testing.expectEqual(MissingFeature.sse2, firstMissing(.{
@@ -220,6 +228,9 @@ test "baseline rejects every missing required feature" {
         .long_mode = true,
         .syscall = true,
     }).?);
+    var missing_rdseed = complete;
+    missing_rdseed.rdseed = false;
+    try std.testing.expectEqual(MissingFeature.rdseed, firstMissing(missing_rdseed).?);
     var missing_syscall = complete;
     missing_syscall.syscall = false;
     try std.testing.expectEqual(MissingFeature.syscall, firstMissing(missing_syscall).?);
@@ -313,6 +324,7 @@ test "baseline rejects every missing required feature" {
         .tsc_deadline = true,
         .invariant_tsc = true,
         .tsc_frequency_hz = 2_400_000_000,
+        .rdseed = true,
     }));
 }
 

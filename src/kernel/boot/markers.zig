@@ -203,3 +203,6 @@ pub const notes_daily_driver_complete = "ZIGOS:NOTES_DAILY:COMPLETE";
 
 pub const task_session_ready = "ZIGOS:TASK:SESSION_READY";
 pub const native_ready = "ZIGOS:NATIVE:READY";
+
+pub const random_ready = "ZIGOS:RANDOM:READY";
+pub const random_rejected = "ZIGOS:RANDOM:REJECTED";
