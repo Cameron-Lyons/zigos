@@ -527,6 +527,10 @@ pub const SessionManager = struct {
                     self.failBoot();
                     return;
                 }
+                @import("proofs/tpm2_sealing_proof.zig").run(self) catch {
+                    self.failBoot();
+                    return;
+                };
             }
         }
         stack_watermark.reportPeak();

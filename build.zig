@@ -169,6 +169,11 @@ pub fn build(b: *std.Build) void {
     tpm2_qemu_step.dependOn(&tpm2_qemu_cmd.step);
     tpm2_qemu_step.dependOn(kernel_role_check_step);
 
+    const tpm2_sealing_cmd = qemu_build.addTpm2SealingQemuCommand(b, kernels.zigos_native_verification, userspace_images);
+    const tpm2_sealing_step = b.step("tpm2-sealing-qemu-test", "Verify encrypted TPM key sealing, persisted recovery and tamper rejection with swtpm");
+    tpm2_sealing_step.dependOn(&tpm2_sealing_cmd.step);
+    tpm2_sealing_step.dependOn(kernel_role_check_step);
+
     const zigos_native_smoke_test_cmd = qemu_build.addNativeSmokeCommand(
         b,
         kernels.zigos_native_verification,

@@ -55,8 +55,8 @@ requests.
   source, erases temporary seed buffers, and stops boot if seeding fails. Runtime
   requests are capped at 4 KiB and require reseeding after 1 MiB of output.
   Each boot publishes a fresh public 128-bit instance identifier; seed material
-  stays private. This supplies randomness for identity provisioning, while
-  durable user keys and a real hardware-sealing backend remain open.
+  stays private. Production identity provisioning still needs an authorization
+  lifecycle and durable bindings between principals and their keys.
 - A TPM 2.0 CRB driver discovers one checksum-validated ACPI TPM2 table and
   probes the real device with family and manufacturer queries. It supports the
   direct CRB start method, locality 0, and command/response buffers contained in
@@ -66,9 +66,21 @@ requests.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-qemu-test` requires swtpm
   (or `SWTPM_BIN`) and checks a CRB cold boot and emulator restart, plus FIFO and
   absent-device boots. It uses disposable emulator state and a separate test
-  disk. This establishes command transport; sealed objects, key recovery, and
-  production identity provisioning remain unimplemented. Interface definitions
-  follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
+  disk. A sealing client now wraps 32-byte keys under an ECC P-256 storage
+  parent using salted HMAC-SHA256 sessions and AES-CFB parameter encryption.
+  Secrets and their authorization values stay encrypted on the TPM command path;
+  authenticated responses are checked before decryption. Objects require 256-bit
+  authorization supplied by the caller and remain bound to their TPM and parent.
+  The client erases temporary material, flushes transient objects and sessions,
+  and returns zeroed key output on failure. It expects empty owner-hierarchy
+  authorization and does not enforce a PCR policy. Production authorization
+  provisioning and secret-vault integration remain open.
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
+  creation, recovery from the native disk after restarting the VM and swtpm,
+  repeated handle cleanup, bad authorization, private-blob tampering, response
+  HMAC tampering, and refusal by a replacement TPM. Public test authorization
+  exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
+  hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
 - Task checkpoints restore execution metadata without restoring saved capability
   attachments. Matching live tasks retain their current grants; removed or

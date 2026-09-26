@@ -1,4 +1,5 @@
 const std = @import("std");
+const tpm2_sealing = @import("../../native/platform/tpm2_sealing.zig");
 
 const attestation_service = @import("../../native/platform/attestation_service.zig");
 const base_boot_selector = @import("../../native/platform/base_boot_selector.zig");
@@ -19,6 +20,7 @@ const secure_secret_store = @import("../../native/platform/secure_secret_store.z
 const update_health = @import("../../native/platform/update_health.zig");
 
 test "platform host tests import native platform modules" {
+    std.testing.refAllDecls(tpm2_sealing);
     std.testing.refAllDecls(attestation_service);
     std.testing.refAllDecls(base_boot_selector);
     std.testing.refAllDecls(compositor_display);

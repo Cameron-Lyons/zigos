@@ -48,6 +48,10 @@ pub fn execute(command: []const u8, response: []u8, timeout_ms: u32) Error![]u8 
     return transport.execute(&io, command, response, timeout_ms);
 }
 
+pub fn available() bool {
+    return online and !transport.failed;
+}
+
 const HardwareIo = struct {
     pub fn read(_: *HardwareIo, reg: crb.Reg) u32 {
         const ptr: *volatile u32 = @ptrFromInt(windows.tpm_crb.base + @intFromEnum(reg));
