@@ -50,6 +50,11 @@ requests.
   the Notes ELF through document load, modeled keyboard input, a durable save,
   and channel teardown. Connecting this opener to the interactive launcher and
   moving the storage core into its userspace service remain open.
+- Task checkpoints restore execution metadata without restoring saved capability
+  attachments. Matching live tasks retain their current grants; removed or
+  replaced tasks retire their endpoints, queued capability moves, shared memory,
+  and associated authority. Reset and restore preserve identity issuance cursors,
+  including exhaustion, so old identifiers cannot be issued to new tasks.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.

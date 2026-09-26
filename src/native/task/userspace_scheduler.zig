@@ -1770,7 +1770,7 @@ test "userspace scheduler refreshes task handles after runtime restore" {
     try std.testing.expect(slot.mapping_handle.isZero());
 }
 
-test "userspace scheduler rejects stale handles after task id reuse" {
+test "userspace scheduler rejects retired task handles after runtime reset" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
@@ -1799,8 +1799,9 @@ test "userspace scheduler rejects stale handles after task id reuse" {
         "app.replacement-task",
         null,
     );
-    try std.testing.expectEqual(task_id, replacement.id);
-    try std.testing.expect(!runtime.taskHandleForResolved(runtime.find(task_id).?).eql(original_handle));
+    try std.testing.expect(replacement.id > task_id);
+    try std.testing.expect(runtime.find(task_id) == null);
+    try std.testing.expect(!runtime.taskHandleForResolved(replacement).eql(original_handle));
 
     try std.testing.expect(!scheduler.runNext(1));
     try std.testing.expect(scheduler.slots.get(task_id) == null);

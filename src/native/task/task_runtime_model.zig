@@ -740,10 +740,9 @@ pub fn resetTaskCold(dest: *TaskColdRecord) void {
     dest.capability_generation = 1;
 }
 
-pub fn copyTaskColdForTask(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
+// Authority is owned by the live kernel and cannot be rolled back with metadata.
+pub fn copyTaskCheckpointCold(dest: *TaskColdRecord, src: *const TaskColdRecord, task: *const TaskRecord) void {
     copySlots(ExecutionComponentRecord, dest.execution_components[0..task.execution_component_count], src.execution_components[0..task.execution_component_count]);
-    copySlots(u64, dest.capability_ids[0..task.capability_count], src.capability_ids[0..task.capability_count]);
-    dest.capability_generation = src.capability_generation;
     copyAuditTrailForTask(dest, src, task);
     copyProvenanceTrailForTask(dest, src, task);
 }
@@ -770,15 +769,6 @@ pub fn taskCold(task: *TaskRecord) *TaskColdRecord {
 
 pub fn taskColdConst(task: *const TaskRecord) *const TaskColdRecord {
     return task.cold_state orelse &detached_task_cold;
-}
-
-pub fn copyTaskColdStates(task_slots: []const TaskSlot, dest: []TaskColdRecord, src: []const TaskColdRecord) void {
-    var index: usize = 0;
-    while (index < dest.len) : (index += 1) {
-        resetTaskCold(&dest[index]);
-        if (index >= task_slots.len or !task_slots[index].in_use) continue;
-        copyTaskColdForTask(&dest[index], &src[index], &task_slots[index].task);
-    }
 }
 
 pub fn bindTaskColdStates(task_slots: []TaskSlot, task_cold: []TaskColdRecord) void {

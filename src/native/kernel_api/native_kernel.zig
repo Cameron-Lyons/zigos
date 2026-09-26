@@ -1188,7 +1188,7 @@ test "moving a capability removes its source task attachment" {
     try std.testing.expect(receiver_task.hasCapability(passed.capability_id));
 }
 
-const UndeliveredCase = enum { terminate, runtime_terminate, endpoint_close, receiver_full, grants_full, expired };
+const UndeliveredCase = enum { terminate, runtime_terminate, restore, endpoint_close, receiver_full, grants_full, expired };
 
 fn expectCreationRollback(shared_object: bool, task_full: bool) !void {
     var harness = TestKernelHarness{};
@@ -1269,6 +1269,12 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     harness.initKernel(&kernel);
     defer kernel.deinit();
     const sender = try harness.createSessionTask();
+    const checkpoint = if (case == .restore) try std.testing.allocator.create(task_runtime.Snapshot) else null;
+    defer if (checkpoint) |state| std.testing.allocator.destroy(state);
+    if (checkpoint) |state| {
+        state.* = task_runtime.Runtime.initSnapshot();
+        harness.runtime.writeSnapshot(state);
+    }
     const receiver = try harness.runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 3 },
         .component_class = .app_component,
@@ -1311,6 +1317,15 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
         .scope = .{ .task_id = receiver.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
     });
+    const peer_grant = if (case == .restore) try harness.capabilities.mintBootRoot(.{
+        .holder = sender.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .endpoint, .id = destination.id.raw() },
+        .rights = .{ .endpoint = .{ .endpoint_connect = true } },
+        .scope = .{ .task_id = sender.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    }) else null;
+    if (peer_grant) |grant| try harness.runtime.grantCapability(sender.id, grant.id);
     try harness.runtime.grantCapability(sender.id, sending.id);
     try harness.runtime.grantCapability(sender.id, gift.id);
     try harness.runtime.grantCapability(receiver.id, receiving.id);
@@ -1323,6 +1338,18 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
         try std.testing.expect(try kernel.taskTerminate(.{ .caller_task_id = receiver.id, .presented_capability_id = termination.id, .target = .{ .task = receiver.id } }, 11));
     } else if (case == .runtime_terminate) {
         try std.testing.expect(try harness.runtime.terminateTask(receiver.id, 11));
+    } else if (case == .restore) {
+        const receiver_id = receiver.id;
+        try harness.runtime.restoreFromSnapshot(checkpoint.?);
+        try std.testing.expect(harness.runtime.find(receiver_id) == null);
+        try std.testing.expectEqual(@as(u16, 0), harness.endpoints.activeForTask(ids.task(receiver_id)));
+        try std.testing.expect(harness.capabilities.query(receiving.id) == null);
+        try std.testing.expect(harness.capabilities.query(termination.id) == null);
+        try std.testing.expect(harness.capabilities.query(sending.id) != null);
+        try std.testing.expect(sender.hasCapability(sending.id));
+        try std.testing.expect(!sender.hasCapability(peer_grant.?.id));
+        try std.testing.expect(harness.capabilities.query(peer_grant.?.id) == null);
+        try std.testing.expectEqual(@as(u16, 1), harness.endpoints.activeForTask(ids.task(sender.id)));
     } else if (case == .endpoint_close) {
         try kernel.endpointClose(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .none }, 11);
         try std.testing.expectEqual(task_runtime.TaskState.active, receiver.state);
@@ -1348,7 +1375,7 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
             .receiver_full => error.CapabilityTableFull,
             .grants_full => error.TableFull,
             .expired => error.CapabilityRevoked,
-            .terminate, .runtime_terminate, .endpoint_close => unreachable,
+            .terminate, .runtime_terminate, .restore, .endpoint_close => unreachable,
         };
         try std.testing.expectError(expected_error, kernel.endpointRecv(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .{ .endpoint = destination.id.raw() } }, receiver.id, &payload, if (case == .expired) 101 else 11));
         try std.testing.expectEqual(count - @intFromBool(moved), harness.capabilities.activeCount());
@@ -1363,7 +1390,7 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     }
     try std.testing.expectEqual(!moved, harness.capabilities.query(gift.id) != null);
     try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
-    if (case == .terminate or case == .runtime_terminate or case == .endpoint_close) {
+    if (case == .terminate or case == .runtime_terminate or case == .restore or case == .endpoint_close) {
         try std.testing.expectEqual(@as(usize, 1), wake_probe.count);
         try std.testing.expectEqual(sender.id, wake_probe.tasks[0]);
     }
@@ -1375,6 +1402,10 @@ test "endpoint retirement disposes unread moves while preserving sender-owned co
 
 test "direct runtime termination disposes unread moves and endpoint resources" {
     for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.runtime_terminate, moved);
+}
+
+test "checkpoint restore disposes removed receivers moves and retains live sender authority" {
+    for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.restore, moved);
 }
 
 test "endpoint close releases unread moves without terminating either task" {
@@ -1823,14 +1854,22 @@ test "native kernel leaves typed service registration outside the TCB" {
 }
 
 test "capability mint query revoke and task termination are exposed by the native kernel" {
-    try expectNativeCapabilityLifecycle(false);
+    try expectNativeCapabilityLifecycle(.syscall);
 }
 
 test "direct runtime termination retires owned memory and all authority for dead objects" {
-    try expectNativeCapabilityLifecycle(true);
+    try expectNativeCapabilityLifecycle(.terminate);
 }
 
-fn expectNativeCapabilityLifecycle(direct_termination: bool) !void {
+test "runtime reset retires owned memory endpoints and authority" {
+    try expectNativeCapabilityLifecycle(.reset);
+}
+
+test "checkpoint restore retires removed tasks and their kernel resources" {
+    try expectNativeCapabilityLifecycle(.restore);
+}
+
+fn expectNativeCapabilityLifecycle(action: enum { syscall, terminate, reset, restore }) !void {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
@@ -1958,10 +1997,21 @@ fn expectNativeCapabilityLifecycle(direct_termination: bool) !void {
     try std.testing.expectError(error.InvalidCapabilityTarget, kernel.capabilityRevoke(testContext(.capability_revoke, admin_capability.id, .{ .capability = minted.capability_id }), minted.capability_id, 10));
     try kernel.capabilityRevoke(testContext(.capability_revoke, minted.capability_id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
-    if (direct_termination) {
-        try std.testing.expect(try runtime.terminateTask(target_task.id, 11));
-    } else {
-        try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
+    const target_task_id = target_task.id;
+    switch (action) {
+        .terminate => try std.testing.expect(try runtime.terminateTask(target_task_id, 11)),
+        .syscall => try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11)),
+        .reset => {
+            runtime.reset();
+            runtime.reset();
+        },
+        .restore => {
+            const empty = try std.testing.allocator.create(task_runtime.Snapshot);
+            defer std.testing.allocator.destroy(empty);
+            empty.* = task_runtime.Runtime.initSnapshot();
+            try runtime.restoreFromSnapshot(empty);
+            try runtime.restoreFromSnapshot(empty);
+        },
     }
     try std.testing.expect(capabilities.query(task_capability.id) == null);
     try std.testing.expect(capabilities.query(external_task_authority.id) == null);
@@ -1969,12 +2019,12 @@ fn expectNativeCapabilityLifecycle(direct_termination: bool) !void {
     try std.testing.expect(capabilities.query(external_owned_shared_authority.id) == null);
     try std.testing.expect(capabilities.query(external_peer_shared_authority.id) != null);
     try std.testing.expect(capabilities.query(admin_capability.id) != null);
-    try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(target_task.id)));
+    try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(target_task_id)));
     try std.testing.expectError(error.EndpointNotFound, endpoints.descriptor(task_endpoint.id));
-    try std.testing.expectEqual(@as(u16, 0), shared.mappingsForTask(ids.task(target_task.id)));
+    try std.testing.expectEqual(@as(u16, 0), shared.mappingsForTask(ids.task(target_task_id)));
     try std.testing.expectError(error.SharedMemoryNotFound, shared.descriptor(owned_shared.id));
     try std.testing.expectEqual(@as(u16, 0), (try shared.descriptor(peer_shared.id)).flags);
-    try std.testing.expect(!shared.hasMapping(peer_shared.id, ids.task(target_task.id)));
+    try std.testing.expect(!shared.hasMapping(peer_shared.id, ids.task(target_task_id)));
     try std.testing.expect(shared.hasMapping(peer_shared.id, ids.task(999)));
 }
 

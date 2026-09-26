@@ -86,7 +86,7 @@ pub const runtime_proof_user_gp_contained = "ZIGOS:RUNTIME_PROOF:USER_GP_CONTAIN
 pub const runtime_proof_syscall_subject_spoof = "ZIGOS:RUNTIME_PROOF:SYSCALL_SUBJECT_SPOOF:PASS";
 pub const runtime_proof_raw_network_bypass = "ZIGOS:RUNTIME_PROOF:RAW_NETWORK_BYPASS:PASS";
 pub const runtime_proof_driver_authority_escape = "ZIGOS:RUNTIME_PROOF:DRIVER_AUTHORITY_ESCAPE:PASS";
-pub const runtime_proof_reboot_grant_revocation = "ZIGOS:RUNTIME_PROOF:REBOOT_GRANT_REVOCATION:PASS";
+pub const runtime_proof_checkpoint_authority = "ZIGOS:RUNTIME_PROOF:CHECKPOINT_AUTHORITY:PASS";
 
 pub const permission_manifest_valid = "ZIGOS:PERMISSION:MANIFEST:VALID";
 pub const permission_zero_authority_deny_network = "ZIGOS:PERMISSION:ZERO_AUTHORITY:DENY_NETWORK";

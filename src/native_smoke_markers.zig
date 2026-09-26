@@ -119,7 +119,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.runtime_proof_syscall_subject_spoof,
     boot_markers.runtime_proof_raw_network_bypass,
     boot_markers.runtime_proof_driver_authority_escape,
-    boot_markers.runtime_proof_reboot_grant_revocation,
+    boot_markers.runtime_proof_checkpoint_authority,
     boot_markers.supervisor_ready,
     boot_markers.service_contract_map_ready,
     boot_markers.policy_ready,
@@ -513,7 +513,7 @@ test "native smoke gate requires runtime isolation proof markers" {
         boot_markers.runtime_proof_syscall_subject_spoof,
         boot_markers.runtime_proof_raw_network_bypass,
         boot_markers.runtime_proof_driver_authority_escape,
-        boot_markers.runtime_proof_reboot_grant_revocation,
+        boot_markers.runtime_proof_checkpoint_authority,
     };
 
     for (required) |marker| {

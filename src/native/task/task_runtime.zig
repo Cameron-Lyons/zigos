@@ -108,6 +108,26 @@ comptime {
     }
 }
 
+fn mergeIssuanceCursor(current: u64, saved: u64) u64 {
+    // Zero is permanently exhausted, rather than the beginning of a new epoch.
+    return if (current == 0 or saved == 0) 0 else @max(current, saved);
+}
+
+fn sameTaskIncarnation(current: *const TaskRecord, saved: *const TaskRecord) bool {
+    return current.state != .terminated and saved.state != .terminated and
+        current.id == saved.id and current.owner.eql(saved.owner) and
+        current.process_id == saved.process_id and
+        current.address_space_id == saved.address_space_id and
+        current.namespace_id == saved.namespace_id and
+        current.process_generation == saved.process_generation and
+        current.component_class == saved.component_class and
+        current.local_only == saved.local_only and
+        current.zero_ambient_authority == saved.zero_ambient_authority and
+        current.executable_loaded == saved.executable_loaded and
+        std.meta.eql(current.budget, saved.budget) and
+        std.meta.eql(current.launch, saved.launch);
+}
+
 pub const BackgroundWorkReservation = struct {
     task_id: u64,
     expected_active_count: u16,
@@ -219,8 +239,7 @@ const reassignHost = model.reassignHost;
 const saturatingSub = model.saturatingSub;
 const zeroTaskCold = model.zeroTaskCold;
 const resetTaskCold = model.resetTaskCold;
-const copyTaskColdForTask = model.copyTaskColdForTask;
-const copyTaskColdStates = model.copyTaskColdStates;
+const copyTaskCheckpointCold = model.copyTaskCheckpointCold;
 const bindTaskColdStates = model.bindTaskColdStates;
 const taskCold = model.taskCold;
 const taskColdConst = model.taskColdConst;
@@ -416,11 +435,8 @@ pub const Runtime = struct {
 
     pub fn reset(self: *Runtime) void {
         const retirements = self.captureAddressSpaceRetirements(.runtime_reset);
-        self.next_task_id = 1;
-        self.next_process_id = 1;
-        self.next_address_space_id = 1;
-        self.next_namespace_id = 1;
-        self.next_component_id = 1;
+        self.retireUnretainedTasks(std.StaticBitSet(MAX_TASKS).initEmpty());
+        // Issuance cursors belong to this runtime's lifetime, not its task set.
         self.tasks.reset();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
@@ -448,7 +464,11 @@ pub const Runtime = struct {
             out.tasks[dense_index] = slot.*;
             const cold_records = task_cold orelse
                 native_util.impossibleByInvariant("live tasks retain cold runtime state");
-            copyTaskColdForTask(&out.task_cold[dense_index], &cold_records[slot_index], &slot.task);
+            // Checkpoints contain execution metadata, never live authority.
+            out.tasks[dense_index].task.capability_count = 0;
+            @memset(&out.task_cold[dense_index].capability_ids, 0);
+            out.task_cold[dense_index].capability_generation = 1;
+            copyTaskCheckpointCold(&out.task_cold[dense_index], &cold_records[slot_index], &slot.task);
             out.task_count += 1;
         }
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
@@ -467,44 +487,65 @@ pub const Runtime = struct {
         const task_cold = if (state.task_count == 0) null else try self.ensureTaskColdRecords();
         const previous_task_claimed_count = self.tasks.claimedCount();
         const restored_address_spaces = if (state.address_space_count == 0) null else try self.ensureAddressSpaceArena();
+
+        // Keep surviving authority in its current cold slot. A dense snapshot
+        // can reorder tasks; copying by snapshot index would overwrite peers.
+        var destinations: [MAX_TASKS]u8 = undefined;
+        var retained = std.StaticBitSet(MAX_TASKS).initEmpty();
+        var occupied = std.StaticBitSet(MAX_TASKS).initEmpty();
+        for (state.tasks[0..state.task_count], 0..) |*slot, index| {
+            const current = self.findConst(slot.task.id) orelse continue;
+            if (!sameTaskIncarnation(current, &slot.task)) continue;
+            destinations[index] = current.arena_slot_index;
+            retained.set(current.arena_slot_index);
+            occupied.set(current.arena_slot_index);
+        }
+        for (state.tasks[0..state.task_count], 0..) |*slot, index| {
+            if (self.findConst(slot.task.id)) |current| {
+                if (retained.isSet(current.arena_slot_index)) continue;
+            }
+            const destination = occupied.complement().findFirstSet() orelse
+                native_util.impossibleByInvariant("snapshot tasks fit in their arena");
+            destinations[index] = @intCast(destination);
+            occupied.set(destination);
+        }
         const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
+        self.retireUnretainedTasks(retained);
         self.resetForSnapshotRestore();
         if (state.task_count == 0 and heap_backed_task_cold) {
             self.releaseTaskColdRecords();
-        } else if (previous_task_claimed_count > state.task_count) {
-            self.clearTaskColdRecordRange(state.task_count, previous_task_claimed_count);
+        } else if (self.taskColdRecords()) |records| {
+            for (0..previous_task_claimed_count) |index| {
+                if (!occupied.isSet(index)) resetTaskCold(&records[index]);
+            }
         }
         if (state.address_space_count == 0 and heap_backed_address_spaces) {
             self.releaseAddressSpaceArena();
         }
-        self.next_task_id = state.next_task_id;
-        self.next_process_id = state.next_process_id;
-        self.next_address_space_id = state.next_address_space_id;
-        self.next_namespace_id = state.next_namespace_id;
-        self.next_component_id = state.next_component_id;
+        self.next_task_id = mergeIssuanceCursor(self.next_task_id, state.next_task_id);
+        self.next_process_id = mergeIssuanceCursor(self.next_process_id, state.next_process_id);
+        self.next_address_space_id = mergeIssuanceCursor(self.next_address_space_id, state.next_address_space_id);
+        self.next_namespace_id = mergeIssuanceCursor(self.next_namespace_id, state.next_namespace_id);
+        self.next_component_id = mergeIssuanceCursor(self.next_component_id, state.next_component_id);
 
-        var task_index: usize = 0;
-        while (task_index < state.task_count) : (task_index += 1) {
-            const snapshot_slot = &state.tasks[task_index];
+        for (state.tasks[0..state.task_count], 0..) |*snapshot_slot, task_index| {
             if (!snapshot_slot.in_use) {
                 native_util.impossibleByInvariant("counted task snapshot records are live");
             }
             const snapshot_task = &snapshot_slot.task;
-            const previous_task = &self.tasks.slotAtConst(task_index).task;
-            const reuses_cold_backing = task_index < previous_task_claimed_count and
-                previous_task.id != 0 and
-                previous_task.id == snapshot_task.id and
-                previous_task.owner.eql(snapshot_task.owner);
+            const destination = destinations[task_index];
+            const previous_task = &self.tasks.slotAtConst(destination).task;
+            const capability_count = if (retained.isSet(destination)) previous_task.capability_count else 0;
             const cold_records = task_cold orelse
                 native_util.impossibleByInvariant("restored tasks retain cold runtime state");
-            if (!reuses_cold_backing) resetTaskCold(&cold_records[task_index]);
+            if (!retained.isSet(destination)) resetTaskCold(&cold_records[destination]);
 
-            const task_id = snapshot_task.id;
-            const slot_index = self.tasks.reserveIndexAt(task_id, task_index) orelse {
+            const slot_index = self.tasks.reserveIndexAt(snapshot_task.id, destination) orelse {
                 native_util.impossibleByInvariant("task snapshot count is bounded by task arena capacity");
             };
             self.tasks.slotAt(slot_index).task = snapshot_task.*;
-            copyTaskColdForTask(&cold_records[task_index], &state.task_cold[task_index], snapshot_task);
+            self.tasks.slotAt(slot_index).task.capability_count = capability_count;
+            copyTaskCheckpointCold(&cold_records[destination], &state.task_cold[task_index], snapshot_task);
             self.rebuildTaskDerivedIndexesAt(slot_index);
         }
 
@@ -527,16 +568,31 @@ pub const Runtime = struct {
     }
 
     fn resetForSnapshotRestore(self: *Runtime) void {
-        self.next_task_id = 1;
-        self.next_process_id = 1;
-        self.next_address_space_id = 1;
-        self.next_namespace_id = 1;
-        self.next_component_id = 1;
         self.tasks.resetRetainingPayloads();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
         self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
         if (self.addressSpaceArena()) |address_spaces| address_spaces.resetRetainingPayloads();
+    }
+
+    fn retireUnretainedTasks(self: *Runtime, retained: std.StaticBitSet(MAX_TASKS)) void {
+        for (0..self.tasks.claimedCount()) |index| {
+            const slot = self.tasks.slotAt(index);
+            if (!slot.in_use or retained.isSet(index) or slot.task.state == .terminated) continue;
+            self.removeInitialComponentLabelIndex(index, &slot.task);
+            self.setTaskState(&slot.task, .terminated);
+            self.notifyTaskRetirement(&slot.task, 0);
+        }
+    }
+
+    fn notifyTaskRetirement(self: *Runtime, task: *const TaskRecord, tick: u64) void {
+        if (self.task_retirement_sink) |sink| {
+            sink.retire(sink.context, .{
+                .task_id = task.id,
+                .capability_ids = task.capabilityIds(),
+                .now_ticks = tick,
+            });
+        }
     }
 
     pub fn rebuildIndexes(self: *Runtime) void {
@@ -1131,13 +1187,7 @@ pub const Runtime = struct {
 
         self.removeInitialComponentLabelIndex(slot_index, task);
         self.setTaskState(task, .terminated);
-        if (self.task_retirement_sink) |sink| {
-            sink.retire(sink.context, .{
-                .task_id = task.id,
-                .capability_ids = task.capabilityIds(),
-                .now_ticks = tick,
-            });
-        }
+        self.notifyTaskRetirement(task, tick);
         clearTerminatedTaskResources(task);
         task.execution_component_count = 0;
         task.capability_count = 0;
@@ -1348,7 +1398,7 @@ test "allocated runtime initialization preserves empty indexes and id sequences"
     const lifecycle_generation_before_reset = runtime.taskLifecycleGeneration();
     runtime.reset();
     try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
-    try std.testing.expectEqual(lifecycle_generation_before_reset + 1, runtime.taskLifecycleGeneration());
+    try std.testing.expectEqual(lifecycle_generation_before_reset + 2, runtime.taskLifecycleGeneration());
 }
 
 const RetirementRecorder = struct {
@@ -1507,7 +1557,7 @@ test "task handles reject stale task records across restore and reuse" {
     try std.testing.expect(runtime.findByHandle(restored_handle, task_id) == null);
     const replacement = try createTaskIdTestTask(&runtime, 2);
     const replacement_handle = runtime.taskHandleForResolved(replacement);
-    try std.testing.expectEqual(task_id, replacement.id);
+    try std.testing.expect(replacement.id > task_id);
     try std.testing.expect(!replacement_handle.eql(restored_handle));
     try std.testing.expect(runtime.findByHandle(restored_handle, replacement.id) == null);
     try std.testing.expectEqual(replacement.id, runtime.findByHandle(replacement_handle, replacement.id).?.id);
@@ -1799,13 +1849,13 @@ test "restoring a snapshot rebuilds authoritative indexes" {
     try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.suspended));
     try std.testing.expect(restored.findAddressSpaceConst(address_space_id) != null);
     try std.testing.expectEqual(task_id, restored.findByOwner(.{ .kind = .service, .serial = 22 }).?.id);
-    try std.testing.expect(restored.hasCapability(task_id, 91));
+    try std.testing.expect(!restored.hasCapability(task_id, 91));
     try std.testing.expectEqual(@as(usize, 2), restored_task.provenance_count);
     try std.testing.expectEqual(debug_contract.ProvenanceKind.capability_grant, restored_task.latestProvenanceEvent().?.kind);
     try std.testing.expectEqual(@as(u64, 91), restored_task.latestProvenanceEvent().?.capability_id);
 
     const post_restore_task = try createTaskIdTestTask(&restored, 23);
-    try std.testing.expectEqual(snapshot.next_task_id, post_restore_task.id);
+    try std.testing.expectEqual(stale_task_id + 1, post_restore_task.id);
     const pre_rehost_address_space_id = restored.find(task_id).?.address_space_id;
     try std.testing.expect(try restored.rehostTask(task_id, 2));
     try std.testing.expect(restored.findAddressSpaceConst(pre_rehost_address_space_id) == null);
@@ -1849,6 +1899,107 @@ test "snapshot restore reuses live cold backing and clears only retired records"
     try std.testing.expectEqual(@as(usize, 0), live.capabilityIds().len);
     try restored.grantCapability(live.id, 0x1234);
     try std.testing.expectEqualSlices(u64, &.{0x1234}, live.capabilityIds());
+}
+
+test "checkpoint restore preserves live grants across dense task reordering" {
+    var runtime = Runtime.init();
+    const first = try createTaskIdTestTask(&runtime, 901);
+    const second = try createTaskIdTestTask(&runtime, 902);
+    const first_id = first.id;
+    const second_id = second.id;
+    try runtime.grantCapability(first_id, 41);
+    try runtime.grantCapability(second_id, 42);
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.tasks[0].task.capabilityIds().len);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.task_cold[0].capability_ids[0]);
+
+    try std.testing.expect(try runtime.revokeCapability(first_id, 41));
+    try runtime.grantCapability(first_id, 43);
+    const generation = first.capabilityGeneration();
+    std.mem.swap(model.TaskSlot, &snapshot.tasks[0], &snapshot.tasks[1]);
+    std.mem.swap(model.TaskColdRecord, &snapshot.task_cold[0], &snapshot.task_cold[1]);
+    bindTaskColdStates(snapshot.tasks[0..snapshot.task_count], snapshot.task_cold[0..snapshot.task_count]);
+    try runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqualSlices(u64, &.{43}, runtime.find(first_id).?.capabilityIds());
+    try std.testing.expectEqualSlices(u64, &.{42}, runtime.find(second_id).?.capabilityIds());
+    try std.testing.expectEqual(generation, runtime.find(first_id).?.capabilityGeneration());
+    try std.testing.expectEqual(@as(u8, 0), runtime.find(first_id).?.arena_slot_index);
+    try std.testing.expectEqual(@as(u8, 1), runtime.find(second_id).?.arena_slot_index);
+
+    // Even an old or stale snapshot attachment cannot reinstate authority.
+    snapshot.tasks[1].task.capability_count = 1;
+    snapshot.task_cold[1].capability_ids[0] = 41;
+    try runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqualSlices(u64, &.{43}, runtime.find(first_id).?.capabilityIds());
+    var fresh = Runtime.init();
+    try fresh.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(usize, 0), fresh.find(first_id).?.capabilityIds().len);
+}
+
+test "checkpoint restore retires changed task incarnations before replacing metadata" {
+    const Recorder = struct {
+        runtime: *Runtime,
+        retired: [4]u64 = @splat(0),
+        count: usize = 0,
+        fn retire(context: *anyopaque, event: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.debug.assert(self.runtime.find(event.task_id).?.state == .terminated);
+            std.debug.assert(event.capability_ids.len == 1);
+            self.retired[self.count] = event.capability_ids[0];
+            self.count += 1;
+        }
+    };
+    var runtime = Runtime.init();
+    const first = try createTaskIdTestTask(&runtime, 910);
+    const second = try createTaskIdTestTask(&runtime, 911);
+    const first_id = first.id;
+    const second_id = second.id;
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    try runtime.grantCapability(first_id, 50);
+    try runtime.grantCapability(second_id, 51);
+    // A reused numeric id and owner do not identify the same process lifetime.
+    try std.testing.expect(try runtime.rehostTask(first_id, 1));
+    const removed = try createTaskIdTestTask(&runtime, 912);
+    const removed_id = removed.id;
+    try runtime.grantCapability(removed_id, 52);
+    var recorder = Recorder{ .runtime = &runtime };
+    try std.testing.expect(runtime.bindTaskRetirementSink(.{ .context = &recorder, .retire = Recorder.retire }));
+    try runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqualSlices(u64, &.{ 50, 52 }, recorder.retired[0..recorder.count]);
+    try std.testing.expectEqual(@as(usize, 0), runtime.find(first_id).?.capabilityIds().len);
+    try std.testing.expectEqualSlices(u64, &.{51}, runtime.find(second_id).?.capabilityIds());
+    try std.testing.expect(runtime.find(removed_id) == null);
+    try runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(usize, 2), recorder.count);
+}
+
+test "runtime reset and older checkpoints cannot rewind or unexhaust identity cursors" {
+    var runtime = Runtime.init();
+    _ = try createTaskIdTestTask(&runtime, 920);
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    inline for (.{ "next_task_id", "next_process_id", "next_address_space_id", "next_namespace_id", "next_component_id" }) |field| {
+        @field(runtime, field) = 100;
+    }
+    try runtime.restoreFromSnapshot(&snapshot);
+    runtime.reset();
+    inline for (.{ "next_task_id", "next_process_id", "next_address_space_id", "next_namespace_id", "next_component_id" }) |field| {
+        try std.testing.expectEqual(@as(u64, 100), @field(runtime, field));
+        @field(runtime, field) = 0;
+    }
+    try runtime.restoreFromSnapshot(&snapshot);
+    runtime.reset();
+    inline for (.{ "next_task_id", "next_process_id", "next_address_space_id", "next_namespace_id", "next_component_id" }) |field| {
+        try std.testing.expectEqual(@as(u64, 0), @field(runtime, field));
+        @field(runtime, field) = 100;
+        @field(snapshot, field) = 0;
+    }
+    try runtime.restoreFromSnapshot(&snapshot);
+    inline for (.{ "next_task_id", "next_process_id", "next_address_space_id", "next_namespace_id", "next_component_id" }) |field| {
+        try std.testing.expectEqual(@as(u64, 0), @field(runtime, field));
+    }
 }
 
 test "snapshot restore preserves compact task denial provenance" {
@@ -2382,7 +2533,7 @@ test "sparse checkpoints preserve cross-page slot order and retire only live add
         );
     }
     const high_snapshot_task = &snapshot.tasks[2].task;
-    try std.testing.expectEqualSlices(u64, &.{0xBEEF}, high_snapshot_task.capabilityIds());
+    try std.testing.expectEqual(@as(usize, 0), high_snapshot_task.capabilityIds().len);
     try std.testing.expectEqual(AuditEventKind.policy_allowed, high_snapshot_task.latestAuditEvent().?.kind);
     try std.testing.expectEqual(@as(u64, 77), high_snapshot_task.latestAuditEvent().?.tick);
     try std.testing.expectEqual(debug_contract.ProvenanceKind.launch, high_snapshot_task.provenanceEventAt(0).?.kind);
@@ -2559,7 +2710,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     try std.testing.expectEqual(@as(usize, 1), restored.countTasksInState(.terminated));
 
     restored.reset();
-    try std.testing.expectEqual(@as(u64, 3), restored.taskLifecycleGeneration());
+    try std.testing.expectEqual(@as(u64, 4), restored.taskLifecycleGeneration());
     try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.active));
     try std.testing.expectEqual(@as(usize, 0), restored.countTasksInState(.terminated));
 
@@ -2568,7 +2719,7 @@ test "task state counts track lifecycle transitions and snapshot restore" {
     try std.testing.expectEqual(@as(u64, 1), restored.taskLifecycleGeneration());
     restored.task_lifecycle_generation = std.math.maxInt(u64);
     restored.reset();
-    try std.testing.expectEqual(@as(u64, 1), restored.taskLifecycleGeneration());
+    try std.testing.expectEqual(@as(u64, 2), restored.taskLifecycleGeneration());
 }
 
 test "initial component label lookup is indexed across lifecycle and restore" {

@@ -259,6 +259,5 @@ test "task runtime service can restore a persisted checkpoint after service re-i
     const restored = restarted_runtime.find(task.id).?;
     try std.testing.expectEqual(@as(usize, 2), restored.execution_component_count);
     try std.testing.expectEqualStrings("sidecar", restored.executionComponents()[1].labelSlice());
-    try std.testing.expectEqual(@as(usize, 1), restored.capability_count);
-    try std.testing.expectEqual(@as(u64, 91), restored.capabilityIds()[0]);
+    try std.testing.expectEqual(@as(usize, 0), restored.capability_count);
 }

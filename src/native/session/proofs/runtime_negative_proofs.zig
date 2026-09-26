@@ -139,8 +139,8 @@ pub fn runAndPrint() bool {
     if (!driverAuthorityEscapeIsRejected()) return false;
     common.printBootMarker(boot_markers.runtime_proof_driver_authority_escape);
 
-    if (!rebootGrantAndRevocationStatePersists()) return false;
-    common.printBootMarker(boot_markers.runtime_proof_reboot_grant_revocation);
+    if (!checkpointAuthorityIsNotReplayed()) return false;
+    common.printBootMarker(boot_markers.runtime_proof_checkpoint_authority);
 
     return true;
 }
@@ -481,7 +481,7 @@ pub fn driverAuthorityEscapeIsRejected() bool {
     return false;
 }
 
-pub fn rebootGrantAndRevocationStatePersists() bool {
+pub fn checkpointAuthorityIsNotReplayed() bool {
     const runtime = proofRuntime();
     const restarted_runtime = restartedProofRuntime();
     reboot_proof_checkpoint_store.reset();
@@ -501,14 +501,20 @@ pub fn rebootGrantAndRevocationStatePersists() bool {
     runtime.grantCapability(task_id, 92) catch return false;
     service_instance.checkpoint(1) catch return false;
     if (!(runtime.revokeCapability(task_id, 91) catch return false)) return false;
-    service_instance.checkpoint(2) catch return false;
+    runtime.grantCapability(task_id, 93) catch return false;
+    // Restore the older checkpoint after revocation and a new grant. Only
+    // authority still attached to the live task may survive the rollback.
+    if (!service_instance.restartFromCheckpoint(2)) return false;
+    if (runtime.hasCapability(task_id, 91) or
+        !runtime.hasCapability(task_id, 92) or
+        !runtime.hasCapability(task_id, 93)) return false;
 
     var restarted = task_runtime_service.Service.initWithStore(restarted_runtime, &reboot_proof_checkpoint_store);
     restarted.bind(50, service(50));
     if (!restarted.restartFromCheckpoint(3)) return false;
     const restored = restarted_runtime.find(task_id) orelse return false;
-    return !restarted_runtime.hasCapability(restored.id, 91) and
-        restarted_runtime.hasCapability(restored.id, 92);
+    // A new runtime has no authority to inherit from execution metadata.
+    return restored.capability_count == 0;
 }
 
 fn budget() task_runtime.ResourceBudget {
@@ -538,5 +544,5 @@ test "runtime negative proofs reject modeled bypasses" {
     try std.testing.expect(syscallSubjectSpoofingIsRejected());
     try std.testing.expect(rawNetworkSendBypassIsDenied());
     try std.testing.expect(driverAuthorityEscapeIsRejected());
-    try std.testing.expect(rebootGrantAndRevocationStatePersists());
+    try std.testing.expect(checkpointAuthorityIsNotReplayed());
 }
