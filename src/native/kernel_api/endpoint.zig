@@ -78,6 +78,7 @@ pub const Endpoint = struct {
     label_len: u8,
     label: [MAX_ENDPOINT_LABEL_BYTES]u8,
     peer_endpoint_id: ids.EndpointId = ids.EndpointId.zero,
+    peer_closed: bool = false,
     queue_head: u8 = 0,
     queue_len: u8 = 0,
     queue: EndpointQueueBacking = if (heap_backed_endpoint_queues) null else [_]Message{zeroMessage()} ** MAX_ENDPOINT_QUEUE,
@@ -99,6 +100,7 @@ pub const Error = error{
     MessageTooLarge,
     ReceiveBufferTooSmall,
     PeerNotConnected,
+    PeerClosed,
     QueueFull,
     TableFull,
     NoSpaceLeft,
@@ -118,12 +120,19 @@ const EndpointArena = indexed_arena.GenerationalArena("EndpointId", EndpointSlot
 const EndpointHandle = EndpointArena.Handle;
 const EndpointOwnerIndex = indexed_arena.MultimapIndex(MAX_ENDPOINTS, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY);
 
-pub const TaskRetirement = struct {
+pub const Retirement = struct {
     endpoint_count: u16 = 0,
     endpoint_ids: [MAX_ENDPOINTS]ids.EndpointId = [_]ids.EndpointId{ids.EndpointId.zero} ** MAX_ENDPOINTS,
+    disconnected_count: u16 = 0,
+    disconnected_task_ids: [MAX_ENDPOINTS]ids.TaskId = undefined,
 
-    pub fn retiredEndpointIds(self: *const TaskRetirement) []const ids.EndpointId {
+    pub fn retiredEndpointIds(self: *const Retirement) []const ids.EndpointId {
         return self.endpoint_ids[0..self.endpoint_count];
+    }
+
+    // One notification per affected endpoint; the scheduler coalesces tasks.
+    pub fn disconnectedTaskIds(self: *const Retirement) []const ids.TaskId {
+        return self.disconnected_task_ids[0..self.disconnected_count];
     }
 };
 
@@ -215,6 +224,7 @@ pub const Table = struct {
     pub fn connect(self: *Table, endpoint_id: ids.EndpointId, peer_endpoint_id: ids.EndpointId) Error!void {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
+        if (endpoint.peer_closed or peer.peer_closed) return error.PeerClosed;
 
         if (endpoint.flags.service_port and peer.flags.service_port) return error.ScopeViolation;
 
@@ -248,6 +258,7 @@ pub const Table = struct {
         if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
 
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
+        if (endpoint.peer_closed) return error.PeerClosed;
         const peer_endpoint_id = endpoint.peer_endpoint_id;
         if (peer_endpoint_id.isZero()) return error.PeerNotConnected;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
@@ -310,7 +321,10 @@ pub const Table = struct {
         payload_out: []u8,
     ) Error!?ReceivedMessage {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
-        if (endpoint.queue_len == 0) return null;
+        if (endpoint.queue_len == 0) {
+            if (endpoint.peer_closed) return error.PeerClosed;
+            return null;
+        }
 
         const queue = endpointQueue(endpoint) orelse
             native_util.impossibleByInvariant("non-empty endpoint queue retains its backing");
@@ -362,54 +376,68 @@ pub const Table = struct {
         return self.arena.countInUse();
     }
 
-    pub fn retireTask(self: *Table, task_id: ids.TaskId, cleanup: ?MovedCapabilityCleanup) TaskRetirement {
-        var retired = TaskRetirement{};
+    pub fn close(self: *Table, endpoint_id: ids.EndpointId, cleanup: ?MovedCapabilityCleanup) Error!Retirement {
+        const handle = EndpointHandle{ .value = endpoint_id.raw() };
+        _ = self.arena.getByHandle(handle) orelse return error.EndpointNotFound;
+        var retired = Retirement{};
+        self.retireIndex(handle.slotIndex(), cleanup, &retired);
+        self.disconnectRetiredPeers(&retired);
+        return retired;
+    }
+
+    pub fn retireTask(self: *Table, task_id: ids.TaskId, cleanup: ?MovedCapabilityCleanup) Retirement {
+        var retired = Retirement{};
         while (true) {
             const slot_index = self.owner_index.head(task_id.raw());
             if (slot_index == indexed_arena.no_index) break;
-            if (slot_index >= self.arena.slots.len) {
-                native_util.impossibleByInvariant("endpoint owner index points outside endpoint slots");
-            }
-            const slot = &self.arena.slots[slot_index];
-            if (!slot.in_use or !slot.endpoint.owner_task_id.eql(task_id)) {
+            if (slot_index >= self.arena.slots.len or
+                !self.arena.slots[slot_index].endpoint.owner_task_id.eql(task_id))
+            {
                 native_util.impossibleByInvariant("endpoint owner index points at the wrong endpoint");
             }
-            retired.endpoint_ids[retired.endpoint_count] = slot.endpoint.id;
-            retired.endpoint_count += 1;
-            if (!self.owner_index.remove(task_id.raw(), slot_index)) {
-                native_util.impossibleByInvariant("live endpoint is absent from its owner index");
-            }
-            if (cleanup) |sink| {
-                if (endpointQueue(&slot.endpoint)) |queue| {
-                    // Only unread moves belong to this queue. Copies still
-                    // belong to their sender, and consumed slots may be stale.
-                    for (0..slot.endpoint.queue_len) |offset| {
-                        const message = &queue[(slot.endpoint.queue_head + offset) % MAX_ENDPOINT_QUEUE];
-                        if (message.move_attached_capability) {
-                            if (message.attachedCapabilityId()) |capability_id| sink.release(sink.context, capability_id);
-                        }
+            self.retireIndex(slot_index, cleanup, &retired);
+        }
+        if (retired.endpoint_count != 0) self.disconnectRetiredPeers(&retired);
+        return retired;
+    }
+
+    fn retireIndex(self: *Table, slot_index: usize, cleanup: ?MovedCapabilityCleanup, retired: *Retirement) void {
+        const slot = &self.arena.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("retiring endpoint slot remains live");
+        retired.endpoint_ids[retired.endpoint_count] = slot.endpoint.id;
+        retired.endpoint_count += 1;
+        if (!self.owner_index.remove(slot.endpoint.owner_task_id.raw(), slot_index)) {
+            native_util.impossibleByInvariant("live endpoint is absent from its owner index");
+        }
+        if (cleanup) |sink| {
+            if (endpointQueue(&slot.endpoint)) |queue| {
+                // Only unread moves belong to this queue. Copies still
+                // belong to their sender, and consumed slots may be stale.
+                for (0..slot.endpoint.queue_len) |offset| {
+                    const message = &queue[(slot.endpoint.queue_head + offset) % MAX_ENDPOINT_QUEUE];
+                    if (message.move_attached_capability) {
+                        if (message.attachedCapabilityId()) |capability_id| sink.release(sink.context, capability_id);
                     }
                 }
             }
-            releaseEndpointQueue(&slot.endpoint);
-            if (!self.arena.removeIndex(slot_index)) {
-                native_util.impossibleByInvariant("live endpoint disappeared during retirement");
-            }
         }
-        if (retired.endpoint_count == 0) return retired;
+        releaseEndpointQueue(&slot.endpoint);
+        if (!self.arena.removeIndex(slot_index)) {
+            native_util.impossibleByInvariant("live endpoint disappeared during retirement");
+        }
+    }
 
+    fn disconnectRetiredPeers(self: *Table, retired: *Retirement) void {
+        // A single bounded scan, with generational lookups rather than comparing
+        // every live peer against every endpoint retired from a large task.
         for (&self.arena.slots) |*slot| {
-            if (!slot.in_use) continue;
-            const peer_endpoint_id = slot.endpoint.peer_endpoint_id;
-            if (peer_endpoint_id.isZero()) continue;
-            for (retired.retiredEndpointIds()) |retired_id| {
-                if (peer_endpoint_id.eql(retired_id)) {
-                    slot.endpoint.peer_endpoint_id = ids.EndpointId.zero;
-                    break;
-                }
-            }
+            if (!slot.in_use or slot.endpoint.peer_endpoint_id.isZero()) continue;
+            if (self.findConst(slot.endpoint.peer_endpoint_id) != null) continue;
+            slot.endpoint.peer_endpoint_id = ids.EndpointId.zero;
+            slot.endpoint.peer_closed = true;
+            retired.disconnected_task_ids[retired.disconnected_count] = slot.endpoint.owner_task_id;
+            retired.disconnected_count += 1;
         }
-        return retired;
     }
 
     fn find(self: *Table, endpoint_id: ids.EndpointId) ?*Endpoint {
@@ -561,6 +589,75 @@ test "endpoint descriptors track peer links and queue depth" {
     try std.testing.expect(received.attached_capability_id.?.eql(ids.capability(99)));
 }
 
+test "closing an endpoint drains peer replies and makes the connection terminal" {
+    const Recorder = struct {
+        released: u64 = 0,
+        count: usize = 0,
+        fn release(context: *anyopaque, capability_id: ids.CapabilityId) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.released = capability_id.raw();
+            self.count += 1;
+        }
+    };
+    var table = Table.init();
+    var recorder = Recorder{};
+    const left = try table.create(ids.task(10), "left", .{});
+    const right = try table.create(ids.task(20), "right", .{});
+    const sibling = try table.create(left.owner_task_id, "sibling", .{});
+    try table.connect(left.id, right.id);
+    _ = try table.send(left.id, left.owner_task_id, 1, "last reply", ids.capability(77), true);
+    _ = try table.send(right.id, right.owner_task_id, 2, "discarded move", ids.capability(88), true);
+    _ = try table.send(right.id, right.owner_task_id, 3, "sender copy", ids.capability(99), false);
+    const closed = try table.close(left.id, .{ .context = &recorder, .release = Recorder.release });
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    try std.testing.expectEqual(@as(u64, 88), recorder.released);
+    try std.testing.expectEqual(@as(u16, 1), closed.endpoint_count);
+    try std.testing.expectEqual(@as(u16, 1), closed.disconnected_count);
+    try std.testing.expect(closed.disconnectedTaskIds()[0].eql(right.owner_task_id));
+    try std.testing.expectEqual(@as(u16, 1), table.activeForTask(left.owner_task_id));
+    _ = try table.descriptor(sibling.id);
+    try std.testing.expectError(error.PeerClosed, table.send(right.id, right.owner_task_id, 4, "closed", null, false));
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const last = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expectEqualStrings("last reply", payload[0..last.len]);
+    try std.testing.expect(last.attached_capability_id.?.eql(ids.capability(77)));
+    try std.testing.expectError(error.PeerClosed, table.recvInto(right.id, &payload));
+    try std.testing.expectError(error.PeerClosed, table.recvInto(right.id, &payload));
+    try std.testing.expect(!table.hasPendingForTask(right.owner_task_id));
+    const replacement = try table.create(left.owner_task_id, "replacement", .{});
+    try std.testing.expect(!replacement.id.eql(left.id));
+    try std.testing.expectError(error.EndpointNotFound, table.close(left.id, null));
+    try std.testing.expectError(error.PeerClosed, table.connect(right.id, replacement.id));
+    try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(replacement.id)).peer_endpoint_id);
+}
+
+test "closing a client preserves service peers and closing the service notifies survivors" {
+    var table = Table.init();
+    const service = try table.create(ids.task(1), "service", .{ .service_port = true });
+    const first = try table.create(ids.task(2), "first", .{});
+    const second = try table.create(ids.task(3), "second", .{});
+    try table.connect(first.id, service.id);
+    try table.connect(second.id, service.id);
+    _ = try table.send(first.id, first.owner_task_id, 1, "queued", null, false);
+    const closed_client = try table.close(first.id, null);
+    try std.testing.expectEqual(@as(u16, 0), closed_client.disconnected_count);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    _ = (try table.recvInto(service.id, &payload)).?;
+    try std.testing.expectError(error.EndpointNotFound, table.reply(service.id, first.id, service.owner_task_id, 1, "late", null, false));
+    try std.testing.expect((try table.recvInto(service.id, &payload)) == null);
+    _ = try table.send(second.id, second.owner_task_id, 2, "live", null, false);
+    _ = (try table.recvInto(service.id, &payload)).?;
+    _ = try table.reply(service.id, second.id, service.owner_task_id, 2, "reply", null, false);
+    const third = try table.create(ids.task(4), "third", .{});
+    try table.connect(third.id, service.id);
+    const closed_service = try table.close(service.id, null);
+    try std.testing.expectEqual(@as(u16, 2), closed_service.disconnected_count);
+    const last = (try table.recvInto(second.id, &payload)).?;
+    try std.testing.expectEqualStrings("reply", payload[0..last.len]);
+    try std.testing.expectError(error.PeerClosed, table.recvInto(second.id, &payload));
+    try std.testing.expectError(error.PeerClosed, table.recvInto(third.id, &payload));
+}
+
 test "endpoint ids reject stale handles after slot reuse" {
     var table = Table.init();
     const endpoint = try table.create(ids.task(10), "first", .{});
@@ -638,7 +735,7 @@ test "retiring task endpoints clears queues and surviving peer links" {
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(service.id));
     try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_a.id)).peer_endpoint_id);
     try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_b.id)).peer_endpoint_id);
-    try std.testing.expectError(error.PeerNotConnected, table.send(client_a.id, ids.task(10), 3, "stale", null, false));
+    try std.testing.expectError(error.PeerClosed, table.send(client_a.id, ids.task(10), 3, "stale", null, false));
 }
 
 test "endpoint identity paths avoid primary indexes and collision probes" {

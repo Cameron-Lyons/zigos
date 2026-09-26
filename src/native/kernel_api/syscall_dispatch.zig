@@ -297,6 +297,7 @@ fn defaultDenialReasonForStatus(status: abi.SyscallStatus) abi.DenialReason {
         .invalid_request_pointer,
         .invalid_response_buffer,
         .not_found,
+        .peer_closed,
         => .invalid_target,
         .buffer_too_small,
         .conflict,
@@ -307,6 +308,7 @@ fn defaultDenialReasonForStatus(status: abi.SyscallStatus) abi.DenialReason {
 }
 
 pub fn mapError(err: anyerror) DispatchResult {
+    if (err == error.PeerClosed) return .{ .status = .peer_closed, .denial_reason = .invalid_target };
     if (err == error.UnsupportedAbiVersion) return .{ .status = .unsupported_abi_version };
     if (err == error.ReceiveBufferTooSmall) return .{ .status = .buffer_too_small };
     if (err == error.UnexpectedOperation) return .{

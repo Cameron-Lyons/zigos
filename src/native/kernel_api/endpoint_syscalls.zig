@@ -50,6 +50,17 @@ pub fn dispatchEndpointSend(
     return dispatch.success();
 }
 
+pub fn dispatchEndpointClose(
+    port: *component_port.KernelPort,
+    memory: dispatch.UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) dispatch.DispatchResult {
+    return dispatch.invokeNoResponse(.endpoint_close, port, memory, now_ticks, request_addr, response_addr, response_len);
+}
+
 pub fn dispatchEndpointRecv(
     port: *component_port.KernelPort,
     memory: dispatch.UserMemoryContext,

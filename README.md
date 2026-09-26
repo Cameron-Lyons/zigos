@@ -164,13 +164,17 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
-  Native ABI v8 uses bounded endpoint payloads and a 56-byte receive header
+  Native ABI v9 uses bounded endpoint payloads and a 56-byte receive header
   carrying the kernel-recorded sender endpoint. Services explicitly address
   replies to connected clients; stale or unrelated endpoint handles are
   rejected before publishing a reply or moving a capability. Receive buffers
   are validated before dequeue, and undersized outputs leave messages queued.
   A full endpoint queue returns a distinct `would_block` status so clients can
   retry backpressure without spinning on a disconnected peer.
+  The `endpoint_close` operation requires its own right, releases one channel
+  and all authority to it, and wakes surviving peers. Clients drain queued
+  replies before receiving `peer_closed`; closed connections cannot be rebound.
+  Closing one client leaves a shared service available to its other clients.
   Successful sends wake only the destination owner after publishing the message
   and completing any capability move. Kernel initialization binds one synchronous
   runtime retirement hook, so lifecycle requests, direct termination, and user

@@ -64,6 +64,19 @@ const EndpointRecvRequest = struct {
     attached_capability_out: *abi.CapabilityDescriptor,
 };
 
+const EndpointCloseRequest = extern struct {
+    header: abi.RequestHeader,
+    endpoint_capability_id: u64,
+};
+
+pub fn closeEndpoint(endpoint_capability_id: u64) abi.SyscallStatus {
+    var request = EndpointCloseRequest{
+        .header = makeHeader(.endpoint_close, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+    };
+    return trapCallNoResponse(&request);
+}
+
 const InputRecvRequest = extern struct {
     header: abi.RequestHeader,
     input_capability_id: u64,

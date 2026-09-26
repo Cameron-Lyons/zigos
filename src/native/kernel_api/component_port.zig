@@ -63,6 +63,11 @@ pub const EndpointRecvRequest = struct {
     attached_capability_out: *abi.CapabilityDescriptor,
 };
 
+pub const EndpointCloseRequest = extern struct {
+    header: abi.RequestHeader,
+    endpoint_capability_id: u64,
+};
+
 pub const CapabilityMintRequest = struct {
     header: abi.RequestHeader,
     policy_capability_id: u64,
@@ -228,6 +233,11 @@ pub const KernelPort = struct {
             request.move_attached_capability,
             now_ticks,
         );
+    }
+
+    pub fn endpointClose(self: *KernelPort, request: EndpointCloseRequest, now_ticks: u64) Error!void {
+        try self.validateIncomingHeader(request.header, .endpoint_close);
+        try self.kernel.endpointClose(callContext(request.header, request.endpoint_capability_id, .none), now_ticks);
     }
 
     pub fn endpointRecv(

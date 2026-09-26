@@ -230,13 +230,29 @@ pub const Kernel = struct {
             .context = self.capability_table,
             .release = releaseQueuedMove,
         });
-        for (retired_endpoints.retiredEndpointIds()) |endpoint_id| {
-            self.retireCapabilityTarget(.{ .kind = .endpoint, .id = endpoint_id.raw() });
-        }
         const retired_shared_memory = self.shared_memory_table.retireTask(ids.task(task_id));
         for (retired_shared_memory.revokedObjectIds()) |object_id| {
             self.retireCapabilityTarget(.{ .kind = .shared_memory, .id = object_id.raw() });
         }
+        self.completeEndpointRetirement(&retired_endpoints, retirement.now_ticks);
+    }
+
+    fn completeEndpointRetirement(self: *Kernel, retired: *const endpoint.Retirement, now_ticks: u64) void {
+        for (retired.retiredEndpointIds()) |endpoint_id| {
+            self.retireCapabilityTarget(.{ .kind = .endpoint, .id = endpoint_id.raw() });
+        }
+        if (self.endpoint_wake_sink) |sink| {
+            for (retired.disconnectedTaskIds()) |task_id| sink.wake(sink.context, task_id.raw(), now_ticks);
+        }
+    }
+
+    pub fn endpointClose(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!void {
+        const authorized = try self.authorizeOperation(.endpoint_close, context, now_ticks, .{});
+        const retired = try self.endpoint_table.close(ids.endpoint(authorized.target.id), .{
+            .context = self.capability_table,
+            .release = releaseQueuedMove,
+        });
+        self.completeEndpointRetirement(&retired, now_ticks);
     }
 
     pub fn endpointCreate(
@@ -1166,7 +1182,7 @@ test "moving a capability removes its source task attachment" {
     try std.testing.expect(receiver_task.hasCapability(passed.capability_id));
 }
 
-const UndeliveredCase = enum { terminate, runtime_terminate, receiver_full, grants_full, expired };
+const UndeliveredCase = enum { terminate, runtime_terminate, endpoint_close, receiver_full, grants_full, expired };
 
 fn expectCreationRollback(shared_object: bool, task_full: bool) !void {
     var harness = TestKernelHarness{};
@@ -1268,7 +1284,7 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
         .holder = receiver.owner,
         .issuer = test_policy_authority,
         .target = .{ .kind = .endpoint, .id = destination.id.raw() },
-        .rights = .{ .endpoint = .{ .endpoint_recv = true } },
+        .rights = .{ .endpoint = .{ .endpoint_recv = true, .endpoint_close = true } },
         .scope = .{ .task_id = receiver.id, .local_only = true },
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
     });
@@ -1295,10 +1311,18 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     try harness.runtime.grantCapability(receiver.id, termination.id);
     try kernel.endpointSend(.{ .caller_task_id = sender.id, .presented_capability_id = sending.id, .target = .{ .endpoint = source.id.raw() } }, 1, "in flight", 0, gift.id, moved, 10);
     try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
+    var wake_probe = TestEndpointWakeProbe{};
+    kernel.bindEndpointWakeSink(.{ .context = &wake_probe, .wake = TestEndpointWakeProbe.wake });
     if (case == .terminate) {
         try std.testing.expect(try kernel.taskTerminate(.{ .caller_task_id = receiver.id, .presented_capability_id = termination.id, .target = .{ .task = receiver.id } }, 11));
     } else if (case == .runtime_terminate) {
         try std.testing.expect(try harness.runtime.terminateTask(receiver.id, 11));
+    } else if (case == .endpoint_close) {
+        try kernel.endpointClose(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .none }, 11);
+        try std.testing.expectEqual(task_runtime.TaskState.active, receiver.state);
+        try std.testing.expect(harness.capabilities.query(receiving.id) == null);
+        try std.testing.expect(harness.capabilities.query(termination.id) != null);
+        try std.testing.expectEqual(@as(u16, 0), harness.endpoints.activeForTask(ids.task(receiver.id)));
     } else {
         if (case == .receiver_full) {
             var receiver_grant = gift_request;
@@ -1318,7 +1342,7 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
             .receiver_full => error.CapabilityTableFull,
             .grants_full => error.TableFull,
             .expired => error.CapabilityRevoked,
-            .terminate, .runtime_terminate => unreachable,
+            .terminate, .runtime_terminate, .endpoint_close => unreachable,
         };
         try std.testing.expectError(expected_error, kernel.endpointRecv(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .{ .endpoint = destination.id.raw() } }, receiver.id, &payload, if (case == .expired) 101 else 11));
         try std.testing.expectEqual(count - @intFromBool(moved), harness.capabilities.activeCount());
@@ -1333,6 +1357,10 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     }
     try std.testing.expectEqual(!moved, harness.capabilities.query(gift.id) != null);
     try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
+    if (case == .terminate or case == .runtime_terminate or case == .endpoint_close) {
+        try std.testing.expectEqual(@as(usize, 1), wake_probe.count);
+        try std.testing.expectEqual(sender.id, wake_probe.tasks[0]);
+    }
 }
 
 test "endpoint retirement disposes unread moves while preserving sender-owned copies" {
@@ -1341,6 +1369,10 @@ test "endpoint retirement disposes unread moves while preserving sender-owned co
 
 test "direct runtime termination disposes unread moves and endpoint resources" {
     for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.runtime_terminate, moved);
+}
+
+test "endpoint close releases unread moves without terminating either task" {
+    for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.endpoint_close, moved);
 }
 
 test "failed capability receipts dispose moves after quota allocation and expiry failures" {

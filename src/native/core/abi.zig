@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 8;
+pub const ABI_VERSION: u16 = 9;
 pub const ENDPOINT_INLINE_BYTES: usize = 96;
 pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512;
 
@@ -11,6 +11,7 @@ pub const NativeOperation = enum(u16) {
     endpoint_connect,
     endpoint_send,
     endpoint_recv,
+    endpoint_close,
     capability_mint,
     capability_derive,
     capability_pass,
@@ -51,6 +52,7 @@ pub const SyscallStatus = enum(u32) {
     conflict,
     internal_error,
     would_block,
+    peer_closed,
 };
 
 pub const DenialReason = enum(u16) {
@@ -356,7 +358,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 8), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 9), ABI_VERSION);
     try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));

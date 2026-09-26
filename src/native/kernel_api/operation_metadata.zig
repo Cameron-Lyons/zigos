@@ -75,6 +75,7 @@ pub const endpoint_owner_auto_grant = AutoGrant{
         .endpoint_connect = true,
         .endpoint_send = true,
         .endpoint_recv = true,
+        .endpoint_close = true,
         .capability_query = true,
         .ipc_peer = true,
     } },
@@ -173,6 +174,18 @@ pub const operations = [_]Descriptor{
         .required_right = .endpoint_recv,
         .target_kind = .{ .fixed = .endpoint },
         .scope_rule = .{ .task_scope_matches_request_task = true },
+    },
+    .{
+        .operation = .endpoint_close,
+        .binding = .{
+            .request_type_name = "EndpointCloseRequest",
+            .response_type_name = "void",
+            .handler_name = "dispatchEndpointClose",
+            .port_method_name = "endpointClose",
+        },
+        .domain = .endpoint,
+        .required_right = .endpoint_close,
+        .target_kind = .{ .fixed = .endpoint },
     },
     .{
         .operation = .capability_mint,
