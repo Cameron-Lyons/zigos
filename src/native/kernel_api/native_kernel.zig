@@ -239,7 +239,9 @@ pub const Kernel = struct {
 
         const task = try self.taskForAuthorizedRequest(authorization, owner_task_id);
         try self.validateEndpointBudget(task);
+        try validateRuntimeGrantForTask(task, 1);
         const created = try self.endpoint_table.create(ids.task(owner_task_id), label, flags);
+        errdefer self.endpoint_table.rollbackCreate(created.id);
         const endpoint_capability = try self.applySingleAutoGrant(
             .endpoint_create,
             .created_endpoint_owner,
@@ -584,7 +586,9 @@ pub const Kernel = struct {
 
         const task = try self.taskForAuthorizedRequest(authorization, owner_task_id);
         try self.validateSharedMemoryCreateBudget(task, size_bytes);
+        try validateRuntimeGrantForTask(task, 1);
         const object = try self.shared_memory_table.create(ids.task(owner_task_id), size_bytes);
+        errdefer self.shared_memory_table.rollbackCreate(object.id);
         const object_capability = try self.applySingleAutoGrant(
             .shared_memory_create,
             .created_shared_memory_owner,
@@ -1141,6 +1145,77 @@ test "moving a capability removes its source task attachment" {
 }
 
 const UndeliveredCase = enum { terminate, receiver_full, grants_full, expired };
+
+fn expectCreationRollback(shared_object: bool, task_full: bool) !void {
+    var harness = TestKernelHarness{};
+    var kernel = harness.kernel();
+    const task = try harness.createSessionTask();
+    task.budget.shared_memory_bytes = 2 * shared_memory.PAGE_SIZE;
+    const authority = try harness.mintSessionServiceAuthority(task, .{ .service = .{
+        .endpoint_create = true,
+        .shared_memory_create = true,
+    } });
+    try harness.runtime.grantCapability(task.id, authority.id);
+    const context = KernelCallContext{ .caller_task_id = task.id, .presented_capability_id = authority.id, .target = .none };
+    const existing_endpoint = try kernel.endpointCreate(context, task.id, "existing", .{ .local_only = true }, 1);
+    const existing_object = try kernel.sharedMemoryCreate(context, task.id, shared_memory.PAGE_SIZE, 1);
+    const peer = try harness.endpoints.create(ids.task(900), "peer", .{});
+    try harness.endpoints.connect(ids.endpoint(existing_endpoint.endpoint.endpoint_id), peer.id);
+    _ = try harness.endpoints.send(peer.id, peer.owner_task_id, 1, "preserved", null, false);
+    const filler_request = capability.MintRequest{
+        .holder = task.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .service, .id = 901 },
+        .rights = .{ .service = .{ .time_query = true } },
+        .scope = .{ .task_id = task.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    };
+    var last_filler: u64 = 0;
+    while (if (task_full) task.capability_count < task_runtime.MAX_TASK_CAPABILITIES else harness.capabilities.activeCount() < capability.MAX_CAPABILITIES) {
+        const filler = try harness.capabilities.mintBootRoot(filler_request);
+        last_filler = filler.id;
+        if (task_full) try harness.runtime.grantCapability(task.id, filler.id);
+    }
+    const grants_before = harness.capabilities.activeCount();
+    const attached_before = task.capability_count;
+    // Failed retries must not exhaust the object arena or the owner's budget.
+    for (0..endpoint.MAX_ENDPOINTS * 2) |_| {
+        const expected = if (task_full) error.CapabilityTableFull else error.TableFull;
+        if (shared_object) {
+            try std.testing.expectError(expected, kernel.sharedMemoryCreate(context, task.id, shared_memory.PAGE_SIZE, 2));
+        } else {
+            try std.testing.expectError(expected, kernel.endpointCreate(context, task.id, "rejected", .{ .local_only = true }, 2));
+        }
+        try std.testing.expectEqual(@as(usize, 2), harness.endpoints.activeCount());
+        try std.testing.expectEqual(@as(u16, 1), harness.endpoints.activeForTask(ids.task(task.id)));
+        try std.testing.expectEqual(@as(usize, 1), harness.shared.activeCount());
+        try std.testing.expectEqual(shared_memory.PAGE_SIZE, harness.shared.liveOwnedBytesForTask(ids.task(task.id)));
+        try std.testing.expectEqual(grants_before, harness.capabilities.activeCount());
+        try std.testing.expectEqual(attached_before, task.capability_count);
+    }
+    var payload: [32]u8 = undefined;
+    const received = (try harness.endpoints.recvInto(ids.endpoint(existing_endpoint.endpoint.endpoint_id), &payload)).?;
+    try std.testing.expectEqualStrings("preserved", payload[0..received.len]);
+    try std.testing.expectEqual(existing_object.object.object_id, (try harness.shared.descriptor(ids.sharedMemory(existing_object.object.object_id))).object_id);
+    if (task_full) _ = try harness.runtime.revokeCapability(task.id, last_filler);
+    try harness.capabilities.revokeGrant(last_filler);
+    if (shared_object) {
+        _ = try kernel.sharedMemoryCreate(context, task.id, shared_memory.PAGE_SIZE, 3);
+        try std.testing.expectEqual(2 * shared_memory.PAGE_SIZE, harness.shared.liveOwnedBytesForTask(ids.task(task.id)));
+    } else {
+        _ = try kernel.endpointCreate(context, task.id, "retry", .{ .local_only = true }, 3);
+        try std.testing.expectEqual(@as(u16, 2), harness.endpoints.activeForTask(ids.task(task.id)));
+    }
+    try std.testing.expectEqual(grants_before, harness.capabilities.activeCount());
+}
+
+test "endpoint creation rolls back object and budget when its grant cannot be attached" {
+    for ([_]bool{ false, true }) |task_full| try expectCreationRollback(false, task_full);
+}
+
+test "shared memory creation rolls back object and budget when its grant cannot be attached" {
+    for ([_]bool{ false, true }) |task_full| try expectCreationRollback(true, task_full);
+}
 
 fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     var harness = TestKernelHarness{};

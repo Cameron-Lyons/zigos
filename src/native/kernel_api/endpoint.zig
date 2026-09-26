@@ -194,6 +194,24 @@ pub const Table = struct {
         return slot.endpoint;
     }
 
+    // Only for a newly created endpoint whose handle has not been published.
+    // The kernel uses this to unwind creation if the ownership grant fails.
+    pub fn rollbackCreate(self: *Table, endpoint_id: ids.EndpointId) void {
+        const handle = EndpointHandle{ .value = endpoint_id.raw() };
+        const slot = self.arena.getByHandle(handle) orelse
+            native_util.impossibleByInvariant("unpublished endpoint remains live until rollback");
+        if (!slot.endpoint.peer_endpoint_id.isZero() or slot.endpoint.queue_len != 0) {
+            native_util.impossibleByInvariant("unpublished endpoint has no peer or queued messages");
+        }
+        if (!self.owner_index.remove(slot.endpoint.owner_task_id.raw(), handle.slotIndex())) {
+            native_util.impossibleByInvariant("unpublished endpoint is present in its owner index");
+        }
+        releaseEndpointQueue(&slot.endpoint);
+        if (!self.arena.removeHandle(handle)) {
+            native_util.impossibleByInvariant("endpoint rollback removes its live handle");
+        }
+    }
+
     pub fn connect(self: *Table, endpoint_id: ids.EndpointId, peer_endpoint_id: ids.EndpointId) Error!void {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;

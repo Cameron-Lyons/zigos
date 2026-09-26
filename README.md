@@ -175,6 +175,9 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   and completing any capability move. Kernel task termination releases unread
   moved grants before freeing endpoint queues; failed receipt attachment also
   releases a consumed move while leaving copied grants with their sender.
+  Endpoint and shared-memory creation unwind unpublished objects if ownership
+  grants fail, restoring owner budgets and frame reservations. Failed single
+  grants preserve capacity for future capability targets.
   Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.

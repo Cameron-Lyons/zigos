@@ -300,6 +300,12 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
         fn mintSingleRequest(self: *Self, request: MintRequest) Error!Capability {
             if (!rightsAreValidForTarget(request.target, request.rights)) return error.InvalidCapabilityRights;
             if (request.audit.delegation_depth > request.audit.max_delegation_depth) return error.DelegationDepthExceeded;
+            // Reserve the grant first: a full grant table must not consume a
+            // target-generation entry for authority that was never published.
+            const handle = self.slots.reserveHandleForOverwrite() orelse return error.TableFull;
+            errdefer if (!self.slots.removeHandle(handle)) {
+                native_util.impossibleByInvariant("failed mint releases its reserved capability handle");
+            };
             const target_generation_index = try self.ensureTargetGenerationIndex(request.target);
             const record = Capability{
                 .id = 0,
@@ -312,7 +318,8 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 .revocation_generation = self.targetGenerationAt(target_generation_index).generation,
                 .audit = request.audit,
             };
-            const inserted = try self.insertWithNewCapabilityId(record, target_generation_index);
+            const inserted_slot = self.initializeReservedSlot(handle, record, target_generation_index);
+            const inserted = self.commitInsertedSlot(inserted_slot.slot_index);
             return inserted.*;
         }
 
@@ -487,6 +494,15 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
                 self.slots.reserveHandleAtForOverwrite(explicit_index) orelse return null
             else
                 self.slots.reserveHandleForOverwrite() orelse return null;
+            return self.initializeReservedSlot(reserved_handle, capability_template, target_generation_index);
+        }
+
+        fn initializeReservedSlot(
+            self: *Self,
+            reserved_handle: CapabilityHandle,
+            capability_template: Capability,
+            target_generation_index: u8,
+        ) InsertedCapabilitySlot {
             const slot = self.slots.getByHandle(reserved_handle) orelse
                 native_util.impossibleByInvariant("reserved capability handle is not live");
             slot.* = .{
@@ -940,6 +956,40 @@ test "single grants avoid batch plans and retain transactional rollback" {
     table.rollbackSingleGrant(minted.id);
     try std.testing.expectEqual(@as(usize, 0), table.activeCount());
     try std.testing.expect(table.query(minted.id) == null);
+}
+
+test "failed single grants preserve target and capability capacity" {
+    const SmallTable = CapabilityTableWith(.{
+        .max_capabilities = 2,
+        .max_target_generations = 2,
+        .target_generation_index_capacity = 4,
+    });
+    var table = SmallTable.init();
+    var request = emptyGrantPlanEntry().request;
+    const first = try table.mintSingle(request);
+    const second = try table.mintSingle(request);
+    const generation = table.mutationGeneration();
+    const initial_target = request.target;
+    for (2..32) |target_id| {
+        request.target.id = target_id;
+        try std.testing.expectError(error.TableFull, table.mintSingle(request));
+        try std.testing.expectEqual(@as(usize, 1), table.target_generations.countInUse());
+        try std.testing.expectEqual(@as(usize, 2), table.activeCount());
+        try std.testing.expectEqual(generation, table.mutationGeneration());
+    }
+    try table.revokeGrant(second.id);
+    request.target.id = 50;
+    const replacement = try table.mintSingle(request);
+    try std.testing.expect(table.query(second.id) == null);
+    try table.revokeGrant(replacement.id);
+    const before_failure = table.mutationGeneration();
+    request.target.id = 51;
+    try std.testing.expectError(error.TargetTableFull, table.mintSingle(request));
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expectEqual(before_failure, table.mutationGeneration());
+    request.target = initial_target;
+    _ = try table.mintSingle(request);
+    try std.testing.expect(table.query(first.id) != null);
 }
 
 test "capability table omits redundant holder index state" {
