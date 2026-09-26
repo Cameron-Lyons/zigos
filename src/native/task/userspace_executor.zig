@@ -1714,6 +1714,7 @@ test "mailbox publication preserves resume state and resets first launch" {
         .last_counter = 41,
         .input_event_count = 12,
         .ui_state_revision = 15,
+        .document = .{ .endpoint_capability_id = 201, .service_endpoint_id = 202, .object_id = 203, .version_id = 204 },
     };
     const authorities = MailboxAuthorities{
         .bootstrap_capability_id = 101,
@@ -1741,6 +1742,8 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 9), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 12), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 15), mailbox.ui_state_revision);
+    try std.testing.expectEqual(@as(u64, 201), mailbox.document.endpoint_capability_id);
+    try std.testing.expectEqual(@as(u64, 204), mailbox.document.version_id);
 
     const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 11, 107, 108, authorities).?;
     writeBootstrapMailbox(first_launch);
@@ -1753,6 +1756,7 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 11), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 0), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 0), mailbox.ui_state_revision);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.DocumentBinding{}, mailbox.document);
     try std.testing.expectEqual(@as(u64, 107), mailbox.task_id);
     try std.testing.expectEqual(@as(u64, 108), mailbox.ui_surface_id);
 

@@ -4,6 +4,7 @@ const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
 const service_protocol = @import("userspace_service_protocol");
 const ui_surface_state = @import("ui_surface_state.zig");
+const document_editor = @import("document_editor.zig");
 
 pub const ServiceKind = mailbox.ServiceKind;
 
@@ -91,6 +92,7 @@ const mailbox_section = if (builtin.target.ofmt == .macho) "__DATA,__zigos_boot"
 
 export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMENT) linksection(mailbox_section) = .{};
 var ui_state: ui_surface_state.State = .{};
+var document_state: document_editor.Editor = .{};
 
 const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
     struct {
@@ -192,6 +194,7 @@ pub fn zigos_userspace_contract_main(
         detail,
         zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+        comptime ui_surface_state.modelForBundle(bundle_id) == .notes,
     );
 }
 
@@ -213,6 +216,7 @@ pub fn zigos_userspace_service_main(
         detail,
         zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+        comptime ui_surface_state.modelForBundle(bundle_id) == .notes,
     );
 }
 
@@ -548,7 +552,7 @@ const InputDrain = struct {
     exhausted: bool = true,
 };
 
-fn drainFocusedInput() InputDrain {
+fn drainFocusedInput(comptime saves_documents: bool) InputDrain {
     const input_capability_id = zigos_userspace_bootstrap.input_capability_id;
     const task_id = zigos_userspace_bootstrap.task_id;
     if (input_capability_id == 0 or task_id == 0) return .{};
@@ -558,7 +562,7 @@ fn drainFocusedInput() InputDrain {
         const response = inputRecv(input_capability_id, task_id) orelse return .{};
         if (response.present == 0) return .{};
         received += 1;
-        _ = recordInputEvent(&zigos_userspace_bootstrap, response.event);
+        _ = recordInputEvent(&zigos_userspace_bootstrap, response.event, saves_documents);
     }
     return .{ .exhausted = false };
 }
@@ -569,8 +573,12 @@ fn initializeUiState(comptime bundle_id: []const u8, comptime contract_flags: u3
     publishUiState(&zigos_userspace_bootstrap, &ui_state);
 }
 
-fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor) bool {
-    return applyInputEvent(state, &ui_state, event);
+fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor, comptime saves_documents: bool) bool {
+    if (!applyInputEvent(state, &ui_state, event)) return false;
+    if (comptime saves_documents) {
+        if (abi.inputEventKind(event.kind) == .commit_text) document_state.requestSave(state.document, &ui_state);
+    }
+    return true;
 }
 
 fn applyInputEvent(
@@ -623,14 +631,50 @@ fn presentUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
     return true;
 }
 
-fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool) noreturn {
+const DocumentTransport = struct {
+    pub fn send(_: @This(), endpoint_capability_id: u64, correlation_id: u64, payload: []const u8) document_editor.SendResult {
+        var request = EndpointSendRequest{
+            .header = makeHeader(.endpoint_send, correlation_id, zigos_userspace_bootstrap.task_id),
+            .endpoint_capability_id = endpoint_capability_id,
+            .payload = payload,
+        };
+        return switch (trapCallNoResponse(&request)) {
+            .success => .sent,
+            .would_block => .busy,
+            else => .failed,
+        };
+    }
+
+    pub fn receive(_: @This(), endpoint_capability_id: u64) document_editor.ReceiveResult {
+        const received = endpointRecv(endpoint_capability_id, zigos_userspace_bootstrap.task_id) orelse return .failed;
+        if (received.present == 0) return .empty;
+        // The document service sends data-only replies over this dedicated
+        // channel. Unexpected authority must never acknowledge a save.
+        if (received.has_attached_capability != 0) {
+            return .failed;
+        }
+        return .{ .reply = .{
+            .sender_endpoint_id = received.message.sender_endpoint_id,
+            .correlation_id = received.message.correlation_id,
+            .length = received.message.payload_len,
+            .bytes = received.payload,
+        } };
+    }
+};
+
+fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool, comptime saves_documents: bool) noreturn {
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
     while (true) {
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
-            const input = drainFocusedInput();
+            const input = drainFocusedInput(saves_documents);
+            const document_work = if (comptime saves_documents) work: {
+                const pending = document_state.step(zigos_userspace_bootstrap.document, &ui_state, DocumentTransport{});
+                publishUiState(&zigos_userspace_bootstrap, &ui_state);
+                break :work pending;
+            } else false;
             _ = presentUiState(&zigos_userspace_bootstrap, &ui_state);
-            break :wait if (input.exhausted) .wait_for_event else .runnable;
+            break :wait if (input.exhausted and !document_work) .wait_for_event else .runnable;
         } else .wait_for_event;
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
@@ -708,6 +752,35 @@ var next_correlation_id: u64 = 1;
 test "fault codes stay stable for the same message" {
     try std.testing.expectEqual(faultCode("panic"), faultCode("panic"));
     try std.testing.expect(faultCode("panic") != faultCode("different"));
+}
+
+test "Notes input snapshots a save before processing subsequent typing" {
+    ui_state = ui_surface_state.State.init("app.notes");
+    document_state = .{};
+    defer {
+        ui_state = .{};
+        document_state = .{};
+    }
+    var state = mailbox.Mailbox{
+        .task_id = 2,
+        .document = .{ .endpoint_capability_id = 10, .service_endpoint_id = 11, .object_id = 12, .version_id = 13 },
+    };
+    var event = std.mem.zeroes(abi.InputEventDescriptor);
+    event.sequence = 1;
+    event.task_id = 2;
+    event.kind = @intFromEnum(abi.InputEventKind.text);
+    event.text = 'a';
+    try std.testing.expect(recordInputEvent(&state, event, true));
+    event.sequence += 1;
+    event.kind = @intFromEnum(abi.InputEventKind.commit_text);
+    event.text = 0;
+    try std.testing.expect(recordInputEvent(&state, event, true));
+    event.sequence += 1;
+    event.kind = @intFromEnum(abi.InputEventKind.text);
+    event.text = 'b';
+    try std.testing.expect(recordInputEvent(&state, event, true));
+    try std.testing.expectEqualStrings("ab", ui_state.textSlice());
+    try std.testing.expectEqualStrings("a", document_state.client.?.snapshot[0..document_state.client.?.length]);
 }
 
 test "focused input telemetry rejects foreign events and records valid semantic input" {

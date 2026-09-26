@@ -37,9 +37,10 @@ requests.
   reuse its version, and stale editors cannot replace a newer document version.
   A bounded document-scoped endpoint protocol now has a userspace save client
   and a native storage backend, with host tests for durable receipts, retry,
-  backpressure, revocation, and object/path scope. Connecting an isolated app
-  to that backend and moving the storage core into its userspace service remain
-  open.
+  backpressure, revocation, and object/path scope. The Notes event loop captures
+  Ctrl+Enter snapshots, sends bounded batches, and waits for durable receipts.
+  Loading the document and provisioning its channel in a running session, plus
+  moving the storage core into its userspace service, remain open.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.
@@ -160,11 +161,13 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
-  Native ABI v6 uses bounded endpoint payloads and a 56-byte receive header
+  Native ABI v7 uses bounded endpoint payloads and a 56-byte receive header
   carrying the kernel-recorded sender endpoint. Services explicitly address
   replies to connected clients; stale or unrelated endpoint handles are
   rejected before publishing a reply or moving a capability. Receive buffers
   are validated before dequeue, and undersized outputs leave messages queued.
+  A full endpoint queue returns a distinct `would_block` status so clients can
+  retry backpressure without spinning on a disconnected peer.
   Successful sends wake only the destination owner after publishing the message
   and completing any capability move. Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
