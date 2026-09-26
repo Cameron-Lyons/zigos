@@ -127,6 +127,11 @@ pub const TaskRetirement = struct {
     }
 };
 
+pub const MovedCapabilityCleanup = struct {
+    context: *anyopaque,
+    release: *const fn (context: *anyopaque, capability_id: ids.CapabilityId) void,
+};
+
 pub const Table = struct {
     arena: EndpointArena = EndpointArena.init(),
     owner_index: EndpointOwnerIndex = EndpointOwnerIndex.init(),
@@ -339,7 +344,7 @@ pub const Table = struct {
         return self.arena.countInUse();
     }
 
-    pub fn retireTask(self: *Table, task_id: ids.TaskId) TaskRetirement {
+    pub fn retireTask(self: *Table, task_id: ids.TaskId, cleanup: ?MovedCapabilityCleanup) TaskRetirement {
         var retired = TaskRetirement{};
         while (true) {
             const slot_index = self.owner_index.head(task_id.raw());
@@ -355,6 +360,18 @@ pub const Table = struct {
             retired.endpoint_count += 1;
             if (!self.owner_index.remove(task_id.raw(), slot_index)) {
                 native_util.impossibleByInvariant("live endpoint is absent from its owner index");
+            }
+            if (cleanup) |sink| {
+                if (endpointQueue(&slot.endpoint)) |queue| {
+                    // Only unread moves belong to this queue. Copies still
+                    // belong to their sender, and consumed slots may be stale.
+                    for (0..slot.endpoint.queue_len) |offset| {
+                        const message = &queue[(slot.endpoint.queue_head + offset) % MAX_ENDPOINT_QUEUE];
+                        if (message.move_attached_capability) {
+                            if (message.attachedCapabilityId()) |capability_id| sink.release(sink.context, capability_id);
+                        }
+                    }
+                }
             }
             releaseEndpointQueue(&slot.endpoint);
             if (!self.arena.removeIndex(slot_index)) {
@@ -531,7 +548,7 @@ test "endpoint ids reject stale handles after slot reuse" {
     const endpoint = try table.create(ids.task(10), "first", .{});
     const original_handle = EndpointHandle{ .value = endpoint.id.raw() };
 
-    const retired = table.retireTask(ids.task(10));
+    const retired = table.retireTask(ids.task(10), null);
     try std.testing.expectEqual(@as(u16, 1), retired.endpoint_count);
     try std.testing.expect(retired.retiredEndpointIds()[0].eql(endpoint.id));
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(endpoint.id));
@@ -556,6 +573,34 @@ test "endpoint table rejection preserves active endpoints" {
     try std.testing.expectEqual(@as(u16, 1), table.activeForTask(ids.task(100)));
 }
 
+test "endpoint retirement releases only unread moves across queue wraparound" {
+    const Recorder = struct {
+        ids: [MAX_ENDPOINT_QUEUE]u64 = [_]u64{0} ** MAX_ENDPOINT_QUEUE,
+        count: usize = 0,
+        fn release(context: *anyopaque, capability_id: ids.CapabilityId) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.ids[self.count] = capability_id.raw();
+            self.count += 1;
+        }
+    };
+    var recorder = Recorder{};
+    var table = Table.init();
+    const client = try table.create(ids.task(1), "client", .{});
+    const server = try table.create(ids.task(2), "server", .{ .service_port = true });
+    try table.connect(client.id, server.id);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    for (0..4) |index| {
+        _ = try table.send(client.id, client.owner_task_id, 1, "already received", ids.capability(100 + index), true);
+        _ = try table.recvInto(server.id, &payload);
+    }
+    for (0..MAX_ENDPOINT_QUEUE) |index| {
+        _ = try table.send(client.id, client.owner_task_id, 2, "unread", ids.capability(200 + index), index % 2 == 0);
+    }
+    _ = table.retireTask(server.owner_task_id, .{ .context = &recorder, .release = Recorder.release });
+    try std.testing.expectEqual(@as(usize, 4), recorder.count);
+    try std.testing.expectEqualSlices(u64, &.{ 200, 202, 204, 206 }, recorder.ids[0..recorder.count]);
+}
+
 test "retiring task endpoints clears queues and surviving peer links" {
     var table = Table.init();
     const client_a = try table.create(ids.task(10), "client-a", .{});
@@ -568,7 +613,7 @@ test "retiring task endpoints clears queues and surviving peer links" {
     _ = try table.send(client_b.id, ids.task(11), 2, "queued-b", null, false);
     try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(service.id)).queued_messages);
 
-    const retired = table.retireTask(ids.task(12));
+    const retired = table.retireTask(ids.task(12), null);
     try std.testing.expectEqual(@as(u16, 1), retired.endpoint_count);
     try std.testing.expect(retired.retiredEndpointIds()[0].eql(service.id));
     try std.testing.expectEqual(@as(usize, 2), table.activeCount());
@@ -664,7 +709,7 @@ test "delayed service replies reject retired client handles after slot reuse" {
     const service = try table.create(ids.task(12), "service", .{ .service_port = true });
     try table.connect(client.id, service.id);
     _ = try table.send(client.id, client.owner_task_id, 1, "request", null, false);
-    _ = table.retireTask(client.owner_task_id);
+    _ = table.retireTask(client.owner_task_id, null);
     const replacement = try table.create(client.owner_task_id, "replacement", .{});
     try table.connect(replacement.id, service.id);
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
@@ -704,7 +749,7 @@ test "endpoint readiness follows queued ownership through drains and retirement"
     try std.testing.expect(!table.hasPendingForTask(service.owner_task_id));
     try std.testing.expectEqual(client.owner_task_id, try table.reply(service.id, client.id, service.owner_task_id, 1, "reply", null, false));
     try std.testing.expect(table.hasPendingForTask(client.owner_task_id));
-    _ = table.retireTask(client.owner_task_id);
+    _ = table.retireTask(client.owner_task_id, null);
     _ = try table.create(client.owner_task_id, "replacement", .{});
     try std.testing.expect(!table.hasPendingForTask(client.owner_task_id));
 }

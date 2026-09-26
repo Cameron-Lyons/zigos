@@ -172,7 +172,10 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   A full endpoint queue returns a distinct `would_block` status so clients can
   retry backpressure without spinning on a disconnected peer.
   Successful sends wake only the destination owner after publishing the message
-  and completing any capability move. Idle services park instead of generating
+  and completing any capability move. Kernel task termination releases unread
+  moved grants before freeing endpoint queues; failed receipt attachment also
+  releases a consumed move while leaving copied grants with their sender.
+  Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.
   The ABI also defines a task-scoped, fixed-size surface

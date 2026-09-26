@@ -210,7 +210,10 @@ pub const Kernel = struct {
         if (!terminated) return false;
         _ = self.capability_table.retireHeldTaskAuthority(task_id, terminated_capabilities.ids[0..terminated_capabilities.count]);
         self.retireCapabilityTarget(.{ .kind = .task, .id = task_id });
-        const retired_endpoints = self.endpoint_table.retireTask(ids.task(task_id));
+        const retired_endpoints = self.endpoint_table.retireTask(ids.task(task_id), .{
+            .context = self.capability_table,
+            .release = releaseQueuedMove,
+        });
         for (retired_endpoints.retiredEndpointIds()) |endpoint_id| {
             self.retireCapabilityTarget(.{ .kind = .endpoint, .id = endpoint_id.raw() });
         }
@@ -354,6 +357,9 @@ pub const Kernel = struct {
         };
 
         if (message.attached_capability_id) |attached_capability_id| {
+            // Dequeue transfers responsibility for an in-flight move here.
+            // A failed receive must release it if no recipient was attached.
+            errdefer if (message.move_attached_capability) releaseQueuedMove(self.capability_table, attached_capability_id);
             const receiver = authorization.task;
             try validateRuntimeGrantForTask(receiver, 1);
             const resolved_original = try self.capability_table.resolveUsable(attached_capability_id.raw(), now_ticks);
@@ -972,6 +978,14 @@ pub const Kernel = struct {
     }
 };
 
+fn releaseQueuedMove(context: *anyopaque, capability_id: ids.CapabilityId) void {
+    const table: *capability.CapabilityTable = @ptrCast(@alignCast(context));
+    table.revokeGrant(capability_id.raw()) catch |err| switch (err) {
+        error.CapabilityNotFound => {}, // Revocation may have already removed it.
+        else => native_util.impossibleByInvariant("grant disposal only fails for an absent grant"),
+    };
+}
+
 fn validateRuntimeGrantForTask(task: *const task_runtime.TaskRecord, additional_count: usize) Error!void {
     if (task.capability_count + additional_count > task_runtime.MAX_TASK_CAPABILITIES) {
         return error.CapabilityTableFull;
@@ -1124,6 +1138,101 @@ test "moving a capability removes its source task attachment" {
     try std.testing.expect(harness.capabilities.query(source_capability.id) == null);
     try std.testing.expect(!source_task.hasCapability(source_capability.id));
     try std.testing.expect(receiver_task.hasCapability(passed.capability_id));
+}
+
+const UndeliveredCase = enum { terminate, receiver_full, grants_full, expired };
+
+fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
+    var harness = TestKernelHarness{};
+    var kernel = harness.kernel();
+    const sender = try harness.createSessionTask();
+    const receiver = try harness.runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 3 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 4096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .local_only = true,
+    });
+    const source = try harness.endpoints.create(ids.task(sender.id), "source", .{ .local_only = true });
+    const destination = try harness.endpoints.create(ids.task(receiver.id), "destination", .{ .local_only = true });
+    try harness.endpoints.connect(source.id, destination.id);
+    const sending = try harness.capabilities.mintBootRoot(.{
+        .holder = sender.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .endpoint, .id = source.id.raw() },
+        .rights = .{ .endpoint = .{ .endpoint_send = true } },
+        .scope = .{ .task_id = sender.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    const receiving = try harness.capabilities.mintBootRoot(.{
+        .holder = receiver.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .endpoint, .id = destination.id.raw() },
+        .rights = .{ .endpoint = .{ .endpoint_recv = true } },
+        .scope = .{ .task_id = receiver.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    const gift_request = capability.MintRequest{
+        .holder = sender.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .service, .id = 900 },
+        .rights = .{ .service = .{ .capability_pass = true, .time_query = true } },
+        .scope = .{ .task_id = sender.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    };
+    const gift = try harness.capabilities.mintBootRoot(gift_request);
+    const termination = try harness.capabilities.mintBootRoot(.{
+        .holder = receiver.owner,
+        .issuer = test_policy_authority,
+        .target = .{ .kind = .task, .id = receiver.id },
+        .rights = .{ .task = .{ .task_terminate = true } },
+        .scope = .{ .task_id = receiver.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    try harness.runtime.grantCapability(sender.id, sending.id);
+    try harness.runtime.grantCapability(sender.id, gift.id);
+    try harness.runtime.grantCapability(receiver.id, receiving.id);
+    try harness.runtime.grantCapability(receiver.id, termination.id);
+    try kernel.endpointSend(.{ .caller_task_id = sender.id, .presented_capability_id = sending.id, .target = .{ .endpoint = source.id.raw() } }, 1, "in flight", 0, gift.id, moved, 10);
+    try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
+    if (case == .terminate) {
+        try std.testing.expect(try kernel.taskTerminate(.{ .caller_task_id = receiver.id, .presented_capability_id = termination.id, .target = .{ .task = receiver.id } }, 11));
+    } else {
+        if (case == .receiver_full) {
+            var receiver_grant = gift_request;
+            receiver_grant.holder = receiver.owner;
+            receiver_grant.scope.task_id = receiver.id;
+            while (receiver.capability_count < task_runtime.MAX_TASK_CAPABILITIES) {
+                const filler = try harness.capabilities.mintBootRoot(receiver_grant);
+                try harness.runtime.grantCapability(receiver.id, filler.id);
+            }
+        }
+        if (case == .grants_full) {
+            while (harness.capabilities.activeCount() < capability.MAX_CAPABILITIES) _ = try harness.capabilities.mintBootRoot(gift_request);
+        }
+        const count = harness.capabilities.activeCount();
+        var payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+        const expected_error = switch (case) {
+            .receiver_full => error.CapabilityTableFull,
+            .grants_full => error.TableFull,
+            .expired => error.CapabilityRevoked,
+            .terminate => unreachable,
+        };
+        try std.testing.expectError(expected_error, kernel.endpointRecv(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .{ .endpoint = destination.id.raw() } }, receiver.id, &payload, if (case == .expired) 101 else 11));
+        try std.testing.expectEqual(count - @intFromBool(moved), harness.capabilities.activeCount());
+        try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+    }
+    try std.testing.expectEqual(!moved, harness.capabilities.query(gift.id) != null);
+    try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
+}
+
+test "endpoint retirement disposes unread moves while preserving sender-owned copies" {
+    for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.terminate, moved);
+}
+
+test "failed capability receipts dispose moves after quota allocation and expiry failures" {
+    for ([_]UndeliveredCase{ .receiver_full, .grants_full, .expired }) |case| {
+        for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(case, moved);
+    }
 }
 
 test "capability derivation is bound to its authorized source" {
