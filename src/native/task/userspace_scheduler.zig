@@ -772,7 +772,7 @@ pub const Scheduler = struct {
             exception.reasonFingerprint(),
             true,
         );
-        const terminated = runtime.terminateResolvedTask(task, now_ticks, null);
+        const terminated = runtime.terminateResolvedTask(task, now_ticks);
         if (!terminated) native_util.impossibleByInvariant("faulted userspace task was already terminated");
         if (self.slots.slotIndexOf(task_id)) |slot_index| {
             if (!self.unregisterSlotIndex(slot_index)) {

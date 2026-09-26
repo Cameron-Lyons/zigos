@@ -19,13 +19,15 @@ pub fn revokedCapabilitiesFailDuringIpc() !void {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = @import("../../native/kernel_api/shared_memory.zig").Table.init();
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         spec_support.policyAuthority(1),
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var port = component_port.KernelPort.init(&kernel);
 
     const sender = try runtime.createTask(.{
@@ -117,13 +119,15 @@ pub fn expiredLeasesFailAtKernelServiceBoundaries() !void {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = @import("../../native/kernel_api/shared_memory.zig").Table.init();
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         spec_support.policyAuthority(1),
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var port = component_port.KernelPort.init(&kernel);
 
     const task = try runtime.createTask(.{

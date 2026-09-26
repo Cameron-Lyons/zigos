@@ -493,6 +493,7 @@ pub const SessionManager = struct {
                 self.userspaceCatalogPtr(),
                 self.runtimePtr(),
                 self.userspaceSchedulerPtr(),
+                &self.kernel_context.kernel_instance,
             )) {
                 self.failBoot();
                 return;

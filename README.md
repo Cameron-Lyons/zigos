@@ -172,7 +172,10 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   A full endpoint queue returns a distinct `would_block` status so clients can
   retry backpressure without spinning on a disconnected peer.
   Successful sends wake only the destination owner after publishing the message
-  and completing any capability move. Kernel task termination releases unread
+  and completing any capability move. Kernel initialization binds one synchronous
+  runtime retirement hook, so lifecycle requests, direct termination, and user
+  exceptions release task-scoped grants, owned endpoints, and shared-memory
+  objects and mappings through the same path. Termination releases unread
   moved grants before freeing endpoint queues; failed receipt attachment also
   releases a consumed move while leaving copied grants with their sender.
   Endpoint and shared-memory creation unwind unpublished objects if ownership

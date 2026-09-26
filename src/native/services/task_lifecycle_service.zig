@@ -67,7 +67,7 @@ pub const Service = struct {
         const transitioned = switch (request.operation) {
             .suspend_task => self.runtime.suspendResolvedTask(task, request.now_ticks),
             .resume_task => self.runtime.resumeResolvedTask(task, request.now_ticks),
-            .terminate_task => self.runtime.terminateResolvedTask(task, request.now_ticks, null),
+            .terminate_task => self.runtime.terminateResolvedTask(task, request.now_ticks),
         };
         try recordLifecycle(ledger, request, transitioned);
         if (!transitioned) return error.InvalidLifecycleTransition;

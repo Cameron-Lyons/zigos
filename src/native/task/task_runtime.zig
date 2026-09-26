@@ -47,8 +47,8 @@ pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
-pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_664;
-pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_624;
+pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 599_688;
+pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_648;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_RUNTIME_SIZE_CEILING_BYTES
 else
@@ -86,9 +86,20 @@ pub const Error = model.Error;
 pub const Snapshot = model.Snapshot;
 pub const syntheticUserspaceImage = model.syntheticUserspaceImage;
 
-pub const TerminationCapabilities = struct {
-    count: u16 = 0,
-    ids: [MAX_TASK_CAPABILITIES]u64 = undefined,
+pub const TaskRetirement = struct {
+    task_id: u64,
+    // Borrowed only for the synchronous notification, before attachments clear.
+    capability_ids: []const u64,
+    now_ticks: u64,
+};
+
+pub const TaskRetirementSink = struct {
+    context: *anyopaque,
+    retire: *const fn (*anyopaque, TaskRetirement) void,
+
+    pub fn eql(self: TaskRetirementSink, other: TaskRetirementSink) bool {
+        return self.context == other.context and self.retire == other.retire;
+    }
 };
 
 comptime {
@@ -262,6 +273,7 @@ pub const Runtime = struct {
     task_cold: TaskColdBacking = if (heap_backed_task_cold) null else [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
     address_spaces: AddressSpaceBacking = if (heap_backed_address_spaces) null else model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
+    task_retirement_sink: ?TaskRetirementSink = null,
 
     comptime {
         if (@sizeOf(@This()) > RUNTIME_SIZE_CEILING_BYTES) {
@@ -306,6 +318,19 @@ pub const Runtime = struct {
         const current = self.address_space_retirement_sink orelse return false;
         if (!current.eql(expected)) return false;
         self.address_space_retirement_sink = null;
+        return true;
+    }
+
+    pub fn bindTaskRetirementSink(self: *Runtime, sink: TaskRetirementSink) bool {
+        if (self.task_retirement_sink != null) return false;
+        self.task_retirement_sink = sink;
+        return true;
+    }
+
+    pub fn unbindTaskRetirementSink(self: *Runtime, expected: TaskRetirementSink) bool {
+        const current = self.task_retirement_sink orelse return false;
+        if (!current.eql(expected)) return false;
+        self.task_retirement_sink = null;
         return true;
     }
 
@@ -1091,27 +1116,28 @@ pub const Runtime = struct {
 
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
         const task = self.find(task_id) orelse return error.TaskNotFound;
-        return self.terminateResolvedTask(task, tick, null);
+        return self.terminateResolvedTask(task, tick);
     }
 
     pub fn terminateResolvedTask(
         self: *Runtime,
         task: *TaskRecord,
         tick: u64,
-        terminated_capabilities: ?*TerminationCapabilities,
     ) bool {
         if (builtin.mode == .Debug) _ = self.taskHandleForResolved(task);
         const slot_index: usize = task.arena_slot_index;
-        if (terminated_capabilities) |output| output.count = 0;
         if (task.state == .terminated) return false;
         const retired_address_space_id = task.address_space_id;
-        if (terminated_capabilities) |output| {
-            output.count = task.capability_count;
-            @memcpy(output.ids[0..output.count], task.capabilityIds());
-        }
 
         self.removeInitialComponentLabelIndex(slot_index, task);
         self.setTaskState(task, .terminated);
+        if (self.task_retirement_sink) |sink| {
+            sink.retire(sink.context, .{
+                .task_id = task.id,
+                .capability_ids = task.capabilityIds(),
+                .now_ticks = tick,
+            });
+        }
         clearTerminatedTaskResources(task);
         task.execution_component_count = 0;
         task.capability_count = 0;
@@ -2179,6 +2205,57 @@ test "terminating a task clears its capabilities and marks the state" {
     try std.testing.expectEqual(@as(usize, 0), task.execution_component_count);
     try std.testing.expectEqual(@as(usize, 0), task.capability_count);
     try std.testing.expectEqual(AuditEventKind.terminated, task.latestAuditEvent().?.kind);
+}
+
+test "task retirement is exclusive synchronous and exactly once before attachments clear" {
+    const Recorder = struct {
+        task: *const TaskRecord,
+        count: usize = 0,
+        observed_state: TaskState = .active,
+        observed_capability: u64 = 0,
+        observed_tick: u64 = 0,
+
+        fn retire(context: *anyopaque, retirement: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.count += 1;
+            self.observed_state = self.task.state;
+            self.observed_tick = retirement.now_ticks;
+            std.debug.assert(retirement.task_id == self.task.id);
+            std.debug.assert(retirement.capability_ids.len == 1);
+            self.observed_capability = retirement.capability_ids[0];
+        }
+
+        fn sink(self: *@This()) TaskRetirementSink {
+            return .{ .context = self, .retire = retire };
+        }
+    };
+    var runtime = Runtime.init();
+    const first_task = try createTaskIdTestTask(&runtime, 9001);
+    try runtime.grantCapability(first_task.id, 41);
+    var first = Recorder{ .task = first_task };
+    var second = Recorder{ .task = first_task };
+    try std.testing.expect(runtime.bindTaskRetirementSink(first.sink()));
+    try std.testing.expect(!runtime.bindTaskRetirementSink(second.sink()));
+    try std.testing.expect(!runtime.unbindTaskRetirementSink(second.sink()));
+    try std.testing.expect(try runtime.terminateTask(first_task.id, 73));
+    try std.testing.expect(!try runtime.terminateTask(first_task.id, 74));
+    try std.testing.expectEqual(@as(usize, 1), first.count);
+    try std.testing.expectEqual(TaskState.terminated, first.observed_state);
+    try std.testing.expectEqual(@as(u64, 41), first.observed_capability);
+    try std.testing.expectEqual(@as(u64, 73), first.observed_tick);
+    try std.testing.expectEqual(@as(u16, 0), first_task.capability_count);
+    try std.testing.expectEqual(@as(usize, 0), second.count);
+
+    try std.testing.expect(runtime.unbindTaskRetirementSink(first.sink()));
+    try std.testing.expect(runtime.bindTaskRetirementSink(second.sink()));
+    try std.testing.expect(!runtime.unbindTaskRetirementSink(first.sink()));
+    const next_task = try createTaskIdTestTask(&runtime, 9002);
+    try runtime.grantCapability(next_task.id, 42);
+    second.task = next_task;
+    try std.testing.expect(runtime.terminateResolvedTask(next_task, 75));
+    try std.testing.expectEqual(@as(usize, 1), second.count);
+    try std.testing.expectEqual(@as(u64, 42), second.observed_capability);
+    try std.testing.expect(runtime.unbindTaskRetirementSink(second.sink()));
 }
 
 test "address-space retirement follows successful rehost and termination exactly once" {

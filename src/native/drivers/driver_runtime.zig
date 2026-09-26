@@ -431,13 +431,15 @@ test "runtime uses the activation tick when claiming storage authority" {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var kernel_port = component_port.KernelPort.init(&kernel);
 
     const Backend = struct {

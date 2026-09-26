@@ -568,13 +568,15 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .endpoint_id = 99,
         .endpoint_capability_id = 100,
     });
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         spec_support.policyAuthority(1),
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var port = component_port.KernelPort.init(&kernel);
 
     const session_task = try runtime.createTask(.{

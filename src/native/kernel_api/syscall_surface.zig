@@ -210,7 +210,7 @@ const TestKernel = struct {
     authority_capability_id: u64 = 0,
 
     fn init(self: *TestKernel) !void {
-        self.kernel = native_kernel.Kernel.init(
+        self.kernel.initInPlace(
             .{ .kind = .policy_authority, .serial = 1 },
             &self.runtime,
             &self.capabilities,

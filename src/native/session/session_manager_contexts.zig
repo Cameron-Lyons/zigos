@@ -64,7 +64,10 @@ pub const KernelContext = struct {
     }
 
     pub fn resetPort(self: *KernelContext) void {
-        if (self.kernel_port_ready) self.kernel_instance.clearEndpointWakeSink();
+        if (self.kernel_port_ready) {
+            self.kernel_instance.clearEndpointWakeSink();
+            self.kernel_instance.deinit();
+        }
         self.kernel_port_ready = false;
     }
 
@@ -141,7 +144,7 @@ pub const KernelContext = struct {
     ) *component_port.KernelPort {
         const capability_table = self.capabilityTable() orelse unreachable;
         const endpoint_table = self.endpointTable() orelse unreachable;
-        self.kernel_instance = native_kernel.Kernel.init(
+        self.kernel_instance.initInPlace(
             policy_authority,
             runtime_service.runtimePtr(),
             capability_table,

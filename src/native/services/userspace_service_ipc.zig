@@ -288,7 +288,7 @@ const Harness = struct {
 
     fn init(self: *Harness, comptime kind: ServiceKind) !void {
         self.service_owner = .{ .kind = .service, .serial = serviceSerial(kind) };
-        self.kernel = native_kernel.Kernel.init(
+        self.kernel.initInPlace(
             self.policy_authority,
             &self.runtime,
             &self.capabilities,

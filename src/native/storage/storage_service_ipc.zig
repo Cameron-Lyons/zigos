@@ -457,7 +457,7 @@ const UserspaceStorageHarness = struct {
 
     fn init(self: *UserspaceStorageHarness) !void {
         self.checkpoint_store.resetPersistent();
-        self.kernel = native_kernel.Kernel.init(
+        self.kernel.initInPlace(
             self.policy_authority,
             &self.runtime,
             &self.capabilities,

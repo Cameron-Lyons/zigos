@@ -930,13 +930,15 @@ test "active nvme controller sessions reject stale broker generations" {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var kernel_port = component_port.KernelPort.init(&kernel);
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = service_id };

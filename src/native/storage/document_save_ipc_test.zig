@@ -38,7 +38,7 @@ const Fixture = struct {
         const self = try std.testing.allocator.create(Fixture);
         errdefer std.testing.allocator.destroy(self);
         self.* = .{ .device = device };
-        self.kernel = native_kernel.Kernel.init(.{ .kind = .policy_authority, .serial = 1 }, &self.runtime, &self.capabilities, &self.endpoints, &self.shared);
+        self.kernel.initInPlace(.{ .kind = .policy_authority, .serial = 1 }, &self.runtime, &self.capabilities, &self.endpoints, &self.shared);
         self.port = component_port.KernelPort.init(&self.kernel);
         const app = try self.runtime.createTask(.{
             .owner = .{ .kind = .app, .serial = 77 },
@@ -111,6 +111,7 @@ const Fixture = struct {
     }
 
     fn deinit(self: *Fixture) void {
+        self.kernel.deinit();
         self.device.deinit();
         std.testing.allocator.destroy(self);
     }

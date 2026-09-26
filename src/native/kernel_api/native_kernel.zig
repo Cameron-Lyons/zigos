@@ -142,20 +142,34 @@ pub const Kernel = struct {
     focused_input_receiver: ?FocusedInputReceiver = null,
     surface_presentation_receiver: ?SurfacePresentationReceiver = null,
     endpoint_wake_sink: ?EndpointWakeSink = null,
-    pub fn init(
+    // The runtime retains this address until deinit; initialize only in stable
+    // storage, and unbind before either this kernel or its runtime is released.
+    pub fn initInPlace(
+        self: *Kernel,
         policy_authority: principal.PrincipalId,
         runtime: *task_runtime.Runtime,
         capability_table: *capability.CapabilityTable,
         endpoint_table: *endpoint.Table,
         shared_memory_table: *shared_memory.Table,
-    ) Kernel {
-        return .{
+    ) void {
+        self.* = .{
             .policy_authority = policy_authority,
             .runtime = runtime,
             .capability_table = capability_table,
             .endpoint_table = endpoint_table,
             .shared_memory_table = shared_memory_table,
         };
+        if (!runtime.bindTaskRetirementSink(self.retirementSink())) {
+            native_util.impossibleByInvariant("a task runtime has exactly one live kernel resource owner");
+        }
+    }
+
+    pub fn deinit(self: *Kernel) void {
+        _ = self.runtime.unbindTaskRetirementSink(self.retirementSink());
+    }
+
+    fn retirementSink(self: *Kernel) task_runtime.TaskRetirementSink {
+        return .{ .context = self, .retire = retireTaskForRuntime };
     }
 
     pub fn bindFocusedInputReceiver(self: *Kernel, receiver: FocusedInputReceiver) void {
@@ -205,10 +219,12 @@ pub const Kernel = struct {
         const authorization = try self.authorizeOperationWithSubject(.task_terminate, context, now_ticks, .{});
         const task_id = authorization.resolved_capability.capability.target.id;
         const task = try self.taskForAuthorizedRequest(authorization, task_id);
-        var terminated_capabilities = task_runtime.TerminationCapabilities{};
-        const terminated = self.runtime.terminateResolvedTask(task, now_ticks, &terminated_capabilities);
-        if (!terminated) return false;
-        _ = self.capability_table.retireHeldTaskAuthority(task_id, terminated_capabilities.ids[0..terminated_capabilities.count]);
+        return self.runtime.terminateResolvedTask(task, now_ticks);
+    }
+
+    fn retireTaskResources(self: *Kernel, retirement: task_runtime.TaskRetirement) void {
+        const task_id = retirement.task_id;
+        _ = self.capability_table.retireHeldTaskAuthority(task_id, retirement.capability_ids);
         self.retireCapabilityTarget(.{ .kind = .task, .id = task_id });
         const retired_endpoints = self.endpoint_table.retireTask(ids.task(task_id), .{
             .context = self.capability_table,
@@ -221,7 +237,6 @@ pub const Kernel = struct {
         for (retired_shared_memory.revokedObjectIds()) |object_id| {
             self.retireCapabilityTarget(.{ .kind = .shared_memory, .id = object_id.raw() });
         }
-        return true;
     }
 
     pub fn endpointCreate(
@@ -990,6 +1005,11 @@ fn releaseQueuedMove(context: *anyopaque, capability_id: ids.CapabilityId) void 
     };
 }
 
+fn retireTaskForRuntime(context: *anyopaque, retirement: task_runtime.TaskRetirement) void {
+    const kernel: *Kernel = @ptrCast(@alignCast(context));
+    kernel.retireTaskResources(retirement);
+}
+
 fn validateRuntimeGrantForTask(task: *const task_runtime.TaskRecord, additional_count: usize) Error!void {
     if (task.capability_count + additional_count > task_runtime.MAX_TASK_CAPABILITIES) {
         return error.CapabilityTableFull;
@@ -1070,8 +1090,8 @@ const TestKernelHarness = struct {
     endpoints: endpoint.Table = endpoint.Table.init(),
     shared: shared_memory.Table = shared_memory.Table.init(),
 
-    fn kernel(self: *TestKernelHarness) Kernel {
-        return Kernel.init(
+    fn initKernel(self: *TestKernelHarness, kernel: *Kernel) void {
+        kernel.initInPlace(
             test_policy_authority,
             &self.runtime,
             &self.capabilities,
@@ -1112,7 +1132,9 @@ const TestKernelHarness = struct {
 
 test "moving a capability removes its source task attachment" {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const source_task = try harness.createSessionTask();
     const receiver_task = try harness.runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 3 },
@@ -1144,11 +1166,13 @@ test "moving a capability removes its source task attachment" {
     try std.testing.expect(receiver_task.hasCapability(passed.capability_id));
 }
 
-const UndeliveredCase = enum { terminate, receiver_full, grants_full, expired };
+const UndeliveredCase = enum { terminate, runtime_terminate, receiver_full, grants_full, expired };
 
 fn expectCreationRollback(shared_object: bool, task_full: bool) !void {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const task = try harness.createSessionTask();
     task.budget.shared_memory_bytes = 2 * shared_memory.PAGE_SIZE;
     const authority = try harness.mintSessionServiceAuthority(task, .{ .service = .{
@@ -1219,7 +1243,9 @@ test "shared memory creation rolls back object and budget when its grant cannot 
 
 fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const sender = try harness.createSessionTask();
     const receiver = try harness.runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 3 },
@@ -1271,6 +1297,8 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
     try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
     if (case == .terminate) {
         try std.testing.expect(try kernel.taskTerminate(.{ .caller_task_id = receiver.id, .presented_capability_id = termination.id, .target = .{ .task = receiver.id } }, 11));
+    } else if (case == .runtime_terminate) {
+        try std.testing.expect(try harness.runtime.terminateTask(receiver.id, 11));
     } else {
         if (case == .receiver_full) {
             var receiver_grant = gift_request;
@@ -1290,11 +1318,18 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
             .receiver_full => error.CapabilityTableFull,
             .grants_full => error.TableFull,
             .expired => error.CapabilityRevoked,
-            .terminate => unreachable,
+            .terminate, .runtime_terminate => unreachable,
         };
         try std.testing.expectError(expected_error, kernel.endpointRecv(.{ .caller_task_id = receiver.id, .presented_capability_id = receiving.id, .target = .{ .endpoint = destination.id.raw() } }, receiver.id, &payload, if (case == .expired) 101 else 11));
         try std.testing.expectEqual(count - @intFromBool(moved), harness.capabilities.activeCount());
         try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(destination.id)).queued_messages);
+    }
+    if (case == .terminate or case == .runtime_terminate) {
+        try std.testing.expectEqual(@as(u16, 0), harness.endpoints.activeForTask(ids.task(receiver.id)));
+        try std.testing.expect(harness.capabilities.query(receiving.id) == null);
+        try std.testing.expect(harness.capabilities.query(termination.id) == null);
+        try std.testing.expectEqual(@as(u16, 0), receiver.capability_count);
+        try std.testing.expect(!try harness.runtime.terminateTask(receiver.id, 12));
     }
     try std.testing.expectEqual(!moved, harness.capabilities.query(gift.id) != null);
     try std.testing.expectEqual(!moved, sender.hasCapability(gift.id));
@@ -1302,6 +1337,10 @@ fn expectUndeliveredCleanup(case: UndeliveredCase, moved: bool) !void {
 
 test "endpoint retirement disposes unread moves while preserving sender-owned copies" {
     for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.terminate, moved);
+}
+
+test "direct runtime termination disposes unread moves and endpoint resources" {
+    for ([_]bool{ false, true }) |moved| try expectUndeliveredCleanup(.runtime_terminate, moved);
 }
 
 test "failed capability receipts dispose moves after quota allocation and expiry failures" {
@@ -1312,7 +1351,9 @@ test "failed capability receipts dispose moves after quota allocation and expiry
 
 test "capability derivation is bound to its authorized source" {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const source_task = try harness.createSessionTask();
     const receiver_task = try harness.runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 4 },
@@ -1352,7 +1393,9 @@ test "capability derivation is bound to its authorized source" {
 
 test "self-target capability mutations reuse the authorized task" {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const task = try harness.createSessionTask();
     const authority = try harness.capabilities.mintBootRoot(.{
         .holder = task.owner,
@@ -1411,7 +1454,9 @@ const TestEndpointWakeProbe = struct {
 
 test "native kernel creates tasks endpoints and shared memory without owning service discovery" {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const session_task = try harness.createSessionTask();
     const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
         .task_create = true,
@@ -1574,13 +1619,15 @@ test "native kernel descriptor authorization enforces request task scope" {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
+    var kernel: Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
 
     const scoped_task = try runtime.createTask(.{
         .owner = .{ .kind = .service, .serial = 7 },
@@ -1624,7 +1671,9 @@ test "native kernel descriptor authorization enforces request task scope" {
 
 test "native kernel rejects app and service launches without signed userspace image provenance" {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const session_task = try harness.createSessionTask();
     const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
         .task_create = true,
@@ -1702,7 +1751,9 @@ test "native kernel rejects app and service launches without signed userspace im
 
 test "native kernel leaves typed service registration outside the TCB" {
     var harness = TestKernelHarness{};
-    var kernel = harness.kernel();
+    var kernel: Kernel = undefined;
+    harness.initKernel(&kernel);
+    defer kernel.deinit();
     const session_task = try harness.createSessionTask();
     const authority_capability = try harness.mintSessionServiceAuthority(session_task, .{ .service = .{
         .endpoint_create = true,
@@ -1734,17 +1785,27 @@ test "native kernel leaves typed service registration outside the TCB" {
 }
 
 test "capability mint query revoke and task termination are exposed by the native kernel" {
+    try expectNativeCapabilityLifecycle(false);
+}
+
+test "direct runtime termination retires owned memory and all authority for dead objects" {
+    try expectNativeCapabilityLifecycle(true);
+}
+
+fn expectNativeCapabilityLifecycle(direct_termination: bool) !void {
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
+    var kernel: Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
 
     const target_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 7 },
@@ -1859,7 +1920,11 @@ test "capability mint query revoke and task termination are exposed by the nativ
     try std.testing.expectError(error.InvalidCapabilityTarget, kernel.capabilityRevoke(testContext(.capability_revoke, admin_capability.id, .{ .capability = minted.capability_id }), minted.capability_id, 10));
     try kernel.capabilityRevoke(testContext(.capability_revoke, minted.capability_id, .{ .capability = minted.capability_id }), minted.capability_id, 10);
     try std.testing.expect(capabilities.query(minted.capability_id) == null);
-    try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
+    if (direct_termination) {
+        try std.testing.expect(try runtime.terminateTask(target_task.id, 11));
+    } else {
+        try std.testing.expect(try kernel.taskTerminate(testContext(.task_terminate, task_capability.id, .none), 11));
+    }
     try std.testing.expect(capabilities.query(task_capability.id) == null);
     try std.testing.expect(capabilities.query(external_task_authority.id) == null);
     try std.testing.expect(capabilities.query(external_endpoint_authority.id) == null);
@@ -1880,13 +1945,15 @@ test "task authority graph marks target-revoked capabilities unusable" {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
+    var kernel: Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
 
     const task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 77 },
@@ -1933,13 +2000,15 @@ test "capability grant plan does not mint when runtime attachment cannot fit" {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
+    var kernel: Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
 
     const target_task = try runtime.createTask(.{
         .owner = .{ .kind = .app, .serial = 7 },
@@ -1993,13 +2062,15 @@ test "native kernel brokers device metadata and port io through device capabilit
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = Kernel.init(
+    var kernel: Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
 
     const storage_driver_test_image = try generated_image_fixtures.storageDriverImage();
     const driver_task = try runtime.createTask(.{
