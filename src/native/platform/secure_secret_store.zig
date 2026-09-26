@@ -3,18 +3,23 @@ const crypto_hash = @import("../core/crypto_hash.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
+const sealing = @import("secret_sealing.zig");
+const manifest = @import("../policy/manifest.zig");
 
 pub const MAX_SECRETS: usize = 16;
 pub const MAX_HANDLES: usize = 32;
 pub const MAX_LABEL_BYTES: usize = 48;
-pub const MAX_VALUE_BYTES: usize = 96;
+pub const MAX_VALUE_BYTES: usize = sealing.MAX_VALUE_BYTES;
+pub const Value = sealing.Value;
+pub const SealedBlob = sealing.Blob;
+pub const RawValue = struct { len: u8 = 0, bytes: Value = @splat(0) };
 pub const DIRECT_SECRET_LOOKUP = true;
 pub const DENSE_SECRET_TABLE = true;
 pub const COMPACT_SECRET_METADATA = true;
 pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true;
 pub const DIRECT_HANDLE_LOOKUP = true;
 pub const OVERWRITES_RESERVED_HANDLE_SLOTS = true;
-pub const STORE_SIZE_CEILING_BYTES: usize = 5_312;
+pub const STORE_SIZE_CEILING_BYTES: usize = 14_800;
 
 pub const SecretRecord = struct {
     id: u64,
@@ -27,8 +32,17 @@ pub const SecretRecord = struct {
     label: [MAX_LABEL_BYTES]u8,
     sealed_digest_present: bool,
     sealed_digest: crypto_hash.Digest,
-    value_len: u8,
-    value: [MAX_VALUE_BYTES]u8,
+    material: union(enum) {
+        raw: RawValue,
+        sealed: SealedBlob,
+    },
+
+    pub fn sealedBlob(self: *const SecretRecord) ?[]const u8 {
+        return switch (self.material) {
+            .sealed => |*blob| blob.slice(),
+            .raw => null,
+        };
+    }
 
     pub fn labelSlice(self: *const SecretRecord) []const u8 {
         return self.label[0..@as(usize, self.label_len)];
@@ -49,26 +63,17 @@ pub const ExportContext = struct {
     task_id: u64,
 };
 
-pub const HardwareSealProvider = struct {
-    available: bool = false,
-    sealFn: *const fn (label: []const u8, raw: []const u8) crypto_hash.Digest = defaultSeal,
+pub const HardwareSealProvider = sealing.Provider;
 
-    pub fn seal(self: HardwareSealProvider, label: []const u8, raw: []const u8) ?crypto_hash.Digest {
-        if (!self.available) return null;
-        return self.sealFn(label, raw);
-    }
-};
-
-pub const Error = error{
+pub const Error = sealing.Error || error{
     HandleHolderMismatch,
     HandleNotFound,
     HandleTableFull,
-    HardwareProviderUnavailable,
     LabelTooLong,
     RawExportDenied,
     SecretNotFound,
     SecretTableFull,
-    SecretTooLarge,
+    InvalidSigningKey,
 };
 
 const HandleSlot = struct {
@@ -125,29 +130,27 @@ pub const Store = struct {
         const slot_index = self.countSecrets();
         if (slot_index >= MAX_SECRETS) return error.SecretTableFull;
         const secret_id: u64 = @intCast(slot_index + 1);
-        const hardware_sealed_digest = if (hardware_backed)
-            self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable
-        else
-            crypto_hash.zero_digest;
-
+        var blob = SealedBlob{};
+        if (hardware_backed) {
+            const binding = materialBinding(owner, label, exportable);
+            try self.hardware_provider.seal(&binding, raw, &blob);
+        }
         const secret = &self.secrets[slot_index];
         if (secret.id != 0) native_util.impossibleByInvariant("dense secret imports append into pre-zeroed slots");
         secret.id = secret_id;
         secret.owner = owner;
         secret.hardware_backed = hardware_backed;
+        secret.hardware_provider_used = hardware_backed;
         secret.exportable = exportable;
-        secret.resident_material = true;
-        secret.label_len = @intCast(native_util.copyTextExact(&secret.label, label) catch return error.LabelTooLong);
+        secret.resident_material = !hardware_backed;
+        secret.label_len = @intCast(native_util.copyTextExact(&secret.label, label) catch unreachable);
         if (hardware_backed) {
-            secret.hardware_provider_used = true;
             secret.sealed_digest_present = true;
-            secret.sealed_digest = hardware_sealed_digest;
-        }
-        if (hardware_backed and !exportable) {
-            secret.resident_material = false;
-            secret.value_len = 0;
+            std.crypto.hash.sha2.Sha256.hash(blob.slice(), &secret.sealed_digest, .{});
+            secret.material = .{ .sealed = blob };
         } else {
-            secret.value_len = @intCast(native_util.copyTextExact(&secret.value, raw) catch return error.SecretTooLarge);
+            secret.material = .{ .raw = .{ .len = @intCast(raw.len) } };
+            @memcpy(secret.material.raw.bytes[0..raw.len], raw);
         }
 
         self.secret_count += 1;
@@ -219,12 +222,75 @@ pub const Store = struct {
         return self.findSecretConst(secret_id);
     }
 
-    pub fn exportRaw(self: *const Store, handle_id: u64, context: ExportContext) Error![]const u8 {
+    // Restore only after authenticating the encrypted record against its supplied
+    // metadata. Restoring records never restores handles or their authority.
+    pub fn restoreSealed(self: *Store, owner: principal.PrincipalId, label: []const u8, blob: []const u8, exportable: bool) Error!*SecretRecord {
+        if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
+        if (self.countSecrets() >= MAX_SECRETS) return error.SecretTableFull;
+        const binding = materialBinding(owner, label, exportable);
+        var scratch: Value = undefined;
+        defer std.crypto.secureZero(u8, &scratch);
+        _ = try self.hardware_provider.open(&binding, blob, &scratch);
+        const secret = &self.secrets[self.countSecrets()];
+        secret.id = @intCast(self.countSecrets() + 1);
+        secret.owner = owner;
+        secret.hardware_backed = true;
+        secret.hardware_provider_used = true;
+        secret.exportable = exportable;
+        secret.resident_material = false;
+        secret.label_len = @intCast(native_util.copyTextExact(&secret.label, label) catch unreachable);
+        secret.sealed_digest_present = true;
+        std.crypto.hash.sha2.Sha256.hash(blob, &secret.sealed_digest, .{});
+        secret.material = .{ .sealed = .{} };
+        @memcpy(secret.material.sealed.bytes[0..blob.len], blob);
+        secret.material.sealed.len = @intCast(blob.len);
+        self.secret_count += 1;
+        return secret;
+    }
+
+    pub fn exportRaw(self: *const Store, handle_id: u64, context: ExportContext, out: *Value) Error![]const u8 {
+        std.crypto.secureZero(u8, out);
+        errdefer std.crypto.secureZero(u8, out);
         const handle = self.describeHandle(handle_id) orelse return error.HandleNotFound;
         if (!handle.holder.eql(context.holder) or handle.task_id != context.task_id) return error.HandleHolderMismatch;
         if (!handle.export_allowed) return error.RawExportDenied;
         const secret = self.findSecretConst(handle.secret_id) orelse return error.SecretNotFound;
-        return secret.value[0..@as(usize, secret.value_len)];
+        const len = try self.openMaterial(secret, out);
+        return out[0..len];
+    }
+
+    // Signing does not grant raw export. Only the fixed-size caller digest enters
+    // Ed25519; the recovered seed and expanded key pair expire with this call.
+    pub fn signDigest(self: *const Store, handle_id: u64, context: ExportContext, digest: *const sealing.Binding) Error!manifest.Signature {
+        const handle = self.describeHandle(handle_id) orelse return error.HandleNotFound;
+        if (!handle.holder.eql(context.holder) or handle.task_id != context.task_id) return error.HandleHolderMismatch;
+        const secret = self.findSecretConst(handle.secret_id) orelse return error.SecretNotFound;
+        var raw: Value = undefined;
+        defer std.crypto.secureZero(u8, &raw);
+        const len = try self.openMaterial(secret, &raw);
+        if (len != 32) return error.InvalidSigningKey;
+        const Ed25519 = std.crypto.sign.Ed25519;
+        var pair = Ed25519.KeyPair.generateDeterministic(raw[0..32].*) catch return error.InvalidSigningKey;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&pair));
+        const signature = pair.sign(digest, null) catch return error.InvalidSigningKey;
+        var result = manifest.Signature{ .signer = secret.labelSlice(), .public_key_len = 32, .value_len = 64 };
+        result.public_key[0..32].* = pair.public_key.toBytes();
+        result.value[0..64].* = signature.toBytes();
+        return result;
+    }
+
+    fn openMaterial(self: *const Store, secret: *const SecretRecord, out: *Value) Error!usize {
+        std.crypto.secureZero(u8, out);
+        return switch (secret.material) {
+            .raw => |*value| blk: {
+                @memcpy(out[0..value.len], value.bytes[0..value.len]);
+                break :blk value.len;
+            },
+            .sealed => |*blob| blk: {
+                const binding = materialBinding(secret.owner, secret.labelSlice(), secret.exportable);
+                break :blk try self.hardware_provider.open(&binding, blob.slice(), out);
+            },
+        };
     }
 
     fn findSecret(self: *Store, secret_id: u64) ?*SecretRecord {
@@ -260,19 +326,21 @@ fn zeroSecret() SecretRecord {
         .label = [_]u8{0} ** MAX_LABEL_BYTES,
         .sealed_digest_present = false,
         .sealed_digest = crypto_hash.zero_digest,
-        .value_len = 0,
-        .value = [_]u8{0} ** MAX_VALUE_BYTES,
+        .material = .{ .raw = .{} },
     };
 }
 
-fn defaultSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
+fn materialBinding(owner: principal.PrincipalId, label: []const u8, exportable: bool) sealing.Binding {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "hardware-seal-label", label);
-    crypto_hash.updateBytes(&hasher, "hardware-seal-material", raw);
+    crypto_hash.updateBytes(&hasher, "zigos-sealed-secret-v1-owner", &owner.keyBytes());
+    crypto_hash.updateBytes(&hasher, "label", label);
+    crypto_hash.updateBool(&hasher, "exportable", exportable);
     return crypto_hash.finalize(&hasher);
 }
 
 test "secret imports preserve zeroed inactive storage" {
+    var secret_export_buffer: Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     try std.testing.expect(IMPORTS_INTO_PREZEROED_SECRET_SLOTS);
     try std.testing.expect(OVERWRITES_RESERVED_HANDLE_SLOTS);
 
@@ -283,9 +351,9 @@ test "secret imports preserve zeroed inactive storage" {
 
     try std.testing.expectEqual(@as(u64, 1), secret.id);
     try std.testing.expectEqualStrings("key", secret.labelSlice());
-    try std.testing.expectEqualStrings("value", secret.value[0..@as(usize, secret.value_len)]);
+    try std.testing.expectEqualStrings("value", secret.material.raw.bytes[0..secret.material.raw.len]);
     for (secret.label[@as(usize, secret.label_len)..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-    for (secret.value[@as(usize, secret.value_len)..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    for (secret.material.raw.bytes[secret.material.raw.len..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     for (secret.sealed_digest) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 
     const handle = try store.lendHandle(secret.id, holder, 44, true);
@@ -293,16 +361,18 @@ test "secret imports preserve zeroed inactive storage" {
     try std.testing.expectEqualStrings("value", try store.exportRaw(handle.id, .{
         .holder = holder,
         .task_id = 44,
-    }));
+    }, &secret_export_buffer));
 }
 
 test "secure secret store requires a hardware provider before hardware-backed imports" {
+    var secret_export_buffer: Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const app_holder = principal.PrincipalId{ .kind = .app, .serial = 44 };
 
     try std.testing.expectError(error.HardwareProviderUnavailable, store.importSecret(owner, "api-key", "super-secret-token", true, false));
-    store.attachHardwareProvider(.{ .available = true });
+    store.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
 
     const api_key = try store.importSecret(owner, "api-key", "super-secret-token", true, false);
     const handle = try store.lendHandle(api_key.id, app_holder, 90, true);
@@ -311,62 +381,53 @@ test "secure secret store requires a hardware provider before hardware-backed im
     try std.testing.expect(!api_key.resident_material);
     try std.testing.expect(api_key.sealed_digest_present);
     try std.testing.expect(api_key.hardware_provider_used);
-    try std.testing.expectEqual(@as(usize, 0), api_key.value_len);
+    try std.testing.expect(api_key.sealedBlob() != null);
     try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id, .{
         .holder = app_holder,
         .task_id = 90,
-    }));
+    }, &secret_export_buffer));
 
     const exportable = try store.importSecret(owner, "backup-code", "abcd-efgh", false, true);
     const export_handle = try store.lendHandle(exportable.id, app_holder, 91, true);
     try std.testing.expectError(error.HandleHolderMismatch, store.exportRaw(export_handle.id, .{
         .holder = owner,
         .task_id = 91,
-    }));
+    }, &secret_export_buffer));
     try std.testing.expectError(error.HandleHolderMismatch, store.exportRaw(export_handle.id, .{
         .holder = app_holder,
         .task_id = 92,
-    }));
+    }, &secret_export_buffer));
     try std.testing.expectEqualStrings("abcd-efgh", try store.exportRaw(export_handle.id, .{
         .holder = app_holder,
         .task_id = 91,
-    }));
+    }, &secret_export_buffer));
 }
 
 test "secure secret store uses hardware seal provider for sealed and exportable hardware-backed imports" {
-    const Provider = struct {
-        fn seal(label: []const u8, raw: []const u8) crypto_hash.Digest {
-            var hasher = crypto_hash.init();
-            crypto_hash.updateBytes(&hasher, "test-hardware", label);
-            crypto_hash.updateBytes(&hasher, "sealed", raw);
-            return crypto_hash.finalize(&hasher);
-        }
-    };
-
     var store = Store.init();
-    store.attachHardwareProvider(.{
-        .available = true,
-        .sealFn = Provider.seal,
-    });
+    store.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
 
     const owner = principal.PrincipalId{ .kind = .user, .serial = 3 };
     const sealed = try store.importSecret(owner, "device-key", "private-material", true, false);
     try std.testing.expect(sealed.hardware_backed);
     try std.testing.expect(sealed.hardware_provider_used);
     try std.testing.expect(sealed.sealed_digest_present);
-    const expected = Provider.seal("device-key", "private-material");
+    var expected: crypto_hash.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(sealed.sealedBlob().?, &expected, .{});
     try std.testing.expectEqualSlices(u8, expected[0..], sealed.sealed_digest[0..]);
-    try std.testing.expectEqual(@as(usize, 0), sealed.value_len);
+    try std.testing.expect(sealed.sealedBlob() != null);
 
     const exportable = try store.importSecret(owner, "portable-key", "exportable-material", true, true);
     try std.testing.expect(exportable.hardware_backed);
     try std.testing.expect(exportable.hardware_provider_used);
     try std.testing.expect(exportable.sealed_digest_present);
-    try std.testing.expect(exportable.resident_material);
-    try std.testing.expectEqualStrings("exportable-material", exportable.value[0..exportable.value_len]);
+    try std.testing.expect(!exportable.resident_material);
+    try std.testing.expect(exportable.sealedBlob() != null);
 }
 
 test "secure secret store reports missing handles and oversized secrets" {
+    var secret_export_buffer: Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 2 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 45 };
@@ -377,7 +438,7 @@ test "secure secret store reports missing handles and oversized secrets" {
     try std.testing.expectError(error.HandleNotFound, store.exportRaw(999, .{
         .holder = holder,
         .task_id = 1,
-    }));
+    }, &secret_export_buffer));
 }
 
 test "secure secret store uses direct dense ids and bounds handle capacity" {
@@ -439,6 +500,8 @@ test "secure secret store replaces one handle with a direct generation" {
 }
 
 test "secure secret store keeps secrets dense and handles direct through full tables" {
+    var secret_export_buffer: Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 4 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 46 };
@@ -470,6 +533,82 @@ test "secure secret store keeps secrets dense and handles direct through full ta
     try std.testing.expectEqualStrings("portable material", try store.exportRaw(last_handle_id, .{
         .holder = holder,
         .task_id = 200 + @as(u64, @intCast(MAX_HANDLES - 1)),
-    }));
+    }, &secret_export_buffer));
     try std.testing.expectError(error.HandleTableFull, store.lendHandle(first_secret_id, holder, 999, true));
+}
+
+test "sealed secrets recover only under bound metadata and sign without raw export" {
+    const fixture = @import("../../tests/fixtures/secret_provider.zig");
+    const signing = @import("../core/signing.zig");
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 7 };
+    const holder = principal.PrincipalId{ .kind = .app, .serial = 8 };
+    const seed: [32]u8 = @splat(0x91);
+    const digest: [32]u8 = @splat(0x19);
+    var store = Store.init();
+    store.attachHardwareProvider(fixture.provider());
+    const secret = try store.importSecret(owner, "signing key", &seed, true, false);
+    const blob = secret.material.sealed;
+    try std.testing.expect(!secret.resident_material);
+    try std.testing.expect(std.mem.indexOf(u8, blob.slice(), &seed) == null);
+    const handle = try store.lendHandle(secret.id, holder, 11, true);
+    var out: Value = @splat(0xaa);
+    try std.testing.expectError(error.RawExportDenied, store.exportRaw(handle.id, .{ .holder = holder, .task_id = 11 }, &out));
+    try std.testing.expect(std.mem.allEqual(u8, &out, 0));
+    const signed = try store.signDigest(handle.id, .{ .holder = holder, .task_id = 11 }, &digest);
+    try std.testing.expect(signing.verify(signed, &digest));
+    try std.testing.expectEqualSlices(u8, &(try signing.publicKey(.{ .label = "key", .seed = seed })), signed.publicKeySlice());
+    try std.testing.expectError(error.HandleHolderMismatch, store.signDigest(handle.id, .{ .holder = owner, .task_id = 11 }, &digest));
+    try std.testing.expectError(error.HandleHolderMismatch, store.signDigest(handle.id, .{ .holder = holder, .task_id = 12 }, &digest));
+
+    var restored = Store.init();
+    restored.attachHardwareProvider(fixture.provider());
+    try std.testing.expectError(error.InvalidSealedSecret, restored.restoreSealed(holder, "signing key", blob.slice(), false));
+    try std.testing.expectError(error.InvalidSealedSecret, restored.restoreSealed(owner, "other key", blob.slice(), false));
+    try std.testing.expectError(error.InvalidSealedSecret, restored.restoreSealed(owner, "signing key", blob.slice(), true));
+    var damaged = blob;
+    damaged.bytes[damaged.len - 1] ^= 1;
+    try std.testing.expectError(error.InvalidSealedSecret, restored.restoreSealed(owner, "signing key", damaged.slice(), false));
+    try std.testing.expectEqual(@as(u8, 0), restored.secret_count);
+    const recovered = try restored.restoreSealed(owner, "signing key", blob.slice(), false);
+    try std.testing.expect(restored.describeHandle(handle.id) == null);
+    const recovered_handle = try restored.lendHandle(recovered.id, holder, 12, false);
+    const after = try restored.signDigest(recovered_handle.id, .{ .holder = holder, .task_id = 12 }, &digest);
+    try std.testing.expectEqualSlices(u8, signed.valueSlice(), after.valueSlice());
+    restored.attachHardwareProvider(.{});
+    try std.testing.expectError(error.HardwareProviderUnavailable, restored.signDigest(recovered_handle.id, .{ .holder = holder, .task_id = 12 }, &digest));
+}
+
+test "failed providers leave no imported record and erase partial or oversized recovery output" {
+    const BadProvider = struct {
+        fn seal(_: ?*anyopaque, _: *const sealing.Binding, _: []const u8, out: *SealedBlob) sealing.Error!void {
+            out.len = 12;
+            @memset(out.bytes[0..12], 0xaa);
+            return error.HardwareOperationFailed;
+        }
+        fn open(_: ?*anyopaque, _: *const sealing.Binding, _: []const u8, out: *Value) sealing.Error!usize {
+            @memset(out, 0xaa);
+            return error.HardwareOperationFailed;
+        }
+        fn oversized(_: ?*anyopaque, _: *const sealing.Binding, _: []const u8, out: *Value) sealing.Error!usize {
+            @memset(out, 0xaa);
+            return out.len + 1;
+        }
+    };
+    var store = Store.init();
+    store.attachHardwareProvider(.{ .sealFn = BadProvider.seal, .openFn = BadProvider.open });
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    try std.testing.expectError(error.HardwareOperationFailed, store.importSecret(owner, "key", "raw", true, false));
+    try std.testing.expectEqual(@as(u8, 0), store.secret_count);
+    try std.testing.expect(store.describeSecret(1) == null);
+    var blob = SealedBlob{};
+    const binding: sealing.Binding = @splat(0);
+    try std.testing.expectError(error.HardwareOperationFailed, store.hardware_provider.seal(&binding, "raw", &blob));
+    try std.testing.expectEqual(@as(u16, 0), blob.len);
+    var out: Value = @splat(0xaa);
+    try std.testing.expectError(error.HardwareOperationFailed, store.hardware_provider.open(&binding, "blob", &out));
+    try std.testing.expect(std.mem.allEqual(u8, &out, 0));
+    store.hardware_provider.openFn = BadProvider.oversized;
+    out = @splat(0xaa);
+    try std.testing.expectError(error.InvalidSealedSecret, store.hardware_provider.open(&binding, "blob", &out));
+    try std.testing.expect(std.mem.allEqual(u8, &out, 0));
 }

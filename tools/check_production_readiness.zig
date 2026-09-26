@@ -3176,11 +3176,15 @@ fn validateSecretVaultHardwareProviderBoundary(
     const store_source = try readRequiredSource(allocator, io, errors, store_path) orelse return;
     const store_snippets = [_][]const u8{
         "HardwareProviderUnavailable",
-        "self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable",
+        "try self.hardware_provider.seal(&binding, raw, &blob)",
         "secret.hardware_provider_used = true",
-        "if (hardware_backed and !exportable)",
+        "secret.resident_material = !hardware_backed",
+        "secret.material = .{ .sealed = blob }",
+        "pub fn restoreSealed",
+        "try self.hardware_provider.open(&binding, blob, &scratch)",
         "secret.resident_material = false",
-        "secret.value_len = 0",
+        "std.crypto.secureZero(u8, out)",
+        "pub fn signDigest",
         "pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true",
         "const secret = &self.secrets[slot_index]",
         "dense secret imports append into pre-zeroed slots",
@@ -3192,8 +3196,23 @@ fn validateSecretVaultHardwareProviderBoundary(
             try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep store snippet: {s}", .{snippet});
         }
     }
-    if (std.mem.indexOf(u8, store_source, "digestSecretMaterial") != null) {
+    if (std.mem.indexOf(u8, store_source, "digestSecretMaterial") != null or
+        std.mem.indexOf(u8, store_source, "defaultSeal") != null)
+    {
         try common.addError(errors, allocator, "Secret vault hardware-backed boundary must not reintroduce software digest fallback for hardware-backed secrets", .{});
+    }
+
+    const adapter_source = try readRequiredSource(allocator, io, errors, "src/native/platform/tpm2_secret_provider.zig") orelse return;
+    for ([_][]const u8{ "self.client.seal(", "self.client.unseal(", "authorization: *const tpm.Key", "std.crypto.secureZero(u8, &key)", "sealing.encrypt(", "envelope.open(" }) |snippet| {
+        if (std.mem.indexOf(u8, adapter_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault TPM adapter must retain operation: {s}", .{snippet});
+        }
+    }
+    const sealing_source = try readRequiredSource(allocator, io, errors, "src/native/platform/secret_sealing.zig") orelse return;
+    for ([_][]const u8{ "XChaCha20Poly1305", "sealFn: ?*const fn", "openFn: ?*const fn", "errdefer std.crypto.secureZero(u8, out)", "Aead.decrypt(" }) |snippet| {
+        if (std.mem.indexOf(u8, sealing_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault sealing boundary must retain operation: {s}", .{snippet});
+        }
     }
 
     const service_path = "src/native/services/secret_vault_service.zig";
@@ -3239,7 +3258,7 @@ fn validateSecretVaultHardwareProviderBoundary(
     const benchmark_path = "src/kernel/boot/benchmark/suite.zig";
     const benchmark_source = try readRequiredSource(allocator, io, errors, benchmark_path) orelse return;
     const benchmark_snippets = [_][]const u8{
-        "secret_store_context.store.attachHardwareProvider(.{ .available = true })",
+        "secret_store_context.store.attachHardwareProvider(@import(\"../../../tests/fixtures/secret_provider.zig\").provider())",
         "const secret = secret_store_context.store.importSecret(",
     };
     for (benchmark_snippets) |snippet| {

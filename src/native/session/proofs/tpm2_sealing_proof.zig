@@ -54,6 +54,11 @@ pub fn run(manager: anytype) !void {
         console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:SEAL:FAIL {s} code={x}\n", .{ @errorName(err), client.last_tpm_error }) catch "ZIGOS:TPM2:SEAL:FAIL\n");
         return err;
     };
+    @import("secret_vault_proof.zig").run(manager, &io, &auth) catch |err| {
+        var line: [128]u8 = undefined;
+        console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:VAULT:FAIL {s}\n", .{@errorName(err)}) catch "ZIGOS:TPM2:VAULT:FAIL\n");
+        return err;
+    };
 }
 
 fn runWithClient(manager: anytype, client: *sealing.Client, io: *Io) !void {

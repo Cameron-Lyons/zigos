@@ -83,6 +83,12 @@ run_boot() {
       echo "TPM2 sealing result mismatch for $name" >&2
       return 1
     fi
+    local vault_marker="${sealing_marker/:SEAL:/:VAULT:}"
+    if [ "$(grep -c '^ZIGOS:TPM2:VAULT:' "$log")" -ne 1 ] || ! grep -Fxq "$vault_marker" "$log"; then
+      cat "$log" >&2
+      echo "TPM2 vault result mismatch for $name" >&2
+      return 1
+    fi
   else
     bash "$SCRIPT_DIR/check-production-boot-log.sh" "$log"
   fi

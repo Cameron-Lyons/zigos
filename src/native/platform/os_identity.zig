@@ -680,18 +680,8 @@ fn hostEnd(rest: []const u8) usize {
     return rest.len;
 }
 
-fn testHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "identity-test-secret-provider", label);
-    crypto_hash.updateBytes(&hasher, "identity-test-seal", raw);
-    return crypto_hash.finalize(&hasher);
-}
-
 fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
-    return .{
-        .available = true,
-        .sealFn = testHardwareSeal,
-    };
+    return @import("../../tests/fixtures/secret_provider.zig").provider();
 }
 
 test "os identity keeps proof and assertion metadata compact" {

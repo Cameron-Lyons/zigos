@@ -73,13 +73,25 @@ requests.
   authorization supplied by the caller and remain bound to their TPM and parent.
   The client erases temporary material, flushes transient objects and sessions,
   and returns zeroed key output on failure. It expects empty owner-hierarchy
-  authorization and does not enforce a PCR policy. Production authorization
-  provisioning and secret-vault integration remain open.
+  authorization and does not enforce a PCR policy.
+  The secret store now retains authenticated encrypted blobs instead of digest-only
+  placeholders. A TPM adapter wraps fresh data keys and protects up to 96 bytes
+  per secret with XChaCha20-Poly1305, binding owner, label, and export policy.
+  Hardware-backed secrets remain encrypted in the store, including exportable
+  ones. Explicit recovery buffers are erased on failure. The vault can sign a
+  digest through a leased handle without granting raw export; signing checks the
+  holder, task, current policy, expiry, and revocation. Ed25519 signing runs in
+  software after an authorized unseal. Restoring a sealed record
+  authenticates its metadata and creates no handles. Production authorization
+  provisioning, persistent vault indexing, identity-service integration, and
+  userspace request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   creation, recovery from the native disk after restarting the VM and swtpm,
   repeated handle cleanup, bad authorization, private-blob tampering, response
-  HMAC tampering, and refusal by a replacement TPM. Public test authorization
-  exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
+  HMAC tampering, and refusal by a replacement TPM. The same guest test persists
+  a vault signing key, checks its public key after reboot, rejects altered owner,
+  label, and export policy, and verifies signing leases and 96-byte secret export.
+  Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
 - Task checkpoints restore execution metadata without restoring saved capability

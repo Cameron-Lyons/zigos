@@ -1,18 +1,18 @@
 const std = @import("std");
-const crypto_hash = @import("../core/crypto_hash.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const principal = @import("../core/principal.zig");
 const secure_secret_store = @import("../platform/secure_secret_store.zig");
+const manifest = @import("../policy/manifest.zig");
 
 pub const MAX_HANDLES: usize = secure_secret_store.MAX_HANDLES;
 pub const BOUNDED_HANDLE_SCAN = true;
 pub const RECLAIMS_TERMINAL_HANDLES = true;
 pub const COMPACT_ACTIVE_HANDLE_COUNT_METADATA = true;
 pub const DIRECT_HANDLE_LOOKUP = true;
-pub const SERVICE_SIZE_CEILING_BYTES: usize = 7_800;
+pub const SERVICE_SIZE_CEILING_BYTES: usize = 17_288;
 
 comptime {
     if (MAX_HANDLES > std.math.maxInt(u8)) {
@@ -50,7 +50,6 @@ pub const LendRequest = struct {
     expires_at_ticks: u64,
     now_ticks: u64,
     allow_raw_export: bool = false,
-    hardware_backed: bool = true,
     detail: []const u8 = "",
 };
 
@@ -60,6 +59,14 @@ pub const ExportRequest = struct {
     handle_id: u64,
     now_ticks: u64,
     detail: []const u8 = "",
+};
+
+pub const SignRequest = struct {
+    holder: principal.PrincipalId,
+    task_id: u64,
+    handle_id: u64,
+    digest: [32]u8,
+    now_ticks: u64,
 };
 
 pub const RotateRequest = struct {
@@ -167,32 +174,32 @@ pub const Service = struct {
         ledger: ?*event_ledger.Ledger,
     ) Error!*VaultHandle {
         if (request.expires_at_ticks <= request.now_ticks) {
-            try recordLend(ledger, request, 0, false);
+            try recordLend(ledger, request, 0, false, false);
             return error.InvalidLease;
         }
         const secret = self.store.describeSecret(request.secret_id) orelse {
-            try recordLend(ledger, request, 0, false);
+            try recordLend(ledger, request, 0, false, false);
             return error.SecretNotFound;
         };
         if (!secret.owner.eql(request.owner)) {
-            try recordLend(ledger, request, 0, false);
+            try recordLend(ledger, request, 0, false, secret.hardware_backed);
             return error.SecretOwnerMismatch;
         }
         const lease_ticks = request.expires_at_ticks - request.now_ticks;
         const decision = policies.secretVaultDecision(subjects, .{
             .operation = .lend,
-            .hardware_backed = request.hardware_backed,
+            .hardware_backed = secret.hardware_backed,
             .raw_export = request.allow_raw_export,
             .lease_ticks = lease_ticks,
         });
         if (!decision.allowed) {
-            try recordLend(ledger, request, 0, false);
+            try recordLend(ledger, request, 0, false, secret.hardware_backed);
             return error.PolicyDenied;
         }
 
         const retired_slot_index = if (self.handles.countInUse() >= MAX_HANDLES)
             self.terminalHandleSlot(request.now_ticks) orelse {
-                try recordLend(ledger, request, 0, false);
+                try recordLend(ledger, request, 0, false, secret.hardware_backed);
                 return error.HandleTableFull;
             }
         else
@@ -230,7 +237,7 @@ pub const Service = struct {
             .generation = self.generation,
         };
         self.active_handle_count += 1;
-        try recordLend(ledger, request, slot.handle.id, true);
+        try recordLend(ledger, request, slot.handle.id, true, secret.hardware_backed);
         return &slot.handle;
     }
 
@@ -240,7 +247,10 @@ pub const Service = struct {
         subjects: policy_object.SubjectSet,
         request: ExportRequest,
         ledger: ?*event_ledger.Ledger,
+        out: *secure_secret_store.Value,
     ) Error![]const u8 {
+        std.crypto.secureZero(u8, out);
+        errdefer std.crypto.secureZero(u8, out);
         const handle = self.findHandle(request.handle_id) orelse {
             try recordExport(ledger, request, 0, false, false);
             return error.VaultHandleNotFound;
@@ -274,9 +284,38 @@ pub const Service = struct {
         const raw = try self.store.exportRaw(handle.store_handle_id, .{
             .holder = request.holder,
             .task_id = request.task_id,
-        });
+        }, out);
         try recordExportFromHandle(ledger, request, handle, true);
         return raw;
+    }
+
+    pub fn signDigest(
+        self: *Service,
+        policies: *const policy_object.Directory,
+        subjects: policy_object.SubjectSet,
+        request: SignRequest,
+        ledger: ?*event_ledger.Ledger,
+    ) Error!manifest.Signature {
+        const handle = self.findHandle(request.handle_id) orelse {
+            if (ledger) |log| try log.recordSecretVault(request.holder, request.task_id, 0, request.handle_id, false, false, false, false, false, request.now_ticks, "sign digest");
+            return error.VaultHandleNotFound;
+        };
+        errdefer if (ledger) |log| log.recordSecretVault(request.holder, request.task_id, handle.secret_id, handle.id, false, handle.hardware_backed, false, false, false, request.now_ticks, "sign digest") catch {};
+        if (!handle.holder.eql(request.holder) or handle.task_id != request.task_id) return error.HandleHolderMismatch;
+        if (handle.revoked) return error.HandleRevoked;
+        if (handle.expired(request.now_ticks)) return error.HandleExpired;
+        const decision = policies.secretVaultDecision(subjects, .{
+            .operation = .sign,
+            .hardware_backed = handle.hardware_backed,
+            .lease_ticks = handle.expires_at_ticks - request.now_ticks,
+        });
+        if (!decision.allowed) return error.PolicyDenied;
+        const signature = try self.store.signDigest(handle.store_handle_id, .{
+            .holder = request.holder,
+            .task_id = request.task_id,
+        }, &request.digest);
+        if (ledger) |log| try log.recordSecretVault(request.holder, request.task_id, handle.secret_id, handle.id, true, handle.hardware_backed, false, false, false, request.now_ticks, "sign digest");
+        return signature;
     }
 
     pub fn rotateSecret(
@@ -450,6 +489,7 @@ fn recordLend(
     request: LendRequest,
     handle_id: u64,
     allowed: bool,
+    hardware_backed: bool,
 ) event_ledger.Error!void {
     if (ledger) |active| {
         try active.recordSecretVault(
@@ -458,7 +498,7 @@ fn recordLend(
             request.secret_id,
             handle_id,
             allowed,
-            request.hardware_backed,
+            hardware_backed,
             request.allow_raw_export,
             false,
             false,
@@ -547,18 +587,8 @@ fn recordRevoke(
     }
 }
 
-fn testHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "secret-vault-test-provider", label);
-    crypto_hash.updateBytes(&hasher, "secret-vault-seal", raw);
-    return crypto_hash.finalize(&hasher);
-}
-
 fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
-    return .{
-        .available = true,
-        .sealFn = testHardwareSeal,
-    };
+    return @import("../../tests/fixtures/secret_provider.zig").provider();
 }
 
 test "secret vault stores active handle count in capacity-sized metadata" {
@@ -568,6 +598,8 @@ test "secret vault stores active handle count in capacity-sized metadata" {
 }
 
 test "secret vault brokers sealed leased handles raw export policy rotation and revocation" {
+    var secret_export_buffer: secure_secret_store.Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     const signing = @import("../core/signing.zig");
 
     var policies = policy_object.Directory.init();
@@ -667,7 +699,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = handle.id,
         .now_ticks = 5,
         .detail = "private api token raw export denied",
-    }, &ledger));
+    }, &ledger, &secret_export_buffer));
 
     const rotated = try service.rotateSecret(&policies, subjects, .{
         .owner = user,
@@ -687,7 +719,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = handle.id,
         .now_ticks = 7,
         .detail = "private api token old handle revoked",
-    }, &ledger));
+    }, &ledger, &secret_export_buffer));
 
     const rotated_handle = try service.lendHandle(&policies, subjects, .{
         .owner = user,
@@ -745,7 +777,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = rotated_handle.id,
         .now_ticks = 10,
         .detail = "private api token v2 raw export denied",
-    }, &ledger));
+    }, &ledger, &secret_export_buffer));
     try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
 
     const first_secret_revoke_handle = try service.lendHandle(&policies, subjects, .{
@@ -783,14 +815,14 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = first_secret_revoke_handle.id,
         .now_ticks = 14,
         .detail = "private api token v2 first raw export denied",
-    }, &ledger));
+    }, &ledger, &secret_export_buffer));
     try std.testing.expectError(error.HandleRevoked, service.exportRaw(&policies, subjects, .{
         .holder = app,
         .task_id = 73,
         .handle_id = second_secret_revoke_handle.id,
         .now_ticks = 14,
         .detail = "private api token v2 second raw export denied",
-    }, &ledger));
+    }, &ledger, &secret_export_buffer));
 
     var expiry_service = Service.init();
     expiry_service.attachHardwareProvider(testHardwareProvider());
@@ -822,7 +854,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = expiring_handle.id,
         .now_ticks = 20,
         .detail = "private expiring token at boundary",
-    }, &expiry_ledger));
+    }, &expiry_ledger, &secret_export_buffer));
 
     var export_policies = policy_object.Directory.init();
     _ = try export_policies.create(.{
@@ -868,7 +900,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = sealed_only_handle.id,
         .now_ticks = 15,
         .detail = "private sealed-only token raw export denied",
-    }, &export_ledger));
+    }, &export_ledger, &secret_export_buffer));
     const export_summary = export_ledger.userVisibleDiagnosticSummary();
     try std.testing.expectEqual(@as(usize, 3), export_summary.secret_vault_events);
     try std.testing.expectEqual(@as(usize, 1), export_summary.secret_vault_denials);
@@ -900,7 +932,7 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
         .handle_id = portable_handle.id,
         .now_ticks = 18,
         .detail = "private portable token raw export allowed",
-    }, &export_ledger));
+    }, &export_ledger, &secret_export_buffer));
     const export_success_summary = export_ledger.userVisibleDiagnosticSummary();
     try std.testing.expectEqual(@as(usize, 6), export_success_summary.secret_vault_events);
     try std.testing.expectEqual(@as(usize, 1), export_success_summary.secret_vault_denials);
@@ -925,6 +957,8 @@ test "secret vault brokers sealed leased handles raw export policy rotation and 
 }
 
 test "secret vault stages lending and reclaims terminal handles under pressure" {
+    var secret_export_buffer: secure_secret_store.Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     const signing = @import("../core/signing.zig");
 
     var policies = policy_object.Directory.init();
@@ -958,7 +992,7 @@ test "secret vault stages lending and reclaims terminal handles under pressure" 
             .expires_at_ticks = 100,
             .now_ticks = 20,
             .allow_raw_export = true,
-            .hardware_backed = false,
+
             .detail = "private full token capacity filler",
         }, null);
         if (index == 0) {
@@ -979,7 +1013,7 @@ test "secret vault stages lending and reclaims terminal handles under pressure" 
         .expires_at_ticks = 30,
         .now_ticks = 20,
         .allow_raw_export = true,
-        .hardware_backed = false,
+
         .detail = "private full token rejected before lower store handle",
     }, null));
     try std.testing.expectEqual(MAX_HANDLES, full_service.handles.countInUse());
@@ -1002,7 +1036,7 @@ test "secret vault stages lending and reclaims terminal handles under pressure" 
         .expires_at_ticks = 40,
         .now_ticks = 22,
         .allow_raw_export = true,
-        .hardware_backed = false,
+
         .detail = "private full token replacement after revocation",
     }, null);
     const first_id = HandleId{ .value = first_full_handle_id };
@@ -1024,7 +1058,7 @@ test "secret vault stages lending and reclaims terminal handles under pressure" 
         .handle_id = replacement.id,
         .now_ticks = 23,
         .detail = "private full token replacement export",
-    }, null));
+    }, null, &secret_export_buffer));
 
     var expiry_reuse_service = Service.init();
     const expiry_reuse_secret = try expiry_reuse_service.store.importSecret(user, "expiry-reuse", "private expiry reuse token", false, true);
@@ -1039,7 +1073,7 @@ test "secret vault stages lending and reclaims terminal handles under pressure" 
             .expires_at_ticks = 30,
             .now_ticks = 20,
             .allow_raw_export = true,
-            .hardware_backed = false,
+
             .detail = "private expiry reuse capacity filler",
         }, null);
         if (index == 0) {
@@ -1057,7 +1091,7 @@ test "secret vault stages lending and reclaims terminal handles under pressure" 
         .expires_at_ticks = 40,
         .now_ticks = 30,
         .allow_raw_export = true,
-        .hardware_backed = false,
+
         .detail = "private expiry reuse replacement",
     }, null);
     try std.testing.expect(expiry_reuse_service.findHandle(first_expired_handle_id) == null);
@@ -1070,5 +1104,87 @@ test "secret vault stages lending and reclaims terminal handles under pressure" 
         .handle_id = expiry_replacement.id,
         .now_ticks = 31,
         .detail = "private expiry reuse replacement export",
+    }, null, &secret_export_buffer));
+}
+
+test "vault signing enforces holder lease revocation and current policy without raw export" {
+    const signing = @import("../core/signing.zig");
+    var service = Service.init();
+    service.attachHardwareProvider(testHardwareProvider());
+    var policies = policy_object.Directory.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 101 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 102 };
+    const subjects = policy_object.SubjectSet{ .user_id = owner.serial };
+    const seed: [32]u8 = @splat(0x91);
+    const secret = try service.importSecret(&policies, subjects, .{
+        .owner = owner,
+        .task_id = 5,
+        .label = "signer",
+        .raw = &seed,
+        .now_ticks = 1,
+    }, null);
+    const handle = try service.lendHandle(&policies, subjects, .{
+        .owner = owner,
+        .holder = app,
+        .task_id = 6,
+        .secret_id = secret.id,
+        .expires_at_ticks = 10,
+        .now_ticks = 2,
+    }, null);
+    const request = SignRequest{ .holder = app, .task_id = 6, .handle_id = handle.id, .digest = @splat(0x23), .now_ticks = 3 };
+    const signature = try service.signDigest(&policies, subjects, request, null);
+    try std.testing.expect(signing.verify(signature, &request.digest));
+    var wrong = request;
+    wrong.holder = owner;
+    try std.testing.expectError(error.HandleHolderMismatch, service.signDigest(&policies, subjects, wrong, null));
+    wrong = request;
+    wrong.task_id += 1;
+    try std.testing.expectError(error.HandleHolderMismatch, service.signDigest(&policies, subjects, wrong, null));
+    wrong = request;
+    wrong.now_ticks = 10;
+    try std.testing.expectError(error.HandleExpired, service.signDigest(&policies, subjects, wrong, null));
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = owner.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .label = "lock vault",
+        .secret_vault_allowed = false,
+    }, .{ .label = "policy", .seed = @splat(0x74) });
+    try std.testing.expectError(error.PolicyDenied, service.signDigest(&policies, subjects, request, null));
+    try service.revoke(.{
+        .subject = owner,
+        .task_id = 5,
+        .handle_id = handle.id,
+        .secret_id = secret.id,
+        .expected_holder = app,
+        .expected_holder_task_id = 6,
+        .now_ticks = 4,
+    }, null);
+    try std.testing.expectError(error.HandleRevoked, service.signDigest(&policies, subjects, request, null));
+}
+
+test "vault hardware policy uses stored custody when lending a software secret" {
+    var service = Service.init();
+    var policies = policy_object.Directory.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 71 };
+    const app = principal.PrincipalId{ .kind = .app, .serial = 72 };
+    const subjects = policy_object.SubjectSet{ .user_id = owner.serial };
+    const secret = try service.store.importSecret(owner, "software", "value", false, false);
+    _ = try policies.create(.{
+        .scope = .user,
+        .subject_id = owner.serial,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .label = "hardware required",
+        .secret_vault_allowed = true,
+        .require_hardware_backed_secrets = true,
+    }, .{ .label = "policy", .seed = @splat(0x75) });
+    try std.testing.expectError(error.PolicyDenied, service.lendHandle(&policies, subjects, .{
+        .owner = owner,
+        .holder = app,
+        .task_id = 5,
+        .secret_id = secret.id,
+        .expires_at_ticks = 10,
+        .now_ticks = 1,
     }, null));
+    try std.testing.expectEqual(@as(usize, 0), service.activeHandleCount());
 }

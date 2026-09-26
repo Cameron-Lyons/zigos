@@ -3967,18 +3967,8 @@ fn credentialPolicyDenies(expected: policy_object.DecisionReason) bool {
     return !decision.allowed and decision.reason == expected;
 }
 
-fn credentialContractHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "credential-contract-provider", label);
-    crypto_hash.updateBytes(&hasher, "credential-contract-seal", raw);
-    return crypto_hash.finalize(&hasher);
-}
-
 fn credentialContractHardwareProvider() secure_secret_store.HardwareSealProvider {
-    return .{
-        .available = true,
-        .sealFn = credentialContractHardwareSeal,
-    };
+    return @import("../../tests/fixtures/secret_provider.zig").provider();
 }
 
 fn identityCredentialEvidence() IdentityCredentialEvidence {
@@ -4778,21 +4768,13 @@ pub fn currentRepositoryNineteenthContract() NineteenthChecklist {
     return .{ .satisfied_features = features };
 }
 
-fn secretVaultContractHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "secret-vault-contract-provider", label);
-    crypto_hash.updateBytes(&hasher, "secret-vault-contract-seal", raw);
-    return crypto_hash.finalize(&hasher);
-}
-
 fn secretVaultContractHardwareProvider() secure_secret_store.HardwareSealProvider {
-    return .{
-        .available = true,
-        .sealFn = secretVaultContractHardwareSeal,
-    };
+    return @import("../../tests/fixtures/secret_provider.zig").provider();
 }
 
 fn secretVaultEvidence() SecretVaultEvidence {
+    var secret_export_buffer: secure_secret_store.Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     var evidence = SecretVaultEvidence{
         .service_model = @hasDecl(secret_vault_service.Service, "importSecret") and
             @hasDecl(secret_vault_service.Service, "lendHandle") and
@@ -4849,7 +4831,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
     evidence.hardware_sealed_import = secret.hardware_backed and
         secret.hardware_provider_used and
         secret.sealed_digest_present;
-    evidence.nonresident_material = !secret.resident_material and secret.value_len == 0;
+    evidence.nonresident_material = !secret.resident_material and secret.sealedBlob() != null;
     const wrong_owner_lend_denied = if (service.lendHandle(&policies, subjects, .{
         .owner = other_user,
         .holder = app,
@@ -4932,7 +4914,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
             .handle_id = expiring_handle.id,
             .now_ticks = 20,
             .detail = "private expiring api secret boundary export",
-        }, &expiry_ledger)) |_| false else |err| err == error.HandleExpired);
+        }, &expiry_ledger, &secret_export_buffer)) |_| false else |err| err == error.HandleExpired);
 
     evidence.raw_export_denial = if (service.exportRaw(&policies, subjects, .{
         .holder = app,
@@ -4940,7 +4922,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .handle_id = old_handle_id,
         .now_ticks = 5,
         .detail = "private api secret raw export denied",
-    }, &ledger)) |_| false else |err| err == error.PolicyDenied;
+    }, &ledger, &secret_export_buffer)) |_| false else |err| err == error.PolicyDenied;
 
     var export_policies = policy_object.Directory.init();
     _ = export_policies.create(.{
@@ -4986,7 +4968,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .handle_id = sealed_only_handle.id,
         .now_ticks = 15,
         .detail = "private sealed-only api secret export",
-    }, &export_ledger)) |_| false else |err| err == error.RawExportDenied;
+    }, &export_ledger, &secret_export_buffer)) |_| false else |err| err == error.RawExportDenied;
     const export_summary = export_ledger.userVisibleDiagnosticSummary();
     evidence.raw_export_handle_capability_gate =
         !sealed_only_handle.raw_export_allowed and
@@ -5021,7 +5003,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
         .handle_id = portable_handle.id,
         .now_ticks = 18,
         .detail = "private portable api secret exported",
-    }, &export_ledger) catch return evidence;
+    }, &export_ledger, &secret_export_buffer) catch return evidence;
     const export_success_summary = export_ledger.userVisibleDiagnosticSummary();
     var export_diag_buffer: [2048]u8 = undefined;
     const export_diag = export_ledger.exportText(&export_diag_buffer, .{}) catch return evidence;
@@ -5047,15 +5029,15 @@ fn secretVaultEvidence() SecretVaultEvidence {
     const wrong_store_holder_denied = if (direct_store.exportRaw(direct_handle.id, .{
         .holder = user,
         .task_id = 87,
-    })) |_| false else |err| err == error.HandleHolderMismatch;
+    }, &secret_export_buffer)) |_| false else |err| err == error.HandleHolderMismatch;
     const wrong_store_task_denied = if (direct_store.exportRaw(direct_handle.id, .{
         .holder = app,
         .task_id = 88,
-    })) |_| false else |err| err == error.HandleHolderMismatch;
+    }, &secret_export_buffer)) |_| false else |err| err == error.HandleHolderMismatch;
     const direct_raw = direct_store.exportRaw(direct_handle.id, .{
         .holder = app,
         .task_id = 87,
-    }) catch return evidence;
+    }, &secret_export_buffer) catch return evidence;
     evidence.store_handle_identity_binding =
         @hasDecl(secure_secret_store, "ExportContext") and
         wrong_store_holder_denied and
@@ -5080,7 +5062,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
             .handle_id = old_handle_id,
             .now_ticks = 7,
             .detail = "private api secret old handle revoked",
-        }, &ledger)) |_| false else |err| err == error.HandleRevoked);
+        }, &ledger, &secret_export_buffer)) |_| false else |err| err == error.HandleRevoked);
 
     const rotated_handle = service.lendHandle(&policies, subjects, .{
         .owner = user,
@@ -5145,7 +5127,7 @@ fn secretVaultEvidence() SecretVaultEvidence {
             .handle_id = rotated_handle.id,
             .now_ticks = 10,
             .detail = "private api secret v2 revoked export",
-        }, &ledger)) |_| false else |err| err == error.HandleRevoked);
+        }, &ledger, &secret_export_buffer)) |_| false else |err| err == error.HandleRevoked);
 
     const summary = ledger.userVisibleDiagnosticSummary();
     evidence.ledger = summary.secret_vault_events >= 9 and

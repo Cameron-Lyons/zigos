@@ -3,7 +3,6 @@ const spec_support = @import("support.zig");
 const accelerator_scheduler = @import("../../native/task/accelerator_scheduler.zig");
 const attestation_service = @import("../../native/platform/attestation_service.zig");
 const contract = @import("../../native/session/contract.zig");
-const crypto_hash = @import("../../native/core/crypto_hash.zig");
 const denial_explanation = @import("../../native/policy/denial_explanation.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
 const event_ledger = @import("../../native/platform/event_ledger.zig");
@@ -28,6 +27,8 @@ const DENIAL_EXPLANATION_BUFFER_BYTES: usize = 256;
 const LEDGER_EXPORT_BUFFER_BYTES: usize = units.kibibytes(1);
 
 pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
+    var secret_export_buffer: secure_secret_store.Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     var recorder = measured_boot.Recorder.init();
     var artifact_manifest = measured_boot.ArtifactManifest.init(21);
     recorder.begin(21);
@@ -134,20 +135,8 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expect(!std.mem.allEqual(u8, &statement.root_digest, 0));
     try std.testing.expectEqual(attestation_service.KeyOrigin.secure_enclave, statement.key_origin);
 
-    const SecretProvider = struct {
-        fn seal(label: []const u8, raw: []const u8) crypto_hash.Digest {
-            var hasher = crypto_hash.init();
-            crypto_hash.updateBytes(&hasher, "spec-platform-secret-provider", label);
-            crypto_hash.updateBytes(&hasher, "spec-platform-secret-seal", raw);
-            return crypto_hash.finalize(&hasher);
-        }
-    };
-
     var secrets = secure_secret_store.Store.init();
-    secrets.attachHardwareProvider(.{
-        .available = true,
-        .sealFn = SecretProvider.seal,
-    });
+    secrets.attachHardwareProvider(@import("../fixtures/secret_provider.zig").provider());
     const imported = try secrets.importSecret(spec_support.user(9), "signing-key", "opaque-secret", true, false);
     const handle = try secrets.lendHandle(imported.id, spec_support.app(90), 700, true);
     try std.testing.expect(handle.hardware_backed);
@@ -156,7 +145,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try std.testing.expectError(secure_secret_store.Error.RawExportDenied, secrets.exportRaw(handle.id, .{
         .holder = spec_support.app(90),
         .task_id = 700,
-    }));
+    }, &secret_export_buffer));
 
     var graph = device_graph.Graph.init();
     const passkey_user = spec_support.user(19);
