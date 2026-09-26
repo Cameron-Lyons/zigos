@@ -197,6 +197,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     if (!runBootedNotesTypedInputLoop(graph, &lifecycle_context, sync_service, &compositor_service, storage_state)) {
         return false;
     }
+    @import("proofs/document_channel_proof.zig").run(manager, graph, storage_state.notes_workspace_id) catch |err| return evidenceStepFailed("document_channel", err);
     return true;
 }
 

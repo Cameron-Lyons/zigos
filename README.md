@@ -42,11 +42,21 @@ requests.
   The same channel loads one immutable version in bounded chunks before Notes
   accepts queued input. Loads reject changed revisions, revoked access,
   oversized documents, and text the current renderer cannot represent, while
-  preserving an existing draft. Provisioning the channel in a running session
-  and moving the storage core into its userspace service remain open.
+  preserving an existing draft. Session opening now validates existing scoped
+  authority, owns the channel's metadata, and publishes the opening binding
+  before the app's first instruction. A lazy four-channel pool services at most
+  two frames or replies per dispatch, preserves suspended sessions, and cancels
+  queued saves when either endpoint or task is retired. Boot verification drives
+  the Notes ELF through document load, modeled keyboard input, a durable save,
+  and channel teardown. Connecting this opener to the interactive launcher and
+  moving the storage core into its userspace service remain open.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.
+- The storage pool provides 640 payload chunk slots for its 640-blob limit,
+  with payload bytes allocated on demand. Failed writes release newly allocated
+  chunks before publishing an object or version. Storage still has an explicit
+  finite quota; automatic history reclamation remains open.
 - Native boot requests a 32-bit firmware graphics mode and presents the active
   compositor-owned surface as a bounded text desktop. Changed cells alone are
   rasterized after the first frame; idle sessions perform no display polling.
@@ -187,6 +197,8 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   grants preserve capacity for future capability targets. Removing the last
   grant to a target also releases its metadata; revoked sibling grants retain
   their epoch until they are removed.
+  Services retire both temporary endpoints after their startup IPC check,
+  including cleanup when a later startup step fails.
   Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.

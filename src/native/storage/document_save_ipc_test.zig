@@ -12,6 +12,7 @@ const storage_service = @import("storage_service.zig");
 const workspace = @import("workspace.zig");
 const durable = @import("document_save_test.zig");
 const ipc = @import("document_save_ipc.zig");
+const document_channel = @import("document_channel.zig");
 const protocol = ipc.protocol;
 const Client = @import("../../userspace/document_client.zig").Client;
 
@@ -23,8 +24,9 @@ const Fixture = struct {
     shared: shared_memory.Table = .init(),
     kernel: native_kernel.Kernel = undefined,
     port: component_port.KernelPort = undefined,
-    storage: storage_service.StoragePort = undefined,
-    server: ipc.Server = undefined,
+    channel: document_channel.Channel = .{},
+    server: *ipc.Server = undefined,
+    open_request: document_channel.OpenRequest = undefined,
     client: Client = undefined,
     app_task_id: u64 = 0,
     app_endpoint_id: u64 = 0,
@@ -55,13 +57,6 @@ const Fixture = struct {
         device.service.task_id = service.id;
         self.app_task_id = app.id;
         self.runtime.allowHostPointerSyscallsForTask(app.id);
-        const client_endpoint = try self.endpoints.create(ids.task(app.id), "document-client", .{ .local_only = true });
-        const server_endpoint = try self.endpoints.create(ids.task(service.id), "document-server", .{ .local_only = true, .service_port = true });
-        try self.endpoints.connect(client_endpoint.id, server_endpoint.id);
-        self.app_endpoint_id = client_endpoint.id.raw();
-        self.server_endpoint_id = server_endpoint.id.raw();
-        self.app_endpoint_capability = try self.endpointCapability(app, client_endpoint.id.raw());
-        const server_capability = try self.endpointCapability(service, server_endpoint.id.raw());
         const write = try self.capabilities.mintBootRoot(.{
             .holder = app.owner,
             .issuer = .{ .kind = .policy_authority, .serial = 1 },
@@ -79,30 +74,29 @@ const Fixture = struct {
             .expires_at_ticks = 100,
             .network_scope = .local_only,
         }).withObjectScope(ids.object(900), durable.path));
-        self.storage = storage_service.StoragePort.init(&device.service, &self.capabilities);
-        self.server = .{
-            .kernel = &self.port,
-            .storage = &self.storage,
-            .binding = .{
-                .client_endpoint_id = self.app_endpoint_id,
-                .server_endpoint_capability_id = server_capability,
-                .authority = .{ .task_id = app.id, .principal = app.owner, .capability_id = write.id, .now_ticks = 0 },
-                .workspace_id = device.workspace_id,
-                .path = durable.path,
-                .object_id = 900,
-                .signer = durable.signer,
-            },
+        self.open_request = .{
+            .authority = .{ .task_id = app.id, .principal = app.owner, .capability_id = write.id, .now_ticks = 0 },
+            .client_bootstrap_capability_id = try self.bootstrapCapability(app),
+            .server_bootstrap_capability_id = try self.bootstrapCapability(service),
+            .workspace_id = device.workspace_id,
+            .path = durable.path,
+            .signer = durable.signer,
         };
-        self.client = .{ .service_endpoint_id = self.server_endpoint_id, .object_id = 900, .version_id = device.original_version_id };
+        const binding = try self.channel.open(&self.port, &device.service, self.open_request, 0);
+        self.server = &self.channel.server.?;
+        self.app_endpoint_id = self.channel.client_endpoint_id;
+        self.server_endpoint_id = binding.service_endpoint_id;
+        self.app_endpoint_capability = binding.endpoint_capability_id;
+        self.client = .{ .service_endpoint_id = binding.service_endpoint_id, .object_id = binding.object_id, .version_id = binding.version_id };
         return self;
     }
 
-    fn endpointCapability(self: *Fixture, task: *task_runtime.TaskRecord, endpoint_id: u64) !u64 {
+    fn bootstrapCapability(self: *Fixture, task: *task_runtime.TaskRecord) !u64 {
         const grant = try self.capabilities.mintBootRoot(.{
             .holder = task.owner,
             .issuer = .{ .kind = .policy_authority, .serial = 1 },
-            .target = .{ .kind = .endpoint, .id = endpoint_id },
-            .rights = .{ .endpoint = .{ .endpoint_send = true, .endpoint_recv = true } },
+            .target = .{ .kind = .service, .id = self.device.service.service_id },
+            .rights = .{ .service = .{ .endpoint_create = true } },
             .scope = .{ .task_id = task.id, .local_only = true },
             .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
         });
@@ -111,6 +105,7 @@ const Fixture = struct {
     }
 
     fn deinit(self: *Fixture) void {
+        self.channel.close(99);
         self.kernel.deinit();
         self.device.deinit();
         std.testing.allocator.destroy(self);
@@ -525,4 +520,210 @@ test "document IPC rejects conflicting duplicates and digest mismatches before s
     try std.testing.expectEqual(protocol.Status.request_conflict, fixture.client.last_status.?);
     try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
     try std.testing.expectEqualStrings("original", try fixture.device.text());
+}
+
+test "document channel owns borrowed opening metadata and reuses retired resources" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.channel.close(1);
+    const baseline = fixture.capabilities.activeCount();
+    var path = durable.path.*;
+    var label = [_]u8{'s'} ** 12;
+    var request = fixture.open_request;
+    request.path = &path;
+    request.signer.label = &label;
+    const binding = try fixture.channel.open(&fixture.port, &fixture.device.service, request, 2);
+    @memset(&path, 'x');
+    @memset(&label, 'x');
+    try std.testing.expectEqualStrings(durable.path, fixture.channel.server.?.binding.path);
+    try std.testing.expectEqualStrings("ssssssssssss", fixture.channel.server.?.binding.signer.label);
+    try std.testing.expectEqual(fixture.device.original_version_id, binding.version_id);
+    try std.testing.expectError(error.DocumentAlreadyOpen, fixture.channel.open(&fixture.port, &fixture.device.service, request, 2));
+    fixture.channel.close(3);
+    for (0..128) |_| {
+        _ = try fixture.channel.open(&fixture.port, &fixture.device.service, fixture.open_request, 4);
+        fixture.channel.close(5);
+        try std.testing.expectEqual(baseline, fixture.capabilities.activeCount());
+        try std.testing.expectEqual(@as(usize, 0), fixture.endpoints.activeCount());
+        try std.testing.expectEqual(@as(u16, 0), fixture.endpoints.activeForTask(ids.task(fixture.app_task_id)));
+    }
+}
+
+test "document channel opening failure rolls back the first endpoint and all ownership grants" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.channel.close(1);
+    const baseline = fixture.capabilities.activeCount();
+    var request = fixture.open_request;
+    request.server_bootstrap_capability_id = request.client_bootstrap_capability_id;
+    for (0..128) |_| {
+        try std.testing.expectError(error.CapabilityNotFound, fixture.channel.open(&fixture.port, &fixture.device.service, request, 2));
+        try std.testing.expect(fixture.channel.server == null);
+        try std.testing.expectEqual(baseline, fixture.capabilities.activeCount());
+        try std.testing.expectEqual(@as(usize, 0), fixture.endpoints.activeCount());
+    }
+    request = fixture.open_request;
+    request.authority.principal.serial += 1;
+    try std.testing.expectError(error.PermissionDenied, fixture.channel.open(&fixture.port, &fixture.device.service, request, 2));
+    request = fixture.open_request;
+    request.authority.capability_id = request.client_bootstrap_capability_id;
+    try std.testing.expectError(error.PermissionDenied, fixture.channel.open(&fixture.port, &fixture.device.service, request, 2));
+    _ = try fixture.channel.open(&fixture.port, &fixture.device.service, fixture.open_request, 3);
+}
+
+test "document channel cancels a queued commit when the client closes or either task exits" {
+    for (0..3) |ending| {
+        const fixture = try Fixture.init();
+        defer fixture.deinit();
+        try fixture.client.start("must never commit");
+        var buffer: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+        while (try fixture.client.nextFrame(&buffer)) |frame| {
+            const commit = (try protocol.decode(frame)).body == .commit;
+            try fixture.send(frame, fixture.client.request_id);
+            fixture.client.sent();
+            if (commit) break;
+            try std.testing.expect(fixture.channel.runOnce(10));
+        }
+        try std.testing.expect(fixture.channel.hasPendingWork());
+        switch (ending) {
+            0 => try fixture.port.endpointClose(.{
+                .header = component_port.makeHeader(.endpoint_close, 0, fixture.app_task_id),
+                .endpoint_capability_id = fixture.app_endpoint_capability,
+            }, 11),
+            1 => _ = try fixture.runtime.terminateTask(fixture.app_task_id, 11),
+            else => _ = try fixture.runtime.terminateTask(fixture.device.service.task_id, 11),
+        }
+        try std.testing.expect(fixture.channel.runOnce(12));
+        try std.testing.expect(!fixture.channel.hasPendingWork());
+        try std.testing.expect(fixture.channel.server == null);
+        try std.testing.expectEqual(@as(usize, 0), fixture.endpoints.activeCount());
+        try std.testing.expectEqual(fixture.device.original_version_id, (try fixture.device.service.resolve(fixture.device.workspace_id, durable.path)).version_id.raw());
+    }
+}
+
+test "document channel teardown still releases endpoints after ownership grants are revoked" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.capabilities.revokeGrant(fixture.app_endpoint_capability);
+    _ = try fixture.runtime.revokeCapability(fixture.app_task_id, fixture.app_endpoint_capability);
+    try fixture.capabilities.revokeGrant(fixture.server.binding.server_endpoint_capability_id);
+    _ = try fixture.runtime.revokeCapability(fixture.device.service.task_id, fixture.server.binding.server_endpoint_capability_id);
+    fixture.channel.close(10);
+    try std.testing.expectEqual(@as(usize, 0), fixture.endpoints.activeCount());
+    try std.testing.expect(!fixture.runtime.find(fixture.app_task_id).?.hasCapability(fixture.app_endpoint_capability));
+}
+
+test "document sessions bound dispatch and remain idle under reply backpressure" {
+    const Sessions = @import("../session/document_sessions.zig").Sessions;
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.channel.close(1);
+    var sessions = Sessions{};
+    defer sessions.deinit(99);
+    const binding = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 2);
+    try std.testing.expectError(error.DocumentAlreadyOpen, sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 2));
+    try std.testing.expect(!sessions.hasPendingWork());
+    try std.testing.expect(!sessions.service(3));
+    fixture.app_endpoint_capability = binding.endpoint_capability_id;
+    var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    for (0..3) |index| {
+        const frame = try protocol.encode(&bytes, .{ .request_id = index + 1, .body = .{ .read = .{ .version_id = binding.version_id, .offset = 0 } } });
+        try fixture.send(frame, index + 1);
+    }
+    try std.testing.expect(sessions.hasPendingWork());
+    try std.testing.expect(sessions.service(4));
+    try std.testing.expectEqual(@as(u16, 2), (try fixture.endpoints.descriptor(ids.endpoint(binding.service_endpoint_id))).queued_messages);
+    try std.testing.expect(sessions.service(4));
+    try std.testing.expectEqual(@as(u16, 1), (try fixture.endpoints.descriptor(ids.endpoint(binding.service_endpoint_id))).queued_messages);
+    const client_id = fixture.capabilities.query(binding.endpoint_capability_id).?.target.id;
+    for (2..endpoint.MAX_ENDPOINT_QUEUE) |index| {
+        _ = try fixture.endpoints.reply(ids.endpoint(binding.service_endpoint_id), ids.endpoint(client_id), ids.task(fixture.device.service.task_id), index, "full", null, false);
+    }
+    try std.testing.expect(sessions.service(5));
+    try std.testing.expect(!sessions.hasPendingWork());
+    try std.testing.expect(!sessions.service(6));
+    var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
+    _ = try fixture.endpoints.recvInto(ids.endpoint(client_id), &payload);
+    try std.testing.expect(sessions.hasPendingWork());
+    try std.testing.expect(sessions.service(7));
+    sessions.closeTask(fixture.app_task_id, 8);
+    try std.testing.expectEqual(@as(usize, 0), fixture.endpoints.activeCount());
+}
+
+test "document channel suspension preserves queued work until both tasks resume" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    const frame = try protocol.encode(&bytes, .{ .request_id = 1, .body = .{ .read = .{ .version_id = fixture.device.original_version_id, .offset = 0 } } });
+    try fixture.send(frame, 1);
+    try std.testing.expect(fixture.channel.hasPendingWork());
+    for ([_]u64{ fixture.app_task_id, fixture.device.service.task_id }) |task_id| {
+        try std.testing.expect(try fixture.runtime.suspendTask(task_id, 10));
+        try std.testing.expect(!fixture.channel.hasPendingWork());
+        try std.testing.expect(!fixture.channel.runOnce(11));
+        try std.testing.expect(fixture.channel.server != null);
+        try std.testing.expectEqual(@as(u16, 1), (try fixture.endpoints.descriptor(ids.endpoint(fixture.server_endpoint_id))).queued_messages);
+        try std.testing.expect(try fixture.runtime.resumeTask(task_id, 12));
+    }
+    try std.testing.expect(fixture.channel.hasPendingWork());
+    try std.testing.expect(fixture.channel.runOnce(13));
+    try std.testing.expect(!fixture.channel.hasPendingWork());
+    const received = try fixture.receive(false);
+    try std.testing.expectEqual(@as(u8, 1), received.present);
+    try std.testing.expectEqual(std.meta.Tag(protocol.Body).read_data, std.meta.activeTag((try protocol.decode(received.payload[0..received.message.payload_len])).body));
+}
+
+test "document sessions enforce capacity and share each dispatch fairly" {
+    const sessions_mod = @import("../session/document_sessions.zig");
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.channel.close(1);
+    var sessions = sessions_mod.Sessions{};
+    defer sessions.deinit(99);
+    const Binding = @import("../task/userspace_bootstrap_mailbox.zig").DocumentBinding;
+    var bindings: [sessions_mod.MAX_CHANNELS]Binding = undefined;
+    var requests: [sessions_mod.MAX_CHANNELS + 1]document_channel.OpenRequest = undefined;
+    for (&requests, 0..) |*request, index| {
+        const app = try fixture.runtime.createTask(.{
+            .owner = fixture.open_request.authority.principal,
+            .component_class = .app_component,
+            .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 4096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+            .local_only = true,
+        });
+        const write = try fixture.capabilities.mintBootRoot(.{
+            .holder = app.owner,
+            .issuer = fixture.kernel.policy_authority,
+            .target = .{ .kind = .workspace, .id = fixture.device.workspace_id },
+            .rights = .{ .workspace = .{ .object_read = true, .object_write = true } },
+            .scope = .{ .task_id = app.id, .workspace_id = fixture.device.workspace_id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        });
+        try fixture.runtime.grantCapability(app.id, write.id);
+        request.* = fixture.open_request;
+        request.authority.task_id = app.id;
+        request.authority.capability_id = write.id;
+        request.client_bootstrap_capability_id = try fixture.bootstrapCapability(app);
+        if (index < bindings.len) bindings[index] = try sessions.open(&fixture.port, &fixture.device.service, request.*, 2);
+    }
+    const count = fixture.capabilities.activeCount();
+    try std.testing.expectError(error.DocumentTableFull, sessions.open(&fixture.port, &fixture.device.service, requests[bindings.len], 2));
+    try std.testing.expectEqual(count, fixture.capabilities.activeCount());
+    var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    for (bindings, requests[0..bindings.len]) |binding, request| {
+        try fixture.port.endpointSend(.{
+            .header = component_port.makeHeader(.endpoint_send, 1, request.authority.task_id),
+            .endpoint_capability_id = binding.endpoint_capability_id,
+            .payload = try protocol.encode(&bytes, .{ .request_id = 1, .body = .{ .read = .{ .version_id = binding.version_id, .offset = 0 } } }),
+        }, 3);
+    }
+    for (0..2) |dispatch| {
+        try std.testing.expect(sessions.service(4));
+        for (bindings, 0..) |binding, index| {
+            const queued: u16 = if (index < (dispatch + 1) * sessions_mod.DISPATCH_BUDGET) 0 else 1;
+            try std.testing.expectEqual(queued, (try fixture.endpoints.descriptor(ids.endpoint(binding.service_endpoint_id))).queued_messages);
+        }
+    }
+    try std.testing.expect(!sessions.hasPendingWork());
+    sessions.closeTask(requests[0].authority.task_id, 5);
+    _ = try sessions.open(&fixture.port, &fixture.device.service, requests[bindings.len], 6);
 }

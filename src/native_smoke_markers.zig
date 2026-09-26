@@ -51,6 +51,9 @@ pub const production_required = [_][]const u8{
 };
 
 pub const production_forbidden = [_][]const u8{
+    boot_markers.document_channel_userspace_open,
+    boot_markers.document_channel_userspace_save,
+    boot_markers.document_channel_retirement,
     boot_markers.kernel_role_verification,
     boot_markers.runtime_proof_process_isolation,
     boot_markers.service_boot_ipc_connect_all_ok,
@@ -187,6 +190,9 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_sync_ok,
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
+    boot_markers.document_channel_userspace_open,
+    boot_markers.document_channel_userspace_save,
+    boot_markers.document_channel_retirement,
     boot_markers.notes_daily_driver_complete,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
@@ -390,6 +396,9 @@ pub const notes_daily_driver_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_sync_ok,
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
+    boot_markers.document_channel_userspace_open,
+    boot_markers.document_channel_userspace_save,
+    boot_markers.document_channel_retirement,
     boot_markers.notes_daily_driver_complete,
 };
 

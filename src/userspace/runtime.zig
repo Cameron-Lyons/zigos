@@ -297,6 +297,10 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
         .{ .local_only = true, .service_port = true },
         failure_code,
     ) orelse return null;
+    var service_live = true;
+    defer if (service_live) {
+        _ = closeEndpoint(service_endpoint.capability_id);
+    };
     failure_code.* = 0x23;
     const peer_endpoint = endpointCreate(
         authority_capability_id,
@@ -305,6 +309,10 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
         .{ .local_only = true },
         failure_code,
     ) orelse return null;
+    var peer_live = true;
+    defer if (peer_live) {
+        _ = closeEndpoint(peer_endpoint.capability_id);
+    };
     failure_code.* = 0x24;
     _ = endpointConnect(
         peer_endpoint.capability_id,
@@ -381,6 +389,14 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
     proof.flags.all_operations_completed = proof.operation_count == @as(u16, @intCast(service_plan.operation_count));
     failure_code.* = 0x32;
     if (!proof.flags.all_operations_completed) return null;
+    // Both endpoints belong only to this startup check. The service's
+    // published endpoint is provisioned separately by session bootstrap.
+    failure_code.* = 0x33;
+    if (closeEndpoint(peer_endpoint.capability_id) != .success) return null;
+    peer_live = false;
+    failure_code.* = 0x34;
+    if (closeEndpoint(service_endpoint.capability_id) != .success) return null;
+    service_live = false;
     return proof;
 }
 

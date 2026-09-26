@@ -1,3 +1,4 @@
+const std = @import("std");
 const indexed_arena = @import("core/indexed_arena.zig");
 const abi = @import("core/abi.zig");
 const id_index = @import("core/id_index.zig");
@@ -1547,7 +1548,7 @@ pub const indexed_hot_path_tables = .{
         .keeps_object_model_state_within_ceiling = @sizeOf(object_store.ObjectRecord) <= object_store.OBJECT_RECORD_SIZE_CEILING_BYTES,
         .exposes_latest_inserted_version_lookup = @hasDecl(object_store.Store, "latestInsertedVersionConst"),
         .uses_compact_blob_chunk_edges = object_store.CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES and
-            @sizeOf(object_store.BlobChunkSlotIndex) == 1 and
+            @sizeOf(object_store.BlobChunkSlotIndex) == @sizeOf(std.math.IntFittingRange(0, object_store.MAX_CHUNKS - 1)) and
             @hasField(object_store.BlobRecord, "chunk_slot_indexes"),
         .packs_blob_state_into_bounded_metadata = object_store.PACKS_BLOB_STATE_INTO_BOUNDED_METADATA and
             @sizeOf(@FieldType(object_store.BlobRecord, "state")) == 4 and

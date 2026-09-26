@@ -37,6 +37,8 @@ const userspace_flags = @import("../task/userspace_flags.zig");
 const trust_boot = @import("trust_boot.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
+const document_sessions = @import("document_sessions.zig");
+const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
 const workspace_mod = @import("../storage/workspace.zig");
@@ -109,6 +111,7 @@ pub const SessionManager = struct {
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
     input_router: input_router_mod.Router = .{},
     surface_authority_scanned_lifecycle_generation: u64 = 0,
+    documents: document_sessions.Sessions = .{},
 
     pub fn init() SessionManager {
         return initial_session_manager;
@@ -124,6 +127,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.documents.deinit(0);
         self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
         self.input_router.deinit();
@@ -273,12 +277,31 @@ pub const SessionManager = struct {
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
-        return self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
+        const serviced = self.documents.service(now_ticks);
+        const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
+        return serviced or dispatched;
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
-        return self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        return self.documents.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+    }
+
+    // The opener supplies existing task-scoped storage and transport authority.
+    // Bind before the app's first dispatch; reopening requires a fresh task.
+    pub fn openDocumentChannel(self: *SessionManager, request: document_sessions.OpenRequest, now_ticks: u64) !userspace_mailbox.DocumentBinding {
+        const port = self.kernelPort() orelse return error.KernelUnavailable;
+        const binding = try self.documents.open(port, self.storageServicePtr(), request, now_ticks);
+        errdefer self.documents.closeTask(request.authority.task_id, now_ticks);
+        if (!self.runtime_context.userspace_executor.bindInitialDocument(
+            self.userspaceCatalogPtr(),
+            self.runtimePtr(),
+            self.capabilityTablePtr(),
+            request.authority.task_id,
+            binding,
+            now_ticks,
+        )) return error.DocumentLaunchUnavailable;
+        return binding;
     }
 
     pub fn servicePendingNetworkWork(self: *SessionManager, now_ticks: u64) usize {
@@ -786,6 +809,7 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.documents.deinit(0);
         self.initialized = false;
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
         self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();

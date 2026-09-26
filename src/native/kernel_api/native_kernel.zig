@@ -248,7 +248,13 @@ pub const Kernel = struct {
 
     pub fn endpointClose(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!void {
         const authorized = try self.authorizeOperation(.endpoint_close, context, now_ticks, .{});
-        const retired = try self.endpoint_table.close(ids.endpoint(authorized.target.id), .{
+        try self.retireEndpoint(ids.endpoint(authorized.target.id), now_ticks);
+    }
+
+    // Trusted channel owners retain generational endpoint ids for teardown,
+    // including after policy revokes the endpoint's userspace grants.
+    pub fn retireEndpoint(self: *Kernel, endpoint_id: ids.EndpointId, now_ticks: u64) endpoint.Error!void {
+        const retired = try self.endpoint_table.close(endpoint_id, .{
             .context = self.capability_table,
             .release = releaseQueuedMove,
         });

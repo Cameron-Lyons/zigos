@@ -18,8 +18,10 @@ pub const MAX_BLOBS: usize = 640;
 pub const PAGE_SIZE_BYTES: usize = 4096;
 pub const MAX_CHUNK_BYTES: usize = PAGE_SIZE_BYTES;
 pub const MAX_BLOB_CHUNKS: usize = 28;
-pub const MAX_CHUNKS: usize = 224;
-pub const BlobChunkSlotIndex = u8;
+// Every nonempty blob needs at least one chunk. Keep the default pool large
+// enough for the blob quota; freestanding payload bytes allocate on demand.
+pub const MAX_CHUNKS: usize = MAX_BLOBS;
+pub const BlobChunkSlotIndex = u16;
 pub const VersionBlobSlotIndex = u16;
 pub const MAX_BLOB_BYTES: usize = MAX_CHUNK_BYTES * MAX_BLOB_CHUNKS;
 pub const MAX_PAYLOAD_BYTES: usize = MAX_BLOB_BYTES;
@@ -73,13 +75,13 @@ pub const OBJECT_QUERY_RESULT_SIZE_CEILING_BYTES: usize = 144;
 pub const OBJECT_HISTORY_ENTRY_SIZE_CEILING_BYTES: usize = 152;
 pub const OBJECT_RECORD_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_RECORD_SIZE_CEILING_BYTES: usize = 288;
-pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 64;
-pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 64;
+pub const BLOB_RECORD_SIZE_CEILING_BYTES: usize = 92;
+pub const BLOB_SLOT_SIZE_CEILING_BYTES: usize = 92;
 pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 288;
 pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = 1_257_008;
+pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 390_736 else 3_003_216;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -489,6 +491,7 @@ pub const ChunkRecord = struct {
 
 pub const Error = error{
     ContentTypeTooLong,
+    InvalidObjectId,
     InvalidSignature,
     LabelTooLong,
     NoSpaceLeft,
@@ -865,6 +868,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         fn insertVersionRef(self: *Self, request: *const PutRequest) Error!PutResult {
+            if (request.preferred_object_id) |object_id| {
+                if (object_id.isZero()) return error.InvalidObjectId;
+            }
             var object_record: ?*ObjectRecord = null;
             var pending_object_id: ?ids.ObjectId = null;
             if (request.parent_version_id) |parent_version_id| {
@@ -895,18 +901,12 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             if (self.versionCount() >= MAX_STORE_VERSIONS) return error.VersionTableFull;
             const version_id = try self.nextVersionId();
 
-            var created_new_object = false;
-            if (pending_object_id) |object_id| {
-                object_record = try self.createObject(object_id, request.object_type);
-                created_new_object = true;
-            }
-            const target_object = object_record orelse native_util.impossibleByInvariant("version target must resolve to an object");
-
+            const current_version_id = if (object_record) |record| record.latest_version_id else ids.VersionId.zero;
             const previous_version_id = if (request.parent_version_id) |parent_version_id|
                 parent_version_id
             else
-                target_object.latest_version_id;
-            if (!target_object.latest_version_id.isZero() and !previous_version_id.eql(target_object.latest_version_id)) {
+                current_version_id;
+            if (!current_version_id.isZero() and !previous_version_id.eql(current_version_id)) {
                 return error.ParentMismatch;
             }
 
@@ -915,17 +915,25 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             const blob_address = blobManifestAddressFromMerkleRoot(request.payload.len, chunk_count, merkle_root);
             const blob_slot_index = try self.putBlobPrepared(blob_address, request.payload, &chunk_refs, chunk_count);
+            // All fallible payload allocation precedes publication. Object and
+            // version capacity and issuance were checked above in this call.
+            const created_new_object = pending_object_id != null;
+            if (pending_object_id) |object_id| {
+                object_record = self.createObject(object_id, request.object_type) catch
+                    native_util.impossibleByInvariant("preflighted object publication has capacity");
+            }
+            const target_object = object_record orelse native_util.impossibleByInvariant("version target must resolve to an object");
             const parents = versionParents(previous_version_id);
             const parent_count = countVersionParents(parents);
             const version_address = computeVersionAddress(parents[0..@as(usize, @intCast(parent_count))], request.metadata, blob_address);
-            try self.insertVersion(.{
+            self.insertVersion(.{
                 .id = version_id,
                 .object_id = target_object.id,
                 .parent_version_ids = parents,
                 .object_type = request.object_type,
                 .metadata = &request.metadata,
                 .blob_slot_index = blob_slot_index,
-            });
+            }) catch native_util.impossibleByInvariant("preflighted version publication has capacity");
 
             target_object.latest_version_id = version_id;
             target_object.version_count += 1;
@@ -1382,17 +1390,9 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             chunk_refs: *[MAX_BLOB_CHUNKS]ChunkRef,
             chunk_count: usize,
         ) Error!usize {
-            var chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS;
-            for (chunk_refs[0..chunk_count], 0..) |chunk_ref, chunk_index| {
-                const start = chunk_index * MAX_CHUNK_BYTES;
-                const end = @min(start + MAX_CHUNK_BYTES, payload.len);
-                const chunk_slot_index = try self.putChunkPrepared(chunk_ref.address, payload[start..end]);
-                chunk_slot_indexes[chunk_index] = @intCast(chunk_slot_index);
-            }
-
             if (self.blobSlotIndex(address)) |slot_index| {
                 const slot = self.blobSlotAt(slot_index);
-                if (!blobManifestMatches(self, slot.blob, payload.len, chunk_refs[0..chunk_count])) return error.CorruptBlob;
+                if (!blobManifestMatches(self, &slot.blob, payload, chunk_refs[0..chunk_count])) return error.CorruptBlob;
                 slot.blob.incrementRefCount();
                 self.recordBlobPayloadBytes(payload.len);
                 return slot_index;
@@ -1400,6 +1400,26 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             const slot_index = self.blobs.reserveIndex(indexIdForBytes(&address)) orelse return error.BlobTableFull;
             const slot = self.blobSlotAt(slot_index);
             slot.blob.address = address;
+            errdefer std.debug.assert(self.blobs.removeIndex(slot_index));
+
+            var created_chunks: [MAX_BLOB_CHUNKS]BlobChunkSlotIndex = undefined;
+            var created_count: usize = 0;
+            errdefer for (created_chunks[0..created_count]) |created_index| {
+                self.chunkSlotAt(created_index).chunk.releasePayload();
+                std.debug.assert(self.chunks.removeIndex(created_index));
+            };
+            var chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS;
+            for (chunk_refs[0..chunk_count], 0..) |chunk_ref, chunk_index| {
+                const start = chunk_index * MAX_CHUNK_BYTES;
+                const end = @min(start + MAX_CHUNK_BYTES, payload.len);
+                const previous_chunk_count = self.chunkCount();
+                const chunk_slot_index = try self.putChunkPrepared(chunk_ref.address, payload[start..end]);
+                chunk_slot_indexes[chunk_index] = @intCast(chunk_slot_index);
+                if (self.chunkCount() != previous_chunk_count) {
+                    created_chunks[created_count] = @intCast(chunk_slot_index);
+                    created_count += 1;
+                }
+            }
             slot.blob.chunk_slot_indexes = chunk_slot_indexes;
             slot.blob.setPayloadState(payload.len, 1);
             self.recordBlobPayloadBytes(payload.len);
@@ -1730,15 +1750,17 @@ fn versionParentsAreCanonical(parent_version_ids: [MAX_VERSION_PARENTS]ids.Versi
     return true;
 }
 
-fn blobManifestMatches(store: anytype, blob_record: BlobRecord, payload_len: usize, chunk_refs: []const ChunkRef) bool {
-    if (blob_record.payloadLen() != payload_len) return false;
+fn blobManifestMatches(store: anytype, blob_record: *const BlobRecord, payload: []const u8, chunk_refs: []const ChunkRef) bool {
+    if (blob_record.payloadLen() != payload.len) return false;
     const chunk_count = blob_record.chunkCount();
     if (chunk_count != chunk_refs.len) return false;
     var index: usize = 0;
     while (index < chunk_count) : (index += 1) {
-        const stored_chunk_ref = store.blobChunkRef(&blob_record, index) catch return false;
-        if (!std.mem.eql(u8, &stored_chunk_ref.address, &chunk_refs[index].address)) return false;
-        if (stored_chunk_ref.payload_len != chunk_refs[index].payload_len) return false;
+        const chunk = store.blobChunk(blob_record, index) orelse return false;
+        if (!std.mem.eql(u8, &chunk.address, &chunk_refs[index].address)) return false;
+        if (chunk.payloadLen() != chunk_refs[index].payload_len) return false;
+        const start = index * MAX_CHUNK_BYTES;
+        if (!std.mem.eql(u8, chunk.chunkSlice(), payload[start..@min(start + MAX_CHUNK_BYTES, payload.len)])) return false;
     }
     return true;
 }

@@ -217,6 +217,62 @@ test "storage volume exposes the first supported product capacity envelope" {
     try storage_volume.ensureWithinProductCapacityEnvelope(&store, &workspaces);
 }
 
+test "single chunk blobs fill their quota and survive a volume round trip" {
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+    defer store.reset();
+    const workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(workspaces);
+    workspaces.* = workspace.Directory.init();
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+    var volume = Volume.init();
+    defer volume.reset();
+    const signer = signing.SignerIdentity{ .label = "chunk-quota", .seed = signing.seedFromByte(0xE3) };
+    var payload: [8]u8 = undefined;
+    for (0..object_store.MAX_BLOBS) |index| {
+        std.mem.writeInt(u64, &payload, index, .little);
+        _ = try store.putLocallySignedVersion(.{
+            .preferred_object_id = object_store.ids.object(1),
+            .object_type = .document,
+            .payload = &payload,
+            .signer = signer,
+            .label = "quota-history",
+            .content_type = "text/plain",
+            .created_at_ticks = index,
+        });
+    }
+    try std.testing.expectEqual(object_store.MAX_BLOBS, store.blobCount());
+    try std.testing.expectEqual(object_store.MAX_BLOBS, store.chunkCount());
+    const next_version = store.next_version_id;
+    for (0..8) |_| {
+        try std.testing.expectError(error.BlobTableFull, store.putLocallySignedVersion(.{
+            .object_type = .document,
+            .payload = "overflow",
+            .signer = signer,
+            .label = "overflow",
+            .content_type = "text/plain",
+            .created_at_ticks = next_version,
+        }));
+        try std.testing.expectEqual(@as(usize, 1), store.objectCount());
+        try std.testing.expectEqual(object_store.MAX_BLOBS, store.versionCount());
+        try std.testing.expectEqual(object_store.MAX_BLOBS, store.chunkCount());
+        try std.testing.expectEqual(next_version, store.next_version_id);
+    }
+    _ = try volume.saveToImage(image, store, workspaces);
+    store.reset();
+    _ = try volume.loadFromImage(image, store, workspaces);
+    try std.testing.expectEqual(object_store.MAX_BLOBS, store.chunkCount());
+    for (0..object_store.MAX_BLOBS) |index| {
+        std.mem.writeInt(u64, &payload, index, .little);
+        const version = store.versionConst(index + 1).?;
+        try std.testing.expectEqualSlices(u8, &payload, try store.versionPayload(version));
+    }
+}
+
 test "storage volume preserves exhausted identifier watermarks" {
     const allocator = std.testing.allocator;
     const image = try allocator.alloc(u8, image_bytes);
