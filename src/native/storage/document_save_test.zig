@@ -6,11 +6,11 @@ const storage_service = @import("storage_service.zig");
 const storage_volume = @import("storage_volume.zig");
 const document_save = @import("document_save.zig");
 
-const signer = signing.SignerIdentity{ .label = "document-save-test", .seed = signing.seedFromByte(0xc1) };
-const path = "documents/note.md";
+pub const signer = signing.SignerIdentity{ .label = "document-save-test", .seed = signing.seedFromByte(0xc1) };
+pub const path = "documents/note.md";
 
 // Writes enter volatile device state. Only a successful flush survives crash().
-const Fixture = struct {
+pub const Fixture = struct {
     var active: ?*Fixture = null;
     checkpoint: *storage_service.CheckpointStore,
     service: storage_service.Service,
@@ -24,7 +24,7 @@ const Fixture = struct {
     writes: usize = 0,
     flushes: usize = 0,
 
-    fn init(attach: bool) !*Fixture {
+    pub fn init(attach: bool) !*Fixture {
         storage_volume.clearAttachedBackend();
         const allocator = std.testing.allocator;
         const self = try allocator.create(Fixture);
@@ -62,7 +62,7 @@ const Fixture = struct {
         return self;
     }
 
-    fn deinit(self: *Fixture) void {
+    pub fn deinit(self: *Fixture) void {
         storage_volume.clearAttachedBackend();
         self.checkpoint.resetPersistent();
         active = null;
@@ -77,13 +77,13 @@ const Fixture = struct {
         return .{ .workspace_id = self.workspace_id, .path = path, .expected_version_id = self.original_version_id, .payload = payload, .signer = signer, .tick = 10 };
     }
 
-    fn crash(self: *Fixture) void {
+    pub fn crash(self: *Fixture) void {
         @memcpy(self.image, self.durable_image);
         self.checkpoint.resetPreparedState();
         self.service = storage_service.Service.initWithStore(500, 501, .{ .kind = .service, .serial = 500 }, self.checkpoint);
     }
 
-    fn text(self: *Fixture) ![]const u8 {
+    pub fn text(self: *Fixture) ![]const u8 {
         const entry = try self.service.resolve(self.workspace_id, path);
         return self.service.versionPayload(self.service.version(entry.version_id).?);
     }

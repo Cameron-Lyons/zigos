@@ -793,6 +793,24 @@ pub const StoragePort = struct {
         return bridge.resolveAuthorized(request.workspace_id, path, request.access, storage_authority, scoped_entry);
     }
 
+    // Native document writes use workspace authority and its object/path share
+    // scope. File-bridge views remain read-only export projections.
+    pub fn requireDocumentWrite(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        path_bytes: []const u8,
+        object_id: u64,
+    ) (AuthorityError || workspace.Error)!void {
+        const path = try file_bridge.validateBridgePath(path_bytes);
+        const grant = try self.requireStorageAuthority(authority, ids.workspace(workspace_id), .write);
+        if (grant.target.kind == .workspace) {
+            _ = try self.requireGrantScopeForResolve(authority, .{ .workspace_id = workspace_id, .path = path.bytes, .access = .write }, path);
+        }
+        const entry = try self.core.resolve(workspace_id, path.bytes);
+        if (entry.object_id.raw() != object_id or entry.object_type != .document) return error.PermissionDenied;
+    }
+
     fn requireGrantScopeForResolve(
         self: *const StoragePort,
         authority: AuthorityContext,

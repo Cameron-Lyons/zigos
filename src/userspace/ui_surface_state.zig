@@ -107,6 +107,13 @@ pub const State = struct {
         return true;
     }
 
+    pub fn acknowledgeSavedText(self: *State, saved_text: []const u8) bool {
+        if (self.model != .notes or !self.flags.dirty or !std.mem.eql(u8, self.textSlice(), saved_text)) return false;
+        self.flags.dirty = false;
+        self.revision +|= 1;
+        return true;
+    }
+
     fn moveFocus(self: *State, forward: bool) bool {
         const count = focusableControlCount(self.model);
         if (count <= 1) return false;
@@ -212,6 +219,47 @@ test "UI surface state selects application-specific fixed-capacity models" {
     try std.testing.expectEqual(mailbox.UiModelKind.permission_review, modelForBundle("zigos.system.permission-review"));
     try std.testing.expectEqual(mailbox.UiModelKind.compositor, modelForBundle("zigos.system.compositor"));
     try std.testing.expectEqual(mailbox.UiModelKind.generic, modelForBundle("app.unknown"));
+}
+
+test "Notes accepts durable receipts without clearing edits made during a save" {
+    const document_client = @import("document_client.zig");
+    const protocol = @import("document_protocol.zig");
+    var state = State.init("app.notes");
+    _ = state.apply(inputEvent(1, .text, 'a'));
+    var client = document_client.Client{ .service_endpoint_id = 12, .object_id = 20, .version_id = 30 };
+    try client.start(state.textSlice());
+    var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    const first = (try client.nextFrame(&bytes)).?;
+    var retry_bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, first, (try client.nextFrame(&retry_bytes)).?);
+    while (try client.nextFrame(&bytes) != null) client.sent();
+    _ = state.apply(inputEvent(2, .text, 'b'));
+    const saved = try protocol.encode(&bytes, .{ .request_id = 1, .body = .{ .receipt = .{
+        .status = .saved,
+        .object_id = 20,
+        .previous_version_id = 30,
+        .version_id = 31,
+        .checkpoint_generation = 7,
+    } } });
+    try std.testing.expect(!client.accept(99, 1, saved));
+    try std.testing.expect(!client.accept(12, 2, saved));
+    try std.testing.expect(client.accept(12, 1, saved));
+    try std.testing.expect(!state.acknowledgeSavedText(client.acknowledgedText().?));
+    try std.testing.expect(state.flags.dirty);
+    try client.start(state.textSlice());
+    try std.testing.expect(!client.accept(12, 1, saved));
+    while (try client.nextFrame(&bytes) != null) client.sent();
+    const latest = try protocol.encode(&bytes, .{ .request_id = 2, .body = .{ .receipt = .{
+        .status = .saved,
+        .object_id = 20,
+        .previous_version_id = 31,
+        .version_id = 32,
+        .checkpoint_generation = 8,
+    } } });
+    try std.testing.expect(client.accept(12, 2, latest));
+    try std.testing.expect(state.acknowledgeSavedText(client.acknowledgedText().?));
+    try std.testing.expect(!state.flags.dirty);
+    try std.testing.expectEqualStrings("ab", state.textSlice());
 }
 
 test "UI surface state serializes a canonical bounded presentation" {

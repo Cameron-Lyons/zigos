@@ -35,7 +35,11 @@ requests.
 - Document saves in that journey acknowledge success only after a device
   checkpoint completes. Write failures keep the editor's draft pending; retries
   reuse its version, and stale editors cannot replace a newer document version.
-  Isolated userspace app persistence still needs its service endpoint path.
+  A bounded document-scoped endpoint protocol now has a userspace save client
+  and a native storage backend, with host tests for durable receipts, retry,
+  backpressure, revocation, and object/path scope. Connecting an isolated app
+  to that backend and moving the storage core into its userspace service remain
+  open.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.

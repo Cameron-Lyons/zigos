@@ -842,6 +842,11 @@
       "implementation_anchors": [
         "src/native/platform/rendered_shell/production_journey.zig",
         "src/native/platform/rendered_shell/tests.zig",
+        "src/native/storage/document_save_ipc.zig",
+        "src/native/storage/document_save_ipc_test.zig",
+        "src/userspace/document_protocol.zig",
+        "src/userspace/document_client.zig",
+        "src/userspace/ui_surface_state.zig",
         "src/native/platform/native_ux.zig",
         "src/native/session/booted_evidence.zig",
         "src/native/services/indexing_service.zig",
@@ -866,11 +871,12 @@
         "The booted QEMU native smoke path now runs the ordered Notes daily-driver production journey through store:zigos/public before native-ready and emits the complete marker group on cold boot and cold reboot.",
         "The booted shell input loop now renders typed document text, syncs the edited note, recovers runtime state while preserving the edit, and then continues through rollback, recovery, and package removal.",
         "The bootstrapped native secure pasteboard service now replaces ambient clipboard assumptions with destination-bound, foreground-session-bound, user-gesture-bound, strictly expiring, read-once or revocable paste grants; audit events count pasteboard access and denials while redacting copied content from user-visible diagnostics.",
-        "The QEMU native smoke path now drives the booted Notes shell input loop with real text input, verifies the object-store payload equals the typed note, syncs that version device-to-device, recovers the shell/runtime checkpoint, and requires typed edit, typed sync, typed recovery, and typed-loop-complete markers before native-ready."
+        "The QEMU native smoke path now drives the booted Notes shell input loop with real text input, verifies the object-store payload equals the typed note, syncs that version device-to-device, recovers the shell/runtime checkpoint, and requires typed edit, typed sync, typed recovery, and typed-loop-complete markers before native-ready.",
+        "A document-scoped endpoint protocol transfers at most 512 draft bytes in canonical frames of at most 96 bytes. Its native storage backend rechecks the original app's live write capability and workspace share scope for every frame, retains one immutable attempt, verifies its digest, acknowledges only a durable checkpoint, and replays completed receipts without creating another version. Host tests exercise the client through native syscall dispatch, full drafts, failed barriers, lost replies, full reply queues, revocation, surrendered authority, unexpected capability cleanup, alternate paths, other workspaces, read-only and expired shares, and conflicting uploads. The userspace client correlates replies with the bound service endpoint and request, while the Notes state model keeps newer edits dirty when an older snapshot is acknowledged. This endpoint path has not yet been connected to a running isolated app."
       ],
       "production_gaps": [
         "The ordered Notes daily-driver marker path and typed editor loop are now emitted by booted QEMU native smoke, but the complete path has not yet been captured on real hardware.",
-        "Durable save acknowledgements currently serve the trusted rendered-shell journey. Isolated userspace UI state records a save request without clearing unsaved text; a scoped application-to-storage endpoint and durable acknowledgement delivery remain open."
+        "Durable save acknowledgements currently serve the trusted rendered-shell journey. The document endpoint protocol, userspace client, native backend, and Notes receipt handling are host-tested, but opening a document, binding its channel, and delivering saves and receipts in a running isolated app remain open. The storage core still runs in the trusted native layer."
       ],
       "graduation_criteria": [
         "Keep the first daily-driver scenario narrow: Notes app install, notes workspace/document use, explicit permission review, object-scoped sharing, local-first sync, update rollback, recovery, and package removal.",
