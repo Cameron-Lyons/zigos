@@ -82,8 +82,15 @@ requests.
   digest through a leased handle without granting raw export; signing checks the
   holder, task, current policy, expiry, and revocation. Ed25519 signing runs in
   software after an authorized unseal. Restoring a sealed record
-  authenticates its metadata and creates no handles. Production authorization
-  provisioning, persistent vault indexing, identity-service integration, and
+  authenticates its metadata and creates no handles. Identity registration,
+  assertions, and recovery now use private service-owned vault leases. Requests
+  carry handles instead of credential seeds. Each vault operation checks current
+  vault policy, and assertions also recheck credential policy. Assertion signatures
+  bind counters and security claims, and recovery approvals bind the registered
+  threshold, replacement key, and
+  credential generation. Origin validation accepts canonical HTTPS DNS origins
+  and rejects URL paths, user-info, and malformed ports. Production authorization
+  provisioning, durable identity/vault indexing, trusted unlock issuance, and
   userspace request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   creation, recovery from the native disk after restarting the VM and swtpm,
@@ -91,6 +98,9 @@ requests.
   HMAC tampering, and refusal by a replacement TPM. The same guest test persists
   a vault signing key, checks its public key after reboot, rejects altered owner,
   label, and export policy, and verifies signing leases and 96-byte secret export.
+  Cold and reboot cases also register an identity against that recovered key,
+  verify a vault-backed assertion, and reject counter tampering, expired leases,
+  wrong service tasks, and revoked handles.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).

@@ -3233,10 +3233,26 @@ fn validateSecretVaultHardwareProviderBoundary(
     const identity_snippets = [_][]const u8{
         "testHardwareProvider() secure_secret_store.HardwareSealProvider",
         "secrets.attachHardwareProvider(testHardwareProvider())",
+        "pub const VaultAuthority",
+        "if (authority.holder.kind != .service) return error.InvalidIdentityAuthority",
+        "authority.vault.signDigest",
+        "authority.policies.credentialAssertionDecision",
+        "secret.id != credential.secret_id",
+        "crypto_hash.updateInt(&hasher, \"assertion-counter\", assertion.assertion_counter)",
+        "const challenge = recoveryIntentDigest(credential, request.recovery_device, secret)",
+        "trusted_device_count < credential.recovery_threshold",
     };
     for (identity_snippets) |snippet| {
         if (std.mem.indexOf(u8, identity_source, snippet) == null) {
             try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep identity provider test snippet: {s}", .{snippet});
+        }
+    }
+
+    const identity_runtime_end = std.mem.indexOf(u8, identity_source, "const identity_keys =") orelse identity_source.len;
+    const identity_runtime = identity_source[0..identity_runtime_end];
+    for ([_][]const u8{ "request.credential_identity", "request.replacement_credential_identity", "request.tick", "request.threshold" }) |legacy_input| {
+        if (std.mem.indexOf(u8, identity_runtime, legacy_input) != null) {
+            try common.addError(errors, allocator, "Identity vault boundary must not trust request-supplied signing authority: {s}", .{legacy_input});
         }
     }
 

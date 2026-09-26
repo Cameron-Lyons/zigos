@@ -1,3 +1,4 @@
+const identity_keys = @import("../../tests/fixtures/identity_vault.zig");
 const std = @import("std");
 const abi = @import("../core/abi.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
@@ -3981,7 +3982,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
             @hasField(os_identity.Assertion, "hardware_backed_credential"),
     };
     var graph = device_graph.Graph.init();
-    var secrets = secure_secret_store.Store.init();
+    var secrets = secret_vault_service.Service.init();
     secrets.attachHardwareProvider(credentialContractHardwareProvider());
     var identities = os_identity.Store.init();
     var ledger = event_ledger.Ledger.init();
@@ -3992,6 +3993,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         .subject_id = 2057,
         .issuer = .{ .kind = .policy_authority, .serial = 2057 },
         .label = "credential-service-policy",
+        .secret_vault_allowed = true,
         .credential_assertions_allowed = true,
         .deny_credential_password_fallback = true,
         .require_phishing_resistant_credential = true,
@@ -4004,6 +4006,8 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
     }) catch return evidence;
 
     const user = principal.PrincipalId{ .kind = .user, .serial = 2057 };
+    var authority = identity_keys.context(&secrets, &policies, user);
+    authority.subjects.organization_id = 2057;
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 2058 };
     const phone = principal.PrincipalId{ .kind = .device, .serial = 2059 };
     const task_id: u64 = 2060;
@@ -4011,20 +4015,23 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
     const laptop_identity = signing.SignerIdentity{ .label = "credential-contract-laptop", .seed = signing.seedFromByte(0xE7) };
     const phone_identity = signing.SignerIdentity{ .label = "credential-contract-phone", .seed = signing.seedFromByte(0xE8) };
     const first_credential_identity = signing.SignerIdentity{ .label = "credential-contract-passkey-v1", .seed = signing.seedFromByte(0xE9) };
+    const handle_first_credential_identity = identity_keys.provision(authority, user, first_credential_identity) catch return evidence;
     const replacement_credential_identity = signing.SignerIdentity{ .label = "credential-contract-passkey-v2", .seed = signing.seedFromByte(0xEA) };
+    const handle_replacement_credential_identity = identity_keys.provision(authority, user, replacement_credential_identity) catch return evidence;
     const bound_credential_identity = signing.SignerIdentity{ .label = "credential-contract-bound", .seed = signing.seedFromByte(0xEB) };
+    const handle_bound_credential_identity = identity_keys.provision(authority, user, bound_credential_identity) catch return evidence;
 
     _ = graph.ensureUserRoot(user, "owner", user_identity) catch return evidence;
     _ = graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1) catch return evidence;
     _ = graph.enrollDevice(user, phone, "phone", user_identity, phone_identity, 2) catch return evidence;
-    const credential = identities.registerCredential(&graph, &secrets, .{
+    const credential = identities.registerCredential(&graph, identity_keys.at(authority, 3), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .label = "accounts-passkey",
         .scope = .synced,
-        .credential_identity = first_credential_identity,
-        .tick = 3,
+        .recovery_threshold = 2,
+        .key_handle_id = handle_first_credential_identity,
     }) catch return evidence;
     const credential_id = credential.id;
     const first_generation = credential.credential_generation;
@@ -4035,15 +4042,14 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         credential.isRecoverableThroughDeviceGraph();
 
     const unlock = os_identity.createLocalUnlockProof(user, laptop, "accounts.example", "nonce-1", .biometric, 4, 8, laptop_identity) catch return evidence;
-    const assertion = identities.assertCredential(&graph, .{
+    const assertion = identities.assertCredential(&graph, identity_keys.at(authority, 5), .{
         .credential_id = credential_id,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .origin = "https://login.accounts.example",
         .challenge = "nonce-1",
         .local_unlock = unlock,
-        .credential_identity = first_credential_identity,
-        .tick = 5,
+        .key_handle_id = handle_first_credential_identity,
     }) catch return evidence;
     const credential_decision = policies.credentialAssertionDecision(.{ .organization_id = 2057 }, .{
         .phishing_resistant = assertion.phishing_resistant,
@@ -4067,25 +4073,23 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         "private credential assertion for accounts.example",
     ) catch return evidence;
 
-    evidence.local_unlock_required = if (identities.assertCredential(&graph, .{
+    evidence.local_unlock_required = if (identities.assertCredential(&graph, identity_keys.at(authority, 6), .{
         .credential_id = credential_id,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .origin = "https://accounts.example",
         .challenge = "nonce-1",
-        .credential_identity = first_credential_identity,
-        .tick = 6,
+        .key_handle_id = handle_first_credential_identity,
     })) |_| false else |err| err == error.LocalUnlockRequired;
 
-    evidence.phishing_rejected = if (identities.assertCredential(&graph, .{
+    evidence.phishing_rejected = if (identities.assertCredential(&graph, identity_keys.at(authority, 6), .{
         .credential_id = credential_id,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .origin = "https://accounts.example.evil.test",
         .challenge = "nonce-1",
         .local_unlock = unlock,
-        .credential_identity = first_credential_identity,
-        .tick = 6,
+        .key_handle_id = handle_first_credential_identity,
     })) |_| false else |err| err == error.PhishingOriginRejected;
     if (evidence.phishing_rejected) {
         ledger.recordIdentityCredential(
@@ -4105,50 +4109,45 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
     }
 
     const expired_unlock = os_identity.createLocalUnlockProof(user, laptop, "accounts.example", "nonce-expired", .biometric, 4, 5, laptop_identity) catch return evidence;
-    evidence.fresh_unlock_enforced = if (identities.assertCredential(&graph, .{
+    evidence.fresh_unlock_enforced = if (identities.assertCredential(&graph, identity_keys.at(authority, 9), .{
         .credential_id = credential_id,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .origin = "https://accounts.example",
         .challenge = "nonce-expired",
         .local_unlock = expired_unlock,
-        .credential_identity = first_credential_identity,
-        .tick = 9,
+        .key_handle_id = handle_first_credential_identity,
     })) |_| false else |err| err == error.LocalUnlockExpired;
 
-    const bound = identities.registerCredential(&graph, &secrets, .{
+    const bound = identities.registerCredential(&graph, identity_keys.at(authority, 10), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "admin.example",
         .label = "admin-device-passkey",
         .scope = .device_bound,
-        .credential_identity = bound_credential_identity,
-        .tick = 10,
+        .key_handle_id = handle_bound_credential_identity,
     }) catch return evidence;
     const phone_unlock = os_identity.createLocalUnlockProof(user, phone, "admin.example", "bound-nonce", .biometric, 11, 15, phone_identity) catch return evidence;
-    evidence.device_bound_wrong_device_rejected = if (identities.assertCredential(&graph, .{
+    evidence.device_bound_wrong_device_rejected = if (identities.assertCredential(&graph, identity_keys.at(authority, 12), .{
         .credential_id = bound.id,
         .device = phone,
         .relying_party_id = "admin.example",
         .origin = "https://admin.example",
         .challenge = "bound-nonce",
         .local_unlock = phone_unlock,
-        .credential_identity = bound_credential_identity,
-        .tick = 12,
+        .key_handle_id = handle_bound_credential_identity,
     })) |_| false else |err| err == error.DeviceBoundCredentialWrongDevice;
 
-    const recovery_unlock = os_identity.createLocalUnlockProof(user, phone, "accounts.example", "recover-1", .recovery_key, 13, 18, phone_identity) catch return evidence;
-    const laptop_recovery_unlock = os_identity.createLocalUnlockProof(user, laptop, "accounts.example", "recover-1", .recovery_key, 13, 18, laptop_identity) catch return evidence;
-    const recovered = identities.recoverCredential(&graph, &secrets, .{
+    const recovery_challenge = identities.recoveryChallenge(authority, credential_id, phone, handle_replacement_credential_identity) catch return evidence;
+    const recovery_unlock = os_identity.createLocalUnlockProof(user, phone, "accounts.example", &recovery_challenge, .recovery_key, 13, 18, phone_identity) catch return evidence;
+    const laptop_recovery_unlock = os_identity.createLocalUnlockProof(user, laptop, "accounts.example", &recovery_challenge, .recovery_key, 13, 18, laptop_identity) catch return evidence;
+    const recovered = identities.recoverCredential(&graph, identity_keys.at(authority, 14), .{
         .credential_id = credential_id,
         .recovery_device = phone,
         .relying_party_id = "accounts.example",
-        .challenge = "recover-1",
         .local_unlock = recovery_unlock,
-        .threshold = 2,
         .approvals = &.{.{ .device = laptop, .local_unlock = laptop_recovery_unlock }},
-        .replacement_credential_identity = replacement_credential_identity,
-        .tick = 14,
+        .replacement_key_handle_id = handle_replacement_credential_identity,
     }) catch return evidence;
     evidence.synced_recovery = recovered.primary_device.eql(phone) and
         recovered.credential_generation == first_generation + 1 and
@@ -4169,14 +4168,12 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
     ) catch return evidence;
 
     const bound_recovery_unlock = os_identity.createLocalUnlockProof(user, phone, "admin.example", "recover-bound", .recovery_key, 15, 19, phone_identity) catch return evidence;
-    evidence.device_bound_recovery_denied = if (identities.recoverCredential(&graph, &secrets, .{
+    evidence.device_bound_recovery_denied = if (identities.recoverCredential(&graph, identity_keys.at(authority, 16), .{
         .credential_id = bound.id,
         .recovery_device = phone,
         .relying_party_id = "admin.example",
-        .challenge = "recover-bound",
         .local_unlock = bound_recovery_unlock,
-        .replacement_credential_identity = replacement_credential_identity,
-        .tick = 16,
+        .replacement_key_handle_id = handle_replacement_credential_identity,
     })) |_| false else |err| err == error.DeviceBoundRecoveryDenied;
 
     identities.revokeCredential(credential_id, 17) catch return evidence;
@@ -4195,15 +4192,14 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         "private credential revocation for accounts.example",
     ) catch return evidence;
     const post_revoke_unlock = os_identity.createLocalUnlockProof(user, phone, "accounts.example", "post-revoke", .device_pin, 18, 21, phone_identity) catch return evidence;
-    evidence.revocation_gate = if (identities.assertCredential(&graph, .{
+    evidence.revocation_gate = if (identities.assertCredential(&graph, identity_keys.at(authority, 19), .{
         .credential_id = credential_id,
         .device = phone,
         .relying_party_id = "accounts.example",
         .origin = "https://accounts.example",
         .challenge = "post-revoke",
         .local_unlock = post_revoke_unlock,
-        .credential_identity = replacement_credential_identity,
-        .tick = 19,
+        .key_handle_id = handle_replacement_credential_identity,
     })) |_| false else |err| err == error.CredentialRevoked;
 
     const summary = ledger.userVisibleDiagnosticSummary();
