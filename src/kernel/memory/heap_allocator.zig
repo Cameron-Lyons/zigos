@@ -35,7 +35,8 @@ pub const Heap = struct {
         self.insertFree(block);
     }
 
-    pub fn allocate(self: *Heap, requested_size: usize) ?*anyopaque {
+    // Keep constant-sized requests and exhausted-bucket returns in the caller.
+    pub inline fn allocate(self: *Heap, requested_size: usize) ?*anyopaque {
         const size = geometry.allocationSize(requested_size) orelse return null;
         const class = geometry.sizeClass(size);
         var first = class.first;
@@ -49,11 +50,15 @@ pub const Heap = struct {
         const second: u5 = @intCast(@ctz(second_bits));
         const block = self.free_lists[first][second].?;
         std.debug.assert(block.size >= size);
-        self.removeFree(block);
+        self.removeFreeInClass(block, .{ .first = first, .second = second });
         self.split(block, size);
         block.state = geometry.block_state_allocated;
         const payload: [*]u8 = @as([*]u8, @ptrCast(block)) + @sizeOf(Header);
-        self.setMarker(self.markerIndex(@intFromPtr(payload)).?, true);
+        // The selected block belongs to this arena and yields an aligned
+        // payload. Untrusted release pointers still pass through liveHeader.
+        const index = (@intFromPtr(payload) - @intFromPtr(self.data.ptr)) / alignment;
+        std.debug.assert(self.markerIndex(@intFromPtr(payload)).? == index);
+        self.setMarker(index, true);
         return payload;
     }
 
@@ -122,7 +127,10 @@ pub const Heap = struct {
     }
 
     fn removeFree(self: *Heap, block: *Header) void {
-        const class = geometry.sizeClass(block.size);
+        self.removeFreeInClass(block, geometry.sizeClass(block.size));
+    }
+
+    fn removeFreeInClass(self: *Heap, block: *Header, class: geometry.SizeClass) void {
         const head = &self.free_lists[class.first][class.second];
         const neighbors = links(block).*;
         if (neighbors.prev) |prev| links(prev).next = neighbors.next else head.* = neighbors.next;

@@ -45,10 +45,8 @@ pub fn sizeClass(size: usize) SizeClass {
 
 pub fn allocationSize(size: usize) ?usize {
     if (size == 0 or size > maximum_heap_bytes) return null;
-    const alignment = if (size < linear_limit)
-        block_alignment
-    else
-        @as(usize, 1) << (std.math.log2_int(usize, size) - second_level_bits);
+    if (size < linear_limit) return (size + block_alignment - 1) & ~(block_alignment - 1);
+    const alignment = @as(usize, 1) << (std.math.log2_int(usize, size) - second_level_bits);
     const rounded = alignSize(size, alignment) orelse return null;
     return if (rounded <= maximum_heap_bytes) rounded else null;
 }

@@ -149,6 +149,47 @@ test "heap coalesces adjacent blocks in every release order" {
     }
 }
 
+test "heap reuses larger size classes without losing free-list membership" {
+    var arena: [32 * 1024]u8 align(16) = undefined;
+    var heap: Heap = undefined;
+    try heap.init(&arena);
+    const before = heap.allocate(16).?;
+    const Chunk = struct { body: *anyopaque, tail: *anyopaque, barrier: *anyopaque };
+    var chunks: [2]Chunk = undefined;
+    for (&chunks) |*chunk| chunk.* = .{
+        .body = heap.allocate(6144).?,
+        .tail = heap.allocate(96).?,
+        .barrier = heap.allocate(16).?,
+    };
+    for (chunks) |chunk| try std.testing.expect(heap.release(chunk.body));
+    try expectIntegrity(&heap);
+    const first_bitmap = heap.nonempty_first;
+    // The first merge leaves the source bucket occupied. The second empties
+    // it while adding to an already occupied destination in the same row.
+    for (chunks) |chunk| {
+        try std.testing.expect(heap.release(chunk.tail));
+        try expectIntegrity(&heap);
+        try std.testing.expectEqual(first_bitmap, heap.nonempty_first);
+    }
+    const small = heap.allocate(16).?;
+    try std.testing.expectEqual(chunks[1].body, small);
+    try expectIntegrity(&heap);
+    try std.testing.expectEqual(first_bitmap, heap.nonempty_first);
+    const large = heap.allocate(6144).?;
+    try expectIntegrity(&heap);
+    try std.testing.expect(heap.release(large));
+    try expectIntegrity(&heap);
+    try std.testing.expect(heap.release(small));
+    try expectIntegrity(&heap);
+    try std.testing.expect(heap.release(before));
+    for (chunks) |chunk| {
+        try std.testing.expect(heap.release(chunk.barrier));
+        try expectIntegrity(&heap);
+    }
+    const first: *const Header = @ptrCast(heap.data.ptr);
+    try std.testing.expect(first.next == null);
+}
+
 test "heap rejects forged interior headers foreign pointers and duplicate frees" {
     var arena: [4096]u8 align(16) = undefined;
     var heap: Heap = undefined;
