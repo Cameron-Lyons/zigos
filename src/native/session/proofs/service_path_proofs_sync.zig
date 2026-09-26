@@ -324,7 +324,7 @@ pub fn proveBootedSyncServicePath(
         authority.id,
         sync_task.id,
         "zigos.sync.source",
-        .{ .local_only = true, .service_port = true },
+        .{ .local_only = true },
         114,
     );
     const peer_endpoint = try expectEndpointCreateWithFlags(

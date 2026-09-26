@@ -50,6 +50,7 @@ pub const EndpointSendRequest = struct {
     header: abi.RequestHeader,
     endpoint_capability_id: u64,
     payload: []const u8,
+    reply_endpoint_id: u64 = 0,
     attached_capability_id: ?u64 = null,
     move_attached_capability: bool = false,
 };
@@ -222,6 +223,7 @@ pub const KernelPort = struct {
             callContext(request.header, request.endpoint_capability_id, .none),
             request.header.correlation_id,
             request.payload,
+            request.reply_endpoint_id,
             request.attached_capability_id,
             request.move_attached_capability,
             now_ticks,

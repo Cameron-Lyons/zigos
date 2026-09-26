@@ -120,7 +120,8 @@ fn runStartupProtocol(
     for (service_plan.slice(), 0..) |operation, index| {
         var request_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
         const request_payload = try service_protocol.encodeRequest(&request_buffer, kind, operation, index);
-        try syscallEndpointSend(port, task_id, peer_endpoint.capability_id, request_payload, now_ticks);
+        const correlation_id = nextCorrelationId();
+        try syscallEndpointSend(port, task_id, peer_endpoint.capability_id, request_payload, 0, correlation_id, now_ticks);
 
         const received_request = try syscallEndpointRecv(port, task_id, service_endpoint.capability_id, now_ticks);
         if (received_request.present == 0) return error.ProtocolMismatch;
@@ -134,10 +135,11 @@ fn runStartupProtocol(
         state_hash = service_protocol.foldOperation(state_hash, operation, index);
         var response_buffer: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
         const response_payload = try service_protocol.encodeResponse(&response_buffer, decoded_request, state_hash);
-        try syscallEndpointSend(port, task_id, service_endpoint.capability_id, response_payload, now_ticks);
+        try syscallEndpointSend(port, task_id, service_endpoint.capability_id, response_payload, received_request.message.sender_endpoint_id, received_request.message.correlation_id, now_ticks);
 
         const received_response = try syscallEndpointRecv(port, task_id, peer_endpoint.capability_id, now_ticks);
-        if (received_response.present == 0) return error.ProtocolMismatch;
+        if (received_response.present == 0 or received_response.message.correlation_id != correlation_id or
+            received_response.message.sender_endpoint_id != service_endpoint.endpoint.endpoint_id) return error.ProtocolMismatch;
         const response_len: usize = @intCast(received_response.message.payload_len);
         if (response_len > received_response.payload.len) return error.ProtocolMismatch;
         const decoded_response = try service_protocol.decodeResponse(received_response.payload[0..response_len]);
@@ -218,12 +220,15 @@ fn syscallEndpointSend(
     task_id: u64,
     endpoint_capability_id: u64,
     payload: []const u8,
+    reply_endpoint_id: u64,
+    correlation_id: u64,
     now_ticks: u64,
 ) Error!void {
     var request = component_port.EndpointSendRequest{
-        .header = component_port.makeHeader(.endpoint_send, nextCorrelationId(), task_id),
+        .header = component_port.makeHeader(.endpoint_send, correlation_id, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
+        .reply_endpoint_id = reply_endpoint_id,
     };
     const result = syscall_surface.dispatch(
         port,

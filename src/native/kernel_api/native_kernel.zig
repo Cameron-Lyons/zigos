@@ -262,6 +262,7 @@ pub const Kernel = struct {
         context: KernelCallContext,
         correlation_id: u64,
         payload: []const u8,
+        reply_endpoint_id: u64,
         attached_capability_id: ?u64,
         move_attached_capability: bool,
         now_ticks: u64,
@@ -283,14 +284,26 @@ pub const Kernel = struct {
             }
         }
 
-        try self.endpoint_table.send(
-            ids.endpoint(endpoint_capability.target.id),
-            ids.task(endpoint_capability.scope.task_id orelse 0),
-            correlation_id,
-            payload,
-            if (attached_capability_id) |id| ids.capability(id) else null,
-            move_attached_capability,
-        );
+        if (reply_endpoint_id != 0) {
+            try self.endpoint_table.reply(
+                ids.endpoint(endpoint_capability.target.id),
+                ids.endpoint(reply_endpoint_id),
+                ids.task(endpoint_capability.scope.task_id orelse 0),
+                correlation_id,
+                payload,
+                if (attached_capability_id) |id| ids.capability(id) else null,
+                move_attached_capability,
+            );
+        } else {
+            try self.endpoint_table.send(
+                ids.endpoint(endpoint_capability.target.id),
+                ids.task(endpoint_capability.scope.task_id orelse 0),
+                correlation_id,
+                payload,
+                if (attached_capability_id) |id| ids.capability(id) else null,
+                move_attached_capability,
+            );
+        }
         if (move_source_task) |source_task| {
             _ = task_runtime.revokeCapabilityFromTask(source_task, attached_capability_id.?);
         }
@@ -315,6 +328,7 @@ pub const Kernel = struct {
         var result = EndpointReceiveResult{
             .message = .{
                 .endpoint_id = endpoint_capability.target.id,
+                .sender_endpoint_id = message.sender_endpoint_id.raw(),
                 .sender_task_id = message.sender_task_id.raw(),
                 .correlation_id = message.correlation_id,
                 .attached_capability_id = if (message.attached_capability_id) |id| id.raw() else 0,
@@ -1262,18 +1276,34 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     const shared_result = try kernel.sharedMemoryCreate(testContext(.shared_memory_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, shared_memory.PAGE_SIZE, 9);
     var send_context = testContext(.endpoint_send, app_endpoint.capability_id, .none);
     send_context.caller_task_id = app_task_desc.task_id;
-    try kernel.endpointSend(send_context, 11, "sync-open", shared_result.capability_id, false, 9);
+    try kernel.endpointSend(send_context, 11, "sync-open", 0, shared_result.capability_id, false, 9);
+    const other_endpoint = try kernel.endpointCreate(testContext(.endpoint_create, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, "app.second-request", .{
+        .local_only = true,
+    }, 9);
+    _ = try kernel.endpointConnect(testContext(.endpoint_connect, other_endpoint.capability_id, .none), service_endpoint.capability_id, service_endpoint.endpoint.endpoint_id, 9);
+    var other_context = testContext(.endpoint_send, other_endpoint.capability_id, .none);
+    other_context.caller_task_id = app_task_desc.task_id;
+    try kernel.endpointSend(other_context, 11, "second request", 0, null, false, 9);
     var received_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, &received_payload, 10)).?;
     try std.testing.expectEqualStrings("sync-open", received_payload[0..received.message.payload_len]);
     try std.testing.expect(received.attached_capability != null);
+    try std.testing.expectEqual(app_endpoint.endpoint.endpoint_id, received.message.sender_endpoint_id);
+    const other_request = (try kernel.endpointRecv(testContext(.endpoint_recv, service_endpoint.capability_id, .none), service_task_desc.task_id, &received_payload, 10)).?;
+    try std.testing.expectEqual(other_endpoint.endpoint.endpoint_id, other_request.message.sender_endpoint_id);
 
     const service_task = harness.runtime.find(service_task_desc.task_id).?;
     const copied_capability_id = received.attached_capability.?.capability_id;
     try std.testing.expect(service_task.hasCapability(copied_capability_id));
     var move_context = testContext(.endpoint_send, service_endpoint.capability_id, .none);
     move_context.caller_task_id = service_task.id;
-    try kernel.endpointSend(move_context, 12, "move-back", copied_capability_id, true, 10);
+    // A denied reply must not consume an attached capability or fall back to
+    // the first connected client. Even clients in one task have distinct routes.
+    try std.testing.expectError(error.ScopeViolation, kernel.endpointSend(move_context, 12, "invalid", service_endpoint.endpoint.endpoint_id, copied_capability_id, true, 10));
+    try std.testing.expect(service_task.hasCapability(copied_capability_id));
+    try kernel.endpointSend(move_context, 11, "second reply", other_request.message.sender_endpoint_id, null, false, 10);
+    try std.testing.expectEqual(@as(u16, 0), (try harness.endpoints.descriptor(ids.endpoint(app_endpoint.endpoint.endpoint_id))).queued_messages);
+    try kernel.endpointSend(move_context, 12, "move-back", received.message.sender_endpoint_id, copied_capability_id, true, 10);
     try std.testing.expect(!service_task.hasCapability(copied_capability_id));
 
     var moved_payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
@@ -1283,11 +1313,16 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     try std.testing.expectEqualStrings("move-back", moved_payload[0..moved.message.payload_len]);
     try std.testing.expect(harness.capabilities.query(copied_capability_id) == null);
     try std.testing.expect(harness.runtime.find(app_task_desc.task_id).?.hasCapability(moved.attached_capability.?.capability_id));
+    try std.testing.expectEqual(service_endpoint.endpoint.endpoint_id, moved.message.sender_endpoint_id);
+    var other_receive_context = testContext(.endpoint_recv, other_endpoint.capability_id, .none);
+    other_receive_context.caller_task_id = app_task_desc.task_id;
+    const other_response = (try kernel.endpointRecv(other_receive_context, app_task_desc.task_id, &moved_payload, 10)).?;
+    try std.testing.expectEqualStrings("second reply", moved_payload[0..other_response.message.payload_len]);
 
     _ = try kernel.sharedMemoryMap(testContext(.shared_memory_map, shared_result.capability_id, .none), app_task_desc.task_id, 10);
     const resources = try kernel.resourceQuery(testContext(.resource_query, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, 10);
     const accounting = try kernel.accountingQuery(testContext(.accounting_query, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, 10);
-    try std.testing.expectEqual(@as(u16, 1), resources.endpoint_count);
+    try std.testing.expectEqual(@as(u16, 2), resources.endpoint_count);
     try std.testing.expect(accounting.audit_event_count >= 1);
     try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(resources.flags));
 

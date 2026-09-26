@@ -156,11 +156,12 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
-  Native ABI v5 copies endpoint sends directly from validated user buffers into
-  queue storage, then streams receive payloads and optional capability
-  descriptors into prevalidated caller buffers. This removes the send-side
-  staging copy, reduces the fixed receive response from 208 bytes to 48, and
-  leaves queued messages untouched when an output is undersized. It also
+  Native ABI v6 uses bounded endpoint payloads and a 56-byte receive header
+  carrying the kernel-recorded sender endpoint. Services explicitly address
+  replies to connected clients; stale or unrelated endpoint handles are
+  rejected before publishing a reply or moving a capability. Receive buffers
+  are validated before dequeue, and undersized outputs leave messages queued.
+  It also
   defines a task-scoped, fixed-size surface
   presentation that is copied into compositor-owned storage with monotonic
   revision checks. UI

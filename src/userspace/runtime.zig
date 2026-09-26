@@ -50,6 +50,7 @@ const EndpointSendRequest = struct {
     header: abi.RequestHeader,
     endpoint_capability_id: u64,
     payload: []const u8,
+    reply_endpoint_id: u64 = 0,
     attached_capability_id: ?u64 = null,
     move_attached_capability: bool = false,
 };
@@ -314,7 +315,8 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
             index,
         ) catch return null;
         failure_code.* = 0x26;
-        if (!endpointSend(peer_endpoint.capability_id, request_payload)) return null;
+        const correlation_id = nextCorrelationId();
+        if (!endpointSend(peer_endpoint.capability_id, request_payload, 0, correlation_id)) return null;
 
         failure_code.* = 0x27;
         const received_request = endpointRecv(service_endpoint.capability_id, task_id) orelse return null;
@@ -338,12 +340,13 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
             proof.state_hash,
         ) catch return null;
         failure_code.* = 0x2C;
-        if (!endpointSend(service_endpoint.capability_id, response_payload)) return null;
+        if (!endpointSend(service_endpoint.capability_id, response_payload, received_request.message.sender_endpoint_id, received_request.message.correlation_id)) return null;
 
         failure_code.* = 0x2D;
         const received_response = endpointRecv(peer_endpoint.capability_id, task_id) orelse return null;
         failure_code.* = 0x2E;
-        if (received_response.present == 0) return null;
+        if (received_response.present == 0 or received_response.message.correlation_id != correlation_id or
+            received_response.message.sender_endpoint_id != service_endpoint.endpoint.endpoint_id) return null;
         const received_response_len: usize = @intCast(received_response.message.payload_len);
         failure_code.* = 0x2F;
         const decoded_response = service_protocol.decodeResponse(
@@ -479,11 +482,12 @@ fn endpointConnect(
     return response;
 }
 
-fn endpointSend(endpoint_capability_id: u64, payload: []const u8) bool {
+fn endpointSend(endpoint_capability_id: u64, payload: []const u8, reply_endpoint_id: u64, correlation_id: u64) bool {
     var request = EndpointSendRequest{
-        .header = makeHeader(.endpoint_send, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .header = makeHeader(.endpoint_send, correlation_id, zigos_userspace_bootstrap.task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
+        .reply_endpoint_id = reply_endpoint_id,
     };
     return trapCallNoResponse(&request) == .success;
 }

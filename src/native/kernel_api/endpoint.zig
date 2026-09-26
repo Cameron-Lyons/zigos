@@ -42,6 +42,7 @@ pub const EndpointFlags = packed struct(u16) {
 };
 
 pub const Message = struct {
+    sender_endpoint_id: ids.EndpointId,
     sender_task_id: ids.TaskId,
     correlation_id: u64,
     attached_capability_id: ids.CapabilityId = ids.CapabilityId.zero,
@@ -61,6 +62,7 @@ pub const Message = struct {
 };
 
 pub const ReceivedMessage = struct {
+    sender_endpoint_id: ids.EndpointId,
     sender_task_id: ids.TaskId,
     correlation_id: u64,
     attached_capability_id: ?ids.CapabilityId,
@@ -100,6 +102,7 @@ pub const Error = error{
     QueueFull,
     TableFull,
     NoSpaceLeft,
+    ScopeViolation,
 };
 
 const EndpointQueue = [MAX_ENDPOINT_QUEUE]Message;
@@ -190,21 +193,17 @@ pub const Table = struct {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
 
+        if (endpoint.flags.service_port and peer.flags.service_port) return error.ScopeViolation;
+
         if (peer.flags.service_port) {
             if (!endpoint.peer_endpoint_id.isZero()) return error.EndpointBusy;
             endpoint.peer_endpoint_id = peer_endpoint_id;
-            if (peer.peer_endpoint_id.isZero()) {
-                peer.peer_endpoint_id = endpoint_id;
-            }
             return;
         }
 
         if (endpoint.flags.service_port) {
             if (!peer.peer_endpoint_id.isZero()) return error.EndpointBusy;
             peer.peer_endpoint_id = endpoint_id;
-            if (endpoint.peer_endpoint_id.isZero()) {
-                endpoint.peer_endpoint_id = peer_endpoint_id;
-            }
             return;
         }
 
@@ -229,17 +228,51 @@ pub const Table = struct {
         const peer_endpoint_id = endpoint.peer_endpoint_id;
         if (peer_endpoint_id.isZero()) return error.PeerNotConnected;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
+        try enqueue(endpoint, peer, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+    }
+
+    // Services have no implicit peer. The kernel supplies the sender endpoint
+    // with each received request, and replies must name that connected client.
+    // Generational endpoint ids prevent delayed replies reaching reused slots.
+    pub fn reply(
+        self: *Table,
+        endpoint_id: ids.EndpointId,
+        reply_endpoint_id: ids.EndpointId,
+        sender_task_id: ids.TaskId,
+        correlation_id: u64,
+        payload: []const u8,
+        attached_capability_id: ?ids.CapabilityId,
+        move_attached_capability: bool,
+    ) Error!void {
+        if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
+        const service = self.find(endpoint_id) orelse return error.EndpointNotFound;
+        const client = self.find(reply_endpoint_id) orelse return error.EndpointNotFound;
+        if (!service.flags.service_port or client.flags.service_port or
+            !client.peer_endpoint_id.eql(service.id)) return error.ScopeViolation;
+        try enqueue(service, client, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+    }
+
+    fn enqueue(
+        source: *const Endpoint,
+        peer: *Endpoint,
+        sender_task_id: ids.TaskId,
+        correlation_id: u64,
+        payload: []const u8,
+        attached_capability_id: ?ids.CapabilityId,
+        move_attached_capability: bool,
+    ) Error!void {
         if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
 
         const queue = try ensureEndpointQueue(peer);
         const insert_index = (peer.queue_head + peer.queue_len) % MAX_ENDPOINT_QUEUE;
+        queue[insert_index].sender_endpoint_id = source.id;
         queue[insert_index].sender_task_id = sender_task_id;
         queue[insert_index].correlation_id = correlation_id;
         queue[insert_index].attached_capability_id = attached_capability_id orelse ids.CapabilityId.zero;
         queue[insert_index].move_attached_capability = move_attached_capability;
         queue[insert_index].flags = .{
-            .local_only = endpoint.flags.local_only and peer.flags.local_only,
-            .service_port = endpoint.flags.service_port or peer.flags.service_port,
+            .local_only = source.flags.local_only and peer.flags.local_only,
+            .service_port = source.flags.service_port or peer.flags.service_port,
             .carries_capability = attached_capability_id != null,
         };
         queue[insert_index].len = @intCast(payload.len);
@@ -262,6 +295,7 @@ pub const Table = struct {
         if (message.len > payload_out.len) return error.ReceiveBufferTooSmall;
         @memcpy(payload_out[0..message.len], message.payload());
         const received = ReceivedMessage{
+            .sender_endpoint_id = message.sender_endpoint_id,
             .sender_task_id = message.sender_task_id,
             .correlation_id = message.correlation_id,
             .attached_capability_id = message.attachedCapabilityId(),
@@ -379,6 +413,7 @@ fn initializeEndpointQueue(queue: *EndpointQueue) void {
 
 fn zeroMessage() Message {
     return .{
+        .sender_endpoint_id = ids.EndpointId.zero,
         .sender_task_id = ids.TaskId.zero,
         .correlation_id = 0,
         .len = 0,
@@ -401,12 +436,12 @@ fn hashLabel(label: []const u8) u64 {
 }
 
 test "endpoint queues use capacity-sized resident metadata" {
-    try std.testing.expectEqual(@as(usize, 128), @sizeOf(Message));
+    try std.testing.expectEqual(@as(usize, 136), @sizeOf(Message));
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Message, "len")));
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Endpoint, "queue_len")));
-    try std.testing.expectEqual(@as(usize, 1_104), @sizeOf(Endpoint));
-    try std.testing.expectEqual(@as(usize, 1_112), @sizeOf(EndpointSlot));
-    try std.testing.expectEqual(@as(usize, 74_000), @sizeOf(Table));
+    try std.testing.expectEqual(@as(usize, 1_168), @sizeOf(Endpoint));
+    try std.testing.expectEqual(@as(usize, 1_176), @sizeOf(EndpointSlot));
+    try std.testing.expectEqual(@as(usize, 78_096), @sizeOf(Table));
 }
 
 test "allocated endpoint table initializes reusable metadata" {
@@ -472,7 +507,7 @@ test "endpoint descriptors track peer links and queue depth" {
     try table.send(left.id, ids.task(10), 1, "ok", ids.capability(99), true);
 
     const descriptor = try table.descriptor(right.id);
-    try std.testing.expectEqual(left.id.raw(), descriptor.peer_endpoint_id);
+    try std.testing.expectEqual(@as(u64, 0), descriptor.peer_endpoint_id);
     try std.testing.expectEqual(@as(u16, 1), descriptor.queued_messages);
     try std.testing.expect(descriptor.label_hash != 0);
 
@@ -570,4 +605,76 @@ test "endpoint receive keeps a message queued when the caller buffer is too smal
     try std.testing.expectEqual(@as(u64, 9), received.correlation_id);
     try std.testing.expectEqualStrings("hello", payload[0..received.len]);
     try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(right.id)).queued_messages);
+}
+
+test "service replies route by request endpoint across clients and out of order" {
+    var table = Table.init();
+    const first = try table.create(ids.task(10), "first", .{});
+    const second = try table.create(ids.task(11), "second", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    try table.connect(first.id, service.id);
+    try table.connect(service.id, second.id);
+    try table.send(first.id, first.owner_task_id, 7, "first request", null, false);
+    try table.send(second.id, second.owner_task_id, 7, "second request", null, false);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const a = (try table.recvInto(service.id, &payload)).?;
+    const b = (try table.recvInto(service.id, &payload)).?;
+    try std.testing.expectEqual(first.id, a.sender_endpoint_id);
+    try std.testing.expectEqual(second.id, b.sender_endpoint_id);
+    try std.testing.expectError(error.PeerNotConnected, table.send(service.id, service.owner_task_id, 7, "ambiguous", null, false));
+    try table.reply(service.id, b.sender_endpoint_id, service.owner_task_id, b.correlation_id, "second reply", null, false);
+    try std.testing.expect((try table.recvInto(first.id, &payload)) == null);
+    try table.reply(service.id, a.sender_endpoint_id, service.owner_task_id, a.correlation_id, "first reply", null, false);
+    const received_b = (try table.recvInto(second.id, &payload)).?;
+    try std.testing.expectEqualStrings("second reply", payload[0..received_b.len]);
+    try std.testing.expectEqual(service.id, received_b.sender_endpoint_id);
+    const received_a = (try table.recvInto(first.id, &payload)).?;
+    try std.testing.expectEqualStrings("first reply", payload[0..received_a.len]);
+}
+
+test "reply routing rejects unrelated endpoints without publishing a message" {
+    var table = Table.init();
+    const client = try table.create(ids.task(10), "client", .{});
+    const stranger = try table.create(ids.task(11), "stranger", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    const other = try table.create(ids.task(13), "other service", .{ .service_port = true });
+    try table.connect(client.id, service.id);
+    try table.connect(stranger.id, other.id);
+    try std.testing.expectError(error.ScopeViolation, table.connect(service.id, other.id));
+    try std.testing.expectError(error.ScopeViolation, table.reply(service.id, stranger.id, service.owner_task_id, 1, "secret", null, false));
+    try std.testing.expectError(error.ScopeViolation, table.reply(client.id, stranger.id, client.owner_task_id, 1, "secret", null, false));
+    try std.testing.expectError(error.ScopeViolation, table.reply(service.id, other.id, service.owner_task_id, 1, "secret", null, false));
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(stranger.id)).queued_messages);
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(other.id)).queued_messages);
+}
+
+test "delayed service replies reject retired client handles after slot reuse" {
+    var table = Table.init();
+    const client = try table.create(ids.task(10), "client", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    try table.connect(client.id, service.id);
+    try table.send(client.id, client.owner_task_id, 1, "request", null, false);
+    _ = table.retireTask(client.owner_task_id);
+    const replacement = try table.create(client.owner_task_id, "replacement", .{});
+    try table.connect(replacement.id, service.id);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const request = (try table.recvInto(service.id, &payload)).?;
+    try std.testing.expectEqual(client.id, request.sender_endpoint_id);
+    try std.testing.expectError(error.EndpointNotFound, table.reply(service.id, request.sender_endpoint_id, service.owner_task_id, 1, "late", null, false));
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(replacement.id)).queued_messages);
+}
+
+test "a full reply queue never redirects a service response to another client" {
+    var table = Table.init();
+    const first = try table.create(ids.task(10), "first", .{});
+    const second = try table.create(ids.task(11), "second", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    try table.connect(first.id, service.id);
+    try table.connect(second.id, service.id);
+    for (0..MAX_ENDPOINT_QUEUE) |sequence| {
+        try table.reply(service.id, second.id, service.owner_task_id, sequence, "reply", null, false);
+    }
+    try std.testing.expectError(error.QueueFull, table.reply(service.id, second.id, service.owner_task_id, 99, "overflow", null, false));
+    try std.testing.expectEqual(@as(u16, MAX_ENDPOINT_QUEUE), (try table.descriptor(second.id)).queued_messages);
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(first.id)).queued_messages);
 }
