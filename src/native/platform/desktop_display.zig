@@ -1,0 +1,39 @@
+const builtin = @import("builtin");
+const std = @import("std");
+const compositor = @import("compositor_session.zig");
+const view = @import("compositor_view.zig");
+const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
+const hardware = if (builtin.os.tag == .freestanding) @import("../../kernel/platform/framebuffer_hw.zig") else struct {};
+
+pub fn hasPresented() bool {
+    if (comptime builtin.os.tag != .freestanding) return false;
+    return hardware.totalPixelWrites() != 0;
+}
+
+// The native text compositor owns the firmware framebuffer. Snapshot lookup
+// never borrows task memory, and the renderer writes only damaged text cells.
+pub fn present(session: *const compositor.Session) bool {
+    if (comptime builtin.os.tag != .freestanding) return false;
+    const frame = hardware.frame() orelse return false;
+    var content: ?view.Content = null;
+    if (session.activeWindow()) |window| {
+        if (session.surfacePresentation(window.ui_surface_id orelse 0)) |surface| {
+            if (surface.task_id == window.subject_task_id) {
+                if (surface.text) |*text| {
+                    content = .{
+                        .surface_id = surface.presentation.surface_id,
+                        .text = text.textSlice(),
+                        .cursor = text.cursor,
+                        .flags = @bitCast(text.flags),
+                        .window_id = text.window_id,
+                        .model = std.enums.fromInt(mailbox.UiModelKind, text.model) orelse return false,
+                        .focus_index = text.focus_index,
+                    };
+                }
+            }
+        }
+    }
+    view.render(frame, session, content);
+    const result = hardware.present() catch return false;
+    return result.pixels_written != 0;
+}

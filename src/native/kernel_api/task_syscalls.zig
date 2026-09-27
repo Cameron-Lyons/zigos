@@ -102,7 +102,12 @@ pub fn dispatchSurfacePresent(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.SurfacePresentRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    var request = dispatch.readRequest(component_port.SurfacePresentRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    var text: abi.SurfaceText = undefined;
+    if (request.text) |address| {
+        text = dispatch.readUserValue(abi.SurfaceText, memory, @intFromPtr(address)) orelse return dispatch.invalidRequest();
+        request.text = &text;
+    }
     const presented = component_port.invokeGeneratedFromValidatedSyscall(.surface_present, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(presented));
 }

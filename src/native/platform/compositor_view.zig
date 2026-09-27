@@ -6,6 +6,9 @@ pub const Content = struct {
     text: []const u8,
     cursor: usize,
     flags: mailbox.UiStateFlags,
+    window_id: u64 = 0,
+    model: mailbox.UiModelKind = .generic,
+    focus_index: u16 = 0,
 };
 const compositor = @import("compositor_session.zig");
 const scanout = @import("../../kernel/platform/text_scanout.zig");
@@ -27,7 +30,8 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
     frame.put(1, 2, window.titleSlice(), .selected);
     if (window.detail_len != 0) frame.put(0, 3, window.detailSlice(), .muted);
 
-    const surface = if (content) |value| if (window.ui_surface_id == value.surface_id) value else null else null;
+    const surface = if (content) |value| if (window.ui_surface_id == value.surface_id and
+        (value.window_id == 0 or value.window_id == window.id)) value else null else null;
     var text_row: usize = 5;
     if (window.item_count != 0) {
         var index: usize = 0;
@@ -48,22 +52,31 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
     if (surface) |record| {
         const state = &record;
         const flags = state.flags;
-        if (flags.loading) {
+        if (state.model == .compositor and flags.active) {
+            const end = @import("std").mem.indexOfScalar(u8, state.text, '\n') orelse state.text.len;
+            frame.put(0, text_row, state.text[0..end], .body);
+            frame.put(0, text_row + 2, " Open ", if (state.focus_index == 0) .selected else .body);
+            frame.put(10, text_row + 2, " Cancel ", if (state.focus_index == 1) .selected else .body);
+            frame.put(0, frame.rows - 1, "Tab  Choose  |  Enter  Confirm", .muted);
+            return;
+        } else if (flags.loading) {
             frame.put(0, text_row, "Opening document...", .muted);
         } else if (flags.load_failed) {
             frame.put(0, text_row, "Unable to open document. Your draft is unchanged.", .warning);
-        } else if (state.text.len == 0) {
+        } else if (state.text.len == 0 and state.model != .notes) {
             frame.put(0, text_row, "Ready for input.", .muted);
         } else {
             drawText(frame, text_row, state.text, state.cursor);
         }
-        frame.put(0, frame.rows - 2, if (flags.dirty) "Text changed in this session" else "Local session", .muted);
+        frame.put(0, frame.rows - 2, if (flags.dirty) "Unsaved changes" else if (state.model == .notes) "Local document" else "Local session", .muted);
         if (flags.input_overflow) frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
         if (flags.recovery_visible) frame.put(0, frame.rows - 2, "Recovery requested", .warning);
     } else {
         frame.put(0, text_row, "Waiting for task content...", .muted);
     }
-    frame.put(0, frame.rows - 1, "Type to edit  |  Backspace to delete", .muted);
+    if (surface) |state| {
+        if (state.model == .notes) frame.put(0, frame.rows - 1, "Type to edit  |  Ctrl+Enter  Save", .muted);
+    }
 }
 
 fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: usize) void {
@@ -113,7 +126,7 @@ test "desktop view renders owned surface text and removes stale task content" {
     try expectText(&frame, 0, 5, "First");
     try expectText(&frame, 0, 6, "Draft");
     try std.testing.expect(frame.cells[6 * frame.columns + 5].cursor);
-    try expectText(&frame, 0, 18, "Text changed in this session");
+    try expectText(&frame, 0, 18, "Unsaved changes");
 
     _ = session.closeWindowsForTask(task.id);
     render(&frame, &session, content);

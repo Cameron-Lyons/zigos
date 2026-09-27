@@ -44,9 +44,11 @@ pub const WindowOrderIndex = u8;
 pub const SessionCount = u8;
 pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
 pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 512;
-pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 24_136;
-pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 24_144;
-pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 24_144;
+// Eight bounded text snapshots add 4,288 bytes; freestanding resident handles
+// stay unchanged because the surface arena is allocated on first presentation.
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_424;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_432;
+pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_432;
 pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 216;
 pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_SESSION_SIZE_CEILING_BYTES
@@ -193,6 +195,7 @@ pub const SurfaceRecord = struct {
     task_id: u64 = 0,
     presentation_count: u64 = 0,
     presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
+    text: ?abi.SurfaceText = null,
 };
 
 pub const Error = error{
@@ -679,8 +682,24 @@ pub const Session = struct {
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
     ) Error!PresentResult {
+        return self.presentSurfaceText(task, presentation, null);
+    }
+
+    pub fn presentSurfaceText(
+        self: *Session,
+        task: *const task_runtime.TaskRecord,
+        presentation: *const abi.SurfacePresentation,
+        text: ?*const abi.SurfaceText,
+    ) Error!PresentResult {
         if (task.id == 0 or task.state != .active or !abi.isCanonicalSurfacePresentation(presentation)) return error.MalformedPresentation;
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.InvalidSurface;
+        if (text) |content| {
+            if (!content.isCanonical()) return error.MalformedPresentation;
+            if (content.window_id != 0) {
+                const window = self.findWindowConst(content.window_id) orelse return error.InvalidSurface;
+                if (window.subject_task_id != task.id or window.ui_surface_id != presentation.surface_id) return error.InvalidSurface;
+            }
+        }
 
         if (self.surfaceArena()) |surfaces| {
             if (surfaces.slotIndexOf(presentation.surface_id)) |slot_index| {
@@ -692,12 +711,14 @@ pub const Session = struct {
                 const previous_revision = slot.surface.presentation.revision;
                 if (presentation.revision < previous_revision) return error.StalePresentation;
                 if (presentation.revision == previous_revision) {
-                    if (std.meta.eql(slot.surface.presentation, presentation.*)) return .duplicate;
+                    if (std.meta.eql(slot.surface.presentation, presentation.*) and
+                        std.meta.eql(slot.surface.text, if (text) |content| content.* else null)) return .duplicate;
                     return error.PresentationConflict;
                 }
                 slot.surface.presentation = presentation.*;
+                slot.surface.text = if (text) |content| content.* else null;
                 slot.surface.presentation_count +|= 1;
-                _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
+                if (text == null) _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
                 return .accepted;
             }
         }
@@ -711,10 +732,11 @@ pub const Session = struct {
             .task_id = task.id,
             .presentation_count = 1,
             .presentation = presentation.*,
+            .text = if (text) |content| content.* else null,
         };
         self.surface_task_index.insertAbsent(surfaceTaskKey(task.id), slot_index);
         self.linkActiveSurface(surfaces, slot_index);
-        _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
+        if (text == null) _ = display_driver_task.presentHandle(scanoutFromPresentation(presentation));
         return .accepted;
     }
 
@@ -2647,6 +2669,45 @@ test "compositor session owns bounded monotonic surface presentations" {
     try std.testing.expectEqual(NO_SURFACE_SLOT_INDEX, restored.active_surface_tail);
     try std.testing.expectEqual(@as(usize, 1), restored.closeWindowsForTask(app_task.id));
     try std.testing.expectEqual(@as(usize, 0), restored.presentedSurfaceCount());
+}
+
+test "compositor text snapshots isolate mutations and reject revision and window conflicts" {
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 82 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 72,
+        .local_only = true,
+    });
+    var session = Session.init();
+    const window = try session.openTaskView(task, "Notes");
+    var presentation = testSurfacePresentation(72, 512);
+    var text = abi.SurfaceText{ .window_id = window.id, .model = 1, .text_length = 5, .cursor = 5 };
+    @memcpy(text.text[0..5], "Draft");
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurfaceText(task, &presentation, &text));
+    try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurfaceText(task, &presentation, &text));
+    text.text[0] = 'X';
+    try std.testing.expectEqualStrings("Draft", session.surfacePresentation(72).?.text.?.textSlice());
+    try std.testing.expectError(error.PresentationConflict, session.presentSurfaceText(task, &presentation, &text));
+    presentation.revision += 1;
+    text.window_id += 1;
+    try std.testing.expectError(error.InvalidSurface, session.presentSurfaceText(task, &presentation, &text));
+    text.window_id = window.id;
+    text.text[511] = 'X';
+    try std.testing.expectError(error.MalformedPresentation, session.presentSurfaceText(task, &presentation, &text));
+    text.text[511] = 0;
+    text.cursor = 6;
+    try std.testing.expectError(error.MalformedPresentation, session.presentSurfaceText(task, &presentation, &text));
+    text.cursor = 5;
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurfaceText(task, &presentation, &text));
+    var snapshot: SessionSnapshot = undefined;
+    session.snapshotInto(&snapshot);
+    var restored = Session.init();
+    try restored.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqualStrings("Xraft", restored.surfacePresentation(72).?.text.?.textSlice());
+    _ = restored.closeWindowsForTask(task.id);
+    try std.testing.expect(restored.surfacePresentation(72) == null);
 }
 
 test "compositor surface pruning caches unchanged task lifecycle generations" {

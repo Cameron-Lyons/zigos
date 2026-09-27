@@ -98,6 +98,7 @@ const SurfacePresentRequest = struct {
     buffer_object_id: u64,
     buffer_offset: u32,
     buffer_bytes: u32,
+    text: ?*const abi.SurfaceText = null,
 };
 
 const INPUT_EVENTS_PER_DISPATCH: usize = 8;
@@ -592,6 +593,7 @@ fn surfacePresent(
     presentation_capability_id: u64,
     task_id: u64,
     presentation: abi.SurfacePresentation,
+    text: *const abi.SurfaceText,
 ) SurfacePresentOutcome {
     var response = std.mem.zeroes(abi.BoolResponse);
     var request = SurfacePresentRequest{
@@ -603,6 +605,7 @@ fn surfacePresent(
         .buffer_object_id = presentation.buffer_object_id,
         .buffer_offset = presentation.buffer_offset,
         .buffer_bytes = presentation.buffer_bytes,
+        .text = text,
     };
     const status = trapCall(&request, &response);
     return .{
@@ -686,10 +689,12 @@ fn presentUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
     if (state.surface_presentation_capability_id == 0 or state.task_id == 0 or state.ui_surface_id == 0) return false;
 
     const presentation = surface.presentation(state.ui_surface_id);
+    var text = surface.presentationText();
     const outcome = surfacePresent(
         state.surface_presentation_capability_id,
         state.task_id,
         presentation,
+        &text,
     );
     state.ui_last_presentation_status = @intFromEnum(outcome.status);
     if (!outcome.accepted) {

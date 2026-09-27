@@ -13,6 +13,7 @@ pub const ApplyResult = enum(u8) {
 };
 
 pub const State = struct {
+    window_id: u64 = 0,
     model: mailbox.UiModelKind = .none,
     flags: mailbox.UiStateFlags = .{},
     focus_index: u16 = 0,
@@ -45,6 +46,19 @@ pub const State = struct {
         out.buffer_object_id = surface_id;
         out.buffer_offset = 0;
         out.buffer_bytes = TEXT_CAPACITY;
+        return out;
+    }
+
+    pub fn presentationText(self: *const State) abi.SurfaceText {
+        var out = abi.SurfaceText{
+            .window_id = self.window_id,
+            .text_length = self.text_length,
+            .cursor = self.cursor,
+            .focus_index = self.focus_index,
+            .model = @intFromEnum(self.model),
+            .flags = @bitCast(self.flags),
+        };
+        @memcpy(out.text[0..self.text_length], self.textSlice());
         return out;
     }
 

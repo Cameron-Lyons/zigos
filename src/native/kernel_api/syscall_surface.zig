@@ -266,17 +266,20 @@ const TestSurfaceReceiver = struct {
     calls: usize = 0,
     last_task_id: u64 = 0,
     last_presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
+    last_text: ?abi.SurfaceText = null,
     status: native_kernel.SurfacePresentStatus = .accepted,
 
     fn present(
         context: *anyopaque,
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
+        text: ?*const abi.SurfaceText,
     ) native_kernel.SurfacePresentStatus {
         const self: *TestSurfaceReceiver = @ptrCast(@alignCast(context));
         self.calls += 1;
         self.last_task_id = task.id;
         self.last_presentation = presentation.*;
+        self.last_text = if (text) |content| content.* else null;
         return self.status;
     }
 };
@@ -848,6 +851,24 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(app_task.id, receiver.last_task_id);
     try std.testing.expect(receiver.last_presentation.presentsByHandle());
     try std.testing.expectEqual(@as(u64, 12), receiver.last_presentation.buffer_object_id);
+
+    var content = abi.SurfaceText{ .model = 1, .text_length = 5, .cursor = 5 };
+    @memcpy(content.text[0..5], "Draft");
+    var with_text = request;
+    with_text.text = &content;
+    const text_result = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.success, text_result.status);
+    @memset(content.text[0..5], 'x');
+    try std.testing.expectEqualStrings("Draft", receiver.last_text.?.textSlice());
+    with_text.text = @ptrFromInt(0x1000);
+    const invalid_text = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, invalid_text.status);
+    with_text.text = &content;
+    content.text_length = 513;
+    const oversized_text = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, oversized_text.status);
+    try std.testing.expectEqual(@as(usize, 2), receiver.calls);
+    receiver.calls = 1;
 
     receiver.status = .duplicate;
     response = std.mem.zeroes(abi.BoolResponse);

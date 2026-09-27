@@ -73,6 +73,7 @@ pub const compositor_input_router_ready = "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY";
 pub const userspace_input_abi_ready = "ZIGOS:USERSPACE:INPUT_ABI:READY";
 pub const userspace_surface_presentation_ready = "ZIGOS:USERSPACE:SURFACE_PRESENTATION:READY";
 pub const compositor_framebuffer_presented = "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED";
+pub const desktop_framebuffer_ready = "ZIGOS:DESKTOP:FRAMEBUFFER:READY";
 pub const compositor_permission_review_rendered = "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED";
 
 pub const transport_native_kernel_ready = "ZIGOS:TRANSPORT:NATIVE_KERNEL:READY";
@@ -205,6 +206,7 @@ pub const document_launcher_userspace_open = "ZIGOS:DOCUMENT_LAUNCHER:USERSPACE_
 pub const document_launcher_userspace_cancel = "ZIGOS:DOCUMENT_LAUNCHER:USERSPACE_CANCEL:PASS";
 pub const document_channel_userspace_open = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_OPEN:PASS";
 pub const document_channel_userspace_save = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_SAVE:PASS";
+pub const document_surface_pixels = "ZIGOS:DOCUMENT:SURFACE_PIXELS:PASS";
 pub const document_channel_sibling_editors = "ZIGOS:DOCUMENT_CHANNEL:SIBLING_EDITORS:PASS";
 pub const document_channel_retirement = "ZIGOS:DOCUMENT_CHANNEL:RETIREMENT:PASS";
 pub const notes_daily_driver_complete = "ZIGOS:NOTES_DAILY:COMPLETE";

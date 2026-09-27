@@ -10,6 +10,7 @@ const scanout = @import("text_scanout.zig");
 var renderer: scanout.Renderer = undefined;
 var composed_frame: scanout.Frame = undefined;
 var initialized = false;
+var pixels_written: u64 = 0;
 
 pub const Mapping = struct {
     physical_base: usize,
@@ -65,7 +66,22 @@ pub fn frame() ?*scanout.Frame {
 
 pub fn present() !scanout.PresentStats {
     if (!initialized) return error.Unavailable;
-    return renderer.present(&composed_frame);
+    const result = try renderer.present(&composed_frame);
+    pixels_written +|= result.pixels_written;
+    return result;
+}
+
+pub fn totalPixelWrites() u64 {
+    return pixels_written;
+}
+
+pub fn verifyText(column: usize, row: usize, text: []const u8) bool {
+    if (!initialized or row >= composed_frame.rows or column >= composed_frame.columns or text.len > composed_frame.columns - column) return false;
+    for (text, column..) |byte, x| {
+        const cell = composed_frame.cells[row * composed_frame.columns + x];
+        if (cell.character != byte or !renderer.matchesCell(x, row, cell)) return false;
+    }
+    return true;
 }
 
 pub fn displayInfo() ?framebuffer.Info {

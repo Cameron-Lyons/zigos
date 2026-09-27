@@ -10,6 +10,7 @@ const document_sessions = @import("../document_sessions.zig");
 const object_store = @import("../../storage/object_store.zig");
 const workspace = @import("../../storage/workspace.zig");
 const paging = @import("../../../kernel/memory/paging64.zig");
+const framebuffer = @import("../../../kernel/platform/framebuffer_hw.zig");
 const xhci = @import("../../../kernel/drivers/xhci.zig");
 const common = @import("../../../kernel/boot/common.zig");
 const timer = @import("../../../kernel/timer/timer.zig");
@@ -85,6 +86,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     if (storage.pendingCheckpointMutations() or storage.checkpoint_store.last_checkpoint_error != null or
         storage.checkpoint_store.last_checkpoint_generation <= checkpoint_generation) return error.SaveNotDurable;
     common.printBootMarker(boot_markers.document_channel_userspace_save);
+    common.printBootMarker(boot_markers.document_surface_pixels);
 
     try editAndSave(manager, second, 0x05);
     try awaitPresentation(manager, second, sibling_text ++ "b", 1);
@@ -131,6 +133,8 @@ fn chooseOffer(manager: anytype, prepared: PreparedEditor, cancel: bool) !void {
         }
     }
     if (!ready) return error.LaunchOfferNotPresented;
+    if (!framebuffer.verifyText(0, 5, label) or !framebuffer.verifyText(0, 7, " Open ") or
+        !framebuffer.verifyText(10, 7, " Cancel ")) return error.LaunchOfferPixelsMissing;
     if (manager.compositorSessionPtr().active_window_id != window_id) return error.LaunchOfferLostFocus;
     report_mode = if (cancel) .cancel else .open;
     report_cursor = 0;
@@ -161,12 +165,17 @@ fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !vo
     const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C5);
     const address_space_id = manager.runtimePtr().find(prepared.task_id).?.address_space_id;
     try chooseOffer(manager, prepared, true);
+    var selected_cancel_seen = false;
     for (0..512) |_| {
         _ = manager.runUserspaceScheduler(timer.getTicks());
+        if (framebuffer.frame()) |frame| {
+            if (frame.cells[7 * frame.columns + 10].style == .selected and framebuffer.verifyText(10, 7, " Cancel ")) selected_cancel_seen = true;
+        }
         if (manager.runtimePtr().find(prepared.task_id)) |task| if (task.state != .terminated) continue;
         if (manager.runtimePtr().findAddressSpaceConst(address_space_id) != null or
             manager.userspaceSchedulerPtr().taskDispatchStats(prepared.task_id) != null or
             compositor.window_count != windows_before or compositor.active_window_id != focus_before) return error.CancelledOfferLeaked;
+        if (!selected_cancel_seen) return error.CancelSelectionPixelsMissing;
         // Deliver the receipt before publishing the next offer.
         for (0..32) |_| _ = manager.runUserspaceScheduler(timer.getTicks());
         common.printBootMarker(boot_markers.document_launcher_userspace_cancel);
@@ -329,7 +338,16 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
         if (!flags.loading and !flags.dirty and state.ui_commit_count == commits and
             state.ui_presented_revision == surface.presentation.revision and
             state.ui_text_length == expected.len and
-            std.mem.eql(u8, &state.ui_text_digest, &protocol.digest(expected))) return;
+            std.mem.eql(u8, &state.ui_text_digest, &protocol.digest(expected)))
+        {
+            const text = if (surface.text) |*content| content else return error.SurfaceTextMissing;
+            if (!std.mem.eql(u8, text.textSlice(), expected)) return error.SurfaceTextMismatch;
+            if (manager.compositorSessionPtr().active_window_id == editor.window_id) {
+                const first_line = std.mem.indexOfScalar(u8, expected, '\n') orelse expected.len;
+                if (!framebuffer.verifyText(0, 5, expected[0..first_line])) return error.DocumentPixelsMissing;
+            }
+            return;
+        }
     }
     const mailbox = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), task_id);
     const stats = manager.userspaceSchedulerPtr().taskDispatchStats(task_id);

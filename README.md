@@ -63,8 +63,14 @@ requests.
   retires cancelled preparations. The 256-byte mailbox uses a typed UI channel
   for either a launcher or an editor. Cold-boot and reboot verification exercise
   these controls through the compositor ELF with modeled keyboard input.
-  A production document picker, identity and permission provisioning, visible
-  display integration, and moving the storage core into userspace remain open.
+  Native ABI v11 copies canonical text snapshots from validated task memory;
+  the compositor owns each accepted revision and rejects conflicting updates.
+  The native boot path now maps the firmware framebuffer and draws document
+  text, cursors, unsaved state, and selected Open/Cancel controls. Later frames
+  write only changed cells. Boot verification reads back mapped device pixels
+  for the launcher and edited Notes text. A production document picker,
+  identity and permission provisioning, accelerated graphics, Unicode rendering,
+  physical display verification, and moving storage into userspace remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
   checks instruction availability and success, bounds retries, rejects a stuck
   source, erases temporary seed buffers, and stops boot if seeding fails. Runtime

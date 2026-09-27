@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 10;
+pub const ABI_VERSION: u16 = 11;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -218,6 +218,30 @@ pub const SurfacePresentation = extern struct {
     }
 };
 
+// Bounded text surfaces are copied once from task-owned memory. The compositor
+// retains its own snapshot; subsequent userspace writes cannot change a frame.
+pub const SURFACE_TEXT_BYTES: usize = 512;
+pub const SurfaceText = extern struct {
+    window_id: u64 = 0,
+    text_length: u16 = 0,
+    cursor: u16 = 0,
+    focus_index: u16 = 0,
+    model: u8 = 0,
+    flags: u8 = 0,
+    text: [SURFACE_TEXT_BYTES]u8 = [_]u8{0} ** SURFACE_TEXT_BYTES,
+
+    pub fn textSlice(self: *const SurfaceText) []const u8 {
+        return self.text[0..self.text_length];
+    }
+
+    pub fn isCanonical(self: *const SurfaceText) bool {
+        if (self.text_length > SURFACE_TEXT_BYTES or self.cursor > self.text_length or
+            self.focus_index > 3 or self.model == 0 or self.model > 6 or self.flags & 0xc0 != 0) return false;
+        for (self.textSlice()) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
+        return std.mem.allEqual(u8, self.text[self.text_length..], 0);
+    }
+};
+
 pub const ServiceConnectionDescriptor = extern struct {
     service_id: u64,
     endpoint_id: u64,
@@ -318,7 +342,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 10), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 11), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));

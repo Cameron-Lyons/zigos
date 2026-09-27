@@ -68,6 +68,7 @@ pub const Client = struct {
                         if (!self.finished or frame.token <= self.token) return true;
                         self.token = frame.token;
                         self.window_id = offer.window_id;
+                        surface.window_id = offer.window_id;
                         self.action = null;
                         self.sent = false;
                         self.finished = false;
@@ -80,6 +81,7 @@ pub const Client = struct {
                         // The server may withdraw an offer before a decision.
                         if (!self.sent and result.status != .unavailable) return true;
                         self.finished = true;
+                        surface.window_id = 0;
                         self.action = null;
                         surface.flags.active = false;
                         show(surface, switch (result.status) {
@@ -97,6 +99,7 @@ pub const Client = struct {
 
     fn fail(self: *Client, surface: *State) void {
         self.failed = true;
+        surface.window_id = 0;
         surface.flags.active = false;
         show(surface, "Document unavailable", "");
     }

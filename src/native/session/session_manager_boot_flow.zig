@@ -39,6 +39,7 @@ const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const document_sessions = @import("document_sessions.zig");
 const document_launcher = @import("document_launcher.zig");
+const desktop_display = @import("../platform/desktop_display.zig");
 const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
@@ -276,13 +277,14 @@ pub const SessionManager = struct {
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
         if (!self.runtime_context.constructed) return false;
         const runtime = self.runtime_context.taskRuntime().?;
-        _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
+        const pruned = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
         const serviced = self.documents.service(now_ticks);
         const launched = self.launcher.service(self, now_ticks);
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
+        if (serviced or launched or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
         return serviced or launched or dispatched;
     }
 
@@ -607,6 +609,8 @@ pub const SessionManager = struct {
             }
         }
         common.printBootMarker(boot_markers.task_session_ready);
+        _ = desktop_display.present(self.compositorSessionPtr());
+        if (desktop_display.hasPresented()) common.printBootMarker(boot_markers.desktop_framebuffer_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
     }
@@ -1190,9 +1194,10 @@ fn presentSurfaceForKernel(
     context: *anyopaque,
     task: *const task_runtime.TaskRecord,
     presentation: *const abi.SurfacePresentation,
+    text: ?*const abi.SurfaceText,
 ) native_kernel.SurfacePresentStatus {
     const session: *compositor_session.Session = @ptrCast(@alignCast(context));
-    return switch (session.presentSurface(task, presentation) catch |err| switch (err) {
+    return switch (session.presentSurfaceText(task, presentation, text) catch |err| switch (err) {
         error.StalePresentation, error.PresentationConflict => return .stale,
         error.SurfaceTableFull, error.OutOfMemory => return .full,
         else => return .invalid_surface,

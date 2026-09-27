@@ -29,6 +29,10 @@ test "scanout preserves padding and guards and writes only damaged cells" {
     const top_left = renderer.origin_y * info.pixels_per_scan_line + renderer.origin_x;
     try std.testing.expectEqual(info.encodeColor(scanout.BACKGROUND), pixels[top_left + 2 * info.pixels_per_scan_line]);
     try std.testing.expectEqual(info.encodeColor(0x72d5bb), pixels[top_left + 2 * info.pixels_per_scan_line + 2]);
+    try std.testing.expect(renderer.matchesCell(0, 0, frame.cells[0]));
+    pixels[top_left + 2 * info.pixels_per_scan_line + 2] = 0;
+    try std.testing.expect(!renderer.matchesCell(0, 0, frame.cells[0]));
+    pixels[top_left + 2 * info.pixels_per_scan_line + 2] = info.encodeColor(0x72d5bb);
     try std.testing.expectEqual(@as(u32, 0xbad0cafe), storage[0]);
     try std.testing.expectEqual(@as(u32, 0xbad0cafe), storage[storage.len - 1]);
     for (0..info.height) |row| {
