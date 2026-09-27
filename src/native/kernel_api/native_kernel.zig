@@ -15,6 +15,7 @@ const principal = @import("../core/principal.zig");
 const shared_memory = @import("shared_memory.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const units = @import("../core/units.zig");
+const userspace_executor = @import("../task/userspace_executor.zig");
 
 pub const EndpointCreateResult = struct {
     endpoint: abi.EndpointDescriptor,
@@ -688,6 +689,12 @@ pub const Kernel = struct {
     pub fn timeQuery(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!u64 {
         _ = try self.authorizeOperation(.time_query, context, now_ticks, .{});
         return now_ticks;
+    }
+
+    pub fn wait(self: *Kernel, context: KernelCallContext, now_ticks: u64) Error!bool {
+        _ = try self.authorizeOperation(.wait, context, now_ticks, .{});
+        userspace_executor.requestEventWait();
+        return true;
     }
 
     pub fn resourceQuery(
@@ -1679,8 +1686,9 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
         try kernel.endpointSend(send_context, index, "pending", 0, null, false, 11);
     }
     const wake_count = wake_probe.count;
-    try std.testing.expectError(error.QueueFull, kernel.endpointSend(send_context, 99, "overflow", 0, null, false, 11));
+    try std.testing.expectError(error.RingFull, kernel.endpointSend(send_context, 99, "overflow", 0, null, false, 11));
     try std.testing.expectEqual(wake_count, wake_probe.count);
+    try std.testing.expect(try kernel.wait(testContext(.wait, authority_capability.id, .none), 10));
 }
 
 test "native kernel descriptor authorization enforces request task scope" {
@@ -2201,9 +2209,17 @@ test "native kernel brokers device metadata and port io through device capabilit
     device_broker.reset();
     defer device_broker.reset();
     try std.testing.expect(device_broker.publishPciController(0x1F001));
+    try device_broker.registerMmioWindows(0x1F001, &.{.{
+        .base = 0,
+        .physical_base = 0xF000_0000,
+        .length = 4096,
+        .writable = true,
+    }});
 
     const descriptor = try kernel.deviceDescribe(testContext(.device_describe, device_capability.id, .none), 12);
     try std.testing.expectEqual(@as(u64, 0x1F001), descriptor.device_id);
-    try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
-    try std.testing.expectError(error.UnsupportedMmioWindow, kernel.deviceMmioWindow(testContext(.device_mmio_window, device_capability.id, .none), 0, 12));
+    try std.testing.expectEqual(@as(u8, 1), descriptor.mmio_window_count);
+    const window = try kernel.deviceMmioWindow(testContext(.device_mmio_window, device_capability.id, .none), 0, 12);
+    try std.testing.expectEqual(@as(u64, 4096), window.length);
+    try std.testing.expect((window.flags & abi.MMIO_WINDOW_FLAG_WRITABLE) != 0);
 }

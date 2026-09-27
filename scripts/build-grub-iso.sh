@@ -5,6 +5,7 @@ KERNEL_PATH="${1:?kernel path required}"
 OUTPUT_ISO="${2:?output iso path required}"
 STAGING_DIR="${3:?staging directory required}"
 GRUB_CONFIG_PATH="${4:-src/boot/grub-x86_64-kernel.cfg}"
+EFI_STUB_PATH="${5:-}"
 GRUB_MKRESCUE="${GRUB_MKRESCUE:-}"
 GRUB_MODULE_DIR="${GRUB_MODULE_DIR:-}"
 
@@ -58,9 +59,14 @@ if ! command -v mformat >/dev/null 2>&1; then
 fi
 
 rm -rf "$STAGING_DIR"
-mkdir -p "$STAGING_DIR/boot/grub" "$(dirname "$OUTPUT_ISO")"
+mkdir -p "$STAGING_DIR/boot/grub" "$STAGING_DIR/EFI/BOOT" "$(dirname "$OUTPUT_ISO")"
 cp "$KERNEL_PATH" "$STAGING_DIR/boot/kernel.elf"
 cp "$GRUB_CONFIG_PATH" "$STAGING_DIR/boot/grub/grub.cfg"
+if [ -z "$EFI_STUB_PATH" ] || [ ! -f "$EFI_STUB_PATH" ]; then
+  echo "Native EFI stub is required: $EFI_STUB_PATH" >&2
+  exit 1
+fi
+cp "$EFI_STUB_PATH" "$STAGING_DIR/EFI/BOOT/BOOTX64.EFI"
 "$GRUB_MKRESCUE" --directory "$GRUB_MODULE_DIR" -o "$OUTPUT_ISO" "$STAGING_DIR"
 
 if ! EL_TORITO_REPORT="$(xorriso -indev "$OUTPUT_ISO" -report_el_torito plain 2>&1)"; then

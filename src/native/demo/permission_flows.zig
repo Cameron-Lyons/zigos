@@ -32,7 +32,7 @@ pub fn run(
     runCapturePermissionFlow(env, state, review_port, policy_port);
 
     const expired_network_decision = policy_port.authorizeRequest(.{
-        .header = policy_component_port.makeHeader(.authorize_request, 28, notes_review.task_id),
+        .header = policy_component_port.makeHeader(.authorize_request, notes_review.task_id),
         .task_id = notes_review.task_id,
         .request = notes_review.network_permission,
         .grants = notes_review.grantsSlice(),
@@ -74,7 +74,7 @@ fn runViewerPermissionFlow(
         env.userspace_scheduler,
     ) catch |err| native_util.bootProofFailure("permission flows", err);
     const viewer_summary = policy_port.applyManifest(.{
-        .header = policy_component_port.makeHeader(.apply_manifest, 20, viewer_task.id),
+        .header = policy_component_port.makeHeader(.apply_manifest, viewer_task.id),
         .task_id = viewer_task.id,
         .bundle = viewer_manifest,
         .grants = &.{},
@@ -124,14 +124,14 @@ fn runNotesPermissionFlow(
 
     var notes_grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
     const notes_grants = review_port.reviewBundle(.{
-        .header = review_component_port.makeHeader(.review_bundle, 21, notes_task.id),
+        .header = review_component_port.makeHeader(.review_bundle, notes_task.id),
         .app_task_id = notes_task.id,
         .bundle = notes_manifest,
         .output = &notes_grants_buffer,
     }, 10) catch |err| native_util.bootProofFailure("permission flows", err);
 
     const notes_summary = policy_port.applyManifest(.{
-        .header = policy_component_port.makeHeader(.apply_manifest, 22, notes_task.id),
+        .header = policy_component_port.makeHeader(.apply_manifest, notes_task.id),
         .task_id = notes_task.id,
         .bundle = notes_manifest,
         .grants = notes_grants,
@@ -161,7 +161,7 @@ fn runNotesPermissionFlow(
         .entry = "/system/components/notes-sync.elf",
     }, 11) catch |err| native_util.bootProofFailure("permission flows", err);
     const notes_accounting = kernel_port.accountingQuery(.{
-        .header = component_port.makeHeader(.accounting_query, 221, state.session_task.id),
+        .header = component_port.makeHeader(.accounting_query, state.session_task.id),
         .authority_capability_id = state.session_capability.id,
         .task_id = notes_task.id,
     }, 11) catch |err| native_util.bootProofFailure("permission flows", err);
@@ -210,13 +210,13 @@ fn runSyncPermissionFlow(
 
     var sync_grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
     const sync_grants = review_port.reviewBundle(.{
-        .header = review_component_port.makeHeader(.review_bundle, 23, sync_task.id),
+        .header = review_component_port.makeHeader(.review_bundle, sync_task.id),
         .app_task_id = sync_task.id,
         .bundle = sync_manifest,
         .output = &sync_grants_buffer,
     }, 20) catch |err| native_util.bootProofFailure("permission flows", err);
     const sync_summary = policy_port.applyManifest(.{
-        .header = policy_component_port.makeHeader(.apply_manifest, 24, sync_task.id),
+        .header = policy_component_port.makeHeader(.apply_manifest, sync_task.id),
         .task_id = sync_task.id,
         .bundle = sync_manifest,
         .grants = sync_grants,
@@ -284,14 +284,14 @@ fn runCapturePermissionFlow(
 
     var capture_grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
     const capture_grants = review_port.reviewBundle(.{
-        .header = review_component_port.makeHeader(.review_bundle, 26, capture_task.id),
+        .header = review_component_port.makeHeader(.review_bundle, capture_task.id),
         .app_task_id = capture_task.id,
         .bundle = capture_manifest,
         .output = &capture_grants_buffer,
     }, 30) catch |err| native_util.bootProofFailure("permission flows", err);
 
     const capture_summary = policy_port.applyManifest(.{
-        .header = policy_component_port.makeHeader(.apply_manifest, 27, capture_task.id),
+        .header = policy_component_port.makeHeader(.apply_manifest, capture_task.id),
         .task_id = capture_task.id,
         .bundle = capture_manifest,
         .grants = capture_grants,

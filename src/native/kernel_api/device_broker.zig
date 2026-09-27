@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
+const userspace_layout = @import("../core/userspace_layout.zig");
 const root = @import("root");
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
@@ -10,12 +11,20 @@ else
     struct {};
 
 pub const MAX_DEVICES: usize = 4;
+pub const MAX_DEVICE_MMIO_WINDOWS: usize = 4;
+pub const EXPOSES_REGISTERED_MMIO_WINDOWS = true;
 pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
 pub const HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING = true;
 pub const COMPACT_DMA_WINDOW_COUNTS = true;
 pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_440;
 pub const DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES: usize = 8;
+
+comptime {
+    if (userspace_layout.DEVICE_MMIO_SLOT_COUNT < MAX_DEVICES) {
+        @compileError("userspace MMIO slots must cover every brokered device");
+    }
+}
 const default_dma_window_bytes: u64 = 128 * 1024;
 const iommu_page_size: u64 = 4096;
 const iommu_root_table_salt = iommu_page_size;
@@ -139,6 +148,7 @@ pub const BrokeredDmaBuffer = struct {
 
 pub const MmioWindow = struct {
     base: u64,
+    physical_base: u64 = 0,
     length: u64,
     writable: bool = false,
     executable: bool = false,
@@ -165,6 +175,8 @@ pub const Error = error{
     OutOfMemory,
     UnsupportedMmioWindow,
     UnsupportedBusMasterDma,
+    MmioWindowTableFull,
+    InvalidMmioWindow,
 };
 
 const ControllerSlot = struct {
@@ -276,6 +288,7 @@ const ControllerArena = struct {
         const key = self.slot_keys[slot_index];
         if (key != 0) self.primary_index.remove(key);
         self.detachUnpublishedIndex(slot_index);
+        clearMmioSet(slot_index);
         resetControllerSlot(slot);
         self.slot_keys[slot_index] = 0;
         self.used_count -= 1;
@@ -326,6 +339,7 @@ const ControllerArena = struct {
 
     fn claimSlot(self: *ControllerArena, key: u64, slot_index: usize) void {
         resetControllerSlot(&self.slots[slot_index]);
+        clearMmioSet(slot_index);
         self.slots[slot_index].in_use = true;
         self.slot_keys[slot_index] = key;
         self.primary_index.insert(key, slot_index);
@@ -409,6 +423,19 @@ comptime {
         @compileError("freestanding controller arena exceeds its static memory budget");
     }
 }
+
+const MmioWindowSet = struct {
+    count: u8 = 0,
+    windows: [MAX_DEVICE_MMIO_WINDOWS]MmioWindow = [_]MmioWindow{zeroMmioWindow()} ** MAX_DEVICE_MMIO_WINDOWS,
+};
+
+const MmioBacking = struct {
+    slots: [MAX_DEVICES]MmioWindowSet = [_]MmioWindowSet{.{}} ** MAX_DEVICES,
+};
+
+const heap_backed_mmio_windows = builtin.target.os.tag == .freestanding;
+const MmioBackingStorage = if (heap_backed_mmio_windows) ?*MmioBacking else MmioBacking;
+var mmio_windows: MmioBackingStorage = if (heap_backed_mmio_windows) null else .{};
 
 const DmaProgramArena = indexed_arena.IndexedArenaWithKey(u64, DmaProgramSlot, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2, dmaProgramSlotId);
 const DmaProgramDeviceIndex = indexed_arena.MultimapIndex(MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS, MAX_DMA_PROGRAMS * 2);
@@ -506,6 +533,7 @@ fn ensureDmaProgramState() Error!*DmaProgramBacking {
 
 pub fn reset() void {
     controllers.reset();
+    resetMmioWindows();
     if (comptime heap_backed_dma_programs) {
         if (dma_program_backing) |backing| {
             @memset(std.mem.asBytes(backing), 0);
@@ -729,16 +757,70 @@ pub fn invalidateDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
 
 pub fn describe(device_id: u64) Error!ControllerDescriptor {
     _ = findController(device_id) orelse return error.DeviceNotFound;
+    const slot_index = findControllerSlotIndex(device_id) orelse return error.DeviceNotFound;
     return .{
         .device_id = device_id,
-        .mmio_window_count = 0,
+        .mmio_window_count = mmioSet(slot_index).count,
     };
 }
 
 pub fn mmioWindow(device_id: u64, window_index: u8) Error!MmioWindow {
-    _ = device_id;
-    _ = window_index;
-    return error.UnsupportedMmioWindow;
+    _ = findController(device_id) orelse return error.DeviceNotFound;
+    const slot_index = findControllerSlotIndex(device_id) orelse return error.DeviceNotFound;
+    const set = mmioSet(slot_index);
+    if (window_index >= set.count) return error.UnsupportedMmioWindow;
+    return set.windows[window_index];
+}
+
+pub fn registerMmioWindows(device_id: u64, windows: []const MmioWindow) Error!void {
+    if (device_id == 0) return error.InvalidDevice;
+    if (windows.len == 0 or windows.len > MAX_DEVICE_MMIO_WINDOWS) return error.InvalidMmioWindow;
+    for (windows) |window| {
+        if (window.length == 0 or window.length % userspace_layout.page_size != 0) return error.InvalidMmioWindow;
+        if (window.physical_base == 0 or window.physical_base % userspace_layout.page_size != 0) return error.InvalidMmioWindow;
+        if (window.executable) return error.InvalidMmioWindow;
+    }
+
+    var created = false;
+    const slot = findControllerSlot(device_id) orelse blk: {
+        const reserved = reserveControllerSlot(device_id) orelse return error.ControllerTableFull;
+        created = true;
+        break :blk reserved;
+    };
+    slot.device_id = device_id;
+    const slot_index = findControllerSlotIndex(device_id) orelse return error.DeviceNotFound;
+    const slot_base = userspace_layout.deviceMmioSlotBase(slot_index) orelse {
+        if (created) _ = controllers.removeIndex(slot_index);
+        return error.MmioWindowTableFull;
+    };
+    const set = try mutableMmioSet(slot_index);
+
+    var offset: u64 = 0;
+    var copied: u8 = 0;
+    for (windows) |window| {
+        const user_base = std.math.add(u64, slot_base, offset) catch {
+            if (created) _ = controllers.removeIndex(slot_index);
+            return error.InvalidMmioWindow;
+        };
+        const next_offset = std.math.add(u64, offset, window.length) catch {
+            if (created) _ = controllers.removeIndex(slot_index);
+            return error.InvalidMmioWindow;
+        };
+        if (next_offset > userspace_layout.DEVICE_MMIO_SLOT_BYTES) {
+            if (created) _ = controllers.removeIndex(slot_index);
+            return error.MmioWindowTableFull;
+        }
+        set.windows[copied] = .{
+            .base = user_base,
+            .physical_base = window.physical_base,
+            .length = window.length,
+            .writable = window.writable,
+            .executable = false,
+        };
+        offset = std.mem.alignForward(u64, next_offset, userspace_layout.page_size);
+        copied += 1;
+    }
+    set.count = copied;
 }
 
 fn findController(device_id: u64) ?*ControllerSlot {
@@ -872,6 +954,61 @@ fn resetControllerSlot(slot: *ControllerSlot) void {
     slot.broker_generation = 0;
 }
 
+fn zeroMmioWindow() MmioWindow {
+    return .{
+        .base = 0,
+        .physical_base = 0,
+        .length = 0,
+    };
+}
+
+fn mmioState() ?*MmioBacking {
+    if (comptime heap_backed_mmio_windows) return mmio_windows;
+    return &mmio_windows;
+}
+
+fn ensureMmioState() Error!*MmioBacking {
+    if (mmioState()) |backing| return backing;
+    if (comptime heap_backed_mmio_windows) {
+        const allocation = kernel_memory.kmalloc(@sizeOf(MmioBacking)) orelse return error.OutOfMemory;
+        const backing: *MmioBacking = @ptrCast(@alignCast(allocation));
+        backing.* = .{};
+        mmio_windows = backing;
+        return backing;
+    }
+    return &mmio_windows;
+}
+
+fn mmioSet(slot_index: usize) MmioWindowSet {
+    const backing = mmioState() orelse return .{};
+    if (slot_index >= MAX_DEVICES) return .{};
+    return backing.slots[slot_index];
+}
+
+fn mutableMmioSet(slot_index: usize) Error!*MmioWindowSet {
+    if (slot_index >= MAX_DEVICES) return error.DeviceNotFound;
+    const backing = try ensureMmioState();
+    return &backing.slots[slot_index];
+}
+
+fn clearMmioSet(slot_index: usize) void {
+    const backing = mmioState() orelse return;
+    if (slot_index >= MAX_DEVICES) return;
+    backing.slots[slot_index] = .{};
+}
+
+fn resetMmioWindows() void {
+    if (comptime heap_backed_mmio_windows) {
+        if (mmio_windows) |backing| {
+            backing.* = .{};
+            kernel_memory.kfree(@ptrCast(backing));
+            mmio_windows = null;
+        }
+    } else {
+        mmio_windows = .{};
+    }
+}
+
 fn dmaProgramSlotId(slot: *const DmaProgramSlot) u64 {
     return slot.program_id;
 }
@@ -1000,6 +1137,19 @@ test "device broker publishes only PCI controllers" {
     try std.testing.expectEqual(device_id, descriptor.device_id);
     try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
     try std.testing.expectError(error.UnsupportedMmioWindow, mmioWindow(device_id, 0));
+
+    try registerMmioWindows(device_id, &.{.{
+        .base = 0,
+        .physical_base = 0xF000_0000,
+        .length = userspace_layout.page_size,
+        .writable = true,
+    }});
+    try std.testing.expectEqual(@as(u8, 1), (try describe(device_id)).mmio_window_count);
+    const mapped = try mmioWindow(device_id, 0);
+    try std.testing.expectEqual(userspace_layout.deviceMmioSlotBase(0).?, mapped.base);
+    try std.testing.expectEqual(@as(u64, 0xF000_0000), mapped.physical_base);
+    try std.testing.expect(mapped.writable);
+    try std.testing.expect(!mapped.executable);
 
     try publishPciControllerChecked(device_id);
     try std.testing.expect(brokerGeneration(device_id).? != first_generation);

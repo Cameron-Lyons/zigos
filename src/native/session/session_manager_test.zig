@@ -116,9 +116,9 @@ test "boot assembles core services without running explicit scenarios" {
     try std.testing.expect(review_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_service_task.runsAsUserspaceProcess());
-    try std.testing.expectEqualStrings("zigos.system.session-manager", session_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.session", session_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.drivers", storage_driver_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.store", storage_service_task.launchBundleIdSlice());
     try std.testing.expect(session_manager.system().surfacePresentationCapabilityForTask(session_task.id, 0) == null);
     const review_surface_capability_id = session_manager.system().surfacePresentationCapabilityForTask(review_task.id, 0).?;
     const review_surface_capability = try session_manager.system().capabilityTablePtr().requireUsable(review_surface_capability_id, 0);
@@ -211,21 +211,21 @@ test "session IPC wakes only its receiver and cannot park over pending messages"
         if (grant.rights.has(.endpoint_create)) break capability_id;
     } else return error.MissingEndpointAuthority;
     const client = try port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 1, sender.id),
+        .header = component_port.makeHeader(.endpoint_create, sender.id),
         .authority_capability_id = authority_id,
         .owner_task_id = sender.id,
         .label = "wake-client",
         .flags = .{ .local_only = true },
     }, 0);
     const server = try port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 2, sender.id),
+        .header = component_port.makeHeader(.endpoint_create, sender.id),
         .authority_capability_id = authority_id,
         .owner_task_id = receiver.id,
         .label = "wake-server",
         .flags = .{ .local_only = true, .service_port = true },
     }, 0);
     _ = try port.endpointConnect(.{
-        .header = component_port.makeHeader(.endpoint_connect, 3, sender.id),
+        .header = component_port.makeHeader(.endpoint_connect, sender.id),
         .endpoint_capability_id = client.capability_id,
         .peer_endpoint_capability_id = server.capability_id,
         .peer_endpoint_id = server.endpoint.endpoint_id,
@@ -237,7 +237,8 @@ test "session IPC wakes only its receiver and cannot park over pending messages"
     const wakes_before = scheduler.taskDispatchStats(receiver.id).?.wake_event_count;
     for (0..2) |index| {
         try port.endpointSend(.{
-            .header = component_port.makeHeader(.endpoint_send, index, sender.id),
+            .header = component_port.makeHeader(.endpoint_send, sender.id),
+            .correlation_id = index,
             .endpoint_capability_id = client.capability_id,
             .payload = "request",
         }, 1);
@@ -251,7 +252,7 @@ test "session IPC wakes only its receiver and cannot park over pending messages"
     var attached: abi.CapabilityDescriptor = undefined;
     for (0..2) |index| {
         const message = (try port.endpointRecv(.{
-            .header = component_port.makeHeader(.endpoint_recv, 4, receiver.id),
+            .header = component_port.makeHeader(.endpoint_recv, receiver.id),
             .endpoint_capability_id = server.capability_id,
             .receiver_task_id = receiver.id,
             .payload_out = &payload,
@@ -262,7 +263,8 @@ test "session IPC wakes only its receiver and cannot park over pending messages"
     }
     try std.testing.expect(scheduler.parkTaskUntilEvent(receiver.id));
     try port.endpointSend(.{
-        .header = component_port.makeHeader(.endpoint_send, 0, receiver.id),
+        .header = component_port.makeHeader(.endpoint_send, receiver.id),
+        .correlation_id = 0,
         .endpoint_capability_id = server.capability_id,
         .payload = "reply",
         .reply_endpoint_id = client.endpoint.endpoint_id,
@@ -275,7 +277,8 @@ test "session IPC wakes only its receiver and cannot park over pending messages"
     try std.testing.expect(try manager.runtimePtr().suspendTask(receiver.id, 4));
     const wakes_while_suspended = scheduler.taskDispatchStats(receiver.id).?.wake_event_count;
     try port.endpointSend(.{
-        .header = component_port.makeHeader(.endpoint_send, 5, sender.id),
+        .header = component_port.makeHeader(.endpoint_send, sender.id),
+        .correlation_id = 5,
         .endpoint_capability_id = client.capability_id,
         .payload = "pending while suspended",
     }, 4);
@@ -378,10 +381,10 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expect(notes_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_driver_task.runsAsUserspaceProcess());
     try std.testing.expect(storage_service_task.runsAsUserspaceProcess());
-    try std.testing.expectEqualStrings("zigos.system.session-manager", session_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.session", session_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("app.notes", notes_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-driver", storage_driver_task.launchBundleIdSlice());
-    try std.testing.expectEqualStrings("zigos.system.storage-object", storage_service_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.drivers", storage_driver_task.launchBundleIdSlice());
+    try std.testing.expectEqualStrings("zigos.system.store", storage_service_task.launchBundleIdSlice());
     try std.testing.expectEqual(storage_driver_task.id, driver_directory.findByClass(.storage_controller).?.owner_task_id);
     try std.testing.expect(storage_driver_task.id != storage_service_task.id);
     const notes_review = compositor.findWindowForTaskBundleConst(notes_task.id, "app.notes").?;
@@ -434,16 +437,16 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     try std.testing.expectEqual(@as(usize, 1), session_manager.servicePendingInputWork(200));
     const input_capability_id = session_manager.system().focusedInputCapabilityForTask(review_task.id, 200).?;
     const focused_input = (try session_manager.kernelPort().?.inputRecv(.{
-        .header = component_port.makeHeader(.input_recv, 201, review_task.id),
+        .header = component_port.makeHeader(.input_recv, review_task.id),
         .input_capability_id = input_capability_id,
         .receiver_task_id = review_task.id,
     }, 201)).?;
     try std.testing.expectEqual(capture_review.id, focused_input.window_id);
     try std.testing.expectEqual(review_task.id, focused_input.task_id);
-    try std.testing.expectEqual(abi.InputEventKind.text, abi.inputEventKind(focused_input.kind).?);
-    try std.testing.expectEqual(@as(u8, 'z'), focused_input.text);
+    try std.testing.expectEqual(abi.InputByte.text, focused_input.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 'z'), focused_input.bytes[1]);
     try std.testing.expect((try session_manager.kernelPort().?.inputRecv(.{
-        .header = component_port.makeHeader(.input_recv, 202, review_task.id),
+        .header = component_port.makeHeader(.input_recv, review_task.id),
         .input_capability_id = input_capability_id,
         .receiver_task_id = review_task.id,
     }, 202)) == null);

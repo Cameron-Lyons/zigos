@@ -1,10 +1,18 @@
 const abi = @import("../core/abi.zig");
+const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
+
+pub const Content = struct {
+    surface_id: u64,
+    text: []const u8,
+    cursor: usize,
+    flags: mailbox.UiStateFlags,
+};
 const compositor = @import("compositor_session.zig");
 const scanout = @import("../../kernel/platform/text_scanout.zig");
 
 // Compose the user-facing view from compositor-owned snapshots. The diagnostic
 // text framebuffer remains separate so its proof labels never become UI copy.
-pub fn render(frame: *scanout.Frame, session: *const compositor.Session) void {
+pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content: ?Content) void {
     frame.clear();
     frame.put(0, 0, "Zigos", .accent);
     if (frame.rows < 10) return;
@@ -19,7 +27,7 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session) void {
     frame.put(1, 2, window.titleSlice(), .selected);
     if (window.detail_len != 0) frame.put(0, 3, window.detailSlice(), .muted);
 
-    const surface = if (window.ui_surface_id) |id| session.surfacePresentation(id) else null;
+    const surface = if (content) |value| if (window.ui_surface_id == value.surface_id) value else null else null;
     var text_row: usize = 5;
     if (window.item_count != 0) {
         var index: usize = 0;
@@ -38,12 +46,16 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session) void {
     }
 
     if (surface) |record| {
-        const state = &record.presentation;
-        const flags: abi.SurfaceStateFlags = @bitCast(state.state_flags);
-        if (state.text_length == 0) {
+        const state = &record;
+        const flags = state.flags;
+        if (flags.loading) {
+            frame.put(0, text_row, "Opening document...", .muted);
+        } else if (flags.load_failed) {
+            frame.put(0, text_row, "Unable to open document. Your draft is unchanged.", .warning);
+        } else if (state.text.len == 0) {
             frame.put(0, text_row, "Ready for input.", .muted);
         } else {
-            drawText(frame, text_row, state.textSlice(), state.cursor);
+            drawText(frame, text_row, state.text, state.cursor);
         }
         frame.put(0, frame.rows - 2, if (flags.dirty) "Text changed in this session" else "Local session", .muted);
         if (flags.input_overflow) frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
@@ -91,17 +103,12 @@ test "desktop view renders owned surface text and removes stale task content" {
     var presentation = std.mem.zeroes(abi.SurfacePresentation);
     presentation.surface_id = 31;
     presentation.revision = 1;
-    presentation.interaction_hash = 0x2026;
-    presentation.model_kind = @intFromEnum(abi.SurfaceModelKind.notes);
-    @memcpy(presentation.text[0..11], "First\nDraft");
-    presentation.text_length = 11;
-    presentation.cursor = 11;
-    presentation.state_flags = @bitCast(abi.SurfaceStateFlags{ .dirty = true });
+    presentation.buffer_object_id = 31;
+    presentation.buffer_bytes = 512;
     _ = try session.presentSurface(task, &presentation);
-    // Mutation of the submitted buffer must never change the displayed copy.
-    @memset(presentation.text[0..11], 'x');
+    const content = Content{ .surface_id = 31, .text = "First\nDraft", .cursor = 11, .flags = .{ .dirty = true } };
     var frame = try scanout.Frame.init(60, 20);
-    render(&frame, &session);
+    render(&frame, &session, content);
     try expectText(&frame, 1, 2, "Notes");
     try expectText(&frame, 0, 5, "First");
     try expectText(&frame, 0, 6, "Draft");
@@ -109,7 +116,7 @@ test "desktop view renders owned surface text and removes stale task content" {
     try expectText(&frame, 0, 18, "Text changed in this session");
 
     _ = session.closeWindowsForTask(task.id);
-    render(&frame, &session);
+    render(&frame, &session, content);
     try expectText(&frame, 0, 5, "No open tasks.");
     for (frame.cells[6 * frame.columns ..][0..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
 }
@@ -127,7 +134,7 @@ test "desktop text wraps clips and clears the previous cursor" {
     for (frame.cells[7 * 20 ..][0..20]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
     var tiny = try scanout.Frame.init(4, 1);
     const empty = compositor.Session.init();
-    render(&tiny, &empty);
+    render(&tiny, &empty, null);
     try expectText(&tiny, 0, 0, "Zigo");
 }
 

@@ -15,6 +15,7 @@ const embedded_file = @import("../task/embedded_file.zig");
 const elf_image_inspector = @import("../task/elf_image_inspector.zig");
 const userspace_boot_registry = @import("../task/userspace_boot_registry.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
+const userspace_registry = @import("../task/userspace_registry.zig");
 const copyText = native_util.copyText;
 
 pub const production_artifact_manifest_signer = signing.SignerIdentity{
@@ -892,7 +893,7 @@ fn requiredArtifactShape(artifact_manifest: *const ArtifactManifest) bool {
 fn requiredBuildArtifactShape(manifest: *const BuildArtifactManifest) bool {
     return manifest.countKind(.bootloader_source) == 1 and
         manifest.countKind(.bootloader_measurement) == 1 and
-        manifest.countKind(.userspace_image) >= 10;
+        manifest.countKind(.userspace_image) >= userspace_registry.production_build_image_specs.len;
 }
 
 fn encodeArtifactManifest(artifact_manifest: ArtifactManifest, buffer: []u8) Error![]const u8 {
@@ -1023,7 +1024,7 @@ test "critical service measurements bind launched userspace image artifacts" {
         },
     };
     bundle.signature = try userspace_manifest_signing.signBundle(bundle);
-    const image_bytes = userspace_loader.makeSyntheticElf32ForTest(0x4000_5000, 2, 2);
+    const image_bytes = userspace_loader.makeSyntheticElf64ForTest(0x4000_5000, 2, 2);
     const image = try catalog.registerEmbeddedArtifact(.{
         .bundle = bundle,
         .component_class = .service_component,
@@ -1276,8 +1277,8 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     const bootloader_measurement_digest = crypto_hash.digestFromByte(0x11);
     const unexpected_bootloader_digest = crypto_hash.digestFromByte(0x12);
 
-    try manifest.addDigest(.bootloader_source, "src/boot/boot_x86_64.S", bootloader_source_digest);
-    try manifest.addDigest(.bootloader_measurement, "multiboot:zigos_native", bootloader_measurement_digest);
+    try manifest.addDigest(.bootloader_source, "src/boot/efi_stub.zig", bootloader_source_digest);
+    try manifest.addDigest(.bootloader_measurement, "efi:zigos_native", bootloader_measurement_digest);
     inline for (0..10) |index| {
         const digest = crypto_hash.digestFromByte(@intCast(0x20 + index));
         var label_buffer: [BUILD_ARTIFACT_LABEL_BUFFER_BYTES]u8 = undefined;
@@ -1290,29 +1291,29 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
 
     try std.testing.expect(verifyBuildArtifactManifest(&manifest));
-    try std.testing.expect(manifest.find(.bootloader_measurement, "multiboot:zigos_native") != null);
+    try std.testing.expect(manifest.find(.bootloader_measurement, "efi:zigos_native") != null);
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
-        "src/boot/boot_x86_64.S",
+        "src/boot/efi_stub.zig",
         &bootloader_source_digest,
     ));
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
         .bootloader_measurement,
-        "multiboot:zigos_native",
+        "efi:zigos_native",
         &bootloader_measurement_digest,
     ));
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
-        "src/boot/boot_x86_64.S",
+        "src/boot/efi_stub.zig",
         &unexpected_bootloader_digest,
     ));
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
         .bootloader_measurement,
-        "multiboot:zigos_native",
+        "efi:zigos_native",
         &unexpected_bootloader_digest,
     ));
 

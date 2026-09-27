@@ -1,4 +1,4 @@
-# Intel NUC11TNKi5 Authenticated Hardware Proof Bundle
+# Intel RNUC15CRSU7 Authenticated Hardware Proof Bundle
 
 This bundle is the real-machine release proof for the first hardware target.
 It is fail-closed: the normal checker rejects a bundle unless the caller
@@ -26,7 +26,7 @@ logs are preflight evidence only.
 Archive each completed bundle under its fresh ceremony directory,
 `build/hardware-proofs/<fresh-name>/`:
 
-- `proof-manifest.txt` uses `format=zigos-nuc11tnki5-proof-v2` and binds the
+- `proof-manifest.txt` uses `format=zigos-nuc15crsu7-proof-v2` and binds the
   fresh `capture_nonce`, stable `device_id`, fixed target/SKU, both log names,
   both ISO/kernel pairs, both marker contracts, every sidecar name, Jujutsu
   change/commit IDs, clean working-copy state, operator, and capture window.
@@ -58,7 +58,7 @@ bundle paths are rejected.
 `cycle-manifest.txt` has no comments or blank lines. Its first line is:
 
 ```text
-format=zigos-nuc11tnki5-cycle-manifest-v1
+format=zigos-nuc15crsu7-cycle-manifest-v1
 ```
 
 Every following line is:
@@ -76,9 +76,9 @@ must contain exactly the listed log files.
 Every cycle log contains exactly one value for this envelope:
 
 ```text
-format=zigos-nuc11tnki5-cycle-log-v1
+format=zigos-nuc15crsu7-cycle-log-v1
 capture_nonce=<fresh-64-hex-challenge>
-target_id=intel-nuc11tnki5
+target_id=asus-nuc15crsu7
 device_id=<stable-device-id>
 cycle_type=<manifest-type>
 cycle_index=<manifest-index>
@@ -97,7 +97,7 @@ evidence.
 ## Canonical capture statement and verifier
 
 After all inputs are final,
-`scripts/write-nuc11tnki5-capture-statement.sh` writes a fixed-order v1
+`scripts/write-nuc15crsu7-capture-statement.sh` writes a fixed-order v1
 statement. The statement binds:
 
 - the fresh nonce, fixed target/SKU, stable device ID, and Jujutsu IDs;
@@ -122,7 +122,7 @@ result=verified
 assertion=signed-response
 statement_sha256=<recomputed-statement-sha256>
 nonce=<fresh-externally-issued-nonce>
-target_id=intel-nuc11tnki5
+target_id=asus-nuc15crsu7
 device_id=<stable-device-id>
 production_role=verified
 verification_role=verified
@@ -163,7 +163,7 @@ the generator, finalizer, reproducibility checker, or `release-bundle-check`
 again. Prepare the proof skeleton from those existing artifacts:
 
 ```bash
-scripts/prepare-nuc11tnki5-hardware-proof.sh \
+scripts/prepare-nuc15crsu7-hardware-proof.sh \
   --nonce <64-lowercase-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -187,7 +187,7 @@ the cycle logs, and collect the two role-specific quotes/signatures. Once the
 manifest is final, write the statement:
 
 ```bash
-scripts/write-nuc11tnki5-capture-statement.sh \
+scripts/write-nuc15crsu7-capture-statement.sh \
   build/hardware-proofs/<fresh-name>
 ```
 
@@ -202,7 +202,7 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-scripts/check-nuc11tnki5-hardware-proof.sh \
+scripts/check-nuc15crsu7-hardware-proof.sh \
   build/hardware-proofs/<fresh-name>
 ```
 

@@ -384,7 +384,26 @@ pub const operations = [_]Descriptor{
         .required_right = .device_use,
         .target_kind = .{ .fixed = .device },
     },
+    .{
+        .operation = .wait,
+        .binding = .{
+            .request_type_name = "WaitRequest",
+            .response_type_name = "BoolResponse",
+            .handler_name = "dispatchWait",
+            .port_method_name = "wait",
+        },
+        .domain = .task,
+        .required_right = .time_query,
+    },
 };
+
+comptime {
+    for (operations) |declaration| {
+        if (!capability.isKernelRight(declaration.required_right)) {
+            @compileError("syscall authorization must use a kernel right");
+        }
+    }
+}
 
 pub fn declarationFor(comptime operation: abi.NativeOperation) Descriptor {
     inline for (operations) |declaration| {

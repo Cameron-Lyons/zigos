@@ -152,6 +152,7 @@ pub fn runFreestandingAndPrint(
     kernel: *native_kernel.Kernel,
 ) bool {
     if (builtin.target.os.tag != .freestanding) return true;
+    if (!sharedDirectoryRangeReclamation()) return false;
     const launched = catalog.launchDirect(runtime, MMU_PROOF_BUNDLE_ID, .{
         .owner = app(60),
         .budget = budget(),
@@ -243,6 +244,34 @@ pub fn runFreestandingAndPrint(
     }
 
     return false;
+}
+
+fn sharedDirectoryRangeReclamation() bool {
+    if (builtin.target.os.tag != .freestanding) return true;
+    var space = paging.createUserAddressSpace() catch return false;
+    defer paging.destroyUserAddressSpace(&space) catch unreachable;
+    const retired_start = 0x4000_0000;
+    const survivor_start = 0x4200_0000;
+    const huge_bytes = 0x20_0000;
+    paging.mapOwnedUserRange(&space, retired_start, huge_bytes, .{ .writable = true }) catch return false;
+    paging.mapOwnedUserRange(&space, survivor_start, 0x1000, .{ .writable = true }) catch return false;
+    const before = paging.frameStats().allocated;
+
+    // Partial huge-page retirement must reject without deleting either peer.
+    if (paging.releaseUserRange(&space, retired_start, 0x1000)) |_| {
+        return false;
+    } else |err| {
+        if (err != error.InvalidRange) return false;
+    }
+    if (paging.frameStats().allocated != before) return false;
+
+    paging.releaseUserRange(&space, retired_start, huge_bytes) catch return false;
+    if (paging.frameStats().allocated + huge_bytes / 0x1000 != before) return false;
+    if (paging.ownedUserPageIsExecutable(&space, retired_start) != null) return false;
+    if (paging.ownedUserPageIsExecutable(&space, survivor_start) == null) return false;
+    // A rehost must be able to reuse the retired image's virtual addresses.
+    paging.mapOwnedUserRange(&space, retired_start, huge_bytes, .{ .writable = true }) catch return false;
+    return paging.frameStats().allocated == before;
 }
 
 fn userGeneralProtectionFaultIsContained(
@@ -344,14 +373,14 @@ pub fn processIsolationBlocksForeignSharedMemory() bool {
     runtime.grantCapability(owner.id, authority.id) catch return false;
 
     const object = port.sharedMemoryCreate(.{
-        .header = component_port.makeHeader(.shared_memory_create, 1, owner.id),
+        .header = component_port.makeHeader(.shared_memory_create, owner.id),
         .authority_capability_id = authority.id,
         .owner_task_id = owner.id,
         .size_bytes = shared_memory.PAGE_SIZE,
     }, 1) catch return false;
 
     _ = port.sharedMemoryMap(.{
-        .header = component_port.makeHeader(.shared_memory_map, 2, attacker.id),
+        .header = component_port.makeHeader(.shared_memory_map, attacker.id),
         .shared_memory_capability_id = object.capability_id,
         .task_id = attacker.id,
     }, 2) catch |err| return err == error.CapabilityNotFound or err == error.ScopeViolation or err == error.SubjectTaskMismatch;
@@ -390,7 +419,7 @@ pub fn syscallSubjectSpoofingIsRejected() bool {
     runtime.grantCapability(receiver.id, authority.id) catch return false;
 
     const receiver_endpoint = port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, 1, receiver.id),
+        .header = component_port.makeHeader(.endpoint_create, receiver.id),
         .authority_capability_id = authority.id,
         .owner_task_id = receiver.id,
         .label = "receiver",
@@ -400,7 +429,7 @@ pub fn syscallSubjectSpoofingIsRejected() bool {
     var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
     var attached_capability = std.mem.zeroes(abi.CapabilityDescriptor);
     _ = port.endpointRecv(.{
-        .header = component_port.makeHeader(.endpoint_recv, 2, attacker.id),
+        .header = component_port.makeHeader(.endpoint_recv, attacker.id),
         .endpoint_capability_id = receiver_endpoint.capability_id,
         .receiver_task_id = receiver.id,
         .payload_out = &payload,

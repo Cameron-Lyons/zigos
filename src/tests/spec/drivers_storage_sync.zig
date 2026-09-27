@@ -5,7 +5,6 @@ const capability = @import("../../native/kernel_api/capability.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
-const file_bridge = @import("../../native/storage/file_bridge.zig");
 const manifest = @import("../../native/policy/manifest.zig");
 const network_policy = @import("../../native/sync/network_policy.zig");
 const object_store = @import("../../native/storage/object_store.zig");
@@ -429,6 +428,10 @@ test "publishedDriversActivateScopedTransports" {
     try publishedDriversActivateScopedTransports();
 }
 
+test "objects are addressed by id and absolute paths are not authority" {
+    try storageStaysVersionedRecoverableSignedAndDerived();
+}
+
 pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try storage_service_ipc.userspaceCreateWorkspaceRoundTripProof();
 
@@ -486,7 +489,6 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, report_model.access_model);
     try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, report_model.sync_policy);
     try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, report_model.history_policy);
-    try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, report_model.file_bridge_policy);
     try std.testing.expect(report_model.has_sharing_policy);
     try std.testing.expectEqual(draft_v2.version_id, report_object.latest_version_id);
 
@@ -496,17 +498,13 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     const imported_entry = try storage.resolve(imported.id, "documents/report.md");
     try std.testing.expectEqual(draft_v1.version_id, imported_entry.version_id);
 
-    const workspace_capability = try bridge_capabilities.mintBootRoot(.{
+    const object_capability = try bridge_capabilities.mintBootRoot(.{
         .holder = writer,
         .issuer = spec_support.policyAuthority(1),
-        .target = .{ .kind = .workspace, .id = workspace_record.id.raw() },
-        .rights = .{ .workspace = .{
-            .object_read = true,
-            .object_write = true,
-        } },
+        .target = .{ .kind = .object, .id = recovered.object_id.raw() },
+        .rights = .{ .object = .{ .object_read = true } },
         .scope = .{
             .task_id = 88,
-            .workspace_id = workspace_record.id.raw(),
             .local_only = true,
             .broker_only = true,
         },
@@ -516,62 +514,11 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
         },
         .audit = .{},
     });
-    const view = try storage.bridgeResolve(.{
-        .workspace_id = workspace_record.id.raw(),
-        .path = "documents/report.md",
-        .access = .read,
-    }, .{
-        .task_id = 88,
-        .principal = workspace_capability.holder,
-        .capability_id = workspace_capability.id,
-        .now_ticks = 8,
-    });
-    try std.testing.expect(!view.authoritative);
-    try std.testing.expect(view.export_only);
-    try std.testing.expect(view.readable);
-    try std.testing.expect(!view.writable);
-    try std.testing.expectEqual(draft_v2.object_id.raw(), view.object_id);
-    try std.testing.expectEqual(draft_v2.version_id.raw(), view.version_id);
-    try std.testing.expectError(file_bridge.Error.PathAuthorityRejected, storage.bridgeResolve(.{
-        .workspace_id = workspace_record.id.raw(),
-        .path = "/documents/report.md",
-        .access = .read,
-    }, .{
-        .task_id = 88,
-        .principal = workspace_capability.holder,
-        .capability_id = workspace_capability.id,
-        .now_ticks = 8,
-    }));
-    try std.testing.expectError(file_bridge.Error.PathAuthorityRejected, storage.bridgeResolve(.{
-        .workspace_id = workspace_record.id.raw(),
-        .path = "~/documents/report.md",
-        .access = .read,
-    }, .{
-        .task_id = 88,
-        .principal = workspace_capability.holder,
-        .capability_id = workspace_capability.id,
-        .now_ticks = 8,
-    }));
-    try std.testing.expectError(file_bridge.Error.PathSyntaxInvalid, storage.bridgeResolve(.{
-        .workspace_id = workspace_record.id.raw(),
-        .path = "../documents/report.md",
-        .access = .read,
-    }, .{
-        .task_id = 88,
-        .principal = workspace_capability.holder,
-        .capability_id = workspace_capability.id,
-        .now_ticks = 8,
-    }));
-    try std.testing.expectError(file_bridge.Error.PermissionDenied, storage.bridgeResolve(.{
-        .workspace_id = workspace_record.id.raw(),
-        .path = "documents/report.md",
-        .access = .write,
-    }, .{
-        .task_id = 88,
-        .principal = workspace_capability.holder,
-        .capability_id = workspace_capability.id,
-        .now_ticks = 8,
-    }));
+    try std.testing.expectEqual(capability.CapabilityTargetKind.object, object_capability.target.kind);
+    try std.testing.expectEqual(recovered.object_id.raw(), object_capability.target.id);
+    try std.testing.expect(object_capability.rights.has(.object_read));
+    try std.testing.expect(!object_capability.rights.has(.object_write));
+    try std.testing.expectError(error.EntryNotFound, storage.resolve(workspace_record.id, "/documents/report.md"));
 }
 
 pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {

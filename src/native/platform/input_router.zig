@@ -258,10 +258,10 @@ pub const Router = struct {
             .window_id = routed.window_id,
             .task_id = routed.task_id,
             .surface_id = routed.surface_id,
-            .kind = @intFromEnum(abiKind(routed.event.kind)),
-            .text = routed.event.text,
             .port_id = routed.port_id,
             .slot_id = routed.slot_id,
+            .length = 2,
+            .bytes = abi.inputPacket(inputByte(routed.event.kind), routed.event.text),
         };
     }
 
@@ -592,18 +592,18 @@ fn inboxTaskId(inbox: *const Inbox) u64 {
     return inbox.task_id;
 }
 
-fn abiKind(kind: input_driver_task.EventKind) abi.InputEventKind {
+fn inputByte(kind: input_driver_task.EventKind) u8 {
     return switch (kind) {
-        .text => .text,
-        .backspace => .backspace,
-        .commit_text => .commit_text,
-        .focus_next => .focus_next,
-        .focus_previous => .focus_previous,
-        .activate => .activate,
-        .task_switch_next => .task_switch_next,
-        .task_switch_previous => .task_switch_previous,
-        .show_recovery => .show_recovery,
-        .dismiss_recovery => .dismiss_recovery,
+        .text => abi.InputByte.text,
+        .backspace => abi.InputByte.backspace,
+        .commit_text => abi.InputByte.commit_text,
+        .focus_next => abi.InputByte.focus_next,
+        .focus_previous => abi.InputByte.focus_previous,
+        .activate => abi.InputByte.activate,
+        .task_switch_next => abi.InputByte.task_switch_next,
+        .task_switch_previous => abi.InputByte.task_switch_previous,
+        .show_recovery => abi.InputByte.show_recovery,
+        .dismiss_recovery => abi.InputByte.dismiss_recovery,
     };
 }
 
@@ -678,8 +678,8 @@ test "input router gives each keyboard independent transitions and targets modal
     try std.testing.expectEqual(@as(u64, 1), wire_event.sequence);
     try std.testing.expectEqual(review.id, wire_event.window_id);
     try std.testing.expectEqual(@as(u64, 77), wire_event.task_id);
-    try std.testing.expectEqual(abi.InputEventKind.text, abi.inputEventKind(wire_event.kind).?);
-    try std.testing.expectEqual(@as(u8, 'a'), wire_event.text);
+    try std.testing.expectEqual(abi.InputByte.text, wire_event.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 'a'), wire_event.bytes[1]);
     try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(77).?.event.text);
     try std.testing.expect(router.pollForTask(app.id) == null);
 }

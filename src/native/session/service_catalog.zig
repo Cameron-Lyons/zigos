@@ -133,8 +133,9 @@ pub const BootstrapTiming = struct {
     tick: u64,
 };
 
+pub const SINGLE_BOOTSTRAP_LAUNCH_MODE = true;
+
 pub const BootstrapLaunchMode = enum(u8) {
-    native_direct,
     kernel_contract,
 };
 
@@ -287,8 +288,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .ui = .session_surface },
         .userspace_image = .{
-            .bundle_id = "zigos.system.session-manager",
-            .artifact_name = "userspace-session-manager.elf",
+            .bundle_id = "zigos.system.session",
+            .artifact_name = "userspace-session.elf",
             .display_name = "Session Manager",
             .label = "session-manager",
             .entry = "zigos.session.manager",
@@ -298,7 +299,7 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "restartable native session and task coordinator",
         .service_bootstrap = .{
-            .mode = .native_direct,
+            .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 50_000,
                 .memory_bytes = mebibytes(8),
@@ -323,8 +324,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
         .userspace_image = .{
-            .bundle_id = "zigos.system.policy-mediation",
-            .artifact_name = "userspace-policy-mediation.elf",
+            .bundle_id = "zigos.system.session",
+            .artifact_name = "userspace-session.elf",
             .display_name = "Policy Mediation",
             .label = "policy-mediation",
             .entry = "zigos.policy.mediation",
@@ -353,8 +354,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
         .userspace_image = .{
-            .bundle_id = "zigos.system.attention-broker",
-            .artifact_name = "userspace-attention-broker.elf",
+            .bundle_id = "zigos.system.session",
+            .artifact_name = "userspace-session.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Attention Broker",
             .label = "attention-broker",
@@ -384,8 +385,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
         .userspace_image = .{
-            .bundle_id = "zigos.system.task-lifecycle",
-            .artifact_name = "userspace-task-lifecycle.elf",
+            .bundle_id = "zigos.system.session",
+            .artifact_name = "userspace-session.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Task Lifecycle",
             .label = "task-lifecycle",
@@ -415,8 +416,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .ui = .review_surface },
         .userspace_image = .{
-            .bundle_id = "zigos.system.permission-review",
-            .artifact_name = "userspace-permission-review.elf",
+            .bundle_id = "zigos.system.session",
+            .artifact_name = "userspace-session.elf",
             .display_name = "Permission Review",
             .label = "permission-review",
             .entry = "zigos.permission.review",
@@ -426,7 +427,7 @@ pub const catalog = [_]ServiceCatalogEntry{
         },
         .description = "task-scoped permission review service for reviewed grants and denials",
         .service_bootstrap = .{
-            .mode = .native_direct,
+            .mode = .kernel_contract,
             .budget = .{
                 .cpu_time_ticks = 10_000,
                 .memory_bytes = kibibytes(512),
@@ -450,8 +451,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
         .userspace_image = .{
-            .bundle_id = "zigos.system.service-registry",
-            .artifact_name = "userspace-service-registry.elf",
+            .bundle_id = "zigos.system.session",
+            .artifact_name = "userspace-session.elf",
             .display_name = "Service Registry",
             .label = "service-registry",
             .entry = "zigos.service.registry",
@@ -486,8 +487,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .network = .unrestricted_brokered, .driver_class = .network_adapter },
         .userspace_image = .{
-            .bundle_id = "zigos.system.network-stack",
-            .artifact_name = "userspace-network-stack.elf",
+            .bundle_id = "zigos.system.network",
+            .artifact_name = "userspace-network.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Network Stack",
             .label = "network-service",
@@ -519,8 +520,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .storage = .object_store_authority, .driver_class = .storage_controller },
         .userspace_image = .{
-            .bundle_id = "zigos.system.storage-object",
-            .artifact_name = "userspace-storage-object.elf",
+            .bundle_id = "zigos.system.store",
+            .artifact_name = "userspace-store.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Storage Object Service",
             .label = "workspace-storage",
@@ -551,8 +552,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .storage = .metadata_only, .network = .named_peer_brokered },
         .userspace_image = .{
-            .bundle_id = "zigos.system.package-service",
-            .artifact_name = "userspace-package-service.elf",
+            .bundle_id = "zigos.system.store",
+            .artifact_name = "userspace-store.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Package Install Service",
             .label = "package-service",
@@ -584,8 +585,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .ui = .session_surface, .driver_class = .graphics_adapter },
         .userspace_image = .{
-            .bundle_id = "zigos.system.compositor",
-            .artifact_name = "userspace-compositor.elf",
+            .bundle_id = "zigos.system.display",
+            .artifact_name = "userspace-display.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Compositor Session",
             .label = "compositor-session",
@@ -617,8 +618,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .storage = .metadata_only },
         .userspace_image = .{
-            .bundle_id = "zigos.system.indexing-search",
-            .artifact_name = "userspace-indexing-search.elf",
+            .bundle_id = "zigos.system.store",
+            .artifact_name = "userspace-store.elf",
             .display_name = "Indexing Search",
             .label = "indexing-service",
             .entry = "zigos.index.search",
@@ -647,8 +648,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .storage = .metadata_only },
         .userspace_image = .{
-            .bundle_id = "zigos.system.personal-context",
-            .artifact_name = "userspace-personal-context.elf",
+            .bundle_id = "zigos.system.privacy",
+            .artifact_name = "userspace-privacy.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Personal Context",
             .label = "personal-context",
@@ -678,8 +679,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .network = .named_peer_brokered, .storage = .metadata_only },
         .userspace_image = .{
-            .bundle_id = "zigos.system.sync-service",
-            .artifact_name = "userspace-sync-service.elf",
+            .bundle_id = "zigos.system.store",
+            .artifact_name = "userspace-store.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Sync Replication",
             .label = "sync-service",
@@ -711,8 +712,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .driver_class = .audio_print_io },
         .userspace_image = .{
-            .bundle_id = "zigos.system.media-print",
-            .artifact_name = "userspace-media-print.elf",
+            .bundle_id = "zigos.system.apps",
+            .artifact_name = "userspace-apps.elf",
             .display_name = "Media Print Helpers",
             .label = "media-print-service",
             .entry = "zigos.media.print",
@@ -741,8 +742,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
         .userspace_image = .{
-            .bundle_id = "zigos.system.sensitive-capture",
-            .artifact_name = "userspace-sensitive-capture.elf",
+            .bundle_id = "zigos.system.privacy",
+            .artifact_name = "userspace-privacy.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Sensitive Capture",
             .label = "sensitive-capture",
@@ -772,8 +773,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
         .userspace_image = .{
-            .bundle_id = "zigos.system.secure-pasteboard",
-            .artifact_name = "userspace-secure-pasteboard.elf",
+            .bundle_id = "zigos.system.privacy",
+            .artifact_name = "userspace-privacy.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Secure Pasteboard",
             .label = "secure-pasteboard",
@@ -803,8 +804,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true, .storage = .object_store_authority },
         .userspace_image = .{
-            .bundle_id = "zigos.system.object-resilience",
-            .artifact_name = "userspace-object-resilience.elf",
+            .bundle_id = "zigos.system.store",
+            .artifact_name = "userspace-store.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Object Resilience",
             .label = "object-resilience",
@@ -834,8 +835,8 @@ pub const catalog = [_]ServiceCatalogEntry{
         .restart_policy = .supervised_restart,
         .isolation = .{ .namespace_isolated = true },
         .userspace_image = .{
-            .bundle_id = "zigos.system.secret-vault",
-            .artifact_name = "userspace-secret-vault.elf",
+            .bundle_id = "zigos.system.privacy",
+            .artifact_name = "userspace-privacy.elf",
             .source_path = "src/userspace/service_main.zig",
             .display_name = "Secret Vault",
             .label = "secret-vault",
@@ -873,7 +874,7 @@ pub const ordered_service_contracts = blk: {
         var progressed = false;
         for (catalog, 0..) |entry, index| {
             const launch = entry.service_bootstrap orelse continue;
-            if (launch.mode != .kernel_contract or used[index]) continue;
+            if (isSessionNucleusClass(entry.class) or used[index]) continue;
             if (!dependenciesSatisfied(entry, derived[0..count_out])) continue;
 
             derived[count_out] = .{
@@ -981,6 +982,14 @@ pub fn orderedPublishedNativeServiceIndex(class: ServiceClass) ?usize {
 pub fn imageForClass(class: ServiceClass) ?UserspaceImageIdentity {
     const entry = entryForClass(class) orelse return null;
     return entry.userspace_image;
+}
+
+pub fn contractFlagsForComponentLabel(label: []const u8) ?u32 {
+    for (catalog) |entry| {
+        const image = entry.userspace_image orelse continue;
+        if (std.mem.eql(u8, image.label, label)) return image.contract_flags;
+    }
+    return null;
 }
 
 pub fn bundleIdForServiceClass(class: ServiceClass) ?[]const u8 {
@@ -1183,20 +1192,21 @@ fn descriptorFromEntry(entry: ServiceCatalogEntry) ServiceDescriptor {
     };
 }
 
+fn isSessionNucleusClass(class: ServiceClass) bool {
+    return class == .session_manager or class == .permission_review_ui;
+}
+
 fn kernelBootstrapCount() usize {
     comptime var count: usize = 0;
     inline for (catalog) |entry| {
-        if (entry.service_bootstrap) |launch| {
-            if (launch.mode == .kernel_contract) count += 1;
-        }
+        if (entry.service_bootstrap != null and !isSessionNucleusClass(entry.class)) count += 1;
     }
     return count;
 }
 
 fn isKernelBootstrapClass(class: ServiceClass) bool {
     const entry = entryForClass(class) orelse return false;
-    const launch = entry.service_bootstrap orelse return false;
-    return launch.mode == .kernel_contract;
+    return entry.service_bootstrap != null and !isSessionNucleusClass(class);
 }
 
 fn dependenciesSatisfied(entry: ServiceCatalogEntry, ordered: []const ServiceContract) bool {
@@ -1266,7 +1276,7 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expectEqual(ServiceClass.object_resilience, ordered_published_native_service_contracts[13].class);
     try std.testing.expectEqual(ServiceClass.secret_vault, ordered_published_native_service_contracts[14].class);
     try std.testing.expectEqualStrings(component_abi_schema.interfaceForService(.storage_object).name, entryForClass(.storage_object).?.interface.name);
-    try std.testing.expectEqualStrings("zigos.system.storage-object", bundleIdForServiceClass(.storage_object).?);
+    try std.testing.expectEqualStrings("zigos.system.store", bundleIdForServiceClass(.storage_object).?);
     try std.testing.expectEqual(@as(usize, 0), orderedServiceIndex(.service_registry).?);
     try std.testing.expectEqual(@as(usize, 1), orderedServiceIndex(.policy_mediation).?);
     try std.testing.expectEqual(@as(usize, 1), orderedPublishedNativeServiceIndex(.attention_broker).?);
@@ -1280,7 +1290,13 @@ test "service catalog derives descriptors and bootstrap contracts from one sourc
     try std.testing.expect(allowsDriverClass(.media_print_helpers, .audio_print_io));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .network_adapter));
     try std.testing.expect(!allowsDriverClass(.policy_mediation, .compositor_policy));
-    try std.testing.expectEqual(BootstrapLaunchMode.native_direct, bootstrapLaunchForClass(.session_manager).?.mode);
+    try std.testing.expectEqual(BootstrapLaunchMode.kernel_contract, bootstrapLaunchForClass(.session_manager).?.mode);
+    try std.testing.expect(SINGLE_BOOTSTRAP_LAUNCH_MODE);
+    for (catalog) |entry| {
+        if (entry.service_bootstrap) |launch| {
+            try std.testing.expectEqual(BootstrapLaunchMode.kernel_contract, launch.mode);
+        }
+    }
     try std.testing.expectEqual(BootstrapOwnerKey.storage_service, bootstrapOwnerKeyForClass(.storage_object).?);
     try std.testing.expectEqual(BootstrapServiceRecordKey.storage_service, bootstrapServiceRecordKeyForClass(.storage_object).?);
     try std.testing.expectEqual(component_abi_schema.InterfaceId.object_workspace, serviceContractForClass(.storage_object).?.interface_id);
@@ -1316,7 +1332,7 @@ test "default service catalog keeps native services userspace restartable and ze
         }
 
         if (entry.service_bootstrap) |launch| {
-            if (launch.mode == .kernel_contract) {
+            if (entry.published_native_service) {
                 try std.testing.expect(entry.userspace_image != null);
                 try std.testing.expect(launch.grants.len != 0);
                 try std.testing.expectEqual(BootstrapGrantKind.service_task_authority, launch.grants[0]);

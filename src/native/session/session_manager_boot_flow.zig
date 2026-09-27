@@ -308,16 +308,19 @@ pub const SessionManager = struct {
         const service = bootstrap_driver_port.servicePendingNetworkFrames(NETWORK_RECEIVE_SERVICE_BUDGET);
         if (service.frames_queued != 0) {
             const task_id = bootstrap_driver_port.activeNetworkTaskId();
-            if (task_id != 0 and self.runtime_context.constructed) {
-                _ = self.runtime_context.userspaceScheduler().?.wakeTask(
-                    task_id,
-                    .external_event,
-                    now_ticks,
-                    now_ticks +% 1,
-                );
-            }
+            _ = self.wakeUserspaceTask(task_id, now_ticks);
         }
         return service.frames_queued;
+    }
+
+    pub fn wakeUserspaceTask(self: *SessionManager, task_id: u64, now_ticks: u64) bool {
+        if (task_id == 0 or !self.runtime_context.constructed) return false;
+        return self.runtime_context.userspaceScheduler().?.wakeTask(
+            task_id,
+            .external_event,
+            now_ticks,
+            now_ticks +% 1,
+        );
     }
 
     pub fn bindHardwareInput(self: *SessionManager, source: input_router_mod.HardwareReportSource) void {
@@ -480,6 +483,13 @@ pub const SessionManager = struct {
 
     fn taskOwnsUiSurface(self: *SessionManager, task: *const task_runtime.TaskRecord) bool {
         if (task.state != .active or task.ui_surface_id == null or task.ui_surface_id.? == 0) return false;
+        if (manifest.isApplicationBundle(task.launchBundleIdSlice())) return true;
+        const components = task.executionComponents();
+        if (components.len != 0) {
+            if (service_catalog.contractFlagsForComponentLabel(components[0].labelSlice())) |flags| {
+                return (flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
+            }
+        }
         const image = self.userspaceCatalogPtr().findById(task.launch.image_id) orelse return false;
         return (image.contract_flags & userspace_flags.FLAG_OWNS_UI_SURFACE) != 0;
     }
@@ -535,6 +545,9 @@ pub const SessionManager = struct {
         }
         stack_watermark.reportPeak();
         userspace_executor.reportTrapStackPeak();
+        if (self.storageServicePtr().checkpoint_enabled) {
+            self.native_store.checkpoint();
+        }
         const checkpoint_clean = self.reportFinalCheckpointState();
         if (comptime !include_verification_evidence) {
             if (!checkpoint_clean) {
@@ -699,17 +712,18 @@ pub const SessionManager = struct {
         const runtime = self.runtimePtr();
         const compositor_task = runtime.find(compositor_task_id) orelse return false;
         if (builtin.target.os.tag == .freestanding) {
-            _ = self.userspaceSchedulerPtr().wakeTask(compositor_task_id, .external_event, 0, 1);
             var attempts: usize = 0;
             const dispatch_budget = runtime.taskSlotCapacity() * 8;
             while (attempts < dispatch_budget and
-                !self.currentUserspaceSurfacePresentationReady(compositor_task)) : (attempts += 1)
+                !self.currentUserspaceSurfacePresentationReady(runtime.find(compositor_task_id) orelse compositor_task)) : (attempts += 1)
             {
+                _ = self.userspaceSchedulerPtr().wakeTask(compositor_task_id, .external_event, @intCast(attempts), @intCast(attempts + 1));
                 if (!self.userspaceSchedulerPtr().hasReadyTasks()) break;
                 _ = self.runUserspaceScheduler(@intCast(attempts + 1));
             }
-            if (!self.proveUserspaceSurfacePresentation(compositor_task)) {
-                self.printSurfacePresentationTelemetry(compositor_task.id);
+            const presented_task = runtime.find(compositor_task_id) orelse compositor_task;
+            if (!self.proveUserspaceSurfacePresentation(presented_task)) {
+                self.printSurfacePresentationTelemetry(compositor_task_id);
                 return false;
             }
         }
@@ -726,7 +740,10 @@ pub const SessionManager = struct {
         var framebuffer = compositor_display.Framebuffer.init(&storage, compositor_display.MIN_WIDTH, compositor_display.MIN_HEIGHT) catch return false;
         framebuffer.renderSession(&self.recovery_context.review_compositor_session) catch return false;
         var expected_buffer: [96]u8 = undefined;
-        const expected = std.fmt.bufPrint(&expected_buffer, "surface_state model=compositor revision={d}", .{surface.presentation.revision}) catch return false;
+        const expected = std.fmt.bufPrint(&expected_buffer, "surface_state revision={d} object={d}", .{
+            surface.presentation.revision,
+            surface.presentation.buffer_object_id,
+        }) catch return false;
         _ = framebuffer.requirePresentation(
             expected,
             self.recovery_context.review_compositor_session.visibleWindowCount(),
@@ -739,8 +756,7 @@ pub const SessionManager = struct {
         const surface_id = compositor_task.ui_surface_id orelse return false;
         const surface = self.recovery_context.review_compositor_session.surfacePresentation(surface_id) orelse return false;
         if (surface.task_id != compositor_task.id or surface.presentation.revision == 0) return false;
-        const model = abi.surfaceModelKind(surface.presentation.model_kind) orelse return false;
-        if (model != .compositor) return false;
+        if (!abi.isCanonicalSurfacePresentation(&surface.presentation)) return false;
         const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(compositor_task.id) orelse return false;
         if (dispatch.last_ui_state_revision != surface.presentation.revision) return false;
         const mailbox = self.runtime_context.userspace_executor.bootstrapMailboxSnapshot(
@@ -763,7 +779,23 @@ pub const SessionManager = struct {
             runtime,
             task_id,
         ) orelse {
-            console.print("ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing\n");
+            var miss_buffer: [96]u8 = undefined;
+            const line = std.fmt.bufPrint(
+                &miss_buffer,
+                "ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing reason={s} task={d}\n",
+                .{
+                    self.runtime_context.userspace_executor.bootstrapMailboxSnapshotMissReason(
+                        self.userspaceCatalogPtr(),
+                        runtime,
+                        task_id,
+                    ),
+                    task_id,
+                },
+            ) catch {
+                console.print("ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL mailbox=missing\n");
+                return;
+            };
+            console.print(line);
             return;
         };
         const dispatch = self.userspaceSchedulerPtr().taskDispatchStats(task_id);
@@ -926,9 +958,10 @@ fn launchNativeBootstrapService(
     class: service_catalog.ServiceClass,
 ) BootstrapError!*task_runtime.TaskRecord {
     const launch = service_catalog.bootstrapLaunchForClass(class) orelse return error.MissingBootstrapLaunch;
-    if (launch.mode != .native_direct) return error.MissingBootstrapLaunch;
+    if (service_catalog.entryForClass(class).?.published_native_service) return error.MissingBootstrapLaunch;
     const bundle_id = service_catalog.bundleIdForServiceClass(class) orelse return error.MissingUserspaceImage;
-    return userspace_launch.launchRegisteredDirect(
+    const catalog_image = service_catalog.imageForClass(class) orelse return error.MissingUserspaceImage;
+    return userspace_launch.launchFromKernel(
         self.userspaceCatalogPtr(),
         self.runtimePtr(),
         bundle_id,
@@ -937,6 +970,7 @@ fn launchNativeBootstrapService(
             .budget = launch.budget,
             .ui_surface_id = launch.ui_surface_id,
             .local_only = true,
+            .component_label = catalog_image.label,
         },
         self.userspaceSchedulerPtr(),
     ) catch |err| {

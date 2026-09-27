@@ -2,16 +2,19 @@
 
 .extern isrHandler
 .extern zigos_userspace_resume_requested
+.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 .extern zigos_handle_invalid_interrupt_return
 
-.equ FXSAVE_BYTES, 512
-.equ FXSAVE_ALIGN_SLACK, 16
+.equ XSAVE_BYTES, 576
+.equ XSAVE_ALIGN_SLACK, 64
+.equ XCOMP_BV, 0x8000000000000003
 .equ KERNEL_CODE_SELECTOR, 0x08
 .equ USER_DATA_SEGMENT, 0x18
 .equ USER_DATA_SELECTOR, 0x1b
 .equ USER_CODE_SELECTOR, 0x23
 .equ SELECTOR_RPL_MASK, 0x3
+.equ FRAME_INT_NO, 136
 .equ FRAME_RIP, 152
 .equ FRAME_CS, 160
 .equ FRAME_RFLAGS, 168
@@ -27,6 +30,7 @@
 .global isr\num
 .type isr\num, @function
 isr\num:
+    endbr64
     pushq $0
     pushq $\num
     jmp isr_common_stub
@@ -36,6 +40,7 @@ isr\num:
 .global isr\num
 .type isr\num, @function
 isr\num:
+    endbr64
     pushq $\num
     jmp isr_common_stub
 .endm
@@ -116,18 +121,41 @@ ISR_NOERRCODE 64
 ISR_NOERRCODE 65
 ISR_NOERRCODE 66
 ISR_NOERRCODE 67
+ISR_NOERRCODE 112
 ISR_NOERRCODE 255
 
 isr_common_stub:
+    # endbr64
+    .byte 0xf3, 0x0f, 0x1e, 0xfa
     clac
     SAVE_REGISTERS
     movq %rsp, %r12
-    movq %r12, %rdi
-    subq $(FXSAVE_BYTES + FXSAVE_ALIGN_SLACK), %rsp
-    andq $-16, %rsp
-    fxsave64 (%rsp)
+    movq FRAME_CS(%r12), %rax
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .skip_xstate
+    # Restored user state remains live even when TS was re-armed on return.
+    clts
+    subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
+    andq $-64, %rsp
+    leaq 512(%rsp), %rdi
+    xorl %eax, %eax
+    movl $8, %ecx
+    rep stosq
+    movabsq $XCOMP_BV, %rax
+    movq %rax, 520(%rsp)
+    movl $3, %eax
+    xorl %edx, %edx
+    # xsaves (%rsp)
+    .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
     cld
+    movq %r12, %rdi
+    jmp .isr_enter
 
+.skip_xstate:
+    movq %r12, %rdi
+
+.isr_enter:
+    clts
     call isrHandler
 
     movq FRAME_CS(%r12), %rax
@@ -142,7 +170,7 @@ isr_common_stub:
     jne .invalid_interrupt_return
     orq $SELECTOR_RPL_MASK, FRAME_USER_SS(%r12)
     movq FRAME_USER_RSP(%r12), %rax
-    shrq $32, %rax
+    shrq $47, %rax
     jne .invalid_interrupt_return
 
     movl $USER_DATA_SELECTOR, %eax
@@ -160,7 +188,7 @@ isr_common_stub:
 
 .validate_common_return:
     movq FRAME_RIP(%r12), %rax
-    shrq $32, %rax
+    shrq $47, %rax
     jne .invalid_interrupt_return
     movq FRAME_RFLAGS(%r12), %rax
     testq $RFLAGS_RESERVED, %rax
@@ -174,11 +202,31 @@ isr_common_stub:
     call zigos_handle_invalid_interrupt_return
 
 .isr_dispatch_complete:
-    fxrstor64 (%rsp)
+    cmpq %rsp, %r12
+    je .skip_xrstors
+    movq FRAME_CS(%r12), %rax
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .skip_xrstors
+    movl $3, %eax
+    xorl %edx, %edx
+    # xrstors (%rsp)
+    .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
+.skip_xrstors:
     movq %r12, %rsp
+    movq FRAME_CS(%r12), %rax
+    cmpq $USER_CODE_SELECTOR, %rax
+    jne .interrupt_return
     cmpl $0, zigos_userspace_resume_requested(%rip)
+    je .interrupt_lazy_ts
+    cmpq $0, zigos_userspace_resume_eip(%rip)
     jne .userspace_resume
-
+.interrupt_lazy_ts:
+    cmpq $7, FRAME_INT_NO(%r12)
+    je .interrupt_return
+    movq %cr0, %rax
+    orq $8, %rax
+    movq %rax, %cr0
+.interrupt_return:
     RESTORE_REGISTERS
     addq $16, %rsp
     iretq

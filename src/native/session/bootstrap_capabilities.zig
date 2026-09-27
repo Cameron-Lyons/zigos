@@ -32,10 +32,11 @@ pub fn deriveTaskCapability(
     correlation_id: u64,
     now_ticks: u64,
 ) component_port.Error!u64 {
+    _ = correlation_id;
     const parent = kernel_port.kernel.capability_table.query(parent_capability_id) orelse return error.CapabilityNotFound;
     const target_task = kernel_port.kernel.runtime.find(target_task_id) orelse return error.TaskNotFound;
     const derived = try kernel_port.capabilityDerive(.{
-        .header = component_port.makeHeader(.capability_derive, correlation_id, controller_task_id),
+        .header = component_port.makeHeader(.capability_derive, controller_task_id),
         .request = .{
             .parent_capability_id = parent_capability_id,
             .holder = target_task.owner,
@@ -67,10 +68,11 @@ pub fn mintTaskCapability(
     correlation_id: u64,
     now_ticks: u64,
 ) component_port.Error!u64 {
+    _ = correlation_id;
     const policy_capability = kernel_port.kernel.capability_table.query(policy_capability_id) orelse return error.CapabilityNotFound;
     const target_task = kernel_port.kernel.runtime.find(target_task_id) orelse return error.TaskNotFound;
     const minted = try kernel_port.capabilityMint(.{
-        .header = component_port.makeHeader(.capability_mint, correlation_id, controller_task_id),
+        .header = component_port.makeHeader(.capability_mint, controller_task_id),
         .policy_capability_id = policy_capability_id,
         .request = .{
             .holder = target_task.owner,

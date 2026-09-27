@@ -15,6 +15,26 @@ else
 pub const Error = userspace_boot_registry.Error || userspace_loader.Error || package_service.Error;
 pub const REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL: u8 = 0;
 
+pub const SINGLE_KERNEL_CONTRACT_LAUNCH = true;
+
+pub fn launchFromKernel(
+    catalog: *userspace_loader.Catalog,
+    runtime_ptr: *task_runtime.Runtime,
+    bundle_id: []const u8,
+    request: userspace_loader.LaunchRequest,
+    schedule_task: anytype,
+) Error!*task_runtime.TaskRecord {
+    try ensureRegisteredBundle(catalog, bundle_id, "register-kernel");
+    return launchDirectImage(
+        catalog,
+        runtime_ptr,
+        bundle_id,
+        request,
+        schedule_task,
+        "launch-kernel",
+    );
+}
+
 pub fn launchRegisteredDirect(
     catalog: *userspace_loader.Catalog,
     runtime_ptr: *task_runtime.Runtime,
@@ -22,15 +42,7 @@ pub fn launchRegisteredDirect(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!*task_runtime.TaskRecord {
-    try ensureRegisteredBundle(catalog, bundle_id, "register-direct");
-    return launchDirectImage(
-        catalog,
-        runtime_ptr,
-        bundle_id,
-        request,
-        schedule_task,
-        "launch-direct",
-    );
+    return launchFromKernel(catalog, runtime_ptr, bundle_id, request, schedule_task);
 }
 
 pub fn launchRegisteredKernel(
@@ -110,7 +122,7 @@ fn ensureRegisteredBundle(
     bundle_id: []const u8,
     failure_phase: []const u8,
 ) Error!void {
-    if (catalog.findByBundleId(bundle_id)) |image| {
+    if (catalog.resolveLaunchImage(bundle_id)) |image| {
         if (!image.embedsElf()) {
             return error.EmbeddedArtifactRequired;
         }
@@ -119,7 +131,7 @@ fn ensureRegisteredBundle(
 
     if (userspace_boot_registry.find(bundle_id) != null) {
         try userspace_boot_registry.registerAll(catalog);
-        const image = catalog.findByBundleId(bundle_id) orelse return error.ImageNotFound;
+        const image = catalog.resolveLaunchImage(bundle_id) orelse return error.ImageNotFound;
         if (!image.embedsElf()) return error.EmbeddedArtifactRequired;
         return;
     }
@@ -141,6 +153,9 @@ pub fn launchInstalledDirect(
     const launch_plan = try packages.buildLaunchPlan(bundle_id);
     if (launch_plan.components.len == 0) return error.MissingBundleComponent;
     var launch_request = request;
+    if (launch_request.component_label.len == 0 and bundle.components.len != 0) {
+        launch_request.component_label = bundle.components[0].id;
+    }
     launch_request.source_identity = launch_plan.provenance.source_identity;
     launch_request.release_transparency_sequence = launch_plan.provenance.release_transparency.sequence;
     launch_request.release_transparency_root = launch_plan.provenance.release_transparency.root;

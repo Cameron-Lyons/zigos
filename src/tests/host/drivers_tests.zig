@@ -3,6 +3,7 @@ const tpm2_crb_test = @import("../../kernel/platform/tpm2_crb_test.zig");
 
 const accelerator_driver_task = @import("../../native/drivers/accelerator_driver_task.zig");
 const bootstrap_driver_port = @import("../../native/drivers/bootstrap_driver_port.zig");
+const dataplane_handoff = @import("../../native/drivers/dataplane_handoff.zig");
 const device_inventory = @import("../../native/drivers/device_inventory.zig");
 const driver_runtime = @import("../../native/drivers/driver_runtime.zig");
 const driver_service = @import("../../native/drivers/driver_service.zig");
@@ -13,11 +14,15 @@ const nvme_completion = @import("../../kernel/drivers/nvme_completion.zig");
 const nvme_prp = @import("../../kernel/drivers/nvme_prp.zig");
 const nvme_timing = @import("../../kernel/drivers/nvme_timing.zig");
 const network_driver_task = @import("../../native/drivers/network_driver_task.zig");
+const storage_driver_task = @import("../../native/drivers/storage_driver_task.zig");
+const xhci_driver_task = @import("../../native/drivers/xhci_driver_task.zig");
+const display_driver_task = @import("../../native/drivers/display_driver_task.zig");
 
 test "driver host tests import native driver modules" {
     std.testing.refAllDecls(tpm2_crb_test);
     std.testing.refAllDecls(accelerator_driver_task);
     std.testing.refAllDecls(bootstrap_driver_port);
+    std.testing.refAllDecls(dataplane_handoff);
     std.testing.refAllDecls(device_inventory);
     std.testing.refAllDecls(driver_runtime);
     std.testing.refAllDecls(driver_service);
@@ -27,6 +32,9 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(nvme_prp);
     std.testing.refAllDecls(nvme_timing);
     std.testing.refAllDecls(network_driver_task);
+    std.testing.refAllDecls(storage_driver_task);
+    std.testing.refAllDecls(xhci_driver_task);
+    std.testing.refAllDecls(display_driver_task);
 }
 
 test "interrupt context tracks nested entry" {

@@ -122,11 +122,11 @@ requests.
   with payload bytes allocated on demand. Failed writes release newly allocated
   chunks before publishing an object or version. Storage still has an explicit
   finite quota; automatic history reclamation remains open.
-- Native boot requests a 32-bit firmware graphics mode and presents the active
-  compositor-owned surface as a bounded text desktop. Changed cells alone are
-  rasterized after the first frame; idle sessions perform no display polling.
-  This bootstrap display uses a supervisor-only uncached mapping, reserves its
-  physical storage, and does not yet provide GPU acceleration or modesetting.
+- Surface presentation uses a shared-buffer handle, revision, and readiness
+  fence through the userspace display service. The current display hardware
+  adapter records the scanout request; physical scanout and modesetting remain
+  open. The bounded text rasterizer and changed-cell renderer are host-tested
+  helpers and are not connected to this production presentation path.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
@@ -135,7 +135,7 @@ requests.
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA
   buffers. The prototype retains bootstrap inventory shims, the storage
-  bootstrap broker, and firmware framebuffer presentation in the kernel.
+  bootstrap broker in the kernel; display presentation is a userspace claim.
 - The driver restart proof now checks that storage I/O works before restart,
   the storage driver has a programmed DMA domain and brokered DMA buffer, stale
   authority/DMA/port access is rejected after a process-generation change, a
@@ -144,10 +144,10 @@ requests.
 - `spec/coverage.json` currently records 59 required requirements and marks all
   59 as `enforced`.
 - `spec/production_readiness.json` currently pins one first hardware target
-  (`intel-nuc11tnki5`) and tracks nine production-readiness workstreams: one
+  (`asus-nuc15crsu7`) and tracks nine production-readiness workstreams: one
   `prod_ready` track, three `prod_candidate` tracks, four `prototype` tracks,
   and one blocked real hardware track.
-- The secure-by-design release gate is `blocked` until the real NUC11TNKi5
+- The secure-by-design release gate is `blocked` until the real RNUC15CRSU7
   hardware proof bundle passes. Release artifacts are measured, DSSE
   in-toto/SLSA provenance is generated through a hardware-backed
   TPM/secure-enclave/HSM/KMS signing command. Customers obtain
@@ -177,8 +177,7 @@ archive, measured against a production artifact manifest, and loaded by the
 native task runtime.
 
 The kernel owns low-level platform concerns: boot setup, interrupts, timers,
-memory protection, bootstrap console/inventory shims, firmware framebuffer
-presentation, typed syscall dispatch,
+memory protection, bootstrap console/inventory shims, typed syscall dispatch,
 and data-plane exclusion boundaries for devices and subsystems. Storage,
 network, USB, GPU/display, media/print, input, and compositor-facing device
 policy live as restartable userspace driver/service claims behind IOMMU DMA
@@ -202,24 +201,22 @@ observable boot markers.
 
 Physical memory allocation uses a two-level availability index above its
 ownership bitmap to skip fully reserved or allocated regions. The index adds
-33,280 bytes for the 64 GiB managed aperture; total allocator metadata remains
-below 3 MiB. Single-page reuse probes the allocation cursor directly, while
+266,240 bytes for the 512 GiB managed aperture; total allocator metadata remains
+below 17 MiB. Single-page reuse probes the allocation cursor directly, while
 sparse page and contiguous-run searches skip empty regions. DMA address bounds,
 immutable firmware reservations, and transactional release checks apply to both
 paths. `./scripts/zig.sh build frame-allocator-benchmark` measures these paths on
 the host, including failed allocations in an exhausted physical range. These
 microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
 
-The kernel heap uses two-level size-class bitmaps to select a fitting block
-without scanning free lists. Class rounding uses 16-byte units for small
-requests and less than 1/32 of the requested size for larger ones. Splitting
-and adjacent-block coalescing keep free space reusable. Allocation reuses the
-selected bucket index when unlinking a block, and small requests round directly
-to their alignment. The allocator core
-borrows an aligned arena independently of boot and locking, allowing host tests
-to check payload preservation, exact live-allocation markers, invalid frees,
-and fragmented traces. `./scripts/zig.sh build heap-allocator-benchmark` measures
-ordinary reuse and allocation under fragmentation, including exhaustion.
+The kernel heap uses per-CPU magazines for power-of-two size classes from
+32 bytes through 4 KiB, with eight cached spans per class. A locked span table
+handles cache misses, larger allocations, splitting, and adjacent-span
+coalescing. Payloads have no in-band header; a bounded address index validates
+allocation starts and rejects invalid or duplicate frees. Host tests exercise
+this same allocator in a bounded arena, including payload preservation and
+randomized fragmentation. `./scripts/zig.sh build heap-allocator-benchmark`
+measures reuse and allocation under fragmentation, including exhaustion.
 
 ## Design Decisions
 
@@ -241,8 +238,8 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
-  Native ABI v9 uses bounded endpoint payloads and a 56-byte receive header
-  carrying the kernel-recorded sender endpoint. Services explicitly address
+  Native ABI v10 uses 128-byte sealed-ring slots with 88-byte payloads and a
+  56-byte receive header carrying the kernel-recorded sender endpoint. Services explicitly address
   replies to connected clients; stale or unrelated endpoint handles are
   rejected before publishing a reply or moving a capability. Receive buffers
   are validated before dequeue, and undersized outputs leave messages queued.
@@ -269,13 +266,14 @@ ordinary reuse and allocation under fragmentation, including exhaustion.
   Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.
-  The ABI also defines a task-scoped, fixed-size surface
-  presentation that is copied into compositor-owned storage with monotonic
-  revision checks. UI
-  processes coalesce each bounded input drain into one revision submission,
+  The ABI also defines a task-scoped, 32-byte surface descriptor carrying a
+  shared-buffer handle and readiness fence, with monotonic revision checks.
+  UI processes coalesce each bounded input drain into one revision submission,
   acknowledge only accepted revisions, and park when no more focused input is
-  queued. Production boot now proves that the compositor's userspace revision
-  crosses the syscall boundary and is rendered from the compositor-owned copy.
+  queued. Production boot proves that the descriptor crosses the syscall
+  boundary and appears in the compositor's diagnostic view. The document proof
+  compares the mailbox's text digest with the loaded and durably saved content;
+  neither proof establishes physical display output.
 - Identity is passwordless and device-bound. Zigos models
   [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
   hardware roots, and threshold recovery; administration is delegated through
@@ -318,10 +316,12 @@ Use the pinned toolchain and repo entrypoints:
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
-- A CPU with CPUID, SSE2, long mode, NX, SMEP, SMAP, UMIP, and RDSEED. Zigos rejects
-  older x86 CPUs instead of weakening its security contract. GRUB Multiboot2
-  enters the bootstrap in 32-bit protected mode; the bootstrap immediately
-  installs four-level paging and enters the x86-64 Zig kernel.
+- An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, PGE, PCID/INVPCID,
+  x2APIC, XSAVE/XSAVES, CET IBT and shadow-stack support, FRED, LASS, LKGS,
+  1 GiB pages, and a calibrated invariant TSC with deadline timers. Production
+  boots require the complete floor. QEMU media explicitly selects its software
+  CPU fallback for features unavailable in the emulator; RDSEED remains required.
+  The native UEFI loader enters the x86-64 kernel directly.
 - Supported boots initialize the calibrated invariant-TSC clock before emitting
   their first marker. COM1 transmit readiness uses a 100 ms elapsed deadline,
   yields to sibling hardware threads while polling, and waits only before
@@ -574,14 +574,14 @@ Optional QEMU gates can be added to `verify`:
 ./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
 ```
 
-The first real-machine gate is an Intel NUC11TNKi5 proof bundle. First complete
+The first real-machine gate is an Intel RNUC15CRSU7 proof bundle. First complete
 the phase-A `release-bundle-check` ceremony described below. Once that command
-returns, freeze the authenticated release bundle and the exact 33 signed target
+returns, freeze the authenticated release bundle and the exact 17 signed target
 files; do not run any generator again. Prepare a fresh proof skeleton bound to
 that candidate:
 
 ```bash
-scripts/prepare-nuc11tnki5-hardware-proof.sh \
+scripts/prepare-nuc15crsu7-hardware-proof.sh \
   --nonce <fresh-verifier-issued-64-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -597,7 +597,7 @@ two role-specific hardware quote/signature pairs, write the canonical capture
 statement and validate it with an external trusted verifier:
 
 ```bash
-scripts/write-nuc11tnki5-capture-statement.sh build/hardware-proofs/<fresh-name>
+scripts/write-nuc15crsu7-capture-statement.sh build/hardware-proofs/<fresh-name>
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
@@ -606,7 +606,7 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-  scripts/check-nuc11tnki5-hardware-proof.sh build/hardware-proofs/<fresh-name>
+  scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>
 ```
 
 The same check is exposed as `./scripts/zig.sh build
@@ -634,10 +634,10 @@ fast `release-security-check` gate. A public release has two ordered phases.
 `release-security-preflight` runs every mutable audit, fixture, build, smoke,
 fault, recovery, sync, and UEFI-QEMU check. `release-bundle-check` depends on
 that preflight, creates the candidate, verifies it before publication, then
-publishes and statefully verifies its manifest. After the candidate's exact 33
+publishes and statefully verifies its manifest. After the candidate's exact 17
 target files and release bundle are frozen, the verify-only
 `release-security-gate` rechecks the existing bundle and seals it with the
-completed NUC11TNKi5 proof; it has no generator or signer dependency. Public
+completed RNUC15CRSU7 proof; it has no generator or signer dependency. Public
 release provenance must be signed per
 DSSE payload through `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a
 hardware-backed TPM, secure enclave, HSM, or KMS key. The signer key must be
@@ -665,8 +665,8 @@ pre-authentication encoding on standard input and must emit only the standard
 base64 Ed25519 signature.
 
 The `release-bundle-check` target coordinates eight generator-side evidence
-files and two independently rebuilt reproducibility files for exactly 33 OS
-targets: nine fixed production artifacts and 24 userspace images. The
+files and two independently rebuilt reproducibility files for exactly 17 OS
+targets: nine fixed production artifacts and 8 userspace images. The
 independently distributed host verifier is outside that catalog. After both
 evidence paths succeed, `release-manifest-finalize` holds a sibling ceremony
 lock, verifies a private candidate, atomically publishes the release-key-signed
@@ -697,11 +697,11 @@ Run `release-security-preflight` by itself for an early mutable-only check; the
 candidate command above always depends on it and cannot bypass it.
 
 From the start of candidate generation through final hardware sealing, the
-exact 33 target files and `build/release-security` inputs must be private,
+exact 17 target files and `build/release-security` inputs must be private,
 owner-controlled, and quiescent: no process outside the ceremony may replace
 them while they are being hashed. Prefer read-only or immutable staging for
 those inputs. The fresh hardware-proof sibling remains writable for capture;
-it is not one of the verifier's 33 target paths. Verification does not claim
+it is not one of the verifier's 15 target paths. Verification does not claim
 safety against a concurrent writer already authorized as the same host user.
 
 With the completed proof directory and external hardware-proof variables set,
@@ -771,7 +771,7 @@ The authenticated trust policy also carries the PQC transition state. FIPS 204
 ML-DSA is the required production signature algorithm when the policy reaches
 `required`; until a validated ML-DSA verifier is linked, that mode fails closed.
 
-The first real hardware target is Intel NUC 11 Pro Kit `NUC11TNKi5`. QEMU proof
+The first real hardware target is Intel NUC 15 Pro Mini PC `RNUC15CRSU7`. QEMU proof
 runs remain required preflight evidence, but they do not satisfy the hardware
 target gate. Real-machine proof must cover UEFI boot, ACPI, APIC/timer, GOP
 framebuffer, USB xHCI input, NVMe block I/O, Intel I225-LM networking,
@@ -779,7 +779,7 @@ suspend/resume, compositor framebuffer presentation, crash recovery,
 crash-record persistence, and update rollback across power cycles. Required
 serial markers live in the production and verification contracts under
 `spec/hardware/`. A complete proof is a directory described by
-`spec/hardware/nuc11tnki5-proof-bundle.md`, with distinct
+`spec/hardware/nuc15crsu7-proof-bundle.md`, with distinct
 `production-serial.log` and `verification-serial.log` single-boot captures,
 individually hashed cycle logs, stable identity and lifecycle sidecars, two
 role-specific quote/signature pairs, and a canonical capture statement. The

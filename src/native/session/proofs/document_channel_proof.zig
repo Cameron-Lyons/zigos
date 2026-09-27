@@ -1,5 +1,6 @@
 const std = @import("std");
-const abi = @import("../../core/abi.zig");
+const mailbox_abi = @import("../../task/userspace_bootstrap_mailbox.zig");
+const protocol = @import("../../../userspace/document_protocol.zig");
 const ids = @import("../../core/ids.zig");
 const principal = @import("../../core/principal.zig");
 const signing = @import("../../core/signing.zig");
@@ -27,8 +28,8 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     const original = try storage.resolve(workspace_id, path);
     const version = storage.version(original.version_id.raw()) orelse return error.MissingVersion;
     const payload = try storage.versionPayload(version);
-    if (payload.len >= abi.SURFACE_PRESENTATION_TEXT_BYTES) return error.DocumentTooLarge;
-    var expected: [abi.SURFACE_PRESENTATION_TEXT_BYTES]u8 = undefined;
+    if (payload.len >= protocol.MAX_DOCUMENT_BYTES) return error.DocumentTooLarge;
+    var expected: [protocol.MAX_DOCUMENT_BYTES]u8 = undefined;
     @memcpy(expected[0..payload.len], payload);
     const original_length = payload.len;
     expected[original_length] = 'a';
@@ -127,9 +128,13 @@ fn awaitPresentation(manager: anytype, task_id: u64, expected: []const u8, commi
     for (0..512) |_| {
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const surface = manager.compositorSessionPtr().surfacePresentation(surface_id) orelse continue;
-        const flags: abi.SurfaceStateFlags = @bitCast(surface.presentation.state_flags);
+        const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), task_id) orelse continue;
+        const flags: mailbox_abi.UiStateFlags = @bitCast(state.ui_state_flags);
         if (flags.load_failed) return error.DocumentLoadFailed;
-        if (!flags.loading and !flags.dirty and surface.presentation.commit_count == commits and std.mem.eql(u8, surface.textSlice(), expected)) return;
+        if (!flags.loading and !flags.dirty and state.ui_commit_count == commits and
+            state.ui_presented_revision == surface.presentation.revision and
+            state.ui_text_length == expected.len and
+            std.mem.eql(u8, &state.ui_text_digest, &protocol.digest(expected))) return;
     }
     const mailbox = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), task_id);
     const stats = manager.userspaceSchedulerPtr().taskDispatchStats(task_id);

@@ -28,13 +28,13 @@ pub const MAX_COMPONENT_ENTRY_BYTES: usize = 64;
 pub const MAX_EXECUTABLE_SEGMENTS: usize = 8;
 pub const MAX_IMAGE_HASH_BYTES: usize = crypto_hash.digest_bytes;
 pub const UserImageByteLength = u32;
-pub const UserStackByteLength = u32;
+pub const UserStackByteLength = u64;
 pub const INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_OWNER_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 pub const TASK_CAPABILITY_SCAN_BOUND: usize = MAX_TASK_CAPABILITIES;
 pub const TASK_CAPABILITY_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
-pub const DEFAULT_USER_STACK_TOP: u64 = 0xBFFF_F000;
-pub const DEFAULT_USER_STACK_SIZE_BYTES: UserStackByteLength = units.kibibytes(64);
+pub const DEFAULT_USER_STACK_TOP: u64 = launch_helpers.DEFAULT_USER_STACK_TOP;
+pub const DEFAULT_USER_STACK_SIZE_BYTES: UserStackByteLength = launch_helpers.DEFAULT_USER_STACK_SIZE_BYTES;
 pub const USER_PAGE_SIZE: u64 = launch_helpers.USER_PAGE_SIZE;
 pub const USER_VIRTUAL_ADDRESS_MIN: u64 = launch_helpers.USER_VIRTUAL_ADDRESS_MIN;
 pub const USER_IMAGE_ADDRESS_MAX_EXCLUSIVE: u64 = launch_helpers.USER_IMAGE_ADDRESS_MAX_EXCLUSIVE;
@@ -201,6 +201,20 @@ pub const AddressSpaceRecord = struct {
 
     pub fn hasMappedExecutable(self: *const AddressSpaceRecord) bool {
         return self.load_state == .executable_loaded;
+    }
+
+    pub fn relocateStack(self: *AddressSpaceRecord, mapped_base: u64, size_bytes: u64) bool {
+        if (self.region_count == 0) return false;
+        const region = &self.regions[self.region_count - 1];
+        if (region.kind != .stack) return false;
+        const recorded_size = std.math.cast(u32, size_bytes) orelse return false;
+        const stack_top = std.math.add(u64, mapped_base, size_bytes) catch return false;
+        region.virtual_address = mapped_base;
+        region.size_bytes = recorded_size;
+        self.stack_size_bytes = recorded_size;
+        self.stack_top = stack_top;
+        self.stack_pointer = stack_top;
+        return true;
     }
 };
 
@@ -449,9 +463,15 @@ pub const TaskCreateRequest = struct {
     userspace_image: ?*const ExecutableImageSpec = null,
 };
 
+pub const CSPACE_SLOT_EMPTY: u8 = 0xFF;
+
 pub const TaskColdRecord = struct {
     execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
     capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
+    /// Userspace name for each dense capability. Stable across revoke of a different capability.
+    stable_slot_of_dense: [MAX_TASK_CAPABILITIES]u8 = [_]u8{CSPACE_SLOT_EMPTY} ** MAX_TASK_CAPABILITIES,
+    /// Dense index for each userspace cspace slot. Empty slots stay `CSPACE_SLOT_EMPTY`.
+    dense_of_stable: [MAX_TASK_CAPABILITIES]u8 = [_]u8{CSPACE_SLOT_EMPTY} ** MAX_TASK_CAPABILITIES,
     capability_generation: u64 = 1,
     audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
     provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord = [_]TaskProvenanceRecord{TaskProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
@@ -635,7 +655,7 @@ test "task runtime uses capacity-sized resident metadata" {
     try std.testing.expectEqual(@as(usize, 320), @sizeOf(AddressSpaceRecord));
     try std.testing.expectEqual(@as(usize, 328), @sizeOf(AddressSpaceSlot));
 
-    const expected_cold_bytes = 1_608 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
+    const expected_cold_bytes = 1_656 + MAX_TASK_PROVENANCE_EVENTS * @sizeOf(TaskProvenanceRecord);
     try std.testing.expectEqual(expected_cold_bytes, @sizeOf(TaskColdRecord));
     const expected_snapshot_bytes = 48 + MAX_TASKS * (@sizeOf(TaskSlot) + expected_cold_bytes + @sizeOf(AddressSpaceSlot));
     try std.testing.expectEqual(expected_snapshot_bytes, @sizeOf(Snapshot));
@@ -738,6 +758,8 @@ pub fn zeroTaskCold() TaskColdRecord {
 pub fn resetTaskCold(dest: *TaskColdRecord) void {
     zeroBytes(std.mem.asBytes(dest));
     dest.capability_generation = 1;
+    @memset(&dest.stable_slot_of_dense, CSPACE_SLOT_EMPTY);
+    @memset(&dest.dense_of_stable, CSPACE_SLOT_EMPTY);
 }
 
 // Authority is owned by the live kernel and cannot be rolled back with metadata.
@@ -791,6 +813,29 @@ pub fn copyBytes(dest: []u8, src: []const u8) void {
 
 pub fn zeroBytes(dest: []u8) void {
     @memset(dest, 0);
+}
+
+pub fn allocCspaceSlot(cold: *TaskColdRecord) ?u8 {
+    for (cold.dense_of_stable, 0..) |dense, stable| {
+        if (dense == CSPACE_SLOT_EMPTY) return @intCast(stable);
+    }
+    return null;
+}
+
+pub fn capabilityIdAtCspaceSlot(task: *const TaskRecord, slot: u8) ?u64 {
+    if (slot >= MAX_TASK_CAPABILITIES) return null;
+    const dense = taskColdConst(task).dense_of_stable[slot];
+    if (dense == CSPACE_SLOT_EMPTY or dense >= task.capability_count) return null;
+    const capability_id = taskColdConst(task).capability_ids[dense];
+    if (capability_id == 0) return null;
+    return capability_id;
+}
+
+pub fn cspaceSlotForCapability(task: *const TaskRecord, capability_id: u64) ?u8 {
+    const dense = taskCapabilityIndex(task, capability_id) orelse return null;
+    const stable = taskColdConst(task).stable_slot_of_dense[dense];
+    if (stable == CSPACE_SLOT_EMPTY) return null;
+    return stable;
 }
 
 pub fn taskCapabilityIndex(task: *const TaskRecord, capability_id: u64) ?usize {

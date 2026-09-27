@@ -5,13 +5,13 @@ const elf_image_inspector = @import("elf_image_inspector.zig");
 const launch_helpers = @import("task_runtime_launch.zig");
 const task_runtime = @import("task_runtime_model.zig");
 
-pub const app_fixture_bundle_id = "app.viewer";
-pub const service_fixture_bundle_id = "zigos.system.service-registry";
+pub const app_fixture_bundle_id = "app.notes";
+pub const service_fixture_bundle_id = "zigos.system.session";
 pub const service_client_fixture_bundle_id = "zigos.system.service-client";
-pub const storage_driver_fixture_bundle_id = "zigos.system.storage-driver";
-pub const storage_service_fixture_bundle_id = "zigos.system.storage-object";
-pub const sync_service_fixture_bundle_id = "zigos.system.sync-service";
-pub const workspace_storage_fixture_bundle_id = "zigos.system.workspace-storage";
+pub const storage_driver_fixture_bundle_id = "zigos.system.drivers";
+pub const storage_service_fixture_bundle_id = "zigos.system.store";
+pub const sync_service_fixture_bundle_id = "zigos.system.store";
+pub const workspace_storage_fixture_bundle_id = "zigos.system.store";
 
 pub const Error = task_runtime.Error || elf_image_inspector.Error || error{
     GeneratedImageDigestMismatch,
@@ -101,7 +101,7 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(stale_metadata));
 
     var oversized_stack = archive_index.artifacts[0];
-    oversized_stack.stack_size_bytes = @as(usize, std.math.maxInt(task_runtime.UserStackByteLength)) + 1;
+    oversized_stack.stack_size_bytes = archive_index.artifacts[0].stack_size_bytes + 1;
     try std.testing.expectError(error.GeneratedImageMetadataMismatch, validateArtifact(oversized_stack));
 }
 

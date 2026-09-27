@@ -15,10 +15,14 @@ const nvme_pipeline = @import("nvme_pipeline.zig");
 const nvme_prp = @import("nvme_prp.zig");
 const nvme_timing = @import("nvme_timing.zig");
 const pci = @import("pci.zig");
+const dataplane_handoff = @import("../../native/drivers/dataplane_handoff.zig");
+const smp = @import("../smp.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 pub const INTERRUPT_VECTOR = nvme_interrupt.INTERRUPT_VECTOR;
 pub const INTERRUPT_STATE_USES_PROTOCOL_ORDERING = true;
+pub const BOOTSTRAP_BOUNCE_ONLY = true;
+pub const RUNTIME_IO_FORBIDDEN_AFTER_CLAIM = true;
 const PAGE_SIZE: u32 = 4096;
 
 const IO_PIPELINE_DEPTH: usize = nvme_pipeline.DEPTH;
@@ -215,6 +219,7 @@ fn barPhysicalAddress(dev: pci.PCIDevice) ?usize {
 }
 
 fn mapBar(phys: usize) usize {
+    published_bar_physical = phys;
     var offset: u32 = 0;
     while (offset < BAR_MAP_BYTES) : (offset += PAGE_SIZE) {
         const page_offset: usize = offset;
@@ -482,6 +487,7 @@ fn acquireCompletion() void {
 var active_controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
+var published_bar_physical: u64 = 0;
 var bounce: [IO_PIPELINE_DEPTH]DmaAddress = [_]DmaAddress{.{}} ** IO_PIPELINE_DEPTH;
 var io_interrupts_active: bool = false;
 var completion_interrupt_count: u64 = 0;
@@ -502,6 +508,21 @@ pub fn attached() bool {
     return active_present;
 }
 
+pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
+    if (!active_present or published_bar_physical == 0) return null;
+    return .{ .physical_base = published_bar_physical, .length = BAR_MAP_BYTES };
+}
+
+pub fn attachedDeviceId() ?u64 {
+    if (!active_present) return null;
+    return pci.stableDeviceId(active_device);
+}
+
+fn runtimeIoPermitted() bool {
+    const device_id = attachedDeviceId() orelse return false;
+    return dataplane_handoff.allowsKernelRuntimeIo(device_id);
+}
+
 pub fn activateInterrupts() Error!void {
     if (!active_present) return error.NamespaceMissing;
     if (interruptsActive()) return;
@@ -509,7 +530,7 @@ pub fn activateInterrupts() Error!void {
     const remapped = intel_vtd.routeInterrupt(
         active_device,
         INTERRUPT_VECTOR,
-        x2apic.localId(),
+        smp.irqDestinationId(),
     ) catch return error.InterruptRouteInstallFailed;
     pci.enableSingleMsi(active_device, .{
         .address = remapped.address,
@@ -669,6 +690,7 @@ pub fn attachAsBackend(
 }
 
 pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+    if (!runtimeIoPermitted()) return false;
     const total_sectors = validateBackendTransfer(start_lba, buffer_len) orelse return false;
     pipelineRead(start_lba, buffer_ptr, total_sectors) catch |err| {
         handleBackendError(err);
@@ -715,6 +737,7 @@ fn pipelineRead(start_lba: u64, buffer_ptr: [*]u8, total_sectors: usize) Error!v
 }
 
 pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+    if (!runtimeIoPermitted()) return false;
     const total_sectors = validateBackendTransfer(start_lba, buffer_len) orelse return false;
     pipelineWrite(start_lba, buffer_ptr, total_sectors) catch |err| {
         handleBackendError(err);
@@ -768,7 +791,7 @@ fn validateBackendTransfer(start_lba: u64, buffer_len: usize) ?usize {
 }
 
 pub fn backendFlush() callconv(.c) bool {
-    if (!active_present) return false;
+    if (!runtimeIoPermitted()) return false;
     flush(&active_controller) catch |err| {
         handleBackendError(err);
         return false;

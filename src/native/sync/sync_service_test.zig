@@ -1451,7 +1451,12 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqual(@as(u8, 1), result.summary.conflict_count);
     try std.testing.expectEqual(@as(u8, 4), result.accepted_frame_count);
     try std.testing.expectEqual(@as(u8, 4), result.persisted_object_count);
-    const expected_relay_deliveries = 3 + (media_payload.len + sync_transport.MAX_NATIVE_PAYLOAD_BYTES - 1) / sync_transport.MAX_NATIVE_PAYLOAD_BYTES;
+    const chunk_bytes = sync_transport.MAX_NATIVE_PAYLOAD_BYTES;
+    const expected_relay_deliveries = ("source edit".len + chunk_bytes - 1) / chunk_bytes +
+        (media_payload.len / object_store.MAX_CHUNK_BYTES) * ((object_store.MAX_CHUNK_BYTES + chunk_bytes - 1) / chunk_bytes) +
+        ((media_payload.len % object_store.MAX_CHUNK_BYTES) + chunk_bytes - 1) / chunk_bytes +
+        (secret_payload.len + chunk_bytes - 1) / chunk_bytes +
+        (database_payload.len + chunk_bytes - 1) / chunk_bytes;
     try std.testing.expectEqual(@as(u32, expected_relay_deliveries), result.relay_delivery_count);
     try std.testing.expect(result.used_booted_relay_service);
     const expected_payload_bytes = "source edit".len + media_payload.len + secret_payload.len + database_payload.len;

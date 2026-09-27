@@ -11,8 +11,12 @@ pub const QualityGateCase = struct {
 };
 
 pub const SECRET_STORE_OPERATIONS_PER_ITERATION: u32 = 16;
+pub const SLO_IRQ_TO_TASK = "slo.irq_to_task";
+pub const SLO_NVME_QUEUED_IO = "slo.nvme_queued_io";
+pub const SLO_ENDPOINT_RTT = "slo.endpoint_rtt";
+pub const SLO_FOCUSED_INPUT = "slo.focused_input";
 
-pub fn benchmarkCases(handlers: anytype) [29]BenchmarkCase {
+pub fn benchmarkCases(handlers: anytype) [33]BenchmarkCase {
     return .{
         .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = handlers.capability_derive },
         .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = handlers.capability_mint_reuse_free_slot },
@@ -28,7 +32,7 @@ pub fn benchmarkCases(handlers: anytype) [29]BenchmarkCase {
         .{ .name = "memory.frame_allocate_release", .iterations = 20_000, .operations_per_iteration = 2, .runIteration = handlers.frame_allocate_release },
         .{ .name = "syscall.fast_entry_roundtrip", .iterations = 64_000, .operations_per_iteration = 64, .runIteration = handlers.syscall_fast_entry_roundtrip },
         .{ .name = "accelerator_scheduler.claim_release", .iterations = 25_000, .runIteration = handlers.accelerator_claim_release },
-        .{ .name = "storage.file_bridge.resolve_shared_view", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
+        .{ .name = "storage.object.resolve_workspace_entry", .iterations = 40_000, .runIteration = handlers.file_bridge_resolve },
         .{ .name = "storage.workspace.commit_overlay", .iterations = 128, .runIteration = handlers.workspace_commit_overlay },
         .{ .name = "storage.volume.replay_segmented_log", .iterations = 24, .runIteration = handlers.storage_volume_replay_segmented_log },
         .{ .name = "storage.volume.compact_checkpoint", .iterations = 1, .runIteration = handlers.storage_volume_compact_checkpoint },
@@ -43,6 +47,10 @@ pub fn benchmarkCases(handlers: anytype) [29]BenchmarkCase {
         .{ .name = "recovery_environment.reinstall_restore_repair", .iterations = 4, .runIteration = handlers.recovery_lifecycle },
         .{ .name = "update_health.validate_pending_activation", .iterations = 8, .runIteration = handlers.update_health_validation },
         .{ .name = "driver_recovery.restart_driver", .iterations = 512, .runIteration = handlers.driver_recovery_restart },
+        .{ .name = SLO_IRQ_TO_TASK, .iterations = 8_000, .runIteration = handlers.slo_irq_to_task },
+        .{ .name = SLO_NVME_QUEUED_IO, .iterations = 4_000, .runIteration = handlers.slo_nvme_queued_io },
+        .{ .name = SLO_ENDPOINT_RTT, .iterations = 40_000, .runIteration = handlers.slo_endpoint_rtt },
+        .{ .name = SLO_FOCUSED_INPUT, .iterations = 12_000, .runIteration = handlers.slo_focused_input },
     };
 }
 

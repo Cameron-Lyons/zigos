@@ -68,15 +68,17 @@ fn fnv1a64AppendIntegerLittleEndian(comptime T: type, hash: u64, value: T) u64 {
     return next;
 }
 
-pub fn bootProofFailure(comptime step: []const u8, err: anyerror) noreturn {
+// Keep diagnostic text at runtime so every invariant does not instantiate its
+// own panic formatter and cold call chain in the freestanding image.
+pub fn bootProofFailure(step: []const u8, err: anyerror) noreturn {
     std.debug.panic("boot proof failed: {s}: {s}", .{ step, @errorName(err) });
 }
 
-pub fn impossibleByInvariant(comptime message: []const u8) noreturn {
+pub fn impossibleByInvariant(message: []const u8) noreturn {
     std.debug.panic("impossible by invariant: {s}", .{message});
 }
 
-pub fn impossibleByInvariantError(comptime message: []const u8, err: anyerror) noreturn {
+pub fn impossibleByInvariantError(message: []const u8, err: anyerror) noreturn {
     std.debug.panic("impossible by invariant: {s}: {s}", .{ message, @errorName(err) });
 }
 

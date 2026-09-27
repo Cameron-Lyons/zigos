@@ -8,7 +8,7 @@ BUNDLE_DIR="${1:?hardware proof bundle directory required}"
 ARTIFACT_ROOT="${ZIGOS_ARTIFACT_ROOT:-$ROOT_DIR}"
 
 fail() {
-  printf 'NUC11TNKi5 capture statement failed: %s\n' "$*" >&2
+  printf 'RNUC15CRSU7 capture statement failed: %s\n' "$*" >&2
   exit 1
 }
 
@@ -57,10 +57,10 @@ repo_vcs="$(extract_unique_key "$manifest" repo_vcs)"
 repo_change_id="$(extract_unique_key "$manifest" repo_change_id)"
 repo_commit="$(extract_unique_key "$manifest" repo_commit)"
 
-[ "$format" = "zigos-nuc11tnki5-proof-v2" ] || fail "unsupported proof manifest format: $format"
+[ "$format" = "zigos-nuc15crsu7-proof-v2" ] || fail "unsupported proof manifest format: $format"
 [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] || fail "capture_nonce must be 64 lowercase hexadecimal characters"
-[ "$target_id" = "intel-nuc11tnki5" ] || fail "unexpected target_id: $target_id"
-[ "$board_sku" = "NUC11TNKi5" ] || fail "unexpected board_sku: $board_sku"
+[ "$target_id" = "asus-nuc15crsu7" ] || fail "unexpected target_id: $target_id"
+[ "$board_sku" = "RNUC15CRSU7" ] || fail "unexpected board_sku: $board_sku"
 [ "$repo_vcs" = "jj" ] || fail "unexpected repo_vcs: $repo_vcs"
 
 device_identity="$BUNDLE_DIR/device-identity.txt"
@@ -101,8 +101,8 @@ production_iso="$ARTIFACT_ROOT/build/os.iso"
 production_kernel="$ARTIFACT_ROOT/zig-out/bin/kernel-zigos-native.elf"
 verification_iso="$ARTIFACT_ROOT/build/os-verification.iso"
 verification_kernel="$ARTIFACT_ROOT/zig-out/bin/kernel-zigos-native-verification.elf"
-production_markers="$ARTIFACT_ROOT/spec/hardware/nuc11tnki5-production-required-markers.txt"
-verification_markers="$ARTIFACT_ROOT/spec/hardware/nuc11tnki5-required-markers.txt"
+production_markers="$ARTIFACT_ROOT/spec/hardware/nuc15crsu7-production-required-markers.txt"
+verification_markers="$ARTIFACT_ROOT/spec/hardware/nuc15crsu7-required-markers.txt"
 
 for entry in \
   "$production_iso:production ISO" \
@@ -119,7 +119,7 @@ done
 tmp_statement="$(mktemp "$BUNDLE_DIR/.capture-statement.XXXXXX")"
 trap 'rm -f -- "$tmp_statement"' EXIT
 cat > "$tmp_statement" <<EOF
-format=zigos-nuc11tnki5-capture-statement-v1
+format=zigos-nuc15crsu7-capture-statement-v1
 capture_nonce=$nonce
 target_id=$target_id
 board_sku=$board_sku
@@ -152,4 +152,4 @@ EOF
 chmod 0600 "$tmp_statement"
 mv -f -- "$tmp_statement" "$statement"
 trap - EXIT
-printf 'NUC11TNKi5 canonical capture statement written: %s\n' "$statement"
+printf 'RNUC15CRSU7 canonical capture statement written: %s\n' "$statement"

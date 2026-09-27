@@ -113,11 +113,12 @@ const Fixture = struct {
 
     fn send(self: *Fixture, bytes: []const u8, request_id: u64) !void {
         const request = component_port.EndpointSendRequest{
-            .header = component_port.makeHeader(.endpoint_send, request_id, self.app_task_id),
+            .header = component_port.makeHeader(.endpoint_send, self.app_task_id),
+            .correlation_id = request_id,
             .endpoint_capability_id = self.app_endpoint_capability,
             .payload = bytes,
         };
-        const result = syscall_surface.dispatch(&self.port, self.app_task_id, 10, @intFromPtr(&request), 0, 0);
+        const result = syscall_surface.dispatch(&self.port, self.app_task_id, 10, request.header.operation, @intFromPtr(&request), 0, 0);
         try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
     }
 
@@ -140,20 +141,13 @@ const Fixture = struct {
         var out = std.mem.zeroes(abi.EndpointRecvResult);
         var response: abi.EndpointRecvResponse = undefined;
         const request = component_port.EndpointRecvRequest{
-            .header = component_port.makeHeader(.endpoint_recv, 99, self.app_task_id),
+            .header = component_port.makeHeader(.endpoint_recv, self.app_task_id),
             .endpoint_capability_id = self.app_endpoint_capability,
             .receiver_task_id = self.app_task_id,
             .payload_out = &out.payload,
             .attached_capability_out = &out.attached_capability,
         };
-        try std.testing.expectEqual(abi.SyscallStatus.success, syscall_surface.dispatch(
-            &self.port,
-            self.app_task_id,
-            10,
-            @intFromPtr(&request),
-            @intFromPtr(&response),
-            @sizeOf(abi.EndpointRecvResponse),
-        ).status);
+        try std.testing.expectEqual(abi.SyscallStatus.success, syscall_surface.dispatch(&self.port, self.app_task_id, 10, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointRecvResponse)).status);
         out.present = response.present;
         out.message = response.message;
         if (deliver) {
@@ -190,7 +184,7 @@ test "document IPC loads bounded immutable versions and empty documents before s
         _ = try fixture.receive(true);
         try fixture.client.open();
         var frames: usize = 0;
-        while (fixture.client.phase != .loaded and frames < 8) : (frames += 1) {
+        while (fixture.client.phase != .loaded and frames < (protocol.MAX_DOCUMENT_BYTES + protocol.READ_CHUNK_BYTES - 1) / protocol.READ_CHUNK_BYTES) : (frames += 1) {
             try fixture.submit();
             _ = try fixture.receive(true);
         }
@@ -429,7 +423,8 @@ test "document IPC discards unexpected grants even on malformed input" {
     const receiver_count = fixture.runtime.find(fixture.device.service.task_id).?.capability_count;
     for (0..4) |_| {
         try fixture.port.endpointSend(.{
-            .header = component_port.makeHeader(.endpoint_send, 1, app.id),
+            .header = component_port.makeHeader(.endpoint_send, app.id),
+            .correlation_id = 1,
             .endpoint_capability_id = fixture.app_endpoint_capability,
             .payload = "bad frame",
             .attached_capability_id = gift.id,
@@ -587,7 +582,7 @@ test "document channel cancels a queued commit when the client closes or either 
         try std.testing.expect(fixture.channel.hasPendingWork());
         switch (ending) {
             0 => try fixture.port.endpointClose(.{
-                .header = component_port.makeHeader(.endpoint_close, 0, fixture.app_task_id),
+                .header = component_port.makeHeader(.endpoint_close, fixture.app_task_id),
                 .endpoint_capability_id = fixture.app_endpoint_capability,
             }, 11),
             1 => _ = try fixture.runtime.terminateTask(fixture.app_task_id, 11),
@@ -711,7 +706,8 @@ test "document sessions enforce capacity and share each dispatch fairly" {
     var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
     for (bindings, requests[0..bindings.len]) |binding, request| {
         try fixture.port.endpointSend(.{
-            .header = component_port.makeHeader(.endpoint_send, 1, request.authority.task_id),
+            .header = component_port.makeHeader(.endpoint_send, request.authority.task_id),
+            .correlation_id = 1,
             .endpoint_capability_id = binding.endpoint_capability_id,
             .payload = try protocol.encode(&bytes, .{ .request_id = 1, .body = .{ .read = .{ .version_id = binding.version_id, .offset = 0 } } }),
         }, 3);

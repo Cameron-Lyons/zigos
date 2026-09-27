@@ -1,12 +1,10 @@
+const std = @import("std");
 const console = @import("../../utils/console.zig");
 const config = @import("../../config.zig");
 const first_target_telemetry = @import("../../drivers/first_target_telemetry.zig");
-const intel_i225_hw = @import("../../drivers/intel_i225_hw.zig");
 const pci = @import("../../drivers/pci.zig");
-const nvme_hw = @import("../../drivers/nvme_hw.zig");
-const xhci_hw = @import("../../drivers/xhci_hw.zig");
-const intel_vtd = @import("../../platform/intel_vtd.zig");
 const bootstrap_driver_port = @import("../../../native/drivers/bootstrap_driver_port.zig");
+const device_broker = @import("../../../native/kernel_api/device_broker.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
 const common = @import("../common.zig");
 const data_plane_boundary = @import("data_plane_boundary.zig");
@@ -17,9 +15,10 @@ const PCI_CLASS_GRAPHICS_ADAPTER: u8 = 0x03;
 const PCI_CLASS_MULTIMEDIA_CONTROLLER: u8 = 0x04;
 const PCI_CLASS_SIMPLE_COMMUNICATIONS_CONTROLLER: u8 = 0x07;
 
-var network_prepared = false;
-var storage_attached = false;
-var xhci_prepared = false;
+var network_detected = false;
+var storage_detected = false;
+var xhci_detected = false;
+var graphics_started = false;
 
 pub const kernel_boundary_role = data_plane_boundary.kernel_boundary_role;
 pub const publishes_device_data_planes = data_plane_boundary.publishes_device_data_planes;
@@ -42,9 +41,10 @@ pub fn init() void {
     console.print("Initializing device drivers...\n");
     bootstrap_driver_port.reset();
     device_inventory.reset();
-    network_prepared = false;
-    storage_attached = false;
-    xhci_prepared = false;
+    network_detected = false;
+    storage_detected = false;
+    xhci_detected = false;
+    graphics_started = false;
     hardware_proof.capturePlatformFirmwareEvidence();
     const ecam_allocation = hardware_proof.pciEcamAllocation() orelse
         @panic("ACPI MCFG is required for PCIe discovery");
@@ -98,58 +98,32 @@ pub fn init() void {
 }
 
 pub fn startDeferredRuntimeInit() void {
-    console.print("Deferred runtime keeps device data planes behind userspace drivers...\n");
-    if (storage_attached) {
-        var interrupts_ready = true;
-        nvme_hw.activateInterrupts() catch |err| {
-            interrupts_ready = false;
-            const real_target = hardware_proof.realTargetDetected();
-            reportHardwareFailure(
-                if (real_target)
-                    "ZIGOS:NVME:HW:INTERRUPT_BRINGUP_FAIL "
-                else
-                    "ZIGOS:NVME:HW:INTERRUPT_UNAVAILABLE ",
-                err,
-                real_target,
-                "production NVMe interrupt activation failed closed",
-            );
-        };
-        if (interrupts_ready) console.print("ZIGOS:NVME:HW:REMAP_MSI_OK\n");
-    }
-    if (xhci_prepared) {
-        if (!storage_attached and hardware_proof.realTargetDetected()) {
-            @panic("production xHCI activation requires the confined storage bootstrap");
-        }
-        xhci_hw.activate() catch |err| {
-            reportHardwareFailure(
-                "ZIGOS:XHCI:HW:ACTIVATION_FAIL ",
-                err,
-                hardware_proof.realTargetDetected(),
-                "production xHCI activation failed closed",
-            );
-            return;
-        };
-        console.print("ZIGOS:XHCI:HW:REMAP_MSI_OK\n");
-        console.print("ZIGOS:XHCI:HW:RUN_OK\n");
-    }
-    if (network_prepared) {
-        if (!storage_attached and hardware_proof.realTargetDetected()) {
-            @panic("production I225-LM activation requires the confined storage bootstrap");
-        }
-        intel_i225_hw.activate() catch |err| {
-            reportHardwareFailure(
-                "ZIGOS:I225:HW:BRINGUP_FAIL ",
-                err,
-                hardware_proof.realTargetDetected(),
-                "production I225-LM activation failed closed",
-            );
-            return;
-        };
-        console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
-        console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
-        console.print("ZIGOS:I225:HW:REMAP_MSI_OK\n");
-    }
-    publishDeferredNetworkBootstrap();
+    console.print("Device dataplanes start at userspace driver claim.\n");
+}
+
+pub fn startStorageDataplane() bool {
+    return storage_detected or pci.firstNvmeController() != null;
+}
+
+pub fn startNetworkDataplane() bool {
+    return network_detected or
+        pci.firstIntelI225Lm() != null or
+        device_inventory.modelDeviceInventoryEnabled();
+}
+
+pub fn startInputDataplane() bool {
+    return xhci_detected or pci.firstXhciController() != null;
+}
+
+pub fn startGraphicsDataplane() bool {
+    if (graphics_started) return true;
+    const device_id = if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev|
+        pciDeviceId(dev)
+    else
+        0xC0DE_9001;
+    registerFramebufferWindow(device_id);
+    graphics_started = true;
+    return true;
 }
 
 fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
@@ -174,48 +148,23 @@ noinline fn reportHardwareFailure(
 }
 
 fn capturePciInventory() void {
-    var isolation_domains: [2]intel_vtd.DmaDomain = undefined;
-    var isolation_domain_count: usize = 0;
     if (pci.firstIntelI225Lm()) |dev| {
         device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .intel_i225_lm_inventory, false);
-        intel_i225_hw.prepare(dev) catch |err| {
-            reportHardwareFailure(
-                "ZIGOS:I225:HW:BRINGUP_FAIL ",
-                err,
-                hardware_proof.realTargetDetected(),
-                "production I225-LM preparation failed closed",
-            );
-            return;
-        };
-        isolation_domains[isolation_domain_count] = intel_i225_hw.isolationDomain() orelse
-            @panic("I225-LM preparation omitted its DMA isolation domain");
-        isolation_domain_count += 1;
-        network_prepared = true;
+        if (pci.memoryBar0(dev)) |bar| {
+            registerDeviceMmio(pciDeviceId(dev), bar.address, 0x1_0000);
+        }
+        network_detected = true;
     }
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);
     }
     if (pci.firstXhciController()) |dev| {
-        if (xhci_hw.probe(dev)) |_| {
-            const xhci_device_id = pciDeviceId(dev);
-            device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false);
-            console.print("ZIGOS:XHCI:HW:CAPABILITY_PROBE_OK\n");
-            console.print("ZIGOS:XHCI:HW:OWNERSHIP_OK\n");
-            console.print("ZIGOS:XHCI:HW:RESET_OK\n");
-            console.print("ZIGOS:XHCI:HW:SLOTS_OK\n");
-            isolation_domains[isolation_domain_count] = xhci_hw.isolationDomain() orelse
-                @panic("xHCI preparation omitted its DMA isolation domain");
-            isolation_domain_count += 1;
-            console.print("ZIGOS:XHCI:HW:DMA_OK\n");
-            xhci_prepared = true;
-        } else |err| {
-            reportHardwareFailure(
-                "ZIGOS:XHCI:HW:CAPABILITY_PROBE_FAIL ",
-                err,
-                hardware_proof.realTargetDetected(),
-                "production xHCI capability probe failed closed",
-            );
+        const xhci_device_id = pciDeviceId(dev);
+        device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false);
+        if (pci.memoryBar0(dev)) |bar| {
+            registerDeviceMmio(xhci_device_id, bar.address, 0x1_0000);
         }
+        xhci_detected = true;
     }
     if (pci.firstDeviceByClass(PCI_CLASS_MULTIMEDIA_CONTROLLER)) |dev| {
         device_inventory.registerDetected(.audio_print_io, pciDeviceId(dev), .pci_inventory, false);
@@ -224,26 +173,10 @@ fn capturePciInventory() void {
     }
     if (pci.firstNvmeController()) |dev| {
         device_inventory.registerDetected(.storage_controller, pciDeviceId(dev), .nvme_pci_inventory, false);
-        var vtd_summary = if (hardware_proof.realTargetDetected())
-            hardware_proof.vtdSummary() orelse @panic("validated VT-d firmware is required on the production target")
-        else
-            null;
-        const vtd_summary_ptr = if (vtd_summary) |*summary| summary else null;
-        const fault_proof = nvme_hw.probeAndReport(
-            dev,
-            vtd_summary_ptr,
-            isolation_domains[0..isolation_domain_count],
-        ) catch |err| {
-            reportHardwareFailure(
-                "ZIGOS:NVME:HW:BRINGUP_FAIL ",
-                err,
-                hardware_proof.realTargetDetected(),
-                "production NVMe bring-up failed closed",
-            );
-            return;
-        };
-        if (fault_proof) |proof| hardware_proof.recordVtdIsolationProof(proof);
-        storage_attached = true;
+        if (pci.memoryBar0(dev)) |bar| {
+            registerDeviceMmio(pciDeviceId(dev), bar.address, 0x4000);
+        }
+        storage_detected = true;
     }
 }
 
@@ -254,4 +187,29 @@ fn publishDeferredNetworkBootstrap() void {
 
 fn pciDeviceId(device_info: pci.PCIDevice) u64 {
     return pci.stableDeviceId(device_info);
+}
+
+fn registerFramebufferWindow(device_id: u64) void {
+    const info = handoff.capturedInfo() orelse return;
+    const framebuffer_info = handoff.framebufferInfo(info) catch return;
+    registerDeviceMmio(device_id, framebuffer_info.physical_address, framebuffer_info.buffer_bytes);
+}
+
+fn registerDeviceMmio(device_id: u64, physical_base: u64, length: u64) void {
+    const page_size: u64 = 4096;
+    if (physical_base == 0 or physical_base % page_size != 0 or length == 0) return;
+    const mapped_length = std.mem.alignForward(u64, length, page_size);
+    device_broker.registerMmioWindows(device_id, &.{.{
+        .base = 0,
+        .physical_base = physical_base,
+        .length = mapped_length,
+        .writable = true,
+    }}) catch {
+        reportHardwareFailure(
+            "ZIGOS:DEVICE:MMIO:REGISTER_FAIL ",
+            error.InvalidMmioWindow,
+            hardware_proof.realTargetDetected(),
+            "userspace MMIO window registration failed closed",
+        );
+    };
 }

@@ -47,9 +47,10 @@ pub const LaunchServiceRequest = struct {
 
 pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding {
     const bundle_id = try userspace_boot_registry.bundleIdForServiceClass(request.entry.class);
+    const catalog_image = service_catalog.imageForClass(request.entry.class) orelse return error.EmbeddedArtifactRequired;
     const bootstrap_rights = rightsForGrant(request.entry.bootstrap_grants, .service_task_authority) orelse return error.MissingBootstrapGrant;
     const service_task_id, const service_authority_capability_id = if (request.controller_task_id == 0) blk: {
-        const service_task = try userspace_launch.launchRegisteredDirect(
+        const service_task = try userspace_launch.launchFromKernel(
             request.catalog,
             request.kernel_port.kernel.runtime,
             bundle_id,
@@ -58,6 +59,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
                 .budget = request.entry.boot_budget,
                 .ui_surface_id = request.entry.ui_surface_id,
                 .local_only = true,
+                .component_label = catalog_image.label,
             },
             request.schedule_task,
         );
@@ -102,6 +104,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
                 .budget = request.entry.boot_budget,
                 .ui_surface_id = request.entry.ui_surface_id,
                 .local_only = true,
+                .component_label = catalog_image.label,
             },
             request.schedule_task,
         );
@@ -118,7 +121,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
     };
 
     const endpoint = try request.kernel_port.endpointCreate(.{
-        .header = component_port.makeHeader(.endpoint_create, request.entry.boot_correlation_base + 2, service_task_id),
+        .header = component_port.makeHeader(.endpoint_create, service_task_id),
         .authority_capability_id = service_authority_capability_id,
         .owner_task_id = service_task_id,
         .label = request.entry.interface.name,
@@ -227,6 +230,7 @@ pub fn launchDriverTask(
                 .owner = owner,
                 .budget = driverBudget(device_class),
                 .local_only = true,
+                .component_label = driverComponentLabel(device_class),
             },
             schedule_task,
         );
@@ -246,9 +250,17 @@ pub fn launchDriverTask(
             .owner = owner,
             .budget = driverBudget(device_class),
             .local_only = true,
+            .component_label = driverComponentLabel(device_class),
         },
         schedule_task,
     );
+}
+
+fn driverComponentLabel(device_class: driver_service.DeviceClass) []const u8 {
+    return switch (device_class) {
+        .storage_controller => "storage-driver",
+        else => "",
+    };
 }
 
 pub fn serviceBudget(class: contract.ServiceClass) task_runtime.ResourceBudget {

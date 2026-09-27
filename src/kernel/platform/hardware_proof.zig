@@ -421,37 +421,37 @@ const RuntimeMarker = enum(u5) {
 };
 
 const runtime_markers = [_][]const u8{
-    hardware_target.nuc11tnki5_proof_metadata_markers[0],
-    hardware_target.nuc11tnki5_proof_metadata_markers[1],
-    hardware_target.nuc11tnki5_hardware_fact_markers[0],
-    hardware_target.nuc11tnki5_hardware_fact_markers[1],
-    hardware_target.nuc11tnki5_hardware_fact_markers[2],
-    hardware_target.nuc11tnki5_hardware_fact_markers[3],
-    hardware_target.nuc11tnki5_hardware_fact_markers[4],
-    hardware_target.nuc11tnki5_hardware_fact_markers[5],
-    hardware_target.nuc11tnki5_hardware_fact_markers[6],
-    hardware_target.nuc11tnki5_markers[0],
-    hardware_target.nuc11tnki5_markers[1],
-    hardware_target.nuc11tnki5_markers[2],
-    hardware_target.nuc11tnki5_markers[3],
-    hardware_target.nuc11tnki5_markers[4],
-    hardware_target.nuc11tnki5_markers[5],
-    hardware_target.nuc11tnki5_hardware_fact_markers[7],
-    hardware_target.nuc11tnki5_markers[6],
-    hardware_target.nuc11tnki5_hardware_fact_markers[8],
-    hardware_target.nuc11tnki5_markers[7],
-    hardware_target.nuc11tnki5_hardware_fact_markers[9],
-    hardware_target.nuc11tnki5_markers[8],
-    hardware_target.nuc11tnki5_hardware_fact_markers[10],
-    hardware_target.nuc11tnki5_markers[9],
-    hardware_target.nuc11tnki5_hardware_fact_markers[11],
-    hardware_target.nuc11tnki5_markers[10],
-    hardware_target.nuc11tnki5_hardware_fact_markers[12],
-    hardware_target.nuc11tnki5_markers[11],
-    hardware_target.nuc11tnki5_hardware_fact_markers[13],
-    hardware_target.nuc11tnki5_markers[12],
-    hardware_target.nuc11tnki5_hardware_fact_markers[14],
-    hardware_target.nuc11tnki5_hardware_fact_markers[15],
+    hardware_target.nuc15crsu7_proof_metadata_markers[0],
+    hardware_target.nuc15crsu7_proof_metadata_markers[1],
+    hardware_target.nuc15crsu7_hardware_fact_markers[0],
+    hardware_target.nuc15crsu7_hardware_fact_markers[1],
+    hardware_target.nuc15crsu7_hardware_fact_markers[2],
+    hardware_target.nuc15crsu7_hardware_fact_markers[3],
+    hardware_target.nuc15crsu7_hardware_fact_markers[4],
+    hardware_target.nuc15crsu7_hardware_fact_markers[5],
+    hardware_target.nuc15crsu7_hardware_fact_markers[6],
+    hardware_target.nuc15crsu7_markers[0],
+    hardware_target.nuc15crsu7_markers[1],
+    hardware_target.nuc15crsu7_markers[2],
+    hardware_target.nuc15crsu7_markers[3],
+    hardware_target.nuc15crsu7_markers[4],
+    hardware_target.nuc15crsu7_markers[5],
+    hardware_target.nuc15crsu7_hardware_fact_markers[7],
+    hardware_target.nuc15crsu7_markers[6],
+    hardware_target.nuc15crsu7_hardware_fact_markers[8],
+    hardware_target.nuc15crsu7_markers[7],
+    hardware_target.nuc15crsu7_hardware_fact_markers[9],
+    hardware_target.nuc15crsu7_markers[8],
+    hardware_target.nuc15crsu7_hardware_fact_markers[10],
+    hardware_target.nuc15crsu7_markers[9],
+    hardware_target.nuc15crsu7_hardware_fact_markers[11],
+    hardware_target.nuc15crsu7_markers[10],
+    hardware_target.nuc15crsu7_hardware_fact_markers[12],
+    hardware_target.nuc15crsu7_markers[11],
+    hardware_target.nuc15crsu7_hardware_fact_markers[13],
+    hardware_target.nuc15crsu7_markers[12],
+    hardware_target.nuc15crsu7_hardware_fact_markers[14],
+    hardware_target.nuc15crsu7_hardware_fact_markers[15],
 };
 
 comptime {
@@ -484,11 +484,17 @@ pub fn tpmDiscovery() ?tpm2_crb.Discovery {
 }
 
 var facts = ProbeFacts{};
+var captured_madt_table: []const u8 = &.{};
 var printed = PrintedMarkers{};
+
+pub fn madtTable() []const u8 {
+    return captured_madt_table;
+}
 
 pub fn resetForTest() void {
     tpm_discovery = null;
     facts = .{};
+    captured_madt_table = &.{};
     printed = .{};
 }
 
@@ -587,7 +593,7 @@ pub fn captureEarlyBootEvidence() void {
 pub fn capturePlatformFirmwareEvidence() void {
     facts.real_target_sku = if (handoff.capturedInfo()) |info|
         if (handoff.efi64SystemTableAddress(info)) |address|
-            smbios.efiSystemTableContainsTargetSku(address, smbios.NUC11TNKI5_SKU)
+            smbios.efiSystemTableContainsTargetSku(address, smbios.NUC15CRSU7_SKU)
         else
             false
     else
@@ -778,6 +784,7 @@ fn captureAcpiEvidence() void {
         if (std.mem.eql(u8, header.signature[0..], apic.MADT_SIGNATURE)) {
             if (apic.parseMadt(table)) |summary| {
                 found_madt = summary.local_apic_address != 0 and summary.enabled_processor_count > 0;
+                if (found_madt) captured_madt_table = table;
             } else |_| {}
         } else if (std.mem.eql(u8, header.signature[0..], fadt.FADT_SIGNATURE)) {
             const firmware = fadt.parseFadt(table) catch continue;
@@ -912,7 +919,7 @@ fn printCounters() void {
         facts.crash_record_persistence_cycles,
         facts.update_rollback_cycles,
     };
-    for (hardware_target.nuc11tnki5_counter_markers, values, 0..) |counter, value, index| {
+    for (hardware_target.nuc15crsu7_counter_markers, values, 0..) |counter, value, index| {
         const bit = @as(u8, 1) << @intCast(index);
         if (printed.counter_bits & bit != 0 or value < counter.minimum) continue;
         printCounter(counter.marker_prefix, value);

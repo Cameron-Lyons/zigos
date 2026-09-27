@@ -6,6 +6,7 @@ const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const userspace_layout = @import("../core/userspace_layout.zig");
+const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
@@ -24,6 +25,22 @@ pub const SHARED_MEMORY_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
 pub const OBJECT_TASK_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT;
 pub const MMU_OBJECT_MAPPING_SCAN_BOUND: usize = MAX_MAPPINGS_PER_OBJECT + 3;
 pub const MMU_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
+pub const SEALS_IPC_RINGS = true;
+pub const REGISTERS_DEMAND_PAGED_MAPPINGS = true;
+pub const MappedObjectHook = *const fn (
+    virt_start: u64,
+    size_bytes: u64,
+    writable: bool,
+    physical_base: u64,
+    copy_on_write: bool,
+    task_id: u64,
+) bool;
+
+var mapped_object_hook: ?MappedObjectHook = null;
+
+pub fn setMappedObjectHook(hook: MappedObjectHook) void {
+    mapped_object_hook = hook;
+}
 const MAPPING_EDGE_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MAX_MAPPINGS_PER_OBJECT;
 const MAPPING_INDEX_CAPACITY: usize = MAPPING_EDGE_CAPACITY * 2;
 const MMU_MAPPING_CAPACITY: usize = MAX_SHARED_MEMORY_OBJECTS * MMU_OBJECT_MAPPING_SCAN_BOUND;
@@ -53,7 +70,9 @@ pub const ComputeAccess = packed struct(u8) {
     gpu: bool = false,
     npu: bool = false,
     media: bool = false,
-    _reserved: u4 = 0,
+    sealed: bool = false,
+    ring: bool = false,
+    _reserved: u2 = 0,
 
     pub fn allows(self: ComputeAccess, target: ComputeTarget) bool {
         return switch (target) {
@@ -93,6 +112,14 @@ pub const Object = struct {
         return self.attached_compute.allows(target);
     }
 
+    pub fn isSealed(self: *const Object) bool {
+        return self.compute_access.sealed;
+    }
+
+    pub fn isRing(self: *const Object) bool {
+        return self.compute_access.ring;
+    }
+
     comptime {
         if (MAX_MAPPINGS_PER_OBJECT > std.math.maxInt(ObjectMappingCount)) {
             @compileError("shared-memory task mapping capacity exceeds its compact count");
@@ -102,6 +129,21 @@ pub const Object = struct {
         }
     }
 };
+
+fn registerDemandMapping(object: *const Object, mapping: FreestandingMappingDescriptor) void {
+    const hook = mapped_object_hook orelse return;
+    const virt = mapping.virtual_base;
+    const size = mapping.size_bytes;
+    if (size == 0) return;
+    _ = hook(
+        virt,
+        size,
+        !object.isSealed(),
+        mapping.physical_base,
+        object.isSealed() or object.isRing(),
+        mapping.task_id.raw(),
+    );
+}
 
 pub const MappingDescriptor = struct {
     object_id: ids.SharedMemoryId,
@@ -152,6 +194,7 @@ pub const Error = error{
     StaleMappingDescriptor,
     TableFull,
     SharedMemoryNotFound,
+    ObjectSealed,
 };
 
 const MmuMappingKind = enum(u8) {
@@ -457,8 +500,7 @@ pub const Table = struct {
     pub fn deinit(self: *Table) void {
         if (comptime heap_backed_table) {
             if (self.backing) |backing| {
-                @memset(std.mem.asBytes(backing), 0);
-                kernel_memory.kfree(@ptrCast(backing));
+                table_backing.free(TableBacking, backing);
                 self.backing = null;
             }
         } else {
@@ -479,8 +521,7 @@ pub const Table = struct {
     fn ensureBacking(self: *Table) error{OutOfMemory}!*TableBacking {
         if (self.backingPtr()) |backing| return backing;
         if (comptime heap_backed_table) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(TableBacking)) orelse return error.OutOfMemory;
-            const backing: *TableBacking = @ptrCast(@alignCast(allocation));
+            const backing = table_backing.alloc(TableBacking) orelse return error.OutOfMemory;
             backing.initializeAllocated();
             self.backing = backing;
             return backing;
@@ -548,12 +589,37 @@ pub const Table = struct {
         return slot.object;
     }
 
+    pub fn createSealedRing(
+        self: *Table,
+        owner_task_id: ids.TaskId,
+        peer_task_id: ids.TaskId,
+        size_bytes: usize,
+    ) Error!Object {
+        const object = try self.createLabeledWithAccess(owner_task_id, size_bytes, "ipc-ring", .{
+            .cpu = true,
+            .ring = true,
+        });
+        errdefer _ = self.revoke(object.id) catch {};
+        try self.map(object.id, owner_task_id);
+        if (!peer_task_id.eql(owner_task_id)) {
+            try self.map(object.id, peer_task_id);
+        }
+        try self.seal(object.id);
+        return self.findConst(object.id).?.*;
+    }
+
+    pub fn seal(self: *Table, object_id: ids.SharedMemoryId) Error!void {
+        const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
+        object.compute_access.sealed = true;
+    }
+
     pub fn map(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!void {
         const backing = self.backingPtr() orelse return error.SharedMemoryNotFound;
         const object_handle = ObjectHandle{ .value = object_id.raw() };
         const object_slot = backing.arena.getByHandle(object_handle) orelse return error.SharedMemoryNotFound;
         const object_slot_index = object_handle.slotIndex();
         const object = &object_slot.object;
+        if (object.isSealed()) return error.ObjectSealed;
 
         if (objectTaskMappingPosition(object, task_id) != null) return error.AlreadyMapped;
         if (object.mapping_count >= object.mapped_task_ids.len) return error.TableFull;
@@ -562,20 +628,26 @@ pub const Table = struct {
         if (!backing.mapping_index.append(task_id.raw(), edge_index)) return error.TableFull;
         object.mapped_task_ids[object.mapping_count] = task_id;
         object.mapping_count += 1;
-        _ = backing.mmu.mapTask(object, task_id) catch |err| {
+        const mapping = backing.mmu.mapTask(object, task_id) catch |err| {
             object.mapping_count -= 1;
             object.mapped_task_ids[object.mapping_count] = ids.TaskId.zero;
             _ = backing.mapping_index.remove(task_id.raw(), mappingEdgeIndex(object_slot_index, object.mapping_count));
             return err;
         };
+        registerDemandMapping(object, mapping);
     }
 
     pub fn unmap(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId) Error!bool {
+        return self.unmapInternal(object_id, task_id, false);
+    }
+
+    fn unmapInternal(self: *Table, object_id: ids.SharedMemoryId, task_id: ids.TaskId, allow_sealed: bool) Error!bool {
         const backing = self.backingPtr() orelse return error.SharedMemoryNotFound;
         const object_handle = ObjectHandle{ .value = object_id.raw() };
         const object_slot = backing.arena.getByHandle(object_handle) orelse return error.SharedMemoryNotFound;
         const object_slot_index = object_handle.slotIndex();
         const object = &object_slot.object;
+        if (object.isSealed() and !allow_sealed) return error.ObjectSealed;
         const index = objectTaskMappingPosition(object, task_id) orelse return false;
         const edge_index = mappingEdgeIndex(object_slot_index, index);
 
@@ -677,7 +749,7 @@ pub const Table = struct {
             {
                 native_util.impossibleByInvariant("shared-memory task mapping index points at the wrong live mapping");
             }
-            const removed = self.unmap(slot.object.id, task_id) catch |err|
+            const removed = self.unmapInternal(slot.object.id, task_id, true) catch |err|
                 native_util.impossibleByInvariantError("task retirement unmaps an indexed shared-memory mapping", err);
             if (!removed) {
                 native_util.impossibleByInvariant("task retirement removes every indexed shared-memory mapping");
@@ -689,6 +761,7 @@ pub const Table = struct {
 
     pub fn attachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!void {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
+        if (object.isSealed()) return error.ObjectSealed;
         if (target == .cpu) return error.AcceleratorAccessDenied;
         if (!object.allowsCompute(target)) return error.AcceleratorAccessDenied;
         if (object.attachedTo(target)) return error.AcceleratorAlreadyAttached;
@@ -705,6 +778,7 @@ pub const Table = struct {
 
     pub fn detachAccelerator(self: *Table, object_id: ids.SharedMemoryId, target: ComputeTarget) Error!bool {
         const object = self.find(object_id) orelse return error.SharedMemoryNotFound;
+        if (object.isSealed()) return error.ObjectSealed;
         if (!object.attachedTo(target)) return false;
 
         _ = try self.backingPtr().?.mmu.unmapAccelerator(object, target);
@@ -1489,4 +1563,30 @@ test "shared memory rejects stale task and accelerator descriptors after generat
     try std.testing.expectError(error.SharedMemoryNotFound, table.validateAcceleratorMappingDescriptor(gpu_descriptor, .gpu));
     try std.testing.expectError(error.SharedMemoryNotFound, table.validateFreestandingTaskMappingDescriptor(refreshed_task_mmu_descriptor));
     try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
+}
+
+test "sealed ipc rings map owner and peer then reject remap" {
+    var table = Table.init();
+    const owner = ids.task(11);
+    const peer = ids.task(12);
+    const object = try table.createSealedRing(owner, peer, PAGE_SIZE);
+
+    try std.testing.expect(object.isRing());
+    try std.testing.expect(object.isSealed());
+    try std.testing.expect(table.find(object.id).?.isSealed());
+    try std.testing.expect(table.hasMapping(object.id, owner));
+    try std.testing.expect(table.hasMapping(object.id, peer));
+    try std.testing.expectError(error.ObjectSealed, table.map(object.id, ids.task(13)));
+    try std.testing.expectError(error.ObjectSealed, table.unmap(object.id, peer));
+    try std.testing.expectError(error.ObjectSealed, table.attachAccelerator(object.id, .gpu));
+
+    const retired = table.retireTask(peer);
+    try std.testing.expectEqual(@as(u16, 0), retired.revoked_owned_objects);
+    try std.testing.expectEqual(@as(u16, 1), retired.removed_peer_mappings);
+    try std.testing.expect(!table.hasMapping(object.id, peer));
+    try std.testing.expect(table.find(object.id).?.isSealed());
+
+    const descriptor = try table.revoke(object.id);
+    try std.testing.expectEqual(@as(u16, 0), descriptor.mapped_task_count);
+    try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(object.id));
 }

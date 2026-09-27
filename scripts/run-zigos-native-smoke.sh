@@ -14,7 +14,7 @@ LOG_PATH="${2:?serial log path required}"
 NATIVE_STORE_IMAGE="${3:?native store image path required}"
 MODE="${4:-full}"
 USERSPACE_BIN_DIR="${5:-$ROOT_DIR/zig-out/bin}"
-BOOTLOADER_SOURCE_PATH="${6:-src/boot/boot_x86_64.S}"
+BOOTLOADER_SOURCE_PATH="${6:-src/boot/efi_stub.zig}"
 ZIGOS_NATIVE_SECONDS="${ZIGOS_NATIVE_SECONDS:-420}"
 NATIVE_STORE_SIZE_MIB="${NATIVE_STORE_SIZE_MIB:-8}"
 HIGH_MEMORY_MARKER="High-memory direct map: online"
@@ -416,7 +416,7 @@ case "$MODE" in
       append_build_artifact_measurements
     } >"$LOG_PATH"
     assert_marker_group_absent "$LOG_PATH" production_forbidden
-    assert_measured_userspace_count "$LOG_PATH" 24
+    assert_measured_userspace_count "$LOG_PATH" 8
     assert_entropy_baseline_rejection
 
     echo "Zigos production smoke test passed across cold reboot. Logs: $LOG_PATH"
@@ -446,7 +446,7 @@ case "$MODE" in
       append_measured_boot_comparison
       append_build_artifact_measurements
     } >"$LOG_PATH"
-    assert_measured_userspace_count "$LOG_PATH" 29
+    assert_measured_userspace_count "$LOG_PATH" 13
 
     echo "Zigos native smoke test passed across cold reboot. Logs: $LOG_PATH"
     ;;

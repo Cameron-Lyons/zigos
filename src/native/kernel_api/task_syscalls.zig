@@ -107,6 +107,19 @@ pub fn dispatchSurfacePresent(
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(presented));
 }
 
+pub fn dispatchWait(
+    port: *component_port.KernelPort,
+    memory: dispatch.UserMemoryContext,
+    now_ticks: u64,
+    request_addr: usize,
+    response_addr: usize,
+    response_len: usize,
+) dispatch.DispatchResult {
+    const request = dispatch.readRequest(component_port.WaitRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    const parked = component_port.invokeGeneratedFromValidatedSyscall(.wait, port, request, now_ticks) catch |err| return dispatch.mapError(err);
+    return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(parked));
+}
+
 fn sanitizeTaskCreateRequest(
     memory: dispatch.UserMemoryContext,
     request: *component_port.TaskCreateRequest,

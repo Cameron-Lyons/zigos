@@ -4,6 +4,7 @@ const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
 const accelerator_driver_task = @import("../drivers/accelerator_driver_task.zig");
+const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const device_broker = @import("../kernel_api/device_broker.zig");
 const device_inventory = @import("../drivers/device_inventory.zig");
 const driver_runtime_mod = @import("../drivers/driver_runtime.zig");
@@ -13,11 +14,7 @@ const std = @import("std");
 const service_bootstrap = @import("service_bootstrap.zig");
 const service_contract = @import("service_contracts.zig");
 const units = @import("../core/units.zig");
-const root = @import("root");
-const storage_volume_mod = if (builtin.target.os.tag == .freestanding and @hasDecl(root, "storage_volume"))
-    root.storage_volume
-else
-    @import("../storage/storage_volume.zig");
+const storage_volume_mod = @import("../storage/storage_volume.zig");
 const support = @import("session_manager_support.zig");
 const accelerator_scheduler = @import("../task/accelerator_scheduler.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -33,7 +30,17 @@ else
 pub const SERVICE_CLIENT_TASK_INDEX_RELOOKUPS: u8 = 0;
 pub const SERVICE_LAUNCH_CONTROLLER_TASK_INDEX_RELOOKUPS: u8 = 0;
 
+const nvme_device_lba_bytes: usize = 512;
 const storage_restart_scratch_lba: u64 = storage_volume_mod.required_device_sectors + 16;
+
+comptime {
+    if (builtin.target.os.tag == .freestanding) {
+        const nvme_hw = @import("../../kernel/drivers/nvme_hw.zig");
+        if (nvme_hw.SECTOR_BYTES != nvme_device_lba_bytes) {
+            @compileError("boot storage plane must translate NVMe LBAs from the volume block size");
+        }
+    }
+}
 const storage_restart_probe_sectors: u64 = 2;
 const booted_storage_sector_count: u64 = storage_restart_scratch_lba + storage_restart_probe_sectors;
 const booted_storage_image_bytes: usize = @as(usize, @intCast(booted_storage_sector_count)) * storage_volume_mod.sector_size;
@@ -213,6 +220,24 @@ const HostedStorageDataPlane = struct {
     }
 };
 
+fn readNvmeVolumeBlocks(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
+    const device_lba = storage_volume_mod.deviceLbaForVolumeTransfer(
+        start_lba,
+        buffer_len,
+        nvme_device_lba_bytes,
+    ) orelse return false;
+    return nvme_bridge.zigosStorageBootstrapNvmeRead(device_lba, buffer_ptr, buffer_len);
+}
+
+fn writeNvmeVolumeBlocks(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
+    const device_lba = storage_volume_mod.deviceLbaForVolumeTransfer(
+        start_lba,
+        buffer_len,
+        nvme_device_lba_bytes,
+    ) orelse return false;
+    return nvme_bridge.zigosStorageBootstrapNvmeWrite(device_lba, buffer_ptr, buffer_len);
+}
+
 const BootedStorageDataPlane = struct {
     fn reset() void {
         if (comptime builtin.target.os.tag != .freestanding) {
@@ -223,13 +248,16 @@ const BootedStorageDataPlane = struct {
     fn activate(device_id: u64) ?storage_volume_mod.Backend {
         if (device_id != device_inventory.deviceIdForClass(.storage_controller)) return null;
         if (nvme_bridge.attached()) {
-            const nvme_sectors = nvme_bridge.sectorCount();
-
-            if (nvme_sectors < booted_storage_sector_count) return null;
+            const device_sectors = nvme_bridge.sectorCount();
+            const volume_sectors = storage_volume_mod.volumeSectorsFromDeviceSectors(
+                device_sectors,
+                nvme_device_lba_bytes,
+            ) orelse return null;
+            if (volume_sectors < booted_storage_sector_count) return null;
             return .{
-                .sector_count = nvme_sectors,
-                .read = nvme_bridge.zigosStorageBootstrapNvmeRead,
-                .write = nvme_bridge.zigosStorageBootstrapNvmeWrite,
+                .sector_count = volume_sectors,
+                .read = readNvmeVolumeBlocks,
+                .write = writeNvmeVolumeBlocks,
                 .flush = nvme_bridge.zigosStorageBootstrapNvmeFlush,
             };
         }
@@ -589,7 +617,7 @@ fn activateDrivers(
         0,
         env.userspace_scheduler,
         state.ids.storage_service,
-        "zigos.system.storage-driver",
+        "zigos.system.drivers",
         .storage_controller,
         328,
         52,
@@ -605,7 +633,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.network_stack).task_id,
         .network_adapter,
         .none,
-        "zigos.system.network-stack",
+        "zigos.system.network",
         53,
     ) orelse return false;
     const storage_driver = attachBootstrapDriver(
@@ -615,13 +643,13 @@ fn activateDrivers(
         storage_driver_task.task_id,
         .storage_controller,
         .kernel_bootstrap_broker,
-        "zigos.system.storage-driver",
+        "zigos.system.drivers",
         54,
     ) orelse return false;
     if (bootstrap_driver_port.storagePublication() == null) {
         const published_storage = bootstrap_driver_port.publishStorageActivator(
             storage_driver.device_id,
-            "zigos.system.storage-driver",
+            "zigos.system.drivers",
             BootedStorageDataPlane.activate,
             false,
         ) catch false;
@@ -637,7 +665,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .graphics_adapter,
         .none,
-        "zigos.system.compositor",
+        "zigos.system.display",
         55,
     ) orelse return false;
     const usb_driver = attachBootstrapDriver(
@@ -647,9 +675,10 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .usb_controller,
         .none,
-        "zigos.system.compositor",
+        "zigos.system.display",
         56,
     ) orelse return false;
+    xhci_driver_task.bindTaskId(service_bindings.bindingFor(.compositor_ui_session).task_id);
     const input_driver = attachBootstrapDriver(
         env,
         state,
@@ -657,7 +686,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .input_device,
         .none,
-        "zigos.system.compositor",
+        "zigos.system.display",
         57,
     ) orelse return false;
     const audio_driver = attachBootstrapDriver(
@@ -667,7 +696,7 @@ fn activateDrivers(
         service_bindings.bindingFor(.media_print_helpers).task_id,
         .audio_print_io,
         .none,
-        "zigos.system.media-print",
+        "zigos.system.apps",
         58,
     ) orelse return false;
     const compositor_policy_driver = attachBootstrapDriver(
@@ -677,14 +706,14 @@ fn activateDrivers(
         service_bindings.bindingFor(.compositor_ui_session).task_id,
         .compositor_policy,
         .none,
-        "zigos.system.compositor",
+        "zigos.system.display",
         59,
     ) orelse return false;
 
     if (bootstrap_driver_port.networkPublication() == null) {
         const published_network = bootstrap_driver_port.publishNetworkActivator(
             network_driver.device_id,
-            "zigos.system.network-stack",
+            "zigos.system.network",
             BootedNetworkDataPlane.activate,
             false,
         ) catch false;
@@ -693,11 +722,11 @@ fn activateDrivers(
             return false;
         }
     }
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, graphics_driver, "zigos.system.compositor", 55)) return false;
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, usb_driver, "zigos.system.compositor", 56)) return false;
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, input_driver, "zigos.system.compositor", 57)) return false;
-    if (!publishBootedDeviceDataPlane(env, state.services.media_service.id, audio_driver, "zigos.system.media-print", 58)) return false;
-    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, compositor_policy_driver, "zigos.system.compositor", 59)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, graphics_driver, "zigos.system.display", 55)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, usb_driver, "zigos.system.display", 56)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, input_driver, "zigos.system.display", 57)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.media_service.id, audio_driver, "zigos.system.apps", 58)) return false;
+    if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, compositor_policy_driver, "zigos.system.display", 59)) return false;
 
     const network_activation_mode = activateBootstrapDriver(env, state.services.network_service.id, network_driver, 53) orelse return false;
     const storage_activation_mode = activateBootstrapDriver(env, state.services.storage_service.id, storage_driver, 54) orelse return false;
@@ -841,10 +870,8 @@ pub fn connectClient(
 
     var service_connect_count: usize = 0;
     for (service_contract.ordered_service_contracts, service_bindings.bindings, 0..) |entry, binding, index| {
-        const endpoint_request_id = 332 + @as(u64, @intCast(index * 2));
-        const connect_request_id = endpoint_request_id + 1;
         const client_endpoint = kernel_port.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, endpoint_request_id, service_client_task.id),
+            .header = component_port.makeHeader(.endpoint_create, service_client_task.id),
             .authority_capability_id = service_client_authority.id,
             .owner_task_id = service_client_task.id,
             .label = entry.interface.name,
@@ -858,7 +885,7 @@ pub fn connectClient(
             return false;
         };
         _ = kernel_port.endpointConnect(.{
-            .header = component_port.makeHeader(.endpoint_connect, connect_request_id, service_client_task.id),
+            .header = component_port.makeHeader(.endpoint_connect, service_client_task.id),
             .endpoint_capability_id = client_endpoint.capability_id,
             .peer_endpoint_capability_id = registry_connection.endpoint_capability_id,
             .peer_endpoint_id = binding.endpoint_id,

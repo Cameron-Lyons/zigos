@@ -281,7 +281,6 @@ fn fuzzCapabilityMessage(input: []const u8) void {
 fn fuzzSyscallAbi(input: []const u8) void {
     var header = abi.RequestHeader{
         .operation = abi.opcode(.task_create),
-        .correlation_id = 0,
         .subject_task_id = 0,
     };
     const header_bytes = std.mem.asBytes(&header);
@@ -374,7 +373,7 @@ fn validateReleaseArtifactSelectionPolicy(
         try common.addError(
             errors,
             allocator,
-            "release artifact selection exact_paths must equal the exact 33-target production catalog: {s}",
+            "release artifact selection exact_paths must equal the exact 17-target production catalog: {s}",
             .{@errorName(err)},
         );
     };
@@ -745,7 +744,7 @@ fn validateReleaseArtifacts(
         try common.addError(
             errors,
             allocator,
-            "release artifacts required_generator_inputs must equal the exact 33-target production catalog: {s}",
+            "release artifacts required_generator_inputs must equal the exact 17-target production catalog: {s}",
             .{@errorName(err)},
         );
     };
@@ -885,7 +884,7 @@ fn validateReleaseArtifacts(
         "release-manifest.dsse.json",
         "sole digest authority",
         "before parsing",
-        "exact 33",
+        "exact 17",
         "exact ten",
         "persistent rollback state",
         "external to the bundle",
@@ -1038,14 +1037,14 @@ fn validateReleaseArtifacts(
         try common.addError(
             errors,
             allocator,
-            "release_artifacts must cover the exact 33-target production catalog once: {s}",
+            "release_artifacts must cover the exact 17-target production catalog once: {s}",
             .{@errorName(err)},
         );
     };
 }
 
 test "release policy uses the exact authenticated production catalogs" {
-    try std.testing.expectEqual(@as(usize, 33), REQUIRED_RELEASE_TARGET_PATHS.len);
+    try std.testing.expectEqual(@as(usize, 17), REQUIRED_RELEASE_TARGET_PATHS.len);
     try std.testing.expectEqual(@as(usize, 10), REQUIRED_RELEASE_EVIDENCE_NAMES.len);
     try std.testing.expect(release_catalog.isProductionTarget("build/os.iso"));
     try std.testing.expect(!release_catalog.isProductionTarget("zig-out/bin/zigos-verify-release"));

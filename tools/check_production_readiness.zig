@@ -17,7 +17,7 @@ const SECURE_BY_DESIGN_REQUIRED_CONTROLS = [_][]const u8{
     "crash-dump-redaction",
     "vulnerability-disclosure",
 };
-const FIRST_HARDWARE_TARGET_ID = "intel-nuc11tnki5";
+const FIRST_HARDWARE_TARGET_ID = "asus-nuc15crsu7";
 const FIRST_HARDWARE_TARGET_STATUSES = [_][]const u8{ "selected", "hardware_required", "hardware_passed" };
 const FIRST_HARDWARE_TARGET_STRING_FIELDS = [_][]const u8{
     "id",
@@ -48,42 +48,42 @@ const FIRST_HARDWARE_TARGET_REQUIRED_SUBSYSTEMS = [_][]const u8{
     "update_rollback_power_cycle",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_MARKERS = [_][]const u8{
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_DISCOVERY:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_STORAGE_ISOLATION:ENFORCED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_INTERRUPT_ISOLATION:ENFORCED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_BLOCKED_DMA_FAULT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:USB_INPUT_XHCI:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_BLOCK:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NETWORK_I225_LM:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:UEFI_BOOT:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_TABLES:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_DISCOVERY:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_STORAGE_ISOLATION:ENFORCED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_INTERRUPT_ISOLATION:ENFORCED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_BLOCKED_DMA_FAULT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:APIC_TIMER:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:FRAMEBUFFER_GOP:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:USB_INPUT_XHCI:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:NVME_BLOCK:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:NETWORK_I225_LM:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:SUSPEND_RESUME:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:CRASH_RECOVERY:PASS",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS = [_][]const u8{
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SMBIOS_SKU:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:MULTIBOOT_MEMORY_MAP:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_XSDT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_MADT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_FADT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_DMAR:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_SEGMENT_ZERO:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_BLOCKED_DMA_FAULT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER_INTERRUPT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_WRITE_READ_COMPLETION:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:I225_LM_FRAME_INTERRUPT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME_POWER:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:SMBIOS_SKU:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:MULTIBOOT_MEMORY_MAP:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_XSDT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_MADT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_FADT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_DMAR:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_SEGMENT_ZERO:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_BLOCKED_DMA_FAULT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:APIC_TIMER_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:NVME_WRITE_READ_COMPLETION:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:I225_LM_FRAME_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:SUSPEND_RESUME_POWER:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS = [_][]const u8{
     "BOOT:ROLE:verification",
     "ZIGOS:CPU:PGE:ENABLED",
-    "ZIGOS:CPU:SYSCALL:ENABLED",
+    "ZIGOS:CPU:FRED:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "ZIGOS:USERSPACE:ARTIFACTS:READY",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
@@ -124,26 +124,26 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "BOOT:PROFILE:zigos_native",
     "BOOT:ROLE:production",
     "ZIGOS:CPU:PGE:ENABLED",
-    "ZIGOS:CPU:SYSCALL:ENABLED",
+    "ZIGOS:CPU:FRED:ENABLED",
     "ZIGOS:CPU:PCID:ENABLED",
     "BOOT:CORE_READY",
     "ZIGOS:KERNEL_NETWORK:DEFERRED",
     "ZIGOS:NATIVE:BOOTSTRAP",
     "ZIGOS:TCB:DEFINED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:EVIDENCE_SOURCE:REAL_HARDWARE",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:BOARD_SKU:NUC11TNKi5",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SMBIOS_SKU:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:MULTIBOOT_MEMORY_MAP:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_XSDT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_MADT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_FADT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_DMAR:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_SEGMENT_ZERO:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_DISCOVERY:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_STORAGE_ISOLATION:ENFORCED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_INTERRUPT_ISOLATION:ENFORCED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:VT_D_BLOCKED_DMA_FAULT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:EVIDENCE_SOURCE:REAL_HARDWARE",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:BOARD_SKU:RNUC15CRSU7",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:SMBIOS_SKU:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:MULTIBOOT_MEMORY_MAP:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_XSDT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_MADT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_FADT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_DMAR:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_SEGMENT_ZERO:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_TABLES:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_DISCOVERY:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_STORAGE_ISOLATION:ENFORCED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_INTERRUPT_ISOLATION:ENFORCED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:VT_D_BLOCKED_DMA_FAULT:OBSERVED",
     "ZIGOS:USERSPACE:SCHEDULER:READY",
     "ZIGOS:USERSPACE:SCHEDULER:EVENT_WAIT:READY",
     "ZIGOS:USERSPACE:UI_STATE:READY",
@@ -172,34 +172,34 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "ZIGOS:NATIVE:READY",
 };
 const FIRST_HARDWARE_TARGET_FORBIDDEN_PRODUCTION_MARKERS = [_][]const u8{
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER_INTERRUPT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:APIC_TIMER:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:FRAMEBUFFER_GOP:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:USB_INPUT_XHCI:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_WRITE_READ_COMPLETION:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NVME_BLOCK:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:I225_LM_FRAME_INTERRUPT:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:NETWORK_I225_LM:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME_POWER:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:SUSPEND_RESUME:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:CRASH_RECOVERY:PASS",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
-    "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:UEFI_BOOT:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:APIC_TIMER_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:APIC_TIMER:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:FRAMEBUFFER_GOP:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:USB_INPUT_XHCI:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:NVME_WRITE_READ_COMPLETION:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:NVME_BLOCK:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:I225_LM_FRAME_INTERRUPT:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:NETWORK_I225_LM:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:SUSPEND_RESUME_POWER:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:SUSPEND_RESUME:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:CRASH_RECOVERY:PASS",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
+    "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
     "src/native/platform/hardware_target.zig",
     "src/kernel/platform/dmar.zig",
-    "spec/hardware/nuc11tnki5-production-required-markers.txt",
-    "spec/hardware/nuc11tnki5-required-markers.txt",
-    "spec/hardware/nuc11tnki5-proof-bundle.md",
-    "scripts/prepare-nuc11tnki5-hardware-proof.sh",
-    "scripts/write-nuc11tnki5-capture-statement.sh",
-    "scripts/check-nuc11tnki5-hardware-proof.sh",
-    "scripts/test-nuc11tnki5-hardware-proof-checker.sh",
+    "spec/hardware/nuc15crsu7-production-required-markers.txt",
+    "spec/hardware/nuc15crsu7-required-markers.txt",
+    "spec/hardware/nuc15crsu7-proof-bundle.md",
+    "scripts/prepare-nuc15crsu7-hardware-proof.sh",
+    "scripts/write-nuc15crsu7-capture-statement.sh",
+    "scripts/check-nuc15crsu7-hardware-proof.sh",
+    "scripts/test-nuc15crsu7-hardware-proof-checker.sh",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_QEMU_PREFLIGHT_COMMANDS = [_][]const u8{
     "./scripts/zig.sh build iso",
@@ -272,6 +272,7 @@ pub fn main(init: std.process.Init) !void {
     try validateBenchmarkEnvironmentGate(allocator, io, &errors);
     try validateSyntheticUserspaceImageMarkers(allocator, io, &errors);
     try validateEventLedgerRollover(allocator, io, &errors);
+    try validateKernelTcbImports(allocator, io, &errors);
 
     if (errors.items.len > 0) {
         common.printErrors(errors.items);
@@ -290,6 +291,106 @@ pub fn main(init: std.process.Init) !void {
         "Production readiness OK: {d} tracks, {d} requirement references\n",
         .{ tracks.len, requirement_refs },
     );
+}
+
+fn validateKernelTcbImports(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+) !void {
+    const tcb_path = "src/kernel/tcb.zig";
+    const tcb_source = try readRequiredSource(allocator, io, errors, tcb_path) orelse return;
+    const required_tcb_snippets = [_][]const u8{
+        "pub const FORBIDS_PRODUCT_IMPORTS = true",
+        "pub const KERNEL_PORT_REQUIRES_PUBLISHED_GS = true",
+        "pub const IDLE_NEVER_SERVICES_DEVICE_QUEUES = true",
+        "native/storage/",
+        "native/sync/",
+        "native/policy/",
+        "native/services/",
+        "native/demo/",
+        "native/platform/compositor",
+    };
+    for (required_tcb_snippets) |snippet| {
+        if (std.mem.indexOf(u8, tcb_source, snippet) == null) {
+            try common.addError(errors, allocator, "kernel TCB contract must retain snippet: {s}", .{snippet});
+        }
+    }
+
+    const native_profile_path = "src/kernel/boot/profiles/zigos_native.zig";
+    const native_profile_source = try readRequiredSource(allocator, io, errors, native_profile_path) orelse return;
+    if (std.mem.indexOf(u8, native_profile_source, "_ = xhci_driver_task.dispatch();") != null) {
+        try common.addError(errors, allocator, "native idle loop must not service xHCI from the kernel", .{});
+    }
+
+    try walkKernelTcbDir(allocator, io, errors, "src/kernel");
+}
+
+fn walkKernelTcbDir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true, .follow_symlinks = false }) catch |err| {
+        try common.addError(errors, allocator, "kernel TCB scan could not open {s}: {s}", .{ path, @errorName(err) });
+        return;
+    };
+    defer dir.close(io);
+
+    var iterator = dir.iterate();
+    while (iterator.next(io) catch |err| {
+        try common.addError(errors, allocator, "kernel TCB scan failed in {s}: {s}", .{ path, @errorName(err) });
+        return;
+    }) |entry| {
+        const child = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, entry.name });
+        switch (entry.kind) {
+            .directory => {
+                if (kernelTcbDirIsExcluded(child)) continue;
+                try walkKernelTcbDir(allocator, io, errors, child);
+            },
+            .file => {
+                if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+                if (kernelTcbFileIsExcluded(child)) continue;
+                try scanKernelTcbFile(allocator, io, errors, child);
+            },
+            else => {},
+        }
+    }
+}
+
+fn kernelTcbDirIsExcluded(path: []const u8) bool {
+    return std.mem.eql(u8, path, "src/kernel/boot/benchmark");
+}
+
+fn kernelTcbFileIsExcluded(path: []const u8) bool {
+    return std.mem.eql(u8, path, "src/kernel/tcb.zig") or
+        std.mem.eql(u8, path, "src/kernel/boot/recovery_suite.zig") or
+        std.mem.eql(u8, path, "src/kernel/boot/profiles/recovery.zig") or
+        std.mem.eql(u8, path, "src/kernel/boot/profiles/benchmark.zig");
+}
+
+fn scanKernelTcbFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+) !void {
+    const source = try common.readFileAlloc(allocator, io, path, common.source_file_max_bytes);
+    const forbidden_prefixes = [_][]const u8{
+        "native/storage/",
+        "native/sync/",
+        "native/policy/",
+        "native/services/",
+        "native/demo/",
+        "native/platform/compositor",
+        "native/platform/rendered_shell",
+        "native/platform/os_contract",
+    };
+    for (forbidden_prefixes) |prefix| {
+        if (std.mem.indexOf(u8, source, prefix) == null) continue;
+        try common.addError(errors, allocator, "kernel TCB forbids product import {s} in {s}", .{ prefix, path });
+    }
 }
 
 fn validateEventLedgerRollover(
@@ -823,6 +924,7 @@ fn validateNuc11tnki5KernelProofSources(
     const interrupt_stubs_path = "src/kernel/interrupts/interrupt64.S";
     const syscall_path = "src/kernel/interrupts/syscall64.zig";
     const syscall_entry_path = "src/kernel/interrupts/syscall64.S";
+    const fred_entry_path = "src/kernel/interrupts/fred64.S";
     const userspace_syscall_path = "src/arch/x86/syscall_trap.S";
     const gdt_path = "src/kernel/interrupts/gdt64.zig";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
@@ -831,14 +933,20 @@ fn validateNuc11tnki5KernelProofSources(
     const qemu_harness_path = "scripts/qemu-harness.sh";
     const kernel_build_path = "build_support/kernel.zig";
     const bootloader_path = "src/boot/boot_x86_64.S";
+    const efi_stub_path = "src/boot/efi_stub.zig";
+    const efi_handoff_path = "src/boot/efi_handoff.zig";
+    const efi_elf_path = "src/boot/efi_elf.zig";
+    const efi_iso_path = "scripts/build-efi-iso.sh";
+    const efi_image_check_path = "scripts/check-efi-image.sh";
     const kernel_linker_path = "src/arch/x86_64/linker.ld";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
-    const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
+    const production_cmdline_path = "src/boot/cmdline.txt";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
     const cpu_baseline_path = "src/arch/cpu_baseline.zig";
     const x86_path = "src/arch/x86.zig";
     const invpcid_path = "src/arch/x86/invpcid.S";
     const user_access_path = "src/arch/x86/user_access.S";
+    const xsaves_path = "src/arch/x86/xsaves.S";
     const cpu_features_path = "src/arch/cpu_features.zig";
     const boot_entry_path = "src/kernel/boot/entry.zig";
     const paging_path = "src/kernel/memory/paging64.zig";
@@ -849,6 +957,7 @@ fn validateNuc11tnki5KernelProofSources(
     const userspace_ui_state_path = "src/userspace/ui_surface_state.zig";
     const permission_review_path = "src/native/policy/permission_review_service.zig";
     const input_driver_task_path = "src/native/drivers/input_driver_task.zig";
+    const xhci_driver_task_path = "src/native/drivers/xhci_driver_task.zig";
     const input_router_path = "src/native/platform/input_router.zig";
     const console_path = "src/kernel/utils/console.zig";
     const legacy_vga_path = "src/kernel/drivers/vga.zig";
@@ -859,79 +968,79 @@ fn validateNuc11tnki5KernelProofSources(
     const pci_path = "src/kernel/drivers/pci.zig";
     const mmio_windows_path = "src/kernel/memory/mmio_windows.zig";
     if (!common.pathExists(io, hardware_proof_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source is missing: {s}", .{hardware_proof_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 hardware proof source is missing: {s}", .{hardware_proof_path});
         return;
     }
     if (!common.pathExists(io, apic_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 APIC proof source is missing: {s}", .{apic_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 APIC proof source is missing: {s}", .{apic_path});
         return;
     }
     if (!common.pathExists(io, devices_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source is missing: {s}", .{devices_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 boot device inventory source is missing: {s}", .{devices_path});
         return;
     }
     if (!common.pathExists(io, crash_record_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 crash persistence proof source is missing: {s}", .{crash_record_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 crash persistence proof source is missing: {s}", .{crash_record_path});
         return;
     }
     if (!common.pathExists(io, acpi_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 ACPI parser is missing: {s}", .{acpi_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 ACPI parser is missing: {s}", .{acpi_path});
         return;
     }
     if (!common.pathExists(io, fadt_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 FADT suspend proof source is missing: {s}", .{fadt_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 FADT suspend proof source is missing: {s}", .{fadt_path});
         return;
     }
     if (!common.pathExists(io, mcfg_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 PCIe firmware parser is missing: {s}", .{mcfg_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 PCIe firmware parser is missing: {s}", .{mcfg_path});
         return;
     }
     if (!common.pathExists(io, framebuffer_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 framebuffer proof source is missing: {s}", .{framebuffer_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 framebuffer proof source is missing: {s}", .{framebuffer_path});
         return;
     }
     if (!common.pathExists(io, handoff_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 boot handoff source is missing: {s}", .{handoff_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 boot handoff source is missing: {s}", .{handoff_path});
         return;
     }
     if (!common.pathExists(io, multiboot2_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 Multiboot2 parser is missing: {s}", .{multiboot2_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 Multiboot2 parser is missing: {s}", .{multiboot2_path});
         return;
     }
     if (!common.pathExists(io, hardware_target_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 update rollback proof source is missing: {s}", .{hardware_target_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 update rollback proof source is missing: {s}", .{hardware_target_path});
         return;
     }
     if (!common.pathExists(io, first_target_telemetry_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 first-target telemetry source is missing: {s}", .{first_target_telemetry_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 first-target telemetry source is missing: {s}", .{first_target_telemetry_path});
         return;
     }
     if (!common.pathExists(io, platform_policy_signals_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 platform policy signal source is missing: {s}", .{platform_policy_signals_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 platform policy signal source is missing: {s}", .{platform_policy_signals_path});
         return;
     }
     if (!common.pathExists(io, device_inventory_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 device inventory source is missing: {s}", .{device_inventory_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 device inventory source is missing: {s}", .{device_inventory_path});
         return;
     }
     if (!common.pathExists(io, service_bootstrap_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 service bootstrap source is missing: {s}", .{service_bootstrap_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 service bootstrap source is missing: {s}", .{service_bootstrap_path});
         return;
     }
     if (!common.pathExists(io, session_service_bootstrap_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 session service bootstrap source is missing: {s}", .{session_service_bootstrap_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 session service bootstrap source is missing: {s}", .{session_service_bootstrap_path});
         return;
     }
     if (!common.pathExists(io, isr_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 interrupt source is missing: {s}", .{isr_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 interrupt source is missing: {s}", .{isr_path});
         return;
     }
     if (!common.pathExists(io, interrupt_stubs_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 interrupt stubs are missing: {s}", .{interrupt_stubs_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 interrupt stubs are missing: {s}", .{interrupt_stubs_path});
         return;
     }
     if (!common.pathExists(io, runtime_init_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 runtime initialization source is missing: {s}", .{runtime_init_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 runtime initialization source is missing: {s}", .{runtime_init_path});
         return;
     }
     if (!common.pathExists(io, native_profile_path)) {
@@ -939,11 +1048,11 @@ fn validateNuc11tnki5KernelProofSources(
         return;
     }
     if (!common.pathExists(io, timer_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 timer source is missing: {s}", .{timer_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 timer source is missing: {s}", .{timer_path});
         return;
     }
     if (!common.pathExists(io, qemu_harness_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 QEMU harness is missing: {s}", .{qemu_harness_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 QEMU harness is missing: {s}", .{qemu_harness_path});
         return;
     }
     if (!common.pathExists(io, kernel_build_path)) {
@@ -954,24 +1063,48 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "x86-64 bootloader source is missing: {s}", .{bootloader_path});
         return;
     }
+    if (!common.pathExists(io, efi_stub_path)) {
+        try common.addError(errors, allocator, "native EFI long-mode stub is missing: {s}", .{efi_stub_path});
+        return;
+    }
     if (!common.pathExists(io, kernel_linker_path)) {
         try common.addError(errors, allocator, "x86-64 kernel linker source is missing: {s}", .{kernel_linker_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_stub_path)) {
+        try common.addError(errors, allocator, "native EFI stub is missing: {s}", .{efi_stub_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_handoff_path)) {
+        try common.addError(errors, allocator, "EFI firmware handoff encoder is missing: {s}", .{efi_handoff_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_elf_path)) {
+        try common.addError(errors, allocator, "EFI kernel ELF loader is missing: {s}", .{efi_elf_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_iso_path)) {
+        try common.addError(errors, allocator, "EFI production ISO builder is missing: {s}", .{efi_iso_path});
+        return;
+    }
+    if (!common.pathExists(io, efi_image_check_path)) {
+        try common.addError(errors, allocator, "EFI PE/COFF image checker is missing: {s}", .{efi_image_check_path});
         return;
     }
     if (!common.pathExists(io, qemu_grub_path)) {
         try common.addError(errors, allocator, "QEMU boot configuration is missing: {s}", .{qemu_grub_path});
         return;
     }
-    if (!common.pathExists(io, production_grub_path)) {
-        try common.addError(errors, allocator, "production boot configuration is missing: {s}", .{production_grub_path});
+    if (!common.pathExists(io, production_cmdline_path)) {
+        try common.addError(errors, allocator, "production EFI command line is missing: {s}", .{production_cmdline_path});
         return;
     }
     if (!common.pathExists(io, ci_setup_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 CI setup action is missing: {s}", .{ci_setup_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 CI setup action is missing: {s}", .{ci_setup_path});
         return;
     }
     if (!common.pathExists(io, cpu_baseline_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 CPU baseline source is missing: {s}", .{cpu_baseline_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 CPU baseline source is missing: {s}", .{cpu_baseline_path});
         return;
     }
     if (!common.pathExists(io, x86_path)) {
@@ -984,6 +1117,10 @@ fn validateNuc11tnki5KernelProofSources(
     }
     if (!common.pathExists(io, user_access_path)) {
         try common.addError(errors, allocator, "x86 supervisor user-memory access assembly is missing: {s}", .{user_access_path});
+        return;
+    }
+    if (!common.pathExists(io, xsaves_path)) {
+        try common.addError(errors, allocator, "x86 XSAVES extended-state assembly is missing: {s}", .{xsaves_path});
         return;
     }
     if (!common.pathExists(io, cpu_features_path)) {
@@ -1015,42 +1152,42 @@ fn validateNuc11tnki5KernelProofSources(
         return;
     }
     if (!common.pathExists(io, permission_review_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 permission review source is missing: {s}", .{permission_review_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 permission review source is missing: {s}", .{permission_review_path});
         return;
     }
     if (!common.pathExists(io, input_router_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 focused input router source is missing: {s}", .{input_router_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 focused input router source is missing: {s}", .{input_router_path});
         return;
     }
     if (!common.pathExists(io, console_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 early console source is missing: {s}", .{console_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 early console source is missing: {s}", .{console_path});
         return;
     }
     if (common.pathExists(io, legacy_vga_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 early console must not restore the legacy VGA text driver: {s}", .{legacy_vga_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 early console must not restore the legacy VGA text driver: {s}", .{legacy_vga_path});
     }
     if (!common.pathExists(io, nvme_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 NVMe proof source is missing: {s}", .{nvme_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 NVMe proof source is missing: {s}", .{nvme_path});
         return;
     }
     if (!common.pathExists(io, xhci_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 xHCI proof source is missing: {s}", .{xhci_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 xHCI proof source is missing: {s}", .{xhci_path});
         return;
     }
     if (!common.pathExists(io, xhci_hw_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 xHCI hardware probe source is missing: {s}", .{xhci_hw_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 xHCI hardware probe source is missing: {s}", .{xhci_hw_path});
         return;
     }
     if (!common.pathExists(io, i225_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 I225 proof source is missing: {s}", .{i225_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 I225 proof source is missing: {s}", .{i225_path});
         return;
     }
     if (!common.pathExists(io, pci_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 PCI inventory source is missing: {s}", .{pci_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 PCI inventory source is missing: {s}", .{pci_path});
         return;
     }
     if (!common.pathExists(io, mmio_windows_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 kernel MMIO layout source is missing: {s}", .{mmio_windows_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 kernel MMIO layout source is missing: {s}", .{mmio_windows_path});
         return;
     }
     const hardware_proof_source = try common.readFileAlloc(allocator, io, hardware_proof_path, common.source_file_max_bytes);
@@ -1073,6 +1210,7 @@ fn validateNuc11tnki5KernelProofSources(
     const interrupt_stubs_source = try common.readFileAlloc(allocator, io, interrupt_stubs_path, common.source_file_max_bytes);
     const syscall_source = try common.readFileAlloc(allocator, io, syscall_path, common.source_file_max_bytes);
     const syscall_entry_source = try common.readFileAlloc(allocator, io, syscall_entry_path, common.source_file_max_bytes);
+    const fred_entry_source = try common.readFileAlloc(allocator, io, fred_entry_path, common.source_file_max_bytes);
     const userspace_syscall_source = try common.readFileAlloc(allocator, io, userspace_syscall_path, common.source_file_max_bytes);
     const gdt_source = try common.readFileAlloc(allocator, io, gdt_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
@@ -1081,14 +1219,18 @@ fn validateNuc11tnki5KernelProofSources(
     const qemu_harness_source = try common.readFileAlloc(allocator, io, qemu_harness_path, common.source_file_max_bytes);
     const kernel_build_source = try common.readFileAlloc(allocator, io, kernel_build_path, common.source_file_max_bytes);
     const bootloader_source = try common.readFileAlloc(allocator, io, bootloader_path, common.source_file_max_bytes);
+    const efi_stub_source = try common.readFileAlloc(allocator, io, efi_stub_path, common.source_file_max_bytes);
+    const efi_handoff_source = try common.readFileAlloc(allocator, io, efi_handoff_path, common.source_file_max_bytes);
+    const efi_iso_source = try common.readFileAlloc(allocator, io, efi_iso_path, common.source_file_max_bytes);
     const kernel_linker_source = try common.readFileAlloc(allocator, io, kernel_linker_path, common.source_file_max_bytes);
     const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
-    const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
+    const production_cmdline_source = try common.readFileAlloc(allocator, io, production_cmdline_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
     const cpu_baseline_source = try common.readFileAlloc(allocator, io, cpu_baseline_path, common.source_file_max_bytes);
     const x86_source = try common.readFileAlloc(allocator, io, x86_path, common.source_file_max_bytes);
     const invpcid_source = try common.readFileAlloc(allocator, io, invpcid_path, common.source_file_max_bytes);
     const user_access_source = try common.readFileAlloc(allocator, io, user_access_path, common.source_file_max_bytes);
+    const xsaves_source = try common.readFileAlloc(allocator, io, xsaves_path, common.source_file_max_bytes);
     const cpu_features_source = try common.readFileAlloc(allocator, io, cpu_features_path, common.source_file_max_bytes);
     const boot_entry_source = try common.readFileAlloc(allocator, io, boot_entry_path, common.source_file_max_bytes);
     const paging_source = try common.readFileAlloc(allocator, io, paging_path, common.source_file_max_bytes);
@@ -1103,6 +1245,7 @@ fn validateNuc11tnki5KernelProofSources(
     const console_source = try common.readFileAlloc(allocator, io, console_path, common.source_file_max_bytes);
     const xhci_source = try common.readFileAlloc(allocator, io, xhci_path, common.source_file_max_bytes);
     const xhci_hw_source = try common.readFileAlloc(allocator, io, xhci_hw_path, common.source_file_max_bytes);
+    const xhci_driver_task_source = try common.readFileAlloc(allocator, io, xhci_driver_task_path, common.source_file_max_bytes);
     const nvme_source = try common.readFileAlloc(allocator, io, nvme_path, common.source_file_max_bytes);
     const i225_source = try common.readFileAlloc(allocator, io, i225_path, common.source_file_max_bytes);
     const pci_source = try common.readFileAlloc(allocator, io, pci_path, common.source_file_max_bytes);
@@ -1120,7 +1263,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_hardware_proof_snippets) |snippet| {
         if (std.mem.indexOf(u8, hardware_proof_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 hardware proof source must enforce snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 hardware proof source must enforce snippet: {s}", .{snippet});
         }
     }
     const required_device_inventory_snippets = [_][]const u8{
@@ -1144,7 +1287,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must enforce production binding snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 device inventory source must enforce production binding snippet: {s}", .{snippet});
         }
     }
     const retired_device_inventory_snippets = [_][]const u8{
@@ -1155,7 +1298,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_device_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must not reintroduce stable synthetic fallback ids: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 device inventory source must not reintroduce stable synthetic fallback ids: {s}", .{snippet});
         }
     }
     const retired_device_inventory_binding_snippets = [_][]const u8{
@@ -1165,7 +1308,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_device_inventory_binding_snippets) |snippet| {
         if (std.mem.indexOf(u8, device_inventory_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 device inventory source must not bind production input through PS/2 bootstrap: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 device inventory source must not bind production input through PS/2 bootstrap: {s}", .{snippet});
         }
     }
     const required_boot_device_inventory_snippets = [_][]const u8{
@@ -1176,8 +1319,15 @@ fn validateNuc11tnki5KernelProofSources(
         "pci.firstNvmeController()",
         ".nvme_pci_inventory",
         "pci.firstXhciController()",
-        "xhci_hw.probe(dev)",
         "device_inventory.registerDetected(.usb_controller, xhci_device_id, .xhci_inventory, false)",
+    };
+    for (required_boot_device_inventory_snippets) |snippet| {
+        if (std.mem.indexOf(u8, devices_source, snippet) == null) {
+            try common.addError(errors, allocator, "RNUC15CRSU7 boot device inventory source must capture target-specific PCI snippet: {s}", .{snippet});
+        }
+    }
+    const required_xhci_driver_task_snippets = [_][]const u8{
+        "xhci_hw.probe(dev)",
         "ZIGOS:XHCI:HW:OWNERSHIP_OK",
         "ZIGOS:XHCI:HW:RESET_OK",
         "ZIGOS:XHCI:HW:SLOTS_OK",
@@ -1188,14 +1338,15 @@ fn validateNuc11tnki5KernelProofSources(
         "xhci_hw.activate()",
         "ZIGOS:XHCI:HW:REMAP_MSI_OK",
         "ZIGOS:XHCI:HW:RUN_OK",
+        "KERNEL_LATCHES_ONLY",
     };
-    for (required_boot_device_inventory_snippets) |snippet| {
-        if (std.mem.indexOf(u8, devices_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 boot device inventory source must capture target-specific PCI snippet: {s}", .{snippet});
+    for (required_xhci_driver_task_snippets) |snippet| {
+        if (std.mem.indexOf(u8, xhci_driver_task_source, snippet) == null) {
+            try common.addError(errors, allocator, "RNUC15CRSU7 xHCI userspace driver task must capture dataplane snippet: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, devices_source, "device_inventory.registerDetected(.input_device, xhci_device_id, .xhci_inventory, false)") != null) {
-        try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not publish input authority before keyboard enumeration and hardware event-ring evidence", .{});
+        try common.addError(errors, allocator, "RNUC15CRSU7 PCI discovery must not publish input authority before keyboard enumeration and hardware event-ring evidence", .{});
     }
     const required_pci_inventory_snippets = [_][]const u8{
         "mcfg.Allocation",
@@ -1215,14 +1366,14 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_pci_inventory_snippets) |snippet| {
         if (std.mem.indexOf(u8, pci_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must retain its cached topology-aware inventory: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 PCI discovery must retain its cached topology-aware inventory: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, pci_source, "var boot_inventory: [PCI_INVENTORY_CAPACITY]PCIDevice") != null) {
         try common.addError(errors, allocator, "PCI inventory must remain heap-backed on freestanding kernels", .{});
     }
     if (std.mem.indexOf(u8, pci_source, "while (bus < PCI_MAX_BUS_COUNT)") != null) {
-        try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore repeated exhaustive 256-bus scans", .{});
+        try common.addError(errors, allocator, "RNUC15CRSU7 PCI discovery must not restore repeated exhaustive 256-bus scans", .{});
     }
     const retired_cached_pci_bar_snippets = [_][]const u8{
         "PCI_BAR2_OFFSET",
@@ -1236,7 +1387,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_cached_pci_bar_snippets) |snippet| {
         if (std.mem.indexOf(u8, pci_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not recache unused BAR words: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 PCI discovery must not recache unused BAR words: {s}", .{snippet});
         }
     }
     const required_mmio_layout_snippets = [_][]const u8{
@@ -1255,7 +1406,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_mmio_layout_snippets) |snippet| {
         if (std.mem.indexOf(u8, mmio_windows_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 kernel MMIO layout must retain bounded non-overlap enforcement: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 kernel MMIO layout must retain bounded non-overlap enforcement: {s}", .{snippet});
         }
     }
     const retired_pci_config_port_snippets = [_][]const u8{
@@ -1267,7 +1418,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_pci_config_port_snippets) |snippet| {
         if (std.mem.indexOf(u8, pci_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 PCI discovery must not restore legacy configuration-port access: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 PCI discovery must not restore legacy configuration-port access: {s}", .{snippet});
         }
     }
     const required_mcfg_snippets = [_][]const u8{
@@ -1279,7 +1430,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_mcfg_snippets) |snippet| {
         if (std.mem.indexOf(u8, mcfg_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 PCIe discovery must retain validated ACPI MCFG parsing: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 PCIe discovery must retain validated ACPI MCFG parsing: {s}", .{snippet});
         }
     }
     const required_service_bootstrap_snippets = [_][]const u8{
@@ -1291,7 +1442,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_service_bootstrap_snippets) |snippet| {
         if (std.mem.indexOf(u8, service_bootstrap_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 service bootstrap source must bind drivers through detected inventory snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 service bootstrap source must bind drivers through detected inventory snippet: {s}", .{snippet});
         }
     }
     const required_session_service_bootstrap_snippets = [_][]const u8{
@@ -1305,7 +1456,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_session_service_bootstrap_snippets) |snippet| {
         if (std.mem.indexOf(u8, session_service_bootstrap_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 hosted service bootstrap source must keep explicit modeled inventory snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 hosted service bootstrap source must keep explicit modeled inventory snippet: {s}", .{snippet});
         }
     }
     const retired_legacy_input_snippets = [_][]const u8{
@@ -1326,7 +1477,7 @@ fn validateNuc11tnki5KernelProofSources(
     for (modern_input_sources) |source_check| {
         for (retired_legacy_input_snippets) |snippet| {
             if (std.mem.indexOf(u8, source_check.source, snippet) != null) {
-                try common.addError(errors, allocator, "NUC11TNKi5 input path must not reintroduce legacy kernel keyboard snippet in {s}: {s}", .{ source_check.label, snippet });
+                try common.addError(errors, allocator, "RNUC15CRSU7 input path must not reintroduce legacy kernel keyboard snippet in {s}: {s}", .{ source_check.label, snippet });
             }
         }
     }
@@ -1340,22 +1491,22 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_x2apic_interrupt_snippets) |snippet| {
         if (std.mem.indexOf(u8, isr_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must use x2APIC timer vectors with both legacy PICs masked: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 interrupt path must use x2APIC timer vectors with both legacy PICs masked: {s}", .{snippet});
         }
     }
     const required_compact_handler_dispatch_snippets = [_][]const u8{
         "exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler",
         "external_handlers: [external_handler_vectors.len]?InterruptHandler",
         "fn externalHandlerIndex(vector: usize) ?usize",
-        "const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 304",
+        "const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 320",
     };
     for (required_compact_handler_dispatch_snippets) |snippet| {
         if (std.mem.indexOf(u8, isr_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 interrupt dispatch must retain compact handler storage: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 interrupt dispatch must retain compact handler storage: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, isr_source, "custom_handlers: [idt.IDT_ENTRIES]") != null) {
-        try common.addError(errors, allocator, "NUC11TNKi5 interrupt dispatch must not restore a full-IDT function-pointer table", .{});
+        try common.addError(errors, allocator, "RNUC15CRSU7 interrupt dispatch must not restore a full-IDT function-pointer table", .{});
     }
     const retired_pic_surface_snippets = [_][]const u8{
         "PIC_EOI",
@@ -1371,17 +1522,18 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_pic_surface_snippets) |snippet| {
         if (std.mem.indexOf(u8, isr_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 interrupt path must not restore legacy PIC dispatch or IRQ stub surface: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 interrupt path must not restore legacy PIC dispatch or IRQ stub surface: {s}", .{snippet});
         }
     }
     const required_x2apic_stubs = [_][]const u8{
         "ISR_NOERRCODE 64",
         "ISR_NOERRCODE 67",
+        "ISR_NOERRCODE 112",
         "ISR_NOERRCODE 255",
     };
     for (required_x2apic_stubs) |snippet| {
         if (std.mem.indexOf(u8, interrupt_stubs_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 interrupt assembly must expose the x2APIC timer surface: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 interrupt assembly must expose the x2APIC timer surface: {s}", .{snippet});
         }
     }
     const required_interrupt_return_guard_snippets = [_][]const u8{
@@ -1403,7 +1555,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_irq_assembly_snippets) |snippet| {
         if (std.mem.indexOf(u8, interrupt_stubs_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 interrupt assembly must not restore legacy PIC IRQ dispatch: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 interrupt assembly must not restore legacy PIC IRQ dispatch: {s}", .{snippet});
         }
     }
     const required_tsc_deadline_timer_snippets = [_][]const u8{
@@ -1422,26 +1574,25 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_tsc_deadline_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, timer_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 timer must use invariant TSC-deadline delivery: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 timer must use invariant TSC-deadline delivery: {s}", .{snippet});
         }
     }
     const required_one_shot_scheduler_snippets = [_][]const u8{
         "timer.synchronize()",
-        "xhci_hw.servicePendingEvents()",
+        "xhci_driver_task.boundTaskId()",
         "session_manager.bindHardwareInput",
         "pollHardwareKeyboardReport",
-        "xhci_hw.pollKeyboardReport()",
+        "xhci_driver_task.pollKeyboardReport()",
         "hardwareInputProof",
-        "xhci_hw.inputProof()",
+        "xhci_driver_task.inputProof()",
         "session_manager.servicePendingInputWork(now_ticks)",
-        "xhci_hw.eventWorkPending()",
-        "xhci_hw.lifecyclePending()",
+        "xhci_driver_task.lifecyclePending()",
         "userspaceSchedulerHasReadyTasks",
         "timer.armSchedulerTick()",
         "timer.disarmSchedulerTick()",
         "x86.cli()",
         "x86.sti()",
-        "x86.hlt()",
+        "smp.idle()",
     };
     for (required_one_shot_scheduler_snippets) |snippet| {
         if (std.mem.indexOf(u8, native_profile_source, snippet) == null) {
@@ -1449,6 +1600,11 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_emulator_countdown_timer_snippets = [_][]const u8{
+        "TICKLESS_TSC_DEADLINE",
+        "X2APIC_TIMER_MODE_TSC_DEADLINE",
+        "IA32_TSC_DEADLINE_MSR",
+        "armSchedulerTick",
+        "disarmSchedulerTick",
         "X2APIC_TIMER_INITIAL_COUNT_MSR",
         "X2APIC_TIMER_CURRENT_COUNT_MSR",
         "X2APIC_TIMER_DIVIDE_CONFIG_MSR",
@@ -1458,7 +1614,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_emulator_countdown_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, timer_source, snippet) == null) {
-            try common.addError(errors, allocator, "QEMU software emulation must retain its isolated x2APIC countdown path: {s}", .{snippet});
+            try common.addError(errors, allocator, "tickless TSC-deadline timer must retain snippet: {s}", .{snippet});
         }
     }
     const required_accelerated_qemu_snippets = [_][]const u8{
@@ -1466,11 +1622,11 @@ fn validateNuc11tnki5KernelProofSources(
         "-c /dev/kvm",
         "QEMU_HARNESS_COMMAND+=(-accel",
         "printf '%s\\n' \"host\"",
-        "max,+x2apic,+pdpe1gb,tsc-frequency=2400000000",
+        "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lkgs,+lass,tsc-frequency=2400000000",
     };
     for (required_accelerated_qemu_snippets) |snippet| {
         if (std.mem.indexOf(u8, qemu_harness_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 QEMU validation must use hardware-backed x2APIC when KVM is available: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 QEMU validation must use hardware-backed x2APIC when KVM is available: {s}", .{snippet});
         }
     }
     const required_compact_kernel_boot_snippets = [_][]const u8{
@@ -1478,6 +1634,9 @@ fn validateNuc11tnki5KernelProofSources(
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
         "qemu_iso.addFileArg(boot_kernel)",
+        "scripts/build-efi-iso.sh",
+        "scripts/check-efi-image.sh",
+        "src/boot/cmdline-qemu.txt",
     };
     for (required_compact_kernel_boot_snippets) |snippet| {
         if (std.mem.indexOf(u8, kernel_build_source, snippet) == null) {
@@ -1490,8 +1649,52 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
         try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
     }
-    if (std.mem.indexOf(u8, production_grub_source, "qemu_software_cpu_fallback") != null) {
-        try common.addError(errors, allocator, "production boot configuration must not permit the software-emulator CPU fallback", .{});
+    if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
+        try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "addEfiStub") == null or
+        std.mem.indexOf(u8, kernel_build_source, ".os_tag = .uefi") == null)
+    {
+        try common.addError(errors, allocator, "kernel build must emit a native x86-64 UEFI stub", .{});
+    }
+    if (std.mem.indexOf(u8, efi_iso_source, "EFI/BOOT/BOOTX64.EFI") == null or
+        std.mem.indexOf(u8, efi_iso_source, "exitBootServices") != null)
+    {
+        try common.addError(errors, allocator, "production ISO builder must install BOOTX64.EFI", .{});
+    }
+    const required_efi_stub_snippets = [_][]const u8{
+        "NATIVE_EFI_LONG_MODE_ENTRY",
+        "DROPS_MULTIBOOT2_PROTECTED_MODE_ENTRY",
+        "exitBootServices",
+        "GraphicsOutput",
+        "acpi_20_table_guid",
+        "efi_elf.load",
+        "efi_handoff.encode",
+        "enterKernel",
+        "KERNEL_PATH",
+        "CMDLINE_PATH",
+        "preferredCommandLine",
+        "loadCommandLineFile",
+        "HANDOFF_MAX_ADDRESS",
+        "128 * 1024 * 1024",
+    };
+    for (required_efi_stub_snippets) |snippet| {
+        if (std.mem.indexOf(u8, efi_stub_source, snippet) == null) {
+            try common.addError(errors, allocator, "native EFI stub must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_efi_handoff_snippets = [_][]const u8{
+        "kindFromEfiMemoryType",
+        "SYNTHESIZES_MULTIBOOT2_HANDOFF",
+        "EXITS_BOOT_SERVICES",
+        "TAG_ACPI_NEW",
+        "TAG_EFI64_SYSTEM_TABLE",
+        "preferredCommandLine",
+    };
+    for (required_efi_handoff_snippets) |snippet| {
+        if (std.mem.indexOf(u8, efi_handoff_source, snippet) == null) {
+            try common.addError(errors, allocator, "EFI firmware handoff must retain snippet: {s}", .{snippet});
+        }
     }
     const required_ci_kvm_snippets = [_][]const u8{
         "Enable KVM acceleration when available",
@@ -1500,7 +1703,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_ci_kvm_snippets) |snippet| {
         if (std.mem.indexOf(u8, ci_setup_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 CI setup must expose KVM to QEMU jobs when the runner supports it: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 CI setup must expose KVM to QEMU jobs when the runner supports it: {s}", .{snippet});
         }
     }
     const retired_pit_timer_snippets = [_][]const u8{
@@ -1511,11 +1714,15 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_pit_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, timer_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 timer must not restore PIT programming: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 timer must not restore PIT programming: {s}", .{snippet});
         }
     }
     const required_modern_cpu_baseline_snippets = [_][]const u8{
         "x2apic",
+        "xsave",
+        "xsaves",
+        "cet_ibt",
+        "cet_ss",
         "tsc_deadline",
         "invariant_tsc",
         "tsc_frequency_hz",
@@ -1528,25 +1735,39 @@ fn validateNuc11tnki5KernelProofSources(
         "smep",
         "smap",
         "umip",
+        "pku",
+        "lass",
+        "fred",
+        "lkgs",
     };
     for (required_modern_cpu_baseline_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_baseline_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 CPU baseline must expose the modern timer and process-context contract: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 CPU baseline must expose the modern timer and process-context contract: {s}", .{snippet});
         }
     }
     const required_x86_pcid_snippets = [_][]const u8{
         "CR4_PCIDE",
         "CR4_PGE",
+        "CR4_OSXSAVE",
+        "CR4_CET",
         "CR3_NO_FLUSH",
         "pcidCr3Value",
         "writeCr3WithPcid",
         "invalidatePcid",
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
+        "enableXsaves",
+        "xsavesEnabled",
+        "enableCet",
+        "cetEnabled",
+        "enableCetOnApplicationProcessor",
         "globalPagesEnabled",
         "CR4_SMEP",
         "CR4_SMAP",
         "CR4_UMIP",
+        "CR4_PKE",
+        "CR4_LASS",
+        "CR4_FRED",
         "supervisorAccessPreventionEnabled",
         "allowSupervisorUserMemory",
         "forbidSupervisorUserMemory",
@@ -1555,7 +1776,15 @@ fn validateNuc11tnki5KernelProofSources(
         "IA32_LSTAR_MSR",
         "IA32_FMASK_MSR",
         "IA32_KERNEL_GS_BASE_MSR",
+        "IA32_FRED_CONFIG_MSR",
         "syscallExtensionEnabled",
+        "enablePku",
+        "enableLass",
+        "enableFred",
+        "fredEnabled",
+        "pkuEnabled",
+        "if (!pkuEnabled()) return",
+        "lassEnabled",
     };
     for (required_x86_pcid_snippets) |snippet| {
         if (std.mem.indexOf(u8, x86_source, snippet) == null) {
@@ -1586,14 +1815,44 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, kernel_build_source, "src/arch/x86/user_access.S") == null) {
         try common.addError(errors, allocator, "kernel build must include the x86 SMAP user-memory access assembly", .{});
     }
-    if (std.mem.indexOf(u8, interrupt_stubs_source, "isr_common_stub:\n    clac") == null) {
-        try common.addError(errors, allocator, "x86 interrupt entry must clear AC before entering kernel handlers", .{});
+    const required_xsaves_assembly_snippets = [_][]const u8{
+        "x86_write_xcr0",
+        "x86_read_xcr0",
+        "0x0f, 0x01, 0xd1",
+        "0x0f, 0x01, 0xd0",
+    };
+    for (required_xsaves_assembly_snippets) |snippet| {
+        if (std.mem.indexOf(u8, xsaves_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 XSAVES support must retain snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "src/arch/x86/xsaves.S") == null) {
+        try common.addError(errors, allocator, "kernel build must include the x86 XSAVES assembly", .{});
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "src/kernel/interrupts/fred64.S") == null) {
+        try common.addError(errors, allocator, "kernel build must include the FRED event-delivery assembly", .{});
+    }
+    if (std.mem.indexOf(u8, kernel_build_source, "src/boot/efi_stub.zig") == null or
+        std.mem.indexOf(u8, kernel_build_source, "addNativeEfiStub") == null)
+    {
+        try common.addError(errors, allocator, "kernel build must compile the native EFI long-mode stub", .{});
+    }
+    if (std.mem.indexOf(u8, interrupt_stubs_source, "isr_common_stub:") == null or
+        std.mem.indexOf(u8, interrupt_stubs_source, "endbr64") == null or
+        std.mem.indexOf(u8, interrupt_stubs_source, "clac") == null)
+    {
+        try common.addError(errors, allocator, "x86 interrupt entry must land on endbr64 and clear AC before entering kernel handlers", .{});
+    }
+    if (std.mem.indexOf(u8, interrupt_stubs_source, "xsaves") == null or
+        std.mem.indexOf(u8, interrupt_stubs_source, "xrstors") == null)
+    {
+        try common.addError(errors, allocator, "x86 interrupt entry must save compact extended state with XSAVES", .{});
     }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
         "ProcessContextMode",
-        "hardware_pcid",
         "software_flush",
+        "CetMode",
         "CR4_PGE",
         "globalPagesEnabled",
         "CR4_SMEP",
@@ -1602,6 +1861,12 @@ fn validateNuc11tnki5KernelProofSources(
         "supervisorAccessPreventionEnabled",
         "enableProcessContextIdentifiers",
         "processContextIdentifiersEnabled",
+        "enableXsaves",
+        "xsavesEnabled",
+        "enableCet",
+        "cetEnabled",
+        "enablePku",
+        "enableLass",
     };
     for (required_cpu_feature_pcid_snippets) |snippet| {
         if (std.mem.indexOf(u8, cpu_features_source, snippet) == null) {
@@ -1622,6 +1887,9 @@ fn validateNuc11tnki5KernelProofSources(
         "cpu_smap_enabled",
         "cpu_umip_enabled",
         "cpu_syscall_enabled",
+        "cpu_fred_enabled",
+        "cpu_pku_enabled",
+        "cpu_lass_enabled",
     };
     for (required_boot_process_context_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
@@ -1641,6 +1909,18 @@ fn validateNuc11tnki5KernelProofSources(
     for (required_boot_timer_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "CPU boot timer gate must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_boot_cet_snippets = [_][]const u8{
+        "hardware_cet",
+        "software_cet_fallback",
+        "required_features.cet_ibt = true",
+        "required_features.cet_ss = true",
+        ".deferred",
+    };
+    for (required_boot_cet_snippets) |snippet| {
+        if (std.mem.indexOf(u8, boot_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "CPU boot CET gate must retain snippet: {s}", .{snippet});
         }
     }
     const required_pcid_allocator_snippets = [_][]const u8{
@@ -1670,6 +1950,10 @@ fn validateNuc11tnki5KernelProofSources(
         "switchAddressSpace",
         "ENTRY_GLOBAL",
         "leafFlags(flags, global)",
+        "USES_RUNTIME_2M_PAGES",
+        "mapOwnedUserHugePage",
+        "LARGE_2M_PAGE_SIZE",
+        "ENTRY_LARGE_PAGE",
     };
     for (required_pcid_paging_snippets) |snippet| {
         if (std.mem.indexOf(u8, paging_source, snippet) == null) {
@@ -1737,6 +2021,7 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_syscall_configuration_snippets = [_][]const u8{
+        "FRED_ONLY_TRAPS",
         "USER_STAR_BASE_SELECTOR",
         "SYSCALL_RFLAGS_MASK",
         "IA32_GS_BASE_MSR",
@@ -1745,12 +2030,32 @@ fn validateNuc11tnki5KernelProofSources(
         "IA32_LSTAR_MSR",
         "IA32_FMASK_MSR",
         "EFER_SCE",
-        "setKernelStack",
+        "enableFred",
+        "setFredRsp0",
+        "fredEnabled",
         "syscallExtensionEnabled",
+        "setKernelStack",
+        "setActiveTaskId",
+        "currentActiveTaskId",
+        "setKernelPort",
     };
     for (required_syscall_configuration_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_source, snippet) == null) {
             try common.addError(errors, allocator, "native x86-64 syscall configuration must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_fred_entry_snippets = [_][]const u8{
+        "zigos_fred_entry",
+        "FRED_EVENT_TYPE_SYSCALL",
+        "xsaves",
+        "xrstors",
+        "call syscall_handler",
+        "call isrHandler",
+        "0xf2, 0x0f, 0x01, 0xca",
+    };
+    for (required_fred_entry_snippets) |snippet| {
+        if (std.mem.indexOf(u8, fred_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "native x86-64 FRED entry must retain snippet: {s}", .{snippet});
         }
     }
     const required_syscall_entry_snippets = [_][]const u8{
@@ -1758,14 +2063,32 @@ fn validateNuc11tnki5KernelProofSources(
         "swapgs",
         "CPU_KERNEL_STACK_TOP",
         "CPU_USER_STACK_POINTER",
-        "fxsave64",
+        "xsaves",
+        "xrstors",
+        "endbr64",
         "sysretq",
         "call syscall_handler",
         "call isrHandler",
+        "zigos_syscall_benchmark_user_start",
+        "syscall",
     };
     for (required_syscall_entry_snippets) |snippet| {
         if (std.mem.indexOf(u8, syscall_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "native x86-64 syscall entry must retain snippet: {s}", .{snippet});
+        }
+    }
+    if (std.mem.indexOf(u8, syscall_entry_source, "xorq %rdi") != null) {
+        try common.addError(errors, allocator, "legacy syscall entry must keep the userspace request pointer in %rdi", .{});
+    }
+    const scheduler_source = try common.readFileAlloc(allocator, io, "src/native/task/userspace_scheduler.zig", common.source_file_max_bytes);
+    const forbidden_scheduler_imports = [_][]const u8{
+        "policy/manifest.zig",
+        "session/service_catalog.zig",
+        "xhci_driver_task.zig",
+    };
+    for (forbidden_scheduler_imports) |snippet| {
+        if (std.mem.indexOf(u8, scheduler_source, snippet) != null) {
+            try common.addError(errors, allocator, "userspace scheduler must not import {s}", .{snippet});
         }
     }
     const required_sysret_gdt_snippets = [_][]const u8{
@@ -1829,7 +2152,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_permission_input_snippets) |snippet| {
         if (std.mem.indexOf(u8, permission_review_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 permission review must retain hardware xHCI input snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 permission review must retain hardware xHCI input snippet: {s}", .{snippet});
         }
     }
     const required_input_router_snippets = [_][]const u8{
@@ -1856,11 +2179,11 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_input_router_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_router_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 compositor input ownership must retain focused-router snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 compositor input ownership must retain focused-router snippet: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, input_router_source, "event_slots: [MAX_QUEUED_EVENTS]EventSlot =") != null) {
-        try common.addError(errors, allocator, "NUC11TNKi5 input event slots must not return to inline freestanding router storage", .{});
+        try common.addError(errors, allocator, "RNUC15CRSU7 input event slots must not return to inline freestanding router storage", .{});
     }
     const retired_input_router_telemetry_snippets = [_][]const u8{
         "pub const ServiceResult",
@@ -1886,7 +2209,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_input_router_telemetry_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_router_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 input router must not restore unobserved telemetry: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 input router must not restore unobserved telemetry: {s}", .{snippet});
         }
     }
     const required_input_decoder_snippets = [_][]const u8{
@@ -1898,7 +2221,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_input_decoder_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_driver_task_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must return bounded event batches: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 input decoder must return bounded event batches: {s}", .{snippet});
         }
     }
     const retired_input_decoder_snippets = [_][]const u8{
@@ -1914,7 +2237,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_input_decoder_snippets) |snippet| {
         if (std.mem.indexOf(u8, input_driver_task_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 input decoder must not restore queued state or duplicate telemetry: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 input decoder must not restore queued state or duplicate telemetry: {s}", .{snippet});
         }
     }
     const required_userspace_input_snippets = [_]struct {
@@ -1923,25 +2246,27 @@ fn validateNuc11tnki5KernelProofSources(
         snippet: []const u8,
     }{
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.input_recv)" },
-        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "mailbox_ptr.input_capability_id" },
+        .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "mailbox.input_capability_id = update.authorities.input_capability_id" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_disposition" },
         .{ .label = userspace_executor_path, .source = userspace_executor_source, .snippet = "last_yield_ui_revision" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "outcome == .wait_for_event" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "executionRemainsReady(outcome)" },
-        .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "ui_revision > slot.last_ui_state_revision" },
+        .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "ui_revision > accounting.last_ui_state_revision" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const INPUT_EVENTS_PER_DISPATCH: usize = 8" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput(comptime saves_documents: bool)" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = ".wait_for_event" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn parkUntilEvent()" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "makeHeader(.wait" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "recordInputEvent" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "publishUiState" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
-        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = abi.SURFACE_PRESENTATION_TEXT_BYTES" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = 512" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn modelForBundle" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state requests a save without claiming durability\"" },
     };
     for (required_userspace_input_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 userspace input delivery must retain snippet in {s}: {s}", .{ required.label, required.snippet });
+            try common.addError(errors, allocator, "RNUC15CRSU7 userspace input delivery must retain snippet in {s}: {s}", .{ required.label, required.snippet });
         }
     }
     const required_early_console_snippets = [_][]const u8{
@@ -1952,7 +2277,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_early_console_snippets) |snippet| {
         if (std.mem.indexOf(u8, console_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 early console must remain serial-backed: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 early console must remain serial-backed: {s}", .{snippet});
         }
     }
     const required_boot_handoff_snippets = [_][]const u8{
@@ -1962,10 +2287,12 @@ fn validateNuc11tnki5KernelProofSources(
         "capturedAcpi2Rsdp",
         "efi64SystemTableAddress",
         "zigos_multiboot_magic != MULTIBOOT2_BOOTLOADER_MAGIC",
+        "BOOT_IDENTITY_BYTES",
+        "128 * 1024 * 1024",
     };
     for (required_boot_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, handoff_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must remain Multiboot2-only: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 boot handoff must parse firmware memory map tags: {s}", .{snippet});
         }
     }
     const required_bootloader_load_contract_snippets = [_][]const u8{
@@ -1973,15 +2300,20 @@ fn validateNuc11tnki5KernelProofSources(
         "MULTIBOOT2_INFO_TAG_EFI64_SYSTEM_TABLE",
         "MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS",
         ".long _start",
+        "zigos_efi_entry",
+        "0x36D76289",
+        ".code64",
+        "call kernel_main",
     };
     for (required_bootloader_load_contract_snippets) |snippet| {
         if (std.mem.indexOf(u8, bootloader_source, snippet) == null) {
-            try common.addError(errors, allocator, "x86-64 bootloader must retain its explicit Multiboot2 entry contract: {s}", .{snippet});
+            try common.addError(errors, allocator, "x86-64 bootloader must retain its Multiboot2 and EFI entry contracts: {s}", .{snippet});
         }
     }
     const required_kernel_load_contract_snippets = [_][]const u8{
         "PHDRS",
         "kernel PT_LOAD FLAGS(6);",
+        "ENTRY(zigos_efi_entry)",
         "__kernel_start = .;",
         "__kernel_data_end = .;",
         "__kernel_end = .;",
@@ -2012,7 +2344,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_multiboot2_acpi_snippets) |snippet| {
         if (std.mem.indexOf(u8, multiboot2_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must retain the ACPI RSDP tag path: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 boot handoff must retain the ACPI RSDP tag path: {s}", .{snippet});
         }
     }
     const retired_multiboot2_acpi_snippets = [_][]const u8{
@@ -2022,7 +2354,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_multiboot2_acpi_snippets) |snippet| {
         if (std.mem.indexOf(u8, multiboot2_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must not restore the ACPI 1 compatibility tag: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 boot handoff must not restore the ACPI 1 compatibility tag: {s}", .{snippet});
         }
     }
     const required_acpi2_xsdt_snippets = [_][]const u8{
@@ -2035,7 +2367,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_acpi2_xsdt_snippets) |snippet| {
         if (std.mem.indexOf(u8, acpi_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 ACPI parser must require ACPI 2+ with XSDT entries: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 ACPI parser must require ACPI 2+ with XSDT entries: {s}", .{snippet});
         }
     }
     const retired_acpi_compatibility_snippets = [_][]const u8{
@@ -2046,7 +2378,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_acpi_compatibility_snippets) |snippet| {
         if (std.mem.indexOf(u8, acpi_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 ACPI parser must not restore RSDT or BIOS scanning compatibility: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 ACPI parser must not restore RSDT or BIOS scanning compatibility: {s}", .{snippet});
         }
     }
     const required_mapped_acpi_snippets = [_][]const u8{
@@ -2056,11 +2388,11 @@ fn validateNuc11tnki5KernelProofSources(
         "paging.mapKernelBorrowedPage",
         "acpi.xsdtEntryCount",
         "mcfg.segmentZeroAllocation",
-        "hardware_target.nuc11tnki5_hardware_fact_markers[2]",
+        "hardware_target.nuc15crsu7_hardware_fact_markers[2]",
     };
     for (required_mapped_acpi_snippets) |snippet| {
         if (std.mem.indexOf(u8, hardware_proof_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 firmware discovery must retain mapped ACPI table access: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 firmware discovery must retain mapped ACPI table access: {s}", .{snippet});
         }
     }
     const retired_hardware_acpi_compatibility_snippets = [_][]const u8{
@@ -2072,7 +2404,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_hardware_acpi_compatibility_snippets) |snippet| {
         if (std.mem.indexOf(u8, hardware_proof_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 firmware discovery must not restore BIOS ACPI scanning or RSDT fallback: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 firmware discovery must not restore BIOS ACPI scanning or RSDT fallback: {s}", .{snippet});
         }
     }
     const retired_boot_handoff_snippets = [_][]const u8{
@@ -2082,7 +2414,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (retired_boot_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, handoff_source, snippet) != null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 boot handoff must not restore legacy Multiboot1 parsing: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 boot handoff must not restore legacy Multiboot1 parsing: {s}", .{snippet});
         }
     }
     const required_apic_snippets = [_][]const u8{
@@ -2102,7 +2434,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_apic_snippets) |snippet| {
         if (std.mem.indexOf(u8, apic_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 APIC proof source must enforce hardware LAPIC timer snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 APIC proof source must enforce hardware LAPIC timer snippet: {s}", .{snippet});
         }
     }
     const required_crash_record_snippets = [_][]const u8{
@@ -2123,7 +2455,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_crash_record_snippets) |snippet| {
         if (std.mem.indexOf(u8, crash_record_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 crash persistence proof source must enforce hardware reboot-persistence snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 crash persistence proof source must enforce hardware reboot-persistence snippet: {s}", .{snippet});
         }
     }
     const required_fadt_snippets = [_][]const u8{
@@ -2145,7 +2477,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_fadt_snippets) |snippet| {
         if (std.mem.indexOf(u8, fadt_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 FADT suspend proof source must enforce hardware power-transition snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 FADT suspend proof source must enforce hardware power-transition snippet: {s}", .{snippet});
         }
     }
     const required_framebuffer_snippets = [_][]const u8{
@@ -2165,7 +2497,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_framebuffer_snippets) |snippet| {
         if (std.mem.indexOf(u8, framebuffer_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 framebuffer proof source must enforce hardware GOP scanout snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 framebuffer proof source must enforce hardware GOP scanout snippet: {s}", .{snippet});
         }
     }
     const required_update_rollback_snippets = [_][]const u8{
@@ -2186,7 +2518,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_update_rollback_snippets) |snippet| {
         if (std.mem.indexOf(u8, hardware_target_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 update rollback proof source must enforce hardware power-cycle snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 update rollback proof source must enforce hardware power-cycle snippet: {s}", .{snippet});
         }
     }
     const required_first_target_telemetry_snippets = [_][]const u8{
@@ -2203,7 +2535,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_first_target_telemetry_snippets) |snippet| {
         if (std.mem.indexOf(u8, first_target_telemetry_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 first-target telemetry recorder must reject stale source sequence snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 first-target telemetry recorder must reject stale source sequence snippet: {s}", .{snippet});
         }
     }
     const required_platform_policy_signal_snippets = [_][]const u8{
@@ -2220,7 +2552,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_platform_policy_signal_snippets) |snippet| {
         if (std.mem.indexOf(u8, platform_policy_signals_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 platform telemetry provider must reject stale reader snapshot snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 platform telemetry provider must reject stale reader snapshot snippet: {s}", .{snippet});
         }
     }
     const required_xhci_snippets = [_][]const u8{
@@ -2340,7 +2672,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_xhci_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 xHCI proof source must enforce hardware-owned event-ring snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 xHCI proof source must enforce hardware-owned event-ring snippet: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, xhci_source, "ports: [256]?PortProtocol") != null) {
@@ -2439,7 +2771,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_xhci_hw_snippets) |snippet| {
         if (std.mem.indexOf(u8, xhci_hw_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 xHCI hardware probe must retain read-only capability validation snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 xHCI hardware probe must retain read-only capability validation snippet: {s}", .{snippet});
         }
     }
     if (std.mem.indexOf(u8, xhci_hw_source, "var ports: [256]PortRuntimeState") != null) {
@@ -2459,7 +2791,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_nvme_snippets) |snippet| {
         if (std.mem.indexOf(u8, nvme_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 NVMe proof source must enforce hardware-owned completion snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 NVMe proof source must enforce hardware-owned completion snippet: {s}", .{snippet});
         }
     }
     const required_i225_snippets = [_][]const u8{
@@ -2477,7 +2809,7 @@ fn validateNuc11tnki5KernelProofSources(
     };
     for (required_i225_snippets) |snippet| {
         if (std.mem.indexOf(u8, i225_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 I225 proof source must enforce hardware-owned descriptor-ring snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 I225 proof source must enforce hardware-owned descriptor-ring snippet: {s}", .{snippet});
         }
     }
 }
@@ -2497,42 +2829,42 @@ fn validateNuc11tnki5MarkerFile(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const marker_path = "spec/hardware/nuc11tnki5-required-markers.txt";
+    const marker_path = "spec/hardware/nuc15crsu7-required-markers.txt";
     if (!common.pathExists(io, marker_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing: {s}", .{marker_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 marker file is missing: {s}", .{marker_path});
         return;
     }
     const source = try common.readFileAlloc(allocator, io, marker_path, common.source_file_max_bytes);
     for (FIRST_HARDWARE_TARGET_REQUIRED_MARKERS) |marker| {
         if (!markerFileHasActiveLine(source, marker)) {
-            try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required marker: {s}", .{marker});
+            try common.addError(errors, allocator, "RNUC15CRSU7 marker file is missing required marker: {s}", .{marker});
         }
     }
     for (FIRST_HARDWARE_TARGET_REQUIRED_FACT_MARKERS) |marker| {
         if (!markerFileHasActiveLine(source, marker)) {
-            try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required hardware fact marker: {s}", .{marker});
+            try common.addError(errors, allocator, "RNUC15CRSU7 marker file is missing required hardware fact marker: {s}", .{marker});
         }
     }
     for (FIRST_HARDWARE_TARGET_REQUIRED_BOOTED_PROOF_MARKERS) |marker| {
         if (!markerFileHasActiveLine(source, marker)) {
-            try common.addError(errors, allocator, "NUC11TNKi5 marker file is missing required booted proof marker: {s}", .{marker});
+            try common.addError(errors, allocator, "RNUC15CRSU7 marker file is missing required booted proof marker: {s}", .{marker});
         }
     }
 
-    const production_marker_path = "spec/hardware/nuc11tnki5-production-required-markers.txt";
+    const production_marker_path = "spec/hardware/nuc15crsu7-production-required-markers.txt";
     if (!common.pathExists(io, production_marker_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 production marker file is missing: {s}", .{production_marker_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 production marker file is missing: {s}", .{production_marker_path});
         return;
     }
     const production_source = try common.readFileAlloc(allocator, io, production_marker_path, common.source_file_max_bytes);
     for (FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS) |marker| {
         if (!markerFileHasActiveLine(production_source, marker)) {
-            try common.addError(errors, allocator, "NUC11TNKi5 production marker file is missing required marker: {s}", .{marker});
+            try common.addError(errors, allocator, "RNUC15CRSU7 production marker file is missing required marker: {s}", .{marker});
         }
     }
     for (FIRST_HARDWARE_TARGET_FORBIDDEN_PRODUCTION_MARKERS) |marker| {
         if (markerFileHasActiveLine(production_source, marker)) {
-            try common.addError(errors, allocator, "NUC11TNKi5 production marker file must not require unreachable exhaustive marker: {s}", .{marker});
+            try common.addError(errors, allocator, "RNUC15CRSU7 production marker file must not require unreachable exhaustive marker: {s}", .{marker});
         }
     }
 }
@@ -2542,9 +2874,9 @@ fn validateNuc11tnki5ProofPreparation(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const prep_path = "scripts/prepare-nuc11tnki5-hardware-proof.sh";
+    const prep_path = "scripts/prepare-nuc15crsu7-hardware-proof.sh";
     if (!common.pathExists(io, prep_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 proof preparation script is missing: {s}", .{prep_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 proof preparation script is missing: {s}", .{prep_path});
         return;
     }
     const source = try common.readFileAlloc(allocator, io, prep_path, common.source_file_max_bytes);
@@ -2555,17 +2887,17 @@ fn validateNuc11tnki5ProofPreparation(
         "zig-out/bin/kernel-zigos-native-verification.elf",
         "--nonce",
         "ZIGOS_HARDWARE_PROOF_NONCE",
-        "zigos-nuc11tnki5-proof-v2",
+        "zigos-nuc15crsu7-proof-v2",
         "capture_nonce=$CAPTURE_NONCE",
         "device_identity=device-identity.txt",
         "production_serial_log=production-serial.log",
         "production_boot_medium=build/os.iso",
         "production_boot_kernel=zig-out/bin/kernel-zigos-native.elf",
-        "production_required_markers=spec/hardware/nuc11tnki5-production-required-markers.txt",
+        "production_required_markers=spec/hardware/nuc15crsu7-production-required-markers.txt",
         "verification_serial_log=verification-serial.log",
         "verification_boot_medium=build/os-verification.iso",
         "verification_boot_kernel=zig-out/bin/kernel-zigos-native-verification.elf",
-        "verification_required_markers=spec/hardware/nuc11tnki5-required-markers.txt",
+        "verification_required_markers=spec/hardware/nuc15crsu7-required-markers.txt",
         "cycle_manifest=cycle-manifest.txt",
         "production_quote=production-attestation.quote",
         "production_signature=production-attestation.sig",
@@ -2584,7 +2916,7 @@ fn validateNuc11tnki5ProofPreparation(
         "cycle-manifest.txt",
         "operator-metadata-markers.txt",
         "$TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE",
-        "$TARGET_PREFIX:BOARD_SKU:NUC11TNKi5",
+        "$TARGET_PREFIX:BOARD_SKU:RNUC15CRSU7",
         "$TARGET_PREFIX:PROOF_MANIFEST:RECORDED",
         "$TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED",
         "$TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED",
@@ -2592,18 +2924,18 @@ fn validateNuc11tnki5ProofPreparation(
     };
     for (required_snippets) |snippet| {
         if (std.mem.indexOf(u8, source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 proof preparation script must emit metadata marker snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 proof preparation script must emit metadata marker snippet: {s}", .{snippet});
         }
     }
 
-    const statement_writer_path = "scripts/write-nuc11tnki5-capture-statement.sh";
+    const statement_writer_path = "scripts/write-nuc15crsu7-capture-statement.sh";
     if (!common.pathExists(io, statement_writer_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 capture-statement writer is missing: {s}", .{statement_writer_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 capture-statement writer is missing: {s}", .{statement_writer_path});
         return;
     }
     const statement_source = try common.readFileAlloc(allocator, io, statement_writer_path, common.source_file_max_bytes);
     const statement_snippets = [_][]const u8{
-        "format=zigos-nuc11tnki5-capture-statement-v1",
+        "format=zigos-nuc15crsu7-capture-statement-v1",
         "capture_nonce=$nonce",
         "device_identity_sha256=",
         "production_serial_sha256=",
@@ -2626,7 +2958,7 @@ fn validateNuc11tnki5ProofPreparation(
     };
     for (statement_snippets) |snippet| {
         if (std.mem.indexOf(u8, statement_source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 capture-statement writer must bind snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 capture-statement writer must bind snippet: {s}", .{snippet});
         }
     }
 }
@@ -2636,14 +2968,14 @@ fn validateNuc11tnki5ProofChecker(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const checker_path = "scripts/check-nuc11tnki5-hardware-proof.sh";
+    const checker_path = "scripts/check-nuc15crsu7-hardware-proof.sh";
     if (!common.pathExists(io, checker_path)) {
-        try common.addError(errors, allocator, "NUC11TNKi5 proof checker is missing: {s}", .{checker_path});
+        try common.addError(errors, allocator, "RNUC15CRSU7 proof checker is missing: {s}", .{checker_path});
         return;
     }
     const source = try common.readFileAlloc(allocator, io, checker_path, common.source_file_max_bytes);
     const required_snippets = [_][]const u8{
-        "zigos-nuc11tnki5-proof-v2",
+        "zigos-nuc15crsu7-proof-v2",
         "proof-manifest.txt",
         "device-identity.txt",
         "production-serial.log",
@@ -2663,7 +2995,7 @@ fn validateNuc11tnki5ProofChecker(
         "trusted verifier executable digest does not match",
         "trusted hardware verifier must be obtained independently of the proof bundle and artifact root",
         "release verifier must be obtained independently of the proof bundle and artifact root",
-        "format=zigos-nuc11tnki5-capture-statement-v1",
+        "format=zigos-nuc15crsu7-capture-statement-v1",
         "write_expected_statement",
         "production_serial_sha256=",
         "verification_serial_sha256=",
@@ -2679,8 +3011,8 @@ fn validateNuc11tnki5ProofChecker(
         "verification_quote_sha256=",
         "verification_signature_sha256=",
         "capture statement is not the canonical statement recomputed",
-        "format=zigos-nuc11tnki5-cycle-manifest-v1",
-        "zigos-nuc11tnki5-cycle-log-v1",
+        "format=zigos-nuc15crsu7-cycle-manifest-v1",
+        "zigos-nuc15crsu7-cycle-log-v1",
         "cycle manifest is malformed, non-canonical, out of order, non-contiguous, or contains duplicate evidence",
         "cycles directory must contain exactly the logs named",
         "cycle log digest mismatch",
@@ -2706,7 +3038,7 @@ fn validateNuc11tnki5ProofChecker(
         "ZIGOS:TASK:SESSION_READY",
         "require_marker_before",
         "EVIDENCE_SOURCE:REAL_HARDWARE",
-        "BOARD_SKU:NUC11TNKi5",
+        "BOARD_SKU:RNUC15CRSU7",
         "APIC_TIMER_INTERRUPT:OBSERVED",
         "FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
         "XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
@@ -2735,7 +3067,7 @@ fn validateNuc11tnki5ProofChecker(
     };
     for (required_snippets) |snippet| {
         if (std.mem.indexOf(u8, source, snippet) == null) {
-            try common.addError(errors, allocator, "NUC11TNKi5 proof checker must enforce snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "RNUC15CRSU7 proof checker must enforce snippet: {s}", .{snippet});
         }
     }
 }
@@ -3019,7 +3351,7 @@ fn validateStorageModernOnlyTrack(
     const driver_port_path = "src/native/drivers/bootstrap_driver_port.zig";
     const driver_port_source = try readRequiredSource(allocator, io, errors, driver_port_path) orelse return;
     const driver_port_snippets = [_][]const u8{
-        "attachPublishedStorageBackend(publication, publication.backend.?)",
+        "attachPublishedStorageBackend(publication, backend)",
         "storagePublicationMatchesTargetNvme",
         "storage_volume.attachNvmePciBackend(backend)",
         "StorageControllerSession",
@@ -3070,7 +3402,7 @@ fn validateStorageModernOnlyTrack(
     const checkpoint_source_path = "src/native/storage/storage_service_checkpoint.zig";
     const checkpoint_source = try readRequiredSource(allocator, io, errors, checkpoint_source_path) orelse return;
     const shared_root_volume_snippets = [_][]const u8{
-        "const shares_root_volume = builtin.target.os.tag == .freestanding and @hasDecl(root, \"storage_volume\")",
+        "const shares_root_volume = builtin.target.os.tag == .freestanding",
         "const CheckpointVolume = if (shares_root_volume) void else storage_volume.Volume",
         "return storage_volume.defaultVolume()",
         "if (comptime !shares_root_volume)",
@@ -3556,7 +3888,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 9",
+        "pub const ABI_VERSION: u16 = 10",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -3618,8 +3950,8 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = endpoint_path, .source = endpoint_source, .snippet = "pub fn initializeAllocated(self: *Table) void" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "pub const HEAP_BACKED_ENDPOINT_TABLE_ON_FREESTANDING = true" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const EndpointTableBacking = if (heap_backed_endpoint_table) ?*endpoint_mod.Table else endpoint_mod.Table" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(endpoint_mod.Table)) orelse return error.NoSpaceLeft" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "kernel_memory.kfree(@ptrCast(table))" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const table = table_backing.alloc(endpoint_mod.Table) orelse return error.NoSpaceLeft" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "table_backing.free(endpoint_mod.Table, table)" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.kernel_context.ensureEndpointTable() catch" },
     };
     for (endpoint_table_storage_snippets) |required| {
@@ -3638,8 +3970,8 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_ux_path, .source = native_ux_source, .snippet = "pub fn initializeAllocated(self: *Controller) void" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "pub const HEAP_BACKED_REVIEW_UX_CONTROLLER_ON_FREESTANDING = true" },
         .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const ReviewUxControllerBacking = if (heap_backed_review_ux_controller) ?*native_ux.Controller else native_ux.Controller" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const allocation = kernel_memory.kmalloc(@sizeOf(native_ux.Controller)) orelse return error.NoSpaceLeft" },
-        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "kernel_memory.kfree(@ptrCast(controller))" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "const controller = table_backing.alloc(native_ux.Controller) orelse return error.NoSpaceLeft" },
+        .{ .path = session_manager_contexts_path, .source = session_manager_contexts_source, .snippet = "table_backing.free(native_ux.Controller, controller)" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "self.recovery_context.releaseReviewUxController()" },
         .{ .path = booted_evidence_path, .source = booted_evidence_source, .snippet = "manager.reviewUxControllerPtr() catch" },
     };
@@ -3658,9 +3990,10 @@ fn validateUserspaceDriverDataPathTrack(
     }{
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "pub fn copyUserSlice(" },
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user slice copies enforce source and destination bounds" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer)" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "if (request.payload.len != 0 and !dispatch.validateUserRange(" },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks)" },
+        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "ipc_ring.pushRecord(peer.data_ring, record)" },
+        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "x86.allowSupervisorUserMemory()" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
     };
     for (protected_endpoint_send_snippets) |required| {
@@ -3678,14 +4011,14 @@ fn validateUserspaceDriverDataPathTrack(
         source: []const u8,
         snippet: []const u8,
     }{
-        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SURFACE_PRESENTATION_TEXT_BYTES: usize = 512" },
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true" },
         .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const SurfacePresentation = ex" ++ "tern struct" },
         .{ .path = component_port_path, .source = component_port_source, .snippet = "pub fn surfacePresent(" },
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.surface_present" },
         .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
-        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 7" },
-        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 224" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 8" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 256" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "heartbeat_increment: u32 = 1" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.surface_present)" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = ".heartbeat_increment = update.heartbeat_increment" },
@@ -3975,7 +4308,7 @@ fn validateNativeOnlyLaunchTrack(
         "validateGeneratedArtifact(artifact)",
         "bundle.signature = try userspace_manifest_signing.signBundle(bundle)",
         "catalog.registerBuildValidatedArtifact",
-        "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session-manager\").?.embedsElf())",
+        "try std.testing.expect(catalog.findByBundleId(\"zigos.system.session\").?.embedsElf())",
     };
     for (required_boot_registry_snippets) |snippet| {
         if (std.mem.indexOf(u8, boot_registry_source, snippet) == null) {
@@ -4221,10 +4554,10 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
     const incomplete_hardware_target_json =
         \\{
         \\  "first_hardware_target": {
-        \\    "id": "intel-nuc11tnki5",
+        \\    "id": "asus-nuc15crsu7",
         \\    "vendor": "Intel",
-        \\    "product": "NUC 11 Pro Kit",
-        \\    "sku": "NUC11TNKi5",
+        \\    "product": "NUC 15 Pro Mini PC",
+        \\    "sku": "RNUC15CRSU7",
         \\    "status": "hardware_required",
         \\    "selection_reason": "self-test",
         \\    "boot_medium": "UEFI",
@@ -4232,8 +4565,8 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
         \\    "required_subsystems": ["uefi_boot"],
         \\    "reference_artifacts": [
         \\      "src/native/platform/hardware_target.zig",
-        \\      "spec/hardware/nuc11tnki5-required-markers.txt",
-        \\      "scripts/check-nuc11tnki5-hardware-proof.sh"
+        \\      "spec/hardware/nuc15crsu7-required-markers.txt",
+        \\      "scripts/check-nuc15crsu7-hardware-proof.sh"
         \\    ],
         \\    "qemu_preflight_commands": ["./scripts/zig.sh build iso"],
         \\    "hardware_exit_criteria": ["self-test"],
@@ -4304,11 +4637,11 @@ test "synthetic userspace marker gate accepts model-only marker" {
 
 test "hardware marker lookup ignores commented requirements" {
     const source =
-        "# ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS\n" ++
-        "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS\n";
+        "# ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:UEFI_BOOT:PASS\n" ++
+        "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_TABLES:PASS\n";
 
-    try std.testing.expect(!markerFileHasActiveLine(source, "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:UEFI_BOOT:PASS"));
-    try std.testing.expect(markerFileHasActiveLine(source, "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5:ACPI_TABLES:PASS"));
+    try std.testing.expect(!markerFileHasActiveLine(source, "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:UEFI_BOOT:PASS"));
+    try std.testing.expect(markerFileHasActiveLine(source, "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7:ACPI_TABLES:PASS"));
 }
 
 test "hardware marker lookup requires a complete active line" {

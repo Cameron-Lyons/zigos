@@ -9,12 +9,16 @@ const timer = @import("../timer/timer.zig");
 const intel_i225_hw = @import("../drivers/intel_i225_hw.zig");
 const nvme_hw = @import("../drivers/nvme_hw.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
+const smp = @import("../smp.zig");
+const event_wake = @import("../event_wake.zig");
+const x86 = @import("../../arch/x86.zig");
 
 const GateHandler = *const fn () callconv(.c) void;
 
 const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
+const DEVICE_NOT_AVAILABLE_VECTOR: u8 = 7;
 const PAGE_FAULT_VECTOR: u32 = 14;
 const USERSPACE_YIELD_VECTOR: u8 = 129;
 const REQUESTED_PRIVILEGE_LEVEL_MASK: usize = 0x3;
@@ -60,6 +64,7 @@ extern fn isr64() void;
 extern fn isr65() void;
 extern fn isr66() void;
 extern fn isr67() void;
+extern fn isr112() void;
 extern fn isr255() void;
 
 const exception_stubs = [_]GateHandler{
@@ -163,6 +168,10 @@ pub export fn isrHandler(regs: *Registers) void {
     interrupt_context.enter();
     defer interrupt_context.leave();
     const vector = interruptVector(regs);
+    if (vector == DEVICE_NOT_AVAILABLE_VECTOR) {
+        x86.clearTaskSwitched();
+        return;
+    }
     if (handlerForVector(vector)) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
@@ -182,15 +191,22 @@ pub export fn isrHandler(regs: *Registers) void {
 pub const InterruptFrame = Registers;
 pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
+var timer_preemption: ?InterruptHandler = null;
+
+pub fn setTimerPreemption(handler: InterruptHandler) void {
+    timer_preemption = handler;
+}
+
 const external_handler_vectors = [_]u8{
     timer.INTERRUPT_VECTOR,
     intel_i225_hw.INTERRUPT_VECTOR,
     nvme_hw.INTERRUPT_VECTOR,
     xhci_hw.INTERRUPT_VECTOR,
+    smp.TLB_IPI_VECTOR,
     USERSPACE_YIELD_VECTOR,
     timer.SPURIOUS_VECTOR,
 };
-const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 304;
+const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 320;
 
 var exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler = [_]?InterruptHandler{null} ** EXCEPTION_VECTOR_COUNT;
 var external_handlers: [external_handler_vectors.len]?InterruptHandler = [_]?InterruptHandler{null} ** external_handler_vectors.len;
@@ -241,6 +257,8 @@ pub fn init() void {
     registerHandler(nvme_hw.INTERRUPT_VECTOR, nvmeInterrupt);
     setKernelGate(xhci_hw.INTERRUPT_VECTOR, &isr67);
     registerHandler(xhci_hw.INTERRUPT_VECTOR, xhciInterrupt);
+    setKernelGate(smp.TLB_IPI_VECTOR, &isr112);
+    registerHandler(smp.TLB_IPI_VECTOR, tlbIpiInterrupt);
     setKernelGate(timer.SPURIOUS_VECTOR, &isr255);
     registerHandler(timer.SPURIOUS_VECTOR, spuriousInterrupt);
 
@@ -255,20 +273,30 @@ fn doubleFaultInterrupt(frame: *InterruptFrame) void {
     );
 }
 
-fn timerInterrupt(_: *InterruptFrame) void {
+fn timerInterrupt(frame: *InterruptFrame) void {
     timer.handleInterrupt();
+    event_wake.raise(.timer);
+    event_wake.raise(.scheduler);
+    if (timer_preemption) |hook| hook(frame);
 }
 
 fn i225Interrupt(_: *InterruptFrame) void {
     intel_i225_hw.handleInterrupt();
+    event_wake.raise(.network);
 }
 
 fn nvmeInterrupt(_: *InterruptFrame) void {
     nvme_hw.handleInterrupt();
+    event_wake.raise(.nvme);
 }
 
 fn xhciInterrupt(_: *InterruptFrame) void {
     xhci_hw.handleInterrupt();
+    event_wake.raise(.xhci);
+}
+
+fn tlbIpiInterrupt(_: *InterruptFrame) void {
+    smp.handleTlbIpi();
 }
 
 fn spuriousInterrupt(_: *InterruptFrame) void {

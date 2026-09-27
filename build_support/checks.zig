@@ -77,9 +77,9 @@ pub fn addCheckSteps(
     const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
     const hardware_proof_checker_cmd = b.addSystemCommand(&.{
         "bash",
-        "scripts/test-nuc11tnki5-hardware-proof-checker.sh",
+        "scripts/test-nuc15crsu7-hardware-proof-checker.sh",
     });
-    const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the NUC11TNKi5 proof-bundle checker with synthetic pass/fail fixtures");
+    const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the RNUC15CRSU7 proof-bundle checker with synthetic pass/fail fixtures");
     hardware_proof_checker_step.dependOn(&hardware_proof_checker_cmd.step);
 
     const prod_readiness_step = b.step("prod-readiness", "Validate production-readiness tracking and the secure-by-design release gate");

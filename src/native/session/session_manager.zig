@@ -135,6 +135,10 @@ pub fn servicePendingInputWork(now_ticks: u64) usize {
     return default_manager.servicePendingInputWork(now_ticks);
 }
 
+pub fn wakeUserspaceTask(task_id: u64, now_ticks: u64) bool {
+    return default_manager.wakeUserspaceTask(task_id, now_ticks);
+}
+
 pub fn networkWorkPending() bool {
     return default_manager.networkWorkPending();
 }

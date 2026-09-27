@@ -13,6 +13,11 @@ const TimeQueryRequest = extern struct {
     authority_capability_id: u64,
 };
 
+const WaitRequest = extern struct {
+    header: abi.RequestHeader,
+    authority_capability_id: u64,
+};
+
 const ResourceQueryRequest = extern struct {
     header: abi.RequestHeader,
     authority_capability_id: u64,
@@ -49,6 +54,7 @@ const EndpointConnectRequest = extern struct {
 
 const EndpointSendRequest = struct {
     header: abi.RequestHeader,
+    correlation_id: u64 = 0,
     endpoint_capability_id: u64,
     payload: []const u8,
     reply_endpoint_id: u64 = 0,
@@ -71,7 +77,7 @@ const EndpointCloseRequest = extern struct {
 
 pub fn closeEndpoint(endpoint_capability_id: u64) abi.SyscallStatus {
     var request = EndpointCloseRequest{
-        .header = makeHeader(.endpoint_close, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .header = makeHeader(.endpoint_close, zigos_userspace_bootstrap.task_id),
         .endpoint_capability_id = endpoint_capability_id,
     };
     return trapCallNoResponse(&request);
@@ -87,7 +93,11 @@ const SurfacePresentRequest = struct {
     header: abi.RequestHeader,
     presentation_capability_id: u64,
     presenter_task_id: u64,
-    presentation: abi.SurfacePresentation,
+    surface_id: u64,
+    fence: u64,
+    buffer_object_id: u64,
+    buffer_offset: u32,
+    buffer_bytes: u32,
 };
 
 const INPUT_EVENTS_PER_DISPATCH: usize = 8;
@@ -127,6 +137,7 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
         }
 
         extern fn syscall3_asm(
+            opcode: usize,
             request_addr: usize,
             response_addr: usize,
             response_len: usize,
@@ -140,13 +151,13 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
         extern fn zigos_probe_nx(target: usize) callconv(.c) void;
         extern fn zigos_probe_gp() callconv(.c) void;
 
-        fn call(request_addr: usize, response_addr: usize, response_len: usize) struct {
+        fn call(opcode: abi.NativeOperation, request_addr: usize, response_addr: usize, response_len: usize) struct {
             status: abi.SyscallStatus,
             bytes_written: u32,
             denial_reason: abi.DenialReason,
         } {
             var outcome = Outcome{ .status = @intFromEnum(abi.SyscallStatus.internal_error), .bytes_written = 0, .denial_reason = 0 };
-            _ = syscall3_asm(request_addr, response_addr, response_len, &outcome);
+            _ = syscall3_asm(@intFromEnum(opcode), request_addr, response_addr, response_len, &outcome);
             return .{
                 .status = @enumFromInt(outcome.status),
                 .bytes_written = outcome.bytes_written,
@@ -158,11 +169,12 @@ else
     struct {
         fn zigos_probe_gp() void {}
 
-        fn call(_: usize, _: usize, _: usize) struct {
+        fn call(opcode: abi.NativeOperation, _: usize, _: usize, _: usize) struct {
             status: abi.SyscallStatus,
             bytes_written: u32,
             denial_reason: abi.DenialReason,
         } {
+            _ = opcode;
             return .{ .status = .unavailable, .bytes_written = 0, .denial_reason = .none };
         }
     };
@@ -426,6 +438,7 @@ fn runGeneralProtectionIsolationProbe() void {
 fn invalidSyscallPointerStatus() abi.SyscallStatus {
     var response = abi.TimeQueryResponse{ .now_ticks = 0 };
     return freestanding_syscall.call(
+        .time_query,
         mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR,
         @intFromPtr(&response),
         @sizeOf(abi.TimeQueryResponse),
@@ -435,7 +448,7 @@ fn invalidSyscallPointerStatus() abi.SyscallStatus {
 fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = abi.TimeQueryResponse{ .now_ticks = 0 };
     var request = TimeQueryRequest{
-        .header = makeHeader(.time_query, nextCorrelationId(), task_id),
+        .header = makeHeader(.time_query, task_id),
         .authority_capability_id = authority_capability_id,
     };
     if (trapCall(&request, &response) != .success) return false;
@@ -443,10 +456,22 @@ fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.Resource
     return true;
 }
 
+fn parkUntilEvent() void {
+    const authority = zigos_userspace_bootstrap.authority_capability_id;
+    const task_id = zigos_userspace_bootstrap.task_id;
+    if (authority == 0 or task_id == 0) return;
+    var response = std.mem.zeroes(abi.BoolResponse);
+    var request = WaitRequest{
+        .header = makeHeader(.wait, task_id),
+        .authority_capability_id = authority,
+    };
+    _ = trapCall(&request, &response);
+}
+
 fn queryResource(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = std.mem.zeroes(abi.ResourceDescriptor);
     var request = ResourceQueryRequest{
-        .header = makeHeader(.resource_query, nextCorrelationId(), task_id),
+        .header = makeHeader(.resource_query, task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
@@ -458,7 +483,7 @@ fn queryResource(authority_capability_id: u64, task_id: u64, mask: *mailbox.Reso
 fn queryAccounting(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = std.mem.zeroes(abi.AccountingDescriptor);
     var request = AccountingQueryRequest{
-        .header = makeHeader(.accounting_query, nextCorrelationId(), task_id),
+        .header = makeHeader(.accounting_query, task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
     };
@@ -476,13 +501,14 @@ fn endpointCreate(
 ) ?abi.EndpointCreateResponse {
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
     var request = EndpointCreateRequest{
-        .header = makeHeader(.endpoint_create, nextCorrelationId(), task_id),
+        .header = makeHeader(.endpoint_create, task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = task_id,
         .label = label,
         .flags = flags,
     };
     const result = freestanding_syscall.call(
+        .endpoint_create,
         @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(@TypeOf(response)),
@@ -505,7 +531,7 @@ fn endpointConnect(
 ) ?abi.EndpointDescriptor {
     var response = std.mem.zeroes(abi.EndpointDescriptor);
     var request = EndpointConnectRequest{
-        .header = makeHeader(.endpoint_connect, nextCorrelationId(), zigos_userspace_bootstrap.task_id),
+        .header = makeHeader(.endpoint_connect, zigos_userspace_bootstrap.task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
         .peer_endpoint_id = peer_endpoint_id,
@@ -517,7 +543,8 @@ fn endpointConnect(
 
 fn endpointSend(endpoint_capability_id: u64, payload: []const u8, reply_endpoint_id: u64, correlation_id: u64) bool {
     var request = EndpointSendRequest{
-        .header = makeHeader(.endpoint_send, correlation_id, zigos_userspace_bootstrap.task_id),
+        .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
+        .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
         .reply_endpoint_id = reply_endpoint_id,
@@ -529,7 +556,7 @@ fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResu
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
     var request = EndpointRecvRequest{
-        .header = makeHeader(.endpoint_recv, nextCorrelationId(), task_id),
+        .header = makeHeader(.endpoint_recv, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = task_id,
         .payload_out = &received.payload,
@@ -545,7 +572,7 @@ fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResu
 fn inputRecv(input_capability_id: u64, task_id: u64) ?abi.InputRecvResponse {
     var response = std.mem.zeroes(abi.InputRecvResponse);
     var request = InputRecvRequest{
-        .header = makeHeader(.input_recv, nextCorrelationId(), task_id),
+        .header = makeHeader(.input_recv, task_id),
         .input_capability_id = input_capability_id,
         .receiver_task_id = task_id,
     };
@@ -565,10 +592,14 @@ fn surfacePresent(
 ) SurfacePresentOutcome {
     var response = std.mem.zeroes(abi.BoolResponse);
     var request = SurfacePresentRequest{
-        .header = makeHeader(.surface_present, nextCorrelationId(), task_id),
+        .header = makeHeader(.surface_present, task_id),
         .presentation_capability_id = presentation_capability_id,
         .presenter_task_id = task_id,
-        .presentation = presentation,
+        .surface_id = presentation.surface_id,
+        .fence = presentation.revision,
+        .buffer_object_id = presentation.buffer_object_id,
+        .buffer_offset = presentation.buffer_offset,
+        .buffer_bytes = presentation.buffer_bytes,
     };
     const status = trapCall(&request, &response);
     return .{
@@ -608,7 +639,7 @@ fn initializeUiState(comptime bundle_id: []const u8, comptime contract_flags: u3
 fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor, comptime saves_documents: bool) bool {
     if (!applyInputEvent(state, &ui_state, event)) return false;
     if (comptime saves_documents) {
-        if (abi.inputEventKind(event.kind) == .commit_text) document_state.requestSave(state.document, &ui_state);
+        if (event.length != 0 and event.bytes[0] == abi.InputByte.commit_text) document_state.requestSave(state.document, &ui_state);
     }
     return true;
 }
@@ -624,8 +655,8 @@ fn applyInputEvent(
     state.last_input_sequence = event.sequence;
     state.last_input_window_id = event.window_id;
     state.last_input_surface_id = event.surface_id;
-    state.last_input_kind = event.kind;
-    state.last_input_text = event.text;
+    state.last_input_kind = if (event.length > 0) event.bytes[0] else 0;
+    state.last_input_text = if (event.length > 1) event.bytes[1] else 0;
     state.last_input_port_id = event.port_id;
     state.last_input_slot_id = event.slot_id;
     publishUiState(state, surface);
@@ -637,6 +668,7 @@ fn publishUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
     state.ui_state_flags = @bitCast(surface.flags);
     state.ui_focus_index = surface.focus_index;
     state.ui_text_length = surface.text_length;
+    std.crypto.hash.sha2.Sha256.hash(surface.textSlice(), &state.ui_text_digest, .{});
     state.ui_cursor = surface.cursor;
     state.ui_commit_count = surface.commit_count;
     state.ui_activation_count = surface.activation_count;
@@ -666,7 +698,8 @@ fn presentUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
 const DocumentTransport = struct {
     pub fn send(_: @This(), endpoint_capability_id: u64, correlation_id: u64, payload: []const u8) document_editor.SendResult {
         var request = EndpointSendRequest{
-            .header = makeHeader(.endpoint_send, correlation_id, zigos_userspace_bootstrap.task_id),
+            .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
+            .correlation_id = correlation_id,
             .endpoint_capability_id = endpoint_capability_id,
             .payload = payload,
         };
@@ -706,8 +739,11 @@ fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime con
                 break :work pending;
             } else false;
             _ = presentUiState(&zigos_userspace_bootstrap, &ui_state);
-            break :wait if (input.exhausted and !document_work) .wait_for_event else .runnable;
-        } else .wait_for_event;
+            break :wait if (input.exhausted and !document_work) blk: {
+                parkUntilEvent();
+                break :blk .wait_for_event;
+            } else .runnable;
+        } else .runnable;
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
     }
@@ -745,6 +781,7 @@ fn yieldCounter(value: u32, disposition: mailbox.YieldDisposition, ui_revision: 
 
 fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
     return freestanding_syscall.call(
+        @enumFromInt(request.header.operation),
         @intFromPtr(request),
         @intFromPtr(response),
         @sizeOf(@TypeOf(response.*)),
@@ -752,15 +789,12 @@ fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
 }
 
 fn trapCallNoResponse(request: anytype) abi.SyscallStatus {
-    return freestanding_syscall.call(@intFromPtr(request), 0, 0).status;
+    return freestanding_syscall.call(@enumFromInt(request.header.operation), @intFromPtr(request), 0, 0).status;
 }
 
-fn makeHeader(operation: abi.NativeOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
+fn makeHeader(operation: abi.NativeOperation, subject_task_id: u64) abi.RequestHeader {
     return .{
-        .version = abi.ABI_VERSION,
         .operation = abi.opcode(operation),
-        .flags = 0,
-        .correlation_id = correlation_id,
         .subject_task_id = subject_task_id,
     };
 }
@@ -805,16 +839,19 @@ test "Notes input snapshots a save before processing subsequent typing" {
     var event = std.mem.zeroes(abi.InputEventDescriptor);
     event.sequence = 1;
     event.task_id = 2;
-    event.kind = @intFromEnum(abi.InputEventKind.text);
-    event.text = 'a';
+    event.length = 2;
+    event.bytes[0] = abi.InputByte.text;
+    event.bytes[1] = 'a';
     try std.testing.expect(recordInputEvent(&state, event, true));
     event.sequence += 1;
-    event.kind = @intFromEnum(abi.InputEventKind.commit_text);
-    event.text = 0;
+    event.length = 2;
+    event.bytes[0] = abi.InputByte.commit_text;
+    event.bytes[1] = 0;
     try std.testing.expect(recordInputEvent(&state, event, true));
     event.sequence += 1;
-    event.kind = @intFromEnum(abi.InputEventKind.text);
-    event.text = 'b';
+    event.length = 2;
+    event.bytes[0] = abi.InputByte.text;
+    event.bytes[1] = 'b';
     try std.testing.expect(recordInputEvent(&state, event, true));
     try std.testing.expectEqualStrings("ab", ui_state.textSlice());
     try std.testing.expectEqualStrings("a", document_state.client.?.snapshot[0..document_state.client.?.length]);
@@ -829,16 +866,19 @@ test "focused input telemetry rejects foreign events and records valid semantic 
         .window_id = 12,
         .task_id = 41,
         .surface_id = 13,
-        .kind = @intFromEnum(abi.InputEventKind.text),
-        .text = 'x',
         .port_id = 2,
         .slot_id = 3,
+        .length = 2,
+        .bytes = abi.inputPacket(abi.InputByte.text, 'x'),
     };
     try std.testing.expect(applyInputEvent(&state, &surface, event));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
     try std.testing.expectEqual(@as(u64, 7), state.last_input_sequence);
     try std.testing.expectEqual(@as(u8, 'x'), state.last_input_text);
     try std.testing.expectEqualStrings("x", surface.textSlice());
+    var expected_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("x", &expected_digest, .{});
+    try std.testing.expectEqualSlices(u8, &expected_digest, &state.ui_text_digest);
     try std.testing.expectEqual(@as(u16, 1), state.ui_text_length);
     try std.testing.expectEqual(surface.revision, state.ui_state_revision);
 
@@ -846,7 +886,7 @@ test "focused input telemetry rejects foreign events and records valid semantic 
     foreign.task_id = 42;
     try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
     foreign.task_id = 41;
-    foreign.kind = 0xFF;
+    foreign.length = 0;
     try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
 }

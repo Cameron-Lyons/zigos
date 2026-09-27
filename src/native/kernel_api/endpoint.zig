@@ -1,15 +1,18 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
-const root = @import("root");
-
-const kernel_memory = if (builtin.target.os.tag == .freestanding)
-    root.kernel_memory
+const table_backing = @import("../core/table_backing.zig");
+const ipc_ring = @import("ipc_ring.zig");
+const x86 = if (builtin.target.os.tag == .freestanding)
+    @import("../../arch/x86.zig")
 else
-    struct {};
+    struct {
+        pub fn allowSupervisorUserMemory() void {}
+        pub fn forbidSupervisorUserMemory() void {}
+    };
 
 pub const MAX_ENDPOINTS: usize = 64;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
@@ -19,7 +22,7 @@ const ENDPOINT_INDEX_CAPACITY: usize = MAX_ENDPOINTS * 2;
 const MAX_ENDPOINT_LABEL_PAYLOAD_BYTES: usize = MAX_ENDPOINT_LABEL_BYTES - 1;
 pub const ENDPOINT_PRIMARY_INDEX_LOOKUPS_PER_OPERATION: u8 = 0;
 pub const ENDPOINT_ID_COLLISION_PROBES_PER_INSERT: u8 = 0;
-pub const FREESTANDING_TABLE_SIZE_CEILING_BYTES: usize = 8_976;
+pub const FREESTANDING_TABLE_SIZE_CEILING_BYTES: usize = 12_000;
 
 comptime {
     const byte_capacities = [_]usize{
@@ -71,6 +74,16 @@ pub const ReceivedMessage = struct {
     len: usize,
 };
 
+pub const HEAP_BACKS_QUEUES_ON_ALL_TARGETS = table_backing.HEAP_BACKS_ON_ALL_TARGETS;
+pub const PREFERS_SEALED_RING_DATAPLANE = ipc_ring.DATA_PLANE_USES_SEALED_RINGS;
+pub const AUTO_ATTACHES_DATA_RINGS = true;
+pub const RINGS_ONLY_DATAPLANE = true;
+pub const DEFAULT_DATA_RING_CAPACITY: u32 = 1024;
+const DataRingStorage = struct {
+    bytes: [ipc_ring.HEADER_BYTES + DEFAULT_DATA_RING_CAPACITY]u8 align(64) = undefined,
+};
+const ENDPOINT_RESIDENT_SIZE_CEILING_BYTES: usize = 160;
+
 pub const Endpoint = struct {
     id: ids.EndpointId,
     owner_task_id: ids.TaskId,
@@ -79,13 +92,14 @@ pub const Endpoint = struct {
     label: [MAX_ENDPOINT_LABEL_BYTES]u8,
     peer_endpoint_id: ids.EndpointId = ids.EndpointId.zero,
     peer_closed: bool = false,
-    queue_head: u8 = 0,
     queue_len: u8 = 0,
-    queue: EndpointQueueBacking = if (heap_backed_endpoint_queues) null else [_]Message{zeroMessage()} ** MAX_ENDPOINT_QUEUE,
+    data_ring: []u8 = &.{},
+    owns_data_ring: bool = false,
 
     comptime {
-        if (heap_backed_endpoint_queues and @sizeOf(@This()) > 128) {
-            @compileError("heap-backed endpoints exceed their compact resident layout");
+        if (@hasField(@This(), "queue")) @compileError("endpoint payloads live in the sealed ring");
+        if (@sizeOf(@This()) > ENDPOINT_RESIDENT_SIZE_CEILING_BYTES) {
+            @compileError("endpoints exceed their compact resident layout");
         }
     }
 
@@ -101,15 +115,12 @@ pub const Error = error{
     ReceiveBufferTooSmall,
     PeerNotConnected,
     PeerClosed,
-    QueueFull,
     TableFull,
     NoSpaceLeft,
     ScopeViolation,
+    RingFull,
+    RingCorrupt,
 };
-
-const EndpointQueue = [MAX_ENDPOINT_QUEUE]Message;
-const heap_backed_endpoint_queues = builtin.target.os.tag == .freestanding;
-const EndpointQueueBacking = if (heap_backed_endpoint_queues) ?*EndpointQueue else EndpointQueue;
 
 const EndpointSlot = struct {
     in_use: bool = false,
@@ -146,8 +157,8 @@ pub const Table = struct {
     owner_index: EndpointOwnerIndex = EndpointOwnerIndex.init(),
 
     comptime {
-        if (builtin.target.os.tag == .freestanding and @sizeOf(@This()) > FREESTANDING_TABLE_SIZE_CEILING_BYTES) {
-            @compileError("freestanding endpoint table exceeds its compact layout ceiling");
+        if (@sizeOf(@This()) > FREESTANDING_TABLE_SIZE_CEILING_BYTES) {
+            @compileError("endpoint table exceeds its compact layout ceiling");
         }
     }
 
@@ -174,10 +185,8 @@ pub const Table = struct {
     }
 
     pub fn deinit(self: *Table) void {
-        if (comptime heap_backed_endpoint_queues) {
-            for (&self.arena.slots) |*slot| {
-                if (slot.in_use) releaseEndpointQueue(&slot.endpoint);
-            }
+        for (&self.arena.slots) |*slot| {
+            if (slot.in_use) releaseEndpointRing(&slot.endpoint);
         }
     }
 
@@ -215,7 +224,7 @@ pub const Table = struct {
         if (!self.owner_index.remove(slot.endpoint.owner_task_id.raw(), handle.slotIndex())) {
             native_util.impossibleByInvariant("unpublished endpoint is present in its owner index");
         }
-        releaseEndpointQueue(&slot.endpoint);
+        releaseEndpointRing(&slot.endpoint);
         if (!self.arena.removeHandle(handle)) {
             native_util.impossibleByInvariant("endpoint rollback removes its live handle");
         }
@@ -230,18 +239,21 @@ pub const Table = struct {
 
         if (peer.flags.service_port) {
             if (!endpoint.peer_endpoint_id.isZero()) return error.EndpointBusy;
+            try attachConnectedRings(endpoint, peer);
             endpoint.peer_endpoint_id = peer_endpoint_id;
             return;
         }
 
         if (endpoint.flags.service_port) {
             if (!peer.peer_endpoint_id.isZero()) return error.EndpointBusy;
+            try attachConnectedRings(endpoint, peer);
             peer.peer_endpoint_id = endpoint_id;
             return;
         }
 
         if (!endpoint.peer_endpoint_id.isZero() or !peer.peer_endpoint_id.isZero()) return error.EndpointBusy;
 
+        try attachConnectedRings(endpoint, peer);
         endpoint.peer_endpoint_id = peer_endpoint_id;
         peer.peer_endpoint_id = endpoint_id;
     }
@@ -255,7 +267,7 @@ pub const Table = struct {
         attached_capability_id: ?ids.CapabilityId,
         move_attached_capability: bool,
     ) Error!ids.TaskId {
-        if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
+        if (payload.len > MAX_MESSAGE_BYTES or payload.len > ipc_ring.PAYLOAD_BYTES) return error.MessageTooLarge;
 
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         if (endpoint.peer_closed) return error.PeerClosed;
@@ -295,24 +307,43 @@ pub const Table = struct {
         attached_capability_id: ?ids.CapabilityId,
         move_attached_capability: bool,
     ) Error!ids.TaskId {
-        if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
+        if (peer.data_ring.len == 0) return error.RingCorrupt;
+        if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.RingFull;
 
-        const queue = try ensureEndpointQueue(peer);
-        const insert_index = (peer.queue_head + peer.queue_len) % MAX_ENDPOINT_QUEUE;
-        queue[insert_index].sender_endpoint_id = source.id;
-        queue[insert_index].sender_task_id = sender_task_id;
-        queue[insert_index].correlation_id = correlation_id;
-        queue[insert_index].attached_capability_id = attached_capability_id orelse ids.CapabilityId.zero;
-        queue[insert_index].move_attached_capability = move_attached_capability;
-        queue[insert_index].flags = .{
-            .local_only = source.flags.local_only and peer.flags.local_only,
-            .service_port = source.flags.service_port or peer.flags.service_port,
-            .carries_capability = attached_capability_id != null,
+        var record = ipc_ring.Record{
+            .sender_endpoint_id = source.id.raw(),
+            .sender_task_id = sender_task_id.raw(),
+            .correlation_id = correlation_id,
+            .attached_capability_id = if (attached_capability_id) |capability_id| capability_id.raw() else 0,
+            .flags = @bitCast(EndpointFlags{
+                .local_only = source.flags.local_only and peer.flags.local_only,
+                .service_port = source.flags.service_port or peer.flags.service_port,
+                .carries_capability = attached_capability_id != null,
+            }),
+            .payload_len = @intCast(payload.len),
+            .move_attached = if (move_attached_capability) 1 else 0,
         };
-        queue[insert_index].len = @intCast(payload.len);
-        @memcpy(queue[insert_index].bytes[0..payload.len], payload);
-        peer.queue_len += 1;
+        x86.allowSupervisorUserMemory();
+        defer x86.forbidSupervisorUserMemory();
+        if (payload.len != 0) @memcpy(record.bytes[0..payload.len], payload);
+        ipc_ring.pushRecord(peer.data_ring, record) catch |err| switch (err) {
+            error.RingFull => return error.RingFull,
+            error.RingTooSmall, error.RingCorrupt, error.RingEmpty, error.PayloadTooLarge => return error.RingCorrupt,
+        };
+        peer.queue_len = @intCast(ipc_ring.queued(peer.data_ring) catch return error.RingCorrupt);
         return peer.owner_task_id;
+    }
+
+    pub fn attachDataRing(self: *Table, endpoint_id: ids.EndpointId, buffer: []u8) Error!void {
+        const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
+        if (endpoint.queue_len != 0) return error.EndpointBusy;
+        if (buffer.len < ipc_ring.minimumBytes(1) or
+            buffer.len > ipc_ring.minimumBytes(MAX_ENDPOINT_QUEUE) or
+            @intFromPtr(buffer.ptr) % @alignOf(ipc_ring.Record) != 0) return error.RingCorrupt;
+        _ = ipc_ring.init(buffer, @intCast(buffer.len - ipc_ring.HEADER_BYTES)) catch return error.RingCorrupt;
+        releaseOwnedRing(endpoint);
+        endpoint.data_ring = buffer;
+        endpoint.owns_data_ring = false;
     }
 
     pub fn recvInto(
@@ -325,25 +356,25 @@ pub const Table = struct {
             if (endpoint.peer_closed) return error.PeerClosed;
             return null;
         }
+        if (endpoint.data_ring.len == 0) return error.RingCorrupt;
 
-        const queue = endpointQueue(endpoint) orelse
-            native_util.impossibleByInvariant("non-empty endpoint queue retains its backing");
-        const index = endpoint.queue_head;
-        const message = &queue[index];
-        if (message.len > payload_out.len) return error.ReceiveBufferTooSmall;
-        @memcpy(payload_out[0..message.len], message.payload());
+        x86.allowSupervisorUserMemory();
+        defer x86.forbidSupervisorUserMemory();
+        const pending = ipc_ring.peekRecord(endpoint.data_ring) catch return error.RingCorrupt;
+        if (pending.payload_len > payload_out.len) return error.ReceiveBufferTooSmall;
+        const record = ipc_ring.popRecord(endpoint.data_ring) catch return error.RingCorrupt;
+        if (record.payload_len != 0) @memcpy(payload_out[0..record.payload_len], record.bytes[0..record.payload_len]);
+        const attached = ids.capability(record.attached_capability_id);
         const received = ReceivedMessage{
-            .sender_endpoint_id = message.sender_endpoint_id,
-            .sender_task_id = message.sender_task_id,
-            .correlation_id = message.correlation_id,
-            .attached_capability_id = message.attachedCapabilityId(),
-            .move_attached_capability = message.move_attached_capability,
-            .flags = message.flags,
-            .len = message.len,
+            .sender_endpoint_id = ids.endpoint(record.sender_endpoint_id),
+            .sender_task_id = ids.task(record.sender_task_id),
+            .correlation_id = record.correlation_id,
+            .attached_capability_id = if (attached.isZero()) null else attached,
+            .move_attached_capability = record.move_attached != 0,
+            .flags = @bitCast(record.flags),
+            .len = record.payload_len,
         };
-        message.len = 0;
-        endpoint.queue_head = @intCast((endpoint.queue_head + 1) % MAX_ENDPOINT_QUEUE);
-        endpoint.queue_len -= 1;
+        endpoint.queue_len = @intCast(ipc_ring.queued(endpoint.data_ring) catch 0);
         return received;
     }
 
@@ -410,18 +441,16 @@ pub const Table = struct {
             native_util.impossibleByInvariant("live endpoint is absent from its owner index");
         }
         if (cleanup) |sink| {
-            if (endpointQueue(&slot.endpoint)) |queue| {
-                // Only unread moves belong to this queue. Copies still
-                // belong to their sender, and consumed slots may be stale.
-                for (0..slot.endpoint.queue_len) |offset| {
-                    const message = &queue[(slot.endpoint.queue_head + offset) % MAX_ENDPOINT_QUEUE];
-                    if (message.move_attached_capability) {
-                        if (message.attachedCapabilityId()) |capability_id| sink.release(sink.context, capability_id);
+            if (slot.endpoint.data_ring.len != 0) {
+                while (true) {
+                    const record = ipc_ring.popRecord(slot.endpoint.data_ring) catch break;
+                    if (record.move_attached != 0 and record.attached_capability_id != 0) {
+                        sink.release(sink.context, ids.capability(record.attached_capability_id));
                     }
                 }
             }
         }
-        releaseEndpointQueue(&slot.endpoint);
+        releaseEndpointRing(&slot.endpoint);
         if (!self.arena.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("live endpoint disappeared during retirement");
         }
@@ -451,47 +480,38 @@ pub const Table = struct {
     }
 };
 
-fn endpointQueue(endpoint: *Endpoint) ?*EndpointQueue {
-    if (comptime heap_backed_endpoint_queues) return endpoint.queue;
-    return &endpoint.queue;
+fn attachConnectedRings(endpoint: *Endpoint, peer: *Endpoint) Error!void {
+    const allocated_endpoint = endpoint.data_ring.len == 0;
+    try ensureDataRing(endpoint);
+    errdefer if (allocated_endpoint) releaseOwnedRing(endpoint);
+    try ensureDataRing(peer);
 }
 
-fn ensureEndpointQueue(endpoint: *Endpoint) error{NoSpaceLeft}!*EndpointQueue {
-    if (endpointQueue(endpoint)) |queue| return queue;
-    if (comptime heap_backed_endpoint_queues) {
-        const allocation = kernel_memory.kmalloc(@sizeOf(EndpointQueue)) orelse return error.NoSpaceLeft;
-        const queue: *EndpointQueue = @ptrCast(@alignCast(allocation));
-        initializeEndpointQueue(queue);
-        endpoint.queue = queue;
-        return queue;
-    }
-    return &endpoint.queue;
-}
-
-fn releaseEndpointQueue(endpoint: *Endpoint) void {
-    if (comptime heap_backed_endpoint_queues) {
-        if (endpoint.queue) |queue| {
-            @memset(std.mem.asBytes(queue), 0);
-            kernel_memory.kfree(@ptrCast(queue));
-            endpoint.queue = null;
-        }
-    }
-    endpoint.queue_head = 0;
+fn releaseEndpointRing(endpoint: *Endpoint) void {
+    releaseOwnedRing(endpoint);
     endpoint.queue_len = 0;
 }
 
-fn initializeEndpointQueue(queue: *EndpointQueue) void {
-    @memset(std.mem.asBytes(queue), 0);
+fn ensureDataRing(endpoint: *Endpoint) error{NoSpaceLeft}!void {
+    if (endpoint.data_ring.len != 0) return;
+    const storage = table_backing.alloc(DataRingStorage) orelse return error.NoSpaceLeft;
+    const buffer = storage.bytes[0..];
+    _ = ipc_ring.init(buffer, DEFAULT_DATA_RING_CAPACITY) catch {
+        table_backing.free(DataRingStorage, storage);
+        return error.NoSpaceLeft;
+    };
+    endpoint.data_ring = buffer;
+    endpoint.owns_data_ring = true;
 }
 
-fn zeroMessage() Message {
-    return .{
-        .sender_endpoint_id = ids.EndpointId.zero,
-        .sender_task_id = ids.TaskId.zero,
-        .correlation_id = 0,
-        .len = 0,
-        .bytes = [_]u8{0} ** MAX_MESSAGE_BYTES,
-    };
+fn releaseOwnedRing(endpoint: *Endpoint) void {
+    if (endpoint.owns_data_ring and endpoint.data_ring.len != 0) {
+        const bytes: *align(64) [ipc_ring.HEADER_BYTES + DEFAULT_DATA_RING_CAPACITY]u8 = @ptrCast(@alignCast(endpoint.data_ring.ptr));
+        const storage: *DataRingStorage = @fieldParentPtr("bytes", bytes);
+        table_backing.free(DataRingStorage, storage);
+    }
+    endpoint.data_ring = &.{};
+    endpoint.owns_data_ring = false;
 }
 
 fn zeroEndpoint() Endpoint {
@@ -509,12 +529,25 @@ fn hashLabel(label: []const u8) u64 {
 }
 
 test "endpoint queues use capacity-sized resident metadata" {
-    try std.testing.expectEqual(@as(usize, 136), @sizeOf(Message));
-    try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Message, "len")));
+    try std.testing.expectEqual(@as(usize, 128), ipc_ring.SLOT_BYTES);
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(@FieldType(Endpoint, "queue_len")));
-    try std.testing.expectEqual(@as(usize, 1_168), @sizeOf(Endpoint));
-    try std.testing.expectEqual(@as(usize, 1_176), @sizeOf(EndpointSlot));
-    try std.testing.expectEqual(@as(usize, 78_096), @sizeOf(Table));
+    try std.testing.expect(HEAP_BACKS_QUEUES_ON_ALL_TARGETS);
+    try std.testing.expect(AUTO_ATTACHES_DATA_RINGS);
+    try std.testing.expect(@sizeOf(Endpoint) <= ENDPOINT_RESIDENT_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(EndpointSlot) <= ENDPOINT_RESIDENT_SIZE_CEILING_BYTES + 8);
+    try std.testing.expect(@sizeOf(Table) <= FREESTANDING_TABLE_SIZE_CEILING_BYTES);
+}
+
+test "endpoints move payloads on a sealed ring" {
+    var table = Table.init();
+    defer table.deinit();
+    const left = try table.create(ids.task(20), "ring-left", .{});
+    const right = try table.create(ids.task(21), "ring-right", .{});
+    try table.connect(left.id, right.id);
+    _ = try table.send(left.id, ids.task(20), 9, "ring-payload", null, false);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expectEqualStrings("ring-payload", payload[0..received.len]);
 }
 
 test "allocated endpoint table initializes reusable metadata" {
@@ -529,6 +562,7 @@ test "allocated endpoint table initializes reusable metadata" {
 
 test "endpoints connect and exchange queued messages" {
     var table = Table.init();
+    defer table.deinit();
     const left = try table.create(ids.task(10), "left", .{ .local_only = true });
     const right = try table.create(ids.task(11), "right", .{ .local_only = true });
     try table.connect(left.id, right.id);
@@ -844,7 +878,7 @@ test "a full reply queue never redirects a service response to another client" {
     for (0..MAX_ENDPOINT_QUEUE) |sequence| {
         _ = try table.reply(service.id, second.id, service.owner_task_id, sequence, "reply", null, false);
     }
-    try std.testing.expectError(error.QueueFull, table.reply(service.id, second.id, service.owner_task_id, 99, "overflow", null, false));
+    try std.testing.expectError(error.RingFull, table.reply(service.id, second.id, service.owner_task_id, 99, "overflow", null, false));
     try std.testing.expectEqual(@as(u16, MAX_ENDPOINT_QUEUE), (try table.descriptor(second.id)).queued_messages);
     try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(first.id)).queued_messages);
 }
@@ -867,4 +901,20 @@ test "endpoint readiness follows queued ownership through drains and retirement"
     _ = table.retireTask(client.owner_task_id, null);
     _ = try table.create(client.owner_task_id, "replacement", .{});
     try std.testing.expect(!table.hasPendingForTask(client.owner_task_id));
+}
+
+test "ring replacement rejects malformed storage and preserves queued messages" {
+    var table = Table.init();
+    defer table.deinit();
+    const left = try table.create(ids.task(101), "left", .{});
+    const right = try table.create(ids.task(102), "right", .{});
+    var invalid: [ipc_ring.HEADER_BYTES]u8 align(64) = undefined;
+    try std.testing.expectError(error.RingCorrupt, table.attachDataRing(left.id, &invalid));
+    try table.connect(left.id, right.id);
+    _ = try table.send(left.id, left.owner_task_id, 1, "pending", null, false);
+    var replacement: [ipc_ring.HEADER_BYTES + DEFAULT_DATA_RING_CAPACITY]u8 align(64) = undefined;
+    try std.testing.expectError(error.EndpointBusy, table.attachDataRing(right.id, &replacement));
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expectEqualStrings("pending", payload[0..received.len]);
 }

@@ -27,6 +27,8 @@ pub const slot_bytes = volume_layout.slot_bytes;
 pub const image_bytes = volume_layout.image_bytes;
 pub const max_payload_bytes = volume_layout.max_payload_bytes;
 pub const required_device_sectors = volume_layout.required_device_sectors;
+pub const deviceLbaForVolumeTransfer = volume_layout.deviceLbaForVolumeTransfer;
+pub const volumeSectorsFromDeviceSectors = volume_layout.volumeSectorsFromDeviceSectors;
 pub const max_signer_bytes = volume_layout.max_signer_bytes;
 pub const SIGNER_TEXT_POOL_BYTES: usize = 12 * 1024;
 pub const HEAP_BACKED_SIGNER_TEXT_POOL_ON_FREESTANDING = true;
@@ -38,6 +40,11 @@ pub const DATA_REGION_BYTES = volume_layout.data_region_bytes;
 pub const IO_LOG_WORKSPACE_BYTES = DATA_REGION_BYTES;
 pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
 pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
+pub const BUILDS_WORKSPACE_INDEXES_DURING_REPLAY = true;
+pub const SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD = true;
+pub const USES_INCREMENTAL_LIVE_INDEX = volume_layout.USES_INCREMENTAL_LIVE_INDEX;
+pub const USES_CHECKPOINT_ONLY_COLD_LOAD = volume_layout.USES_CHECKPOINT_ONLY_COLD_LOAD;
+pub const COMPACTS_IN_BACKGROUND = volume_layout.COMPACTS_IN_BACKGROUND;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
 const IoLogWorkspace = if (heap_backed_io_workspace) ?[*]u8 else [IO_LOG_WORKSPACE_BYTES]u8;
 const SignerTextPool = [SIGNER_TEXT_POOL_BYTES]u8;
@@ -126,6 +133,8 @@ pub const Volume = struct {
     signer_text_len: u16 = 0,
     signer_text_pool: SignerTextPoolBacking = if (heap_backed_signer_text_pool) null else [_]u8{0} ** SIGNER_TEXT_POOL_BYTES,
     workspace_state_hashes: WorkspaceStateHashCache = .{},
+    live_index_generation: u64 = 0,
+    live_index_root_checksum: u64 = 0,
 
     pub fn init() Volume {
         return .{};
@@ -142,6 +151,8 @@ pub const Volume = struct {
         self.attached_backend_kind = .none;
         self.resetSignerText();
         self.workspace_state_hashes = .{};
+        self.live_index_generation = 0;
+        self.live_index_root_checksum = 0;
     }
 
     fn ioLogWorkspace(self: *Volume) Error![]u8 {
@@ -631,12 +642,23 @@ fn loadImageRootCandidate(
     loaded: LoadedRoot,
 ) Error!u64 {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
+    if (USES_INCREMENTAL_LIVE_INDEX and
+        self.live_index_generation == loaded.root.generation and
+        self.live_index_root_checksum == liveIndexChecksum(loaded.root) and
+        store.objectCount() != 0)
+    {
+        return loaded.root.generation;
+    }
     const region_start = data_start_byte + loaded.root.data_offset;
     if (region_start + loaded.root.log_bytes > image.len) return error.CorruptImage;
     try replayLog(self, store, workspaces, image[region_start .. region_start + loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
+    if (USES_INCREMENTAL_LIVE_INDEX) {
+        self.live_index_generation = loaded.root.generation;
+        self.live_index_root_checksum = liveIndexChecksum(loaded.root);
+    }
     return loaded.root.generation;
 }
 
@@ -647,12 +669,23 @@ fn loadBackendRootCandidate(
     loaded: LoadedRoot,
 ) Error!void {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
+    if (USES_INCREMENTAL_LIVE_INDEX and
+        self.live_index_generation == loaded.root.generation and
+        self.live_index_root_checksum == liveIndexChecksum(loaded.root) and
+        store.objectCount() != 0)
+    {
+        return;
+    }
     const io_log_buffer = try self.ioLogWorkspace();
     if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
     try replayLog(self, store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
+    if (USES_INCREMENTAL_LIVE_INDEX) {
+        self.live_index_generation = loaded.root.generation;
+        self.live_index_root_checksum = liveIndexChecksum(loaded.root);
+    }
 }
 
 pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, workspaces: *const workspace.Directory) Error!void {
@@ -916,6 +949,13 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
     return null;
 }
 
+fn liveIndexChecksum(root: RootState) u64 {
+    return root.generation ^
+        (@as(u64, root.log_bytes) << 32) ^
+        root.compacted_generation ^
+        @as(u64, root.log_record_count);
+}
+
 fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
     store.reset();
     workspaces.reset();
@@ -924,6 +964,13 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     self.workspace_state_hashes.reset();
     if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
     if (root.log_segment_count > max_log_segments) return error.CorruptImage;
+    if (USES_CHECKPOINT_ONLY_COLD_LOAD and
+        root.generation != 0 and
+        root.compacted_generation == root.generation and
+        root.log_record_count != 1)
+    {
+        return error.CorruptImage;
+    }
 
     var reader = CursorReader{ .buffer = log };
     var replayed_id_bounds = ReplayIdBounds{};
@@ -962,7 +1009,7 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     store.next_version_id = root.next_version_id;
     workspaces.next_workspace_id = root.next_workspace_id;
     workspaces.next_snapshot_id = root.next_snapshot_id;
-    workspaces.rebuildDerivedIndexes();
+    workspaces.rebuildDirectoryIndexes();
 }
 
 fn countLogRecords(log: []const u8) Error!u16 {
@@ -1306,6 +1353,7 @@ fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) E
     slot.workspace.staging.transaction_open = false;
     slot.workspace.staging.staged_entry_count = 0;
     slot.workspace.staging.staged_effective_entry_count = 0;
+    workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
     return workspace_id.raw();
 }
 
@@ -1545,6 +1593,7 @@ fn deserializeState(
                 deleted_entries[entry_index] = try readEntry(&reader);
             }
         }
+        workspaces.indexReplayedWorkspaceEntries(&slot.workspace);
     }
 
     for (0..@as(usize, snapshot_count_value)) |_| {

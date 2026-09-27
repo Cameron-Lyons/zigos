@@ -15,9 +15,13 @@ pub const cpu_smap_enabled = "ZIGOS:CPU:SMAP:ENABLED";
 pub const cpu_umip_enabled = "ZIGOS:CPU:UMIP:ENABLED";
 pub const cpu_pge_enabled = "ZIGOS:CPU:PGE:ENABLED";
 pub const cpu_syscall_enabled = "ZIGOS:CPU:SYSCALL:ENABLED";
+pub const cpu_fred_enabled = "ZIGOS:CPU:FRED:ENABLED";
 pub const cpu_pcid_enabled = "ZIGOS:CPU:PCID:ENABLED";
-pub const cpu_pcid_software_fallback = "ZIGOS:CPU:PCID:SOFTWARE_FLUSH";
+pub const cpu_pcid_software_fallback = "ZIGOS:CPU:PCID:SOFTWARE_FALLBACK";
 pub const cpu_pcid_ready = "ZIGOS:CPU:PCID:READY";
+pub const cpu_pku_enabled = "ZIGOS:CPU:PKU:ENABLED";
+pub const cpu_lass_enabled = "ZIGOS:CPU:LASS:ENABLED";
+pub const smp_ready = "ZIGOS:SMP:READY";
 pub const kernel_wx_enforced = "ZIGOS:KERNEL:W_X:ENFORCED";
 
 pub const bench_start = "BENCH:START";
@@ -36,6 +40,7 @@ pub const recovery_revoke_trust_ok = "RECOVERY:REVOKE_TRUST:OK";
 pub const recovery_pass = "RECOVERY:PASS";
 pub const recovery_fail = "RECOVERY:FAIL";
 
+pub const kernel_dataplane_userspace = "ZIGOS:KERNEL:DATAPLANE:USERSPACE";
 pub const kernel_network_deferred = "ZIGOS:KERNEL_NETWORK:DEFERRED";
 
 pub const native_bootstrap = "ZIGOS:NATIVE:BOOTSTRAP";
@@ -68,7 +73,6 @@ pub const compositor_input_router_ready = "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY";
 pub const userspace_input_abi_ready = "ZIGOS:USERSPACE:INPUT_ABI:READY";
 pub const userspace_surface_presentation_ready = "ZIGOS:USERSPACE:SURFACE_PRESENTATION:READY";
 pub const compositor_framebuffer_presented = "ZIGOS:COMPOSITOR:FRAMEBUFFER:PRESENTED";
-pub const compositor_scanout_presented = "ZIGOS:COMPOSITOR:SCANOUT:PRESENTED";
 pub const compositor_permission_review_rendered = "ZIGOS:COMPOSITOR:PERMISSION_REVIEW:RENDERED";
 
 pub const transport_native_kernel_ready = "ZIGOS:TRANSPORT:NATIVE_KERNEL:READY";
@@ -132,7 +136,7 @@ pub const storage_reload_notes_workspace_done = "ZIGOS:STORAGE:RELOAD:NOTES_WORK
 pub const storage_reload_imported_workspace_done = "ZIGOS:STORAGE:RELOAD:IMPORTED_WORKSPACE:DONE";
 pub const storage_reload_latest_version_done = "ZIGOS:STORAGE:RELOAD:LATEST_VERSION:DONE";
 pub const storage_service_recovered = "ZIGOS:STORAGE:STORAGE_SERVICE:RECOVERED";
-pub const storage_file_bridge_derived = "ZIGOS:STORAGE:FILE_BRIDGE:DERIVED";
+pub const storage_object_addressed = "ZIGOS:STORAGE:OBJECT:ADDRESSED";
 pub const storage_path_authority_rejected = "ZIGOS:STORAGE:PATH_AUTHORITY:REJECTED";
 pub const storage_durability_start = "ZIGOS:STORAGE:DURABILITY:START";
 pub const storage_durability_document_save_acked = "ZIGOS:STORAGE:DURABILITY:DOCUMENT_SAVE_ACKED";

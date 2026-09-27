@@ -78,6 +78,17 @@
     "20. One-sentence summary"
   ],
   "one_sentence_summary": "Zigos is a capability-based, local-first, multi-device operating system with an immutable core, versioned object storage, strong sandboxing, explicit identity, and first-class support for modern accelerators.",
+  "floor_2026": [
+    "kernel_tcb_forbids_product_imports",
+    "wait_plus_sealed_rings",
+    "userspace_nvme_dataplane",
+    "userspace_i225_dataplane",
+    "userspace_xhci_dataplane",
+    "userspace_gop_dataplane",
+    "eight_address_spaces_pku",
+    "efi_only_production_boot",
+    "checkpoint_only_cold_load"
+  ],
   "sections": [
     {
       "id": "1",
@@ -123,8 +134,8 @@
           "name": "spec 2.3 11.4 12 and 15 keep indexing notifications media helpers and diagnostics structured"
         },
         {
-          "file": "src/native/storage/file_bridge.zig",
-          "name": "file bridge is derived, permission-aware, and non-authoritative"
+          "file": "src/tests/spec/drivers_storage_sync.zig",
+          "name": "objects are addressed by id and absolute paths are not authority"
         }
       ],
       "requirements": [
@@ -145,7 +156,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
+          "name": "spec 8 storage stays versioned recoverable signed and addressed by object id"
         },
         {
           "file": "src/native/task/task_runtime.zig",
@@ -345,7 +356,7 @@
       "tests": [
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
+          "name": "spec 8 storage stays versioned recoverable signed and addressed by object id"
         },
         {
           "file": "src/native/storage/object_store/tests.zig",
@@ -356,8 +367,8 @@
           "name": "workspace transactions, snapshot restore, delete recovery, and signed export import work"
         },
         {
-          "file": "src/native/storage/file_bridge.zig",
-          "name": "file bridge is derived, permission-aware, and non-authoritative"
+          "file": "src/tests/spec/drivers_storage_sync.zig",
+          "name": "objects are addressed by id and absolute paths are not authority"
         }
       ],
       "requirements": [
@@ -826,7 +837,7 @@
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
-          "name": "spec 8 storage stays versioned recoverable signed and exposed through a derived file bridge"
+          "name": "spec 8 storage stays versioned recoverable signed and addressed by object id"
         },
         {
           "file": "src/tests/spec/spec_conformance_test.zig",
@@ -1096,7 +1107,7 @@
         },
         {
           "file": "src/native/kernel_api/syscall_surface.zig",
-          "name": "syscall surface rejects spoofed subject task ids"
+          "name": "syscall surface binds the caller from the trap, not the request header"
         },
         {
           "file": "src/kernel/boot/init/data_plane_boundary.zig",
@@ -1450,12 +1461,13 @@
     "REQ-FILE-BRIDGE": {
       "status": "enforced",
       "enforcement_modules": [
-        "src/native/storage/file_bridge.zig"
+        "src/native/storage/storage_service/service.zig",
+        "src/native/storage/object_store/store.zig"
       ],
       "negative_tests": [
         {
-          "file": "src/native/storage/file_bridge.zig",
-          "name": "file bridge is derived, permission-aware, and non-authoritative"
+          "file": "src/tests/spec/drivers_storage_sync.zig",
+          "name": "objects are addressed by id and absolute paths are not authority"
         }
       ]
     },

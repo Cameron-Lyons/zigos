@@ -40,8 +40,8 @@ pub const Port = struct {
     }
 };
 
-pub fn makeHeader(operation: abi.ReviewOperation, correlation_id: u64, subject_task_id: u64) abi.RequestHeader {
-    return request_header.makeHeader(abi.reviewOpcode(operation), correlation_id, subject_task_id);
+pub fn makeHeader(operation: abi.ReviewOperation, subject_task_id: u64) abi.RequestHeader {
+    return request_header.makeHeader(abi.reviewOpcode(operation), subject_task_id);
 }
 
 fn validateHeader(header: abi.RequestHeader, expected: abi.ReviewOperation) Error!void {
@@ -85,7 +85,7 @@ test "review port validates headers and returns reviewed grants" {
     var grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
     const grants = try port.reviewBundle(.{
-        .header = makeHeader(.review_bundle, 1, task.id),
+        .header = makeHeader(.review_bundle, task.id),
         .app_task_id = task.id,
         .bundle = bundle,
         .output = &grants_buffer,
@@ -97,7 +97,6 @@ test "review port validates headers and returns reviewed grants" {
     try std.testing.expectError(error.UnexpectedOperation, port.reviewBundle(.{
         .header = .{
             .operation = abi.policyOpcode(.apply_manifest),
-            .correlation_id = 2,
             .subject_task_id = task.id,
         },
         .app_task_id = task.id,
@@ -117,7 +116,7 @@ test "review port rejects invalid manifests before entering the review loop" {
     var grants_buffer: [permission_review_service.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant = undefined;
 
     try std.testing.expectError(error.MissingBackgroundPermission, port.reviewBundle(.{
-        .header = makeHeader(.review_bundle, 2, task.id),
+        .header = makeHeader(.review_bundle, task.id),
         .app_task_id = task.id,
         .bundle = bundle,
         .output = &grants_buffer,

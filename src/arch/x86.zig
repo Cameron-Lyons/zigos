@@ -124,16 +124,26 @@ pub inline fn loadIdt(descriptor: *const anyopaque) void {
 
 pub const CR0_EM: usize = 1 << 2;
 pub const CR0_MP: usize = 1 << 1;
+pub const CR0_TS: usize = 1 << 3;
 pub const CR0_WP: usize = 1 << 16;
 pub const CR0_PG: usize = 1 << 31;
+pub const LAZY_XSAVES = true;
 
 pub const CR4_PGE: usize = 1 << 7;
 pub const CR4_OSFXSR: usize = 1 << 9;
 pub const CR4_OSXMMEXCPT: usize = 1 << 10;
 pub const CR4_UMIP: usize = 1 << 11;
 pub const CR4_PCIDE: usize = 1 << 17;
+pub const CR4_OSXSAVE: usize = 1 << 18;
 pub const CR4_SMEP: usize = 1 << 20;
 pub const CR4_SMAP: usize = 1 << 21;
+pub const CR4_PKE: usize = 1 << 22;
+pub const CR4_CET: usize = 1 << 23;
+pub const CR4_LASS: usize = 1 << 27;
+pub const CR4_FRED: usize = 1 << 32;
+
+pub const XCR0_X87: u64 = 1 << 0;
+pub const XCR0_SSE: u64 = 1 << 1;
 
 pub const CR3_PCID_MASK: usize = 0x0FFF;
 pub const CR3_ADDRESS_MASK: usize = 0x000F_FFFF_FFFF_F000;
@@ -147,6 +157,8 @@ const InvpcidDescriptor = extern struct {
 extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 extern fn x86_allow_supervisor_user_memory() callconv(.c) void;
 extern fn x86_forbid_supervisor_user_memory() callconv(.c) void;
+extern fn x86_write_xcr0(value: u64) callconv(.c) void;
+extern fn x86_read_xcr0() callconv(.c) u64;
 
 pub const EFER_MSR: u32 = 0xC000_0080;
 pub const EFER_SCE: u64 = 1 << 0;
@@ -156,6 +168,17 @@ pub const IA32_LSTAR_MSR: u32 = 0xC000_0082;
 pub const IA32_FMASK_MSR: u32 = 0xC000_0084;
 pub const IA32_GS_BASE_MSR: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
+pub const IA32_U_CET_MSR: u32 = 0x6A0;
+pub const IA32_S_CET_MSR: u32 = 0x6A2;
+pub const CET_SH_STK_EN: u64 = 1 << 0;
+pub const CET_ENDBR_EN: u64 = 1 << 2;
+pub const IA32_FRED_RSP0_MSR: u32 = 0x1CC;
+pub const IA32_FRED_RSP1_MSR: u32 = 0x1CD;
+pub const IA32_FRED_RSP2_MSR: u32 = 0x1CE;
+pub const IA32_FRED_RSP3_MSR: u32 = 0x1CF;
+pub const IA32_FRED_STKLVLS_MSR: u32 = 0x1D0;
+pub const IA32_FRED_CONFIG_MSR: u32 = 0x1D4;
+pub const FRED_CONFIG_ENTRY_ALIGN: u64 = 64;
 
 pub inline fn enableNoExecute() void {
     writeMsr(EFER_MSR, readMsr(EFER_MSR) | EFER_NXE);
@@ -180,6 +203,18 @@ pub inline fn writeCr0(value: usize) void {
         :
         : [value] "r" (value),
         : .{ .memory = true });
+}
+
+pub inline fn taskSwitched() bool {
+    return (readCr0() & CR0_TS) != 0;
+}
+
+pub inline fn setTaskSwitched() void {
+    writeCr0(readCr0() | CR0_TS);
+}
+
+pub inline fn clearTaskSwitched() void {
+    writeCr0(readCr0() & ~CR0_TS);
 }
 
 pub inline fn readCr3() usize {
@@ -262,6 +297,103 @@ pub fn enableSse() void {
     writeCr4(readCr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
 
     asm volatile ("fninit");
+}
+
+pub fn enableXsaves() void {
+    writeCr4(readCr4() | CR4_OSXSAVE);
+    writeXcr0(XCR0_X87 | XCR0_SSE);
+}
+
+pub fn xsavesEnabled() bool {
+    return (readCr4() & CR4_OSXSAVE) != 0 and readXcr0() == (XCR0_X87 | XCR0_SSE);
+}
+
+var cet_programmed = false;
+
+pub fn enableCet() void {
+    writeMsr(IA32_S_CET_MSR, CET_ENDBR_EN);
+    writeMsr(IA32_U_CET_MSR, 0);
+    writeCr4(readCr4() | CR4_CET);
+    cet_programmed = true;
+}
+
+pub fn enableCetOnApplicationProcessor() void {
+    if (cet_programmed) enableCet();
+}
+
+pub fn cetEnabled() bool {
+    return (readCr4() & CR4_CET) != 0 and
+        (readMsr(IA32_S_CET_MSR) & CET_ENDBR_EN) != 0;
+}
+
+extern fn x86_wrpkru(value: u32) callconv(.c) void;
+
+pub fn wrpkru(value: u32) void {
+    if (!pkuEnabled()) return;
+    x86_wrpkru(value);
+}
+
+pub fn pkruAllowKeys(key: u4) u32 {
+    var value: u32 = 0xFFFF_FFFC;
+    if (key != 0) {
+        const shift: u5 = @as(u5, key) * 2;
+        value &= ~(@as(u32, 0b11) << shift);
+    }
+    return value;
+}
+
+pub fn allowUserProtectionKey(key: u4) void {
+    wrpkru(pkruAllowKeys(key));
+}
+
+pub fn enablePku() void {
+    writeCr4(readCr4() | CR4_PKE);
+    wrpkru(0);
+}
+
+pub fn pkuEnabled() bool {
+    return (readCr4() & CR4_PKE) != 0;
+}
+
+pub fn enableLass() void {
+    writeCr4(readCr4() | CR4_LASS);
+}
+
+pub fn lassEnabled() bool {
+    return (readCr4() & CR4_LASS) != 0;
+}
+
+extern fn zigos_fred_entry() callconv(.c) void;
+
+pub fn enableFred(kernel_stack_top: usize) void {
+    if (kernel_stack_top == 0 or (kernel_stack_top & 0xF) != 0) unreachable;
+    const entry = @intFromPtr(&zigos_fred_entry);
+    if ((entry & (FRED_CONFIG_ENTRY_ALIGN - 1)) != 0) unreachable;
+    writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_RSP1_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_RSP2_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_RSP3_MSR, kernel_stack_top);
+    writeMsr(IA32_FRED_STKLVLS_MSR, 0);
+    writeMsr(IA32_FRED_CONFIG_MSR, entry);
+    writeCr4(readCr4() | CR4_FRED);
+}
+
+pub fn fredEnabled() bool {
+    return (readCr4() & CR4_FRED) != 0 and
+        readMsr(IA32_FRED_CONFIG_MSR) == @intFromPtr(&zigos_fred_entry);
+}
+
+pub fn setFredRsp0(kernel_stack_top: usize) void {
+    if (kernel_stack_top == 0 or (kernel_stack_top & 0xF) != 0) unreachable;
+    writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
+}
+
+pub fn writeXcr0(value: u64) void {
+    x86_write_xcr0(value);
+}
+
+pub fn readXcr0() u64 {
+    return x86_read_xcr0();
 }
 
 test "PCID CR3 composition preserves an aligned page-table root" {

@@ -43,7 +43,7 @@ pub const Client = struct {
     pub fn describe(self: *Client) Error!abi.DeviceDescriptor {
         try self.requireCurrentGeneration();
         const descriptor = try self.kernel_port.deviceDescribe(.{
-            .header = component_port.makeHeader(.device_describe, self.nextCorrelationId(), self.task_id),
+            .header = component_port.makeHeader(.device_describe, self.task_id),
             .device_capability_id = self.authority_capability_id,
         }, self.now_ticks);
         self.device_id = descriptor.device_id;
@@ -54,7 +54,7 @@ pub const Client = struct {
     pub fn mmioWindow(self: *Client, window_index: u8) Error!abi.DeviceMmioWindowDescriptor {
         try self.requireCurrentGeneration();
         return self.kernel_port.deviceMmioWindow(.{
-            .header = component_port.makeHeader(.device_mmio_window, self.nextCorrelationId(), self.task_id),
+            .header = component_port.makeHeader(.device_mmio_window, self.task_id),
             .device_capability_id = self.authority_capability_id,
             .window_index = window_index,
         }, self.now_ticks);

@@ -170,7 +170,7 @@ fn syscallEndpointCreate(
 ) Error!abi.EndpointCreateResponse {
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
     var request = component_port.EndpointCreateRequest{
-        .header = component_port.makeHeader(.endpoint_create, nextCorrelationId(), task_id),
+        .header = component_port.makeHeader(.endpoint_create, task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = task_id,
         .label = label,
@@ -180,6 +180,7 @@ fn syscallEndpointCreate(
         port,
         task_id,
         now_ticks,
+        request.header.operation,
         @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointCreateResponse),
@@ -198,7 +199,7 @@ fn syscallEndpointConnect(
 ) Error!abi.EndpointDescriptor {
     var response = std.mem.zeroes(abi.EndpointDescriptor);
     var request = component_port.EndpointConnectRequest{
-        .header = component_port.makeHeader(.endpoint_connect, nextCorrelationId(), task_id),
+        .header = component_port.makeHeader(.endpoint_connect, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
         .peer_endpoint_id = peer_endpoint_id,
@@ -207,6 +208,7 @@ fn syscallEndpointConnect(
         port,
         task_id,
         now_ticks,
+        request.header.operation,
         @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointDescriptor),
@@ -225,7 +227,8 @@ fn syscallEndpointSend(
     now_ticks: u64,
 ) Error!void {
     var request = component_port.EndpointSendRequest{
-        .header = component_port.makeHeader(.endpoint_send, correlation_id, task_id),
+        .header = component_port.makeHeader(.endpoint_send, task_id),
+        .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
         .reply_endpoint_id = reply_endpoint_id,
@@ -234,6 +237,7 @@ fn syscallEndpointSend(
         port,
         task_id,
         now_ticks,
+        request.header.operation,
         @intFromPtr(&request),
         0,
         0,
@@ -250,7 +254,7 @@ fn syscallEndpointRecv(
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
     var request = component_port.EndpointRecvRequest{
-        .header = component_port.makeHeader(.endpoint_recv, nextCorrelationId(), task_id),
+        .header = component_port.makeHeader(.endpoint_recv, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = task_id,
         .payload_out = &received.payload,
@@ -260,6 +264,7 @@ fn syscallEndpointRecv(
         port,
         task_id,
         now_ticks,
+        request.header.operation,
         @intFromPtr(&request),
         @intFromPtr(&response),
         @sizeOf(abi.EndpointRecvResponse),
@@ -332,7 +337,7 @@ const Harness = struct {
 
         const image = try generated_image_fixtures.imageByBundleId(serviceBundle(kind));
         const service_task = try self.port.taskCreate(.{
-            .header = component_port.makeHeader(.task_create, nextCorrelationId(), self.session_task_id),
+            .header = component_port.makeHeader(.task_create, self.session_task_id),
             .authority_capability_id = self.session_authority_capability_id,
             .request = .{
                 .owner = self.service_owner,
@@ -388,12 +393,12 @@ const Harness = struct {
 
 fn serviceBundle(comptime kind: ServiceKind) []const u8 {
     return switch (kind) {
-        .storage => "zigos.system.storage-object",
-        .sync => "zigos.system.sync-service",
-        .network => "zigos.system.network-stack",
-        .package => "zigos.system.package-service",
-        .compositor => "zigos.system.compositor",
-        .generic => "zigos.system.generic-service",
+        .storage => "zigos.system.store",
+        .sync => "zigos.system.store",
+        .network => "zigos.system.network",
+        .package => "zigos.system.store",
+        .compositor => "zigos.system.display",
+        .generic => "zigos.system.session",
     };
 }
 

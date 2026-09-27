@@ -73,13 +73,13 @@ The following are release blockers:
 - Missing passing `release-security-preflight`, authenticated candidate
   creation/verification through `release-bundle-check`, or final verify-only
   `release-security-gate` evidence from the ordered ceremony in `README.md`.
-- Missing current-commit `NUC11TNKi5` real-hardware proof run with the full
+- Missing current-commit `RNUC15CRSU7` real-hardware proof run with the full
   external trust configuration and explicit fresh `-Dhardware-proof-dir`
   documented in `README.md`.
 - Release provenance not signed through a hardware-backed TPM, secure enclave,
   HSM, or KMS key delegated by the independently pinned,
   threshold-authenticated trust policy.
-- Customer verification bundle missing the exact signed 33-target manifest,
+- Customer verification bundle missing the exact signed 17-target manifest,
   root consistency evidence, signed trust policy, artifact digests, SPDX SBOM,
   DSSE in-toto/SLSA provenance, or reproducible-build evidence.
 - Release verification performed without an independently distributed,
@@ -91,7 +91,7 @@ The following are release blockers:
 - Pinned root metadata missing `minimumPolicyVersion`, or its authenticated
   trust policy missing `minimumReleaseSequence`, for first-use rollback floors.
 - Candidate generation, finalization, or verification performed while an
-  untrusted concurrent writer can replace the release bundle or any of its 33
+  untrusted concurrent writer can replace the release bundle or any of its 15
   signed target files; authenticated inputs must remain private and quiescent
   or be staged read-only.
 - Treating any locally computed commitment as a production FIPS 204 ML-DSA

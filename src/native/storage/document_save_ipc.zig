@@ -49,7 +49,7 @@ pub const Server = struct {
         var payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
         var attached: abi.CapabilityDescriptor = undefined;
         const received = (try self.kernel.endpointRecv(.{
-            .header = component_port.makeHeader(.endpoint_recv, 0, self.storage.core.task_id),
+            .header = component_port.makeHeader(.endpoint_recv, self.storage.core.task_id),
             .endpoint_capability_id = self.binding.server_endpoint_capability_id,
             .receiver_task_id = self.storage.core.task_id,
             .payload_out = &payload,
@@ -84,12 +84,13 @@ pub const Server = struct {
     fn flushReply(self: *Server, now_ticks: u64) !bool {
         const pending = self.pending_reply orelse return false;
         self.kernel.endpointSend(.{
-            .header = component_port.makeHeader(.endpoint_send, pending.request_id, self.storage.core.task_id),
+            .header = component_port.makeHeader(.endpoint_send, self.storage.core.task_id),
+            .correlation_id = pending.request_id,
             .endpoint_capability_id = self.binding.server_endpoint_capability_id,
             .reply_endpoint_id = pending.endpoint_id,
             .payload = pending.bytes[0..pending.length],
         }, now_ticks) catch |err| switch (err) {
-            error.QueueFull => return false,
+            error.RingFull => return false,
             error.EndpointNotFound => {
                 // Generational handles forbid delivery to a replacement task.
                 self.pending_reply = null;
@@ -104,13 +105,9 @@ pub const Server = struct {
     fn read(self: *Server, version_id: u64, offset: u16, now_ticks: u64) protocol.Body {
         var authority = self.binding.authority;
         authority.now_ticks = now_ticks;
-        const view = self.storage.resolve(authority, .{
-            .workspace_id = self.binding.workspace_id,
-            .path = self.binding.path,
-            .access = .read,
-        }) catch return .{ .receipt = .{ .status = .permission_denied } };
-        if (view.object_id != self.binding.object_id or view.object_type != .document) return .{ .receipt = .{ .status = .permission_denied } };
-        if (view.version_id != version_id) return .{ .receipt = .{ .status = .document_changed } };
+        const view = self.storage.openEntry(authority, self.binding.workspace_id, self.binding.path, .read) catch return .{ .receipt = .{ .status = .permission_denied } };
+        if (view.object_id.raw() != self.binding.object_id or view.object_type != .document) return .{ .receipt = .{ .status = .permission_denied } };
+        if (view.version_id.raw() != version_id) return .{ .receipt = .{ .status = .document_changed } };
         const version = self.storage.core.version(version_id) orelse return .{ .receipt = .{ .status = .document_changed } };
         if (version.object_id.raw() != self.binding.object_id) return .{ .receipt = .{ .status = .document_changed } };
         const blob = self.storage.core.versionBlob(version) orelse return .{ .receipt = .{ .status = .storage_failed } };

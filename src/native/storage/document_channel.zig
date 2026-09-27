@@ -46,12 +46,12 @@ pub const Channel = struct {
         self.storage = storage_service.StoragePort.init(core, kernel.kernel.capability_table);
         var authority = request.authority;
         authority.now_ticks = now_ticks;
-        const view = try self.storage.resolve(authority, .{ .workspace_id = request.workspace_id, .path = request.path, .access = .read });
+        const view = try self.storage.openEntry(authority, request.workspace_id, request.path, .read);
         if (view.object_type != .document) return error.NotDocument;
-        try self.storage.requireDocumentWrite(authority, request.workspace_id, request.path, view.object_id);
+        try self.storage.requireDocumentWrite(authority, request.workspace_id, request.path, view.object_id.raw());
 
         const client = try kernel.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, 0, task.id),
+            .header = component_port.makeHeader(.endpoint_create, task.id),
             .authority_capability_id = request.client_bootstrap_capability_id,
             .owner_task_id = task.id,
             .label = "document-client",
@@ -59,7 +59,7 @@ pub const Channel = struct {
         }, now_ticks);
         errdefer kernel.kernel.retireEndpoint(ids.endpoint(client.endpoint.endpoint_id), now_ticks) catch unreachable;
         const server = try kernel.endpointCreate(.{
-            .header = component_port.makeHeader(.endpoint_create, 0, core.task_id),
+            .header = component_port.makeHeader(.endpoint_create, core.task_id),
             .authority_capability_id = request.server_bootstrap_capability_id,
             .owner_task_id = core.task_id,
             .label = "document-service",
@@ -67,7 +67,7 @@ pub const Channel = struct {
         }, now_ticks);
         errdefer kernel.kernel.retireEndpoint(ids.endpoint(server.endpoint.endpoint_id), now_ticks) catch unreachable;
         _ = try kernel.endpointConnect(.{
-            .header = component_port.makeHeader(.endpoint_connect, 0, task.id),
+            .header = component_port.makeHeader(.endpoint_connect, task.id),
             .endpoint_capability_id = client.capability_id,
             .peer_endpoint_capability_id = server.capability_id,
             .peer_endpoint_id = server.endpoint.endpoint_id,
@@ -86,15 +86,15 @@ pub const Channel = struct {
                 .authority = authority,
                 .workspace_id = request.workspace_id,
                 .path = self.path[0..request.path.len],
-                .object_id = view.object_id,
+                .object_id = view.object_id.raw(),
                 .signer = .{ .label = self.signer_label[0..request.signer.label.len], .seed = request.signer.seed },
             },
         };
         return .{
             .endpoint_capability_id = client.capability_id,
             .service_endpoint_id = self.server_endpoint_id,
-            .object_id = view.object_id,
-            .version_id = view.version_id,
+            .object_id = view.object_id.raw(),
+            .version_id = view.version_id.raw(),
         };
     }
 

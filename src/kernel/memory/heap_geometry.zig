@@ -1,54 +1,39 @@
 const std = @import("std");
 
 pub const block_alignment: usize = 16;
-pub const maximum_heap_bytes: usize = 16 * 1024 * 1024;
-pub const second_level_bits = 5;
-pub const second_level_count = 1 << second_level_bits;
-const linear_limit = block_alignment * second_level_count;
-const linear_limit_log2 = std.math.log2_int(usize, linear_limit);
-pub const first_level_count = std.math.log2_int(usize, maximum_heap_bytes) - linear_limit_log2 + 2;
-
-pub const SizeClass = struct { first: u5, second: u5 };
-
-pub const BlockHeader = struct {
-    size: usize,
-    state: u64,
-    next: ?*@This(),
-    prev: ?*@This(),
-};
-
-pub const FreeLinks = struct {
-    next: ?*BlockHeader,
-    prev: ?*BlockHeader,
-};
+pub const size_classes = [_]usize{ 32, 64, 128, 256, 512, 1024, 2048, 4096 };
+pub const free_list_class_count: usize = size_classes.len + 1;
 
 pub const AlignedRange = struct {
     start: usize,
     end: usize,
 };
 
-pub const minimum_free_data_size: usize = @sizeOf(FreeLinks);
-pub const block_state_allocated: u64 = 0x4c49_5645_424c_4f43;
-pub const block_state_free: u64 = 0x4652_4545_424c_4f43;
+pub const granule: usize = 32;
+pub const payload_has_no_header = true;
+pub const minimum_free_data_size: usize = granule;
 
-// Free blocks map down to their containing class. Requests round up to a
-// class boundary so every block in the selected class is large enough.
-pub fn sizeClass(size: usize) SizeClass {
-    std.debug.assert(size >= minimum_free_data_size and size <= maximum_heap_bytes);
-    if (size < linear_limit) return .{ .first = 0, .second = @intCast(size / block_alignment) };
-    const exponent = std.math.log2_int(usize, size);
-    return .{
-        .first = @intCast(exponent - linear_limit_log2 + 1),
-        .second = @intCast((size >> (exponent - second_level_bits)) - second_level_count),
-    };
+pub fn freeListIndex(size: usize, large_block_threshold: usize) usize {
+    if (size > large_block_threshold) return size_classes.len;
+    return sizeClassIndex(size);
 }
 
-pub fn allocationSize(size: usize) ?usize {
-    if (size == 0 or size > maximum_heap_bytes) return null;
-    if (size < linear_limit) return (size + block_alignment - 1) & ~(block_alignment - 1);
-    const alignment = @as(usize, 1) << (std.math.log2_int(usize, size) - second_level_bits);
-    const rounded = alignSize(size, alignment) orelse return null;
-    return if (rounded <= maximum_heap_bytes) rounded else null;
+pub fn sizeClassIndex(size: usize) usize {
+    for (size_classes, 0..) |limit, index| {
+        if (size <= limit) return index;
+    }
+    return size_classes.len;
+}
+
+pub fn sizeClassBytes(index: usize) ?usize {
+    if (index >= size_classes.len) return null;
+    return size_classes[index];
+}
+
+pub fn reusableMagazineBytes(class_index: usize, span_length: usize) ?usize {
+    const class_bytes = sizeClassBytes(class_index) orelse return null;
+    if (span_length != class_bytes) return null;
+    return class_bytes;
 }
 
 pub fn allocationMarkerIndex(
@@ -105,19 +90,19 @@ test "heap sizes align without overflow" {
 }
 
 test "heap block splitting accepts the exact reusable tail threshold" {
-    const header_size = @sizeOf(BlockHeader);
+    const header_size: usize = 0;
 
     try std.testing.expectEqual(
         @as(?usize, null),
-        splitRemainder(63, 16, header_size, minimum_free_data_size),
-    );
-    try std.testing.expectEqual(
-        @as(?usize, 16),
-        splitRemainder(64, 16, header_size, minimum_free_data_size),
+        splitRemainder(63, 32, header_size, minimum_free_data_size),
     );
     try std.testing.expectEqual(
         @as(?usize, 32),
-        splitRemainder(80, 16, header_size, minimum_free_data_size),
+        splitRemainder(64, 32, header_size, minimum_free_data_size),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 48),
+        splitRemainder(80, 32, header_size, minimum_free_data_size),
     );
     try std.testing.expectEqual(
         @as(?usize, null),
@@ -143,12 +128,11 @@ test "aligned prefix claims are bounded and overflow safe" {
     );
 }
 
-test "heap metadata preserves aligned payloads and holds free-list links" {
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(BlockHeader));
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(FreeLinks));
-    try std.testing.expectEqual(@as(usize, 0), @sizeOf(BlockHeader) % block_alignment);
-    try std.testing.expect(minimum_free_data_size >= @sizeOf(FreeLinks));
-    try std.testing.expect(block_alignment >= @alignOf(FreeLinks));
+test "heap metadata stays outside the payload" {
+    try std.testing.expect(payload_has_no_header);
+    try std.testing.expectEqual(@as(usize, 32), granule);
+    try std.testing.expectEqual(@as(usize, 0), granule % block_alignment);
+    try std.testing.expect(minimum_free_data_size >= granule);
 }
 
 test "heap allocation markers accept only aligned arena addresses" {
@@ -160,27 +144,21 @@ test "heap allocation markers accept only aligned arena addresses" {
     try std.testing.expectEqual(@as(?usize, null), allocationMarkerIndex(0x2000, 0x2000, 4096, 0));
 }
 
-test "heap size classes round requests up without unbounded internal fragmentation" {
-    try std.testing.expect(allocationSize(0) == null);
-    try std.testing.expect(allocationSize(maximum_heap_bytes + 1) == null);
-    try std.testing.expect(allocationSize(std.math.maxInt(usize)) == null);
-    try std.testing.expectEqual(@as(?usize, 16), allocationSize(1));
-    try std.testing.expectEqual(@as(?usize, 528), allocationSize(513));
-    try std.testing.expectEqual(@as(?usize, 4224), allocationSize(4097));
-    try std.testing.expectEqual(@as(?usize, maximum_heap_bytes), allocationSize(maximum_heap_bytes));
+test "heap free-list classes round small blocks onto exact size classes" {
+    const page_size: usize = 4096;
 
-    var size: usize = block_alignment;
-    while (size <= maximum_heap_bytes) : (size += block_alignment) {
-        const rounded = allocationSize(size).?;
-        try std.testing.expect(rounded >= size);
-        try std.testing.expectEqual(@as(usize, 0), rounded % block_alignment);
-        try std.testing.expect(rounded - size <= @max(block_alignment - 1, size / second_level_count));
-        const class = sizeClass(rounded);
-        try std.testing.expect(class.first < first_level_count);
-        if (rounded > block_alignment) {
-            const preceding = sizeClass(rounded - block_alignment);
-            try std.testing.expect(preceding.first < class.first or
-                (preceding.first == class.first and preceding.second < class.second));
-        }
-    }
+    try std.testing.expectEqual(@as(usize, 0), freeListIndex(16, page_size));
+    try std.testing.expectEqual(@as(usize, 0), freeListIndex(32, page_size));
+    try std.testing.expectEqual(@as(usize, 1), freeListIndex(33, page_size));
+    try std.testing.expectEqual(@as(usize, 7), freeListIndex(page_size, page_size));
+    try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(page_size + 1, page_size));
+    try std.testing.expectEqual(@as(usize, size_classes.len), freeListIndex(128, 64));
+    try std.testing.expectEqual(@as(?usize, 32), sizeClassBytes(0));
+    try std.testing.expectEqual(@as(?usize, null), sizeClassBytes(size_classes.len));
+    try std.testing.expectEqual(size_classes.len + 1, free_list_class_count);
+    try std.testing.expectEqual(@as(?usize, 32), reusableMagazineBytes(0, 32));
+    try std.testing.expectEqual(@as(?usize, 4096), reusableMagazineBytes(size_classes.len - 1, 4096));
+    try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len - 1, 8192));
+    try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len, 8192));
+    try std.testing.expectEqual(@as(?usize, null), reusableMagazineBytes(size_classes.len, 16384));
 }

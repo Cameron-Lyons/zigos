@@ -3,18 +3,19 @@
 .extern isrHandler
 .extern syscall_handler
 .extern zigos_userspace_resume_requested
+.extern zigos_userspace_resume_eip
 .extern zigos_resume_from_userspace_interrupt
 
 .equ SYSCALL_CALL_YIELD, 0
-.equ SYSCALL_CALL_DISPATCH, 1
 .equ SYSCALL_VECTOR, 128
 .equ USERSPACE_YIELD_VECTOR, 129
 .equ USER_DATA_SELECTOR, 0x1b
 .equ USER_CODE_SELECTOR, 0x23
 .equ CPU_KERNEL_STACK_TOP, 0
 .equ CPU_USER_STACK_POINTER, 8
-.equ FXSAVE_BYTES, 512
-.equ FXSAVE_ALIGN_SLACK, 16
+.equ XSAVE_BYTES, 576
+.equ XSAVE_ALIGN_SLACK, 64
+.equ XCOMP_BV, 0x8000000000000003
 
 .macro SAVE_REGISTERS
     pushq %rax
@@ -59,6 +60,8 @@
 .global zigos_syscall_entry
 .type zigos_syscall_entry, @function
 zigos_syscall_entry:
+    # endbr64
+    .byte 0xf3, 0x0f, 0x1e, 0xfa
     swapgs
     movq %rsp, %gs:CPU_USER_STACK_POINTER
     movq %gs:CPU_KERNEL_STACK_TOP, %rsp
@@ -74,11 +77,7 @@ zigos_syscall_entry:
 
     cmpq $SYSCALL_CALL_YIELD, %rax
     je .yield_entry
-    cmpq $SYSCALL_CALL_DISPATCH, %rax
-    je .dispatch_entry
-    xorq %rdi, %rdi
-
-.dispatch_entry:
+    # %rax is the native operation. %rdi stays the request pointer, matching FRED.
     pushq $SYSCALL_VECTOR
     jmp .save_and_dispatch
 
@@ -88,27 +87,53 @@ zigos_syscall_entry:
 
 .save_and_dispatch:
     SAVE_REGISTERS
-    movq %rsp, %r12
-    movq %r12, %rdi
-    subq $(FXSAVE_BYTES + FXSAVE_ALIGN_SLACK), %rsp
-    andq $-16, %rsp
-    fxsave64 (%rsp)
-    cld
-
-    cmpq $SYSCALL_VECTOR, 136(%r12)
-    jne .handle_userspace_yield
+    clts
+    movq %rsp, %rdi
+    cmpq $SYSCALL_VECTOR, 136(%rsp)
+    jne .yield_with_xstate
     call syscall_handler
+    jmp .dispatch_complete_lazy
+
+.yield_with_xstate:
+    movq %rsp, %r12
+    subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
+    andq $-64, %rsp
+    leaq 512(%rsp), %rdi
+    xorl %eax, %eax
+    movl $8, %ecx
+    rep stosq
+    movabsq $XCOMP_BV, %rax
+    movq %rax, 520(%rsp)
+    movl $3, %eax
+    xorl %edx, %edx
+    # xsaves (%rsp)
+    .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
+    cld
+    movq %r12, %rdi
+    clts
+    call isrHandler
+    movl $3, %eax
+    xorl %edx, %edx
+    # xrstors (%rsp)
+    .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
+    movq %r12, %rsp
     jmp .dispatch_complete
 
-.handle_userspace_yield:
-    call isrHandler
-
 .dispatch_complete:
-    fxrstor64 (%rsp)
-    movq %r12, %rsp
     cmpl $0, zigos_userspace_resume_requested(%rip)
-    jne .userspace_resume
+    je .sysret
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    je .sysret
+    jmp .userspace_resume
 
+.dispatch_complete_lazy:
+    cmpl $0, zigos_userspace_resume_requested(%rip)
+    je .sysret
+    cmpq $0, zigos_userspace_resume_eip(%rip)
+    je .sysret
+    jmp .userspace_resume
+
+.sysret:
     RESTORE_REGISTERS
     movq 16(%rsp), %rcx
     movq 32(%rsp), %r11
@@ -134,7 +159,7 @@ zigos_syscall_benchmark_user_start:
     movw %ax, %gs
     movq %r12, %r15
 .benchmark_dispatch_loop:
-    movl $SYSCALL_CALL_DISPATCH, %eax
+    movl $0x10f, %eax
     xorl %edi, %edi
     xorl %esi, %esi
     xorl %edx, %edx

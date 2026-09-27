@@ -81,6 +81,11 @@ pub const Summary = struct {
     x2apic_count: u16 = 0,
 };
 
+pub const Processor = struct {
+    apic_id: u32,
+    enabled: bool,
+};
+
 pub const TIMER_VECTOR_MIN: u8 = 0x20;
 pub const TIMER_VECTOR_MAX: u8 = 0xEF;
 
@@ -192,6 +197,46 @@ pub fn parseMadt(table: []const u8) Error!Summary {
     }
 
     return summary;
+}
+
+pub fn collectProcessors(table: []const u8, out: []Processor) Error!usize {
+    _ = try parseMadt(table);
+    var count: usize = 0;
+    var offset: usize = MADT_HEADER_LENGTH;
+    const table_length = (try acpi.parseSdtHeader(table)).length;
+    while (offset < table_length) {
+        if (offset + MADT_ENTRY_HEADER_BYTES > table_length) return error.InvalidEntryLength;
+        const entry_type = EntryType.fromByte(table[offset + MADT_ENTRY_TYPE_OFFSET]);
+        const entry_length = table[offset + MADT_ENTRY_LENGTH_OFFSET];
+        if (entry_length < MADT_ENTRY_HEADER_BYTES or offset + entry_length > table_length) {
+            return error.InvalidEntryLength;
+        }
+        const entry = table[offset .. offset + entry_length];
+        const processor: ?Processor = switch (entry_type) {
+            .processor_local_apic => blk: {
+                if (entry.len < MADT_LOCAL_APIC_MIN_BYTES) break :blk null;
+                break :blk .{
+                    .apic_id = entry[3],
+                    .enabled = (readU32Le(entry[MADT_LOCAL_APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
+                };
+            },
+            .processor_local_x2apic => blk: {
+                if (entry.len < MADT_X2APIC_MIN_BYTES) break :blk null;
+                break :blk .{
+                    .apic_id = readU32Le(entry[4..8]),
+                    .enabled = (readU32Le(entry[MADT_X2APIC_FLAGS_OFFSET..][0..4]) & MADT_PROCESSOR_ENABLED_FLAG) != 0,
+                };
+            },
+            else => null,
+        };
+        if (processor) |record| {
+            if (count >= out.len) return error.InvalidLength;
+            out[count] = record;
+            count += 1;
+        }
+        offset += entry_length;
+    }
+    return count;
 }
 
 pub fn proveTimerInterrupt(
@@ -326,6 +371,12 @@ test "APIC MADT parser summarizes APIC topology" {
     try std.testing.expectEqual(@as(u16, 1), summary.enabled_processor_count);
     try std.testing.expectEqual(@as(u16, 1), summary.io_apic_count);
     try std.testing.expectEqual(@as(u16, 1), summary.interrupt_source_override_count);
+
+    var processors: [4]Processor = undefined;
+    const count = try collectProcessors(table[0..], processors[0..]);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@as(u32, 1), processors[0].apic_id);
+    try std.testing.expect(processors[0].enabled);
 }
 
 test "APIC MADT parser rejects corrupted checksum" {

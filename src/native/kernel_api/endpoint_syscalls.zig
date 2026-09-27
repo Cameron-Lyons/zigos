@@ -43,9 +43,17 @@ pub fn dispatchEndpointSend(
 ) dispatch.DispatchResult {
     _ = response_len;
     _ = response_addr;
-    var request = dispatch.readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
-    request.payload = dispatch.copyUserSlice(memory, request.payload, &payload_buffer) orelse return dispatch.invalidRequest();
+    const request = dispatch.readRequest(component_port.EndpointSendRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    if (request.payload.len > endpoint.MAX_MESSAGE_BYTES) return dispatch.invalidRequest();
+    if (request.payload.len != 0 and !dispatch.validateUserRange(
+        memory,
+        @intFromPtr(request.payload.ptr),
+        request.payload.len,
+        1,
+        .read,
+    )) {
+        return dispatch.invalidRequest();
+    }
     component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.success();
 }
@@ -92,24 +100,10 @@ pub fn dispatchEndpointRecv(
     {
         return .{ .status = .invalid_response_buffer };
     }
-    var payload_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined;
-    var attached_capability = @import("std").mem.zeroes(abi.CapabilityDescriptor);
-    var kernel_request = request;
-    kernel_request.payload_out = payload_buffer[0..request.payload_out.len];
-    kernel_request.attached_capability_out = &attached_capability;
-    const received = component_port.invokeGeneratedFromValidatedSyscall(.endpoint_recv, port, kernel_request, now_ticks) catch |err| return dispatch.mapError(err);
+    const received = component_port.invokeGeneratedFromValidatedSyscall(.endpoint_recv, port, request, now_ticks) catch |err| return dispatch.mapError(err);
 
     var response = @import("std").mem.zeroes(abi.EndpointRecvResponse);
     if (received) |message| {
-        const payload_len: usize = message.message.payload_len;
-        if (!dispatch.copyToUser(memory, request.payload_out, payload_buffer[0..payload_len])) {
-            return .{ .status = .invalid_response_buffer };
-        }
-        if (message.attached_capability != null and
-            !dispatch.writeUserValue(memory, @intFromPtr(request.attached_capability_out), attached_capability))
-        {
-            return .{ .status = .invalid_response_buffer };
-        }
         response.present = 1;
         response.has_attached_capability = @intFromBool(message.attached_capability != null);
         response.message = message.message;

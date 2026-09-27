@@ -7,10 +7,20 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
+const userspace_layout = @import("../core/userspace_layout.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
+const userspace_registry = @import("userspace_registry.zig");
+const demand_paging = @import("../../kernel/memory/demand_paging.zig");
+const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
+const shared_memory = @import("../kernel_api/shared_memory.zig");
+const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
+
+pub const SHARES_GROUP_PAGE_TABLES = userspace_registry.SHARES_GROUP_PAGE_TABLES;
+pub const USES_PKU_WITHIN_SHARED_TABLES = false;
+const GROUP_SPACE_COUNT = userspace_registry.PRODUCTION_ADDRESS_SPACE_COUNT;
 
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
@@ -27,6 +37,8 @@ else
 
         pub fn allowSupervisorUserMemory() void {}
         pub fn forbidSupervisorUserMemory() void {}
+        pub fn allowUserProtectionKey(_: u4) void {}
+        pub fn wrpkru(_: u32) void {}
     };
 
 const common = if (builtin.target.os.tag == .freestanding)
@@ -45,7 +57,7 @@ else
         }
     };
 const include_verification_evidence = kernel_config.includesVerificationEvidence();
-const NxProbeTarget = if (include_verification_evidence) u32 else void;
+const NxProbeTarget = if (include_verification_evidence) u64 else void;
 
 pub const ExecutionOutcome = enum(u8) {
     unavailable,
@@ -94,6 +106,7 @@ else
             pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
             pub fn registerHandler(_: u8, _: InterruptHandler) void {}
+            pub fn setTimerPreemption(_: *const fn (regs: *InterruptFrame) void) void {}
         };
 
         pub const paging = struct {
@@ -103,6 +116,7 @@ else
                 executable: bool = false,
                 write_through: bool = false,
                 cache_disabled: bool = false,
+                protection_key: u4 = 0,
             };
             pub const UserAddressSpace = struct {
                 directory: *PageDirectory,
@@ -139,18 +153,36 @@ else
             }
 
             pub fn switchToUserAddressSpace(_: *const UserAddressSpace) void {}
+            pub fn activateUserDomain(_: *const UserAddressSpace, _: u4) void {}
             pub fn switchToKernelAddressSpace() void {}
-            pub fn mapOwnedUserRange(_: *UserAddressSpace, _: u32, _: u32, _: UserPermissions) UserMapError!void {
+            pub fn mapOwnedUserRange(_: *UserAddressSpace, _: usize, _: usize, _: UserPermissions) UserMapError!void {
                 return error.OutOfMemory;
             }
-            pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: u32, _: []const u8) UserWriteError!void {
+            pub fn validateUserRangeAvailable(_: *const UserAddressSpace, _: usize, _: usize) UserMapError!void {}
+            pub fn releaseUserRange(_: *const UserAddressSpace, _: usize, _: usize) UserMapError!void {}
+            pub fn mapBorrowedPhysicalUserRange(
+                _: *UserAddressSpace,
+                _: usize,
+                _: u64,
+                _: usize,
+                _: UserPermissions,
+            ) UserMapError!void {
+                return error.OutOfMemory;
+            }
+            pub fn writeOwnedUserRange(_: *const UserAddressSpace, _: usize, _: []const u8) UserWriteError!void {
                 return error.PageNotOwned;
             }
-            pub fn ownedUserPageIsExecutable(_: *const UserAddressSpace, _: u32) ?bool {
+            pub fn readOwnedUserRange(_: *const UserAddressSpace, _: usize, _: []u8) UserWriteError!void {
+                return error.PageNotOwned;
+            }
+            pub fn copyOwnedUserPageFromPhysical(_: *const UserAddressSpace, _: usize, _: u64) UserWriteError!void {
+                return error.PageNotOwned;
+            }
+            pub fn ownedUserPageIsExecutable(_: *const UserAddressSpace, _: usize) ?bool {
                 return null;
             }
             pub fn destroyUserAddressSpace(_: *UserAddressSpace) UserAddressSpaceDestroyError!void {}
-            pub fn unmapBorrowedCurrentPage(_: u32) bool {
+            pub fn unmapBorrowedCurrentPage(_: usize) bool {
                 return true;
             }
             pub fn frameStats() FrameStats {
@@ -273,6 +305,12 @@ pub fn reportTrapStackPeak() void {
 }
 
 pub export var zigos_userspace_resume_requested: u32 = 0;
+const PreemptCheck = *const fn (u64) bool;
+var preempt_check: ?PreemptCheck = null;
+
+pub fn setPreemptCheck(check: ?PreemptCheck) void {
+    preempt_check = check;
+}
 pub export var zigos_userspace_resume_esp: usize = 0;
 pub export var zigos_userspace_resume_eip: usize = 0;
 
@@ -314,7 +352,10 @@ extern fn zigos_enter_userspace(context: usize, reserved: usize) callconv(.c) u3
 
 pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
     if (builtin.target.os.tag != .freestanding) return 0;
-    return zigos_enter_userspace(@intFromPtr(context), 0);
+    const result = zigos_enter_userspace(@intFromPtr(context), 0);
+    zigos_userspace_resume_eip = 0;
+    zigos_userspace_resume_esp = 0;
+    return result;
 }
 
 const MappingState = enum(u8) {
@@ -325,14 +366,15 @@ const MappingState = enum(u8) {
 
 const MappingLaunchPolicy = packed struct(u32) {
     contract_flags: u16 = 0,
-    heartbeat_increment: u16 = 1,
+    heartbeat_increment: u12 = 1,
+    protection_key: u4 = 0,
 };
 
 const MappingDispatchMetadata = struct {
     owner_task_id: u64 = 0,
     image_id: u64 = 0,
-    initial_instruction_pointer: u32 = 0,
-    initial_stack_pointer: u32 = 0,
+    initial_instruction_pointer: u64 = 0,
+    initial_stack_pointer: u64 = 0,
     bootstrap_mailbox_address: u32 = 0,
     launch_policy: MappingLaunchPolicy = .{},
 
@@ -343,29 +385,43 @@ const MappingDispatchMetadata = struct {
     fn heartbeatIncrement(self: MappingDispatchMetadata) u32 {
         return self.launch_policy.heartbeat_increment;
     }
+
+    fn protectionKey(self: MappingDispatchMetadata) u4 {
+        return self.launch_policy.protection_key;
+    }
 };
 
-const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 32;
-const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 376 else 368;
-const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 53_384 else 52_360;
+const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 40;
+const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 680 else 456;
+const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 98_304 else 66_560;
+
+const MappedImageRegions = struct {
+    const Range = struct { start: usize = 0, size: usize = 0 };
+    ranges: [task_runtime.MAX_EXECUTABLE_SEGMENTS]Range = [_]Range{.{}} ** task_runtime.MAX_EXECUTABLE_SEGMENTS,
+    count: usize = 0,
+};
 
 const MappingEntry = struct {
     state: MappingState = .building,
     address_space_id: u64 = 0,
     address_space: ?freestanding.paging.UserAddressSpace = null,
+    image_regions: ?*MappedImageRegions = null,
     dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
-    resume_instruction_pointer: u32 = 0,
-    resume_stack_pointer: u32 = 0,
+    resume_instruction_pointer: u64 = 0,
+    resume_stack_pointer: u64 = 0,
     user_context64: UserContext64 = .{},
     yield_count: u64 = 0,
     last_user_counter: u32 = 0,
     page_fault_count: u64 = 0,
-    last_fault_address: u32 = 0,
+    last_fault_address: u64 = 0,
     last_fault_error_code: u32 = 0,
     mailbox_authority_cache: MailboxAuthorityCache = .{},
     mailbox_publication_cache: MailboxPublicationCache = .{},
     initial_mailbox_prepared: bool = false,
+    captured_mailbox: if (builtin.target.os.tag == .freestanding) userspace_bootstrap_mailbox.Mailbox else void =
+        if (builtin.target.os.tag == .freestanding) .{} else {},
+    mailbox_captured: bool = false,
 
     fn pageDirectory(self: *const MappingEntry) *freestanding.paging.PageDirectory {
         return self.address_space.?.directory;
@@ -419,6 +475,11 @@ pub fn activeTaskId() u64 {
     return executor.activeTaskId();
 }
 
+pub fn requestEventWait() void {
+    const executor = registered_executor orelse return;
+    executor.last_yield_disposition = .wait_for_event;
+}
+
 pub const Executor = struct {
     initialized: bool = false,
     binding_owner: ?*const anyopaque = null,
@@ -430,19 +491,21 @@ pub const Executor = struct {
     active_mapping_handle: MappingHandle = .{},
     handoff_completed: bool = false,
     pending_user_context64: UserContext64 = .{},
-    last_trap_instruction_pointer: u32 = 0,
-    last_trap_stack_pointer: u32 = 0,
+    last_trap_instruction_pointer: u64 = 0,
+    last_trap_stack_pointer: u64 = 0,
     last_trap_counter: u32 = 0,
     last_yield_disposition: userspace_bootstrap_mailbox.YieldDisposition = .runnable,
     last_yield_ui_revision: u64 = 0,
     last_user_exception: ?UserException = null,
     last_fault_task_id: u64 = 0,
     last_fault_address_space_id: u64 = 0,
-    last_fault_address: u32 = 0,
+    last_fault_address: u64 = 0,
     last_fault_error_code: u32 = 0,
     user_page_fault_count: u64 = 0,
     active_nx_probe_target: NxProbeTarget = if (include_verification_evidence) 0 else {},
     mappings: MappingArenaBacking = if (heap_backed_mappings) null else MappingArena.init(),
+    group_spaces: [GROUP_SPACE_COUNT]?freestanding.paging.UserAddressSpace = .{null} ** GROUP_SPACE_COUNT,
+    group_refs: [GROUP_SPACE_COUNT]u8 = .{0} ** GROUP_SPACE_COUNT,
 
     comptime {
         if (heap_backed_mappings and @sizeOf(@This()) > units.kibibytes(1)) {
@@ -463,8 +526,7 @@ pub const Executor = struct {
     fn ensureMappingArena(self: *Executor) error{OutOfMemory}!*MappingArena {
         if (self.mappingArena()) |mappings| return mappings;
         if (comptime heap_backed_mappings) {
-            const allocation = kernel_memory.kmalloc(@sizeOf(MappingArena)) orelse return error.OutOfMemory;
-            const mappings: *MappingArena = @ptrCast(@alignCast(allocation));
+            const mappings = table_backing.alloc(MappingArena) orelse return error.OutOfMemory;
             initializeMappingArena(mappings);
             self.mappings = mappings;
             return mappings;
@@ -475,14 +537,14 @@ pub const Executor = struct {
     fn releaseMappingArena(self: *Executor) void {
         if (comptime heap_backed_mappings) {
             if (self.mappings) |mappings| {
-                @memset(std.mem.asBytes(mappings), 0);
-                kernel_memory.kfree(@ptrCast(mappings));
+                table_backing.free(MappingArena, mappings);
                 self.mappings = null;
             }
         }
     }
 
     pub fn init(self: *Executor) void {
+        shared_memory.setMappedObjectHook(registerMappedObject);
         if (builtin.target.os.tag != .freestanding) return;
         registered_executor = self;
         if (self.initialized) return;
@@ -492,6 +554,7 @@ pub const Executor = struct {
                 freestanding.isr.registerHandler(vector, userspaceExceptionHandler);
             }
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
+            freestanding.isr.setTimerPreemption(userspaceTimerPreemption);
             trap_handler_registered = true;
         }
         const trap_stack_top = prepareKernelStack();
@@ -547,7 +610,7 @@ pub const Executor = struct {
             zigos_userspace_resume_requested = 1;
             return;
         }
-        releaseMapping(resolution.mappings, resolution.slot_index, mapping);
+        releaseMapping(self, resolution.mappings, resolution.slot_index, mapping);
     }
 
     pub fn materializedCount(self: *const Executor) usize {
@@ -595,7 +658,7 @@ pub const Executor = struct {
         self: *Executor,
         task_id: u64,
         address_space_id: u64,
-        expected_fault_address: u32,
+        expected_fault_address: u64,
     ) bool {
         if (self.last_fault_task_id != task_id) return false;
         if (self.last_fault_address_space_id != address_space_id) return false;
@@ -609,7 +672,7 @@ pub const Executor = struct {
         self: *Executor,
         task_id: u64,
         address_space_id: u64,
-        expected_fault_address: u32,
+        expected_fault_address: u64,
     ) bool {
         const required = @as(u32, 0x1 | 0x4 | 0x10);
         const forbidden = @as(u32, 0x2);
@@ -645,22 +708,54 @@ pub const Executor = struct {
         runtime: *const task_runtime.Runtime,
         task_id: u64,
     ) ?userspace_bootstrap_mailbox.Mailbox {
-        if (builtin.target.os.tag != .freestanding) return null;
-        if (self.active_task_id != 0) return null;
-        const task = runtime.findConst(task_id) orelse return null;
-        if (task.state != .active) return null;
-        const mapping = self.findMapping(task.address_space_id) orelse return null;
-        if (mapping.state != .live or mapping.address_space == null) return null;
-        const image = catalog.findById(task.launch.image_id) orelse return null;
-        if (image.bootstrap_mailbox_address == 0) return null;
+        return switch (self.inspectBootstrapMailbox(catalog, runtime, task_id)) {
+            .ready => |mailbox| mailbox,
+            .miss => null,
+        };
+    }
 
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-        defer freestanding.paging.switchToKernelAddressSpace();
-        x86.allowSupervisorUserMemory();
-        defer x86.forbidSupervisorUserMemory();
-        const mailbox_ptr: *const userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(@as(usize, @intCast(image.bootstrap_mailbox_address)));
-        if (mailbox_ptr.version != userspace_bootstrap_mailbox.VERSION) return null;
-        return mailbox_ptr.*;
+    pub fn bootstrapMailboxSnapshotMissReason(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *const task_runtime.Runtime,
+        task_id: u64,
+    ) []const u8 {
+        return switch (self.inspectBootstrapMailbox(catalog, runtime, task_id)) {
+            .ready => "ok",
+            .miss => |reason| @tagName(reason),
+        };
+    }
+
+    fn inspectBootstrapMailbox(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *const task_runtime.Runtime,
+        task_id: u64,
+    ) MailboxSnapshotInspection {
+        if (builtin.target.os.tag != .freestanding) return .{ .miss = .host };
+        const task = runtime.findConst(task_id) orelse return .{ .miss = .task };
+        if (task.state != .active) return .{ .miss = .inactive };
+        const mapping = self.findMapping(task.address_space_id) orelse return .{ .miss = .mapping };
+        if ((mapping.state != .live and mapping.state != .retire_pending) or mapping.address_space == null) {
+            return .{ .miss = .mapping_state };
+        }
+        const mailbox_address = mailboxAddressForSnapshot(mapping, catalog.findById(task.launch.image_id));
+        if (mailbox_address == 0) return .{ .miss = .address };
+        if (readUserspaceMailboxFromMapping(mapping, mailbox_address)) |mailbox| {
+            if (mailboxBelongsToTask(mailbox, task_id)) {
+                storeCapturedMailbox(mapping, mailbox);
+                return .{ .ready = mailbox };
+            }
+        }
+        if (mapping.mailbox_captured) {
+            if (comptime builtin.target.os.tag == .freestanding) {
+                const captured = mapping.captured_mailbox;
+                if (mailboxBelongsToTask(captured, task_id)) return .{ .ready = captured };
+                if (captured.version == userspace_bootstrap_mailbox.VERSION) return .{ .miss = .sibling };
+                return .{ .miss = .version };
+            }
+        }
+        return .{ .miss = .unread };
     }
 
     // Publish an opened document before the first instruction of a fresh app.
@@ -720,6 +815,7 @@ pub const Executor = struct {
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
+        _ = xhci_driver_task.dispatchForTask(task.id);
         if (!self.initialized) return .unavailable;
         if (self.bound_runtime != runtime) return .unavailable;
         if (debugIndexChecksEnabled()) {
@@ -863,7 +959,7 @@ pub const Executor = struct {
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
         zigos_userspace_resume_requested = 0;
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
 
         const rehosted = runtime.rehostTask(task_id, now_ticks) catch false;
         const deferred = rehosted and
@@ -895,8 +991,7 @@ pub const Executor = struct {
         if (mapping.dispatch_metadata.bootstrap_mailbox_address == 0) return null;
 
         const authorities = resolveMailboxAuthoritiesCached(task, capability_table, now_ticks, &mapping.mailbox_authority_cache);
-        return prepareCachedBootstrapMailboxUpdate(
-            &mapping.mailbox_publication_cache,
+        return prepareBootstrapMailboxUpdate(
             mapping.dispatch_metadata.bootstrap_mailbox_address,
             mapping.resume_valid or mapping.initial_mailbox_prepared,
             task.component_class,
@@ -905,7 +1000,6 @@ pub const Executor = struct {
             task.id,
             task.ui_surface_id orelse 0,
             authorities,
-            mapping.mailbox_authority_cache.authority_generation,
         );
     }
 
@@ -923,10 +1017,11 @@ pub const Executor = struct {
             image.bootstrap_mailbox_address,
             image.contract_flags,
             image.heartbeat_increment,
+            userspace_registry.protectionKeyForBundle(image.bundleIdSlice()),
         );
         if (self.findMappingWithHandle(address_space.id)) |resolution| {
             if (resolution.entry.state != .live) return error.AddressSpaceRetiring;
-            if (!std.meta.eql(resolution.entry.dispatch_metadata, dispatch_metadata)) {
+            if (!mappingDispatchMetadataCompatible(resolution.entry.dispatch_metadata, dispatch_metadata)) {
                 native_util.impossibleByInvariant("materialized userspace dispatch metadata changed without retirement");
             }
             return resolution;
@@ -942,14 +1037,34 @@ pub const Executor = struct {
             .address_space_id = address_space.id,
             .dispatch_metadata = dispatch_metadata,
         };
-        errdefer releaseMapping(mappings, handle.slotIndex(), entry);
+        errdefer self.releaseMapping(mappings, handle.slotIndex(), entry);
 
-        entry.address_space = try freestanding.paging.createUserAddressSpace();
+        entry.address_space = try self.acquireUserAddressSpace(image.bundleIdSlice());
+        entry.image_regions = table_backing.alloc(MappedImageRegions) orelse return error.OutOfMemory;
 
         for (address_space.regions[0..address_space.region_count]) |region| {
             switch (region.kind) {
-                .load_segment => try mapLoadRegion(&entry.address_space.?, region, image.elf_file),
-                .stack => try mapZeroedRegion(&entry.address_space.?, region.virtual_address, @as(usize, region.size_bytes), region.access),
+                .load_segment => {
+                    if (try userRangeOccupied(&entry.address_space.?, region.virtual_address, region.size_bytes)) continue;
+                    const image_regions = entry.image_regions.?;
+                    image_regions.ranges[image_regions.count] = .{ .start = @intCast(region.virtual_address), .size = region.size_bytes };
+                    image_regions.count += 1;
+                    try mapLoadRegion(&entry.address_space.?, region, image.elf_file, dispatch_metadata.protectionKey());
+                },
+                .stack => {
+                    const mapped_base = try mapUniqueZeroedStack(
+                        &entry.address_space.?,
+                        region.virtual_address,
+                        @as(usize, region.size_bytes),
+                        region.access,
+                        dispatch_metadata.protectionKey(),
+                    );
+                    const runtime = self.bound_runtime orelse return error.AddressSpaceOwnerInvalid;
+                    const live = runtime.findAddressSpace(address_space.id) orelse return error.AddressSpaceOwnerInvalid;
+                    if (!live.relocateStack(mapped_base, region.size_bytes)) return error.InitialContextInvalid;
+                    entry.dispatch_metadata.initial_stack_pointer = std.math.sub(u64, live.stack_top, 16) catch
+                        return error.InitialContextInvalid;
+                },
             }
         }
 
@@ -1013,7 +1128,39 @@ pub const Executor = struct {
         return resolution.entry;
     }
 
+    fn acquireUserAddressSpace(self: *Executor, bundle_id: []const u8) MaterializationError!freestanding.paging.UserAddressSpace {
+        if (comptime !SHARES_GROUP_PAGE_TABLES) {
+            return freestanding.paging.createUserAddressSpace();
+        }
+        const group = userspace_registry.addressSpaceGroupForBundle(bundle_id) orelse
+            return freestanding.paging.createUserAddressSpace();
+        const index = @intFromEnum(group);
+        if (self.group_refs[index] == 0) {
+            const space = try freestanding.paging.createUserAddressSpace();
+            self.group_spaces[index] = space;
+            self.group_refs[index] = 1;
+            return space;
+        }
+        self.group_refs[index] += 1;
+        return self.group_spaces[index].?;
+    }
+
+    fn releaseSharedGroupSpace(self: *Executor, space: *freestanding.paging.UserAddressSpace) bool {
+        if (comptime !SHARES_GROUP_PAGE_TABLES) return false;
+        var index: usize = 0;
+        while (index < GROUP_SPACE_COUNT) : (index += 1) {
+            const shared = self.group_spaces[index] orelse continue;
+            if (shared.directory != space.directory) continue;
+            self.group_refs[index] -= 1;
+            if (self.group_refs[index] != 0) return true;
+            self.group_spaces[index] = null;
+            return false;
+        }
+        return false;
+    }
+
     fn releaseMapping(
+        self: *Executor,
         mappings: *MappingArena,
         slot_index: usize,
         entry: *MappingEntry,
@@ -1022,8 +1169,23 @@ pub const Executor = struct {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
         if (entry.address_space) |*space| {
-            freestanding.paging.destroyUserAddressSpace(space) catch
-                native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
+            const retain_shared = self.releaseSharedGroupSpace(space);
+            if (!retain_shared) {
+                demand_paging.unregisterSpace(space);
+                if (entry.image_regions) |image_regions| {
+                    for (image_regions.ranges[0..image_regions.count]) |range| {
+                        freestanding.paging.releaseUserRange(space, range.start, range.size) catch
+                            native_util.impossibleByInvariant("invalid retired image mapping range");
+                    }
+                }
+                freestanding.paging.destroyUserAddressSpace(space) catch
+                    native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
+            }
+            entry.address_space = null;
+        }
+        if (entry.image_regions) |image_regions| {
+            table_backing.free(MappedImageRegions, image_regions);
+            entry.image_regions = null;
         }
         if (!mappings.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("live userspace mapping disappeared during release");
@@ -1037,8 +1199,10 @@ pub const Executor = struct {
         while (slot_index < claimed_count) : (slot_index += 1) {
             const slot = mappings.slotAt(slot_index);
             if (!slot.in_use) continue;
-            releaseMapping(mappings, slot_index, &slot.mapping);
+            self.releaseMapping(mappings, slot_index, &slot.mapping);
         }
+        self.group_spaces = .{null} ** GROUP_SPACE_COUNT;
+        self.group_refs = .{0} ** GROUP_SPACE_COUNT;
         self.releaseMappingArena();
     }
 
@@ -1058,7 +1222,7 @@ pub const Executor = struct {
                 native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
             std.debug.assert(&slot.mapping == completed_mapping);
         }
-        releaseMapping(mappings, completed_mapping_handle.slotIndex(), completed_mapping);
+        releaseMapping(self, mappings, completed_mapping_handle.slotIndex(), completed_mapping);
     }
 
     fn clearUserPageFaultObservation(self: *Executor) void {
@@ -1085,22 +1249,34 @@ fn prepareMappingDispatchMetadata(
     bootstrap_mailbox_address: u64,
     contract_flags: u32,
     heartbeat_increment: u32,
+    protection_key: u4,
 ) MaterializationError!MappingDispatchMetadata {
     if (owner_task_id == 0) return error.AddressSpaceOwnerInvalid;
     if (image_id == 0 or address_space_image_id != image_id) return error.AddressSpaceImageMismatch;
     const initial_stack_pointer = std.math.sub(u64, stack_pointer, 16) catch return error.InitialContextInvalid;
     const compact_contract_flags = std.math.cast(u16, contract_flags) orelse return error.LaunchPolicyInvalid;
-    const compact_heartbeat_increment = std.math.cast(u16, heartbeat_increment) orelse return error.LaunchPolicyInvalid;
+    const compact_heartbeat_increment = std.math.cast(u12, heartbeat_increment) orelse return error.LaunchPolicyInvalid;
     if (compact_heartbeat_increment == 0) return error.LaunchPolicyInvalid;
+    if (entry_point < userspace_layout.image_start or
+        entry_point >= userspace_layout.image_end_exclusive)
+    {
+        return error.InitialContextInvalid;
+    }
+    if (bootstrap_mailbox_address < userspace_layout.image_start or
+        bootstrap_mailbox_address >= userspace_layout.image_end_exclusive)
+    {
+        return error.InitialContextInvalid;
+    }
     return .{
         .owner_task_id = owner_task_id,
         .image_id = image_id,
-        .initial_instruction_pointer = std.math.cast(u32, entry_point) orelse return error.InitialContextInvalid,
-        .initial_stack_pointer = std.math.cast(u32, initial_stack_pointer) orelse return error.InitialContextInvalid,
+        .initial_instruction_pointer = entry_point,
+        .initial_stack_pointer = initial_stack_pointer,
         .bootstrap_mailbox_address = std.math.cast(u32, bootstrap_mailbox_address) orelse return error.InitialContextInvalid,
         .launch_policy = .{
             .contract_flags = compact_contract_flags,
             .heartbeat_increment = compact_heartbeat_increment,
+            .protection_key = protection_key,
         },
     };
 }
@@ -1125,6 +1301,23 @@ const BootstrapMailboxUpdate = struct {
     task_id: u64,
     ui_surface_id: u64,
     document: userspace_bootstrap_mailbox.DocumentBinding = .{},
+};
+
+const MailboxSnapshotMiss = enum {
+    host,
+    task,
+    inactive,
+    mapping,
+    mapping_state,
+    address,
+    unread,
+    sibling,
+    version,
+};
+
+const MailboxSnapshotInspection = union(enum) {
+    ready: userspace_bootstrap_mailbox.Mailbox,
+    miss: MailboxSnapshotMiss,
 };
 
 const MailboxPublicationCache = struct {
@@ -1192,8 +1385,72 @@ fn prepareBootstrapMailboxUpdate(
 }
 
 fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
-    freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-    writeBootstrapMailbox(mailbox_update);
+    freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+    const update = mailboxWriteForDispatch(mapping, mailbox_update);
+    if (writeUserspaceMailboxThroughMapping(mapping, update)) return;
+    writeBootstrapMailbox(update);
+}
+
+fn mailboxWriteForDispatch(mapping: *MappingEntry, update: ?BootstrapMailboxUpdate) ?BootstrapMailboxUpdate {
+    const candidate = update orelse return null;
+    const cache = &mapping.mailbox_publication_cache;
+    const generation = mapping.mailbox_authority_cache.authority_generation;
+    if (generation == 0) native_util.impossibleByInvariant("resolved mailbox authorities require a nonzero generation");
+    const unchanged = candidate.preserve_runtime_state and
+        cache.initialized and
+        cache.published_authority_generation == generation;
+    if (unchanged and liveMailboxBelongsToTask(mapping, candidate.task_id)) return null;
+    cache.* = .{
+        .published_authority_generation = generation,
+        .initialized = true,
+    };
+    return candidate;
+}
+
+fn liveMailboxBelongsToTask(mapping: *MappingEntry, task_id: u64) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return true;
+    const mailbox = readUserspaceMailboxFromMapping(mapping, mapping.dispatch_metadata.bootstrap_mailbox_address) orelse
+        return false;
+    return mailboxBelongsToTask(mailbox, task_id);
+}
+
+fn kernelPublishedMailbox(
+    update: BootstrapMailboxUpdate,
+    preserved: ?userspace_bootstrap_mailbox.Mailbox,
+) userspace_bootstrap_mailbox.Mailbox {
+    var mailbox: userspace_bootstrap_mailbox.Mailbox = preserved orelse .{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
+        .detail = update.detail,
+        .fault_code = 0,
+        ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
+        .resource_mask = 0,
+        .last_counter = 0,
+    };
+    mailbox.version = userspace_bootstrap_mailbox.VERSION;
+    mailbox.authority_capability_id = update.authorities.bootstrap_capability_id;
+    mailbox.input_capability_id = update.authorities.input_capability_id;
+    mailbox.surface_presentation_capability_id = update.authorities.surface_presentation_capability_id;
+    mailbox.ui_surface_id = update.ui_surface_id;
+    mailbox.task_id = update.task_id;
+    mailbox.service_id = update.authorities.bootstrap_service_id;
+    mailbox.heartbeat_increment = update.heartbeat_increment;
+    if (preserved == null) {
+        mailbox.detail = update.detail;
+        mailbox.document = update.document;
+    }
+    return mailbox;
+}
+
+fn writeUserspaceMailboxThroughMapping(mapping: *MappingEntry, prepared: ?BootstrapMailboxUpdate) bool {
+    const update = prepared orelse return true;
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const space = if (mapping.address_space) |*address_space| address_space else return false;
+    const existing = readUserspaceMailboxFromMapping(mapping, update.address);
+    const preserved = preservedMailboxForUpdate(mapping, existing, update);
+    const mailbox = kernelPublishedMailbox(update, preserved);
+    freestanding.paging.writeOwnedUserRange(space, update.address, std.mem.asBytes(&mailbox)) catch return false;
+    return true;
 }
 
 fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
@@ -1201,34 +1458,86 @@ fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
     x86.allowSupervisorUserMemory();
     defer x86.forbidSupervisorUserMemory();
     const mailbox_ptr: *userspace_bootstrap_mailbox.Mailbox = @ptrFromInt(update.address);
-    if (!update.preserve_runtime_state) {
-        mailbox_ptr.* = .{
-            .version = userspace_bootstrap_mailbox.VERSION,
-            .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
-            .detail = update.detail,
-            .fault_code = 0,
-            ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
-            .authority_capability_id = update.authorities.bootstrap_capability_id,
-            .input_capability_id = update.authorities.input_capability_id,
-            .surface_presentation_capability_id = update.authorities.surface_presentation_capability_id,
-            .ui_surface_id = update.ui_surface_id,
-            .task_id = update.task_id,
-            .service_id = update.authorities.bootstrap_service_id,
-            .resource_mask = 0,
-            .last_counter = 0,
-            .heartbeat_increment = update.heartbeat_increment,
-            .document = update.document,
-        };
-        return;
+    const preserved = if (update.preserve_runtime_state) mailbox_ptr.* else null;
+    mailbox_ptr.* = kernelPublishedMailbox(update, preserved);
+}
+
+fn mailboxAddressForSnapshot(
+    mapping: *const MappingEntry,
+    image: ?*const userspace_loader.ImageRecord,
+) usize {
+    if (mapping.dispatch_metadata.bootstrap_mailbox_address != 0) {
+        return mapping.dispatch_metadata.bootstrap_mailbox_address;
     }
-    mailbox_ptr.version = userspace_bootstrap_mailbox.VERSION;
-    mailbox_ptr.authority_capability_id = update.authorities.bootstrap_capability_id;
-    mailbox_ptr.input_capability_id = update.authorities.input_capability_id;
-    mailbox_ptr.surface_presentation_capability_id = update.authorities.surface_presentation_capability_id;
-    mailbox_ptr.ui_surface_id = update.ui_surface_id;
-    mailbox_ptr.task_id = update.task_id;
-    mailbox_ptr.service_id = update.authorities.bootstrap_service_id;
-    mailbox_ptr.heartbeat_increment = update.heartbeat_increment;
+    if (image) |record| {
+        return std.math.cast(usize, record.bootstrap_mailbox_address) orelse 0;
+    }
+    return 0;
+}
+
+fn readUserspaceMailboxFromMapping(
+    mapping: *const MappingEntry,
+    address: usize,
+) ?userspace_bootstrap_mailbox.Mailbox {
+    if (comptime builtin.target.os.tag != .freestanding) return null;
+    if (address == 0) return null;
+    const space = mapping.address_space orelse return null;
+    var mailbox: userspace_bootstrap_mailbox.Mailbox = undefined;
+    freestanding.paging.readOwnedUserRange(
+        &space,
+        address,
+        std.mem.asBytes(&mailbox),
+    ) catch return null;
+    if (mailbox.version != userspace_bootstrap_mailbox.VERSION) return null;
+    return mailbox;
+}
+
+fn storeCapturedMailbox(mapping: *MappingEntry, mailbox: userspace_bootstrap_mailbox.Mailbox) void {
+    if (comptime builtin.target.os.tag != .freestanding) return;
+    mapping.captured_mailbox = mailbox;
+    mapping.mailbox_captured = true;
+}
+
+fn captureMailbox(mapping: *MappingEntry) void {
+    const mailbox = readUserspaceMailboxFromMapping(mapping, mapping.dispatch_metadata.bootstrap_mailbox_address) orelse return;
+    if (!mailboxBelongsToTask(mailbox, mapping.dispatch_metadata.owner_task_id)) return;
+    storeCapturedMailbox(mapping, mailbox);
+}
+
+fn mailboxBelongsToTask(mailbox: userspace_bootstrap_mailbox.Mailbox, task_id: u64) bool {
+    return mailbox.version == userspace_bootstrap_mailbox.VERSION and mailbox.task_id == task_id;
+}
+
+fn preservedMailboxForUpdate(
+    mapping: *const MappingEntry,
+    existing: ?userspace_bootstrap_mailbox.Mailbox,
+    update: BootstrapMailboxUpdate,
+) ?userspace_bootstrap_mailbox.Mailbox {
+    const captured: ?userspace_bootstrap_mailbox.Mailbox = if (comptime builtin.target.os.tag == .freestanding)
+        if (mapping.mailbox_captured) mapping.captured_mailbox else null
+    else
+        null;
+    return preservedMailboxBytes(existing, captured, update);
+}
+
+fn preservedMailboxBytes(
+    existing: ?userspace_bootstrap_mailbox.Mailbox,
+    captured: ?userspace_bootstrap_mailbox.Mailbox,
+    update: BootstrapMailboxUpdate,
+) ?userspace_bootstrap_mailbox.Mailbox {
+    if (existing) |live| {
+        if (mailboxBelongsToTask(live, update.task_id)) return live;
+    }
+    if (!update.preserve_runtime_state) return null;
+    const snapshot = captured orelse return null;
+    if (!mailboxBelongsToTask(snapshot, update.task_id)) return null;
+    return snapshot;
+}
+
+fn mappingDispatchMetadataCompatible(live: MappingDispatchMetadata, expected: MappingDispatchMetadata) bool {
+    var normalized = live;
+    normalized.initial_stack_pointer = expected.initial_stack_pointer;
+    return std.meta.eql(normalized, expected);
 }
 
 pub const MailboxAuthorityCache = struct {
@@ -1413,15 +1722,32 @@ fn scanMailboxAuthorities(
     return resolution;
 }
 
+fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
+    if (comptime builtin.target.os.tag != .freestanding) return;
+    const executor = registered_executor orelse return;
+    if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) return;
+    const check = preempt_check orelse return;
+    if (!check(executor.active_task_id)) return;
+    const mapping = executor.active_mapping orelse return;
+    mapping.resume_valid = true;
+    mapping.resume_instruction_pointer = frame.eip;
+    mapping.resume_stack_pointer = frame.useresp;
+    captureUserContext64(mapping, frame);
+    mapping.yield_count += 1;
+    executor.last_yield_disposition = .runnable;
+    executor.handoff_completed = true;
+    zigos_userspace_resume_requested = 1;
+    captureMailbox(mapping);
+    freestanding.paging.switchToKernelAddressSpace();
+}
+
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     const executor = registered_executor orelse return;
     if (executor.active_task_id == 0) return;
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
-    const instruction_pointer = std.math.cast(u32, frame.eip) orelse
-        native_util.impossibleByInvariant("userspace instruction pointer exceeds the low-address sandbox");
-    const stack_pointer = std.math.cast(u32, frame.useresp) orelse
-        native_util.impossibleByInvariant("userspace stack pointer exceeds the low-address sandbox");
+    const instruction_pointer = frame.eip;
+    const stack_pointer = frame.useresp;
     const counter = std.math.cast(u32, frame.eax) orelse
         native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
     const disposition_raw = std.math.cast(u32, frame.esi) orelse
@@ -1446,6 +1772,7 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
+    captureMailbox(mapping);
     freestanding.paging.switchToKernelAddressSpace();
 }
 
@@ -1510,12 +1837,16 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
 
-    const faulting_address = std.math.cast(u32, x86.readCr2()) orelse {
-        freestanding.paging.page_fault_handler(frame);
-        return;
-    };
+    const faulting_address = x86.readCr2();
     const error_code = std.math.cast(u32, frame.err_code) orelse
         native_util.impossibleByInvariant("userspace page-fault code exceeds its ABI width");
+    const not_present = (error_code & 0x1) == 0;
+    const write_fault = (error_code & 0x2) != 0;
+    if (not_present) {
+        if (mapping.address_space) |*space| {
+            if (demand_paging.resolveAndMap(space, faulting_address, write_fault)) return;
+        }
+    }
     @call(.never_inline, recordUserPageFault, .{
         executor,
         executor.active_task_id,
@@ -1552,7 +1883,7 @@ fn nxProbeRecoveryContext(
     executor: *const Executor,
     mapping: *MappingEntry,
     frame: *freestanding.isr.InterruptFrame,
-    faulting_address: u32,
+    faulting_address: u64,
     error_code: u32,
 ) bool {
     if (comptime !include_verification_evidence) return false;
@@ -1565,7 +1896,7 @@ fn nxProbeRecoveryContext(
     ) orelse return false;
     if (target_is_executable) return false;
 
-    const recovery_address = std.math.cast(u32, frame.r15) orelse return false;
+    const recovery_address = frame.r15;
     const runtime = executor.bound_runtime orelse return false;
     const task = runtime.find(executor.active_task_id) orelse return false;
     const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
@@ -1575,12 +1906,11 @@ fn nxProbeRecoveryContext(
     return true;
 }
 
-fn addressSpaceAllowsExecution(address_space: *const task_runtime.AddressSpaceRecord, address: u32) bool {
-    const address64: u64 = address;
+fn addressSpaceAllowsExecution(address_space: *const task_runtime.AddressSpaceRecord, address: u64) bool {
     for (address_space.regions[0..address_space.region_count]) |region| {
         if (region.kind != .load_segment or !region.access.execute) continue;
         const region_end = std.math.add(u64, region.virtual_address, @as(u64, region.size_bytes)) catch continue;
-        if (address64 >= region.virtual_address and address64 < region_end) return true;
+        if (address >= region.virtual_address and address < region_end) return true;
     }
     return false;
 }
@@ -1589,28 +1919,30 @@ fn mapLoadRegion(
     space: *freestanding.paging.UserAddressSpace,
     region: task_runtime.AddressSpaceRegionRecord,
     elf_file: embedded_file.File,
+    protection_key: u4,
 ) MaterializationError!void {
-    const virtual_address = std.math.cast(u32, region.virtual_address) orelse return error.InvalidRange;
-    const size_bytes = std.math.cast(u32, region.size_bytes) orelse return error.InvalidRange;
+    const virtual_address = region.virtual_address;
+    const size_bytes = region.size_bytes;
     const start: usize = region.file_offset;
     const file_size: usize = region.file_size;
     const end = std.math.add(usize, start, file_size) catch return error.ImageExtentInvalid;
     if (end > elf_file.byte_len) return error.ImageExtentInvalid;
     const reader = elf_file.reader() orelse return error.ImageExtentInvalid;
-    try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
+    try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), @intCast(size_bytes), .{
         .writable = region.access.write,
         .executable = region.access.execute,
+        .protection_key = protection_key,
     });
 
     var source_offset = start;
-    var target_offset: u32 = 0;
+    var target_offset: u64 = 0;
     while (source_offset < end) {
         const bytes = reader.logicalSliceAt(source_offset) orelse return error.ImageExtentInvalid;
         const copy_len = @min(bytes.len, end - source_offset);
-        const target_address = std.math.add(u32, virtual_address, target_offset) catch return error.InvalidRange;
-        try freestanding.paging.writeOwnedUserRange(space, target_address, bytes[0..copy_len]);
+        const target_address = std.math.add(u64, virtual_address, target_offset) catch return error.InvalidRange;
+        try freestanding.paging.writeOwnedUserRange(space, @intCast(target_address), bytes[0..copy_len]);
         source_offset += copy_len;
-        target_offset += @intCast(copy_len);
+        target_offset += copy_len;
     }
 }
 
@@ -1619,13 +1951,98 @@ fn mapZeroedRegion(
     virtual_address_raw: u64,
     size_bytes_raw: usize,
     access: task_runtime.SegmentAccess,
+    protection_key: u4,
 ) MaterializationError!void {
-    const virtual_address = std.math.cast(u32, virtual_address_raw) orelse return error.InvalidRange;
-    const size_bytes = std.math.cast(u32, size_bytes_raw) orelse return error.InvalidRange;
-    try freestanding.paging.mapOwnedUserRange(space, virtual_address, size_bytes, .{
+    const virtual_address = virtual_address_raw;
+    const size_bytes = size_bytes_raw;
+    if (access.execute) {
+        try freestanding.paging.mapOwnedUserRange(space, @intCast(virtual_address), size_bytes, .{
+            .writable = access.write,
+            .executable = access.execute,
+            .protection_key = protection_key,
+        });
+        return;
+    }
+    const region_end = std.math.add(u64, virtual_address, size_bytes) catch return error.InvalidRange;
+    if (!demand_paging.registerForSpace(space, .{
+        .virt_start = virtual_address,
+        .virt_end_exclusive = region_end,
         .writable = access.write,
-        .executable = access.execute,
+        .kind = if (access.write) .anonymous_zero else .object_cow,
+        .protection_key = protection_key,
+    })) return error.OutOfMemory;
+}
+
+const SHARED_STACK_SLOT_ATTEMPTS: usize = 32;
+
+fn userRangeOccupied(
+    space: *const freestanding.paging.UserAddressSpace,
+    virtual_address: u64,
+    size_bytes: usize,
+) MaterializationError!bool {
+    freestanding.paging.validateUserRangeAvailable(space, @intCast(virtual_address), size_bytes) catch |err| switch (err) {
+        error.AlreadyMapped => return true,
+        else => return err,
+    };
+    const end = std.math.add(u64, virtual_address, size_bytes) catch return error.InvalidRange;
+    return demand_paging.regionOverlapsSpace(space, virtual_address, end);
+}
+
+fn uniqueStackBase(preferred_base: u64, size_bytes: u64, attempt: usize) ?u64 {
+    if (attempt == 0) return preferred_base;
+    const top = userspace_layout.stackTopForSlot(attempt - 1);
+    const base = std.math.sub(u64, top, size_bytes) catch return null;
+    if (base < userspace_layout.stack_start) return null;
+    if (base == preferred_base) return null;
+    return base;
+}
+
+fn mapUniqueZeroedStack(
+    space: *freestanding.paging.UserAddressSpace,
+    preferred_base: u64,
+    size_bytes: usize,
+    access: task_runtime.SegmentAccess,
+    protection_key: u4,
+) MaterializationError!u64 {
+    var attempt: usize = 0;
+    while (attempt < SHARED_STACK_SLOT_ATTEMPTS) : (attempt += 1) {
+        const base = uniqueStackBase(preferred_base, size_bytes, attempt) orelse continue;
+        if (try userRangeOccupied(space, base, size_bytes)) continue;
+        try mapZeroedRegion(space, base, size_bytes, access, protection_key);
+        return base;
+    }
+    return error.AlreadyMapped;
+}
+
+fn registerMappedObject(
+    virt_start: u64,
+    size_bytes: u64,
+    writable: bool,
+    physical_base: u64,
+    copy_on_write: bool,
+    task_id: u64,
+) bool {
+    if (size_bytes == 0) return false;
+    const end = std.math.add(u64, virt_start, size_bytes) catch return false;
+    const mapping = mappingForDemandPagedObject(task_id) orelse return false;
+    const space = if (mapping.address_space) |*address_space| address_space else return false;
+    return demand_paging.registerForSpace(space, .{
+        .virt_start = virt_start,
+        .virt_end_exclusive = end,
+        .writable = writable,
+        .kind = if (copy_on_write) .object_cow else .object_physical,
+        .physical_base = physical_base,
     });
+}
+
+fn mappingForDemandPagedObject(task_id: u64) ?*MappingEntry {
+    const executor = registered_executor orelse return null;
+    if (executor.active_mapping) |mapping| {
+        if (mapping.dispatch_metadata.owner_task_id == task_id) return mapping;
+    }
+    const runtime = executor.bound_runtime orelse return null;
+    const task = runtime.findConst(task_id) orelse return null;
+    return executor.findMapping(task.address_space_id);
 }
 
 fn enterUserspace(executor: *const Executor) u32 {
@@ -1655,13 +2072,13 @@ fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.Interru
     };
 }
 
-fn recordTrapState(self: *Executor, instruction_pointer: u32, stack_pointer: u32, counter: u32) void {
+fn recordTrapState(self: *Executor, instruction_pointer: u64, stack_pointer: u64, counter: u32) void {
     self.last_trap_instruction_pointer = instruction_pointer;
     self.last_trap_stack_pointer = stack_pointer;
     self.last_trap_counter = counter;
 }
 
-fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, faulting_address: u32, error_code: u32) void {
+fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, faulting_address: u64, error_code: u32) void {
     self.last_fault_task_id = task_id;
     self.last_fault_address_space_id = address_space_id;
     self.last_fault_address = faulting_address;
@@ -1697,51 +2114,148 @@ test "mapping dispatch metadata is compact and bound to one address-space image"
         0x4000_3000,
         userspace_flags.FLAG_NX_PROOF_PROBE,
         9,
+        3,
     );
     try std.testing.expectEqual(@as(u64, 40), metadata.owner_task_id);
     try std.testing.expectEqual(@as(u64, 41), metadata.image_id);
-    try std.testing.expectEqual(@as(u32, 0x4000_1000), metadata.initial_instruction_pointer);
-    try std.testing.expectEqual(@as(u32, 0x7FFF_EFF0), metadata.initial_stack_pointer);
+    try std.testing.expectEqual(@as(u64, 0x4000_1000), metadata.initial_instruction_pointer);
+    try std.testing.expectEqual(@as(u64, 0x7FFF_EFF0), metadata.initial_stack_pointer);
     try std.testing.expectEqual(@as(u32, 0x4000_3000), metadata.bootstrap_mailbox_address);
     try std.testing.expectEqual(userspace_flags.FLAG_NX_PROOF_PROBE, metadata.contractFlags());
     try std.testing.expectEqual(@as(u32, 9), metadata.heartbeatIncrement());
+    try std.testing.expectEqual(@as(u4, 3), metadata.protectionKey());
     try std.testing.expectEqual(MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES, @sizeOf(MappingDispatchMetadata));
-    try std.testing.expectEqual(MAPPING_ENTRY_SIZE_CEILING_BYTES, @sizeOf(MappingEntry));
-    try std.testing.expectEqual(MAPPING_ARENA_SIZE_CEILING_BYTES, @sizeOf(MappingArena));
+    try std.testing.expect(@sizeOf(MappingEntry) <= MAPPING_ENTRY_SIZE_CEILING_BYTES);
+    try std.testing.expect(@sizeOf(MappingArena) <= MAPPING_ARENA_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(u8, 0), STEADY_ADDRESS_SPACE_IMAGE_INDEX_LOOKUPS);
+    const empty_mapping = MappingEntry{};
+    try std.testing.expect(!empty_mapping.mailbox_captured);
 
     try std.testing.expectError(
         error.AddressSpaceOwnerInvalid,
-        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(0, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.AddressSpaceImageMismatch,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 42, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 15, 41, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, @as(u64, std.math.maxInt(u32)) + 1, 0x7FFF_F000, 41, 0x4000_3000, 0, 1, 1),
     );
     try std.testing.expectError(
         error.InitialContextInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, @as(u64, std.math.maxInt(u32)) + 1, 0, 1, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, @as(u32, std.math.maxInt(u16)) + 1, 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, @as(u32, std.math.maxInt(u16)) + 1, 1, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 0),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, 0, 1),
     );
     try std.testing.expectError(
         error.LaunchPolicyInvalid,
-        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, @as(u32, std.math.maxInt(u16)) + 1),
+        prepareMappingDispatchMetadata(40, 41, 0x4000_1000, 0x7FFF_F000, 41, 0x4000_3000, 0, @as(u32, std.math.maxInt(u12)) + 1, 1),
     );
+}
+
+test "mailbox snapshot uses the mapping address and rejects an invalid version" {
+    var mapping = MappingEntry{
+        .dispatch_metadata = .{ .bootstrap_mailbox_address = 0x4000_3000 },
+    };
+    try std.testing.expectEqual(@as(usize, 0x4000_3000), mailboxAddressForSnapshot(&mapping, null));
+    try std.testing.expect(readUserspaceMailboxFromMapping(&mapping, 0x4000_3000) == null);
+
+    var mailbox = userspace_bootstrap_mailbox.Mailbox{};
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.VERSION, mailbox.version);
+    mailbox.version = 0;
+    try std.testing.expect(mailbox.version != userspace_bootstrap_mailbox.VERSION);
+}
+
+test "shared mailbox restore keeps the dispatching task snapshot" {
+    const captured = userspace_bootstrap_mailbox.Mailbox{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady),
+        .task_id = 10,
+        .ui_state_revision = 4,
+        .ui_presented_revision = 4,
+        .ui_last_presentation_status = 0,
+    };
+    const sibling = userspace_bootstrap_mailbox.Mailbox{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.runtime_ready),
+        .task_id = 11,
+    };
+    const update = BootstrapMailboxUpdate{
+        .address = 0x4000,
+        .preserve_runtime_state = true,
+        .detail = @intFromEnum(userspace_bootstrap_mailbox.Detail.ui),
+        .heartbeat_increment = 15,
+        .authorities = .{ .bootstrap_capability_id = 101, .surface_presentation_capability_id = 104 },
+        .task_id = 10,
+        .ui_surface_id = 2,
+    };
+    const preserved = preservedMailboxBytes(sibling, captured, update).?;
+    const restored = kernelPublishedMailbox(update, preserved);
+    try std.testing.expectEqual(@as(u64, 10), restored.task_id);
+    try std.testing.expectEqual(@as(u64, 2), restored.ui_surface_id);
+    try std.testing.expectEqual(@as(u64, 101), restored.authority_capability_id);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), restored.stage);
+    try std.testing.expectEqual(@as(u64, 4), restored.ui_presented_revision);
+    var first_launch = update;
+    first_launch.preserve_runtime_state = false;
+    try std.testing.expect(preservedMailboxBytes(sibling, captured, first_launch) == null);
+}
+
+test "mailbox snapshot ignores a sibling task identity" {
+    try std.testing.expect(mailboxBelongsToTask(.{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .task_id = 7,
+    }, 7));
+    try std.testing.expect(!mailboxBelongsToTask(.{
+        .version = userspace_bootstrap_mailbox.VERSION,
+        .task_id = 8,
+    }, 7));
+    try std.testing.expect(!mailboxBelongsToTask(.{
+        .version = 0,
+        .task_id = 7,
+    }, 7));
+}
+
+test "shared-group stacks walk to the next free slot" {
+    const preferred = userspace_layout.default_stack_top - userspace_layout.default_stack_size;
+    try std.testing.expectEqual(preferred, uniqueStackBase(preferred, userspace_layout.default_stack_size, 0).?);
+    try std.testing.expect(uniqueStackBase(preferred, userspace_layout.default_stack_size, 1) == null);
+    try std.testing.expectEqual(
+        userspace_layout.stackTopForSlot(1) - userspace_layout.default_stack_size,
+        uniqueStackBase(preferred, userspace_layout.default_stack_size, 2).?,
+    );
+}
+
+test "materialized dispatch metadata may relocate a shared-group stack" {
+    const baseline = try prepareMappingDispatchMetadata(
+        40,
+        41,
+        0x4000_1000,
+        0x7FFF_F000,
+        41,
+        0x4000_3000,
+        userspace_flags.FLAG_NX_PROOF_PROBE,
+        9,
+        3,
+    );
+    var relocated = baseline;
+    relocated.initial_stack_pointer = baseline.initial_stack_pointer - userspace_layout.STACK_SLOT_STRIDE;
+    try std.testing.expect(mappingDispatchMetadataCompatible(relocated, baseline));
+    var mutated = relocated;
+    mutated.image_id = baseline.image_id + 1;
+    try std.testing.expect(!mappingDispatchMetadataCompatible(mutated, baseline));
 }
 
 test "mailbox publication preserves resume state and resets first launch" {
@@ -2196,7 +2710,7 @@ test "executor mapping arena enforces capacity and invalidates reused handles" {
     const retired_slot_index = retired_handle.slotIndex();
     const retired_mappings = executor.mappingArena().?;
     const retired_slot = retired_mappings.slotAt(retired_slot_index);
-    Executor.releaseMapping(retired_mappings, retired_slot_index, &retired_slot.mapping);
+    executor.releaseMapping(retired_mappings, retired_slot_index, &retired_slot.mapping);
     const replacement_address_space_id: u64 = task_runtime.MAX_TASKS + 1;
     const replacement_handle = executor.mappings.reserveHandle(replacement_address_space_id).?;
     executor.mappings.getByHandle(replacement_handle).?.mapping = .{
@@ -2287,4 +2801,10 @@ test "userspace exception containment excludes system-fatal and dedicated vector
     try std.testing.expect(!isContainableUserExceptionVector(8));
     try std.testing.expect(!isContainableUserExceptionVector(PAGE_FAULT_VECTOR));
     try std.testing.expect(!isContainableUserExceptionVector(18));
+}
+
+test "production address-space groups share page tables" {
+    try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
+    try std.testing.expect(!USES_PKU_WITHIN_SHARED_TABLES);
+    try std.testing.expectEqual(@as(usize, 8), GROUP_SPACE_COUNT);
 }

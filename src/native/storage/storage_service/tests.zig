@@ -292,28 +292,20 @@ test "storage port derives shared workspace capabilities and blocks unauthorized
     try std.testing.expectEqual(core.service_id, team_share.capability.audit.broker_service_id);
     try std.testing.expectEqual(@as(u64, 31), team_share.capability.audit.source_task_id);
 
-    const team_view = try port.resolve(.{
+    const team_view = try port.openEntry(.{
         .task_id = 41,
         .principal = team,
         .capability_id = team_share.capability.id,
         .now_ticks = 40,
-    }, .{
-        .workspace_id = notes.id.raw(),
-        .path = "documents/shared.md",
-        .access = .read,
-    });
-    try std.testing.expectEqual(object.object_id.raw(), team_view.object_id);
-    try std.testing.expectEqual(object.version_id.raw(), team_view.version_id);
-    try std.testing.expectError(error.PermissionDenied, port.resolve(.{
+    }, notes.id.raw(), "documents/shared.md", .read);
+    try std.testing.expectEqual(object.object_id, team_view.object_id);
+    try std.testing.expectEqual(object.version_id, team_view.version_id);
+    try std.testing.expectError(error.PermissionDenied, port.openEntry(.{
         .task_id = 41,
         .principal = team,
         .capability_id = team_share.capability.id,
         .now_ticks = 40,
-    }, .{
-        .workspace_id = notes.id.raw(),
-        .path = "documents/shared.md",
-        .access = .write,
-    }));
+    }, notes.id.raw(), "documents/shared.md", .write));
 
     const app_share = try port.grantWorkspaceShare(&capabilities, owner_authority, notes.id, .{
         .principal_id = app,
@@ -328,16 +320,12 @@ test "storage port derives shared workspace capabilities and blocks unauthorized
     });
     try std.testing.expect(app_share.capability.rights.has(.capability_derive));
     try std.testing.expectEqual(@as(u64, 80), app_share.capability.lease.expires_at_ticks);
-    try std.testing.expectError(error.CapabilityRevoked, port.resolve(.{
+    try std.testing.expectError(error.CapabilityRevoked, port.openEntry(.{
         .task_id = 42,
         .principal = app,
         .capability_id = app_share.capability.id,
         .now_ticks = 81,
-    }, .{
-        .workspace_id = notes.id.raw(),
-        .path = "documents/shared.md",
-        .access = .read,
-    }));
+    }, notes.id.raw(), "documents/shared.md", .read));
 
     const app_authority = AuthorityContext{
         .task_id = 42,
@@ -507,17 +495,9 @@ test "storage service enforces durable object-scoped workspace shares" {
         .capability_id = scoped_share.capability.id,
         .now_ticks = 30,
     };
-    const shared_view = try port.resolve(viewer_authority, .{
-        .workspace_id = notes.id.raw(),
-        .path = "documents/shared.md",
-        .access = .read,
-    });
-    try std.testing.expectEqual(shared.object_id.raw(), shared_view.object_id);
-    try std.testing.expectError(error.PermissionDenied, port.resolve(viewer_authority, .{
-        .workspace_id = notes.id.raw(),
-        .path = "documents/private.md",
-        .access = .read,
-    }));
+    const shared_view = try port.openEntry(viewer_authority, notes.id.raw(), "documents/shared.md", .read);
+    try std.testing.expectEqual(shared.object_id, shared_view.object_id);
+    try std.testing.expectError(error.PermissionDenied, port.openEntry(viewer_authority, notes.id.raw(), "documents/private.md", .read));
     try std.testing.expect(core.workspaceHasAccess(notes.id, .{
         .principal_id = viewer,
         .object_id = shared.object_id,
@@ -647,7 +627,6 @@ test "storage port queries object history and grants object capabilities" {
     try std.testing.expectEqual(object_store.ObjectAccessModel.capability_scoped, model.access_model);
     try std.testing.expectEqual(object_store.ObjectHistoryPolicy.signed_version_chain, model.history_policy);
     try std.testing.expectEqual(object_store.ObjectSyncPolicy.local_first_selective, model.sync_policy);
-    try std.testing.expectEqual(object_store.FileBridgePolicy.import_export_only, model.file_bridge_policy);
     var share_sheet_buffer: [SHARE_SHEET_TEST_BUFFER_BYTES]u8 = undefined;
     const share_sheet = try humane_permissions.renderShareSheetToBuffer(
         &share_sheet_buffer,

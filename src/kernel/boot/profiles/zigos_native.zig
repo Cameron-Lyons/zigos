@@ -1,95 +1,85 @@
-const x86 = @import("../../../arch/x86.zig");
 const common = @import("../common.zig");
+const boot_markers = @import("../markers.zig");
+const x86 = @import("../../../arch/x86.zig");
 const session_manager = @import("root").session_manager;
 const timer = @import("../../timer/timer.zig");
-const xhci = @import("../../drivers/xhci.zig");
-const xhci_hw = @import("../../drivers/xhci_hw.zig");
 const hardware_proof = @import("../../platform/hardware_proof.zig");
 const device_inventory = @import("../../../native/drivers/device_inventory.zig");
-const std = @import("std");
-const console = @import("../../utils/console.zig");
-const framebuffer_hw = @import("../../platform/framebuffer_hw.zig");
-const compositor_view = @import("../../../native/platform/compositor_view.zig");
-const boot_markers = @import("../markers.zig");
+const xhci_driver_task = @import("../../../native/drivers/xhci_driver_task.zig");
+const event_wake = @import("../../event_wake.zig");
+const smp = @import("../../smp.zig");
 
 var recorded_input_report_count: u64 = 0;
-var reported_scanout = false;
-var reported_idle = false;
+var reported_scheduler_idle = false;
+
+pub const INTERRUPT_DRIVEN_IDLE = event_wake.INTERRUPT_DRIVEN_IDLE;
 
 pub fn run() noreturn {
-    framebuffer_hw.init() catch |err| {
-        console.print("ZIGOS:DISPLAY:UNAVAILABLE ");
-        console.print(@errorName(err));
-        console.print("\n");
-    };
     session_manager.bindHardwareInput(.{
         .poll_report = pollHardwareKeyboardReport,
         .input_proof = hardwareInputProof,
     });
     session_manager.boot();
-    presentCompositor();
     while (true) {
         timer.synchronize();
         const now_ticks = timer.getTicks();
-        _ = xhci_hw.servicePendingEvents();
-        const input_report_count = xhci_hw.keyboardReportCount();
-        if (input_report_count != recorded_input_report_count) {
-            if (xhci_hw.inputProof()) |proof| {
-                if (xhci_hw.controllerDeviceId()) |device_id| {
-                    device_inventory.registerDetected(
-                        .input_device,
-                        device_id,
-                        .xhci_inventory,
-                        false,
-                    );
-                }
-                hardware_proof.recordInputProof(proof);
-                recorded_input_report_count = input_report_count;
+        const pending = event_wake.takeAll();
+
+        if (pending.xhci or pending.timer) {
+            const bound_task_id = xhci_driver_task.boundTaskId();
+            if (bound_task_id != 0) {
+                _ = session_manager.wakeUserspaceTask(bound_task_id, now_ticks);
             }
         }
-        const input_work = session_manager.servicePendingInputWork(now_ticks);
-        const network_work = session_manager.servicePendingNetworkWork(now_ticks);
-        const dispatched = session_manager.runUserspaceScheduler(now_ticks);
-        if (input_work != 0 or network_work != 0 or dispatched) presentCompositor();
+        if (pending.network) {
+            _ = session_manager.servicePendingNetworkWork(now_ticks);
+        }
+        _ = session_manager.runUserspaceScheduler(now_ticks);
+        if (pending.xhci or pending.timer) {
+            harvestInputProof();
+            _ = session_manager.servicePendingInputWork(now_ticks);
+        }
+
         x86.cli();
-        if (xhci_hw.eventWorkPending() or session_manager.networkWorkPending()) {
+        const ready_tasks = session_manager.userspaceSchedulerHasReadyTasks();
+        if (event_wake.any() or ready_tasks) {
+            if (ready_tasks) timer.armSchedulerTick();
             x86.sti();
             continue;
         }
-        if (session_manager.userspaceSchedulerHasReadyTasks() or xhci_hw.lifecyclePending()) {
+        if (xhci_driver_task.lifecyclePending()) {
             timer.armSchedulerTick();
         } else {
             timer.disarmSchedulerTick();
-            if (!reported_idle) {
+            if (!reported_scheduler_idle) {
+                reported_scheduler_idle = true;
                 common.printBootMarker(boot_markers.userspace_scheduler_idle);
-                reported_idle = true;
             }
         }
-        x86.sti();
-        x86.hlt();
+        smp.idle();
     }
 }
 
-fn presentCompositor() void {
-    if (!session_manager.system().initialized) return;
-    const frame = framebuffer_hw.frame() orelse return;
-    compositor_view.render(frame, session_manager.system().compositorSessionPtr());
-    const stats = framebuffer_hw.present() catch return;
-    if (!reported_scanout and stats.pixels_written != 0) {
-        const info = framebuffer_hw.displayInfo().?;
-        var buffer: [160]u8 = undefined;
-        const line = std.fmt.bufPrint(&buffer, "{s} width={d} height={d} pixels={d}\n", .{
-            boot_markers.compositor_scanout_presented, info.width, info.height, stats.pixels_written,
-        }) catch return;
-        console.print(line);
-        reported_scanout = true;
+fn harvestInputProof() void {
+    const input_report_count = xhci_driver_task.keyboardReportCount();
+    if (input_report_count == recorded_input_report_count) return;
+    const proof = xhci_driver_task.inputProof() orelse return;
+    if (xhci_driver_task.controllerDeviceId()) |device_id| {
+        device_inventory.registerDetected(
+            .input_device,
+            device_id,
+            .xhci_inventory,
+            false,
+        );
     }
+    hardware_proof.recordInputProof(proof);
+    recorded_input_report_count = input_report_count;
 }
 
-fn pollHardwareKeyboardReport() ?xhci.HardwareBootKeyboardReport {
-    return xhci_hw.pollKeyboardReport();
+fn pollHardwareKeyboardReport() ?xhci_driver_task.HardwareBootKeyboardReport {
+    return xhci_driver_task.pollKeyboardReport();
 }
 
-fn hardwareInputProof() ?xhci.InputProof {
-    return xhci_hw.inputProof();
+fn hardwareInputProof() ?xhci_driver_task.InputProof {
+    return xhci_driver_task.inputProof();
 }

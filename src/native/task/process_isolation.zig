@@ -146,7 +146,6 @@ pub const Broker = struct {
             .privacy_indicator_id = request.privacy_indicator_id,
         };
     }
-
 };
 
 fn auditDenied(caller: *task_runtime.TaskRecord, request: Request, capability_id: u64, reason: abi.DenialReason) void {

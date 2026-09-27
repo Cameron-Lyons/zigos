@@ -15,7 +15,6 @@ else
     };
 
 const USER_POINTER_FLOOR: usize = 0x10000;
-const USER_POINTER_CEILING_32: usize = 0xC0000000;
 pub const SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION = true;
 pub const DIRECT_STACK_RANGE_VALIDATION = true;
 
@@ -94,10 +93,6 @@ pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, ali
     if (alignment != 0 and addr % alignment != 0) return false;
     const end_exclusive = std.math.add(usize, addr, len) catch return false;
     if (end_exclusive <= addr) return false;
-
-    if (builtin.target.os.tag == .freestanding and @bitSizeOf(usize) <= 32) {
-        if (end_exclusive > USER_POINTER_CEILING_32) return false;
-    }
 
     if (memory.address_space) |address_space| {
         if (address_space.region_count == 0) {
@@ -375,7 +370,7 @@ pub fn mapError(err: anyerror) DispatchResult {
         .status = .not_found,
         .denial_reason = .invalid_target,
     };
-    if (err == error.QueueFull) return .{ .status = .would_block, .denial_reason = .budget_exhausted };
+    if (err == error.RingFull) return .{ .status = .would_block, .denial_reason = .budget_exhausted };
 
     if (err == error.TableFull or
         err == error.TargetTableFull or
@@ -412,7 +407,7 @@ fn regionAllows(access: task_runtime.SegmentAccess, requested: UserMemoryAccess)
 }
 
 test "endpoint queue backpressure is distinct from a disconnected peer" {
-    try std.testing.expectEqual(abi.SyscallStatus.would_block, mapError(error.QueueFull).status);
+    try std.testing.expectEqual(abi.SyscallStatus.would_block, mapError(error.RingFull).status);
     try std.testing.expectEqual(abi.SyscallStatus.conflict, mapError(error.PeerNotConnected).status);
 }
 
@@ -471,4 +466,11 @@ test "user range validation resolves the terminal stack mapping directly" {
     try std.testing.expect(validateUserRange(memory, 0x30020, 0x60, 8, .write));
     try std.testing.expect(!validateUserRange(memory, 0x31FF0, 0x20, 8, .write));
     try std.testing.expect(validateUserRange(memory, 0x21020, 0x60, 8, .read));
+
+    try std.testing.expect(address_space.relocateStack(0x28000, 0x2000));
+    try std.testing.expect(validateUserRange(memory, 0x28020, 0x60, 8, .read));
+    try std.testing.expect(!validateUserRange(memory, 0x30020, 0x60, 8, .read));
+    try std.testing.expect(validateUserRange(memory, 0x21020, 0x60, 8, .read));
+    try std.testing.expectEqual(@as(u64, 0x2A000), address_space.stack_top);
+    try std.testing.expectEqual(@as(u64, 0x2A000), address_space.stack_pointer);
 }

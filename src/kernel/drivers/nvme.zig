@@ -490,6 +490,10 @@ fn saturatedDelta(after: u32, before: u32) u32 {
     return if (after >= before) after - before else 0;
 }
 
+pub fn softwareQueueCapabilities() ControllerCapabilities {
+    return makeCapabilities(63, 0, true, 0, 0);
+}
+
 fn makeCapabilities(
     mqes_zero_based: u16,
     dstrd: u4,

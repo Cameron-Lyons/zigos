@@ -1,12 +1,12 @@
 const std = @import("std");
 
 pub const MAX_DOCUMENT_BYTES: usize = 512;
-pub const MAX_FRAME_BYTES: usize = 96;
+pub const MAX_FRAME_BYTES: usize = 88;
 pub const CHUNK_BYTES: usize = MAX_FRAME_BYTES - 20;
 pub const READ_CHUNK_BYTES: usize = MAX_FRAME_BYTES - 32;
 pub const Digest = [32]u8;
 const MAGIC: u32 = 0x434f445a;
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 pub const Status = enum(u16) {
     saved,

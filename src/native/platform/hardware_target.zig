@@ -169,63 +169,63 @@ pub const required_subsystems = [_]Subsystem{
     .update_rollback_power_cycle,
 };
 
-pub const nuc11tnki5_marker_prefix = "ZIGOS:HW_TARGET:INTEL_NUC11TNKI5";
+pub const nuc15crsu7_marker_prefix = "ZIGOS:HW_TARGET:ASUS_NUC15CRSU7";
 
-pub const nuc11tnki5_markers = [_][]const u8{
-    nuc11tnki5_marker_prefix ++ ":UEFI_BOOT:PASS",
-    nuc11tnki5_marker_prefix ++ ":ACPI_TABLES:PASS",
-    nuc11tnki5_marker_prefix ++ ":VT_D_DISCOVERY:PASS",
-    nuc11tnki5_marker_prefix ++ ":VT_D_STORAGE_ISOLATION:ENFORCED",
-    nuc11tnki5_marker_prefix ++ ":VT_D_INTERRUPT_ISOLATION:ENFORCED",
-    nuc11tnki5_marker_prefix ++ ":VT_D_BLOCKED_DMA_FAULT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":APIC_TIMER:PASS",
-    nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP:PASS",
-    nuc11tnki5_marker_prefix ++ ":USB_INPUT_XHCI:PASS",
-    nuc11tnki5_marker_prefix ++ ":NVME_BLOCK:PASS",
-    nuc11tnki5_marker_prefix ++ ":NETWORK_I225_LM:PASS",
-    nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME:PASS",
-    nuc11tnki5_marker_prefix ++ ":CRASH_RECOVERY:PASS",
+pub const nuc15crsu7_markers = [_][]const u8{
+    nuc15crsu7_marker_prefix ++ ":UEFI_BOOT:PASS",
+    nuc15crsu7_marker_prefix ++ ":ACPI_TABLES:PASS",
+    nuc15crsu7_marker_prefix ++ ":VT_D_DISCOVERY:PASS",
+    nuc15crsu7_marker_prefix ++ ":VT_D_STORAGE_ISOLATION:ENFORCED",
+    nuc15crsu7_marker_prefix ++ ":VT_D_INTERRUPT_ISOLATION:ENFORCED",
+    nuc15crsu7_marker_prefix ++ ":VT_D_BLOCKED_DMA_FAULT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":APIC_TIMER:PASS",
+    nuc15crsu7_marker_prefix ++ ":FRAMEBUFFER_GOP:PASS",
+    nuc15crsu7_marker_prefix ++ ":USB_INPUT_XHCI:PASS",
+    nuc15crsu7_marker_prefix ++ ":NVME_BLOCK:PASS",
+    nuc15crsu7_marker_prefix ++ ":NETWORK_I225_LM:PASS",
+    nuc15crsu7_marker_prefix ++ ":SUSPEND_RESUME:PASS",
+    nuc15crsu7_marker_prefix ++ ":CRASH_RECOVERY:PASS",
 };
 
-pub const nuc11tnki5_proof_metadata_markers = [_][]const u8{
-    nuc11tnki5_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
-    nuc11tnki5_marker_prefix ++ ":BOARD_SKU:NUC11TNKi5",
-    nuc11tnki5_marker_prefix ++ ":PROOF_MANIFEST:RECORDED",
-    nuc11tnki5_marker_prefix ++ ":FIRMWARE_SETTINGS:RECORDED",
-    nuc11tnki5_marker_prefix ++ ":POWER_CYCLE_NOTES:RECORDED",
-    nuc11tnki5_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
+pub const nuc15crsu7_proof_metadata_markers = [_][]const u8{
+    nuc15crsu7_marker_prefix ++ ":EVIDENCE_SOURCE:REAL_HARDWARE",
+    nuc15crsu7_marker_prefix ++ ":BOARD_SKU:RNUC15CRSU7",
+    nuc15crsu7_marker_prefix ++ ":PROOF_MANIFEST:RECORDED",
+    nuc15crsu7_marker_prefix ++ ":FIRMWARE_SETTINGS:RECORDED",
+    nuc15crsu7_marker_prefix ++ ":POWER_CYCLE_NOTES:RECORDED",
+    nuc15crsu7_marker_prefix ++ ":ARTIFACT_DIGESTS:RECORDED",
 };
 
-pub const nuc11tnki5_hardware_fact_markers = [_][]const u8{
-    nuc11tnki5_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":ACPI_XSDT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":ACPI_MADT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":ACPI_FADT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":ACPI_DMAR:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":NVME_WRITE_READ_COMPLETION:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":I225_LM_FRAME_INTERRUPT:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME_POWER:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
-    nuc11tnki5_marker_prefix ++ ":ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
+pub const nuc15crsu7_hardware_fact_markers = [_][]const u8{
+    nuc15crsu7_marker_prefix ++ ":SMBIOS_SKU:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":MULTIBOOT_MEMORY_MAP:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":ACPI_XSDT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":ACPI_MADT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":ACPI_FADT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":ACPI_DMAR:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":VT_D_SEGMENT_ZERO:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":APIC_TIMER_INTERRUPT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":NVME_WRITE_READ_COMPLETION:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":I225_LM_FRAME_INTERRUPT:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":SUSPEND_RESUME_POWER:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":UPDATE_ROLLBACK_POWER_CYCLE:OBSERVED",
+    nuc15crsu7_marker_prefix ++ ":ATTESTATION_ROOT_LIFECYCLE:OBSERVED",
 };
 
 pub const first_supported_target = Target{
-    .id = "intel-nuc11tnki5",
-    .vendor = "Intel",
-    .product = "NUC 11 Pro Kit",
-    .sku = "NUC11TNKi5",
-    .cpu = "Core i5-1135G7 Tiger Lake",
+    .id = "asus-nuc15crsu7",
+    .vendor = "ASUS",
+    .product = "NUC 15 Pro Mini PC",
+    .sku = "RNUC15CRSU7",
+    .cpu = "Core Ultra 7 255H Arrow Lake",
     .storage = "M.2 2280 PCIe NVMe SSD",
     .network = "Intel Ethernet Controller I225-LM",
     .firmware = "UEFI firmware with ACPI wake support",
     .required_subsystems = &required_subsystems,
-    .required_markers = &nuc11tnki5_markers,
+    .required_markers = &nuc15crsu7_markers,
     .proof_minimums = .{
         .cold_boots = 10,
         .warm_reboots = 10,
@@ -243,37 +243,37 @@ pub const CounterMarker = struct {
     minimum: u16,
 };
 
-pub const nuc11tnki5_counter_markers = [_]CounterMarker{
+pub const nuc15crsu7_counter_markers = [_]CounterMarker{
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":COLD_BOOTS:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":COLD_BOOTS:",
         .minimum = first_supported_target.proof_minimums.cold_boots,
     },
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":WARM_REBOOTS:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":WARM_REBOOTS:",
         .minimum = first_supported_target.proof_minimums.warm_reboots,
     },
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":STORAGE_WRITE_READ_CYCLES:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":STORAGE_WRITE_READ_CYCLES:",
         .minimum = first_supported_target.proof_minimums.storage_write_read_cycles,
     },
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":NETWORK_FRAME_CYCLES:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":NETWORK_FRAME_CYCLES:",
         .minimum = first_supported_target.proof_minimums.network_frame_cycles,
     },
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":SUSPEND_RESUME_CYCLES:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":SUSPEND_RESUME_CYCLES:",
         .minimum = first_supported_target.proof_minimums.suspend_resume_cycles,
     },
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":CRASH_RECOVERY_CYCLES:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":CRASH_RECOVERY_CYCLES:",
         .minimum = first_supported_target.proof_minimums.crash_recovery_cycles,
     },
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":CRASH_RECORD_PERSISTENCE_CYCLES:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":CRASH_RECORD_PERSISTENCE_CYCLES:",
         .minimum = first_supported_target.proof_minimums.crash_record_persistence_cycles,
     },
     .{
-        .marker_prefix = nuc11tnki5_marker_prefix ++ ":UPDATE_ROLLBACK_CYCLES:",
+        .marker_prefix = nuc15crsu7_marker_prefix ++ ":UPDATE_ROLLBACK_CYCLES:",
         .minimum = first_supported_target.proof_minimums.update_rollback_cycles,
     },
 };

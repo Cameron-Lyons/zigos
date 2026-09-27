@@ -13,7 +13,7 @@ pub fn addAllocatorBenchmarks(b: *std.Build) void {
             .optimize = .ReleaseFast,
         });
         module.addImport(kind ++ "_allocator", b.createModule(.{
-            .root_source_file = b.path("src/kernel/memory/" ++ kind ++ "_allocator.zig"),
+            .root_source_file = b.path(if (comptime std.mem.eql(u8, kind, "heap")) "src/heap_benchmark.zig" else "src/kernel/memory/frame_allocator.zig"),
             .target = b.graph.host,
             .optimize = .ReleaseFast,
         }));

@@ -1,5 +1,8 @@
-pub const sector_size: usize = 512;
-pub const slot_sectors: u32 = 768;
+const std = @import("std");
+
+pub const block_size: usize = 4096;
+pub const sector_size: usize = block_size;
+pub const slot_sectors: u32 = 96;
 pub const slot_count: u32 = 2;
 pub const header_sectors: u32 = 1;
 pub const payload_sectors: u32 = slot_sectors - header_sectors;
@@ -19,7 +22,10 @@ pub const data_region_bytes: usize = data_capacity_bytes / data_region_count;
 pub const alternate_data_region_offset: u32 = @intCast(data_region_bytes);
 
 pub const root_magic = "ZG4LOG1";
-pub const root_format_version: u16 = 4;
+pub const root_format_version: u16 = 5;
+pub const USES_INCREMENTAL_LIVE_INDEX = true;
+pub const USES_CHECKPOINT_ONLY_COLD_LOAD = true;
+pub const COMPACTS_IN_BACKGROUND = true;
 pub const max_replay_log_records: u16 = 512;
 pub const max_log_segments: u16 = 64;
 pub const compaction_threshold_bytes: u32 = @intCast((data_region_bytes * 3) / 4);
@@ -32,4 +38,40 @@ pub const log_record_checksum_offset: usize = log_record_payload_len_offset + lo
 pub const log_record_header_len: usize = log_record_checksum_offset + log_record_checksum_bytes;
 
 pub const payload_magic = "ZG4STATE";
-pub const format_version: u16 = 17;
+pub const format_version: u16 = 18;
+
+pub fn deviceLbaForVolumeTransfer(
+    volume_lba: u64,
+    buffer_len: usize,
+    device_lba_bytes: usize,
+) ?u64 {
+    if (device_lba_bytes == 0 or sector_size % device_lba_bytes != 0) return null;
+    if (buffer_len == 0 or buffer_len % sector_size != 0) return null;
+    const scale = sector_size / device_lba_bytes;
+    return std.math.mul(u64, volume_lba, scale) catch null;
+}
+
+pub fn volumeSectorsFromDeviceSectors(device_sectors: u64, device_lba_bytes: usize) ?u64 {
+    if (device_lba_bytes == 0 or sector_size % device_lba_bytes != 0) return null;
+    return device_sectors / (sector_size / device_lba_bytes);
+}
+
+test "volume blocks map onto NVMe LBAs and partial blocks are rejected" {
+    const device_lba_bytes: usize = 512;
+    const scratch_lba = required_device_sectors + 16;
+    const scale = sector_size / device_lba_bytes;
+    const device_lba = deviceLbaForVolumeTransfer(scratch_lba, sector_size, device_lba_bytes);
+    try std.testing.expectEqual(@as(?u64, scratch_lba * scale), device_lba);
+    try std.testing.expect((device_lba orelse 0) * device_lba_bytes >= image_bytes);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        deviceLbaForVolumeTransfer(scratch_lba, sector_size / 2, device_lba_bytes),
+    );
+    try std.testing.expectEqual(@as(?u64, null), deviceLbaForVolumeTransfer(0, 0, device_lba_bytes));
+    try std.testing.expectEqual(@as(?u64, null), deviceLbaForVolumeTransfer(0, sector_size, 0));
+
+    const eight_mib_device_sectors: u64 = (8 * 1024 * 1024) / device_lba_bytes;
+    const volume_sectors = volumeSectorsFromDeviceSectors(eight_mib_device_sectors, device_lba_bytes);
+    try std.testing.expectEqual(@as(?u64, eight_mib_device_sectors / scale), volume_sectors);
+    try std.testing.expect((volume_sectors orelse 0) > scratch_lba);
+}

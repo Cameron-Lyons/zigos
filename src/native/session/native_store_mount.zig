@@ -152,9 +152,7 @@ pub fn emptyStorageService() storage_service_mod.Service {
 
 pub fn adoptRootStorageVolume(checkpoint_store: *storage_service_mod.CheckpointStore) bool {
     if (builtin.target.os.tag != .freestanding) return false;
-    const root = @import("root");
-    if (!@hasDecl(root, "storage_volume")) return false;
-    const root_volume = root.storage_volume.defaultVolume();
+    const root_volume = storage_volume.defaultVolume();
     if (!canAdoptProductionRootVolume(root_volume)) return false;
     checkpoint_store.adoptRootVolume(root_volume);
     return true;

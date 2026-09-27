@@ -1,0 +1,1 @@
+model_inventory qemu_software_cpu_fallback qemu_tsc_frequency_hz=2400000000

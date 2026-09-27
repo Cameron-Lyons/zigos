@@ -330,11 +330,11 @@ test "document editor publishes a complete load before allowing queued input" {
     try std.testing.expect(!editor.canEdit(test_binding, &surface));
     try std.testing.expect(surface.flags.loading);
     try std.testing.expect(!editor.step(test_binding, &surface, &transport));
-    try transport.respond(&editor, .{ .read_data = .{ .version_id = test_binding.version_id, .total_length = text.len, .offset = 0, .bytes = text[0..64] } });
+    try transport.respond(&editor, .{ .read_data = .{ .version_id = test_binding.version_id, .total_length = text.len, .offset = 0, .bytes = text[0..protocol.READ_CHUNK_BYTES] } });
     try std.testing.expect(!editor.step(test_binding, &surface, &transport));
     try std.testing.expectEqualStrings("", surface.textSlice());
     try std.testing.expect(!editor.canEdit(test_binding, &surface));
-    try transport.respond(&editor, .{ .read_data = .{ .version_id = test_binding.version_id, .total_length = text.len, .offset = 64, .bytes = text[64..] } });
+    try transport.respond(&editor, .{ .read_data = .{ .version_id = test_binding.version_id, .total_length = text.len, .offset = protocol.READ_CHUNK_BYTES, .bytes = text[protocol.READ_CHUNK_BYTES..] } });
     try std.testing.expect(editor.step(test_binding, &surface, &transport));
     try std.testing.expect(editor.canEdit(test_binding, &surface));
     try std.testing.expectEqualStrings(&text, surface.textSlice());

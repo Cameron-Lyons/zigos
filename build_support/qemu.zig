@@ -1,6 +1,7 @@
 const std = @import("std");
 const shared = @import("shared.zig");
 const userspace_build = @import("userspace.zig");
+const kernel_build = @import("kernel.zig");
 
 pub const NativeSmokeMode = enum {
     production,
@@ -237,18 +238,21 @@ pub fn addIsoCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
+    efi_stub: *std.Build.Step.Compile,
     output_path: []const u8,
     staging_path: []const u8,
 ) *std.Build.Step.Run {
     const command = b.addSystemCommand(&.{"bash"});
-    command.addFileArg(b.path("scripts/build-grub-iso.sh"));
+    command.addFileArg(b.path("scripts/build-efi-iso.sh"));
+    command.addFileArg(kernel.output_file);
+    command.addFileArg(efi_stub.getEmittedBin());
     command.addArgs(&.{
-        kernel.output_path,
         output_path,
         staging_path,
     });
-    command.addFileArg(b.path("src/boot/grub-x86_64-kernel.cfg"));
+    command.addFileArg(b.path("src/boot/cmdline.txt"));
     command.step.dependOn(kernel.install_step);
+    command.step.dependOn(&efi_stub.step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
