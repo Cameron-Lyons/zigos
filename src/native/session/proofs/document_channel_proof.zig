@@ -22,6 +22,7 @@ const signer = signing.SignerIdentity{ .label = "document-channel-proof", .seed 
 var report_cursor: u8 = 0;
 var report_sequence: u64 = 0;
 var report_usage: u8 = 0x04;
+var report_mode: enum { edit, open, cancel } = .edit;
 
 const EditorSession = struct {
     task_id: u64,
@@ -58,9 +59,16 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     for (0..40) |_| try expectLaunchRollback(manager, graph, workspace_id);
     common.printBootMarker(boot_markers.document_channel_launch_rollback);
 
-    // Both bindings are prepared before either task runs. They share the Notes
-    // image and page tables, but each editor must retain its own runtime state.
-    const first = try openEditor(manager, graph, workspace_id, path, 0xD0C1);
+    const input = manager.inputRouterPtr();
+    const previous_source = input.source;
+    input.bindHardwareSource(.{ .poll_report = nextReport, .input_proof = noHardwareProof });
+    defer {
+        if (previous_source) |source| input.bindHardwareSource(source) else input.clearHardwareSource();
+    }
+    try cancelFromCompositor(manager, graph, workspace_id);
+    // Open executes in the already-running compositor ELF. The Notes tasks
+    // share image and page tables, but retain independent editor state.
+    const first = try openFromCompositor(manager, graph, workspace_id);
     defer retireEditor(manager, first);
     const second = try openEditor(manager, graph, workspace_id, sibling_path, 0xD0C2);
     defer retireEditor(manager, second);
@@ -70,12 +78,6 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.capabilityTablePtr(), first.task_id, first.binding, 0)) return error.RunningMailboxRebound;
     common.printBootMarker(boot_markers.document_channel_userspace_open);
 
-    const input = manager.inputRouterPtr();
-    const previous_source = input.source;
-    input.bindHardwareSource(.{ .poll_report = nextReport, .input_proof = noHardwareProof });
-    defer {
-        if (previous_source) |source| input.bindHardwareSource(source) else input.clearHardwareSource();
-    }
     const checkpoint_generation = storage.checkpoint_store.last_checkpoint_generation;
     try editAndSave(manager, first, 0x04);
     try awaitPresentation(manager, first, expected[0 .. original_length + 1], 1);
@@ -109,6 +111,69 @@ const PreparedEditor = struct {
     surface_id: u64,
     request: document_sessions.OpenRequest,
 };
+
+fn chooseOffer(manager: anytype, prepared: PreparedEditor, cancel: bool) !void {
+    const label = "Notes document";
+    _ = try manager.offerDocumentLaunch(prepared.request, label, timer.getTicks());
+    const window_id = manager.compositorSessionPtr().active_window_id;
+    const compositor_task_id = manager.inputRouterPtr().compositor_task_id;
+    var ready = false;
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        if (manager.userspaceSchedulerPtr().taskDispatchStats(prepared.task_id) != null) return error.EditorScheduledBeforeChoice;
+        const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), compositor_task_id) orelse continue;
+        if (state.launcherBinding().isValid() and state.ui_focus_index == 0 and
+            state.ui_presented_revision == state.ui_state_revision and
+            std.mem.eql(u8, &state.ui_text_digest, &protocol.digest(label ++ "\nOpen    Cancel")))
+        {
+            ready = true;
+            break;
+        }
+    }
+    if (!ready) return error.LaunchOfferNotPresented;
+    if (manager.compositorSessionPtr().active_window_id != window_id) return error.LaunchOfferLostFocus;
+    report_mode = if (cancel) .cancel else .open;
+    report_cursor = 0;
+    if (manager.servicePendingInputWork(timer.getTicks()) != @as(usize, if (cancel) 2 else 1)) return error.LaunchInputNotRouted;
+}
+
+fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !EditorSession {
+    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C1);
+    errdefer manager.cancelPreparedDocumentTask(prepared.task_id, timer.getTicks()) catch {};
+    try chooseOffer(manager, prepared, false);
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), prepared.task_id) orelse continue;
+        const binding = state.documentBinding();
+        if (!binding.isValid()) continue;
+        const window = manager.compositorSessionPtr().findWindow(manager.compositorSessionPtr().active_window_id) orelse continue;
+        if (window.subject_task_id != prepared.task_id) continue;
+        common.printBootMarker(boot_markers.document_launcher_userspace_open);
+        return .{ .task_id = prepared.task_id, .surface_id = prepared.surface_id, .window_id = window.id, .binding = binding };
+    }
+    return error.LaunchDecisionTimedOut;
+}
+
+fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !void {
+    const compositor = manager.compositorSessionPtr();
+    const windows_before = compositor.window_count;
+    const focus_before = compositor.active_window_id;
+    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C5);
+    const address_space_id = manager.runtimePtr().find(prepared.task_id).?.address_space_id;
+    try chooseOffer(manager, prepared, true);
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        if (manager.runtimePtr().find(prepared.task_id)) |task| if (task.state != .terminated) continue;
+        if (manager.runtimePtr().findAddressSpaceConst(address_space_id) != null or
+            manager.userspaceSchedulerPtr().taskDispatchStats(prepared.task_id) != null or
+            compositor.window_count != windows_before or compositor.active_window_id != focus_before) return error.CancelledOfferLeaked;
+        // Deliver the receipt before publishing the next offer.
+        for (0..32) |_| _ = manager.runUserspaceScheduler(timer.getTicks());
+        common.printBootMarker(boot_markers.document_launcher_userspace_cancel);
+        return;
+    }
+    return error.CancelDecisionTimedOut;
+}
 
 fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64) !EditorSession {
     const prepared = try prepareEditor(manager, graph, workspace_id, document_path, surface_id);
@@ -219,6 +284,7 @@ fn retireEditor(manager: anytype, editor: EditorSession) void {
 fn editAndSave(manager: anytype, editor: EditorSession, usage: u8) !void {
     _ = try manager.compositorSessionPtr().switchView(editor.window_id);
     report_cursor = 0;
+    report_mode = .edit;
     report_usage = usage;
     if (manager.servicePendingInputWork(timer.getTicks()) != 2) return error.InputNotRouted;
 }
@@ -257,7 +323,7 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), task_id) orelse continue;
-        if (!std.meta.eql(editor.binding, state.document)) return error.DocumentBindingLost;
+        if (!std.meta.eql(editor.binding, state.documentBinding())) return error.DocumentBindingLost;
         const flags: mailbox_abi.UiStateFlags = @bitCast(state.ui_state_flags);
         if (flags.load_failed) return error.DocumentLoadFailed;
         if (!flags.loading and !flags.dirty and state.ui_commit_count == commits and
@@ -280,7 +346,7 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
 }
 
 fn nextReport() ?xhci.HardwareBootKeyboardReport {
-    if (report_cursor >= 4) return null;
+    if (report_cursor >= @as(u8, if (report_mode == .open) 2 else 4)) return null;
     defer report_cursor += 1;
     report_sequence += 1;
     var report = xhci.HardwareBootKeyboardReport{
@@ -292,9 +358,13 @@ fn nextReport() ?xhci.HardwareBootKeyboardReport {
         .vendor_id = 0x046D,
         .product_id = 0xC31C,
     };
-    if (report_cursor == 0) report.bytes[2] = report_usage;
+    if (report_cursor == 0) report.bytes[2] = switch (report_mode) {
+        .edit => report_usage,
+        .open => 0x28,
+        .cancel => 0x2B,
+    };
     if (report_cursor == 2) {
-        report.bytes[0] = 0x01;
+        report.bytes[0] = if (report_mode == .edit) 0x01 else 0;
         report.bytes[2] = 0x28;
     }
     return report;

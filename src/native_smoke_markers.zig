@@ -54,6 +54,8 @@ pub const production_required = [_][]const u8{
 
 pub const production_forbidden = [_][]const u8{
     boot_markers.document_channel_launch_rollback,
+    boot_markers.document_launcher_userspace_open,
+    boot_markers.document_launcher_userspace_cancel,
     boot_markers.document_channel_userspace_open,
     boot_markers.document_channel_userspace_save,
     boot_markers.document_channel_sibling_editors,
@@ -198,6 +200,8 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
     boot_markers.document_channel_launch_rollback,
+    boot_markers.document_launcher_userspace_open,
+    boot_markers.document_launcher_userspace_cancel,
     boot_markers.document_channel_userspace_open,
     boot_markers.document_channel_userspace_save,
     boot_markers.document_channel_sibling_editors,
@@ -406,6 +410,8 @@ pub const notes_daily_driver_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
     boot_markers.document_channel_launch_rollback,
+    boot_markers.document_launcher_userspace_open,
+    boot_markers.document_launcher_userspace_cancel,
     boot_markers.document_channel_userspace_open,
     boot_markers.document_channel_userspace_save,
     boot_markers.document_channel_sibling_editors,

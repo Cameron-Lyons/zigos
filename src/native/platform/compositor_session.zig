@@ -913,6 +913,14 @@ pub const Session = struct {
         return .{ .window = &slot.window, .visible_index = target_index };
     }
 
+    pub fn closeWindow(self: *Session, window_id: u64) bool {
+        const state = self.windowState() orelse return false;
+        const slot_index = state.windows.slotIndexOf(window_id) orelse return false;
+        if (!self.closeWindowSlot(slot_index)) return false;
+        if (self.findWindowConst(self.active_window_id) == null) self.active_window_id = self.firstVisibleWindowId();
+        return true;
+    }
+
     pub fn closeWindowsForTask(self: *Session, task_id: u64) usize {
         if (task_id == 0) return 0;
 

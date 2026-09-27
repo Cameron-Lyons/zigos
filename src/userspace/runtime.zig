@@ -108,7 +108,10 @@ export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMEN
 // Tasks in one address-space group share the ELF's writable pages. Keep
 // editor state on each task's private stack; only the executor-managed mailbox
 // is shared between dispatches.
+const launcher_client = @import("launcher_client.zig");
+
 const UiRuntime = struct {
+    launcher: launcher_client.Client = .{},
     surface: ui_surface_state.State = .{},
     document: document_editor.Editor = .{},
 };
@@ -614,7 +617,7 @@ const InputDrain = struct {
 
 fn drainFocusedInput(ui: *UiRuntime, comptime saves_documents: bool) InputDrain {
     if (comptime saves_documents) {
-        if (!ui.document.canEdit(zigos_userspace_bootstrap.document, &ui.surface)) return .{};
+        if (!ui.document.canEdit(zigos_userspace_bootstrap.documentBinding(), &ui.surface)) return .{};
     }
     const input_capability_id = zigos_userspace_bootstrap.input_capability_id;
     const task_id = zigos_userspace_bootstrap.task_id;
@@ -637,9 +640,11 @@ fn initializeUiState(ui: *UiRuntime, comptime bundle_id: []const u8, comptime co
 }
 
 fn recordInputEvent(ui: *UiRuntime, state: *mailbox.Mailbox, event: abi.InputEventDescriptor, comptime saves_documents: bool) bool {
+    if (ui.surface.model == .compositor and !ui.launcher.acceptsInput(event)) return false;
     if (!applyInputEvent(state, &ui.surface, event)) return false;
+    if (ui.surface.model == .compositor) ui.launcher.recordActivation(event, &ui.surface);
     if (comptime saves_documents) {
-        if (event.length != 0 and event.bytes[0] == abi.InputByte.commit_text) ui.document.requestSave(state.document, &ui.surface);
+        if (event.length != 0 and event.bytes[0] == abi.InputByte.commit_text) ui.document.requestSave(state.documentBinding(), &ui.surface);
     }
     return true;
 }
@@ -732,14 +737,15 @@ fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u
     var pulse: u16 = 4;
     while (true) {
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
+            const launcher_work = if (ui.surface.model == .compositor) ui.launcher.step(zigos_userspace_bootstrap.launcherBinding(), &ui.surface, DocumentTransport{}) else false;
             const input = drainFocusedInput(ui, saves_documents);
             const document_work = if (comptime saves_documents) work: {
-                const pending = ui.document.step(zigos_userspace_bootstrap.document, &ui.surface, DocumentTransport{});
-                publishUiState(&zigos_userspace_bootstrap, &ui.surface);
+                const pending = ui.document.step(zigos_userspace_bootstrap.documentBinding(), &ui.surface, DocumentTransport{});
                 break :work pending;
             } else false;
+            if (zigos_userspace_bootstrap.ui_state_revision != ui.surface.revision) publishUiState(&zigos_userspace_bootstrap, &ui.surface);
             _ = presentUiState(&zigos_userspace_bootstrap, &ui.surface);
-            break :wait if (input.exhausted and !document_work) blk: {
+            break :wait if (input.exhausted and !document_work and !launcher_work and !ui.launcher.hasUnsentDecision()) blk: {
                 parkUntilEvent();
                 break :blk .wait_for_event;
             } else .runnable;
@@ -815,10 +821,11 @@ test "Notes input snapshots a save before processing subsequent typing" {
     var ui = UiRuntime{ .surface = ui_surface_state.State.init("app.notes") };
     var state = mailbox.Mailbox{
         .task_id = 2,
-        .document = .{ .endpoint_capability_id = 10, .service_endpoint_id = 11, .object_id = 12, .version_id = 13 },
+        .ui_channel_kind = .document,
+        .ui_channel = .{ .document = .{ .endpoint_capability_id = 10, .service_endpoint_id = 11, .object_id = 12, .version_id = 13 } },
     };
     ui.document = .{
-        .binding = state.document,
+        .binding = state.documentBinding(),
         .client = .{ .service_endpoint_id = 11, .object_id = 12, .version_id = 13 },
         .opened = true,
     };
@@ -849,13 +856,13 @@ test "interleaved Notes editors retain their own text and pending save" {
         .{ .surface = ui_surface_state.State.init("app.notes") },
     };
     var states = [_]mailbox.Mailbox{
-        .{ .task_id = 1, .document = .{ .endpoint_capability_id = 10, .service_endpoint_id = 11, .object_id = 12, .version_id = 13 } },
-        .{ .task_id = 2, .document = .{ .endpoint_capability_id = 20, .service_endpoint_id = 21, .object_id = 22, .version_id = 23 } },
+        .{ .task_id = 1, .ui_channel_kind = .document, .ui_channel = .{ .document = .{ .endpoint_capability_id = 10, .service_endpoint_id = 11, .object_id = 12, .version_id = 13 } } },
+        .{ .task_id = 2, .ui_channel_kind = .document, .ui_channel = .{ .document = .{ .endpoint_capability_id = 20, .service_endpoint_id = 21, .object_id = 22, .version_id = 23 } } },
     };
     for (&editors, &states) |*editor, *state| {
         editor.document = .{
-            .binding = state.document,
-            .client = .{ .service_endpoint_id = state.document.service_endpoint_id, .object_id = state.document.object_id, .version_id = state.document.version_id },
+            .binding = state.documentBinding(),
+            .client = .{ .service_endpoint_id = state.documentBinding().service_endpoint_id, .object_id = state.documentBinding().object_id, .version_id = state.documentBinding().version_id },
             .opened = true,
         };
     }
@@ -878,7 +885,7 @@ test "interleaved Notes editors retain their own text and pending save" {
         try std.testing.expectEqualStrings(expected[0..1], client.snapshot[0..client.length]);
         try std.testing.expect(editor.document.has_queued);
         try std.testing.expectEqualStrings(expected, editor.document.queued[0..editor.document.queued_length]);
-        try std.testing.expectEqual(state.document.object_id, client.object_id);
+        try std.testing.expectEqual(state.documentBinding().object_id, client.object_id);
         try std.testing.expectEqual(@as(u64, 4), state.input_event_count);
     }
 }

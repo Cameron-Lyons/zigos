@@ -1,8 +1,8 @@
 const std = @import("std");
 
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 8;
-pub const MAILBOX_RESERVED_BYTES: usize = 3;
+pub const VERSION: u16 = 9;
+pub const MAILBOX_RESERVED_BYTES: usize = 2;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
 pub const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
@@ -114,11 +114,29 @@ pub const DocumentBinding = extern struct {
     }
 };
 
+pub const LauncherBinding = extern struct {
+    endpoint_capability_id: u64 = 0,
+    service_endpoint_id: u64 = 0,
+    _reserved: [2]u64 = .{ 0, 0 },
+
+    pub fn isValid(self: LauncherBinding) bool {
+        return self.endpoint_capability_id != 0 and self.service_endpoint_id != 0 and
+            self._reserved[0] == 0 and self._reserved[1] == 0;
+    }
+};
+
+pub const UiChannelKind = enum(u8) { none, document, launcher, _ };
+pub const UiChannel = extern union {
+    document: DocumentBinding,
+    launcher: LauncherBinding,
+};
+
 pub const Mailbox = extern struct {
     version: u16 = VERSION,
     stage: u8 = @intFromEnum(Stage.boot),
     detail: u8 = @intFromEnum(Detail.unknown),
     fault_code: u8 = 0,
+    ui_channel_kind: UiChannelKind = .none,
     _reserved0: [MAILBOX_RESERVED_BYTES]u8 = [_]u8{0} ** MAILBOX_RESERVED_BYTES,
     authority_capability_id: u64 = 0,
     task_id: u64 = 0,
@@ -159,14 +177,22 @@ pub const Mailbox = extern struct {
     ui_presentation_failures: u32 = 0,
     ui_last_presentation_status: u32 = PRESENTATION_STATUS_NOT_ATTEMPTED,
     ui_text_digest: [32]u8 = [_]u8{0} ** 32,
-    document: DocumentBinding = .{},
+    ui_channel: UiChannel = .{ .document = .{} },
+
+    pub fn documentBinding(self: Mailbox) DocumentBinding {
+        return if (self.ui_channel_kind == .document) self.ui_channel.document else .{};
+    }
+
+    pub fn launcherBinding(self: Mailbox) LauncherBinding {
+        return if (self.ui_channel_kind == .launcher) self.ui_channel.launcher else .{};
+    }
 };
 
 pub const ABI_SIZE_BYTES: usize = 256;
 pub const ABI_ALIGNMENT: usize = 8;
 
 comptime {
-    if (@offsetOf(Mailbox, "document") + @sizeOf(DocumentBinding) != ABI_SIZE_BYTES) {
+    if (@offsetOf(Mailbox, "ui_channel") + @sizeOf(UiChannel) != ABI_SIZE_BYTES) {
         @compileError("userspace bootstrap mailbox fields no longer match the wire ABI");
     }
 }
@@ -245,6 +271,15 @@ test "mailbox records focused input consumption without architecture-dependent p
     try @import("std").testing.expectEqual(@as(usize, 160), @offsetOf(Mailbox, "surface_presentation_capability_id"));
     try @import("std").testing.expectEqual(@as(usize, 176), @offsetOf(Mailbox, "ui_presented_revision"));
     try @import("std").testing.expectEqual(@as(usize, 192), @offsetOf(Mailbox, "ui_text_digest"));
-    try @import("std").testing.expectEqual(@as(usize, 224), @offsetOf(Mailbox, "document"));
+    try @import("std").testing.expectEqual(@as(usize, 224), @offsetOf(Mailbox, "ui_channel"));
     try @import("std").testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
+}
+
+test "mailbox UI channels cannot reinterpret another channel's authority" {
+    var state = Mailbox{ .ui_channel_kind = .launcher, .ui_channel = .{ .launcher = .{ .endpoint_capability_id = 1, .service_endpoint_id = 2 } } };
+    try std.testing.expect(state.launcherBinding().isValid());
+    try std.testing.expectEqual(DocumentBinding{}, state.documentBinding());
+    state.ui_channel_kind = @enumFromInt(255);
+    try std.testing.expectEqual(LauncherBinding{}, state.launcherBinding());
+    try std.testing.expectEqual(DocumentBinding{}, state.documentBinding());
 }

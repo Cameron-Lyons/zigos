@@ -38,6 +38,7 @@ const trust_boot = @import("trust_boot.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const document_sessions = @import("document_sessions.zig");
+const document_launcher = @import("document_launcher.zig");
 const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
@@ -112,6 +113,7 @@ pub const SessionManager = struct {
     input_router: input_router_mod.Router = .{},
     surface_authority_scanned_lifecycle_generation: u64 = 0,
     documents: document_sessions.Sessions = .{},
+    launcher: document_launcher.Launcher = .{},
 
     pub fn init() SessionManager {
         return initial_session_manager;
@@ -127,6 +129,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.launcher.deinit(self, 0);
         self.documents.deinit(0);
         self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
@@ -278,13 +281,14 @@ pub const SessionManager = struct {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
         const serviced = self.documents.service(now_ticks);
+        const launched = self.launcher.service(self, now_ticks);
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
-        return serviced or dispatched;
+        return serviced or launched or dispatched;
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
-        return self.documents.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        return self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
     pub const DocumentTask = struct {
@@ -293,11 +297,17 @@ pub const SessionManager = struct {
         binding: userspace_mailbox.DocumentBinding,
     };
 
+    pub fn offerDocumentLaunch(self: *SessionManager, request: document_sessions.OpenRequest, label: []const u8, now_ticks: u64) !u64 {
+        const task = try self.requirePreparedDocumentTask(request.authority.task_id, false);
+        if (!task.owner.eql(request.authority.principal) or !task.hasCapability(request.authority.capability_id)) return error.PermissionDenied;
+        return self.launcher.offer(self, request, label, now_ticks);
+    }
+
     // A prepared task has an identity for permission review, but no scheduler
     // slot. Existing approved grants must be supplied by the caller. Publish to
     // the scheduler only after the document, window, and UI authority are ready.
     pub fn activateDocumentTask(self: *SessionManager, request: document_sessions.OpenRequest, now_ticks: u64) !DocumentTask {
-        const task = try self.requirePreparedDocumentTask(request.authority.task_id);
+        const task = try self.requirePreparedDocumentTask(request.authority.task_id, false);
         const previous_window_id = self.compositorSessionPtr().active_window_id;
         errdefer {
             self.retirePreparedDocumentTask(task, now_ticks);
@@ -324,13 +334,14 @@ pub const SessionManager = struct {
     }
 
     pub fn cancelPreparedDocumentTask(self: *SessionManager, task_id: u64, now_ticks: u64) !void {
-        const task = try self.requirePreparedDocumentTask(task_id);
+        const task = try self.requirePreparedDocumentTask(task_id, true);
         self.retirePreparedDocumentTask(task, now_ticks);
     }
 
-    fn requirePreparedDocumentTask(self: *SessionManager, task_id: u64) !*task_runtime.TaskRecord {
+    fn requirePreparedDocumentTask(self: *SessionManager, task_id: u64, allow_suspended: bool) !*task_runtime.TaskRecord {
         const task = self.runtimePtr().find(task_id) orelse return error.TaskNotFound;
-        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return error.TaskNotPrepared;
+        if ((task.state != .active and !(allow_suspended and task.state == .suspended)) or
+            !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return error.TaskNotPrepared;
         if (!std.mem.eql(u8, task.launchBundleIdSlice(), "app.notes")) return error.UnsupportedDocumentEditor;
         if (self.userspaceSchedulerPtr().taskDispatchStats(task_id) != null) return error.TaskAlreadyScheduled;
         return task;
@@ -885,6 +896,7 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.launcher.deinit(self, 0);
         self.documents.deinit(0);
         self.initialized = false;
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
@@ -1134,6 +1146,7 @@ fn prepareKernelInterface(
     policy_authority: principal.PrincipalId,
     session_task_id: u64,
 ) *component_port.KernelPort {
+    self.launcher.owner_task_id = session_task_id;
     const kernel_port = self.kernel_context.prepare(
         policy_authority,
         &self.runtime_context.runtime_service,

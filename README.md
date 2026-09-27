@@ -57,8 +57,14 @@ requests.
   restores focus. Retiring a task releases its demand-paged stack while sibling
   tasks keep their shared page tables. Boot verification repeats failed
   activation beyond the stack-slot limit and checks physical page reclamation.
-  Connecting these operations to interactive launch controls
-  and moving the storage core into its userspace service remain open.
+  The compositor's Open and Cancel controls now consume a session-owned,
+  one-use document offer over a bounded endpoint channel. The session rechecks
+  permissions and document identity before activation, rejects replays, and
+  retires cancelled preparations. The 256-byte mailbox uses a typed UI channel
+  for either a launcher or an editor. Cold-boot and reboot verification exercise
+  these controls through the compositor ELF with modeled keyboard input.
+  A production document picker, identity and permission provisioning, visible
+  display integration, and moving the storage core into userspace remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
   checks instruction availability and success, bounds retries, rejects a stuck
   source, erases temporary seed buffers, and stops boot if seeding fails. Runtime
