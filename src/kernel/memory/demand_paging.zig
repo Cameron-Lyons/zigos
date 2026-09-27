@@ -77,6 +77,27 @@ pub fn unregisterSpace(space: anytype) void {
     slot.* = .{};
 }
 
+// Remove exactly one owned region while other tasks keep the space alive.
+// Partial or foreign ranges must leave the registrations and mappings intact.
+pub fn unregisterRegionForSpace(space: anytype, virt_start: u64, virt_end_exclusive: u64) bool {
+    if (virt_end_exclusive <= virt_start) return false;
+    const slot = findSpace(spaceIdOf(space)) orelse return false;
+    for (slot.regions[0..slot.region_count], 0..) |region, index| {
+        if (region.virt_start != virt_start or region.virt_end_exclusive != virt_end_exclusive) continue;
+        if (comptime builtin.target.os.tag == .freestanding) {
+            @import("paging64.zig").releaseUserRange(space, @intCast(virt_start), @intCast(virt_end_exclusive - virt_start)) catch
+                @panic("invalid retired demand-paging region");
+        }
+        const last = slot.region_count - 1;
+        std.mem.copyForwards(Region, slot.regions[index..last], slot.regions[index + 1 .. slot.region_count]);
+        slot.regions[last] = .{};
+        slot.region_count = last;
+        if (last == 0) slot.* = .{};
+        return true;
+    }
+    return false;
+}
+
 pub fn regionFor(fault_address: u64) ?*Region {
     return regionForSpaceId(0, fault_address);
 }
@@ -351,4 +372,34 @@ test "demand paging unregisters retired spaces" {
     }));
     try std.testing.expect(RELEASES_REGIONS_WITH_SPACE);
     reset();
+}
+
+test "retiring one shared-space region preserves siblings and reuses capacity" {
+    reset();
+    defer reset();
+    var space: u8 = 1;
+    var foreign: u8 = 2;
+    const base = 0x0000_007F_0000_0000;
+    for (0..3) |index| {
+        try std.testing.expect(registerForSpace(&space, .{
+            .virt_start = base + index * 0x1000,
+            .virt_end_exclusive = base + (index + 1) * 0x1000,
+            .writable = true,
+        }));
+    }
+    try std.testing.expect(!unregisterRegionForSpace(&foreign, base + 0x1000, base + 0x2000));
+    try std.testing.expect(!unregisterRegionForSpace(&space, base + 0x1000, base + 0x1800));
+    for (0..MAX_REGIONS + 1) |_| {
+        try std.testing.expect(unregisterRegionForSpace(&space, base + 0x1000, base + 0x2000));
+        try std.testing.expect(!resolveAndMap(&space, base + 0x1000, true));
+        try std.testing.expect(resolveAndMap(&space, base, true));
+        try std.testing.expect(resolveAndMap(&space, base + 0x2000, true));
+        try std.testing.expect(registerForSpace(&space, .{
+            .virt_start = base + 0x1000,
+            .virt_end_exclusive = base + 0x2000,
+            .writable = true,
+        }));
+    }
+    for (0..3) |index| try std.testing.expect(unregisterRegionForSpace(&space, base + index * 0x1000, base + (index + 1) * 0x1000));
+    try std.testing.expect(findSpace(spaceIdOf(&space)) == null);
 }

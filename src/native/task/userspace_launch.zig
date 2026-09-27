@@ -12,10 +12,22 @@ else
         pub fn print(_: []const u8) void {}
     };
 
-pub const Error = userspace_boot_registry.Error || userspace_loader.Error || package_service.Error;
+pub const Error = userspace_boot_registry.Error || userspace_loader.Error || package_service.Error || error{SchedulerUnavailable};
 pub const REGISTERED_LAUNCH_MANIFEST_SIGNATURES_PER_CALL: u8 = 0;
 
 pub const SINGLE_KERNEL_CONTRACT_LAUNCH = true;
+
+// Creation deliberately leaves the task out of the run queue. The session
+// provisions task-scoped authority and initial resources before activation.
+pub fn prepareRegisteredDirect(
+    catalog: *userspace_loader.Catalog,
+    runtime_ptr: *task_runtime.Runtime,
+    bundle_id: []const u8,
+    request: userspace_loader.LaunchRequest,
+) Error!*task_runtime.TaskRecord {
+    try ensureRegisteredBundle(catalog, bundle_id, "register-prepared");
+    return catalog.launchDirect(runtime_ptr, bundle_id, request);
+}
 
 pub fn launchFromKernel(
     catalog: *userspace_loader.Catalog,
@@ -86,7 +98,8 @@ fn launchDirectImage(
         logLaunchFailure(bundle_id, failure_phase, err);
         return err;
     };
-    scheduleTask(schedule_task, task.id);
+    errdefer _ = runtime_ptr.terminateTask(task.id, 0) catch false;
+    if (!scheduleTask(schedule_task, task.id)) return error.SchedulerUnavailable;
     return task;
 }
 
@@ -113,7 +126,8 @@ fn launchKernelImage(
         logLaunchFailure(bundle_id, failure_phase, err);
         return err;
     };
-    scheduleTask(schedule_task, task.task_id);
+    errdefer _ = authority.port.kernel.runtime.terminateTask(task.task_id, authority.now_ticks) catch false;
+    if (!scheduleTask(schedule_task, task.task_id)) return error.SchedulerUnavailable;
     return task;
 }
 
@@ -148,6 +162,19 @@ pub fn launchInstalledDirect(
     request: userspace_loader.LaunchRequest,
     schedule_task: anytype,
 ) Error!*task_runtime.TaskRecord {
+    const task = try prepareInstalledDirect(packages, catalog, runtime_ptr, bundle_id, request);
+    errdefer _ = runtime_ptr.terminateTask(task.id, 0) catch false;
+    if (!scheduleTask(schedule_task, task.id)) return error.SchedulerUnavailable;
+    return task;
+}
+
+pub fn prepareInstalledDirect(
+    packages: *const package_service.Service,
+    catalog: *userspace_loader.Catalog,
+    runtime_ptr: *task_runtime.Runtime,
+    bundle_id: []const u8,
+    request: userspace_loader.LaunchRequest,
+) Error!*task_runtime.TaskRecord {
     var resolved: package_service.ResolvedManifest = undefined;
     const bundle = try packages.resolveCurrentManifest(bundle_id, &resolved);
     const launch_plan = try packages.buildLaunchPlan(bundle_id);
@@ -161,26 +188,18 @@ pub fn launchInstalledDirect(
     launch_request.release_transparency_root = launch_plan.provenance.release_transparency.root;
     launch_request.release_transparency_log_head = launch_plan.provenance.release_transparency.log_head;
 
-    return launchDirectBundle(
-        catalog,
-        runtime_ptr,
-        bundle,
-        launch_request,
-        schedule_task,
-    );
+    return prepareRegisteredDirect(catalog, runtime_ptr, bundle.bundle_id, launch_request);
 }
 
-fn scheduleTask(schedule_target: anytype, task_id: u64) void {
+fn scheduleTask(schedule_target: anytype, task_id: u64) bool {
     switch (@typeInfo(@TypeOf(schedule_target))) {
         .pointer => |pointer| {
             if (@hasDecl(pointer.child, "registerTask")) {
-                _ = schedule_target.registerTask(task_id);
-                return;
+                return schedule_target.registerTask(task_id);
             }
         },
         .@"fn" => {
-            _ = schedule_target(task_id);
-            return;
+            return schedule_target(task_id);
         },
         else => {},
     }
@@ -197,4 +216,31 @@ fn logLaunchFailure(bundle_id: []const u8, phase: []const u8, err: anytype) void
         console.print(@errorName(err));
         console.print("\n");
     }
+}
+
+test "scheduler rejection retires a newly created userspace task and address space" {
+    const std = @import("std");
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    const RejectingScheduler = struct {
+        runtime: *task_runtime.Runtime,
+        task_id: u64 = 0,
+        address_space_id: u64 = 0,
+
+        pub fn registerTask(self: *@This(), task_id: u64) bool {
+            self.task_id = task_id;
+            self.address_space_id = self.runtime.find(task_id).?.address_space_id;
+            return false;
+        }
+    };
+    var scheduler = RejectingScheduler{ .runtime = &runtime };
+    try std.testing.expectError(error.SchedulerUnavailable, launchRegisteredDirect(&catalog, &runtime, "app.notes", .{
+        .owner = .{ .kind = .app, .serial = 71 },
+        .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .ui_surface_id = 71,
+    }, &scheduler));
+    try std.testing.expect(scheduler.task_id != 0);
+    try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(scheduler.task_id).?.state);
+    try std.testing.expect(runtime.findAddressSpaceConst(scheduler.address_space_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.active));
 }

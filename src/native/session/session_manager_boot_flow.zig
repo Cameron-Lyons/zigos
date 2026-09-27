@@ -287,12 +287,30 @@ pub const SessionManager = struct {
         return self.documents.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
-    // The opener supplies existing task-scoped storage and transport authority.
-    // Bind before the app's first dispatch; reopening requires a fresh task.
-    pub fn openDocumentChannel(self: *SessionManager, request: document_sessions.OpenRequest, now_ticks: u64) !userspace_mailbox.DocumentBinding {
+    pub const DocumentTask = struct {
+        task_id: u64,
+        window_id: u64,
+        binding: userspace_mailbox.DocumentBinding,
+    };
+
+    // A prepared task has an identity for permission review, but no scheduler
+    // slot. Existing approved grants must be supplied by the caller. Publish to
+    // the scheduler only after the document, window, and UI authority are ready.
+    pub fn activateDocumentTask(self: *SessionManager, request: document_sessions.OpenRequest, now_ticks: u64) !DocumentTask {
+        const task = try self.requirePreparedDocumentTask(request.authority.task_id);
+        const previous_window_id = self.compositorSessionPtr().active_window_id;
+        errdefer {
+            self.retirePreparedDocumentTask(task, now_ticks);
+            if (previous_window_id != 0) {
+                _ = self.compositorSessionPtr().switchView(previous_window_id) catch {};
+            }
+        }
+        if ((task.ui_surface_id orelse 0) == 0) return error.SurfaceRequired;
         const port = self.kernelPort() orelse return error.KernelUnavailable;
         const binding = try self.documents.open(port, self.storageServicePtr(), request, now_ticks);
-        errdefer self.documents.closeTask(request.authority.task_id, now_ticks);
+        const window = try self.compositorSessionPtr().openDocumentView(task, request.workspace_id, request.path);
+        _ = self.ensureFocusedInputCapabilityForResolvedTask(task, self.capabilityTablePtr(), now_ticks) orelse return error.InputAuthorityUnavailable;
+        _ = self.ensureSurfacePresentationCapabilityForResolvedTask(task, now_ticks) orelse return error.SurfaceAuthorityUnavailable;
         if (!self.runtime_context.userspace_executor.bindInitialDocument(
             self.userspaceCatalogPtr(),
             self.runtimePtr(),
@@ -301,7 +319,29 @@ pub const SessionManager = struct {
             binding,
             now_ticks,
         )) return error.DocumentLaunchUnavailable;
-        return binding;
+        if (!self.userspaceSchedulerPtr().registerTask(task.id)) return error.SchedulerUnavailable;
+        return .{ .task_id = task.id, .window_id = window.id, .binding = binding };
+    }
+
+    pub fn cancelPreparedDocumentTask(self: *SessionManager, task_id: u64, now_ticks: u64) !void {
+        const task = try self.requirePreparedDocumentTask(task_id);
+        self.retirePreparedDocumentTask(task, now_ticks);
+    }
+
+    fn requirePreparedDocumentTask(self: *SessionManager, task_id: u64) !*task_runtime.TaskRecord {
+        const task = self.runtimePtr().find(task_id) orelse return error.TaskNotFound;
+        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return error.TaskNotPrepared;
+        if (!std.mem.eql(u8, task.launchBundleIdSlice(), "app.notes")) return error.UnsupportedDocumentEditor;
+        if (self.userspaceSchedulerPtr().taskDispatchStats(task_id) != null) return error.TaskAlreadyScheduled;
+        return task;
+    }
+
+    fn retirePreparedDocumentTask(self: *SessionManager, task: *task_runtime.TaskRecord, now_ticks: u64) void {
+        const task_id = task.id;
+        self.documents.closeTask(task_id, now_ticks);
+        _ = self.compositorSessionPtr().closeWindowsForTask(task_id);
+        _ = self.input_router.dropForTask(task_id);
+        _ = self.runtimePtr().terminateResolvedTask(task, now_ticks);
     }
 
     pub fn servicePendingNetworkWork(self: *SessionManager, now_ticks: u64) usize {

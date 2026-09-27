@@ -542,3 +542,75 @@ test "boot is idempotent once initialized" {
     try std.testing.expectEqual(bindings_after_first_boot, session_manager.testing.serviceDirectoryPtr().bindingCount());
     try std.testing.expectEqual(diagnostics_after_first_boot, session_manager.testing.supervisorPtr().diagnostic_count);
 }
+
+fn prepareNotesForLaunchTest(manager: *session_manager.SessionManager) !*task_runtime.TaskRecord {
+    return @import("../task/userspace_launch.zig").prepareRegisteredDirect(manager.userspaceCatalogPtr(), manager.runtimePtr(), "app.notes", .{
+        .owner = .{ .kind = .app, .serial = 0xD0C4 },
+        .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .ui_surface_id = 0xD0C4,
+    });
+}
+
+fn rejectedDocumentRequest(task: *const task_runtime.TaskRecord) @import("document_sessions.zig").OpenRequest {
+    return .{
+        .authority = .{ .task_id = task.id, .principal = task.owner, .capability_id = 0, .now_ticks = 0 },
+        .client_bootstrap_capability_id = 0,
+        .server_bootstrap_capability_id = 0,
+        .workspace_id = 0,
+        .path = "documents/notes.md",
+        .signer = .{ .label = "launch-test", .seed = signing.seedFromByte(0xD4) },
+    };
+}
+
+test "prepared document task waits for activation and cancellation retires grants and windows" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const task = try prepareNotesForLaunchTest(manager);
+    const task_id = task.id;
+    const address_space_id = task.address_space_id;
+    const capabilities = manager.capabilityTablePtr();
+    const grants_before = capabilities.activeCount();
+    const windows_before = manager.compositorSessionPtr().window_count;
+    const granted = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = task_id },
+        .rights = .{ .task = .{ .input_recv = true } },
+        .scope = .{ .task_id = task_id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    try manager.runtimePtr().grantCapability(task_id, granted.id);
+    _ = try manager.compositorSessionPtr().openTaskView(task, "Pending review");
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+    _ = manager.userspaceSchedulerPtr().runNext(1);
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+    try manager.cancelPreparedDocumentTask(task_id, 2);
+    try std.testing.expectEqual(task_runtime.TaskState.terminated, task.state);
+    try std.testing.expect(manager.runtimePtr().findAddressSpaceConst(address_space_id) == null);
+    try std.testing.expectEqual(grants_before, capabilities.activeCount());
+    try std.testing.expectEqual(windows_before, manager.compositorSessionPtr().window_count);
+    try std.testing.expectError(error.TaskNotPrepared, manager.cancelPreparedDocumentTask(task_id, 3));
+}
+
+test "document activation denial retires preparation but never cancels a scheduled editor" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const task = try prepareNotesForLaunchTest(manager);
+    const task_id = task.id;
+    const address_space_id = task.address_space_id;
+    try std.testing.expectError(error.PermissionDenied, manager.activateDocumentTask(rejectedDocumentRequest(task), 0));
+    try std.testing.expectEqual(task_runtime.TaskState.terminated, task.state);
+    try std.testing.expect(manager.runtimePtr().findAddressSpaceConst(address_space_id) == null);
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+
+    const active = try prepareNotesForLaunchTest(manager);
+    try std.testing.expect(manager.userspaceSchedulerPtr().registerTask(active.id));
+    try std.testing.expectError(error.TaskAlreadyScheduled, manager.activateDocumentTask(rejectedDocumentRequest(active), 0));
+    try std.testing.expectError(error.TaskAlreadyScheduled, manager.cancelPreparedDocumentTask(active.id, 0));
+    try std.testing.expectEqual(task_runtime.TaskState.active, active.state);
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(active.id) != null);
+}

@@ -6,8 +6,10 @@ const principal = @import("../../core/principal.zig");
 const signing = @import("../../core/signing.zig");
 const userspace_launch = @import("../../task/userspace_launch.zig");
 const userspace_executor = @import("../../task/userspace_executor.zig");
+const document_sessions = @import("../document_sessions.zig");
 const object_store = @import("../../storage/object_store.zig");
 const workspace = @import("../../storage/workspace.zig");
+const paging = @import("../../../kernel/memory/paging64.zig");
 const xhci = @import("../../../kernel/drivers/xhci.zig");
 const common = @import("../../../kernel/boot/common.zig");
 const timer = @import("../../../kernel/timer/timer.zig");
@@ -51,6 +53,11 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try storage.stagePut(workspace_id, sibling_path, sibling.object_id, sibling.version_id, .document);
     _ = try storage.commit(workspace_id, 0);
 
+    // Exceed the shared stack-slot limit: failed activation must make the
+    // slot reusable while sibling tasks keep the Notes address space alive.
+    for (0..40) |_| try expectLaunchRollback(manager, graph, workspace_id);
+    common.printBootMarker(boot_markers.document_channel_launch_rollback);
+
     // Both bindings are prepared before either task runs. They share the Notes
     // image and page tables, but each editor must retain its own runtime state.
     const first = try openEditor(manager, graph, workspace_id, path, 0xD0C1);
@@ -84,7 +91,10 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try expectStored(manager, workspace_id, path, expected[0 .. original_length + 1], original.version_id.raw());
 
     try expectChannelRetired(manager, first);
+    const frames_before_retirement = paging.frameStats();
     retireEditor(manager, first);
+    const frames_after_retirement = paging.frameStats();
+    if (frames_after_retirement.free <= frames_before_retirement.free) return error.EditorStackPagesNotReclaimed;
     // Retiring the first mapping must leave the sibling's editor usable.
     try editAndSave(manager, second, 0x06);
     try awaitPresentation(manager, second, sibling_text ++ "bc", 2);
@@ -94,17 +104,34 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     common.printBootMarker(boot_markers.document_channel_retirement);
 }
 
+const PreparedEditor = struct {
+    task_id: u64,
+    surface_id: u64,
+    request: document_sessions.OpenRequest,
+};
+
 fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64) !EditorSession {
+    const prepared = try prepareEditor(manager, graph, workspace_id, document_path, surface_id);
+    const launched = try manager.activateDocumentTask(prepared.request, 0);
+    if (manager.focusedInputCapabilityForTask(launched.task_id, 0) == null or
+        manager.surfacePresentationCapabilityForTask(launched.task_id, 0) == null) return error.InitialUiAuthorityMissing;
+    const stats = manager.userspaceSchedulerPtr().taskDispatchStats(launched.task_id) orelse return error.EditorNotScheduled;
+    if (!stats.queued_ready or stats.dispatch_count != 0) return error.EditorDispatchedBeforeActivation;
+    if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.capabilityTablePtr(), launched.task_id, launched.binding, 0)) return error.PreparedMailboxRebound;
+    return .{ .task_id = launched.task_id, .surface_id = surface_id, .window_id = launched.window_id, .binding = launched.binding };
+}
+
+fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64) !PreparedEditor {
     const storage = manager.storageServicePtr();
     const runtime = manager.runtimePtr();
     const capabilities = manager.capabilityTablePtr();
     const original = try storage.resolve(workspace_id, document_path);
     const owner = principal.PrincipalId{ .kind = .app, .serial = surface_id };
-    const task = try userspace_launch.launchRegisteredDirect(manager.userspaceCatalogPtr(), runtime, "app.notes", .{
+    const task = try userspace_launch.prepareRegisteredDirect(manager.userspaceCatalogPtr(), runtime, "app.notes", .{
         .owner = owner,
         .budget = .{ .cpu_time_ticks = 1_000_000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
         .ui_surface_id = surface_id,
-    }, manager.userspaceSchedulerPtr());
+    });
     const task_id = task.id;
     errdefer {
         const now_ticks = timer.getTicks();
@@ -140,18 +167,45 @@ fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path
     }).withObjectScope(original.object_id, document_path));
     const service = runtime.find(storage.task_id) orelse return error.ServiceMissing;
     const service_authority = userspace_executor.resolveMailboxAuthorities(service, capabilities, 0).bootstrap_capability_id;
-    const binding = try manager.openDocumentChannel(.{
+    if (manager.userspaceSchedulerPtr().taskDispatchStats(task_id) != null) return error.EditorScheduledBeforeSetup;
+    return .{ .task_id = task_id, .surface_id = surface_id, .request = .{
         .authority = .{ .task_id = task_id, .principal = owner, .capability_id = document.id, .now_ticks = 0 },
         .client_bootstrap_capability_id = bootstrap.id,
         .server_bootstrap_capability_id = service_authority,
         .workspace_id = workspace_id,
         .path = document_path,
         .signer = signer,
-    }, 0);
-    // Binding twice must fail even before the first dispatch.
-    if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), runtime, capabilities, task_id, binding, 0)) return error.PreparedMailboxRebound;
-    const window = try manager.compositorSessionPtr().openDocumentView(task, workspace_id, document_path);
-    return .{ .task_id = task_id, .surface_id = surface_id, .window_id = window.id, .binding = binding };
+    } };
+}
+
+fn expectLaunchRollback(manager: anytype, graph: anytype, workspace_id: u64) !void {
+    const runtime = manager.runtimePtr();
+    const capabilities = manager.capabilityTablePtr();
+    const endpoints = manager.kernelPort().?.kernel.endpoint_table;
+    const compositor = manager.compositorSessionPtr();
+    const grants_before = capabilities.activeCount();
+    const endpoints_before = endpoints.activeCount();
+    const windows_before = compositor.window_count;
+    const focus_before = compositor.active_window_id;
+    const active_before = runtime.countTasksInState(.active);
+    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C3);
+    const address_space_id = runtime.find(prepared.task_id).?.address_space_id;
+    const scheduler = manager.userspaceSchedulerPtr();
+    // Force rejection at the final publish step, after real channel endpoints,
+    // mailbox pages, the window, and task-scoped UI grants have been created.
+    scheduler.initialized = false;
+    const failure = failure: {
+        defer scheduler.initialized = true;
+        _ = manager.activateDocumentTask(prepared.request, 0) catch |err| break :failure err;
+        return error.SchedulerRejectionMissing;
+    };
+    if (failure != error.SchedulerUnavailable) return failure;
+    if (runtime.find(prepared.task_id).?.state != .terminated or
+        runtime.findAddressSpaceConst(address_space_id) != null or
+        scheduler.taskDispatchStats(prepared.task_id) != null or
+        runtime.countTasksInState(.active) != active_before or
+        capabilities.activeCount() != grants_before or endpoints.activeCount() != endpoints_before or
+        compositor.window_count != windows_before or compositor.active_window_id != focus_before) return error.DocumentLaunchResourcesLeaked;
 }
 
 fn retireEditor(manager: anytype, editor: EditorSession) void {

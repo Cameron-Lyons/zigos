@@ -50,9 +50,15 @@ requests.
   and save state on each task's stack, and prepared bindings survive sibling
   dispatches through the shared mailbox. Boot verification runs two Notes tasks
   with distinct documents through modeled keyboard input, independent durable
-  saves, and continued editing after one task retires. Connecting this opener
-  to the interactive launcher and moving the storage core into its userspace
-  service remain open.
+  saves, and continued editing after one task retires. Launch preparation keeps
+  the task off the run queue while permission review provisions scoped grants.
+  Session activation binds the document, creates its window, and provisions UI
+  authority before scheduling; failure retires the task and its resources and
+  restores focus. Retiring a task releases its demand-paged stack while sibling
+  tasks keep their shared page tables. Boot verification repeats failed
+  activation beyond the stack-slot limit and checks physical page reclamation.
+  Connecting these operations to interactive launch controls
+  and moving the storage core into its userspace service remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
   checks instruction availability and success, bounds retries, rejects a stuck
   source, erases temporary seed buffers, and stops boot if seeding fails. Runtime

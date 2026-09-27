@@ -399,6 +399,7 @@ const MappedImageRegions = struct {
     const Range = struct { start: usize = 0, size: usize = 0 };
     ranges: [task_runtime.MAX_EXECUTABLE_SEGMENTS]Range = [_]Range{.{}} ** task_runtime.MAX_EXECUTABLE_SEGMENTS,
     count: usize = 0,
+    stack: Range = .{},
 };
 
 const MappingEntry = struct {
@@ -1060,6 +1061,7 @@ pub const Executor = struct {
                         region.access,
                         dispatch_metadata.protectionKey(),
                     );
+                    entry.image_regions.?.stack = .{ .start = @intCast(mapped_base), .size = region.size_bytes };
                     const runtime = self.bound_runtime orelse return error.AddressSpaceOwnerInvalid;
                     const live = runtime.findAddressSpace(address_space.id) orelse return error.AddressSpaceOwnerInvalid;
                     if (!live.relocateStack(mapped_base, region.size_bytes)) return error.InitialContextInvalid;
@@ -1170,6 +1172,13 @@ pub const Executor = struct {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
         if (entry.address_space) |*space| {
+            if (entry.image_regions) |regions| {
+                const stack = regions.stack;
+                if (stack.size != 0 and !demand_paging.unregisterRegionForSpace(space, stack.start, stack.start + stack.size)) {
+                    freestanding.paging.releaseUserRange(space, stack.start, stack.size) catch
+                        native_util.impossibleByInvariant("invalid retired stack mapping range");
+                }
+            }
             const retain_shared = self.releaseSharedGroupSpace(space);
             if (!retain_shared) {
                 demand_paging.unregisterSpace(space);
