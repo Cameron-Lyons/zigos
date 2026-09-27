@@ -25,6 +25,23 @@ pub fn addAllocatorBenchmarks(b: *std.Build) void {
     }
 }
 
+pub fn addIpcBenchmark(b: *std.Build) void {
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/benchmark_ipc_ring.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    module.addImport("ipc_ring", b.createModule(.{
+        .root_source_file = b.path("src/native/kernel_api/ipc_ring.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    }));
+    const executable = b.addExecutable(.{ .name = "benchmark-ipc-ring", .root_module = module });
+    const run = b.addRunArtifact(executable);
+    run.has_side_effects = true;
+    b.step("ipc-ring-benchmark", "Measure bounded IPC ring send/receive and backpressure on the host").dependOn(&run.step);
+}
+
 pub fn addBenchmarkGate(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,

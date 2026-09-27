@@ -6,6 +6,7 @@ const binary_cursor = @import("binary_cursor");
 const capability = @import("native/kernel_api/capability.zig");
 const crash_record = @import("kernel/platform/crash_record.zig");
 const elf_image_inspector = @import("native/task/elf_image_inspector.zig");
+const ipc_ring = @import("native/kernel_api/ipc_ring.zig");
 const manifest = @import("native/policy/manifest.zig");
 const object_store = @import("native/storage/object_store.zig");
 const release_catalog = @import("tools/release_catalog.zig");
@@ -34,6 +35,7 @@ const REQUIRED_HARNESS_IDS = [_][]const u8{
     "storage-volume-image",
     "sync-record",
     "capability-message",
+    "ipc-ring",
     "syscall-abi",
     "manifest-permissions",
 };
@@ -233,8 +235,29 @@ fn runFuzzHarness(id: []const u8, input: []const u8) void {
     if (std.mem.eql(u8, id, "storage-volume-image")) return fuzzStorageVolumeImage(input);
     if (std.mem.eql(u8, id, "sync-record")) return fuzzSyncRecord(input);
     if (std.mem.eql(u8, id, "capability-message")) return fuzzCapabilityMessage(input);
+    if (std.mem.eql(u8, id, "ipc-ring")) return fuzzIpcRing(input);
     if (std.mem.eql(u8, id, "syscall-abi")) return fuzzSyscallAbi(input);
     if (std.mem.eql(u8, id, "manifest-permissions")) return fuzzManifestPermissions(input);
+}
+
+fn fuzzIpcRing(input: []const u8) void {
+    // Compact seeds keep header, counters and record metadata in the mutation
+    // window rather than spending mutations on cache-line padding.
+    var compact: [24 + ipc_ring.SLOT_BYTES]u8 = @splat(0);
+    const length = @min(input.len, compact.len);
+    @memcpy(compact[0..length], input[0..length]);
+    var storage: [ipc_ring.minimumBytes(2)]u8 align(ipc_ring.STORAGE_ALIGNMENT) = @splat(0);
+    @memcpy(storage[0..16], compact[0..16]);
+    @memcpy(storage[ipc_ring.HEAD_OFFSET..][0..4], compact[16..20]);
+    @memcpy(storage[ipc_ring.TAIL_OFFSET..][0..4], compact[20..24]);
+    @memcpy(storage[ipc_ring.HEADER_BYTES..][0..ipc_ring.SLOT_BYTES], compact[24..]);
+    var output: [ipc_ring.PAYLOAD_BYTES]u8 = undefined;
+    _ = ipc_ring.queued(&storage) catch {};
+    _ = ipc_ring.peekRecord(&storage) catch {};
+    _ = ipc_ring.receive(&storage, output[0..4]) catch {};
+    _ = ipc_ring.pop(&storage, &output) catch {};
+    _ = ipc_ring.push(&storage, input[0..@min(input.len, ipc_ring.PAYLOAD_BYTES)]) catch {};
+    _ = ipc_ring.popRecord(&storage) catch {};
 }
 
 fn fuzzBinaryCursor(input: []const u8) void {

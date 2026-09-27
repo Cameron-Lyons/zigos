@@ -245,6 +245,14 @@ measures reuse and allocation under fragmentation, including exhaustion.
   are validated before dequeue, and undersized outputs leave messages queued.
   A full endpoint queue returns a distinct `would_block` status so clients can
   retry backpressure without spinning on a disconnected peer.
+  Ring storage is explicitly cache-line aligned within its heap allocation.
+  Power-of-two capacities preserve FIFO order across sequence-counter rollover;
+  malformed geometry, impossible queue depths, and invalid record lengths are
+  rejected before access. Receive validates and copies one snapshot before
+  releasing the slot, preserving messages and moved capabilities on short
+  outputs. Ring replacement rejects overlapping live storage. The host
+  `ipc-ring-benchmark` target compares this receive path with separate peek/pop
+  calls and measures full-queue backpressure.
   The `endpoint_close` operation requires its own right, releases one channel
   and all authority to it, and wakes surviving peers. Clients drain queued
   replies before receiving `peer_closed`; closed connections cannot be rebound.

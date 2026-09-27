@@ -30,3 +30,12 @@ ReleaseFast build and KVM. All values are cycles per complete operation:
 
 The standard 50% regression allowance applies to both baselines. Other
 workloads retain their existing baselines and ceilings.
+
+`./scripts/zig.sh build ipc-ring-benchmark` measures an eight-slot ring with
+88-byte payloads on the host. `single_receive` sends and receives one record;
+`split_receive` sends, peeks, pops, and copies the same record. Both use the
+current validation code, so this is a comparison of receive strategies, not a
+historical kernel baseline. `full_queue` measures rejection while all eight
+slots remain occupied. Each result is the median of five 200,000-iteration
+samples after warmup. These host timings are informational; the QEMU kernel
+benchmark remains the integration gate.
