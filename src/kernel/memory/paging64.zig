@@ -465,8 +465,22 @@ fn releasePhysicalFrames(base: frame_allocator.PhysicalAddress, count: u32) Fram
 }
 
 fn releasePhysicalFramesLocked(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
-    try physical_frames.release(.{ .base = base, .count = count });
-    if (base >= LOW_IDENTITY_PHYSICAL_LIMIT) high_memory_zone_has_free_frames = true;
+    try releaseRunTo(&physical_frames, &high_memory_zone_has_free_frames, .{
+        .base = base,
+        .count = count,
+    }, LOW_IDENTITY_PHYSICAL_LIMIT);
+}
+
+fn releaseRunTo(
+    allocator: anytype,
+    high_zone_has_free_frames: *bool,
+    run: FrameRun,
+    low_identity_limit: frame_allocator.PhysicalAddress,
+) FrameReleaseError!void {
+    try allocator.release(run);
+    // The validated run may start below the boundary and still return high frames.
+    const end = run.base + @as(frame_allocator.PhysicalAddress, run.count) * PAGE_SIZE;
+    if (end > low_identity_limit) high_zone_has_free_frames.* = true;
 }
 
 pub fn frameStats() FrameStats {
@@ -1492,6 +1506,39 @@ test "general single-frame allocation caches an exhausted high zone" {
         managed_bytes,
     ).?;
     try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 0), run.base);
+    try std.testing.expect(!high_zone_has_free_frames);
+}
+
+test "releasing a run across the identity boundary restores high-memory allocation" {
+    const managed_bytes = 8 * PAGE_SIZE;
+    const low_identity_limit = 4 * PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
+    _ = allocator.allocate(8).?;
+    var high_zone_has_free_frames = false;
+    var low_cursor = frame_allocator.AllocationCursor{};
+
+    try releaseRunTo(&allocator, &high_zone_has_free_frames, .{
+        .base = 3 * PAGE_SIZE,
+        .count = 2,
+    }, low_identity_limit);
+    try std.testing.expect(high_zone_has_free_frames);
+    const run = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, 1, low_identity_limit, managed_bytes).?;
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), run.base);
+
+    high_zone_has_free_frames = false;
+    try std.testing.expectError(error.NotAllocated, releaseRunTo(&allocator, &high_zone_has_free_frames, .{
+        .base = 3 * PAGE_SIZE,
+        .count = 2,
+    }, low_identity_limit));
+    try std.testing.expect(!high_zone_has_free_frames);
+    try std.testing.expect(allocator.isAllocated(low_identity_limit));
+
+    try releaseRunTo(&allocator, &high_zone_has_free_frames, .{
+        .base = 2 * PAGE_SIZE,
+        .count = 1,
+    }, low_identity_limit);
     try std.testing.expect(!high_zone_has_free_frames);
 }
 

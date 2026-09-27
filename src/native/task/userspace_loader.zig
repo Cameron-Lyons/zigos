@@ -813,13 +813,15 @@ test "kernel-launched userspace images surface a userspace task flag" {
     var capabilities = @import("../kernel_api/capability.zig").CapabilityTable.init();
     var endpoints = @import("../kernel_api/endpoint.zig").Table.init();
     var shared = @import("../kernel_api/shared_memory.zig").Table.init();
-    var kernel = @import("../kernel_api/native_kernel.zig").Kernel.init(
+    var kernel: @import("../kernel_api/native_kernel.zig").Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var port = component_port.KernelPort.init(&kernel);
 
     const controller = try runtime.createTask(.{

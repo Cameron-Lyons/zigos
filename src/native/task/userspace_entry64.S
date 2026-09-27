@@ -42,6 +42,7 @@ zigos_enter_userspace:
     iretq
 
 .resume_from_userspace:
+    endbr64
     popq %r15
     popq %r14
     popq %r13

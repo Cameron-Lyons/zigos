@@ -108,7 +108,43 @@ pub const State = struct {
 
     fn commit(self: *State) bool {
         self.commit_count +|= 1;
+        // This requests a save. Only a durable storage acknowledgement may
+        // clear dirty state; surface presentation is not a persistence receipt.
+        return true;
+    }
+
+    pub fn acknowledgeSavedText(self: *State, saved_text: []const u8) bool {
+        if (self.model != .notes or !self.flags.dirty or !std.mem.eql(u8, self.textSlice(), saved_text)) return false;
         self.flags.dirty = false;
+        self.revision +|= 1;
+        return true;
+    }
+
+    pub fn beginDocumentLoad(self: *State) void {
+        self.flags.loading = true;
+        self.flags.load_failed = false;
+        self.revision +|= 1;
+    }
+
+    pub fn failDocumentLoad(self: *State) void {
+        if (self.flags.load_failed) return;
+        self.flags.loading = false;
+        self.flags.load_failed = true;
+        self.revision +|= 1;
+    }
+
+    pub fn loadDocument(self: *State, text: []const u8) bool {
+        if (self.model != .notes or self.flags.dirty or text.len > self.text.len) return false;
+        // The current text presentation accepts printable ASCII and newlines.
+        // Refuse unsupported content without truncating or changing its bytes.
+        for (text) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
+        @memset(&self.text, 0);
+        @memcpy(self.text[0..text.len], text);
+        self.text_length = @intCast(text.len);
+        self.cursor = self.text_length;
+        self.flags.loading = false;
+        self.flags.load_failed = false;
+        self.revision +|= 1;
         return true;
     }
 
@@ -209,6 +245,47 @@ test "UI surface state selects application-specific fixed-capacity models" {
     try std.testing.expectEqual(mailbox.UiModelKind.generic, modelForBundle("app.unknown"));
 }
 
+test "Notes accepts durable receipts without clearing edits made during a save" {
+    const document_client = @import("document_client.zig");
+    const protocol = @import("document_protocol.zig");
+    var state = State.init("app.notes");
+    _ = state.apply(inputEvent(1, abi.InputByte.text, 'a'));
+    var client = document_client.Client{ .service_endpoint_id = 12, .object_id = 20, .version_id = 30 };
+    try client.start(state.textSlice());
+    var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    const first = (try client.nextFrame(&bytes)).?;
+    var retry_bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, first, (try client.nextFrame(&retry_bytes)).?);
+    while (try client.nextFrame(&bytes) != null) client.sent();
+    _ = state.apply(inputEvent(2, abi.InputByte.text, 'b'));
+    const saved = try protocol.encode(&bytes, .{ .request_id = 1, .body = .{ .receipt = .{
+        .status = .saved,
+        .object_id = 20,
+        .previous_version_id = 30,
+        .version_id = 31,
+        .checkpoint_generation = 7,
+    } } });
+    try std.testing.expect(!client.accept(99, 1, saved));
+    try std.testing.expect(!client.accept(12, 2, saved));
+    try std.testing.expect(client.accept(12, 1, saved));
+    try std.testing.expect(!state.acknowledgeSavedText(client.acknowledgedText().?));
+    try std.testing.expect(state.flags.dirty);
+    try client.start(state.textSlice());
+    try std.testing.expect(!client.accept(12, 1, saved));
+    while (try client.nextFrame(&bytes) != null) client.sent();
+    const latest = try protocol.encode(&bytes, .{ .request_id = 2, .body = .{ .receipt = .{
+        .status = .saved,
+        .object_id = 20,
+        .previous_version_id = 31,
+        .version_id = 32,
+        .checkpoint_generation = 8,
+    } } });
+    try std.testing.expect(client.accept(12, 2, latest));
+    try std.testing.expect(state.acknowledgeSavedText(client.acknowledgedText().?));
+    try std.testing.expect(!state.flags.dirty);
+    try std.testing.expectEqualStrings("ab", state.textSlice());
+}
+
 test "UI surface state serializes a canonical bounded presentation" {
     var state = State.init("app.notes");
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, abi.InputByte.text, 'x')));
@@ -226,7 +303,7 @@ test "UI surface state serializes a canonical bounded presentation" {
     try std.testing.expect(state.flags.dirty);
 }
 
-test "Notes UI state edits and commits document text" {
+test "Notes UI state requests a save without claiming durability" {
     var state = State.init("app.notes");
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, abi.InputByte.text, 'a')));
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, abi.InputByte.text, 'b')));
@@ -235,7 +312,7 @@ test "Notes UI state edits and commits document text" {
     try std.testing.expectEqualStrings("a\n", state.textSlice());
     try std.testing.expect(state.flags.dirty);
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(5, abi.InputByte.commit_text, 0)));
-    try std.testing.expect(!state.flags.dirty);
+    try std.testing.expect(state.flags.dirty);
     try std.testing.expectEqual(@as(u32, 1), state.commit_count);
     try std.testing.expectEqual(@as(u32, 1), state.activation_count);
     try std.testing.expectEqual(@as(u64, 6), state.revision);

@@ -22,7 +22,8 @@ package_revision.rollforward_rollback 2487.82 50
 indexing_service.query_ranked 227.76 50
 media_print.submit_complete 2791.18 50
 event_ledger.export_redacted 7753.01 50
-secret_store.import_handle_export 1534.38 50
+secret_store.software_import_handle_export 139.62 50
+secret_store.sealed_import_handle_export 5353.70 50
 denial_explanation.render_policy_hint 51.51 50
 sync_service.overlay_session_flow 1042.66 50
 recovery_environment.reinstall_restore_repair 9562748.00 50

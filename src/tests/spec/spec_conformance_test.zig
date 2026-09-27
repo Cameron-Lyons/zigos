@@ -175,7 +175,7 @@ test "adversarial freestanding runtime proofs reject modeled bypasses" {
     try std.testing.expect(runtime_negative_proofs.syscallSubjectSpoofingIsRejected());
     try std.testing.expect(runtime_negative_proofs.rawNetworkSendBypassIsDenied());
     try std.testing.expect(runtime_negative_proofs.driverAuthorityEscapeIsRejected());
-    try std.testing.expect(runtime_negative_proofs.rebootGrantAndRevocationStatePersists());
+    try std.testing.expect(runtime_negative_proofs.checkpointAuthorityIsNotReplayed());
 }
 
 test "backlog gate enforces isolation proof depth" {

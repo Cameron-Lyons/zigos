@@ -28,7 +28,7 @@ const signMetadata = object_store.signMetadata;
 
 test "blob manifests store compact chunk slot edges" {
     try std.testing.expect(object_store.CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES);
-    try std.testing.expectEqual(@as(usize, 1), @sizeOf(BlobChunkSlotIndex));
+    try std.testing.expectEqual(@sizeOf(std.math.IntFittingRange(0, object_store.MAX_CHUNKS - 1)), @sizeOf(BlobChunkSlotIndex));
     try std.testing.expect(@hasField(object_store.BlobRecord, "chunk_slot_indexes"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "chunks"));
     try std.testing.expect(!@hasField(object_store.BlobRecord, "merkle_root"));
@@ -41,6 +41,106 @@ test "blob manifests store compact chunk slot edges" {
     try std.testing.expect(!@hasField(object_store.BlobRecord, "manifest_verified"));
     try std.testing.expect(object_store.PACKS_BLOB_SLOT_MEMBERSHIP_INTO_STATE);
     try std.testing.expect(!@hasField(object_store.BlobSlot, "in_use"));
+}
+
+test "failed chunk allocation rolls back a new blob and unpublished object" {
+    const SmallStore = StoreWith(.{
+        .max_objects = 4,
+        .max_versions = 8,
+        .max_blobs = 64,
+        .max_chunks = 32,
+        .object_index_capacity = 8,
+        .version_index_capacity = 16,
+        .blob_index_capacity = 128,
+        .chunk_index_capacity = 64,
+    });
+    var store = SmallStore.init();
+    defer store.reset();
+    for (0..31) |index| {
+        const payload = [_]u8{@intCast(index)};
+        _ = try store.putChunk(computeChunkAddress(&payload), &payload);
+    }
+    const signer = signing.SignerIdentity{ .label = "allocation-rollback", .seed = signing.seedFromByte(0xE2) };
+    var payload = [_]u8{'a'} ** (MAX_CHUNK_BYTES + 1);
+    payload[MAX_CHUNK_BYTES] = 'b';
+    const metadata = try signMetadata(signer, "failed", "text/plain", .document, &payload, 1);
+    try std.testing.expectError(error.InvalidObjectId, store.putVersion(.{
+        .preferred_object_id = ids.ObjectId.zero,
+        .object_type = .document,
+        .payload = &payload,
+        .metadata = metadata,
+    }));
+    try std.testing.expectEqual(@as(usize, 31), store.chunkCount());
+    try std.testing.expectEqual(@as(usize, 0), store.blobCount());
+    try std.testing.expectEqual(@as(usize, 0), store.objectCount());
+    try std.testing.expectEqual(@as(usize, 0), store.versionCount());
+    for (0..32) |_| {
+        try std.testing.expectError(error.BlobTableFull, store.putVersion(.{
+            .object_type = .document,
+            .payload = &payload,
+            .metadata = metadata,
+        }));
+        try std.testing.expectEqual(@as(usize, 31), store.chunkCount());
+        try std.testing.expectEqual(@as(usize, 0), store.blobCount());
+        try std.testing.expectEqual(@as(usize, 0), store.objectCount());
+        try std.testing.expectEqual(@as(usize, 0), store.versionCount());
+        try std.testing.expectEqual(@as(u64, 1), store.next_object_id);
+        try std.testing.expectEqual(@as(u64, 1), store.next_version_id);
+        try std.testing.expectEqual(@as(usize, 0), store.dirtyObjectIds().len);
+    }
+    const saved = try store.putLocallySignedVersion(.{
+        .object_type = .document,
+        .payload = "retry",
+        .signer = signer,
+        .label = "retry",
+        .content_type = "text/plain",
+        .created_at_ticks = 2,
+    });
+    try std.testing.expectEqual(@as(usize, 32), store.chunkCount());
+    const duplicate = try store.putLocallySignedVersion(.{
+        .object_type = .document,
+        .payload = "retry",
+        .signer = signer,
+        .label = "duplicate",
+        .content_type = "text/plain",
+        .created_at_ticks = 3,
+    });
+    try std.testing.expectEqual(saved.blob_address, duplicate.blob_address);
+    try std.testing.expectEqual(@as(usize, 32), store.chunkCount());
+    try std.testing.expectEqual(@as(usize, 1), store.blobCount());
+    for (0..31) |index| {
+        const bytes = [_]u8{@intCast(index)};
+        const chunk_index = store.chunkSlotIndex(computeChunkAddress(&bytes)).?;
+        try std.testing.expectEqualSlices(u8, &bytes, store.chunkSlotAtConst(chunk_index).chunk.chunkSlice());
+    }
+}
+
+test "a full blob table rejects new data without consuming chunk slots" {
+    const SmallStore = StoreWith(.{
+        .max_objects = 4,
+        .max_versions = 8,
+        .max_blobs = 64,
+        .max_chunks = 96,
+        .object_index_capacity = 8,
+        .version_index_capacity = 16,
+        .blob_index_capacity = 128,
+        .chunk_index_capacity = 192,
+    });
+    var store = SmallStore.init();
+    defer store.reset();
+    for (0..64) |index| {
+        const payload = [_]u8{@intCast(index)};
+        _ = try store.putBlob(computeBlobAddress(&payload), &payload);
+    }
+    for (64..96) |index| {
+        const payload = [_]u8{@intCast(index)};
+        try std.testing.expectError(error.BlobTableFull, store.putBlob(computeBlobAddress(&payload), &payload));
+        try std.testing.expectEqual(@as(usize, 64), store.blobCount());
+        try std.testing.expectEqual(@as(usize, 64), store.chunkCount());
+    }
+    const existing = [_]u8{0};
+    _ = try store.putBlob(computeBlobAddress(&existing), &existing);
+    try std.testing.expectEqual(@as(usize, 64), store.chunkCount());
 }
 
 test "blob chunk counts derive from payload lengths" {
@@ -492,6 +592,8 @@ test "object store verifies blob backend corruption before serving payloads" {
     const chunk_slot_index = store.blobChunkSlotIndex(blob, 0).?;
     store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
     try std.testing.expectError(error.CorruptBlob, store.versionPayload(version_record));
+    try std.testing.expectError(error.CorruptBlob, store.putBlob(result.blob_address, "checked"));
+    try std.testing.expectEqual(@as(u16, 1), blob.refCount());
 
     store.chunkSlotAt(chunk_slot_index).chunk.payload[0] ^= 0xFF;
     store.blobSlotAt(version_record.blob_slot_index).blob.chunk_slot_indexes[0] = std.math.maxInt(BlobChunkSlotIndex);

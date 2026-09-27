@@ -257,6 +257,7 @@ pub fn summarizeMemoryMap(map: MemoryMap) Error!MemoryMapSummary {
 pub fn framebufferInfo(info: Info) Error!framebuffer.Info {
     if (!info.hasFramebuffer()) return error.InvalidFramebuffer;
     if (info.framebuffer_type != 1 or info.framebuffer_bpp != 32) return error.UnsupportedFramebuffer;
+    if (info.framebuffer_pitch % 4 != 0) return error.InvalidFramebuffer;
 
     const pixel_mask = framebuffer.PixelMask{
         .red = maskFromField(info.framebuffer_rgb[0], info.framebuffer_rgb[1]) orelse return error.UnsupportedFramebuffer,
@@ -526,4 +527,7 @@ test "Multiboot2 handoff validates rgb framebuffer descriptors" {
     try std.testing.expectEqual(@as(u64, 0x8000_0000), fb.physical_address);
     try std.testing.expectEqual(@as(u32, 1920), fb.width);
     try std.testing.expectEqual(@as(u32, 1080), fb.height);
+    var bad_stride = info;
+    bad_stride.framebuffer_pitch += 1;
+    try std.testing.expectError(error.InvalidFramebuffer, framebufferInfo(bad_stride));
 }

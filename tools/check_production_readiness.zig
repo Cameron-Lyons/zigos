@@ -2253,7 +2253,7 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "executionRemainsReady(outcome)" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "ui_revision > accounting.last_ui_state_revision" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const INPUT_EVENTS_PER_DISPATCH: usize = 8" },
-        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput()" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput(comptime saves_documents: bool)" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = ".wait_for_event" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn parkUntilEvent()" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "makeHeader(.wait" },
@@ -2262,7 +2262,7 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "mailbox.FLAG_OWNS_UI_SURFACE" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub const TEXT_CAPACITY: usize = 512" },
         .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn modelForBundle" },
-        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state edits and commits document text\"" },
+        .{ .label = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "test \"Notes UI state requests a save without claiming durability\"" },
     };
     for (required_userspace_input_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
@@ -3508,11 +3508,17 @@ fn validateSecretVaultHardwareProviderBoundary(
     const store_source = try readRequiredSource(allocator, io, errors, store_path) orelse return;
     const store_snippets = [_][]const u8{
         "HardwareProviderUnavailable",
-        "self.hardware_provider.seal(label, raw) orelse return error.HardwareProviderUnavailable",
+        "try self.hardware_provider.seal(&binding, raw, &blob)",
         "secret.hardware_provider_used = true",
-        "if (hardware_backed and !exportable)",
+        "secret.resident_material = !hardware_backed",
+        "secret.material = .{ .sealed = blob }",
+        "pub fn generateSigningKey",
+        "try self.hardware_provider.generateSigningKey(&binding, &blob)",
+        "pub fn restoreSealed",
+        "try self.hardware_provider.open(&binding, blob, &scratch)",
         "secret.resident_material = false",
-        "secret.value_len = 0",
+        "std.crypto.secureZero(u8, out)",
+        "pub fn signDigest",
         "pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true",
         "const secret = &self.secrets[slot_index]",
         "dense secret imports append into pre-zeroed slots",
@@ -3524,13 +3530,32 @@ fn validateSecretVaultHardwareProviderBoundary(
             try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep store snippet: {s}", .{snippet});
         }
     }
-    if (std.mem.indexOf(u8, store_source, "digestSecretMaterial") != null) {
+    if (std.mem.indexOf(u8, store_source, "digestSecretMaterial") != null or
+        std.mem.indexOf(u8, store_source, "defaultSeal") != null)
+    {
         try common.addError(errors, allocator, "Secret vault hardware-backed boundary must not reintroduce software digest fallback for hardware-backed secrets", .{});
+    }
+
+    const adapter_source = try readRequiredSource(allocator, io, errors, "src/native/platform/tpm2_secret_provider.zig") orelse return;
+    for ([_][]const u8{ "self.client.seal(", "self.client.unseal(", "authorization: *const tpm.Key", "std.crypto.secureZero(u8, &key)", "std.crypto.secureZero(u8, &seed)", "self.io.random(&seed)", "sealing.encrypt(", "envelope.open(" }) |snippet| {
+        if (std.mem.indexOf(u8, adapter_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault TPM adapter must retain operation: {s}", .{snippet});
+        }
+    }
+    const sealing_source = try readRequiredSource(allocator, io, errors, "src/native/platform/secret_sealing.zig") orelse return;
+    for ([_][]const u8{ "XChaCha20Poly1305", "operations: ?*const Operations", "seal: *const fn", "open: *const fn", "generateSigningKey: ?*const fn", "errdefer std.crypto.secureZero(u8, out)", "Aead.decrypt(" }) |snippet| {
+        if (std.mem.indexOf(u8, sealing_source, snippet) == null) {
+            try common.addError(errors, allocator, "Secret vault sealing boundary must retain operation: {s}", .{snippet});
+        }
     }
 
     const service_path = "src/native/services/secret_vault_service.zig";
     const service_source = try readRequiredSource(allocator, io, errors, service_path) orelse return;
     const service_snippets = [_][]const u8{
+        "pub const GenerateSigningKeyRequest",
+        "self.store.generateSigningKey(request.owner, request.label)",
+        ".operation = .generate_signing_key",
+        "self.store.secrets[slot_index] = unused_slot",
         "service.attachHardwareProvider(testHardwareProvider())",
         "expiry_service.attachHardwareProvider(testHardwareProvider())",
         "export_service.attachHardwareProvider(testHardwareProvider())",
@@ -3546,10 +3571,26 @@ fn validateSecretVaultHardwareProviderBoundary(
     const identity_snippets = [_][]const u8{
         "testHardwareProvider() secure_secret_store.HardwareSealProvider",
         "secrets.attachHardwareProvider(testHardwareProvider())",
+        "pub const VaultAuthority",
+        "if (authority.holder.kind != .service) return error.InvalidIdentityAuthority",
+        "authority.vault.signDigest",
+        "authority.policies.credentialAssertionDecision",
+        "secret.id != credential.secret_id",
+        "crypto_hash.updateInt(&hasher, \"assertion-counter\", assertion.assertion_counter)",
+        "const challenge = recoveryIntentDigest(credential, request.recovery_device, secret)",
+        "trusted_device_count < credential.recovery_threshold",
     };
     for (identity_snippets) |snippet| {
         if (std.mem.indexOf(u8, identity_source, snippet) == null) {
             try common.addError(errors, allocator, "Secret vault hardware-backed boundary must keep identity provider test snippet: {s}", .{snippet});
+        }
+    }
+
+    const identity_runtime_end = std.mem.indexOf(u8, identity_source, "const identity_keys =") orelse identity_source.len;
+    const identity_runtime = identity_source[0..identity_runtime_end];
+    for ([_][]const u8{ "request.credential_identity", "request.replacement_credential_identity", "request.tick", "request.threshold" }) |legacy_input| {
+        if (std.mem.indexOf(u8, identity_runtime, legacy_input) != null) {
+            try common.addError(errors, allocator, "Identity vault boundary must not trust request-supplied signing authority: {s}", .{legacy_input});
         }
     }
 
@@ -3571,7 +3612,7 @@ fn validateSecretVaultHardwareProviderBoundary(
     const benchmark_path = "src/kernel/boot/benchmark/suite.zig";
     const benchmark_source = try readRequiredSource(allocator, io, errors, benchmark_path) orelse return;
     const benchmark_snippets = [_][]const u8{
-        "secret_store_context.store.attachHardwareProvider(.{ .available = true })",
+        "secret_store_context.store.attachHardwareProvider(@import(\"../../../tests/fixtures/secret_provider.zig\").provider())",
         "const secret = secret_store_context.store.importSecret(",
     };
     for (benchmark_snippets) |snippet| {
@@ -3847,7 +3888,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 8",
+        "pub const ABI_VERSION: u16 = 10",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -3890,7 +3931,7 @@ fn validateUserspaceDriverDataPathTrack(
         snippet: []const u8,
     }{
         .{ .path = native_abi_path, .source = native_abi_source, .snippet = "pub const EndpointRecvResponse = ex" ++ "tern struct" },
-        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "try std.testing.expectEqual(@as(usize, 48), @sizeOf(EndpointRecvResponse))" },
+        .{ .path = native_abi_path, .source = native_abi_source, .snippet = "try std.testing.expectEqual(@as(usize, 56), @sizeOf(EndpointRecvResponse))" },
         .{ .path = component_port_path, .source = component_port_source, .snippet = "payload_out: []u8" },
         .{ .path = component_port_path, .source = component_port_source, .snippet = "attached_capability_out: *abi.CapabilityDescriptor" },
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "self.endpoint_table.recvInto(" },
@@ -3976,14 +4017,14 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.surface_present" },
         .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
-        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 5" },
-        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 192" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 8" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 256" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "heartbeat_increment: u32 = 1" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.surface_present)" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = ".heartbeat_increment = update.heartbeat_increment" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn presentUiState(" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "zigos_userspace_bootstrap.heartbeat_increment" },
-        .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const input = drainFocusedInput();" },
+        .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const input = drainFocusedInput(saves_documents);" },
         .{ .path = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn presentation(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "provisionSurfacePresentationCapabilities" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "proveUserspaceSurfacePresentation" },

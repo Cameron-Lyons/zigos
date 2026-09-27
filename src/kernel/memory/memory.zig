@@ -148,6 +148,33 @@ pub fn init() void {
     payload_bytes = (heap_end - payload_base) & ~(GRANULE - 1);
     if (payload_bytes < GRANULE) @panic("kernel heap payload is smaller than one granule");
 
+    resetArena();
+    verifyAllocationStartGuards();
+    verifyOverflowSpansKeepTheirLength();
+
+    console.print("Memory allocator initialized!\n");
+    console.print("Heap start: 0x");
+    numfmt.printHex(payload_base);
+    console.print("\nEarly heap state: ");
+    numfmt.printDec(early_claimed_bytes);
+    console.print(" bytes\nHeap allocatable: ");
+    numfmt.printDec(payload_bytes);
+    console.print(" bytes\n");
+}
+
+// Host validation exercises exactly the production allocator against a bounded arena.
+pub fn initHostArena(arena: []u8) error{ TooSmall, TooLarge }!void {
+    if (comptime builtin.os.tag == .freestanding) @compileError("host arenas are unavailable in the kernel");
+    if (arena.len > HEAP_SIZE) return error.TooLarge;
+    const base = heap_geometry.alignSize(@intFromPtr(arena.ptr), GRANULE) orelse return error.TooSmall;
+    const skipped = base - @intFromPtr(arena.ptr);
+    if (skipped > arena.len or arena.len - skipped < GRANULE) return error.TooSmall;
+    payload_base = base;
+    payload_bytes = (arena.len - skipped) & ~(GRANULE - 1);
+    resetArena();
+}
+
+fn resetArena() void {
     spans = [_]Span{.{}} ** MAX_SPANS;
     span_used = 0;
     recycled = NO_SPAN;
@@ -160,17 +187,6 @@ pub fn init() void {
     address_head = initial;
     pushFree(initial);
     is_initialized = true;
-    verifyAllocationStartGuards();
-    verifyOverflowSpansKeepTheirLength();
-
-    console.print("Memory allocator initialized!\n");
-    console.print("Heap start: 0x");
-    numfmt.printHex(payload_base);
-    console.print("\nEarly heap state: ");
-    numfmt.printDec(early_claimed_bytes);
-    console.print(" bytes\nHeap allocatable: ");
-    numfmt.printDec(payload_bytes);
-    console.print(" bytes\n");
 }
 
 pub fn kmalloc(size: usize) ?*anyopaque {

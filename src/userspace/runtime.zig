@@ -4,6 +4,7 @@ const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
 const service_protocol = @import("userspace_service_protocol");
 const ui_surface_state = @import("ui_surface_state.zig");
+const document_editor = @import("document_editor.zig");
 
 pub const ServiceKind = mailbox.ServiceKind;
 
@@ -56,6 +57,7 @@ const EndpointSendRequest = struct {
     correlation_id: u64 = 0,
     endpoint_capability_id: u64,
     payload: []const u8,
+    reply_endpoint_id: u64 = 0,
     attached_capability_id: ?u64 = null,
     move_attached_capability: bool = false,
 };
@@ -67,6 +69,19 @@ const EndpointRecvRequest = struct {
     payload_out: []u8,
     attached_capability_out: *abi.CapabilityDescriptor,
 };
+
+const EndpointCloseRequest = extern struct {
+    header: abi.RequestHeader,
+    endpoint_capability_id: u64,
+};
+
+pub fn closeEndpoint(endpoint_capability_id: u64) abi.SyscallStatus {
+    var request = EndpointCloseRequest{
+        .header = makeHeader(.endpoint_close, zigos_userspace_bootstrap.task_id),
+        .endpoint_capability_id = endpoint_capability_id,
+    };
+    return trapCallNoResponse(&request);
+}
 
 const InputRecvRequest = extern struct {
     header: abi.RequestHeader,
@@ -100,6 +115,7 @@ const mailbox_section = if (builtin.target.ofmt == .macho) "__DATA,__zigos_boot"
 
 export var zigos_userspace_bootstrap: mailbox.Mailbox align(mailbox.ABI_ALIGNMENT) linksection(mailbox_section) = .{};
 var ui_state: ui_surface_state.State = .{};
+var document_state: document_editor.Editor = .{};
 
 const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
     struct {
@@ -148,7 +164,6 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
                 .denial_reason = @enumFromInt(outcome.denial_reason),
             };
         }
-
     }
 else
     struct {
@@ -204,6 +219,7 @@ pub fn zigos_userspace_contract_main(
         detail,
         zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+        comptime ui_surface_state.modelForBundle(bundle_id) == .notes,
     );
 }
 
@@ -225,6 +241,7 @@ pub fn zigos_userspace_service_main(
         detail,
         zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
+        comptime ui_surface_state.modelForBundle(bundle_id) == .notes,
     );
 }
 
@@ -292,6 +309,10 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
         .{ .local_only = true, .service_port = true },
         failure_code,
     ) orelse return null;
+    var service_live = true;
+    defer if (service_live) {
+        _ = closeEndpoint(service_endpoint.capability_id);
+    };
     failure_code.* = 0x23;
     const peer_endpoint = endpointCreate(
         authority_capability_id,
@@ -300,6 +321,10 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
         .{ .local_only = true },
         failure_code,
     ) orelse return null;
+    var peer_live = true;
+    defer if (peer_live) {
+        _ = closeEndpoint(peer_endpoint.capability_id);
+    };
     failure_code.* = 0x24;
     _ = endpointConnect(
         peer_endpoint.capability_id,
@@ -327,7 +352,8 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
             index,
         ) catch return null;
         failure_code.* = 0x26;
-        if (!endpointSend(peer_endpoint.capability_id, request_payload)) return null;
+        const correlation_id = nextCorrelationId();
+        if (!endpointSend(peer_endpoint.capability_id, request_payload, 0, correlation_id)) return null;
 
         failure_code.* = 0x27;
         const received_request = endpointRecv(service_endpoint.capability_id, task_id) orelse return null;
@@ -351,12 +377,13 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
             proof.state_hash,
         ) catch return null;
         failure_code.* = 0x2C;
-        if (!endpointSend(service_endpoint.capability_id, response_payload)) return null;
+        if (!endpointSend(service_endpoint.capability_id, response_payload, received_request.message.sender_endpoint_id, received_request.message.correlation_id)) return null;
 
         failure_code.* = 0x2D;
         const received_response = endpointRecv(peer_endpoint.capability_id, task_id) orelse return null;
         failure_code.* = 0x2E;
-        if (received_response.present == 0) return null;
+        if (received_response.present == 0 or received_response.message.correlation_id != correlation_id or
+            received_response.message.sender_endpoint_id != service_endpoint.endpoint.endpoint_id) return null;
         const received_response_len: usize = @intCast(received_response.message.payload_len);
         failure_code.* = 0x2F;
         const decoded_response = service_protocol.decodeResponse(
@@ -374,6 +401,14 @@ fn runServiceStartupIpc(comptime service_kind: ServiceKind, failure_code: *u8) ?
     proof.flags.all_operations_completed = proof.operation_count == @as(u16, @intCast(service_plan.operation_count));
     failure_code.* = 0x32;
     if (!proof.flags.all_operations_completed) return null;
+    // Both endpoints belong only to this startup check. The service's
+    // published endpoint is provisioned separately by session bootstrap.
+    failure_code.* = 0x33;
+    if (closeEndpoint(peer_endpoint.capability_id) != .success) return null;
+    peer_live = false;
+    failure_code.* = 0x34;
+    if (closeEndpoint(service_endpoint.capability_id) != .success) return null;
+    service_live = false;
     return proof;
 }
 
@@ -506,12 +541,13 @@ fn endpointConnect(
     return response;
 }
 
-fn endpointSend(endpoint_capability_id: u64, payload: []const u8) bool {
+fn endpointSend(endpoint_capability_id: u64, payload: []const u8, reply_endpoint_id: u64, correlation_id: u64) bool {
     var request = EndpointSendRequest{
         .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
-        .correlation_id = nextCorrelationId(),
+        .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
+        .reply_endpoint_id = reply_endpoint_id,
     };
     return trapCallNoResponse(&request) == .success;
 }
@@ -576,7 +612,10 @@ const InputDrain = struct {
     exhausted: bool = true,
 };
 
-fn drainFocusedInput() InputDrain {
+fn drainFocusedInput(comptime saves_documents: bool) InputDrain {
+    if (comptime saves_documents) {
+        if (!document_state.canEdit(zigos_userspace_bootstrap.document, &ui_state)) return .{};
+    }
     const input_capability_id = zigos_userspace_bootstrap.input_capability_id;
     const task_id = zigos_userspace_bootstrap.task_id;
     if (input_capability_id == 0 or task_id == 0) return .{};
@@ -586,7 +625,7 @@ fn drainFocusedInput() InputDrain {
         const response = inputRecv(input_capability_id, task_id) orelse return .{};
         if (response.present == 0) return .{};
         received += 1;
-        _ = recordInputEvent(&zigos_userspace_bootstrap, response.event);
+        _ = recordInputEvent(&zigos_userspace_bootstrap, response.event, saves_documents);
     }
     return .{ .exhausted = false };
 }
@@ -597,8 +636,12 @@ fn initializeUiState(comptime bundle_id: []const u8, comptime contract_flags: u3
     publishUiState(&zigos_userspace_bootstrap, &ui_state);
 }
 
-fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor) bool {
-    return applyInputEvent(state, &ui_state, event);
+fn recordInputEvent(state: *mailbox.Mailbox, event: abi.InputEventDescriptor, comptime saves_documents: bool) bool {
+    if (!applyInputEvent(state, &ui_state, event)) return false;
+    if (comptime saves_documents) {
+        if (event.length != 0 and event.bytes[0] == abi.InputByte.commit_text) document_state.requestSave(state.document, &ui_state);
+    }
+    return true;
 }
 
 fn applyInputEvent(
@@ -625,6 +668,7 @@ fn publishUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
     state.ui_state_flags = @bitCast(surface.flags);
     state.ui_focus_index = surface.focus_index;
     state.ui_text_length = surface.text_length;
+    std.crypto.hash.sha2.Sha256.hash(surface.textSlice(), &state.ui_text_digest, .{});
     state.ui_cursor = surface.cursor;
     state.ui_commit_count = surface.commit_count;
     state.ui_activation_count = surface.activation_count;
@@ -651,14 +695,51 @@ fn presentUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
     return true;
 }
 
-fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool) noreturn {
+const DocumentTransport = struct {
+    pub fn send(_: @This(), endpoint_capability_id: u64, correlation_id: u64, payload: []const u8) document_editor.SendResult {
+        var request = EndpointSendRequest{
+            .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
+            .correlation_id = correlation_id,
+            .endpoint_capability_id = endpoint_capability_id,
+            .payload = payload,
+        };
+        return switch (trapCallNoResponse(&request)) {
+            .success => .sent,
+            .would_block => .busy,
+            else => .failed,
+        };
+    }
+
+    pub fn receive(_: @This(), endpoint_capability_id: u64) document_editor.ReceiveResult {
+        const received = endpointRecv(endpoint_capability_id, zigos_userspace_bootstrap.task_id) orelse return .failed;
+        if (received.present == 0) return .empty;
+        // The document service sends data-only replies over this dedicated
+        // channel. Unexpected authority must never acknowledge a save.
+        if (received.has_attached_capability != 0) {
+            return .failed;
+        }
+        return .{ .reply = .{
+            .sender_endpoint_id = received.message.sender_endpoint_id,
+            .correlation_id = received.message.correlation_id,
+            .length = received.message.payload_len,
+            .bytes = received.payload,
+        } };
+    }
+};
+
+fn runSteadyState(detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool, comptime saves_documents: bool) noreturn {
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
     while (true) {
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
-            const input = drainFocusedInput();
+            const input = drainFocusedInput(saves_documents);
+            const document_work = if (comptime saves_documents) work: {
+                const pending = document_state.step(zigos_userspace_bootstrap.document, &ui_state, DocumentTransport{});
+                publishUiState(&zigos_userspace_bootstrap, &ui_state);
+                break :work pending;
+            } else false;
             _ = presentUiState(&zigos_userspace_bootstrap, &ui_state);
-            break :wait if (input.exhausted) blk: {
+            break :wait if (input.exhausted and !document_work) blk: {
                 parkUntilEvent();
                 break :blk .wait_for_event;
             } else .runnable;
@@ -739,6 +820,43 @@ test "fault codes stay stable for the same message" {
     try std.testing.expect(faultCode("panic") != faultCode("different"));
 }
 
+test "Notes input snapshots a save before processing subsequent typing" {
+    ui_state = ui_surface_state.State.init("app.notes");
+    document_state = .{};
+    defer {
+        ui_state = .{};
+        document_state = .{};
+    }
+    var state = mailbox.Mailbox{
+        .task_id = 2,
+        .document = .{ .endpoint_capability_id = 10, .service_endpoint_id = 11, .object_id = 12, .version_id = 13 },
+    };
+    document_state = .{
+        .binding = state.document,
+        .client = .{ .service_endpoint_id = 11, .object_id = 12, .version_id = 13 },
+        .opened = true,
+    };
+    var event = std.mem.zeroes(abi.InputEventDescriptor);
+    event.sequence = 1;
+    event.task_id = 2;
+    event.length = 2;
+    event.bytes[0] = abi.InputByte.text;
+    event.bytes[1] = 'a';
+    try std.testing.expect(recordInputEvent(&state, event, true));
+    event.sequence += 1;
+    event.length = 2;
+    event.bytes[0] = abi.InputByte.commit_text;
+    event.bytes[1] = 0;
+    try std.testing.expect(recordInputEvent(&state, event, true));
+    event.sequence += 1;
+    event.length = 2;
+    event.bytes[0] = abi.InputByte.text;
+    event.bytes[1] = 'b';
+    try std.testing.expect(recordInputEvent(&state, event, true));
+    try std.testing.expectEqualStrings("ab", ui_state.textSlice());
+    try std.testing.expectEqualStrings("a", document_state.client.?.snapshot[0..document_state.client.?.length]);
+}
+
 test "focused input telemetry rejects foreign events and records valid semantic input" {
     var state = mailbox.Mailbox{ .task_id = 41, .ui_surface_id = 13 };
     var surface = ui_surface_state.State.init("app.notes");
@@ -758,6 +876,9 @@ test "focused input telemetry rejects foreign events and records valid semantic 
     try std.testing.expectEqual(@as(u64, 7), state.last_input_sequence);
     try std.testing.expectEqual(@as(u8, 'x'), state.last_input_text);
     try std.testing.expectEqualStrings("x", surface.textSlice());
+    var expected_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("x", &expected_digest, .{});
+    try std.testing.expectEqualSlices(u8, &expected_digest, &state.ui_text_digest);
     try std.testing.expectEqual(@as(u16, 1), state.ui_text_length);
     try std.testing.expectEqual(surface.revision, state.ui_state_revision);
 

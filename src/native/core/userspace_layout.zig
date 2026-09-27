@@ -79,5 +79,3 @@ test "user stacks occupy the top of canonical low memory" {
     try testing.expectEqual(image_start, imageBaseForSlot(0));
     try testing.expect(imageBaseForSlot(1) < image_end_exclusive);
 }
-
-

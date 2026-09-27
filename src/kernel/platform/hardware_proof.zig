@@ -1,4 +1,5 @@
 const std = @import("std");
+const tpm2_crb = @import("tpm2_crb.zig");
 const builtin = @import("builtin");
 const acpi = @import("acpi.zig");
 const apic = @import("apic.zig");
@@ -476,6 +477,12 @@ fn runtimeMarkerBit(marker: RuntimeMarker) u32 {
     return @as(u32, 1) << @intFromEnum(marker);
 }
 
+var tpm_discovery: ?tpm2_crb.Discovery = null;
+
+pub fn tpmDiscovery() ?tpm2_crb.Discovery {
+    return tpm_discovery;
+}
+
 var facts = ProbeFacts{};
 var captured_madt_table: []const u8 = &.{};
 var printed = PrintedMarkers{};
@@ -485,6 +492,7 @@ pub fn madtTable() []const u8 {
 }
 
 pub fn resetForTest() void {
+    tpm_discovery = null;
     facts = .{};
     captured_madt_table = &.{};
     printed = .{};
@@ -748,6 +756,8 @@ pub fn recordGridCarbonIntensitySample(sample: GridCarbonIntensitySample) void {
 }
 
 fn captureAcpiEvidence() void {
+    tpm_discovery = null;
+    var tpm_table_seen = false;
     const rsdp = capturedRsdp() orelse return;
     const xsdt = mappedPhysicalTableBytes(rsdp.xsdt_address, mmio_windows.acpi_root.base) orelse return;
     const count = acpi.xsdtEntryCount(xsdt) catch return;
@@ -761,6 +771,15 @@ fn captureAcpiEvidence() void {
     while (index < count) : (index += 1) {
         const table_address = acpi.xsdtEntryAddress(xsdt, index) catch continue;
         const table = mappedPhysicalTableBytes(table_address, mmio_windows.acpi_entry.base) orelse continue;
+        if (std.mem.eql(u8, table[0..4], tpm2_crb.SIGNATURE)) {
+            if (tpm_table_seen) {
+                tpm_discovery = null;
+            } else {
+                tpm_discovery = tpm2_crb.parseAcpi(table) catch null;
+            }
+            tpm_table_seen = true;
+            continue;
+        }
         const header = acpi.parseSdtHeader(table) catch continue;
         if (std.mem.eql(u8, header.signature[0..], apic.MADT_SIGNATURE)) {
             if (apic.parseMadt(table)) |summary| {

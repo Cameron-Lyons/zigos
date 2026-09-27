@@ -45,6 +45,7 @@ pub const EndpointFlags = packed struct(u16) {
 };
 
 pub const Message = struct {
+    sender_endpoint_id: ids.EndpointId,
     sender_task_id: ids.TaskId,
     correlation_id: u64,
     attached_capability_id: ids.CapabilityId = ids.CapabilityId.zero,
@@ -64,6 +65,7 @@ pub const Message = struct {
 };
 
 pub const ReceivedMessage = struct {
+    sender_endpoint_id: ids.EndpointId,
     sender_task_id: ids.TaskId,
     correlation_id: u64,
     attached_capability_id: ?ids.CapabilityId,
@@ -89,6 +91,7 @@ pub const Endpoint = struct {
     label_len: u8,
     label: [MAX_ENDPOINT_LABEL_BYTES]u8,
     peer_endpoint_id: ids.EndpointId = ids.EndpointId.zero,
+    peer_closed: bool = false,
     queue_len: u8 = 0,
     data_ring: []u8 = &.{},
     owns_data_ring: bool = false,
@@ -111,9 +114,10 @@ pub const Error = error{
     MessageTooLarge,
     ReceiveBufferTooSmall,
     PeerNotConnected,
-    QueueFull,
+    PeerClosed,
     TableFull,
     NoSpaceLeft,
+    ScopeViolation,
     RingFull,
     RingCorrupt,
 };
@@ -127,13 +131,25 @@ const EndpointArena = indexed_arena.GenerationalArena("EndpointId", EndpointSlot
 const EndpointHandle = EndpointArena.Handle;
 const EndpointOwnerIndex = indexed_arena.MultimapIndex(MAX_ENDPOINTS, MAX_ENDPOINTS, ENDPOINT_INDEX_CAPACITY);
 
-pub const TaskRetirement = struct {
+pub const Retirement = struct {
     endpoint_count: u16 = 0,
     endpoint_ids: [MAX_ENDPOINTS]ids.EndpointId = [_]ids.EndpointId{ids.EndpointId.zero} ** MAX_ENDPOINTS,
+    disconnected_count: u16 = 0,
+    disconnected_task_ids: [MAX_ENDPOINTS]ids.TaskId = undefined,
 
-    pub fn retiredEndpointIds(self: *const TaskRetirement) []const ids.EndpointId {
+    pub fn retiredEndpointIds(self: *const Retirement) []const ids.EndpointId {
         return self.endpoint_ids[0..self.endpoint_count];
     }
+
+    // One notification per affected endpoint; the scheduler coalesces tasks.
+    pub fn disconnectedTaskIds(self: *const Retirement) []const ids.TaskId {
+        return self.disconnected_task_ids[0..self.disconnected_count];
+    }
+};
+
+pub const MovedCapabilityCleanup = struct {
+    context: *anyopaque,
+    release: *const fn (context: *anyopaque, capability_id: ids.CapabilityId) void,
 };
 
 pub const Table = struct {
@@ -196,35 +212,50 @@ pub const Table = struct {
         return slot.endpoint;
     }
 
+    // Only for a newly created endpoint whose handle has not been published.
+    // The kernel uses this to unwind creation if the ownership grant fails.
+    pub fn rollbackCreate(self: *Table, endpoint_id: ids.EndpointId) void {
+        const handle = EndpointHandle{ .value = endpoint_id.raw() };
+        const slot = self.arena.getByHandle(handle) orelse
+            native_util.impossibleByInvariant("unpublished endpoint remains live until rollback");
+        if (!slot.endpoint.peer_endpoint_id.isZero() or slot.endpoint.queue_len != 0) {
+            native_util.impossibleByInvariant("unpublished endpoint has no peer or queued messages");
+        }
+        if (!self.owner_index.remove(slot.endpoint.owner_task_id.raw(), handle.slotIndex())) {
+            native_util.impossibleByInvariant("unpublished endpoint is present in its owner index");
+        }
+        releaseEndpointRing(&slot.endpoint);
+        if (!self.arena.removeHandle(handle)) {
+            native_util.impossibleByInvariant("endpoint rollback removes its live handle");
+        }
+    }
+
     pub fn connect(self: *Table, endpoint_id: ids.EndpointId, peer_endpoint_id: ids.EndpointId) Error!void {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
+        if (endpoint.peer_closed or peer.peer_closed) return error.PeerClosed;
+
+        if (endpoint.flags.service_port and peer.flags.service_port) return error.ScopeViolation;
 
         if (peer.flags.service_port) {
             if (!endpoint.peer_endpoint_id.isZero()) return error.EndpointBusy;
+            try attachConnectedRings(endpoint, peer);
             endpoint.peer_endpoint_id = peer_endpoint_id;
-            if (peer.peer_endpoint_id.isZero()) {
-                peer.peer_endpoint_id = endpoint_id;
-            }
-            attachConnectedRings(endpoint, peer);
             return;
         }
 
         if (endpoint.flags.service_port) {
             if (!peer.peer_endpoint_id.isZero()) return error.EndpointBusy;
+            try attachConnectedRings(endpoint, peer);
             peer.peer_endpoint_id = endpoint_id;
-            if (endpoint.peer_endpoint_id.isZero()) {
-                endpoint.peer_endpoint_id = peer_endpoint_id;
-            }
-            attachConnectedRings(endpoint, peer);
             return;
         }
 
         if (!endpoint.peer_endpoint_id.isZero() or !peer.peer_endpoint_id.isZero()) return error.EndpointBusy;
 
+        try attachConnectedRings(endpoint, peer);
         endpoint.peer_endpoint_id = peer_endpoint_id;
         peer.peer_endpoint_id = endpoint_id;
-        attachConnectedRings(endpoint, peer);
     }
 
     pub fn send(
@@ -235,23 +266,58 @@ pub const Table = struct {
         payload: []const u8,
         attached_capability_id: ?ids.CapabilityId,
         move_attached_capability: bool,
-    ) Error!void {
+    ) Error!ids.TaskId {
         if (payload.len > MAX_MESSAGE_BYTES or payload.len > ipc_ring.PAYLOAD_BYTES) return error.MessageTooLarge;
 
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
+        if (endpoint.peer_closed) return error.PeerClosed;
         const peer_endpoint_id = endpoint.peer_endpoint_id;
         if (peer_endpoint_id.isZero()) return error.PeerNotConnected;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
+        return enqueue(endpoint, peer, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+    }
+
+    // Services have no implicit peer. The kernel supplies the sender endpoint
+    // with each received request, and replies must name that connected client.
+    // Generational endpoint ids prevent delayed replies reaching reused slots.
+    pub fn reply(
+        self: *Table,
+        endpoint_id: ids.EndpointId,
+        reply_endpoint_id: ids.EndpointId,
+        sender_task_id: ids.TaskId,
+        correlation_id: u64,
+        payload: []const u8,
+        attached_capability_id: ?ids.CapabilityId,
+        move_attached_capability: bool,
+    ) Error!ids.TaskId {
+        if (payload.len > MAX_MESSAGE_BYTES) return error.MessageTooLarge;
+        const service = self.find(endpoint_id) orelse return error.EndpointNotFound;
+        const client = self.find(reply_endpoint_id) orelse return error.EndpointNotFound;
+        if (!service.flags.service_port or client.flags.service_port or
+            !client.peer_endpoint_id.eql(service.id)) return error.ScopeViolation;
+        return enqueue(service, client, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+    }
+
+    fn enqueue(
+        source: *const Endpoint,
+        peer: *Endpoint,
+        sender_task_id: ids.TaskId,
+        correlation_id: u64,
+        payload: []const u8,
+        attached_capability_id: ?ids.CapabilityId,
+        move_attached_capability: bool,
+    ) Error!ids.TaskId {
         if (peer.data_ring.len == 0) return error.RingCorrupt;
-        if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.QueueFull;
+        if (peer.queue_len >= MAX_ENDPOINT_QUEUE) return error.RingFull;
 
         var record = ipc_ring.Record{
+            .sender_endpoint_id = source.id.raw(),
             .sender_task_id = sender_task_id.raw(),
             .correlation_id = correlation_id,
             .attached_capability_id = if (attached_capability_id) |capability_id| capability_id.raw() else 0,
             .flags = @bitCast(EndpointFlags{
-                .local_only = endpoint.flags.local_only and peer.flags.local_only,
-                .service_port = endpoint.flags.service_port or peer.flags.service_port,
+                .local_only = source.flags.local_only and peer.flags.local_only,
+                .service_port = source.flags.service_port or peer.flags.service_port,
                 .carries_capability = attached_capability_id != null,
             }),
             .payload_len = @intCast(payload.len),
@@ -265,10 +331,15 @@ pub const Table = struct {
             error.RingTooSmall, error.RingCorrupt, error.RingEmpty, error.PayloadTooLarge => return error.RingCorrupt,
         };
         peer.queue_len = @intCast(ipc_ring.queued(peer.data_ring) catch return error.RingCorrupt);
+        return peer.owner_task_id;
     }
 
     pub fn attachDataRing(self: *Table, endpoint_id: ids.EndpointId, buffer: []u8) Error!void {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
+        if (endpoint.queue_len != 0) return error.EndpointBusy;
+        if (buffer.len < ipc_ring.minimumBytes(1) or
+            buffer.len > ipc_ring.minimumBytes(MAX_ENDPOINT_QUEUE) or
+            @intFromPtr(buffer.ptr) % @alignOf(ipc_ring.Record) != 0) return error.RingCorrupt;
         _ = ipc_ring.init(buffer, @intCast(buffer.len - ipc_ring.HEADER_BYTES)) catch return error.RingCorrupt;
         releaseOwnedRing(endpoint);
         endpoint.data_ring = buffer;
@@ -281,7 +352,11 @@ pub const Table = struct {
         payload_out: []u8,
     ) Error!?ReceivedMessage {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
-        if (endpoint.queue_len == 0 or endpoint.data_ring.len == 0) return null;
+        if (endpoint.queue_len == 0) {
+            if (endpoint.peer_closed) return error.PeerClosed;
+            return null;
+        }
+        if (endpoint.data_ring.len == 0) return error.RingCorrupt;
 
         x86.allowSupervisorUserMemory();
         defer x86.forbidSupervisorUserMemory();
@@ -291,6 +366,7 @@ pub const Table = struct {
         if (record.payload_len != 0) @memcpy(payload_out[0..record.payload_len], record.bytes[0..record.payload_len]);
         const attached = ids.capability(record.attached_capability_id);
         const received = ReceivedMessage{
+            .sender_endpoint_id = ids.endpoint(record.sender_endpoint_id),
             .sender_task_id = ids.task(record.sender_task_id),
             .correlation_id = record.correlation_id,
             .attached_capability_id = if (attached.isZero()) null else attached,
@@ -318,46 +394,79 @@ pub const Table = struct {
         return @intCast(self.owner_index.count(task_id.raw()));
     }
 
+    // Only visit this owner's endpoints when deciding whether it can sleep.
+    pub fn hasPendingForTask(self: *const Table, task_id: ids.TaskId) bool {
+        var slot_index = self.owner_index.head(task_id.raw());
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.owner_index.next(slot_index)) {
+            if (self.arena.slots[slot_index].endpoint.queue_len != 0) return true;
+        }
+        return false;
+    }
+
     pub fn activeCount(self: *const Table) usize {
         return self.arena.countInUse();
     }
 
-    pub fn retireTask(self: *Table, task_id: ids.TaskId) TaskRetirement {
-        var retired = TaskRetirement{};
+    pub fn close(self: *Table, endpoint_id: ids.EndpointId, cleanup: ?MovedCapabilityCleanup) Error!Retirement {
+        const handle = EndpointHandle{ .value = endpoint_id.raw() };
+        _ = self.arena.getByHandle(handle) orelse return error.EndpointNotFound;
+        var retired = Retirement{};
+        self.retireIndex(handle.slotIndex(), cleanup, &retired);
+        self.disconnectRetiredPeers(&retired);
+        return retired;
+    }
+
+    pub fn retireTask(self: *Table, task_id: ids.TaskId, cleanup: ?MovedCapabilityCleanup) Retirement {
+        var retired = Retirement{};
         while (true) {
             const slot_index = self.owner_index.head(task_id.raw());
             if (slot_index == indexed_arena.no_index) break;
-            if (slot_index >= self.arena.slots.len) {
-                native_util.impossibleByInvariant("endpoint owner index points outside endpoint slots");
-            }
-            const slot = &self.arena.slots[slot_index];
-            if (!slot.in_use or !slot.endpoint.owner_task_id.eql(task_id)) {
+            if (slot_index >= self.arena.slots.len or
+                !self.arena.slots[slot_index].endpoint.owner_task_id.eql(task_id))
+            {
                 native_util.impossibleByInvariant("endpoint owner index points at the wrong endpoint");
             }
-            retired.endpoint_ids[retired.endpoint_count] = slot.endpoint.id;
-            retired.endpoint_count += 1;
-            if (!self.owner_index.remove(task_id.raw(), slot_index)) {
-                native_util.impossibleByInvariant("live endpoint is absent from its owner index");
-            }
-            releaseEndpointRing(&slot.endpoint);
-            if (!self.arena.removeIndex(slot_index)) {
-                native_util.impossibleByInvariant("live endpoint disappeared during retirement");
-            }
+            self.retireIndex(slot_index, cleanup, &retired);
         }
-        if (retired.endpoint_count == 0) return retired;
+        if (retired.endpoint_count != 0) self.disconnectRetiredPeers(&retired);
+        return retired;
+    }
 
-        for (&self.arena.slots) |*slot| {
-            if (!slot.in_use) continue;
-            const peer_endpoint_id = slot.endpoint.peer_endpoint_id;
-            if (peer_endpoint_id.isZero()) continue;
-            for (retired.retiredEndpointIds()) |retired_id| {
-                if (peer_endpoint_id.eql(retired_id)) {
-                    slot.endpoint.peer_endpoint_id = ids.EndpointId.zero;
-                    break;
+    fn retireIndex(self: *Table, slot_index: usize, cleanup: ?MovedCapabilityCleanup, retired: *Retirement) void {
+        const slot = &self.arena.slots[slot_index];
+        if (!slot.in_use) native_util.impossibleByInvariant("retiring endpoint slot remains live");
+        retired.endpoint_ids[retired.endpoint_count] = slot.endpoint.id;
+        retired.endpoint_count += 1;
+        if (!self.owner_index.remove(slot.endpoint.owner_task_id.raw(), slot_index)) {
+            native_util.impossibleByInvariant("live endpoint is absent from its owner index");
+        }
+        if (cleanup) |sink| {
+            if (slot.endpoint.data_ring.len != 0) {
+                while (true) {
+                    const record = ipc_ring.popRecord(slot.endpoint.data_ring) catch break;
+                    if (record.move_attached != 0 and record.attached_capability_id != 0) {
+                        sink.release(sink.context, ids.capability(record.attached_capability_id));
+                    }
                 }
             }
         }
-        return retired;
+        releaseEndpointRing(&slot.endpoint);
+        if (!self.arena.removeIndex(slot_index)) {
+            native_util.impossibleByInvariant("live endpoint disappeared during retirement");
+        }
+    }
+
+    fn disconnectRetiredPeers(self: *Table, retired: *Retirement) void {
+        // A single bounded scan, with generational lookups rather than comparing
+        // every live peer against every endpoint retired from a large task.
+        for (&self.arena.slots) |*slot| {
+            if (!slot.in_use or slot.endpoint.peer_endpoint_id.isZero()) continue;
+            if (self.findConst(slot.endpoint.peer_endpoint_id) != null) continue;
+            slot.endpoint.peer_endpoint_id = ids.EndpointId.zero;
+            slot.endpoint.peer_closed = true;
+            retired.disconnected_task_ids[retired.disconnected_count] = slot.endpoint.owner_task_id;
+            retired.disconnected_count += 1;
+        }
     }
 
     fn find(self: *Table, endpoint_id: ids.EndpointId) ?*Endpoint {
@@ -371,10 +480,11 @@ pub const Table = struct {
     }
 };
 
-fn attachConnectedRings(endpoint: *Endpoint, peer: *Endpoint) void {
-    if (comptime !AUTO_ATTACHES_DATA_RINGS) return;
-    ensureDataRing(endpoint) catch {};
-    ensureDataRing(peer) catch {};
+fn attachConnectedRings(endpoint: *Endpoint, peer: *Endpoint) Error!void {
+    const allocated_endpoint = endpoint.data_ring.len == 0;
+    try ensureDataRing(endpoint);
+    errdefer if (allocated_endpoint) releaseOwnedRing(endpoint);
+    try ensureDataRing(peer);
 }
 
 fn releaseEndpointRing(endpoint: *Endpoint) void {
@@ -434,7 +544,7 @@ test "endpoints move payloads on a sealed ring" {
     const left = try table.create(ids.task(20), "ring-left", .{});
     const right = try table.create(ids.task(21), "ring-right", .{});
     try table.connect(left.id, right.id);
-    try table.send(left.id, ids.task(20), 9, "ring-payload", null, false);
+    _ = try table.send(left.id, ids.task(20), 9, "ring-payload", null, false);
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try table.recvInto(right.id, &payload)).?;
     try std.testing.expectEqualStrings("ring-payload", payload[0..received.len]);
@@ -457,7 +567,7 @@ test "endpoints connect and exchange queued messages" {
     const right = try table.create(ids.task(11), "right", .{ .local_only = true });
     try table.connect(left.id, right.id);
 
-    try table.send(left.id, ids.task(10), 77, "hello", null, false);
+    _ = try table.send(left.id, ids.task(10), 77, "hello", null, false);
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try table.recvInto(right.id, &payload)).?;
 
@@ -474,7 +584,7 @@ test "queued endpoint messages own their payload" {
     try table.connect(left.id, right.id);
 
     var source = [_]u8{ 'o', 'r', 'i', 'g', 'i', 'n', 'a', 'l' };
-    try table.send(left.id, ids.task(10), 78, &source, null, false);
+    _ = try table.send(left.id, ids.task(10), 78, &source, null, false);
     @memset(&source, 'x');
 
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
@@ -487,7 +597,7 @@ test "endpoint table reset clears live queues and reuses capacity" {
     const left = try table.create(ids.task(20), "left", .{});
     const right = try table.create(ids.task(21), "right", .{});
     try table.connect(left.id, right.id);
-    try table.send(left.id, ids.task(20), 88, "queued", null, false);
+    _ = try table.send(left.id, ids.task(20), 88, "queued", null, false);
     try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(right.id)).queued_messages);
 
     table.reset();
@@ -501,10 +611,10 @@ test "endpoint descriptors track peer links and queue depth" {
     const left = try table.create(ids.task(10), "left", .{});
     const right = try table.create(ids.task(11), "right", .{ .service_port = true });
     try table.connect(left.id, right.id);
-    try table.send(left.id, ids.task(10), 1, "ok", ids.capability(99), true);
+    _ = try table.send(left.id, ids.task(10), 1, "ok", ids.capability(99), true);
 
     const descriptor = try table.descriptor(right.id);
-    try std.testing.expectEqual(left.id.raw(), descriptor.peer_endpoint_id);
+    try std.testing.expectEqual(@as(u64, 0), descriptor.peer_endpoint_id);
     try std.testing.expectEqual(@as(u16, 1), descriptor.queued_messages);
     try std.testing.expect(descriptor.label_hash != 0);
 
@@ -513,12 +623,81 @@ test "endpoint descriptors track peer links and queue depth" {
     try std.testing.expect(received.attached_capability_id.?.eql(ids.capability(99)));
 }
 
+test "closing an endpoint drains peer replies and makes the connection terminal" {
+    const Recorder = struct {
+        released: u64 = 0,
+        count: usize = 0,
+        fn release(context: *anyopaque, capability_id: ids.CapabilityId) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.released = capability_id.raw();
+            self.count += 1;
+        }
+    };
+    var table = Table.init();
+    var recorder = Recorder{};
+    const left = try table.create(ids.task(10), "left", .{});
+    const right = try table.create(ids.task(20), "right", .{});
+    const sibling = try table.create(left.owner_task_id, "sibling", .{});
+    try table.connect(left.id, right.id);
+    _ = try table.send(left.id, left.owner_task_id, 1, "last reply", ids.capability(77), true);
+    _ = try table.send(right.id, right.owner_task_id, 2, "discarded move", ids.capability(88), true);
+    _ = try table.send(right.id, right.owner_task_id, 3, "sender copy", ids.capability(99), false);
+    const closed = try table.close(left.id, .{ .context = &recorder, .release = Recorder.release });
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    try std.testing.expectEqual(@as(u64, 88), recorder.released);
+    try std.testing.expectEqual(@as(u16, 1), closed.endpoint_count);
+    try std.testing.expectEqual(@as(u16, 1), closed.disconnected_count);
+    try std.testing.expect(closed.disconnectedTaskIds()[0].eql(right.owner_task_id));
+    try std.testing.expectEqual(@as(u16, 1), table.activeForTask(left.owner_task_id));
+    _ = try table.descriptor(sibling.id);
+    try std.testing.expectError(error.PeerClosed, table.send(right.id, right.owner_task_id, 4, "closed", null, false));
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const last = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expectEqualStrings("last reply", payload[0..last.len]);
+    try std.testing.expect(last.attached_capability_id.?.eql(ids.capability(77)));
+    try std.testing.expectError(error.PeerClosed, table.recvInto(right.id, &payload));
+    try std.testing.expectError(error.PeerClosed, table.recvInto(right.id, &payload));
+    try std.testing.expect(!table.hasPendingForTask(right.owner_task_id));
+    const replacement = try table.create(left.owner_task_id, "replacement", .{});
+    try std.testing.expect(!replacement.id.eql(left.id));
+    try std.testing.expectError(error.EndpointNotFound, table.close(left.id, null));
+    try std.testing.expectError(error.PeerClosed, table.connect(right.id, replacement.id));
+    try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(replacement.id)).peer_endpoint_id);
+}
+
+test "closing a client preserves service peers and closing the service notifies survivors" {
+    var table = Table.init();
+    const service = try table.create(ids.task(1), "service", .{ .service_port = true });
+    const first = try table.create(ids.task(2), "first", .{});
+    const second = try table.create(ids.task(3), "second", .{});
+    try table.connect(first.id, service.id);
+    try table.connect(second.id, service.id);
+    _ = try table.send(first.id, first.owner_task_id, 1, "queued", null, false);
+    const closed_client = try table.close(first.id, null);
+    try std.testing.expectEqual(@as(u16, 0), closed_client.disconnected_count);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    _ = (try table.recvInto(service.id, &payload)).?;
+    try std.testing.expectError(error.EndpointNotFound, table.reply(service.id, first.id, service.owner_task_id, 1, "late", null, false));
+    try std.testing.expect((try table.recvInto(service.id, &payload)) == null);
+    _ = try table.send(second.id, second.owner_task_id, 2, "live", null, false);
+    _ = (try table.recvInto(service.id, &payload)).?;
+    _ = try table.reply(service.id, second.id, service.owner_task_id, 2, "reply", null, false);
+    const third = try table.create(ids.task(4), "third", .{});
+    try table.connect(third.id, service.id);
+    const closed_service = try table.close(service.id, null);
+    try std.testing.expectEqual(@as(u16, 2), closed_service.disconnected_count);
+    const last = (try table.recvInto(second.id, &payload)).?;
+    try std.testing.expectEqualStrings("reply", payload[0..last.len]);
+    try std.testing.expectError(error.PeerClosed, table.recvInto(second.id, &payload));
+    try std.testing.expectError(error.PeerClosed, table.recvInto(third.id, &payload));
+}
+
 test "endpoint ids reject stale handles after slot reuse" {
     var table = Table.init();
     const endpoint = try table.create(ids.task(10), "first", .{});
     const original_handle = EndpointHandle{ .value = endpoint.id.raw() };
 
-    const retired = table.retireTask(ids.task(10));
+    const retired = table.retireTask(ids.task(10), null);
     try std.testing.expectEqual(@as(u16, 1), retired.endpoint_count);
     try std.testing.expect(retired.retiredEndpointIds()[0].eql(endpoint.id));
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(endpoint.id));
@@ -543,6 +722,34 @@ test "endpoint table rejection preserves active endpoints" {
     try std.testing.expectEqual(@as(u16, 1), table.activeForTask(ids.task(100)));
 }
 
+test "endpoint retirement releases only unread moves across queue wraparound" {
+    const Recorder = struct {
+        ids: [MAX_ENDPOINT_QUEUE]u64 = [_]u64{0} ** MAX_ENDPOINT_QUEUE,
+        count: usize = 0,
+        fn release(context: *anyopaque, capability_id: ids.CapabilityId) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.ids[self.count] = capability_id.raw();
+            self.count += 1;
+        }
+    };
+    var recorder = Recorder{};
+    var table = Table.init();
+    const client = try table.create(ids.task(1), "client", .{});
+    const server = try table.create(ids.task(2), "server", .{ .service_port = true });
+    try table.connect(client.id, server.id);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    for (0..4) |index| {
+        _ = try table.send(client.id, client.owner_task_id, 1, "already received", ids.capability(100 + index), true);
+        _ = try table.recvInto(server.id, &payload);
+    }
+    for (0..MAX_ENDPOINT_QUEUE) |index| {
+        _ = try table.send(client.id, client.owner_task_id, 2, "unread", ids.capability(200 + index), index % 2 == 0);
+    }
+    _ = table.retireTask(server.owner_task_id, .{ .context = &recorder, .release = Recorder.release });
+    try std.testing.expectEqual(@as(usize, 4), recorder.count);
+    try std.testing.expectEqualSlices(u64, &.{ 200, 202, 204, 206 }, recorder.ids[0..recorder.count]);
+}
+
 test "retiring task endpoints clears queues and surviving peer links" {
     var table = Table.init();
     const client_a = try table.create(ids.task(10), "client-a", .{});
@@ -551,18 +758,18 @@ test "retiring task endpoints clears queues and surviving peer links" {
 
     try table.connect(client_a.id, service.id);
     try table.connect(client_b.id, service.id);
-    try table.send(client_a.id, ids.task(10), 1, "queued-a", null, false);
-    try table.send(client_b.id, ids.task(11), 2, "queued-b", null, false);
+    _ = try table.send(client_a.id, ids.task(10), 1, "queued-a", null, false);
+    _ = try table.send(client_b.id, ids.task(11), 2, "queued-b", null, false);
     try std.testing.expectEqual(@as(u16, 2), (try table.descriptor(service.id)).queued_messages);
 
-    const retired = table.retireTask(ids.task(12));
+    const retired = table.retireTask(ids.task(12), null);
     try std.testing.expectEqual(@as(u16, 1), retired.endpoint_count);
     try std.testing.expect(retired.retiredEndpointIds()[0].eql(service.id));
     try std.testing.expectEqual(@as(usize, 2), table.activeCount());
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(service.id));
     try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_a.id)).peer_endpoint_id);
     try std.testing.expectEqual(@as(u64, 0), (try table.descriptor(client_b.id)).peer_endpoint_id);
-    try std.testing.expectError(error.PeerNotConnected, table.send(client_a.id, ids.task(10), 3, "stale", null, false));
+    try std.testing.expectError(error.PeerClosed, table.send(client_a.id, ids.task(10), 3, "stale", null, false));
 }
 
 test "endpoint identity paths avoid primary indexes and collision probes" {
@@ -578,7 +785,7 @@ test "service ports accept multiple client connections without blocking later bi
 
     try table.connect(client_a.id, service.id);
     try table.connect(client_b.id, service.id);
-    try table.send(client_b.id, ids.task(11), 77, "ping", null, false);
+    _ = try table.send(client_b.id, ids.task(11), 77, "ping", null, false);
 
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try table.recvInto(service.id, &payload)).?;
@@ -591,7 +798,7 @@ test "endpoint receive keeps a message queued when the caller buffer is too smal
     const left = try table.create(ids.task(10), "left", .{});
     const right = try table.create(ids.task(11), "right", .{});
     try table.connect(left.id, right.id);
-    try table.send(left.id, ids.task(10), 9, "hello", null, false);
+    _ = try table.send(left.id, ids.task(10), 9, "hello", null, false);
 
     var short_payload: [4]u8 = undefined;
     try std.testing.expectError(error.ReceiveBufferTooSmall, table.recvInto(right.id, &short_payload));
@@ -602,4 +809,112 @@ test "endpoint receive keeps a message queued when the caller buffer is too smal
     try std.testing.expectEqual(@as(u64, 9), received.correlation_id);
     try std.testing.expectEqualStrings("hello", payload[0..received.len]);
     try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(right.id)).queued_messages);
+}
+
+test "service replies route by request endpoint across clients and out of order" {
+    var table = Table.init();
+    const first = try table.create(ids.task(10), "first", .{});
+    const second = try table.create(ids.task(11), "second", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    try table.connect(first.id, service.id);
+    try table.connect(service.id, second.id);
+    _ = try table.send(first.id, first.owner_task_id, 7, "first request", null, false);
+    _ = try table.send(second.id, second.owner_task_id, 7, "second request", null, false);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const a = (try table.recvInto(service.id, &payload)).?;
+    const b = (try table.recvInto(service.id, &payload)).?;
+    try std.testing.expectEqual(first.id, a.sender_endpoint_id);
+    try std.testing.expectEqual(second.id, b.sender_endpoint_id);
+    try std.testing.expectError(error.PeerNotConnected, table.send(service.id, service.owner_task_id, 7, "ambiguous", null, false));
+    _ = try table.reply(service.id, b.sender_endpoint_id, service.owner_task_id, b.correlation_id, "second reply", null, false);
+    try std.testing.expect((try table.recvInto(first.id, &payload)) == null);
+    _ = try table.reply(service.id, a.sender_endpoint_id, service.owner_task_id, a.correlation_id, "first reply", null, false);
+    const received_b = (try table.recvInto(second.id, &payload)).?;
+    try std.testing.expectEqualStrings("second reply", payload[0..received_b.len]);
+    try std.testing.expectEqual(service.id, received_b.sender_endpoint_id);
+    const received_a = (try table.recvInto(first.id, &payload)).?;
+    try std.testing.expectEqualStrings("first reply", payload[0..received_a.len]);
+}
+
+test "reply routing rejects unrelated endpoints without publishing a message" {
+    var table = Table.init();
+    const client = try table.create(ids.task(10), "client", .{});
+    const stranger = try table.create(ids.task(11), "stranger", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    const other = try table.create(ids.task(13), "other service", .{ .service_port = true });
+    try table.connect(client.id, service.id);
+    try table.connect(stranger.id, other.id);
+    try std.testing.expectError(error.ScopeViolation, table.connect(service.id, other.id));
+    try std.testing.expectError(error.ScopeViolation, table.reply(service.id, stranger.id, service.owner_task_id, 1, "secret", null, false));
+    try std.testing.expectError(error.ScopeViolation, table.reply(client.id, stranger.id, client.owner_task_id, 1, "secret", null, false));
+    try std.testing.expectError(error.ScopeViolation, table.reply(service.id, other.id, service.owner_task_id, 1, "secret", null, false));
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(stranger.id)).queued_messages);
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(other.id)).queued_messages);
+}
+
+test "delayed service replies reject retired client handles after slot reuse" {
+    var table = Table.init();
+    const client = try table.create(ids.task(10), "client", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    try table.connect(client.id, service.id);
+    _ = try table.send(client.id, client.owner_task_id, 1, "request", null, false);
+    _ = table.retireTask(client.owner_task_id, null);
+    const replacement = try table.create(client.owner_task_id, "replacement", .{});
+    try table.connect(replacement.id, service.id);
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const request = (try table.recvInto(service.id, &payload)).?;
+    try std.testing.expectEqual(client.id, request.sender_endpoint_id);
+    try std.testing.expectError(error.EndpointNotFound, table.reply(service.id, request.sender_endpoint_id, service.owner_task_id, 1, "late", null, false));
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(replacement.id)).queued_messages);
+}
+
+test "a full reply queue never redirects a service response to another client" {
+    var table = Table.init();
+    const first = try table.create(ids.task(10), "first", .{});
+    const second = try table.create(ids.task(11), "second", .{});
+    const service = try table.create(ids.task(12), "service", .{ .service_port = true });
+    try table.connect(first.id, service.id);
+    try table.connect(second.id, service.id);
+    for (0..MAX_ENDPOINT_QUEUE) |sequence| {
+        _ = try table.reply(service.id, second.id, service.owner_task_id, sequence, "reply", null, false);
+    }
+    try std.testing.expectError(error.RingFull, table.reply(service.id, second.id, service.owner_task_id, 99, "overflow", null, false));
+    try std.testing.expectEqual(@as(u16, MAX_ENDPOINT_QUEUE), (try table.descriptor(second.id)).queued_messages);
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(first.id)).queued_messages);
+}
+
+test "endpoint readiness follows queued ownership through drains and retirement" {
+    var table = Table.init();
+    const client = try table.create(ids.task(10), "client", .{});
+    const service = try table.create(ids.task(20), "service", .{ .service_port = true });
+    _ = try table.create(service.owner_task_id, "empty service endpoint", .{});
+    try table.connect(client.id, service.id);
+    try std.testing.expect(!table.hasPendingForTask(service.owner_task_id));
+    try std.testing.expectEqual(service.owner_task_id, try table.send(client.id, client.owner_task_id, 1, "request", null, false));
+    try std.testing.expect(table.hasPendingForTask(service.owner_task_id));
+    try std.testing.expect(!table.hasPendingForTask(client.owner_task_id));
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    _ = try table.recvInto(service.id, &payload);
+    try std.testing.expect(!table.hasPendingForTask(service.owner_task_id));
+    try std.testing.expectEqual(client.owner_task_id, try table.reply(service.id, client.id, service.owner_task_id, 1, "reply", null, false));
+    try std.testing.expect(table.hasPendingForTask(client.owner_task_id));
+    _ = table.retireTask(client.owner_task_id, null);
+    _ = try table.create(client.owner_task_id, "replacement", .{});
+    try std.testing.expect(!table.hasPendingForTask(client.owner_task_id));
+}
+
+test "ring replacement rejects malformed storage and preserves queued messages" {
+    var table = Table.init();
+    defer table.deinit();
+    const left = try table.create(ids.task(101), "left", .{});
+    const right = try table.create(ids.task(102), "right", .{});
+    var invalid: [ipc_ring.HEADER_BYTES]u8 align(64) = undefined;
+    try std.testing.expectError(error.RingCorrupt, table.attachDataRing(left.id, &invalid));
+    try table.connect(left.id, right.id);
+    _ = try table.send(left.id, left.owner_task_id, 1, "pending", null, false);
+    var replacement: [ipc_ring.HEADER_BYTES + DEFAULT_DATA_RING_CAPACITY]u8 align(64) = undefined;
+    try std.testing.expectError(error.EndpointBusy, table.attachDataRing(right.id, &replacement));
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(right.id, &payload)).?;
+    try std.testing.expectEqualStrings("pending", payload[0..received.len]);
 }

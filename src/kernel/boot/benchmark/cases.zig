@@ -16,7 +16,7 @@ pub const SLO_NVME_QUEUED_IO = "slo.nvme_queued_io";
 pub const SLO_ENDPOINT_RTT = "slo.endpoint_rtt";
 pub const SLO_FOCUSED_INPUT = "slo.focused_input";
 
-pub fn benchmarkCases(handlers: anytype) [32]BenchmarkCase {
+pub fn benchmarkCases(handlers: anytype) [33]BenchmarkCase {
     return .{
         .{ .name = "capability.derive.workspace_object", .iterations = 40_000, .runIteration = handlers.capability_derive },
         .{ .name = "capability.mint_reuse_free_slot", .iterations = 4_000, .runIteration = handlers.capability_mint_reuse_free_slot },
@@ -40,7 +40,8 @@ pub fn benchmarkCases(handlers: anytype) [32]BenchmarkCase {
         .{ .name = "indexing_service.query_ranked", .iterations = 20_000, .runIteration = handlers.indexing_query },
         .{ .name = "media_print.submit_complete", .iterations = 8_000, .runIteration = handlers.media_print_submit_complete },
         .{ .name = "event_ledger.export_redacted", .iterations = 4_000, .runIteration = handlers.event_ledger_export },
-        .{ .name = "secret_store.import_handle_export", .iterations = 20_000, .operations_per_iteration = SECRET_STORE_OPERATIONS_PER_ITERATION, .runIteration = handlers.secret_store_import_handle_export },
+        .{ .name = "secret_store.software_import_handle_export", .iterations = 20_000, .operations_per_iteration = SECRET_STORE_OPERATIONS_PER_ITERATION, .runIteration = handlers.secret_store_software_import_handle_export },
+        .{ .name = "secret_store.sealed_import_handle_export", .iterations = 20_000, .operations_per_iteration = SECRET_STORE_OPERATIONS_PER_ITERATION, .runIteration = handlers.secret_store_sealed_import_handle_export },
         .{ .name = "denial_explanation.render_policy_hint", .iterations = 32_000, .runIteration = handlers.denial_explanation_render },
         .{ .name = "sync_service.overlay_session_flow", .iterations = 8_000, .runIteration = handlers.overlay_session_flow },
         .{ .name = "recovery_environment.reinstall_restore_repair", .iterations = 4, .runIteration = handlers.recovery_lifecycle },

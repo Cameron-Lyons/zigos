@@ -278,6 +278,25 @@ pub fn expectEndpointSend(
     try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
 }
 
+pub fn expectEndpointReply(
+    kernel_port: *component_port.KernelPort,
+    caller_task_id: u64,
+    endpoint_capability_id: u64,
+    incoming: abi.EndpointMessageDescriptor,
+    payload: []const u8,
+    tick: u64,
+) !void {
+    const request = component_port.EndpointSendRequest{
+        .header = component_port.makeHeader(.endpoint_send, caller_task_id),
+        .correlation_id = incoming.correlation_id,
+        .endpoint_capability_id = endpoint_capability_id,
+        .payload = payload,
+        .reply_endpoint_id = incoming.sender_endpoint_id,
+    };
+    const result = syscall_surface.dispatch(kernel_port, caller_task_id, tick, request.header.operation, @intFromPtr(&request), 0, 0);
+    try std.testing.expectEqual(abi.SyscallStatus.success, result.status);
+}
+
 pub fn expectEndpointRecv(
     kernel_port: *component_port.KernelPort,
     caller_task_id: u64,

@@ -645,7 +645,7 @@ pub const NativeTransportService = struct {
             sequence,
             &signed_frame,
         );
-        try (try self.endpointTable()).send(
+        _ = try (try self.endpointTable()).send(
             connection.source_endpoint_id,
             ids.task(connection.source_task_id),
             signed_frame.packet.session_id,
@@ -756,6 +756,7 @@ pub const NativeTransportService = struct {
         var message: endpoint.Message = undefined;
         const received = (try (try self.endpointTable()).recvInto(connection.target_endpoint_id, &message.bytes)) orelse
             return error.NativeTransportFrameMissing;
+        message.sender_endpoint_id = received.sender_endpoint_id;
         message.sender_task_id = received.sender_task_id;
         message.correlation_id = received.correlation_id;
         message.attached_capability_id = received.attached_capability_id orelse ids.CapabilityId.zero;

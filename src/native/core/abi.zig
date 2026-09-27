@@ -1,7 +1,7 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 8;
-pub const ENDPOINT_INLINE_BYTES: usize = 96;
+pub const ABI_VERSION: u16 = 10;
+pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
 pub const WAIT_PLUS_SEALED_RINGS = true;
@@ -33,6 +33,7 @@ pub const NativeOperation = enum(u16) {
     endpoint_connect,
     endpoint_send,
     endpoint_recv,
+    endpoint_close,
     capability_mint,
     capability_derive,
     capability_pass,
@@ -73,6 +74,8 @@ pub const SyscallStatus = enum(u32) {
     not_found,
     conflict,
     internal_error,
+    would_block,
+    peer_closed,
 };
 
 pub const DenialReason = enum(u16) {
@@ -145,6 +148,7 @@ pub const EndpointDescriptor = extern struct {
 
 pub const EndpointMessageDescriptor = extern struct {
     endpoint_id: u64,
+    sender_endpoint_id: u64,
     sender_task_id: u64,
     correlation_id: u64,
     attached_capability_id: u64,
@@ -314,11 +318,11 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 8), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 10), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));
-    try std.testing.expectEqual(@as(usize, 96), ENDPOINT_INLINE_BYTES);
+    try std.testing.expectEqual(@as(usize, 88), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ResourceDescriptor));
@@ -329,7 +333,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(DeviceMmioWindowDescriptor));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(BoolResponse));
     try std.testing.expectEqual(@as(usize, 112), @sizeOf(EndpointCreateResponse));
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(EndpointRecvResponse));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(EndpointRecvResponse));
     try std.testing.expectEqual(@as(usize, 104), @sizeOf(SharedMemoryCreateResponse));
     try std.testing.expect(taskFlagsHas(TASK_FLAG_LOCAL_ONLY, TASK_FLAG_LOCAL_ONLY));
     try std.testing.expectEqual(@as(u8, 3), taskFlagsResourceClass(@as(u16, 3) << TASK_RESOURCE_CLASS_SHIFT));

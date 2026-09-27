@@ -722,6 +722,103 @@ test "event ledger batches durable writes until persistence batch flush" {
     storage_checkpoint_store.resetPersistent();
 }
 
+test "bulk boot ledger absorption survives two full histories within storage capacity" {
+    var checkpoint = storage_service.CheckpointStore{};
+    defer checkpoint.resetPersistent();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
+    const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
+    var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
+    for (0..2) |boot| {
+        var source = Ledger.init();
+        defer source.deinit();
+        for (0..event_ledger.MAX_EVENTS) |index| {
+            const tick = boot * event_ledger.MAX_EVENTS + index + 1;
+            try source.recordPermissionDecision(owner, tick, .screen_capture, false, .policy_denied, tick, "boot event", true);
+        }
+        var ledger = try Ledger.initPersistent(&storage, owner, signer);
+        defer ledger.deinit();
+        try ledger.absorb(&source);
+        try std.testing.expectEqual(@as(usize, 0), ledger.pendingPersistenceCount());
+        try std.testing.expectEqual(@as(usize, 0), ledger.persistence_batch_depth);
+    }
+    var reloaded = try Ledger.initPersistent(&storage, owner, signer);
+    defer reloaded.deinit();
+    try std.testing.expectEqual(event_ledger.MAX_EVENTS, reloaded.countMatching(.{}));
+    try std.testing.expectEqual(@as(u64, 2 * event_ledger.MAX_EVENTS + 1), reloaded.next_sequence);
+    try std.testing.expectEqual(@as(usize, 0), reloaded.countMatching(.{ .task_id = 1 }));
+    try std.testing.expectEqual(@as(usize, 1), reloaded.countMatching(.{ .task_id = 2 * event_ledger.MAX_EVENTS }));
+}
+
+test "bulk ledger absorption preserves caller persistence deferral" {
+    var checkpoint = storage_service.CheckpointStore{};
+    defer checkpoint.resetPersistent();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
+    const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
+    var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
+    var source = Ledger.init();
+    defer source.deinit();
+    try source.recordUpdateTransition(owner, 1, .none, false, 20, "batched source");
+    var ledger = try Ledger.initPersistent(&storage, owner, signer);
+    defer ledger.deinit();
+    ledger.beginPersistenceBatch();
+    try ledger.absorb(&source);
+    try std.testing.expectEqual(@as(usize, 1), ledger.persistence_batch_depth);
+    try std.testing.expectEqual(@as(usize, 0), storage.objectCount());
+    try ledger.flushPersistenceBatch();
+    try std.testing.expectEqual(@as(usize, 2), storage.objectCount());
+}
+
+test "diagnostic appends retain one format header and derive sequence after reload" {
+    var checkpoint = storage_service.CheckpointStore{};
+    defer checkpoint.resetPersistent();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
+    const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
+    var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
+    var ledger = try Ledger.initPersistent(&storage, owner, signer);
+    defer ledger.deinit();
+    for (0..2 * event_ledger.MAX_EVENTS) |index| {
+        const tick = index + 1;
+        try ledger.recordPermissionDecision(owner, tick, .screen_capture, false, .policy_denied, tick, "diagnostic", true);
+    }
+    try std.testing.expectEqual(@as(usize, 2 * event_ledger.MAX_EVENTS + 1), storage.versionCount());
+    const header_version_id = ledger.header_version_id;
+    var reloaded = try Ledger.initPersistent(&storage, owner, signer);
+    defer reloaded.deinit();
+    try std.testing.expectEqual(@as(u64, 2 * event_ledger.MAX_EVENTS + 1), reloaded.next_sequence);
+    try reloaded.recordUpdateTransition(owner, 1, .none, false, 130, "after reload");
+    try std.testing.expectEqual(header_version_id, reloaded.header_version_id);
+    try std.testing.expectEqual(@as(u64, 2 * event_ledger.MAX_EVENTS + 1), reloaded.latestKind(.update_transition).?.sequence);
+}
+
+test "diagnostic reload rejects an obsolete counter header" {
+    var checkpoint = storage_service.CheckpointStore{};
+    defer checkpoint.resetPersistent();
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
+    const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
+    var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
+    var ledger = try Ledger.initPersistent(&storage, owner, signer);
+    defer ledger.deinit();
+    try ledger.recordUpdateTransition(owner, 1, .none, false, 20, "initial event");
+    const header = try storage.resolve(ledger.workspace_id, "state/event-ledger");
+    var obsolete = [_]u8{0} ** 16;
+    std.mem.writeInt(u32, obsolete[0..4], 0x454C4733, .little);
+    std.mem.writeInt(u64, obsolete[8..16], 2, .little);
+    const replacement = try storage.putLocallySignedVersion(.{
+        .preferred_object_id = header.object_id,
+        .object_type = .document,
+        .payload = &obsolete,
+        .signer = signer,
+        .label = "event-ledger-state",
+        .content_type = "application/zigos-event-ledger",
+        .created_at_ticks = 21,
+        .parent_version_id = header.version_id,
+    });
+    try storage.beginTransaction(ledger.workspace_id);
+    try storage.stagePut(ledger.workspace_id, "state/event-ledger", replacement.object_id, replacement.version_id, .document);
+    _ = try storage.commit(ledger.workspace_id, 21);
+    try std.testing.expectError(error.CorruptState, Ledger.initPersistent(&storage, owner, signer));
+}
+
 test "event ledger persists user visible policy ux history across restart and query" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
     storage_checkpoint_store.resetPersistent();

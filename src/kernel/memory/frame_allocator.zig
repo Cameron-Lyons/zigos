@@ -71,6 +71,8 @@ fn FixedWithReservationCapacity(
     const BitmapWord = u64;
     const bitmap_word_bits: u32 = @bitSizeOf(BitmapWord);
     const bitmap_word_count: usize = @intCast((frame_count_value + bitmap_word_bits - 1) / bitmap_word_bits);
+    const summary_word_count = (bitmap_word_count + bitmap_word_bits - 1) / bitmap_word_bits;
+    const summary_group_count = (summary_word_count + bitmap_word_bits - 1) / bitmap_word_bits;
     const theoretical_reservation_capacity: usize = @intCast((frame_count_value + 1) / 2);
     const reservation_range_capacity = @min(requested_reservation_capacity, theoretical_reservation_capacity);
     if (reservation_range_capacity == 0) {
@@ -85,6 +87,10 @@ fn FixedWithReservationCapacity(
         };
         pub const Storage = struct {
             unavailable_bitmap: [bitmap_word_count]BitmapWord,
+            // A set bit identifies a child word with free frames. These indexes
+            // skip full physical regions without duplicating ownership state.
+            available_words: [summary_word_count]BitmapWord,
+            available_groups: [summary_group_count]BitmapWord,
             reservation_ranges: [reservation_range_capacity]ReservationRange,
         };
 
@@ -106,6 +112,7 @@ fn FixedWithReservationCapacity(
         pub const max_reservation_ranges = reservation_range_capacity;
         pub const reservation_range_bytes = @sizeOf(ReservationRange);
         pub const storage_bytes = @sizeOf(Storage);
+        pub const availability_index_bytes = (summary_word_count + summary_group_count) * @sizeOf(BitmapWord);
 
         pub fn bindStorage(storage: *Storage) Self {
             return .{ .storage = storage };
@@ -119,6 +126,18 @@ fn FixedWithReservationCapacity(
 
         pub fn reset(self: *Self) void {
             @memset(&self.storage.unavailable_bitmap, 0);
+            // Padding must never appear as free memory in the summary index.
+            self.storage.unavailable_bitmap[bitmap_word_count - 1] = ~lowBitsMask(@intCast(
+                frame_count_value - (bitmap_word_count - 1) * bitmap_word_bits,
+            ));
+            @memset(&self.storage.available_words, std.math.maxInt(BitmapWord));
+            self.storage.available_words[summary_word_count - 1] = lowBitsMask(@intCast(
+                bitmap_word_count - (summary_word_count - 1) * bitmap_word_bits,
+            ));
+            @memset(&self.storage.available_groups, std.math.maxInt(BitmapWord));
+            self.storage.available_groups[summary_group_count - 1] = lowBitsMask(@intCast(
+                summary_word_count - (summary_group_count - 1) * bitmap_word_bits,
+            ));
             self.reservation_range_count = 0;
             self.reservations_sealed = false;
             self.known_unreserved_start = 0;
@@ -130,6 +149,8 @@ fn FixedWithReservationCapacity(
 
         pub fn cloneInto(self: *const Self, storage: *Storage) Self {
             storage.unavailable_bitmap = self.storage.unavailable_bitmap;
+            storage.available_words = self.storage.available_words;
+            storage.available_groups = self.storage.available_groups;
             std.mem.copyForwards(
                 ReservationRange,
                 storage.reservation_ranges[0..self.reservation_range_count],
@@ -145,7 +166,6 @@ fn FixedWithReservationCapacity(
             const end = start + run.count;
 
             self.reserved_count += self.mutateRange(
-                &self.storage.unavailable_bitmap,
                 start,
                 run.count,
                 true,
@@ -179,7 +199,6 @@ fn FixedWithReservationCapacity(
                 return error.ReservationsSealed;
             }
             self.reserved_count -= self.mutateRange(
-                &self.storage.unavailable_bitmap,
                 start,
                 run.count,
                 false,
@@ -293,7 +312,7 @@ fn FixedWithReservationCapacity(
             const start = self.findRun(search_start, upper_frame, count) orelse
                 (if (search_start == lower_frame) null else self.findRun(lower_frame, upper_frame, count)) orelse return null;
 
-            _ = self.mutateRange(&self.storage.unavailable_bitmap, start, count, true, false);
+            _ = self.mutateRange(start, count, true, false);
             self.allocated_count += count;
             self.cacheKnownUnreservedRange(start, start + count);
             self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
@@ -325,7 +344,7 @@ fn FixedWithReservationCapacity(
             if (!self.reservations_sealed) try self.sealReservations();
 
             try self.validateReleasableRange(start, run.count);
-            _ = self.mutateRange(&self.storage.unavailable_bitmap, start, run.count, false, false);
+            _ = self.mutateRange(start, run.count, false, false);
             self.allocated_count -= run.count;
             self.search_frame_hint = start;
         }
@@ -344,7 +363,9 @@ fn FixedWithReservationCapacity(
                 return error.FrameReserved;
             }
             if ((self.storage.unavailable_bitmap[word] & mask) == 0) return error.NotAllocated;
+            const was_full = self.storage.unavailable_bitmap[word] == std.math.maxInt(BitmapWord);
             self.storage.unavailable_bitmap[word] &= ~mask;
+            if (was_full) self.setWordAvailable(word, true);
             self.allocated_count -= 1;
             self.search_frame_hint = start;
         }
@@ -404,6 +425,8 @@ fn FixedWithReservationCapacity(
 
                 if (available == 0) {
                     contiguous = 0;
+                    const next = self.findAvailableWord(word_index + 1, last_word_index + 1) orelse return null;
+                    word_index = next - 1;
                     continue;
                 }
 
@@ -454,6 +477,7 @@ fn FixedWithReservationCapacity(
         }
 
         fn findFreeFrame(self: *const Self, start: u32, end: u32) ?u32 {
+            if (start >= end) return null;
             var word_index = start / bitmap_word_bits;
             const last_word_index = (end - 1) / bitmap_word_bits;
             while (word_index <= last_word_index) : (word_index += 1) {
@@ -462,12 +486,59 @@ fn FixedWithReservationCapacity(
                 const range_end = word_start + @min(bitmap_word_bits, end - word_start);
                 const range_mask = wordRangeMask(range_start - word_start, range_end - word_start);
                 const available = ~self.storage.unavailable_bitmap[word_index] & range_mask;
-                if (available == 0) continue;
+                if (available == 0) {
+                    const next = self.findAvailableWord(word_index + 1, last_word_index + 1) orelse return null;
+                    word_index = next - 1;
+                    continue;
+                }
 
                 const free_bit: u32 = @intCast(@ctz(available));
                 return word_start + free_bit;
             }
             return null;
+        }
+
+        fn findAvailableWord(self: *const Self, start: u32, end: u32) ?u32 {
+            if (start >= end) return null;
+            var summary_index = start / bitmap_word_bits;
+            const first_bit: u6 = @intCast(start % bitmap_word_bits);
+            var words = self.storage.available_words[summary_index] &
+                (~@as(BitmapWord, 0) << first_bit);
+            if (words == 0) {
+                const next_summary = summary_index + 1;
+                const last_summary = (end - 1) / bitmap_word_bits;
+                if (next_summary > last_summary) return null;
+                var group_index = next_summary / bitmap_word_bits;
+                const last_group = last_summary / bitmap_word_bits;
+                const first_group_bit: u6 = @intCast(next_summary % bitmap_word_bits);
+                var groups = self.storage.available_groups[group_index] &
+                    (~@as(BitmapWord, 0) << first_group_bit);
+                while (groups == 0) {
+                    if (group_index == last_group) return null;
+                    group_index += 1;
+                    groups = self.storage.available_groups[group_index];
+                }
+                summary_index = group_index * bitmap_word_bits + @as(u32, @intCast(@ctz(groups)));
+                if (summary_index > last_summary) return null;
+                words = self.storage.available_words[summary_index];
+            }
+            const word_index = summary_index * bitmap_word_bits + @as(u32, @intCast(@ctz(words)));
+            return if (word_index < end) word_index else null;
+        }
+
+        fn setWordAvailable(self: *Self, word: usize, available: bool) void {
+            const summary_index = word / bitmap_word_bits;
+            const summary_bit: u6 = @intCast(word % bitmap_word_bits);
+            const summary = &self.storage.available_words[summary_index];
+            const was_empty = summary.* == 0;
+            const mask = @as(BitmapWord, 1) << summary_bit;
+            if (available) summary.* |= mask else summary.* &= ~mask;
+            if (was_empty == (summary.* == 0)) return;
+
+            const group = &self.storage.available_groups[summary_index / bitmap_word_bits];
+            const group_bit: u6 = @intCast(summary_index % bitmap_word_bits);
+            const group_mask = @as(BitmapWord, 1) << group_bit;
+            if (available) group.* |= group_mask else group.* &= ~group_mask;
         }
 
         fn allocateFrameIndexBetween(self: *Self, lower_frame: u32, upper_frame: u32) ?u32 {
@@ -486,6 +557,9 @@ fn FixedWithReservationCapacity(
             const word: usize = @intCast(start / bitmap_word_bits);
             const bit: u6 = @truncate(start % bitmap_word_bits);
             self.storage.unavailable_bitmap[word] |= @as(BitmapWord, 1) << bit;
+            if (self.storage.unavailable_bitmap[word] == std.math.maxInt(BitmapWord)) {
+                self.setWordAvailable(word, false);
+            }
             self.allocated_count += 1;
             self.cacheKnownUnreservedRange(start, start + 1);
             self.search_frame_hint = if (start + 1 == frame_count) 0 else start + 1;
@@ -514,13 +588,13 @@ fn FixedWithReservationCapacity(
         }
 
         fn mutateRange(
-            _: *Self,
-            bitmap: *[bitmap_word_count]BitmapWord,
+            self: *Self,
             start: u32,
             count: u32,
             comptime set_bits: bool,
             comptime count_changes: bool,
         ) u32 {
+            const bitmap = &self.storage.unavailable_bitmap;
             const end = start + count;
             var changed: u32 = 0;
             var word_index = start / bitmap_word_bits;
@@ -530,6 +604,7 @@ fn FixedWithReservationCapacity(
                 const range_start = @max(start, word_start);
                 const range_end = word_start + @min(bitmap_word_bits, end - word_start);
                 const mask = wordRangeMask(range_start - word_start, range_end - word_start);
+                const was_full = bitmap[word_index] == std.math.maxInt(BitmapWord);
                 if (count_changes) {
                     const affected = if (set_bits) mask & ~bitmap[word_index] else mask & bitmap[word_index];
                     changed += @popCount(affected);
@@ -539,6 +614,8 @@ fn FixedWithReservationCapacity(
                 } else {
                     bitmap[word_index] &= ~mask;
                 }
+                const is_full = bitmap[word_index] == std.math.maxInt(BitmapWord);
+                if (was_full != is_full) self.setWordAvailable(word_index, !is_full);
             }
             return changed;
         }
@@ -775,6 +852,147 @@ test "64 GiB allocator state stays below three MiB" {
     try std.testing.expectEqual(@sizeOf(Allocator.Storage), Allocator.storage_bytes);
     try std.testing.expect(@sizeOf(Allocator.Storage) < 3 * 1024 * 1024);
     try std.testing.expect(@sizeOf(Allocator) <= 64);
+    try std.testing.expectEqual(@as(usize, 33_280), Allocator.availability_index_bytes);
+}
+
+test "availability indexes respect partial words at every level" {
+    inline for (.{ 1, 63, 64, 65, 4095, 4096, 4097, 262143, 262144, 262145 }) |frames| {
+        const Allocator = Fixed(frames * 4096, 4096);
+        var storage: Allocator.Storage = undefined;
+        var allocator = Allocator.init(&storage);
+        try allocator.reserve(.{ .base = 0, .count = frames });
+        try allocator.makeAvailable(.{ .base = (frames - 1) * 4096, .count = 1 });
+        allocator.search_frame_hint = 0;
+        const last = allocator.allocate(1).?;
+        try std.testing.expectEqual(@as(PhysicalAddress, (frames - 1) * 4096), last.base);
+        try std.testing.expect(allocator.allocate(1) == null);
+        try std.testing.expect(allocator.findFreeFrame(0, frames) == null);
+        try allocator.release(last);
+        allocator.search_frame_hint = 0;
+        try std.testing.expectEqual(last, allocator.allocate(1).?);
+
+        allocator.reset();
+        try std.testing.expectEqual(@as(PhysicalAddress, 0), allocator.allocate(1).?.base);
+    }
+}
+
+test "sparse searches preserve physical bounds and independent cursor wraparound" {
+    const frames = 262_144 + 131;
+    const Allocator = Fixed(frames * 4096, 4096);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 0, .count = frames });
+    for ([_]u32{ 63, 4096, 262_144, frames - 1 }) |frame| {
+        try allocator.makeAvailable(.{ .base = @as(PhysicalAddress, frame) * 4096, .count = 1 });
+    }
+    var cursor = AllocationCursor{ .next_frame = frames - 1 };
+    try std.testing.expect(allocator.allocateBetweenWithCursor(1, 4097 * 4096, 262_144 * 4096, &cursor) == null);
+    try std.testing.expect(allocator.allocateBetweenWithCursor(1, 64 * 4096, 4096 * 4096, &cursor) == null);
+    cursor.next_frame = 262_143;
+    try std.testing.expectEqual(@as(PhysicalAddress, 262_144 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 63 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
+    try std.testing.expectEqual(@as(PhysicalAddress, 4096 * 4096), allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor).?.base);
+    try std.testing.expect(allocator.allocateBelowWithCursor(1, 262_145 * 4096, &cursor) == null);
+    try std.testing.expectEqual(@as(u32, 0), allocator.search_frame_hint);
+    try std.testing.expectEqual(@as(PhysicalAddress, (frames - 1) * 4096), allocator.allocate(1).?.base);
+}
+
+test "contiguous search skips full groups without joining separated free runs" {
+    const frames = 262_144 + 131;
+    const Allocator = Fixed(frames * 4096, 4096);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 0, .count = frames });
+    try allocator.makeAvailable(.{ .base = 4094 * 4096, .count = 2 });
+    try allocator.makeAvailable(.{ .base = 262_142 * 4096, .count = 70 });
+    allocator.search_frame_hint = 0;
+    const run = allocator.allocate(70).?;
+    try std.testing.expectEqual(@as(PhysicalAddress, 262_142 * 4096), run.base);
+    try std.testing.expect(allocator.allocate(3) == null);
+
+    var clone_storage: Allocator.Storage = undefined;
+    var clone = allocator.cloneInto(&clone_storage);
+    try clone.release(run);
+    clone.search_frame_hint = 0;
+    try std.testing.expectEqual(run, clone.allocate(70).?);
+    try std.testing.expect(allocator.allocate(70) == null);
+    try allocator.release(run);
+    allocator.search_frame_hint = 0;
+    try std.testing.expectEqual(run, allocator.allocate(70).?);
+}
+
+test "indexed frame allocation matches a linear ownership model under churn" {
+    const frames = 8199;
+    const Allocator = Fixed(frames * 4096, 4096);
+    const State = enum { free, reserved, allocated };
+    const Reference = struct {
+        fn find(states: []const State, start: u32, end: u32, count: u32) ?u32 {
+            var run: u32 = 0;
+            for (states[start..end], start..) |state, frame| {
+                run = if (state == .free) run + 1 else 0;
+                if (run == count) return @as(u32, @intCast(frame + 1)) - count;
+            }
+            return null;
+        }
+    };
+    var states = [_]State{.reserved} ** frames;
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 0, .count = frames });
+    var prng = std.Random.DefaultPrng.init(0x2026_0925);
+    const random = prng.random();
+    for (0..80) |_| {
+        const start = random.uintLessThan(u32, frames);
+        const count = random.intRangeAtMost(u32, 1, @min(100, frames - start));
+        try allocator.makeAvailable(.{ .base = @as(PhysicalAddress, start) * 4096, .count = count });
+        @memset(states[start..][0..count], .free);
+    }
+    try allocator.sealReservations();
+
+    for (0..4000) |iteration| {
+        const lower = random.uintLessThan(u32, frames);
+        const upper = random.intRangeAtMost(u32, lower + 1, frames);
+        const count = random.intRangeAtMost(u32, 1, @min(80, upper - lower));
+        if (iteration % 3 != 0) {
+            const hint = random.uintLessThan(u32, frames);
+            var cursor = AllocationCursor{ .next_frame = hint };
+            const start = if (hint >= lower and hint < upper) hint else lower;
+            const expected = Reference.find(&states, start, upper, count) orelse
+                Reference.find(&states, lower, upper, count);
+            const actual = allocator.allocateBetweenWithCursor(count, @as(PhysicalAddress, lower) * 4096, @as(PhysicalAddress, upper) * 4096, &cursor);
+            if (expected) |frame| {
+                try std.testing.expectEqual(FrameRun{ .base = @as(PhysicalAddress, frame) * 4096, .count = count }, actual.?);
+                @memset(states[frame..][0..count], .allocated);
+            } else try std.testing.expect(actual == null);
+        } else {
+            const run = FrameRun{ .base = @as(PhysicalAddress, lower) * 4096, .count = count };
+            const expected_error: ?Error = for (states[lower..][0..count]) |state| {
+                if (state == .free) break error.NotAllocated;
+                if (state == .reserved) break error.FrameReserved;
+            } else null;
+            if (expected_error) |err| {
+                try std.testing.expectError(err, allocator.release(run));
+            } else {
+                try allocator.release(run);
+                @memset(states[lower..][0..count], .free);
+            }
+        }
+        // Exercise successful reuse regularly even when random spans hit holes.
+        if (iteration % 16 == 0) {
+            for (states, 0..) |state, frame| {
+                if (state != .allocated) continue;
+                try allocator.releaseFrame(frame * 4096);
+                states[frame] = .free;
+            }
+        }
+        var expected_stats = Stats{ .total = frames, .free = 0, .allocated = 0, .reserved = 0 };
+        for (states) |state| switch (state) {
+            .free => expected_stats.free += 1,
+            .allocated => expected_stats.allocated += 1,
+            .reserved => expected_stats.reserved += 1,
+        };
+        try std.testing.expectEqual(expected_stats, allocator.stats());
+    }
 }
 
 test "recent allocations cache only their immutable unreserved span" {

@@ -200,6 +200,7 @@ pub const Client = struct {
             self.endpoint_capability_id,
             correlation_id,
             payload,
+            0,
             self.storage_authority_capability_id,
             false,
             now_ticks,
@@ -253,6 +254,7 @@ pub const Server = struct {
             self.endpoint_capability_id,
             received.message.correlation_id,
             response,
+            received.message.sender_endpoint_id,
             null,
             false,
             now_ticks,
@@ -329,6 +331,7 @@ fn syscallEndpointSend(
     endpoint_capability_id: u64,
     correlation_id: u64,
     payload: []const u8,
+    reply_endpoint_id: u64,
     attached_capability_id: ?u64,
     move_attached_capability: bool,
     now_ticks: u64,
@@ -338,6 +341,7 @@ fn syscallEndpointSend(
         .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
         .payload = payload,
+        .reply_endpoint_id = reply_endpoint_id,
         .attached_capability_id = attached_capability_id,
         .move_attached_capability = move_attached_capability,
     };
@@ -456,7 +460,7 @@ const UserspaceStorageHarness = struct {
 
     fn init(self: *UserspaceStorageHarness) !void {
         self.checkpoint_store.resetPersistent();
-        self.kernel = native_kernel.Kernel.init(
+        self.kernel.initInPlace(
             self.policy_authority,
             &self.runtime,
             &self.capabilities,

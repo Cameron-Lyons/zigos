@@ -22,6 +22,11 @@ pub const pci_ecam = Region{
     .bytes = PAGE_BYTES,
 };
 
+pub const framebuffer = Region{
+    .base = virtual_layout.device_memory.base + 0x0400_0000,
+    .bytes = 64 * 1024 * 1024,
+};
+
 pub const intel_i225 = Region{
     .base = virtual_layout.device_memory.base + 0x1100_0000,
     .bytes = 0x1_0000,
@@ -29,6 +34,11 @@ pub const intel_i225 = Region{
 
 pub const xhci = Region{
     .base = virtual_layout.device_memory.base + 0x1200_0000,
+    .bytes = PAGE_BYTES,
+};
+
+pub const tpm_crb = Region{
+    .base = virtual_layout.device_memory.base + 0x1300_0000,
     .bytes = PAGE_BYTES,
 };
 
@@ -49,9 +59,11 @@ pub const intel_vtd = Region{
 
 pub const all = [_]Region{
     nvme,
+    framebuffer,
     pci_ecam,
     intel_i225,
     xhci,
+    tpm_crb,
     acpi_root,
     acpi_entry,
     intel_vtd,

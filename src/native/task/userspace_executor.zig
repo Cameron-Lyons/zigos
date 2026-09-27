@@ -418,6 +418,7 @@ const MappingEntry = struct {
     last_fault_error_code: u32 = 0,
     mailbox_authority_cache: MailboxAuthorityCache = .{},
     mailbox_publication_cache: MailboxPublicationCache = .{},
+    initial_mailbox_prepared: bool = false,
     captured_mailbox: if (builtin.target.os.tag == .freestanding) userspace_bootstrap_mailbox.Mailbox else void =
         if (builtin.target.os.tag == .freestanding) .{} else {},
     mailbox_captured: bool = false,
@@ -757,6 +758,42 @@ pub const Executor = struct {
         return .{ .miss = .unread };
     }
 
+    // Publish an opened document before the first instruction of a fresh app.
+    // Initializing here avoids retaining another binding in every mapping.
+    pub fn bindInitialDocument(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *task_runtime.Runtime,
+        capability_table: *const capability.CapabilityTable,
+        task_id: u64,
+        binding: userspace_bootstrap_mailbox.DocumentBinding,
+        now_ticks: u64,
+    ) bool {
+        if (builtin.target.os.tag != .freestanding) return false;
+        if (self.active_task_id != 0 or self.bound_runtime != runtime or !binding.isValid()) return false;
+        const task = runtime.find(task_id) orelse return false;
+        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable() or
+            !task.hasCapability(binding.endpoint_capability_id)) return false;
+        const granted = capability_table.requireUsable(binding.endpoint_capability_id, now_ticks) catch return false;
+        if (!granted.holder.eql(task.owner) or granted.scope.task_id != task_id or
+            granted.target.kind != .endpoint or !granted.rights.has(.endpoint_send) or
+            !granted.rights.has(.endpoint_recv)) return false;
+        const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
+        if (address_space.owner_task_id != task.id or address_space.image_id != task.launch.image_id) return false;
+        const image = catalog.findById(task.launch.image_id) orelse return false;
+        if (!image.elf_file.isPresent() or image.bootstrap_mailbox_address == 0) return false;
+        self.init();
+        const mapping = (self.ensureMaterialized(address_space, image) catch return false).entry;
+        if (mapping.resume_valid or mapping.mailbox_publication_cache.initialized) return false;
+        var update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks) orelse return false;
+        update.document = binding;
+        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
+        defer freestanding.paging.switchToKernelAddressSpace();
+        writeBootstrapMailbox(update);
+        mapping.initial_mailbox_prepared = true;
+        return true;
+    }
+
     pub fn observedUserCounterStagePulse(
         self: *Executor,
         address_space_id: u64,
@@ -956,7 +993,7 @@ pub const Executor = struct {
         const authorities = resolveMailboxAuthoritiesCached(task, capability_table, now_ticks, &mapping.mailbox_authority_cache);
         return prepareBootstrapMailboxUpdate(
             mapping.dispatch_metadata.bootstrap_mailbox_address,
-            mapping.resume_valid,
+            mapping.resume_valid or mapping.initial_mailbox_prepared,
             task.component_class,
             mapping.dispatch_metadata.contractFlags(),
             mapping.dispatch_metadata.heartbeatIncrement(),
@@ -1263,6 +1300,7 @@ const BootstrapMailboxUpdate = struct {
     authorities: MailboxAuthorities,
     task_id: u64,
     ui_surface_id: u64,
+    document: userspace_bootstrap_mailbox.DocumentBinding = .{},
 };
 
 const MailboxSnapshotMiss = enum {
@@ -1397,7 +1435,10 @@ fn kernelPublishedMailbox(
     mailbox.task_id = update.task_id;
     mailbox.service_id = update.authorities.bootstrap_service_id;
     mailbox.heartbeat_increment = update.heartbeat_increment;
-    if (preserved == null) mailbox.detail = update.detail;
+    if (preserved == null) {
+        mailbox.detail = update.detail;
+        mailbox.document = update.document;
+    }
     return mailbox;
 }
 
@@ -2226,6 +2267,7 @@ test "mailbox publication preserves resume state and resets first launch" {
         .last_counter = 41,
         .input_event_count = 12,
         .ui_state_revision = 15,
+        .document = .{ .endpoint_capability_id = 201, .service_endpoint_id = 202, .object_id = 203, .version_id = 204 },
     };
     const authorities = MailboxAuthorities{
         .bootstrap_capability_id = 101,
@@ -2253,6 +2295,8 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 9), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 12), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 15), mailbox.ui_state_revision);
+    try std.testing.expectEqual(@as(u64, 201), mailbox.document.endpoint_capability_id);
+    try std.testing.expectEqual(@as(u64, 204), mailbox.document.version_id);
 
     const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 11, 107, 108, authorities).?;
     writeBootstrapMailbox(first_launch);
@@ -2265,6 +2309,7 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 11), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 0), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 0), mailbox.ui_state_revision);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.DocumentBinding{}, mailbox.document);
     try std.testing.expectEqual(@as(u64, 107), mailbox.task_id);
     try std.testing.expectEqual(@as(u64, 108), mailbox.ui_surface_id);
 

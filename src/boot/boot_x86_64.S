@@ -4,6 +4,7 @@
 .equ MULTIBOOT2_ARCH_I386, 0
 .equ MULTIBOOT2_HEADER_TAG_INFORMATION_REQUEST, 1
 .equ MULTIBOOT2_HEADER_TAG_ENTRY_ADDRESS, 3
+.equ MULTIBOOT2_HEADER_TAG_FRAMEBUFFER, 5
 .equ MULTIBOOT2_INFO_TAG_COMMAND_LINE, 1
 .equ MULTIBOOT2_INFO_TAG_BASIC_MEMORY, 4
 .equ MULTIBOOT2_INFO_TAG_MEMORY_MAP, 6
@@ -31,6 +32,15 @@ multiboot2_header_start:
     .short 0
     .long 12
     .long _start
+    .align 8
+
+    # Request a linear graphics mode; accept the firmware's actual dimensions.
+    .short MULTIBOOT2_HEADER_TAG_FRAMEBUFFER
+    .short 0
+    .long 20
+    .long 1280
+    .long 800
+    .long 32
     .align 8
 
     .short 0
@@ -150,6 +160,7 @@ _start:
 .global zigos_efi_entry
 .type zigos_efi_entry, @function
 zigos_efi_entry:
+    endbr64
     movl %edi, zigos_multiboot_info_addr
     movl $0x36D76289, zigos_multiboot_magic
     movq $stack_top, %rsp

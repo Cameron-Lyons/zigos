@@ -28,6 +28,7 @@ pub const CapabilityRight = enum(u8) {
     endpoint_connect,
     endpoint_send,
     endpoint_recv,
+    endpoint_close,
     input_recv,
     capability_mint,
     capability_derive,
@@ -82,6 +83,7 @@ const RightsBits = packed struct(u64) {
     endpoint_connect: bool = false,
     endpoint_send: bool = false,
     endpoint_recv: bool = false,
+    endpoint_close: bool = false,
     input_recv: bool = false,
     capability_mint: bool = false,
     capability_derive: bool = false,
@@ -111,7 +113,7 @@ const RightsBits = packed struct(u64) {
     contacts_read: bool = false,
     screen_capture: bool = false,
     notification_post: bool = false,
-    _reserved: u29 = 0,
+    _reserved: u28 = 0,
 };
 
 pub const CapabilityRights = union(CapabilityTargetKind) {
@@ -153,6 +155,7 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
         endpoint_connect: bool = false,
         endpoint_send: bool = false,
         endpoint_recv: bool = false,
+        endpoint_close: bool = false,
         ipc_peer: bool = false,
     };
 

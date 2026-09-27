@@ -2022,12 +2022,12 @@ fn indexInsertedEntry(workspace: *WorkspaceRecord, insert_index: usize) void {
         entries[insert_index].pathSlice(),
         insert_index,
     );
-        workspace_index.insertEntryObjectSlot(
-            ENTRY_OBJECT_INDEX_CAPACITY,
-            workspace.path_index.objectSlots(),
-            entries[insert_index].object_id.raw(),
-            insert_index,
-        );
+    workspace_index.insertEntryObjectSlot(
+        ENTRY_OBJECT_INDEX_CAPACITY,
+        workspace.path_index.objectSlots(),
+        entries[insert_index].object_id.raw(),
+        insert_index,
+    );
 }
 
 fn unindexRemovedEntry(workspace: *WorkspaceRecord, remove_index: usize) void {

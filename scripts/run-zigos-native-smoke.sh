@@ -149,6 +149,36 @@ assert_reboot_markers() {
   assert_marker_group "$log_path" cold_reboot
 }
 
+assert_fresh_boot_instances() {
+  if ! awk '
+    /^ZIGOS:BOOT:INSTANCE/ {
+      if ($1 != "ZIGOS:BOOT:INSTANCE" || NF != 2 || $2 !~ /^[0-9a-f]+$/ || length($2) != 32 || $2 ~ /^0+$/) exit 1
+      count[FILENAME] += 1
+      if (count[FILENAME] != 1 || seen[$2]++) exit 1
+      instances += 1
+    }
+    END { if (instances != 2) exit 1 }
+  ' "$BOOT1_LOG" "$BOOT2_LOG"; then
+    echo "Zigos native smoke test failed: expected a fresh nonzero 128-bit instance id in each boot" >&2
+    exit 1
+  fi
+}
+
+assert_entropy_baseline_rejection() (
+  local log_path="${BASE_LOG_PATH}.no-rdseed.log"
+  QEMU_CPU_MODEL="$(qemu_harness_cpu_model),-rdseed"
+  export QEMU_CPU_MODEL
+  qemu_harness_run_native_store_until_marker \
+    "$KERNEL_PATH" "$NATIVE_STORE_IMAGE" "$log_path" \
+    "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED" "$ZIGOS_NATIVE_SECONDS"
+  if ! grep -Fxq "Unsupported CPU: missing rdseed" "$log_path" ||
+     grep -Eq '^ZIGOS:RANDOM:READY$|^BOOT:CORE_READY$|^ZIGOS:NATIVE:READY$' "$log_path"; then
+    echo "Zigos native smoke test failed: missing entropy must stop boot before readiness" >&2
+    exit 1
+  fi
+  echo "Zigos missing RDSEED negative smoke test passed. Log: $log_path"
+)
+
 assert_stack_headroom() {
   local log_path="$1"
   local marker="$2"
@@ -376,6 +406,7 @@ case "$MODE" in
     assert_stack_headroom_markers "$BOOT2_LOG"
     assert_production_boot_markers "$BOOT2_LOG"
     assert_marker_group "$BOOT2_LOG" production_reboot
+    assert_fresh_boot_instances
 
     {
       cat "$BOOT1_LOG"
@@ -386,6 +417,7 @@ case "$MODE" in
     } >"$LOG_PATH"
     assert_marker_group_absent "$LOG_PATH" production_forbidden
     assert_measured_userspace_count "$LOG_PATH" 8
+    assert_entropy_baseline_rejection
 
     echo "Zigos production smoke test passed across cold reboot. Logs: $LOG_PATH"
     ;;
@@ -402,6 +434,7 @@ case "$MODE" in
     assert_stack_headroom_markers "$BOOT2_LOG"
     assert_boot_markers "$BOOT2_LOG"
     assert_reboot_markers "$BOOT2_LOG"
+    assert_fresh_boot_instances
     assert_ab_rollback_markers "$BOOT2_LOG"
     assert_base_selector_active_slot "$BOOT2_LOG"
     assert_driver_restart_without_reboot "$BOOT2_LOG"

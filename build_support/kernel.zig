@@ -92,6 +92,12 @@ pub fn addX86_64KernelBootCheck(
         .name = "kernel-x86_64-core-boot",
         .root_module = kernel_module,
     });
+    // CET requires ENDBR at every generated indirect target. The pinned
+    // compiler exposes the LLVM pass through the LTO linker. Switches use
+    // direct branches because this LLVM pass does not mark jump-table targets;
+    // supervisor IBT remains enforced without NOTRACK exemptions.
+    kernel_object.lto = .full;
+    const kernel_assembly = addKernelAssemblyObject(b, kernel_module.resolved_target.?, optimize);
     kernel_object.bundle_compiler_rt = true;
     kernel_object.link_function_sections = true;
     kernel_object.link_data_sections = true;
@@ -99,9 +105,14 @@ pub fn addX86_64KernelBootCheck(
     const link = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "ld.lld",
+        "-mllvm",
+        "-x86-indirect-branch-tracking",
+        "-mllvm",
+        "-min-jump-table-entries=4294967295",
         "-m",
         "elf_x86_64",
         "--gc-sections",
+        "--strip-debug",
         "-z",
         "common-page-size=4096",
         "-z",
@@ -112,6 +123,7 @@ pub fn addX86_64KernelBootCheck(
     link.addArg("-o");
     const linked_kernel = link.addOutputFileArg("kernel-x86_64-core-boot.elf");
     link.addFileArg(kernel_object.getEmittedBin());
+    link.addFileArg(kernel_assembly.getEmittedBin());
 
     const efi_stub = addNativeEfiStub(b, optimize);
     const validate_image = b.addSystemCommand(&.{"bash"});
@@ -170,7 +182,6 @@ fn createX86_64KernelModule(
     kernel_module.addImport("userspace_archive", userspace_images.production_archive_module);
     kernel_module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
     kernel_module.addOptions("build_options", options);
-    addKernelAssemblyFiles(b, kernel_module);
     return kernel_module;
 }
 
@@ -495,12 +506,17 @@ pub fn addKernelArtifact(
     }
 
     kernel_module.addOptions("build_options", options);
-    addKernelAssemblyFiles(b, kernel_module);
 
     const kernel_object = b.addObject(.{
         .name = name,
         .root_module = kernel_module,
     });
+    // CET requires ENDBR at every generated indirect target. The pinned
+    // compiler exposes the LLVM pass through the LTO linker. Switches use
+    // direct branches because this LLVM pass does not mark jump-table targets;
+    // supervisor IBT remains enforced without NOTRACK exemptions.
+    kernel_object.lto = .full;
+    const kernel_assembly = addKernelAssemblyObject(b, kernel_module.resolved_target.?, optimize);
     kernel_object.bundle_compiler_rt = true;
     kernel_object.link_function_sections = true;
     kernel_object.link_data_sections = true;
@@ -508,6 +524,10 @@ pub fn addKernelArtifact(
     const link = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "ld.lld",
+        "-mllvm",
+        "-x86-indirect-branch-tracking",
+        "-mllvm",
+        "-min-jump-table-entries=4294967295",
         "-m",
         "elf_x86_64",
         "--gc-sections",
@@ -521,10 +541,15 @@ pub fn addKernelArtifact(
     link.addArg("-o");
     const linked_kernel = link.addOutputFileArg(name);
     link.addFileArg(kernel_object.getEmittedBin());
+    link.addFileArg(kernel_assembly.getEmittedBin());
 
     const boot_link = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "ld.lld",
+        "-mllvm",
+        "-x86-indirect-branch-tracking",
+        "-mllvm",
+        "-min-jump-table-entries=4294967295",
         "-m",
         "elf_x86_64",
         "--gc-sections",
@@ -539,6 +564,7 @@ pub fn addKernelArtifact(
     boot_link.addArg("-o");
     const boot_kernel = boot_link.addOutputFileArg(b.fmt("{s}.boot", .{name}));
     boot_link.addFileArg(kernel_object.getEmittedBin());
+    boot_link.addFileArg(kernel_assembly.getEmittedBin());
 
     const efi_stub = addNativeEfiStub(b, .ReleaseSmall);
     const validate_qemu_image = b.addSystemCommand(&.{"bash"});
@@ -584,12 +610,19 @@ pub fn addNativeEfiStub(
     });
 }
 
+fn addKernelAssemblyObject(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    addKernelAssemblyFiles(b, module);
+    return b.addObject(.{ .name = "kernel-assembly", .root_module = module });
+}
+
 fn addKernelAssemblyFiles(
     b: *std.Build,
     kernel_module: *std.Build.Module,
 ) void {
     kernel_module.addAssemblyFile(b.path("src/boot/boot_x86_64.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/invpcid.S"));
+    kernel_module.addAssemblyFile(b.path("src/arch/x86/rdseed.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/wrpkru.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/user_access.S"));
     kernel_module.addAssemblyFile(b.path("src/arch/x86/xsaves.S"));

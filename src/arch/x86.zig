@@ -408,3 +408,13 @@ test "PCID CR3 composition preserves an aligned page-table root" {
     try @import("std").testing.expectEqual(@as(?usize, null), pcidCr3Value(0x1234_5001, 7, true));
     try @import("std").testing.expectEqual(@as(?usize, null), pcidCr3Value(0x1234_5000, 0x1000, true));
 }
+
+// RDSEED64, CPUID.7.0:EBX[18], with CF checked independently of the data.
+// Intel DRNG Software Implementation Guide rev. 2.2, sections 5.1 and 5.3:
+// https://cdrdv2-public.intel.com/864722/drng-software-implementation-guide.pdf
+extern fn x86_rdseed64(out: *u64) callconv(.c) u8;
+
+pub fn rdseed64() ?u64 {
+    var value: u64 = undefined;
+    return if (x86_rdseed64(&value) != 0) value else null;
+}

@@ -139,8 +139,8 @@ pub fn runAndPrint() bool {
     if (!driverAuthorityEscapeIsRejected()) return false;
     common.printBootMarker(boot_markers.runtime_proof_driver_authority_escape);
 
-    if (!rebootGrantAndRevocationStatePersists()) return false;
-    common.printBootMarker(boot_markers.runtime_proof_reboot_grant_revocation);
+    if (!checkpointAuthorityIsNotReplayed()) return false;
+    common.printBootMarker(boot_markers.runtime_proof_checkpoint_authority);
 
     return true;
 }
@@ -149,6 +149,7 @@ pub fn runFreestandingAndPrint(
     catalog: *userspace_loader.Catalog,
     runtime: *task_runtime.Runtime,
     scheduler: *userspace_scheduler.Scheduler,
+    kernel: *native_kernel.Kernel,
 ) bool {
     if (builtin.target.os.tag != .freestanding) return true;
     if (!sharedDirectoryRangeReclamation()) return false;
@@ -234,7 +235,7 @@ pub fn runFreestandingAndPrint(
             if (scheduler.executor.materializedCount() != baseline_mappings) return false;
             if (paging.frameStats().allocated != baseline_frames) return false;
             common.printBootMarker(boot_markers.runtime_proof_address_space_reclamation);
-            if (!userGeneralProtectionFaultIsContained(catalog, runtime, scheduler)) return false;
+            if (!userGeneralProtectionFaultIsContained(catalog, runtime, scheduler, kernel)) return false;
             common.printBootMarker(boot_markers.runtime_proof_user_gp_contained);
             return true;
         }
@@ -277,14 +278,42 @@ fn userGeneralProtectionFaultIsContained(
     catalog: *userspace_loader.Catalog,
     runtime: *task_runtime.Runtime,
     scheduler: *userspace_scheduler.Scheduler,
+    kernel: *native_kernel.Kernel,
 ) bool {
-    const baseline_frames = paging.frameStats().allocated;
     const baseline_mappings = scheduler.executor.materializedCount();
+    const baseline_grants = kernel.capability_table.activeCount();
+    const baseline_endpoints = kernel.endpoint_table.activeCount();
+    const baseline_objects = kernel.shared_memory_table.activeCount();
     const launched = catalog.launchDirect(runtime, GP_PROOF_BUNDLE_ID, .{
         .owner = app(61),
         .budget = budget(),
         .local_only = true,
     }) catch return false;
+
+    // Exercise resource retirement through the real userspace exception path,
+    // independently of the capability-authorized task-termination syscall.
+    const authority = kernel.capability_table.mintBootRoot(.{
+        .holder = launched.owner,
+        .issuer = kernel.policy_authority,
+        .target = .{ .kind = .service, .id = 0xF047 },
+        .rights = .{ .service = .{ .endpoint_create = true, .shared_memory_create = true } },
+        .scope = .{ .task_id = launched.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
+    }) catch return false;
+    runtime.grantCapability(launched.id, authority.id) catch return false;
+    const context = native_kernel.KernelCallContext{
+        .caller_task_id = launched.id,
+        .presented_capability_id = authority.id,
+        .target = .none,
+    };
+    const owned_endpoint = kernel.endpointCreate(context, launched.id, "fault-owned", .{ .local_only = true }, 0) catch return false;
+    const owned_memory = kernel.sharedMemoryCreate(context, launched.id, shared_memory.PAGE_SIZE, 0) catch return false;
+    _ = kernel.sharedMemoryMap(.{
+        .caller_task_id = launched.id,
+        .presented_capability_id = owned_memory.capability_id,
+        .target = .none,
+    }, launched.id, 0) catch return false;
+    const baseline_frames = paging.frameStats().allocated;
 
     var attempt: usize = 0;
     while (attempt < 3) : (attempt += 1) {
@@ -299,6 +328,14 @@ fn userGeneralProtectionFaultIsContained(
     if (terminated.state != .terminated) return false;
     const provenance = terminated.latestProvenanceEvent() orelse return false;
     if (provenance.kind != .crash_report) return false;
+    if (terminated.capability_count != 0) return false;
+    if (kernel.capability_table.query(authority.id) != null or
+        kernel.capability_table.query(owned_endpoint.capability_id) != null or
+        kernel.capability_table.query(owned_memory.capability_id) != null) return false;
+    if (kernel.capability_table.activeCount() != baseline_grants or
+        kernel.endpoint_table.activeCount() != baseline_endpoints or
+        kernel.shared_memory_table.activeCount() != baseline_objects) return false;
+    if (kernel.shared_memory_table.mappingsForTask(@import("../../core/ids.zig").task(launched.id)) != 0) return false;
     if (scheduler.executor.materializedCount() != baseline_mappings) return false;
     if (paging.frameStats().allocated != baseline_frames) return false;
     return true;
@@ -308,7 +345,9 @@ pub fn processIsolationBlocksForeignSharedMemory() bool {
     resetProofFixtures();
     const runtime = proofRuntime();
     const capabilities = proofCapabilities();
-    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, proofEndpoints(), &proof_shared);
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(policyAuthority(1), runtime, capabilities, proofEndpoints(), &proof_shared);
+    defer kernel.deinit();
     var port = component_port.KernelPort.init(&kernel);
 
     const owner = runtime.createTask(.{
@@ -352,7 +391,9 @@ pub fn syscallSubjectSpoofingIsRejected() bool {
     resetProofFixtures();
     const runtime = proofRuntime();
     const capabilities = proofCapabilities();
-    var kernel = native_kernel.Kernel.init(policyAuthority(1), runtime, capabilities, proofEndpoints(), &proof_shared);
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(policyAuthority(1), runtime, capabilities, proofEndpoints(), &proof_shared);
+    defer kernel.deinit();
     var port = component_port.KernelPort.init(&kernel);
 
     const receiver = runtime.createTask(.{
@@ -469,7 +510,7 @@ pub fn driverAuthorityEscapeIsRejected() bool {
     return false;
 }
 
-pub fn rebootGrantAndRevocationStatePersists() bool {
+pub fn checkpointAuthorityIsNotReplayed() bool {
     const runtime = proofRuntime();
     const restarted_runtime = restartedProofRuntime();
     reboot_proof_checkpoint_store.reset();
@@ -489,14 +530,20 @@ pub fn rebootGrantAndRevocationStatePersists() bool {
     runtime.grantCapability(task_id, 92) catch return false;
     service_instance.checkpoint(1) catch return false;
     if (!(runtime.revokeCapability(task_id, 91) catch return false)) return false;
-    service_instance.checkpoint(2) catch return false;
+    runtime.grantCapability(task_id, 93) catch return false;
+    // Restore the older checkpoint after revocation and a new grant. Only
+    // authority still attached to the live task may survive the rollback.
+    if (!service_instance.restartFromCheckpoint(2)) return false;
+    if (runtime.hasCapability(task_id, 91) or
+        !runtime.hasCapability(task_id, 92) or
+        !runtime.hasCapability(task_id, 93)) return false;
 
     var restarted = task_runtime_service.Service.initWithStore(restarted_runtime, &reboot_proof_checkpoint_store);
     restarted.bind(50, service(50));
     if (!restarted.restartFromCheckpoint(3)) return false;
     const restored = restarted_runtime.find(task_id) orelse return false;
-    return !restarted_runtime.hasCapability(restored.id, 91) and
-        restarted_runtime.hasCapability(restored.id, 92);
+    // A new runtime has no authority to inherit from execution metadata.
+    return restored.capability_count == 0;
 }
 
 fn budget() task_runtime.ResourceBudget {
@@ -526,5 +573,5 @@ test "runtime negative proofs reject modeled bypasses" {
     try std.testing.expect(syscallSubjectSpoofingIsRejected());
     try std.testing.expect(rawNetworkSendBypassIsDenied());
     try std.testing.expect(driverAuthorityEscapeIsRejected());
-    try std.testing.expect(rebootGrantAndRevocationStatePersists());
+    try std.testing.expect(checkpointAuthorityIsNotReplayed());
 }

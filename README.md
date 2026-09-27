@@ -32,6 +32,101 @@ requests.
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised
   together by the rendered-shell production journey.
+- Document saves in that journey acknowledge success only after a device
+  checkpoint completes. Write failures keep the editor's draft pending; retries
+  reuse its version, and stale editors cannot replace a newer document version.
+  A bounded document-scoped endpoint protocol now has a userspace save client
+  and a native storage backend, with host tests for durable receipts, retry,
+  backpressure, revocation, and object/path scope. The Notes event loop captures
+  Ctrl+Enter snapshots, sends bounded batches, and waits for durable receipts.
+  The same channel loads one immutable version in bounded chunks before Notes
+  accepts queued input. Loads reject changed revisions, revoked access,
+  oversized documents, and text the current renderer cannot represent, while
+  preserving an existing draft. Session opening now validates existing scoped
+  authority, owns the channel's metadata, and publishes the opening binding
+  before the app's first instruction. A lazy four-channel pool services at most
+  two frames or replies per dispatch, preserves suspended sessions, and cancels
+  queued saves when either endpoint or task is retired. Boot verification drives
+  the Notes ELF through document load, modeled keyboard input, a durable save,
+  and channel teardown. Connecting this opener to the interactive launcher and
+  moving the storage core into its userspace service remain open.
+- Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
+  checks instruction availability and success, bounds retries, rejects a stuck
+  source, erases temporary seed buffers, and stops boot if seeding fails. Runtime
+  requests are capped at 4 KiB and require reseeding after 1 MiB of output.
+  Each boot publishes a fresh public 128-bit instance identifier; seed material
+  stays private. Production identity provisioning still needs an authorization
+  lifecycle and durable bindings between principals and their keys.
+- A TPM 2.0 CRB driver discovers one checksum-validated ACPI TPM2 table and
+  probes the real device with family and manufacturer queries. It supports the
+  direct CRB start method, locality 0, and command/response buffers contained in
+  one device page. Bounds checks, monotonic deadlines, bounded cancellation,
+  locality handoff, and a permanent failure latch constrain device faults.
+  Unsupported start methods, RAM buffers, and FIFO devices remain unavailable.
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-qemu-test` requires swtpm
+  (or `SWTPM_BIN`) and checks a CRB cold boot and emulator restart, plus FIFO and
+  absent-device boots. It uses disposable emulator state and a separate test
+  disk. A sealing client now wraps 32-byte keys under an ECC P-256 storage
+  parent using salted HMAC-SHA256 sessions and AES-CFB parameter encryption.
+  Secrets and their authorization values stay encrypted on the TPM command path;
+  authenticated responses are checked before decryption. Objects require 256-bit
+  authorization supplied by the caller and remain bound to their TPM and parent.
+  The client erases temporary material, flushes transient objects and sessions,
+  and returns zeroed key output on failure. It expects empty owner-hierarchy
+  authorization and does not enforce a PCR policy.
+  The secret store now retains authenticated encrypted blobs instead of digest-only
+  placeholders. A TPM adapter wraps fresh data keys and protects up to 96 bytes
+  per secret with XChaCha20-Poly1305, binding owner, label, and export policy.
+  Hardware-backed secrets remain encrypted in the store, including exportable
+  ones. The vault can also generate nonexportable Ed25519 keys: the TPM adapter
+  obtains each seed from the kernel CSPRNG, seals it, and erases it before returning
+  ciphertext. Policy denial, unavailable generation, and provider failures publish
+  no secret; an audit failure rolls back the unpublished record. Immutable provider
+  operation tables keep sealing and opening paired and reduce resident state.
+  Explicit recovery buffers are erased on failure. The vault can sign a
+  digest through a leased handle without granting raw export; signing checks the
+  holder, task, current policy, expiry, and revocation. Ed25519 signing runs in
+  software after an authorized unseal. Restoring a sealed record
+  authenticates its metadata and creates no handles. Identity registration,
+  assertions, and recovery now use private service-owned vault leases. Requests
+  carry handles instead of credential seeds. Each vault operation checks current
+  vault policy, and assertions also recheck credential policy. Assertion signatures
+  bind counters and security claims, and recovery approvals bind the registered
+  threshold, replacement key, and credential generation. Origin validation
+  accepts canonical HTTPS DNS origins
+  and rejects URL paths, user-info, and malformed ports. Production authorization
+  provisioning, durable identity/vault indexing, trusted unlock issuance, and
+  userspace request dispatch remain open.
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
+  creation, recovery from the native disk after restarting the VM and swtpm,
+  repeated handle cleanup, bad authorization, private-blob tampering, response
+  HMAC tampering, and refusal by a replacement TPM. The same guest test persists
+  a vault-generated signing key, checks its public key after reboot, proves another
+  generation with the same label yields a distinct key, rejects altered owner,
+  label, and export policy, and verifies signing leases and 96-byte secret export.
+  Cold and reboot cases also register an identity against that recovered key,
+  verify a vault-backed assertion, and reject counter tampering, expired leases,
+  wrong service tasks, and revoked handles.
+  Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
+  hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
+  and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
+- Task checkpoints restore execution metadata without restoring saved capability
+  attachments. Matching live tasks retain their current grants; removed or
+  replaced tasks retire their endpoints, queued capability moves, shared memory,
+  and associated authority. Reset and restore preserve identity issuance cursors,
+  including exhaustion, so old identifiers cannot be issued to new tasks.
+- Diagnostic ledger format v4 writes its header once and reconstructs sequence
+  numbers from retained events, avoiding a second immutable version per append.
+  Older diagnostic ledger formats are rejected.
+- The storage pool provides 640 payload chunk slots for its 640-blob limit,
+  with payload bytes allocated on demand. Failed writes release newly allocated
+  chunks before publishing an object or version. Storage still has an explicit
+  finite quota; automatic history reclamation remains open.
+- Surface presentation uses a shared-buffer handle, revision, and readiness
+  fence through the userspace display service. The current display hardware
+  adapter records the scanout request; physical scanout and modesetting remain
+  open. The bounded text rasterizer and changed-cell renderer are host-tested
+  helpers and are not connected to this production presentation path.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
@@ -39,8 +134,8 @@ requests.
 - The driver model treats storage, network, USB controllers, GPU/display,
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA
-  buffers. Kernel device code is limited to bootstrap inventory shims and the
-  storage bootstrap broker needed to hand early block devices to userspace.
+  buffers. The prototype retains bootstrap inventory shims, the storage
+  bootstrap broker in the kernel; display presentation is a userspace claim.
 - The driver restart proof now checks that storage I/O works before restart,
   the storage driver has a programmed DMA domain and brokered DMA buffer, stale
   authority/DMA/port access is rejected after a process-generation change, a
@@ -104,6 +199,25 @@ machine-readable requirement coverage, and QEMU proof profiles validate boot,
 smoke, recovery, storage durability, driver restart, and benchmark paths against
 observable boot markers.
 
+Physical memory allocation uses a two-level availability index above its
+ownership bitmap to skip fully reserved or allocated regions. The index adds
+266,240 bytes for the 512 GiB managed aperture; total allocator metadata remains
+below 17 MiB. Single-page reuse probes the allocation cursor directly, while
+sparse page and contiguous-run searches skip empty regions. DMA address bounds,
+immutable firmware reservations, and transactional release checks apply to both
+paths. `./scripts/zig.sh build frame-allocator-benchmark` measures these paths on
+the host, including failed allocations in an exhausted physical range. These
+microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
+
+The kernel heap uses per-CPU magazines for power-of-two size classes from
+32 bytes through 4 KiB, with eight cached spans per class. A locked span table
+handles cache misses, larger allocations, splitting, and adjacent-span
+coalescing. Payloads have no in-band header; a bounded address index validates
+allocation starts and rejects invalid or duplicate frees. Host tests exercise
+this same allocator in a bounded arena, including payload preservation and
+randomized fragmentation. `./scripts/zig.sh build heap-allocator-benchmark`
+measures reuse and allocation under fragmentation, including exhaustion.
+
 ## Design Decisions
 
 - Native-only userspace is the platform model. Apps are signed typed components
@@ -124,18 +238,42 @@ observable boot markers.
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
-  Native ABI v5 copies endpoint sends directly from validated user buffers into
-  queue storage, then streams receive payloads and optional capability
-  descriptors into prevalidated caller buffers. This removes the send-side
-  staging copy, reduces the fixed receive response from 208 bytes to 48, and
-  leaves queued messages untouched when an output is undersized. It also
-  defines a task-scoped, fixed-size surface
-  presentation that is copied into compositor-owned storage with monotonic
-  revision checks. UI
-  processes coalesce each bounded input drain into one revision submission,
+  Native ABI v10 uses 128-byte sealed-ring slots with 88-byte payloads and a
+  56-byte receive header carrying the kernel-recorded sender endpoint. Services explicitly address
+  replies to connected clients; stale or unrelated endpoint handles are
+  rejected before publishing a reply or moving a capability. Receive buffers
+  are validated before dequeue, and undersized outputs leave messages queued.
+  A full endpoint queue returns a distinct `would_block` status so clients can
+  retry backpressure without spinning on a disconnected peer.
+  The `endpoint_close` operation requires its own right, releases one channel
+  and all authority to it, and wakes surviving peers. Clients drain queued
+  replies before receiving `peer_closed`; closed connections cannot be rebound.
+  Closing one client leaves a shared service available to its other clients.
+  Successful sends wake only the destination owner after publishing the message
+  and completing any capability move. Kernel initialization binds one synchronous
+  runtime retirement hook, so lifecycle requests, direct termination, and user
+  exceptions release task-scoped grants, owned endpoints, and shared-memory
+  objects and mappings through the same path. Termination releases unread
+  moved grants before freeing endpoint queues; failed receipt attachment also
+  releases a consumed move while leaving copied grants with their sender.
+  Endpoint and shared-memory creation unwind unpublished objects if ownership
+  grants fail, restoring owner budgets and frame reservations. Failed single
+  grants preserve capacity for future capability targets. Removing the last
+  grant to a target also releases its metadata; revoked sibling grants retain
+  their epoch until they are removed.
+  Services retire both temporary endpoints after their startup IPC check,
+  including cleanup when a later startup step fails.
+  Idle services park instead of generating
+  heartbeat work; a task with queued endpoint messages stays runnable. Production
+  smoke tests require the scheduler to reach idle and stop its periodic tick.
+  The ABI also defines a task-scoped, 32-byte surface descriptor carrying a
+  shared-buffer handle and readiness fence, with monotonic revision checks.
+  UI processes coalesce each bounded input drain into one revision submission,
   acknowledge only accepted revisions, and park when no more focused input is
-  queued. Production boot now proves that the compositor's userspace revision
-  crosses the syscall boundary and is rendered from the compositor-owned copy.
+  queued. Production boot proves that the descriptor crosses the syscall
+  boundary and appears in the compositor's diagnostic view. The document proof
+  compares the mailbox's text digest with the loaded and durably saved content;
+  neither proof establishes physical display output.
 - Identity is passwordless and device-bound. Zigos models
   [FIDO-style passkeys](https://fidoalliance.org/passkeys/), recovery keys,
   hardware roots, and threshold recovery; administration is delegated through
@@ -178,10 +316,12 @@ Use the pinned toolchain and repo entrypoints:
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
-- A CPU with CPUID, SSE2, long mode, NX, SMEP, SMAP, and UMIP. Zigos rejects
-  older x86 CPUs instead of weakening its security contract. GRUB Multiboot2
-  enters the bootstrap in 32-bit protected mode; the bootstrap immediately
-  installs four-level paging and enters the x86-64 Zig kernel.
+- An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, PGE, PCID/INVPCID,
+  x2APIC, XSAVE/XSAVES, CET IBT and shadow-stack support, FRED, LASS, LKGS,
+  1 GiB pages, and a calibrated invariant TSC with deadline timers. Production
+  boots require the complete floor. QEMU media explicitly selects its software
+  CPU fallback for features unavailable in the emulator; RDSEED remains required.
+  The native UEFI loader enters the x86-64 kernel directly.
 - Supported boots initialize the calibrated invariant-TSC clock before emitting
   their first marker. COM1 transmit readiness uses a 100 ms elapsed deadline,
   yields to sibling hardware threads while polling, and waits only before

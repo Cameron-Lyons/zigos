@@ -45,7 +45,7 @@ pub const PersistenceBatchDepth = u16;
 pub const PendingPersistenceCount = u16;
 const state_entry_path = "state/event-ledger";
 const event_entry_prefix = "events/";
-const persistent_header_magic: u32 = 0x454C4733;
+const persistent_header_magic: u32 = 0x454C4734;
 const permission_kind_none: u8 = 0xFF;
 const DENIAL_HELP_BUFFER_BYTES: usize = 256;
 const PERSISTENT_EVENT_RESERVED_BYTES: usize = 3;
@@ -64,7 +64,6 @@ comptime {
 
 const PersistentHeader = extern struct {
     magic: u32 = persistent_header_magic,
-    next_sequence: u64 = 1,
 };
 
 pub const EventKind = kinds.EventKind;
@@ -1823,11 +1822,32 @@ pub const Ledger = struct {
 
     pub fn absorb(self: *Ledger, source: *const Ledger) Error!void {
         const source_backing = source.backingConst() orelse return;
+        // Bulk imports share workspace commits. Reserve staging space for both
+        // expiring paths and new paths plus the initial format header.
+        const batch_limit = (workspace.MAX_WORKSPACE_ENTRIES - 1) / 2;
+        const owns_batch = self.storage != null and self.persistence_batch_depth == 0;
+        if (owns_batch and self.pending_persist_count != 0) try self.flushPersistenceBatch();
+        var batch_open = false;
+        defer if (batch_open) {
+            self.persistence_batch_depth -= 1;
+        };
         for (&source_backing.events.slots) |*slot| {
             if (!slot.in_use) continue;
+            if (owns_batch and !batch_open) {
+                self.beginPersistenceBatch();
+                batch_open = true;
+            }
             var event = slot.event;
             event.sequence = 0;
             try self.appendEvent(&event);
+            if (owns_batch and self.pending_persist_count >= batch_limit) {
+                batch_open = false;
+                try self.flushPersistenceBatch();
+            }
+        }
+        if (batch_open) {
+            batch_open = false;
+            try self.flushPersistenceBatch();
         }
     }
 
@@ -2077,9 +2097,7 @@ pub const Ledger = struct {
 
     fn persistRange(self: *Ledger, first_sequence: u64, latest_sequence: u64, latest_tick: u64) Error!void {
         const storage = self.storage orelse return;
-        var header = PersistentHeader{ .next_sequence = self.next_sequence };
-        const header_payload = std.mem.asBytes(&header);
-        const previous_header_version_id = if (self.header_version_id != 0)
+        var header_version_id = if (self.header_version_id != 0)
             self.header_version_id
         else blk: {
             const existing_header = storage.resolve(self.workspace_id, state_entry_path) catch |err| switch (err) {
@@ -2106,18 +2124,24 @@ pub const Ledger = struct {
             };
         }
 
-        const header_result = try storage.putLocallySignedVersion(.{
-            .preferred_object_id = object_store.ids.object(stateObjectId()),
-            .object_type = .document,
-            .payload = header_payload,
-            .signer = self.state_signer,
-            .label = "event-ledger-state",
-            .content_type = "application/zigos-event-ledger",
-            .created_at_ticks = latest_tick,
-            .parent_version_id = if (previous_header_version_id != 0) object_store.ids.version(previous_header_version_id) else null,
-        });
-        try storage.stagePut(self.workspace_id, state_entry_path, header_result.object_id, header_result.version_id, .document);
-        self.header_version_id = header_result.version_id.raw();
+        // The retained event with the highest sequence determines the next
+        // sequence on reload. Persist the format header once; a mutable counter
+        // would consume a second immutable version and blob on every append.
+        if (header_version_id == 0) {
+            var header = PersistentHeader{};
+            const header_result = try storage.putLocallySignedVersion(.{
+                .preferred_object_id = object_store.ids.object(stateObjectId()),
+                .object_type = .document,
+                .payload = std.mem.asBytes(&header),
+                .signer = self.state_signer,
+                .label = "event-ledger-state",
+                .content_type = "application/zigos-event-ledger",
+                .created_at_ticks = latest_tick,
+                .parent_version_id = null,
+            });
+            try storage.stagePut(self.workspace_id, state_entry_path, header_result.object_id, header_result.version_id, .document);
+            header_version_id = header_result.version_id.raw();
+        }
 
         var sequence = first_sequence;
         while (sequence <= latest_sequence) : (sequence += 1) {
@@ -2140,6 +2164,7 @@ pub const Ledger = struct {
         }
 
         _ = try storage.commit(self.workspace_id, latest_tick);
+        self.header_version_id = header_version_id;
     }
 
     fn loadPersistedEvents(self: *Ledger) Error!void {
@@ -2152,7 +2177,7 @@ pub const Ledger = struct {
 
         if (storage.resolve(self.workspace_id, state_entry_path)) |entry| {
             const version = storage.version(entry.version_id) orelse return error.CorruptState;
-            self.next_sequence = try parseHeader(try storage.versionPayload(version));
+            try parseHeader(try storage.versionPayload(version));
             self.header_version_id = entry.version_id.raw();
         } else |err| switch (err) {
             error.EntryNotFound => return,
@@ -2181,9 +2206,10 @@ pub const Ledger = struct {
             }
         }
 
-        if (loaded_count > 0 and self.next_sequence <= backing.events.slots[loaded_count - 1].event.sequence) {
-            self.next_sequence = backing.events.slots[loaded_count - 1].event.sequence + 1;
-        }
+        if (loaded_count == 0) return error.CorruptState;
+        const last_sequence = backing.events.slots[loaded_count - 1].event.sequence;
+        if (last_sequence == 0 or last_sequence == std.math.maxInt(u64)) return error.CorruptState;
+        self.next_sequence = last_sequence + 1;
         try self.rebuildIndexes();
     }
 };
@@ -2614,12 +2640,11 @@ fn eventObjectId(sequence: u64) u64 {
     );
 }
 
-fn parseHeader(payload: []const u8) Error!u64 {
+fn parseHeader(payload: []const u8) Error!void {
     if (payload.len != @sizeOf(PersistentHeader)) return error.CorruptState;
     var header = std.mem.zeroes(PersistentHeader);
     @memcpy(std.mem.asBytes(&header), payload);
     if (header.magic != persistent_header_magic) return error.CorruptState;
-    return header.next_sequence;
 }
 
 fn parsePersistentEvent(payload: []const u8) Error!Event {

@@ -26,6 +26,7 @@ const expectEndpointConnect = common.expectEndpointConnect;
 const expectEndpointCreateWithFlags = common.expectEndpointCreateWithFlags;
 const expectEndpointRecv = common.expectEndpointRecv;
 const expectEndpointSend = common.expectEndpointSend;
+const expectEndpointReply = common.expectEndpointReply;
 const signer = common.signer;
 const HEADLESS_TEST_SHARED_MEMORY_BYTES: usize = 512;
 const REVIEW_CARD_BUFFER_BYTES: usize = 512;
@@ -785,12 +786,13 @@ fn compositorRoundTrip(
         received_request.payload[0..received_request.message.payload_len],
         &response_buffer,
     );
-    try expectEndpointSend(kernel_port, task_id, service_endpoint_capability_id, response_payload, tick.*);
+    try expectEndpointReply(kernel_port, task_id, service_endpoint_capability_id, received_request.message, response_payload, tick.*);
     tick.* += 1;
 
     const received_response = try expectEndpointRecv(kernel_port, task_id, peer_endpoint_capability_id, tick.*);
     tick.* += 1;
     try std.testing.expectEqual(@as(u8, 1), received_response.present);
+    try std.testing.expectEqual(received_request.message.correlation_id, received_response.message.correlation_id);
     return compositor_session.decodeResponse(received_response.payload[0..received_response.message.payload_len]);
 }
 
@@ -817,11 +819,12 @@ fn taskShellRoundTrip(
         received_request.payload[0..received_request.message.payload_len],
         &response_buffer,
     );
-    try expectEndpointSend(kernel_port, task_id, service_endpoint_capability_id, response_payload, tick.*);
+    try expectEndpointReply(kernel_port, task_id, service_endpoint_capability_id, received_request.message, response_payload, tick.*);
     tick.* += 1;
 
     const received_response = try expectEndpointRecv(kernel_port, task_id, peer_endpoint_capability_id, tick.*);
     tick.* += 1;
     try std.testing.expectEqual(@as(u8, 1), received_response.present);
+    try std.testing.expectEqual(received_request.message.correlation_id, received_response.message.correlation_id);
     return rendered_shell.decodeTaskShellResponse(received_response.payload[0..received_response.message.payload_len]);
 }

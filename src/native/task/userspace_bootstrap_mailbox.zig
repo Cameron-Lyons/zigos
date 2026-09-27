@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 8;
 pub const MAILBOX_RESERVED_BYTES: usize = 3;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
@@ -61,7 +61,9 @@ pub const UiStateFlags = packed struct(u8) {
     recovery_visible: bool = false,
     active: bool = false,
     input_overflow: bool = false,
-    _reserved: u4 = 0,
+    loading: bool = false,
+    load_failed: bool = false,
+    _reserved: u2 = 0,
 };
 
 pub fn yieldDisposition(raw: u32) ?YieldDisposition {
@@ -96,6 +98,20 @@ pub const ServiceStatusFlags = packed struct(u32) {
     response_received: bool = false,
     all_operations_completed: bool = false,
     _reserved: u27 = 0,
+};
+
+// One channel for one loaded document. version_id is the opening version;
+// the client advances its own receipt token. Reopening uses a fresh channel.
+pub const DocumentBinding = extern struct {
+    endpoint_capability_id: u64 = 0,
+    service_endpoint_id: u64 = 0,
+    object_id: u64 = 0,
+    version_id: u64 = 0,
+
+    pub fn isValid(self: DocumentBinding) bool {
+        return self.endpoint_capability_id != 0 and self.service_endpoint_id != 0 and
+            self.object_id != 0 and self.version_id != 0;
+    }
 };
 
 pub const Mailbox = extern struct {
@@ -142,13 +158,15 @@ pub const Mailbox = extern struct {
     ui_presented_revision: u64 = 0,
     ui_presentation_failures: u32 = 0,
     ui_last_presentation_status: u32 = PRESENTATION_STATUS_NOT_ATTEMPTED,
+    ui_text_digest: [32]u8 = [_]u8{0} ** 32,
+    document: DocumentBinding = .{},
 };
 
-pub const ABI_SIZE_BYTES: usize = 192;
+pub const ABI_SIZE_BYTES: usize = 256;
 pub const ABI_ALIGNMENT: usize = 8;
 
 comptime {
-    if (@offsetOf(Mailbox, "ui_last_presentation_status") + @sizeOf(@FieldType(Mailbox, "ui_last_presentation_status")) != ABI_SIZE_BYTES) {
+    if (@offsetOf(Mailbox, "document") + @sizeOf(DocumentBinding) != ABI_SIZE_BYTES) {
         @compileError("userspace bootstrap mailbox fields no longer match the wire ABI");
     }
 }
@@ -226,5 +244,7 @@ test "mailbox records focused input consumption without architecture-dependent p
     try @import("std").testing.expectEqual(@as(usize, 144), @offsetOf(Mailbox, "ui_state_revision"));
     try @import("std").testing.expectEqual(@as(usize, 160), @offsetOf(Mailbox, "surface_presentation_capability_id"));
     try @import("std").testing.expectEqual(@as(usize, 176), @offsetOf(Mailbox, "ui_presented_revision"));
+    try @import("std").testing.expectEqual(@as(usize, 192), @offsetOf(Mailbox, "ui_text_digest"));
+    try @import("std").testing.expectEqual(@as(usize, 224), @offsetOf(Mailbox, "document"));
     try @import("std").testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
 }

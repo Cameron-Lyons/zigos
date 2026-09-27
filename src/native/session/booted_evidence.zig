@@ -7,6 +7,7 @@ const bootstrap_packages = @import("../demo/bootstrap_packages.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const daily_journey_state = @import("daily_journey_state.zig");
+const device_graph = @import("../sync/device_graph.zig");
 const humane_shell = @import("../platform/rendered_shell/humane_shell.zig");
 const native_ux = @import("../platform/native_ux.zig");
 const notification_center = @import("../services/notification_center.zig");
@@ -196,6 +197,7 @@ pub fn runProduction(manager: anytype, graph: anytype) bool {
     if (!runBootedNotesTypedInputLoop(graph, &lifecycle_context, sync_service, &compositor_service, storage_state)) {
         return false;
     }
+    @import("proofs/document_channel_proof.zig").run(manager, graph, storage_state.notes_workspace_id) catch |err| return evidenceStepFailed("document_channel", err);
     return true;
 }
 
@@ -303,6 +305,18 @@ fn runNotesDailyDriverJourney(
 
     var sync_port = sync_service_mod.SyncPort.init(sync_service, context.capability_table);
     const sync_authority = scenario_support.mintSyncAuthority(context, 221);
+    // The prior journey revokes its paired device, and explicit document saves
+    // now preserve that revocation across reboot. Each repeated verification
+    // journey enrolls a fresh test identity; revoked identities stay revoked.
+    var paired_device: principal.PrincipalId = undefined;
+    var paired_signer = notes_daily_paired_device_signer;
+    for (0..device_graph.MAX_DEVICES) |index| {
+        const candidate = principal.PrincipalId{ .kind = .device, .serial = 26_029 + index };
+        if (sync_service.findDeviceRecord(candidate) != null) continue;
+        paired_device = candidate;
+        std.mem.writeInt(u64, paired_signer.seed[0..8], candidate.serial, .little);
+        break;
+    } else return evidenceCheckFailed("daily.fresh_paired_device_capacity");
     const install_bundle = signedNotesDailyBundle(0) catch |err| return evidenceStepFailed("daily.sign_install_bundle", err);
     const update_bundle = signedNotesDailyBundle(1) catch |err| return evidenceStepFailed("daily.sign_update_bundle", err);
     var state_instance: daily_journey_state.Instance = .{};
@@ -349,11 +363,11 @@ fn runNotesDailyDriverJourney(
             .image_id = 26_026_001,
             .share_principal = principal.PrincipalId{ .kind = .user, .serial = 26_027 },
             .sync_from_device = principal.PrincipalId{ .kind = .device, .serial = 26_028 },
-            .sync_to_device = principal.PrincipalId{ .kind = .device, .serial = 26_029 },
+            .sync_to_device = paired_device,
             .policy_signer = notes_daily_policy_signer,
             .user_signer = notes_daily_user_signer,
             .primary_device_signer = notes_daily_primary_device_signer,
-            .paired_device_signer = notes_daily_paired_device_signer,
+            .paired_device_signer = paired_signer,
         },
     );
 

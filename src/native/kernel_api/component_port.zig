@@ -59,6 +59,7 @@ pub const EndpointSendRequest = struct {
     correlation_id: u64 = 0,
     endpoint_capability_id: u64,
     payload: []const u8,
+    reply_endpoint_id: u64 = 0,
     attached_capability_id: ?u64 = null,
     move_attached_capability: bool = false,
 };
@@ -69,6 +70,11 @@ pub const EndpointRecvRequest = struct {
     receiver_task_id: u64,
     payload_out: []u8,
     attached_capability_out: *abi.CapabilityDescriptor,
+};
+
+pub const EndpointCloseRequest = extern struct {
+    header: abi.RequestHeader,
+    endpoint_capability_id: u64,
 };
 
 pub const CapabilityMintRequest = struct {
@@ -257,10 +263,16 @@ pub const KernelPort = struct {
             self.callContext(request.header, request.endpoint_capability_id, .none),
             request.correlation_id,
             request.payload,
+            request.reply_endpoint_id,
             request.attached_capability_id,
             request.move_attached_capability,
             now_ticks,
         );
+    }
+
+    pub fn endpointClose(self: *KernelPort, request: EndpointCloseRequest, now_ticks: u64) Error!void {
+        try self.validateIncomingHeader(request.header, .endpoint_close);
+        try self.kernel.endpointClose(self.callContext(request.header, request.endpoint_capability_id, .none), now_ticks);
     }
 
     pub fn endpointRecv(
@@ -616,18 +628,6 @@ fn validateHeader(header: abi.RequestHeader, comptime expected: abi.NativeOperat
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
 }
 
-fn callContext(
-    header: abi.RequestHeader,
-    presented_capability_id: u64,
-    target: native_kernel.KernelTarget,
-) native_kernel.KernelCallContext {
-    return .{
-        .caller_task_id = header.subject_task_id,
-        .presented_capability_id = presented_capability_id,
-        .target = target,
-    };
-}
-
 test "kernel port generated wrappers cover operation metadata" {
     try std.testing.expectEqual(operation_metadata.operations.len, generated_wrappers.len);
     inline for (operation_metadata.operations) |descriptor| {
@@ -649,13 +649,15 @@ test "kernel port enforces operation ids and forwards typed task create requests
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var port = KernelPort.init(&kernel);
 
     const session_task = try runtime.createTask(.{
@@ -746,13 +748,15 @@ test "kernel port validates and forwards typed device broker requests" {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         .{ .kind = .policy_authority, .serial = 1 },
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var port = KernelPort.init(&kernel);
 
     const kernel_port_device_image = try generated_image_fixtures.storageDriverImage();

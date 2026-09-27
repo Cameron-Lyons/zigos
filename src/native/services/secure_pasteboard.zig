@@ -276,7 +276,6 @@ pub const Service = struct {
         const generation = if (incremented == 0) 1 else incremented;
         return TokenId.fromParts(grant_index, generation).value;
     }
-
 };
 
 fn grantReusableAt(grant: *const Grant, now_ticks: u64) bool {

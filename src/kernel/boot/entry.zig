@@ -1,3 +1,5 @@
+const std = @import("std");
+const secure_random = @import("../platform/secure_random.zig");
 const x86 = @import("../../arch/x86.zig");
 const cpu_features = @import("../../arch/cpu_features.zig");
 const console = @import("../utils/console.zig");
@@ -90,6 +92,18 @@ pub fn kernelMain() void {
     tsc_clock.init(features.tsc_frequency_hz);
     printBootIdentity();
     common.printBootMarker(boot_markers.cpu_baseline_ready);
+    secure_random.initialize(features.rdseed) catch |err| {
+        common.printBootMarker(boot_markers.random_rejected);
+        console.print(@errorName(err));
+        console.print("\n");
+        x86.cli();
+        while (true) x86.hlt();
+    };
+    common.printBootMarker(boot_markers.random_ready);
+    console.print("ZIGOS:BOOT:INSTANCE ");
+    const instance_hex = std.fmt.bytesToHex(&secure_random.bootInstanceId(), .lower);
+    console.print(&instance_hex);
+    console.print("\n");
     cpu_features.enableModernFeatures(
         features,
         if (hardware_process_contexts) .hardware_pcid else .software_flush,

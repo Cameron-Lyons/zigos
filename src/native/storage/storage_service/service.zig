@@ -12,6 +12,7 @@ const signing = @import("../../core/signing.zig");
 const workspace = @import("../workspace.zig");
 
 pub const CheckpointStore = checkpoint_support.CheckpointStore;
+pub const DurabilityError = checkpoint_support.DurabilityError;
 
 pub const SharedPayloadTransfer = struct {
     table: *const shared_memory.Table,
@@ -122,13 +123,27 @@ pub const StorageCore = struct {
         self.flushCheckpoint();
     }
 
+    pub fn checkpointDurable(self: *const Service) DurabilityError!u64 {
+        return checkpoint_support.checkpointDurable(self);
+    }
+
+    pub fn requireDurableBoundary(self: *const Service) DurabilityError!void {
+        return checkpoint_support.requireDurableBoundary(self);
+    }
+
     pub fn beginCheckpointBatch(self: *Service) void {
         self.checkpoint_batch_depth += 1;
     }
 
     pub fn flushCheckpointBatch(self: *Service) void {
-        if (self.checkpoint_batch_depth != 0) self.checkpoint_batch_depth -= 1;
+        self.endCheckpointBatch();
         if (self.checkpoint_batch_depth == 0) self.flushCheckpoint();
+    }
+
+    // End deferral without an implicit flush, so a caller can explicitly await
+    // checkpointDurable() and propagate the device's result to its client.
+    pub fn endCheckpointBatch(self: *Service) void {
+        if (self.checkpoint_batch_depth != 0) self.checkpoint_batch_depth -= 1;
     }
 
     pub fn pendingCheckpointMutations(self: *const Service) bool {
@@ -769,6 +784,17 @@ pub const StoragePort = struct {
             .now_ticks = authority.now_ticks,
         })) return error.PermissionDenied;
         return entry;
+    }
+
+    pub fn requireDocumentWrite(
+        self: *StoragePort,
+        authority: AuthorityContext,
+        workspace_id: u64,
+        path: []const u8,
+        object_id: u64,
+    ) (AuthorityError || workspace.Error)!void {
+        const entry = try self.openEntry(authority, workspace_id, path, .write);
+        if (entry.object_id.raw() != object_id or entry.object_type != .document) return error.PermissionDenied;
     }
 
     fn requireObjectAuthority(

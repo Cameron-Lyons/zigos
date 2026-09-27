@@ -8,6 +8,7 @@ pub const production_required = [_][]const u8{
     boot_markers.boot_profile_zigos_native,
     boot_markers.kernel_role_production,
     boot_markers.cpu_baseline_ready,
+    boot_markers.random_ready,
     boot_markers.cpu_nx_enabled,
     boot_markers.cpu_smep_enabled,
     boot_markers.cpu_smap_enabled,
@@ -48,9 +49,13 @@ pub const production_required = [_][]const u8{
     boot_markers.storage_checkpoint_final_clean,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
+    boot_markers.userspace_scheduler_idle,
 };
 
 pub const production_forbidden = [_][]const u8{
+    boot_markers.document_channel_userspace_open,
+    boot_markers.document_channel_userspace_save,
+    boot_markers.document_channel_retirement,
     boot_markers.kernel_role_verification,
     boot_markers.runtime_proof_process_isolation,
     boot_markers.service_boot_ipc_connect_all_ok,
@@ -86,6 +91,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.boot_profile_zigos_native,
     boot_markers.kernel_role_verification,
     boot_markers.cpu_baseline_ready,
+    boot_markers.random_ready,
     boot_markers.cpu_nx_enabled,
     boot_markers.cpu_smep_enabled,
     boot_markers.cpu_smap_enabled,
@@ -118,7 +124,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.runtime_proof_syscall_subject_spoof,
     boot_markers.runtime_proof_raw_network_bypass,
     boot_markers.runtime_proof_driver_authority_escape,
-    boot_markers.runtime_proof_reboot_grant_revocation,
+    boot_markers.runtime_proof_checkpoint_authority,
     boot_markers.supervisor_ready,
     boot_markers.service_contract_map_ready,
     boot_markers.policy_ready,
@@ -189,6 +195,9 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_sync_ok,
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
+    boot_markers.document_channel_userspace_open,
+    boot_markers.document_channel_userspace_save,
+    boot_markers.document_channel_retirement,
     boot_markers.notes_daily_driver_complete,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
@@ -345,7 +354,9 @@ pub const storage_durability_required = [_][]const u8{
     boot_markers.kernel_role_verification,
     boot_markers.boot_core_ready,
     boot_markers.storage_durability_start,
+    boot_markers.storage_durability_document_save_acked,
     boot_markers.storage_durability_baseline_checkpointed,
+    boot_markers.storage_durability_document_reopened,
     boot_markers.storage_durability_interrupted_write_staged,
     boot_markers.storage_durability_interrupted_boot_recovered,
     boot_markers.storage_durability_final_checkpointed,
@@ -390,6 +401,9 @@ pub const notes_daily_driver_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_sync_ok,
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
+    boot_markers.document_channel_userspace_open,
+    boot_markers.document_channel_userspace_save,
+    boot_markers.document_channel_retirement,
     boot_markers.notes_daily_driver_complete,
 };
 
@@ -398,6 +412,7 @@ pub const recovery_required = [_][]const u8{
     boot_markers.boot_profile_recovery,
     boot_markers.kernel_role_verification,
     boot_markers.cpu_baseline_ready,
+    boot_markers.random_ready,
     boot_markers.cpu_nx_enabled,
     boot_markers.cpu_smep_enabled,
     boot_markers.cpu_smap_enabled,
@@ -432,6 +447,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.boot_profile_zigos_native,
         boot_markers.kernel_role_production,
         boot_markers.cpu_baseline_ready,
+        boot_markers.random_ready,
         boot_markers.cpu_nx_enabled,
         boot_markers.cpu_smep_enabled,
         boot_markers.cpu_smap_enabled,
@@ -447,6 +463,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.platform_artifact_manifest_verified,
         boot_markers.platform_measured_boot_verified_root,
         boot_markers.native_ready,
+        boot_markers.userspace_scheduler_idle,
     };
     for (required) |marker| {
         try std.testing.expect(contains(&production_required, marker));
@@ -507,7 +524,7 @@ test "native smoke gate requires runtime isolation proof markers" {
         boot_markers.runtime_proof_syscall_subject_spoof,
         boot_markers.runtime_proof_raw_network_bypass,
         boot_markers.runtime_proof_driver_authority_escape,
-        boot_markers.runtime_proof_reboot_grant_revocation,
+        boot_markers.runtime_proof_checkpoint_authority,
     };
 
     for (required) |marker| {

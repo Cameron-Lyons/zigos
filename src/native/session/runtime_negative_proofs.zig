@@ -7,12 +7,12 @@ pub const processIsolationBlocksForeignSharedMemory = impl.processIsolationBlock
 pub const syscallSubjectSpoofingIsRejected = impl.syscallSubjectSpoofingIsRejected;
 pub const rawNetworkSendBypassIsDenied = impl.rawNetworkSendBypassIsDenied;
 pub const driverAuthorityEscapeIsRejected = impl.driverAuthorityEscapeIsRejected;
-pub const rebootGrantAndRevocationStatePersists = impl.rebootGrantAndRevocationStatePersists;
+pub const checkpointAuthorityIsNotReplayed = impl.checkpointAuthorityIsNotReplayed;
 
 test "runtime negative proofs reject modeled bypasses" {
     try std.testing.expect(processIsolationBlocksForeignSharedMemory());
     try std.testing.expect(syscallSubjectSpoofingIsRejected());
     try std.testing.expect(rawNetworkSendBypassIsDenied());
     try std.testing.expect(driverAuthorityEscapeIsRejected());
-    try std.testing.expect(rebootGrantAndRevocationStatePersists());
+    try std.testing.expect(checkpointAuthorityIsNotReplayed());
 }

@@ -1,3 +1,5 @@
+const common = @import("../common.zig");
+const boot_markers = @import("../markers.zig");
 const x86 = @import("../../../arch/x86.zig");
 const session_manager = @import("root").session_manager;
 const timer = @import("../../timer/timer.zig");
@@ -8,6 +10,7 @@ const event_wake = @import("../../event_wake.zig");
 const smp = @import("../../smp.zig");
 
 var recorded_input_report_count: u64 = 0;
+var reported_scheduler_idle = false;
 
 pub const INTERRUPT_DRIVEN_IDLE = event_wake.INTERRUPT_DRIVEN_IDLE;
 
@@ -48,6 +51,10 @@ pub fn run() noreturn {
             timer.armSchedulerTick();
         } else {
             timer.disarmSchedulerTick();
+            if (!reported_scheduler_idle) {
+                reported_scheduler_idle = true;
+                common.printBootMarker(boot_markers.userspace_scheduler_idle);
+            }
         }
         smp.idle();
     }

@@ -198,7 +198,7 @@ const TestKernel = struct {
     authority_capability_id: u64 = 0,
 
     fn init(self: *TestKernel) !void {
-        self.kernel = native_kernel.Kernel.init(
+        self.kernel.initInPlace(
             .{ .kind = .policy_authority, .serial = 1 },
             &self.runtime,
             &self.capabilities,
@@ -423,7 +423,7 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
 
     const peer = try test_kernel.endpoints.create(ids.task(test_kernel.session_task_id), "receive-peer", .{ .local_only = true });
     try test_kernel.endpoints.connect(peer.id, ids.endpoint(created.endpoint.endpoint_id));
-    try test_kernel.endpoints.send(peer.id, ids.task(test_kernel.session_task_id), 91, "hello", null, false);
+    _ = try test_kernel.endpoints.send(peer.id, ids.task(test_kernel.session_task_id), 91, "hello", null, false);
 
     const short_response = dispatchRequest(
         &test_kernel.port,
@@ -462,8 +462,209 @@ test "syscall surface validates compact endpoint receive outputs before dequeue"
     try std.testing.expectEqual(abi.SyscallStatus.success, received.status);
     try std.testing.expectEqual(@as(u8, 1), response.present);
     try std.testing.expectEqual(@as(u16, 5), response.message.payload_len);
+    try std.testing.expectEqual(peer.id.raw(), response.message.sender_endpoint_id);
     try std.testing.expectEqualStrings("hello", payload[0..response.message.payload_len]);
     try std.testing.expectEqual(@as(u16, 0), (try test_kernel.endpoints.descriptor(ids.endpoint(created.endpoint.endpoint_id))).queued_messages);
+}
+
+test "endpoint close syscall enforces authority and wakes parked peers without spinning" {
+    const Scheduler = @import("../task/userspace_scheduler.zig").Scheduler;
+    const Wake = struct {
+        fn wake(context: *anyopaque, task_id: u64, tick: u64) void {
+            const scheduler: *Scheduler = @ptrCast(@alignCast(context));
+            _ = scheduler.wakeTask(task_id, .ipc_message, tick, 0);
+        }
+    };
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+    defer test_kernel.kernel.deinit();
+    const app = try test_kernel.runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 88 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 4096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .local_only = true,
+    });
+    test_kernel.runtime.allowHostPointerSyscallsForTask(app.id);
+    test_kernel.runtime.allowHostPointerSyscallsForTask(test_kernel.session_task_id);
+    var endpoints: [3]native_kernel.EndpointCreateResult = undefined;
+    for (&endpoints, 0..) |*created, index| {
+        created.* = try test_kernel.port.endpointCreate(.{
+            .header = component_port.makeHeader(.endpoint_create, test_kernel.session_task_id),
+            .authority_capability_id = test_kernel.authority_capability_id,
+            .owner_task_id = if (index == 0) test_kernel.session_task_id else app.id,
+            .label = "close-test",
+            .flags = .{ .local_only = true, .service_port = index == 0 },
+        }, 1);
+    }
+    const server = endpoints[0];
+    const client = endpoints[1];
+    const sibling = endpoints[2];
+    try test_kernel.endpoints.connect(ids.endpoint(client.endpoint.endpoint_id), ids.endpoint(server.endpoint.endpoint_id));
+    const send_only = try test_kernel.capabilities.mintBootRoot(.{
+        .holder = app.owner,
+        .issuer = test_kernel.kernel.policy_authority,
+        .target = .{ .kind = .endpoint, .id = client.endpoint.endpoint_id },
+        .rights = .{ .endpoint = .{ .endpoint_send = true } },
+        .scope = .{ .task_id = app.id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+    });
+    try test_kernel.runtime.grantCapability(app.id, send_only.id);
+    var close_request = component_port.EndpointCloseRequest{
+        .header = component_port.makeHeader(.endpoint_close, app.id),
+        .endpoint_capability_id = send_only.id,
+    };
+    try std.testing.expectEqual(abi.SyscallStatus.denied, dispatch(&test_kernel.port, app.id, 2, close_request.header.operation, @intFromPtr(&close_request), 0, 0).status);
+    close_request.endpoint_capability_id = server.capability_id;
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, dispatch(&test_kernel.port, app.id, 2, close_request.header.operation, @intFromPtr(&close_request), 0, 0).status);
+    close_request.header.subject_task_id = test_kernel.session_task_id;
+    const unsupported_opcode: u16 = 0xffff;
+    try std.testing.expectEqual(abi.SyscallStatus.unsupported_operation, dispatch(&test_kernel.port, test_kernel.session_task_id, 2, unsupported_opcode, @intFromPtr(&close_request), 0, 0).status);
+
+    var executor = @import("../task/userspace_executor.zig").Executor{};
+    var catalog = @import("../task/userspace_loader.zig").Catalog.init();
+    var scheduler = Scheduler.init(&executor);
+    scheduler.bind(&catalog, &test_kernel.runtime, &test_kernel.capabilities);
+    defer scheduler.deinit();
+    scheduler.bindEndpointTable(&test_kernel.endpoints);
+    try std.testing.expect(scheduler.registerTask(app.id));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(app.id));
+    test_kernel.kernel.bindEndpointWakeSink(.{ .context = &scheduler, .wake = Wake.wake });
+    defer test_kernel.kernel.clearEndpointWakeSink();
+    try std.testing.expect(!scheduler.hasReadyTasks());
+    // Publish a final reply without a wake to exercise closure's own wakeup.
+    _ = try test_kernel.endpoints.reply(ids.endpoint(server.endpoint.endpoint_id), ids.endpoint(client.endpoint.endpoint_id), ids.task(test_kernel.session_task_id), 3, "last reply", null, false);
+    try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(&test_kernel.port, test_kernel.session_task_id, 3, close_request.header.operation, @intFromPtr(&close_request), 0, 0).status);
+    try std.testing.expect(scheduler.hasReadyTasks());
+    try std.testing.expect(!scheduler.parkTaskUntilEvent(app.id));
+    try std.testing.expect(test_kernel.capabilities.query(server.capability_id) == null);
+    var payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    var attached: abi.CapabilityDescriptor = undefined;
+    var response: abi.EndpointRecvResponse = undefined;
+    const receive = component_port.EndpointRecvRequest{
+        .header = component_port.makeHeader(.endpoint_recv, app.id),
+        .endpoint_capability_id = client.capability_id,
+        .receiver_task_id = app.id,
+        .payload_out = &payload,
+        .attached_capability_out = &attached,
+    };
+    try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(&test_kernel.port, app.id, 4, receive.header.operation, @intFromPtr(&receive), @intFromPtr(&response), @sizeOf(@TypeOf(response))).status);
+    try std.testing.expectEqualStrings("last reply", payload[0..response.message.payload_len]);
+    try std.testing.expectEqual(abi.SyscallStatus.peer_closed, dispatch(&test_kernel.port, app.id, 4, receive.header.operation, @intFromPtr(&receive), @intFromPtr(&response), @sizeOf(@TypeOf(response))).status);
+    try std.testing.expect(scheduler.parkTaskUntilEvent(app.id));
+    try std.testing.expect(!scheduler.hasReadyTasks());
+    const send = component_port.EndpointSendRequest{
+        .header = component_port.makeHeader(.endpoint_send, app.id),
+        .correlation_id = 5,
+        .endpoint_capability_id = client.capability_id,
+        .payload = "closed",
+    };
+    try std.testing.expectEqual(abi.SyscallStatus.peer_closed, dispatch(&test_kernel.port, app.id, 5, send.header.operation, @intFromPtr(&send), 0, 0).status);
+    close_request.header.subject_task_id = app.id;
+    close_request.endpoint_capability_id = client.capability_id;
+    try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(&test_kernel.port, app.id, 5, close_request.header.operation, @intFromPtr(&close_request), 0, 0).status);
+    try std.testing.expect(!app.hasCapability(client.capability_id));
+    try std.testing.expect(!app.hasCapability(send_only.id));
+    try std.testing.expectEqual(@as(u16, 1), test_kernel.endpoints.activeForTask(ids.task(app.id)));
+    _ = try test_kernel.endpoints.descriptor(ids.endpoint(sibling.endpoint.endpoint_id));
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, dispatch(&test_kernel.port, app.id, 6, close_request.header.operation, @intFromPtr(&close_request), 0, 0).status);
+}
+
+test "syscall service replies preserve client isolation with overlapping correlations" {
+    var test_kernel = TestKernel{};
+    try test_kernel.init();
+    const server = try test_kernel.port.endpointCreate(.{
+        .header = component_port.makeHeader(.endpoint_create, test_kernel.session_task_id),
+        .authority_capability_id = test_kernel.authority_capability_id,
+        .owner_task_id = test_kernel.session_task_id,
+        .label = "service",
+        .flags = .{ .local_only = true, .service_port = true },
+    }, 1);
+    test_kernel.runtime.allowHostPointerSyscallsForTask(test_kernel.session_task_id);
+
+    var clients: [3]native_kernel.EndpointCreateResult = undefined;
+    var task_ids: [3]u64 = undefined;
+    for (&clients, &task_ids, 0..) |*client, *task_id, index| {
+        const task = try test_kernel.runtime.createTask(.{
+            .owner = .{ .kind = .app, .serial = @intCast(30 + index) },
+            .component_class = .app_component,
+            .budget = .{
+                .cpu_time_ticks = 1_000,
+                .memory_bytes = units.kibibytes(1),
+                .endpoint_slots = 1,
+                .shared_memory_bytes = 0,
+            },
+            .local_only = true,
+        });
+        task_id.* = task.id;
+        test_kernel.runtime.allowHostPointerSyscallsForTask(task.id);
+        client.* = try test_kernel.port.endpointCreate(.{
+            .header = component_port.makeHeader(.endpoint_create, test_kernel.session_task_id),
+            .authority_capability_id = test_kernel.authority_capability_id,
+            .owner_task_id = task.id,
+            .label = "client",
+            .flags = .{ .local_only = true },
+        }, 2);
+        if (index == 2) continue; // The third client has no connection to this service.
+        try test_kernel.endpoints.connect(ids.endpoint(client.endpoint.endpoint_id), ids.endpoint(server.endpoint.endpoint_id));
+        const request = component_port.EndpointSendRequest{
+            .header = component_port.makeHeader(.endpoint_send, task.id),
+            .correlation_id = 7,
+            .endpoint_capability_id = client.capability_id,
+            .payload = "request",
+        };
+        try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(&test_kernel.port, task.id, 3, request.header.operation, @intFromPtr(&request), 0, 0).status);
+    }
+
+    var payload: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+    var attached = std.mem.zeroes(abi.CapabilityDescriptor);
+    var incoming: [2]abi.EndpointRecvResponse = undefined;
+    for (&incoming, 0..) |*response, index| {
+        const request = component_port.EndpointRecvRequest{
+            .header = component_port.makeHeader(.endpoint_recv, test_kernel.session_task_id),
+            .endpoint_capability_id = server.capability_id,
+            .receiver_task_id = test_kernel.session_task_id,
+            .payload_out = &payload,
+            .attached_capability_out = &attached,
+        };
+        try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(&test_kernel.port, test_kernel.session_task_id, 4, request.header.operation, @intFromPtr(&request), @intFromPtr(response), @sizeOf(abi.EndpointRecvResponse)).status);
+        try std.testing.expectEqual(@as(u8, 1), response.present);
+        try std.testing.expectEqual(task_ids[index], response.message.sender_task_id);
+        try std.testing.expectEqual(clients[index].endpoint.endpoint_id, response.message.sender_endpoint_id);
+    }
+
+    var reply = component_port.EndpointSendRequest{
+        .header = component_port.makeHeader(.endpoint_send, test_kernel.session_task_id),
+        .correlation_id = 7,
+        .endpoint_capability_id = server.capability_id,
+        .payload = "private reply",
+        .reply_endpoint_id = clients[2].endpoint.endpoint_id,
+    };
+    const denied = dispatch(&test_kernel.port, test_kernel.session_task_id, 5, reply.header.operation, @intFromPtr(&reply), 0, 0);
+    try std.testing.expectEqual(abi.SyscallStatus.denied, denied.status);
+    try std.testing.expectEqual(abi.DenialReason.scope_violation, denied.denial_reason);
+    for (clients) |client| {
+        try std.testing.expectEqual(@as(u16, 0), (try test_kernel.endpoints.descriptor(ids.endpoint(client.endpoint.endpoint_id))).queued_messages);
+    }
+
+    // Reverse reply order with the same correlation id in two different tasks.
+    for ([_]usize{ 1, 0 }) |index| {
+        reply.reply_endpoint_id = incoming[index].message.sender_endpoint_id;
+        reply.payload = if (index == 0) "first reply" else "second reply";
+        try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(&test_kernel.port, test_kernel.session_task_id, 6, reply.header.operation, @intFromPtr(&reply), 0, 0).status);
+        const request = component_port.EndpointRecvRequest{
+            .header = component_port.makeHeader(.endpoint_recv, task_ids[index]),
+            .endpoint_capability_id = clients[index].capability_id,
+            .receiver_task_id = task_ids[index],
+            .payload_out = &payload,
+            .attached_capability_out = &attached,
+        };
+        var response: abi.EndpointRecvResponse = undefined;
+        try std.testing.expectEqual(abi.SyscallStatus.success, dispatch(&test_kernel.port, task_ids[index], 7, request.header.operation, @intFromPtr(&request), @intFromPtr(&response), @sizeOf(abi.EndpointRecvResponse)).status);
+        try std.testing.expectEqual(@as(u8, 1), response.present);
+        try std.testing.expectEqual(@as(u64, 7), response.message.correlation_id);
+        try std.testing.expectEqual(server.endpoint.endpoint_id, response.message.sender_endpoint_id);
+        try std.testing.expectEqualStrings(reply.payload, payload[0..response.message.payload_len]);
+    }
 }
 
 test "syscall surface delivers focused input only through task-scoped authority" {

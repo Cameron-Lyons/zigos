@@ -292,15 +292,18 @@ fn defaultDenialReasonForStatus(status: abi.SyscallStatus) abi.DenialReason {
         .invalid_request_pointer,
         .invalid_response_buffer,
         .not_found,
+        .peer_closed,
         => .invalid_target,
         .buffer_too_small,
         .conflict,
+        .would_block,
         => .budget_exhausted,
         .denied => .policy_denied,
     };
 }
 
 pub fn mapError(err: anyerror) DispatchResult {
+    if (err == error.PeerClosed) return .{ .status = .peer_closed, .denial_reason = .invalid_target };
     if (err == error.UnsupportedAbiVersion) return .{ .status = .unsupported_abi_version };
     if (err == error.ReceiveBufferTooSmall) return .{ .status = .buffer_too_small };
     if (err == error.UnexpectedOperation) return .{
@@ -367,6 +370,8 @@ pub fn mapError(err: anyerror) DispatchResult {
         .status = .not_found,
         .denial_reason = .invalid_target,
     };
+    if (err == error.RingFull) return .{ .status = .would_block, .denial_reason = .budget_exhausted };
+
     if (err == error.TableFull or
         err == error.TargetTableFull or
         err == error.ComponentTableFull or
@@ -375,7 +380,6 @@ pub fn mapError(err: anyerror) DispatchResult {
         err == error.NoSpaceLeft or
         err == error.ResourceBudgetExceeded or
         err == error.EndpointBusy or
-        err == error.QueueFull or
         err == error.PeerNotConnected or
         err == error.VersionMismatch)
     {
@@ -400,6 +404,11 @@ fn regionAllows(access: task_runtime.SegmentAccess, requested: UserMemoryAccess)
         .read => access.read,
         .write => access.write,
     };
+}
+
+test "endpoint queue backpressure is distinct from a disconnected peer" {
+    try std.testing.expectEqual(abi.SyscallStatus.would_block, mapError(error.RingFull).status);
+    try std.testing.expectEqual(abi.SyscallStatus.conflict, mapError(error.PeerNotConnected).status);
 }
 
 test "user slice copies enforce source and destination bounds" {

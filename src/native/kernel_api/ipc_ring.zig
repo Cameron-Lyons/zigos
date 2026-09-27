@@ -3,12 +3,13 @@ const std = @import("std");
 pub const DATA_PLANE_USES_SEALED_RINGS = true;
 pub const MAGIC: u32 = 0x5247_4950;
 pub const SLOT_BYTES: usize = 128;
-pub const PAYLOAD_BYTES: usize = 96;
+pub const PAYLOAD_BYTES: usize = 88;
 pub const HEADER_BYTES: usize = 192;
 pub const HEAD_OFFSET: usize = 64;
 pub const TAIL_OFFSET: usize = 128;
 
 pub const Record = extern struct {
+    sender_endpoint_id: u64 = 0,
     sender_task_id: u64 = 0,
     correlation_id: u64 = 0,
     attached_capability_id: u64 = 0,

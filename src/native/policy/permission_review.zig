@@ -129,7 +129,7 @@ pub fn renderToBuffer(
 
     try appendTextParts(buffer, &used, .{
         "Permission review for ", session.bundle.display_name,
-        " [",                    session.bundle.bundle_id,
+        " [",                     session.bundle.bundle_id,
         "] task=",
     });
     try appendUnsigned(buffer, &used, session.task_id);
@@ -256,8 +256,8 @@ fn appendRequest(
     try appendText(buffer, used, "/");
     try appendUnsigned(buffer, used, @intCast(bundle.requested_permissions.len));
     try appendTextParts(buffer, used, .{
-        "] ", manifest.permissionDisplayLabel(request.kind),
-        ": ", request.resource,
+        "] ",     manifest.permissionDisplayLabel(request.kind),
+        ": ",     request.resource,
         "\n    ",
     });
     const scope_summary = try humane_permissions.renderRequestScopeToBuffer(buffer[used.*..], request);

@@ -1323,13 +1323,15 @@ pub fn bootedDriverKernelBoundaryGate() !void {
     var capabilities = capability.CapabilityTable.init();
     var endpoints = endpoint.Table.init();
     var shared = shared_memory.Table.init();
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         spec_support.policyAuthority(1),
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
 
     const bootstrap_task = try runtime.createTask(.{
         .owner = spec_support.service(821),
@@ -1513,6 +1515,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         kernelContext(control_task.task_id, .endpoint_send, control_endpoint.capability_id, .{ .endpoint = control_endpoint.endpoint.endpoint_id }),
         100,
         "ring=request",
+        0,
         request_ring.capability_id,
         false,
         13,
@@ -1536,6 +1539,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         kernelContext(control_task.task_id, .endpoint_send, control_endpoint.capability_id, .{ .endpoint = control_endpoint.endpoint.endpoint_id }),
         101,
         "ring=completion",
+        0,
         completion_ring.capability_id,
         false,
         15,
@@ -1558,6 +1562,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         kernelContext(control_task.task_id, .endpoint_send, control_endpoint.capability_id, .{ .endpoint = control_endpoint.endpoint.endpoint_id }),
         102,
         "io:read lba=7 sectors=1",
+        0,
         null,
         false,
         17,
@@ -1574,6 +1579,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         kernelContext(driver_task.task_id, .endpoint_send, driver_endpoint.capability_id, .{ .endpoint = driver_endpoint.endpoint.endpoint_id }),
         103,
         "io:complete status=ok",
+        io_request.message.sender_endpoint_id,
         null,
         false,
         19,
@@ -1671,6 +1677,7 @@ pub fn bootedDriverKernelBoundaryGate() !void {
         kernelContext(control_task.task_id, .endpoint_send, control_endpoint.capability_id, .{ .endpoint = control_endpoint.endpoint.endpoint_id }),
         104,
         "io:read after restart",
+        0,
         null,
         false,
         25,

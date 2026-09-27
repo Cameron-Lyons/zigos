@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
         @panic("Zigos supports only the x86_64-freestanding-none target");
     }
     const optimize = b.standardOptimizeOption(.{});
+    benchmarks_build.addAllocatorBenchmarks(b);
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
     const test_artifacts = tests_build.addTestArtifacts(b, optimize, userspace_images);
     const x86_64_architecture_compile_check = kernel_build.addX86_64ArchitectureCompileCheck(b, optimize);
@@ -162,6 +163,16 @@ pub fn build(b: *std.Build) void {
     const zigos_native_production_smoke_step = b.step("zigos-native-production-smoke-test", "Boot the production kernel across a cold reboot without verification workloads");
     zigos_native_production_smoke_step.dependOn(&zigos_native_production_smoke_cmd.step);
     zigos_native_production_smoke_step.dependOn(kernel_role_check_step);
+
+    const tpm2_qemu_cmd = qemu_build.addTpm2QemuCommand(b, kernels.zigos_native, userspace_images);
+    const tpm2_qemu_step = b.step("tpm2-qemu-test", "Validate TPM2 CRB discovery and commands with a disposable swtpm across reboot and unsupported-device boots");
+    tpm2_qemu_step.dependOn(&tpm2_qemu_cmd.step);
+    tpm2_qemu_step.dependOn(kernel_role_check_step);
+
+    const tpm2_sealing_cmd = qemu_build.addTpm2SealingQemuCommand(b, kernels.zigos_native_verification, userspace_images);
+    const tpm2_sealing_step = b.step("tpm2-sealing-qemu-test", "Verify encrypted TPM key sealing, persisted recovery and tamper rejection with swtpm");
+    tpm2_sealing_step.dependOn(&tpm2_sealing_cmd.step);
+    tpm2_sealing_step.dependOn(kernel_role_check_step);
 
     const zigos_native_smoke_test_cmd = qemu_build.addNativeSmokeCommand(
         b,

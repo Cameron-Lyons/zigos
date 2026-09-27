@@ -30,6 +30,7 @@
 .global isr\num
 .type isr\num, @function
 isr\num:
+    endbr64
     pushq $0
     pushq $\num
     jmp isr_common_stub
@@ -39,6 +40,7 @@ isr\num:
 .global isr\num
 .type isr\num, @function
 isr\num:
+    endbr64
     pushq $\num
     jmp isr_common_stub
 .endm

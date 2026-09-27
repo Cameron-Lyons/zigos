@@ -51,6 +51,7 @@ pub const userspace_exec_probe_ok = "ZIGOS:USERSPACE:EXEC_PROBE:OK";
 pub const userspace_resume_ok = "ZIGOS:USERSPACE:RESUME:OK";
 pub const userspace_scheduler_active = "ZIGOS:USERSPACE:SCHEDULER:ACTIVE";
 pub const userspace_scheduler_event_wait_ready = "ZIGOS:USERSPACE:SCHEDULER:EVENT_WAIT:READY";
+pub const userspace_scheduler_idle = "ZIGOS:USERSPACE:SCHEDULER:IDLE";
 pub const userspace_ui_state_ready = "ZIGOS:USERSPACE:UI_STATE:READY";
 pub const storage_checkpoint_final_clean = "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false";
 
@@ -89,7 +90,7 @@ pub const runtime_proof_user_gp_contained = "ZIGOS:RUNTIME_PROOF:USER_GP_CONTAIN
 pub const runtime_proof_syscall_subject_spoof = "ZIGOS:RUNTIME_PROOF:SYSCALL_SUBJECT_SPOOF:PASS";
 pub const runtime_proof_raw_network_bypass = "ZIGOS:RUNTIME_PROOF:RAW_NETWORK_BYPASS:PASS";
 pub const runtime_proof_driver_authority_escape = "ZIGOS:RUNTIME_PROOF:DRIVER_AUTHORITY_ESCAPE:PASS";
-pub const runtime_proof_reboot_grant_revocation = "ZIGOS:RUNTIME_PROOF:REBOOT_GRANT_REVOCATION:PASS";
+pub const runtime_proof_checkpoint_authority = "ZIGOS:RUNTIME_PROOF:CHECKPOINT_AUTHORITY:PASS";
 
 pub const permission_manifest_valid = "ZIGOS:PERMISSION:MANIFEST:VALID";
 pub const permission_zero_authority_deny_network = "ZIGOS:PERMISSION:ZERO_AUTHORITY:DENY_NETWORK";
@@ -138,7 +139,9 @@ pub const storage_service_recovered = "ZIGOS:STORAGE:STORAGE_SERVICE:RECOVERED";
 pub const storage_object_addressed = "ZIGOS:STORAGE:OBJECT:ADDRESSED";
 pub const storage_path_authority_rejected = "ZIGOS:STORAGE:PATH_AUTHORITY:REJECTED";
 pub const storage_durability_start = "ZIGOS:STORAGE:DURABILITY:START";
+pub const storage_durability_document_save_acked = "ZIGOS:STORAGE:DURABILITY:DOCUMENT_SAVE_ACKED";
 pub const storage_durability_baseline_checkpointed = "ZIGOS:STORAGE:DURABILITY:BASELINE_CHECKPOINTED";
+pub const storage_durability_document_reopened = "ZIGOS:STORAGE:DURABILITY:DOCUMENT_REOPENED";
 pub const storage_durability_interrupted_write_staged = "ZIGOS:STORAGE:DURABILITY:INTERRUPTED_WRITE_STAGED";
 pub const storage_durability_interrupted_boot_recovered = "ZIGOS:STORAGE:DURABILITY:INTERRUPTED_BOOT_RECOVERED";
 pub const storage_durability_final_checkpointed = "ZIGOS:STORAGE:DURABILITY:FINAL_CHECKPOINTED";
@@ -197,7 +200,13 @@ pub const notes_daily_driver_typed_edit_ok = "ZIGOS:NOTES_DAILY:TYPED_EDIT:OK";
 pub const notes_daily_driver_typed_sync_ok = "ZIGOS:NOTES_DAILY:TYPED_SYNC:OK";
 pub const notes_daily_driver_typed_recovery_ok = "ZIGOS:NOTES_DAILY:TYPED_RECOVERY:OK";
 pub const notes_daily_driver_typed_loop_complete = "ZIGOS:NOTES_DAILY:TYPED_LOOP:COMPLETE";
+pub const document_channel_userspace_open = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_OPEN:PASS";
+pub const document_channel_userspace_save = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_SAVE:PASS";
+pub const document_channel_retirement = "ZIGOS:DOCUMENT_CHANNEL:RETIREMENT:PASS";
 pub const notes_daily_driver_complete = "ZIGOS:NOTES_DAILY:COMPLETE";
 
 pub const task_session_ready = "ZIGOS:TASK:SESSION_READY";
 pub const native_ready = "ZIGOS:NATIVE:READY";
+
+pub const random_ready = "ZIGOS:RANDOM:READY";
+pub const random_rejected = "ZIGOS:RANDOM:REJECTED";

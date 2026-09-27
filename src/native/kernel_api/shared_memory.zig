@@ -695,6 +695,25 @@ pub const Table = struct {
         return revoked_descriptor;
     }
 
+    // Synchronous creation rollback: this object is still unpublished and its
+    // frame reservation is the allocator's tail. Preserve older live objects.
+    pub fn rollbackCreate(self: *Table, object_id: ids.SharedMemoryId) void {
+        const backing = self.backingPtr() orelse
+            native_util.impossibleByInvariant("unpublished shared memory retains its backing");
+        const slot = backing.arena.getByHandle(ObjectHandle{ .value = object_id.raw() }) orelse
+            native_util.impossibleByInvariant("unpublished shared memory retains its live handle");
+        const object = &slot.object;
+        const frame_start = (object.page_base - FREESTANDING_PHYSICAL_BASE) / PAGE_SIZE;
+        if (object.mapping_count != 0 or object.mmu_mapping_count != 0 or
+            backing.mmu.next_physical_frame != frame_start + object.page_count)
+        {
+            native_util.impossibleByInvariant("unpublished shared memory is unmapped and owns the frame allocator tail");
+        }
+        _ = self.revoke(object_id) catch |err|
+            native_util.impossibleByInvariantError("shared-memory rollback revokes its live object", err);
+        backing.mmu.next_physical_frame = frame_start;
+    }
+
     pub fn retireTask(self: *Table, task_id: ids.TaskId) TaskRetirement {
         var retired = TaskRetirement{};
         const backing = self.backingPtr() orelse return retired;
@@ -1156,6 +1175,27 @@ test "allocated shared memory backing initializes every arena and index" {
 
     const mapping_index = backing.mmu.mappings.reserveIndex().?;
     try std.testing.expect(backing.mmu.mappings.removeIndex(mapping_index));
+}
+
+test "unpublished shared memory rollback restores frame reservation and invalidates its handle" {
+    var table = Table.init();
+    const owner = ids.task(10);
+    const existing = try table.create(owner, PAGE_SIZE);
+    const frame_cursor = table.mmuForTests().next_physical_frame;
+    var previous_id = ids.SharedMemoryId.zero;
+    for (0..MAX_SHARED_MEMORY_OBJECTS * 2) |_| {
+        const unpublished = try table.create(owner, 2 * PAGE_SIZE);
+        try std.testing.expect(!unpublished.id.eql(previous_id));
+        table.rollbackCreate(unpublished.id);
+        previous_id = unpublished.id;
+        try std.testing.expectEqual(frame_cursor, table.mmuForTests().next_physical_frame);
+        try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+        try std.testing.expectEqual(PAGE_SIZE, table.liveOwnedBytesForTask(owner));
+        try std.testing.expectError(error.SharedMemoryNotFound, table.descriptor(unpublished.id));
+        _ = try table.descriptor(existing.id);
+    }
+    const next = try table.create(owner, PAGE_SIZE);
+    try std.testing.expectEqual(existing.page_base + PAGE_SIZE, next.page_base);
 }
 
 test "shared memory objects map unmap and revoke across tasks" {

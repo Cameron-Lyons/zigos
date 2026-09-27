@@ -277,7 +277,8 @@ const cases = benchmark_cases.benchmarkCases(.{
     .indexing_query = benchmarkIndexingQuery,
     .media_print_submit_complete = benchmarkMediaPrintSubmitComplete,
     .event_ledger_export = benchmarkEventLedgerExport,
-    .secret_store_import_handle_export = benchmarkSecretStoreImportHandleExport,
+    .secret_store_software_import_handle_export = benchmarkSoftwareSecretStore,
+    .secret_store_sealed_import_handle_export = benchmarkSealedSecretStore,
     .denial_explanation_render = benchmarkDenialExplanationRender,
     .overlay_session_flow = benchmarkOverlaySessionFlow,
     .recovery_lifecycle = benchmarkRecoveryLifecycle,
@@ -1621,7 +1622,15 @@ fn benchmarkEventLedgerExport(iteration: u32) u64 {
     return exported.len + event_ledger_context.ledger.next_sequence;
 }
 
-fn benchmarkSecretStoreImportHandleExport(batch_iteration: u32) u64 {
+fn benchmarkSoftwareSecretStore(batch_iteration: u32) u64 {
+    return benchmarkSecretStoreImportHandleExport(batch_iteration, false);
+}
+
+fn benchmarkSealedSecretStore(batch_iteration: u32) u64 {
+    return benchmarkSecretStoreImportHandleExport(batch_iteration, true);
+}
+
+fn benchmarkSecretStoreImportHandleExport(batch_iteration: u32, comptime hardware_backed: bool) u64 {
     comptime {
         if (benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION > secure_secret_store.MAX_SECRETS or
             benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION > secure_secret_store.MAX_HANDLES)
@@ -1631,23 +1640,25 @@ fn benchmarkSecretStoreImportHandleExport(batch_iteration: u32) u64 {
     }
 
     secret_store_context.store = secure_secret_store.Store.init();
-    secret_store_context.store.attachHardwareProvider(.{ .available = true });
+    if (hardware_backed) secret_store_context.store.attachHardwareProvider(@import("../../../tests/fixtures/secret_provider.zig").provider());
     var checksum: u64 = 0;
     for (0..benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION) |offset| {
         const iteration = batch_iteration * benchmark_cases.SECRET_STORE_OPERATIONS_PER_ITERATION +
             @as(u32, @intCast(offset));
-        checksum +%= benchmarkSecretStoreOperation(iteration);
+        checksum +%= benchmarkSecretStoreOperation(iteration, hardware_backed);
     }
     return checksum;
 }
 
-fn benchmarkSecretStoreOperation(iteration: u32) u64 {
+fn benchmarkSecretStoreOperation(iteration: u32, comptime hardware_backed: bool) u64 {
+    var secret_export_buffer: secure_secret_store.Value = undefined;
+    defer std.crypto.secureZero(u8, &secret_export_buffer);
     const exportable = (iteration & 1) != 0;
     const secret = secret_store_context.store.importSecret(
         secret_store_context.owner,
         if (exportable) "backup-code" else "api-key",
         if (exportable) "abcd-efgh" else "super-secret-token",
-        !exportable,
+        hardware_backed,
         exportable,
     ) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     const handle = secret_store_context.store.lendHandle(
@@ -1661,7 +1672,7 @@ fn benchmarkSecretStoreOperation(iteration: u32) u64 {
         const exported = secret_store_context.store.exportRaw(handle.id, .{
             .holder = secret_store_context.holder,
             .task_id = 700 + iteration,
-        }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+        }, &secret_export_buffer) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
         return secret.id +
             handle.id +
             described.task_id +
@@ -1671,7 +1682,7 @@ fn benchmarkSecretStoreOperation(iteration: u32) u64 {
     _ = secret_store_context.store.exportRaw(handle.id, .{
         .holder = secret_store_context.holder,
         .task_id = 700 + iteration,
-    }) catch |err| switch (err) {
+    }, &secret_export_buffer) catch |err| switch (err) {
         error.RawExportDenied => {},
         else => unreachable,
     };
@@ -2529,7 +2540,7 @@ fn benchmarkSloEndpointRtt(iteration: u32) u64 {
     _ = iteration;
     prepareSloEndpointFixture();
     slo_endpoint_context.correlation += 1;
-    slo_endpoint_context.table.send(
+    _ = slo_endpoint_context.table.send(
         slo_endpoint_context.source_id,
         ids.task(11),
         slo_endpoint_context.correlation,

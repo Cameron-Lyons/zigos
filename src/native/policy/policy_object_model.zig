@@ -320,6 +320,8 @@ pub const CredentialAssertionRequest = struct {
 };
 
 pub const SecretVaultOperation = enum(u8) {
+    generate_signing_key,
+    sign,
     import,
     lend,
     export_raw,

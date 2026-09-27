@@ -4,6 +4,8 @@ const boot_markers = @import("../../kernel/boot/markers.zig");
 const accelerator_scheduler = @import("accelerator_scheduler.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const capability = @import("../kernel_api/capability.zig");
+const endpoint = @import("../kernel_api/endpoint.zig");
+const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const task_runtime = @import("task_runtime.zig");
 const units = @import("../core/units.zig");
@@ -260,6 +262,7 @@ pub const Scheduler = struct {
     catalog_ptr: ?*userspace_loader.Catalog = null,
     runtime_ptr: ?*task_runtime.Runtime = null,
     capability_table_ptr: ?*const capability.CapabilityTable = null,
+    endpoint_table_ptr: ?*const endpoint.Table = null,
     slots: SchedulerSlotArena = SchedulerSlotArena.init(),
     dispatch_accounting: ?*DispatchAccountingStorage = null,
     ready_heads: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
@@ -374,6 +377,7 @@ pub const Scheduler = struct {
         self.catalog_ptr = null;
         self.runtime_ptr = null;
         self.capability_table_ptr = null;
+        self.endpoint_table_ptr = null;
         self.releaseAcceleratorClaimBacking();
         self.releaseDispatchAccounting();
     }
@@ -492,8 +496,18 @@ pub const Scheduler = struct {
 
     pub fn parkTaskUntilEvent(self: *Scheduler, task_id: u64) bool {
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
+        if (self.hasPendingIpc(task_id)) return false;
         self.unlinkReadyIndex(slot_index);
         return true;
+    }
+
+    pub fn bindEndpointTable(self: *Scheduler, table: *const endpoint.Table) void {
+        self.endpoint_table_ptr = table;
+    }
+
+    fn hasPendingIpc(self: *const Scheduler, task_id: u64) bool {
+        const table = self.endpoint_table_ptr orelse return false;
+        return table.hasPendingForTask(ids.task(task_id));
     }
 
     pub fn wakeTask(
@@ -507,6 +521,7 @@ pub const Scheduler = struct {
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
+        if (task.state != .active) return false;
         const task_handle = runtime.taskHandleForResolved(task);
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         const slot = &self.slots.slots[slot_index];
@@ -815,7 +830,9 @@ pub const Scheduler = struct {
                 slot.resource_class = updated_task.resourceClass();
                 if (!slot.dispatch_request_configured) slot.dispatch_request = deriveDispatchRequest(updated_task);
                 slot.deadline_tick = deadlineAfterDispatch(slot.resource_class, now_ticks);
-                if (executionRemainsReady(outcome)) {
+                if (executionRemainsReady(outcome) or
+                    (outcome == .wait_for_event and self.hasPendingIpc(task_id)))
+                {
                     _ = self.enqueueReadyIndex(index, slot.resource_class);
                 }
             } else {
@@ -846,7 +863,7 @@ pub const Scheduler = struct {
             exception.reasonFingerprint(),
             true,
         );
-        const terminated = runtime.terminateResolvedTask(task, now_ticks, null);
+        const terminated = runtime.terminateResolvedTask(task, now_ticks);
         if (!terminated) native_util.impossibleByInvariant("faulted userspace task was already terminated");
         if (self.slots.slotIndexOf(task_id)) |slot_index| {
             if (!self.unregisterSlotIndex(slot_index)) {
@@ -2059,7 +2076,7 @@ test "userspace scheduler refreshes task handles after runtime restore" {
     try std.testing.expect(slot.mapping_handle.isZero());
 }
 
-test "userspace scheduler rejects stale handles after task id reuse" {
+test "userspace scheduler rejects retired task handles after runtime reset" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
     var catalog = userspace_loader.Catalog.init();
@@ -2088,8 +2105,9 @@ test "userspace scheduler rejects stale handles after task id reuse" {
         "app.replacement-task",
         null,
     );
-    try std.testing.expectEqual(task_id, replacement.id);
-    try std.testing.expect(!runtime.taskHandleForResolved(runtime.find(task_id).?).eql(original_handle));
+    try std.testing.expect(replacement.id > task_id);
+    try std.testing.expect(runtime.find(task_id) == null);
+    try std.testing.expect(!runtime.taskHandleForResolved(replacement).eql(original_handle));
 
     try std.testing.expect(!scheduler.runNext(1));
     try std.testing.expect(scheduler.slots.get(task_id) == null);

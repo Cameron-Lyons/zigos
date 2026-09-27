@@ -6,6 +6,9 @@ const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const secure_secret_store = @import("secure_secret_store.zig");
 const signing = @import("../core/signing.zig");
+const vault_service = @import("../services/secret_vault_service.zig");
+const policy_object = @import("../policy/policy_object.zig");
+const event_ledger = @import("event_ledger.zig");
 
 pub const MAX_CREDENTIALS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -19,9 +22,9 @@ pub const COMPACT_IDENTITY_PROOF_METADATA = true;
 pub const STORE_SIZE_CEILING_BYTES: usize = 5_000;
 pub const LOCAL_UNLOCK_PROOF_SIZE_CEILING_BYTES: usize = 304;
 pub const ASSERTION_SIZE_CEILING_BYTES: usize = 416;
-pub const ASSERTION_REQUEST_SIZE_CEILING_BYTES: usize = 440;
+pub const ASSERTION_REQUEST_SIZE_CEILING_BYTES: usize = 392;
 pub const RECOVERY_APPROVAL_SIZE_CEILING_BYTES: usize = 320;
-pub const RECOVERY_REQUEST_SIZE_CEILING_BYTES: usize = 440;
+pub const RECOVERY_REQUEST_SIZE_CEILING_BYTES: usize = 368;
 
 comptime {
     if (MAX_RP_ID_BYTES > std.math.maxInt(u8) or
@@ -49,14 +52,28 @@ pub const UnlockMethod = enum(u8) {
     recovery_key,
 };
 
+// Holds the identity service's private vault lease and service task identity.
+// These signing handles must never be lent to apps. Session policy subjects and
+// time come from authenticated service state, not credential request fields.
+// The caller serializes access to all borrowed stores during an operation.
+pub const VaultAuthority = struct {
+    vault: *vault_service.Service,
+    policies: *const policy_object.Directory,
+    subjects: policy_object.SubjectSet,
+    holder: principal.PrincipalId,
+    task_id: u64,
+    now_ticks: u64,
+    ledger: ?*event_ledger.Ledger = null,
+};
+
 pub const RegisterCredentialRequest = struct {
     owner: principal.PrincipalId,
     device: principal.PrincipalId,
     relying_party_id: []const u8,
     label: []const u8,
     scope: CredentialScope = .synced,
-    credential_identity: signing.SignerIdentity,
-    tick: u64,
+    recovery_threshold: u8 = 1,
+    key_handle_id: u64,
 };
 
 pub const LocalUnlockProof = struct {
@@ -87,8 +104,7 @@ pub const AssertionRequest = struct {
     origin: []const u8,
     challenge: []const u8,
     local_unlock: ?LocalUnlockProof = null,
-    credential_identity: signing.SignerIdentity,
-    tick: u64,
+    key_handle_id: u64,
 };
 
 pub const RecoveryApproval = struct {
@@ -100,12 +116,9 @@ pub const RecoveryRequest = struct {
     credential_id: u64,
     recovery_device: principal.PrincipalId,
     relying_party_id: []const u8,
-    challenge: []const u8,
     local_unlock: LocalUnlockProof,
-    threshold: usize = 1,
     approvals: []const RecoveryApproval = &.{},
-    replacement_credential_identity: signing.SignerIdentity,
-    tick: u64,
+    replacement_key_handle_id: u64,
 };
 
 pub const CredentialRecord = struct {
@@ -113,6 +126,7 @@ pub const CredentialRecord = struct {
     owner: principal.PrincipalId,
     primary_device: principal.PrincipalId,
     scope: CredentialScope,
+    recovery_threshold: u8 = 1,
     status: CredentialStatus = .active,
     local_unlock_required: bool = true,
     phishing_resistant: bool = true,
@@ -201,6 +215,13 @@ pub const Error = error{
     CredentialNotFound,
     CredentialRevoked,
     CredentialTableFull,
+    CredentialKeyBindingMismatch,
+    CredentialKeyCustodyRequired,
+    CredentialCounterExhausted,
+    InvalidRecoveryThreshold,
+    InvalidIdentityAuthority,
+    InvalidRelyingParty,
+    InvalidChallenge,
     DeviceBoundCredentialWrongDevice,
     DeviceBoundRecoveryDenied,
     DeviceNotTrusted,
@@ -215,7 +236,7 @@ pub const Error = error{
     RecoveryApprovalDuplicate,
     RecoveryThresholdNotMet,
     RelyingPartyTooLong,
-} || secure_secret_store.Error || device_graph.Error;
+} || vault_service.Error || device_graph.Error;
 
 pub const Store = struct {
     credentials: [MAX_CREDENTIALS]CredentialRecord = [_]CredentialRecord{zeroCredential()} ** MAX_CREDENTIALS,
@@ -237,15 +258,16 @@ pub const Store = struct {
     pub fn registerCredential(
         self: *Store,
         graph: *const device_graph.Graph,
-        secrets: *secure_secret_store.Store,
+        authority: VaultAuthority,
         request: RegisterCredentialRequest,
-    ) Error!*CredentialRecord {
+    ) Error!*const CredentialRecord {
         _ = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
         if (request.relying_party_id.len > MAX_RP_ID_BYTES) return error.RelyingPartyTooLong;
+        if (!validDnsName(request.relying_party_id)) return error.InvalidRelyingParty;
         if (request.label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
-        const credential_public_key = signing.publicKey(request.credential_identity) catch return error.InvalidCredentialSignature;
-
+        if (request.recovery_threshold == 0 or request.recovery_threshold > device_graph.MAX_DEVICES) return error.InvalidRecoveryThreshold;
         if (self.countCredentials() >= MAX_CREDENTIALS) return error.CredentialTableFull;
+        const secret = try signingSecret(authority, request.key_handle_id, request.owner);
         const slot_index = self.countCredentials();
         const credential_id: u64 = @intCast(slot_index + 1);
 
@@ -254,23 +276,16 @@ pub const Store = struct {
         credential.owner = request.owner;
         credential.primary_device = request.device;
         credential.scope = request.scope;
+        credential.recovery_threshold = request.recovery_threshold;
         credential.synced_to_device_graph = request.scope == .synced;
         credential.relying_party_id_len = @intCast(native_util.copyTextExact(&credential.relying_party_id, request.relying_party_id) catch return error.RelyingPartyTooLong);
         credential.label_len = @intCast(native_util.copyTextExact(&credential.label, request.label) catch return error.LabelTooLong);
-        credential.credential_public_key = credential_public_key;
-        credential.created_at_ticks = request.tick;
-
-        const secret = try secrets.importSecret(
-            request.owner,
-            request.label,
-            request.credential_identity.seed[0..],
-            true,
-            false,
-        );
+        credential.created_at_ticks = authority.now_ticks;
         credential.secret_id = secret.id;
         credential.hardware_backed_credential = secret.hardware_backed;
         credential.sealed_credential_secret = secret.sealed_digest_present;
         credential.sealed_secret_digest = secret.sealed_digest;
+        credential.credential_public_key = try credentialPublicKey(authority, request.key_handle_id, &credential);
         credential.credential_digest = credentialDigest(
             credential.owner,
             credential.primary_device,
@@ -279,6 +294,7 @@ pub const Store = struct {
             &credential.credential_public_key,
             &credential.sealed_secret_digest,
             credential.credential_generation,
+            credential.recovery_threshold,
         );
 
         const slot = &self.credentials[slot_index];
@@ -290,9 +306,11 @@ pub const Store = struct {
     pub fn assertCredential(
         self: *Store,
         graph: *const device_graph.Graph,
+        authority: VaultAuthority,
         request: AssertionRequest,
     ) Error!Assertion {
         if (request.origin.len > MAX_ORIGIN_BYTES) return error.OriginTooLong;
+        if (request.challenge.len == 0) return error.InvalidChallenge;
         if (request.challenge.len > MAX_CHALLENGE_BYTES) return error.ChallengeTooLong;
         const credential = self.findCredential(request.credential_id) orelse return error.CredentialNotFound;
         try requireActiveCredential(credential);
@@ -301,85 +319,99 @@ pub const Store = struct {
         if (!originMatchesRelyingParty(request.origin, credential.relyingPartySlice())) return error.PhishingOriginRejected;
 
         const unlock = request.local_unlock orelse return error.LocalUnlockRequired;
-        try verifyLocalUnlock(graph, credential, request.device, unlock, request.challenge, request.tick);
+        try verifyLocalUnlock(graph, credential, request.device, unlock, request.challenge, authority.now_ticks);
+        const secret = try signingSecret(authority, request.key_handle_id, credential.owner);
+        if (secret.id != credential.secret_id or !std.mem.eql(u8, &secret.sealed_digest, &credential.sealed_secret_digest)) return error.CredentialKeyBindingMismatch;
+        const next_counter = std.math.add(u64, credential.assertion_count, 1) catch return error.CredentialCounterExhausted;
+        const decision = authority.policies.credentialAssertionDecision(authority.subjects, .{
+            .phishing_resistant = true,
+            .hardware_backed = true,
+            .local_unlock_verified = true,
+            .unlock_age_ticks = authority.now_ticks - unlock.issued_at_ticks,
+        });
+        if (!decision.allowed) return error.PolicyDenied;
 
-        const digest = assertionDigest(
-            credential.id,
-            credential.owner,
-            request.device,
-            credential.credential_generation,
-            credential.relyingPartySlice(),
-            request.origin,
-            request.challenge,
-        );
-        const signature = signing.sign(request.credential_identity, &digest) catch return error.InvalidCredentialSignature;
-        if (!std.mem.eql(u8, signature.publicKeySlice(), &credential.credential_public_key)) return error.InvalidCredentialSignature;
-        if (!signing.verify(signature, &digest)) return error.InvalidCredentialSignature;
-
-        credential.assertion_count += 1;
-        credential.last_asserted_at_ticks = request.tick;
         var assertion = Assertion{
             .credential_id = credential.id,
             .owner = credential.owner,
             .device = request.device,
             .credential_generation = credential.credential_generation,
-            .assertion_counter = credential.assertion_count,
+            .assertion_counter = next_counter,
             .relying_party_id_len = 0,
             .relying_party_id = [_]u8{0} ** MAX_RP_ID_BYTES,
             .origin_len = 0,
             .origin = [_]u8{0} ** MAX_ORIGIN_BYTES,
             .challenge_len = 0,
             .challenge = [_]u8{0} ** MAX_CHALLENGE_BYTES,
-            .signature = signature,
+            .signature = .{},
             .local_unlock_verified = true,
             .phishing_resistant = true,
             .hardware_backed_credential = credential.hardware_backed_credential and credential.sealed_credential_secret,
             .device_platform_backed = device_record.usesPlatformBackedKey(),
             .primary_device_assertion = credential.primary_device.eql(request.device),
             .device_trust_generation = device_record.trust_generation,
-            .unlock_age_ticks = request.tick - unlock.issued_at_ticks,
+            .unlock_age_ticks = authority.now_ticks - unlock.issued_at_ticks,
         };
         assertion.relying_party_id_len = @intCast(native_util.copyTextExact(&assertion.relying_party_id, credential.relyingPartySlice()) catch return error.RelyingPartyTooLong);
         assertion.origin_len = @intCast(native_util.copyTextExact(&assertion.origin, request.origin) catch return error.OriginTooLong);
         assertion.challenge_len = @intCast(native_util.copyTextExact(&assertion.challenge, request.challenge) catch return error.ChallengeTooLong);
+        const digest = assertionDigest(&assertion);
+        assertion.signature = try signThroughVault(authority, request.key_handle_id, &digest);
+        if (!verifyAssertion(&assertion, &credential.credential_public_key)) return error.InvalidCredentialSignature;
+        credential.assertion_count = next_counter;
+        credential.last_asserted_at_ticks = authority.now_ticks;
         return assertion;
+    }
+
+    // Approvers sign this intent, including the current credential generation
+    // and replacement ciphertext binding. An approval cannot select another key
+    // or be replayed after a completed recovery.
+    pub fn recoveryChallenge(
+        self: *const Store,
+        authority: VaultAuthority,
+        credential_id: u64,
+        recovery_device: principal.PrincipalId,
+        replacement_key_handle_id: u64,
+    ) Error!crypto_hash.Digest {
+        const credential = self.findCredentialConst(credential_id) orelse return error.CredentialNotFound;
+        try requireActiveCredential(credential);
+        if (!credential.isRecoverableThroughDeviceGraph()) return error.DeviceBoundRecoveryDenied;
+        const secret = try signingSecret(authority, replacement_key_handle_id, credential.owner);
+        return recoveryIntentDigest(credential, recovery_device, secret);
     }
 
     pub fn recoverCredential(
         self: *Store,
         graph: *const device_graph.Graph,
-        secrets: *secure_secret_store.Store,
+        authority: VaultAuthority,
         request: RecoveryRequest,
-    ) Error!*CredentialRecord {
+    ) Error!*const CredentialRecord {
         const credential = self.findCredential(request.credential_id) orelse return error.CredentialNotFound;
         try requireActiveCredential(credential);
         if (!credential.isRecoverableThroughDeviceGraph()) return error.DeviceBoundRecoveryDenied;
         if (!std.mem.eql(u8, credential.relyingPartySlice(), request.relying_party_id)) return error.PhishingOriginRejected;
-        try verifyRecoveryThreshold(graph, credential, request);
-
-        const credential_public_key = signing.publicKey(request.replacement_credential_identity) catch return error.InvalidCredentialSignature;
-        const secret = try secrets.importSecret(
-            credential.owner,
-            credential.labelSlice(),
-            request.replacement_credential_identity.seed[0..],
-            true,
-            false,
+        const generation = std.math.add(u32, credential.credential_generation, 1) catch return error.CredentialCounterExhausted;
+        const secret = try signingSecret(authority, request.replacement_key_handle_id, credential.owner);
+        const challenge = recoveryIntentDigest(credential, request.recovery_device, secret);
+        try verifyRecoveryThreshold(graph, credential, request, &challenge, authority.now_ticks);
+        var replacement = credential.*;
+        replacement.primary_device = request.recovery_device;
+        replacement.secret_id = secret.id;
+        replacement.sealed_secret_digest = secret.sealed_digest;
+        replacement.credential_generation = generation;
+        replacement.recovered_at_ticks = authority.now_ticks;
+        replacement.credential_public_key = try credentialPublicKey(authority, request.replacement_key_handle_id, &replacement);
+        replacement.credential_digest = credentialDigest(
+            replacement.owner,
+            replacement.primary_device,
+            replacement.scope,
+            replacement.relyingPartySlice(),
+            &replacement.credential_public_key,
+            &replacement.sealed_secret_digest,
+            replacement.credential_generation,
+            replacement.recovery_threshold,
         );
-        credential.primary_device = request.recovery_device;
-        credential.secret_id = secret.id;
-        credential.sealed_secret_digest = secret.sealed_digest;
-        credential.credential_public_key = credential_public_key;
-        credential.credential_generation += 1;
-        credential.recovered_at_ticks = request.tick;
-        credential.credential_digest = credentialDigest(
-            credential.owner,
-            credential.primary_device,
-            credential.scope,
-            credential.relyingPartySlice(),
-            &credential.credential_public_key,
-            &credential.sealed_secret_digest,
-            credential.credential_generation,
-        );
+        credential.* = replacement;
         return credential;
     }
 
@@ -390,7 +422,7 @@ pub const Store = struct {
         credential.revoked_at_ticks = tick;
     }
 
-    pub fn findCredential(self: *Store, credential_id: u64) ?*CredentialRecord {
+    fn findCredential(self: *Store, credential_id: u64) ?*CredentialRecord {
         const slot_index = self.credentialSlotIndex(credential_id) orelse return null;
         return &self.credentials[slot_index];
     }
@@ -421,7 +453,7 @@ pub fn createLocalUnlockProof(
     expires_at_ticks: u64,
     device_identity: signing.SignerIdentity,
 ) Error!LocalUnlockProof {
-    if (expires_at_ticks < issued_at_ticks) return error.LocalUnlockExpired;
+    if (expires_at_ticks <= issued_at_ticks) return error.LocalUnlockExpired;
     var proof = LocalUnlockProof{
         .owner = owner,
         .device = device,
@@ -458,10 +490,11 @@ fn verifyLocalUnlock(
     challenge: []const u8,
     tick: u64,
 ) Error!void {
+    if (proof.relying_party_id_len > MAX_RP_ID_BYTES or proof.challenge_len > MAX_CHALLENGE_BYTES) return error.InvalidLocalUnlock;
     if (!proof.owner.eql(credential.owner) or !proof.device.eql(device)) return error.InvalidLocalUnlock;
     if (!std.mem.eql(u8, proof.relyingPartySlice(), credential.relyingPartySlice())) return error.InvalidLocalUnlock;
     if (!std.mem.eql(u8, proof.challengeSlice(), challenge)) return error.InvalidLocalUnlock;
-    if (tick < proof.issued_at_ticks or tick > proof.expires_at_ticks) return error.LocalUnlockExpired;
+    if (tick < proof.issued_at_ticks or tick >= proof.expires_at_ticks) return error.LocalUnlockExpired;
 
     const device_record = try requireTrustedDeviceForOwner(graph, credential.owner, device);
     const digest = localUnlockDigest(
@@ -493,9 +526,9 @@ fn verifyRecoveryThreshold(
     graph: *const device_graph.Graph,
     credential: *const CredentialRecord,
     request: RecoveryRequest,
+    challenge: []const u8,
+    tick: u64,
 ) Error!void {
-    if (request.threshold == 0) return error.RecoveryThresholdNotMet;
-
     var trusted_devices: [device_graph.MAX_DEVICES]principal.PrincipalId = undefined;
     var trusted_device_count: usize = 0;
 
@@ -504,8 +537,8 @@ fn verifyRecoveryThreshold(
         credential,
         request.recovery_device,
         request.local_unlock,
-        request.challenge,
-        request.tick,
+        challenge,
+        tick,
     );
     trusted_devices[trusted_device_count] = request.recovery_device;
     trusted_device_count += 1;
@@ -517,15 +550,15 @@ fn verifyRecoveryThreshold(
             credential,
             approval.device,
             approval.local_unlock,
-            request.challenge,
-            request.tick,
+            challenge,
+            tick,
         );
         if (trusted_device_count >= trusted_devices.len) return error.RecoveryThresholdNotMet;
         trusted_devices[trusted_device_count] = approval.device;
         trusted_device_count += 1;
     }
 
-    if (trusted_device_count < request.threshold) return error.RecoveryThresholdNotMet;
+    if (trusted_device_count < credential.recovery_threshold) return error.RecoveryThresholdNotMet;
 }
 
 fn verifyRecoveryApproval(
@@ -599,8 +632,11 @@ fn credentialDigest(
     public_key: *const [signing.PUBLIC_KEY_BYTES]u8,
     sealed_secret_digest: *const crypto_hash.Digest,
     generation: u32,
+    recovery_threshold: u8,
 ) crypto_hash.Digest {
     var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "domain", "zigos.identity.credential.v1");
+    crypto_hash.updateInt(&hasher, "recovery-threshold", recovery_threshold);
     crypto_hash.updateEnum(&hasher, "owner-kind", owner.kind);
     crypto_hash.updateInt(&hasher, "owner-serial", owner.serial);
     crypto_hash.updateEnum(&hasher, "device-kind", device.kind);
@@ -635,63 +671,135 @@ fn localUnlockDigest(
     return crypto_hash.finalize(&hasher);
 }
 
-fn assertionDigest(
-    credential_id: u64,
-    owner: principal.PrincipalId,
-    device: principal.PrincipalId,
-    generation: u32,
-    relying_party_id: []const u8,
-    origin: []const u8,
-    challenge: []const u8,
-) crypto_hash.Digest {
+fn signingSecret(authority: VaultAuthority, handle_id: u64, owner: principal.PrincipalId) Error!*const secure_secret_store.SecretRecord {
+    if (authority.holder.kind != .service) return error.InvalidIdentityAuthority;
+    const handle = authority.vault.findHandle(handle_id) orelse return error.VaultHandleNotFound;
+    const secret = authority.vault.store.describeSecret(handle.secret_id) orelse return error.SecretNotFound;
+    if (!secret.owner.eql(owner)) return error.SecretOwnerMismatch;
+    if (!secret.hardware_backed or !secret.hardware_provider_used or !secret.sealed_digest_present or
+        secret.exportable or secret.resident_material or secret.sealedBlob() == null) return error.CredentialKeyCustodyRequired;
+    return secret;
+}
+
+fn signThroughVault(authority: VaultAuthority, handle_id: u64, digest: *const crypto_hash.Digest) Error!manifest.Signature {
+    return authority.vault.signDigest(authority.policies, authority.subjects, .{
+        .holder = authority.holder,
+        .task_id = authority.task_id,
+        .handle_id = handle_id,
+        .digest = digest.*,
+        .now_ticks = authority.now_ticks,
+    }, authority.ledger);
+}
+
+fn recoveryIntentDigest(credential: *const CredentialRecord, recovery_device: principal.PrincipalId, secret: *const secure_secret_store.SecretRecord) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateInt(&hasher, "credential-id", credential_id);
-    crypto_hash.updateEnum(&hasher, "owner-kind", owner.kind);
-    crypto_hash.updateInt(&hasher, "owner-serial", owner.serial);
-    crypto_hash.updateEnum(&hasher, "device-kind", device.kind);
-    crypto_hash.updateInt(&hasher, "device-serial", device.serial);
-    crypto_hash.updateInt(&hasher, "generation", generation);
-    crypto_hash.updateBytes(&hasher, "relying-party-id", relying_party_id);
-    crypto_hash.updateBytes(&hasher, "origin", origin);
-    crypto_hash.updateBytes(&hasher, "challenge", challenge);
+    crypto_hash.updateBytes(&hasher, "domain", "zigos.identity.recovery-intent.v1");
+    crypto_hash.updateInt(&hasher, "credential-id", credential.id);
+    crypto_hash.updateBytes(&hasher, "credential-digest", &credential.credential_digest);
+    crypto_hash.updateInt(&hasher, "generation", credential.credential_generation);
+    crypto_hash.updateInt(&hasher, "threshold", credential.recovery_threshold);
+    crypto_hash.updateEnum(&hasher, "recovery-device-kind", recovery_device.kind);
+    crypto_hash.updateInt(&hasher, "recovery-device-serial", recovery_device.serial);
+    crypto_hash.updateInt(&hasher, "replacement-secret-id", secret.id);
+    crypto_hash.updateBytes(&hasher, "replacement-sealed-digest", &secret.sealed_digest);
     return crypto_hash.finalize(&hasher);
 }
 
+fn credentialPublicKey(authority: VaultAuthority, handle_id: u64, credential: *const CredentialRecord) Error!signing.PublicKey {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "domain", "zigos.identity.key-binding.v1");
+    crypto_hash.updateInt(&hasher, "credential-id", credential.id);
+    crypto_hash.updateEnum(&hasher, "owner-kind", credential.owner.kind);
+    crypto_hash.updateInt(&hasher, "owner-serial", credential.owner.serial);
+    crypto_hash.updateEnum(&hasher, "device-kind", credential.primary_device.kind);
+    crypto_hash.updateInt(&hasher, "device-serial", credential.primary_device.serial);
+    crypto_hash.updateEnum(&hasher, "scope", credential.scope);
+    crypto_hash.updateBytes(&hasher, "relying-party-id", credential.relyingPartySlice());
+    crypto_hash.updateBytes(&hasher, "sealed-secret-digest", &credential.sealed_secret_digest);
+    crypto_hash.updateInt(&hasher, "generation", credential.credential_generation);
+    crypto_hash.updateInt(&hasher, "recovery-threshold", credential.recovery_threshold);
+    const digest = crypto_hash.finalize(&hasher);
+    const signature = try signThroughVault(authority, handle_id, &digest);
+    if (!signing.verify(signature, &digest) or signature.public_key_len != signing.PUBLIC_KEY_BYTES) return error.InvalidCredentialSignature;
+    return signature.public_key[0..signing.PUBLIC_KEY_BYTES].*;
+}
+
+pub fn verifyAssertion(assertion: *const Assertion, expected_public_key: *const signing.PublicKey) bool {
+    if (assertion.relying_party_id_len > MAX_RP_ID_BYTES or assertion.origin_len > MAX_ORIGIN_BYTES or
+        assertion.challenge_len == 0 or assertion.challenge_len > MAX_CHALLENGE_BYTES) return false;
+    if (assertion.signature.public_key_len != signing.PUBLIC_KEY_BYTES or
+        !std.mem.eql(u8, assertion.signature.publicKeySlice(), expected_public_key)) return false;
+    const digest = assertionDigest(assertion);
+    return signing.verify(assertion.signature, &digest);
+}
+
+fn assertionDigest(assertion: *const Assertion) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "domain", "zigos.identity.assertion.v1");
+    crypto_hash.updateInt(&hasher, "credential-id", assertion.credential_id);
+    crypto_hash.updateEnum(&hasher, "owner-kind", assertion.owner.kind);
+    crypto_hash.updateInt(&hasher, "owner-serial", assertion.owner.serial);
+    crypto_hash.updateEnum(&hasher, "device-kind", assertion.device.kind);
+    crypto_hash.updateInt(&hasher, "device-serial", assertion.device.serial);
+    crypto_hash.updateInt(&hasher, "generation", assertion.credential_generation);
+    crypto_hash.updateInt(&hasher, "assertion-counter", assertion.assertion_counter);
+    crypto_hash.updateBytes(&hasher, "relying-party-id", assertion.relyingPartySlice());
+    crypto_hash.updateBytes(&hasher, "origin", assertion.originSlice());
+    crypto_hash.updateBytes(&hasher, "challenge", assertion.challengeSlice());
+    crypto_hash.updateBool(&hasher, "local-unlock-verified", assertion.local_unlock_verified);
+    crypto_hash.updateBool(&hasher, "phishing-resistant", assertion.phishing_resistant);
+    crypto_hash.updateBool(&hasher, "hardware-backed-credential", assertion.hardware_backed_credential);
+    crypto_hash.updateBool(&hasher, "device-platform-backed", assertion.device_platform_backed);
+    crypto_hash.updateBool(&hasher, "primary-device-assertion", assertion.primary_device_assertion);
+    crypto_hash.updateInt(&hasher, "device-trust-generation", assertion.device_trust_generation);
+    crypto_hash.updateInt(&hasher, "unlock-age-ticks", assertion.unlock_age_ticks);
+    return crypto_hash.finalize(&hasher);
+}
+
+// Credential callers supply canonical HTTPS origins and ASCII DNS names
+// (including already encoded IDNA labels). Reject URL paths and user-info.
 fn originMatchesRelyingParty(origin: []const u8, relying_party_id: []const u8) bool {
     const https = "https://";
-    if (!std.mem.startsWith(u8, origin, https)) return false;
-    const host_start = https.len;
-    const host_end = hostEnd(origin[host_start..]) + host_start;
-    const host = origin[host_start..host_end];
-    if (std.mem.eql(u8, host, relying_party_id)) return true;
-    if (host.len <= relying_party_id.len + 1) return false;
-    if (!std.mem.endsWith(u8, host, relying_party_id)) return false;
-    return host[host.len - relying_party_id.len - 1] == '.';
-}
-
-fn hostEnd(rest: []const u8) usize {
-    var index: usize = 0;
-    while (index < rest.len) : (index += 1) {
-        switch (rest[index]) {
-            '/', ':', '?', '#' => return index,
-            else => {},
-        }
+    if (!std.mem.startsWith(u8, origin, https) or !validDnsName(relying_party_id)) return false;
+    const authority = origin[https.len..];
+    const end = std.mem.indexOfScalar(u8, authority, ':') orelse authority.len;
+    const host = authority[0..end];
+    if (!validDnsName(host)) return false;
+    if (end < authority.len) {
+        const port = authority[end + 1 ..];
+        if (port.len == 0 or port.len > 5 or port[0] == '0') return false;
+        for (port) |byte| if (byte < '0' or byte > '9') return false;
+        _ = std.fmt.parseInt(u16, port, 10) catch return false;
     }
-    return rest.len;
+    if (std.mem.eql(u8, host, relying_party_id)) return true;
+    return host.len > relying_party_id.len + 1 and
+        std.mem.endsWith(u8, host, relying_party_id) and
+        host[host.len - relying_party_id.len - 1] == '.';
 }
 
-fn testHardwareSeal(label: []const u8, raw: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "identity-test-secret-provider", label);
-    crypto_hash.updateBytes(&hasher, "identity-test-seal", raw);
-    return crypto_hash.finalize(&hasher);
+fn validDnsName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 253) return false;
+    var label_len: usize = 0;
+    var previous: u8 = 0;
+    for (name) |byte| {
+        if (byte == '.') {
+            if (label_len == 0 or previous == '-') return false;
+            label_len = 0;
+        } else {
+            if (!(byte >= 'a' and byte <= 'z') and !(byte >= '0' and byte <= '9') and byte != '-') return false;
+            if (label_len == 0 and byte == '-') return false;
+            label_len += 1;
+            if (label_len > 63) return false;
+        }
+        previous = byte;
+    }
+    return label_len != 0 and previous != '-';
 }
+
+const identity_keys = @import("../../tests/fixtures/identity_vault.zig");
 
 fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
-    return .{
-        .available = true,
-        .sealFn = testHardwareSeal,
-    };
+    return @import("../../tests/fixtures/secret_provider.zig").provider();
 }
 
 test "os identity keeps proof and assertion metadata compact" {
@@ -711,10 +819,12 @@ test "os identity creates passkey credentials and rejects phishing origins" {
     try std.testing.expect(std.meta.stringToEnum(UnlockMethod, "password") == null);
 
     var graph = device_graph.Graph.init();
-    var secrets = secure_secret_store.Store.init();
+    var secrets = vault_service.Service.init();
+    const policies = policy_object.Directory.init();
     secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 701 };
+    const authority = identity_keys.context(&secrets, &policies, user);
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 711 };
     const user_identity = signing.SignerIdentity{
         .label = "passkey-user",
@@ -728,17 +838,17 @@ test "os identity creates passkey credentials and rejects phishing origins" {
         .label = "accounts.example-passkey",
         .seed = signing.seedFromByte(0xA3),
     };
+    const handle_credential_identity = try identity_keys.provision(authority, user, credential_identity);
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
     _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
-    const credential = try identities.registerCredential(&graph, &secrets, .{
+    const credential = try identities.registerCredential(&graph, identity_keys.at(authority, 2), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .label = "accounts-passkey",
         .scope = .synced,
-        .credential_identity = credential_identity,
-        .tick = 2,
+        .key_handle_id = handle_credential_identity,
     });
     try std.testing.expect(credential.local_unlock_required);
     try std.testing.expect(credential.phishing_resistant);
@@ -746,15 +856,14 @@ test "os identity creates passkey credentials and rejects phishing origins" {
     try std.testing.expect(!std.mem.allEqual(u8, &credential.sealed_secret_digest, 0));
 
     const unlock = try createLocalUnlockProof(user, laptop, "accounts.example", "nonce-1", .biometric, 3, 8, laptop_identity);
-    const assertion = try identities.assertCredential(&graph, .{
+    const assertion = try identities.assertCredential(&graph, identity_keys.at(authority, 4), .{
         .credential_id = credential.id,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .origin = "https://login.accounts.example",
         .challenge = "nonce-1",
         .local_unlock = unlock,
-        .credential_identity = credential_identity,
-        .tick = 4,
+        .key_handle_id = handle_credential_identity,
     });
     try std.testing.expect(assertion.local_unlock_verified);
     try std.testing.expect(assertion.phishing_resistant);
@@ -766,33 +875,33 @@ test "os identity creates passkey credentials and rejects phishing origins" {
     try std.testing.expectEqual(@as(u64, 1), assertion.assertion_counter);
     try std.testing.expectEqualStrings("accounts.example", assertion.relyingPartySlice());
 
-    try std.testing.expectError(error.PhishingOriginRejected, identities.assertCredential(&graph, .{
+    try std.testing.expectError(error.PhishingOriginRejected, identities.assertCredential(&graph, identity_keys.at(authority, 5), .{
         .credential_id = credential.id,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .origin = "https://accounts.example.evil.test",
         .challenge = "nonce-1",
         .local_unlock = unlock,
-        .credential_identity = credential_identity,
-        .tick = 5,
+        .key_handle_id = handle_credential_identity,
     }));
-    try std.testing.expectError(error.LocalUnlockRequired, identities.assertCredential(&graph, .{
+    try std.testing.expectError(error.LocalUnlockRequired, identities.assertCredential(&graph, identity_keys.at(authority, 5), .{
         .credential_id = credential.id,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .origin = "https://accounts.example",
         .challenge = "nonce-1",
-        .credential_identity = credential_identity,
-        .tick = 5,
+        .key_handle_id = handle_credential_identity,
     }));
 }
 
 test "os identity registration rejects overlong text without consuming credential ids" {
     var graph = device_graph.Graph.init();
-    var secrets = secure_secret_store.Store.init();
+    var secrets = vault_service.Service.init();
+    const policies = policy_object.Directory.init();
     secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 751 };
+    const authority = identity_keys.context(&secrets, &policies, user);
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 761 };
     const user_identity = signing.SignerIdentity{
         .label = "oversized-user",
@@ -812,40 +921,38 @@ test "os identity registration rejects overlong text without consuming credentia
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
     _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
 
-    try std.testing.expectError(error.RelyingPartyTooLong, identities.registerCredential(&graph, &secrets, .{
+    try std.testing.expectError(error.RelyingPartyTooLong, identities.registerCredential(&graph, identity_keys.at(authority, 2), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = oversized_relying_party[0..],
         .label = "accounts-passkey",
         .scope = .synced,
-        .credential_identity = credential_identity,
-        .tick = 2,
+        .key_handle_id = 0,
     }));
-    try std.testing.expectError(error.LabelTooLong, identities.registerCredential(&graph, &secrets, .{
+    try std.testing.expectError(error.LabelTooLong, identities.registerCredential(&graph, identity_keys.at(authority, 3), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .label = oversized_label[0..],
         .scope = .synced,
-        .credential_identity = credential_identity,
-        .tick = 3,
+        .key_handle_id = 0,
     }));
     try std.testing.expect(identities.findCredential(1) == null);
-    try std.testing.expect(secrets.describeSecret(1) == null);
+    try std.testing.expect(secrets.store.describeSecret(1) == null);
 
-    const credential = try identities.registerCredential(&graph, &secrets, .{
+    const handle_credential_identity = try identity_keys.provision(authority, user, credential_identity);
+    const credential = try identities.registerCredential(&graph, identity_keys.at(authority, 4), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "accounts.example",
         .label = "accounts-passkey",
         .scope = .synced,
-        .credential_identity = credential_identity,
-        .tick = 4,
+        .key_handle_id = handle_credential_identity,
     });
     try std.testing.expectEqual(@as(u64, 1), credential.id);
     try std.testing.expectEqual(@as(u64, 1), credential.secret_id);
     try std.testing.expect(identities.findCredential(2) == null);
-    try std.testing.expect(secrets.describeSecret(2) == null);
+    try std.testing.expect(secrets.store.describeSecret(2) == null);
 }
 
 test "os identity full credential table does not consume secrets" {
@@ -860,16 +967,14 @@ test "os identity full credential table does not consume secrets" {
         .label = "wrap-laptop",
         .seed = signing.seedFromByte(0xE2),
     };
-    const credential_identity = signing.SignerIdentity{
-        .label = "wrap-passkey",
-        .seed = signing.seedFromByte(0xE3),
-    };
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
     _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
 
     var full_identities = Store.init();
-    var full_secrets = secure_secret_store.Store.init();
+    var full_secrets = vault_service.Service.init();
+    const policies = policy_object.Directory.init();
+    const authority = identity_keys.context(&full_secrets, &policies, user);
     for (0..MAX_CREDENTIALS) |index| {
         const credential_id: u64 = @intCast(index + 1);
         full_identities.credentials[index] = zeroCredential();
@@ -878,26 +983,27 @@ test "os identity full credential table does not consume secrets" {
     full_identities.credential_count = @intCast(MAX_CREDENTIALS);
     try std.testing.expect(full_identities.findCredential(0) == null);
     try std.testing.expect(full_identities.findCredential(MAX_CREDENTIALS + 1) == null);
-    try std.testing.expect(full_secrets.describeSecret(1) == null);
-    try std.testing.expectError(error.CredentialTableFull, full_identities.registerCredential(&graph, &full_secrets, .{
+    try std.testing.expect(full_secrets.store.describeSecret(1) == null);
+    try std.testing.expectError(error.CredentialTableFull, full_identities.registerCredential(&graph, identity_keys.at(authority, 5), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "wrap.example",
         .label = "wrap-passkey-full",
         .scope = .synced,
-        .credential_identity = credential_identity,
-        .tick = 5,
+        .key_handle_id = 0,
     }));
     try std.testing.expectEqual(MAX_CREDENTIALS, full_identities.countCredentials());
-    try std.testing.expect(full_secrets.describeSecret(1) == null);
+    try std.testing.expect(full_secrets.store.describeSecret(1) == null);
 }
 
 test "os identity recovers synced credentials through trusted device graph" {
     var graph = device_graph.Graph.init();
-    var secrets = secure_secret_store.Store.init();
+    var secrets = vault_service.Service.init();
+    const policies = policy_object.Directory.init();
     secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 801 };
+    const authority = identity_keys.context(&secrets, &policies, user);
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 811 };
     const phone = principal.PrincipalId{ .kind = .device, .serial = 812 };
     const user_identity = signing.SignerIdentity{
@@ -916,63 +1022,59 @@ test "os identity recovers synced credentials through trusted device graph" {
         .label = "recover-passkey-v1",
         .seed = signing.seedFromByte(0xB4),
     };
+    const handle_first_credential_identity = try identity_keys.provision(authority, user, first_credential_identity);
     const replacement_credential_identity = signing.SignerIdentity{
         .label = "recover-passkey-v2",
         .seed = signing.seedFromByte(0xB5),
     };
+    const handle_replacement_credential_identity = try identity_keys.provision(authority, user, replacement_credential_identity);
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
     _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
     _ = try graph.enrollDevice(user, phone, "phone", user_identity, phone_identity, 2);
-    const synced = try identities.registerCredential(&graph, &secrets, .{
+    const synced = try identities.registerCredential(&graph, identity_keys.at(authority, 3), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "zigos.dev",
         .label = "zigos-passkey",
         .scope = .synced,
-        .credential_identity = first_credential_identity,
-        .tick = 3,
+        .recovery_threshold = 2,
+        .key_handle_id = handle_first_credential_identity,
     });
     const first_digest = synced.credential_digest;
-    const bound = try identities.registerCredential(&graph, &secrets, .{
+    const bound = try identities.registerCredential(&graph, identity_keys.at(authority, 4), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "admin.zigos.dev",
         .label = "admin-device-key",
         .scope = .device_bound,
-        .credential_identity = first_credential_identity,
-        .tick = 4,
+        .key_handle_id = handle_first_credential_identity,
     });
 
-    const recovery_unlock = try createLocalUnlockProof(user, phone, "zigos.dev", "recover-1", .recovery_key, 5, 10, phone_identity);
-    try std.testing.expectError(error.RecoveryThresholdNotMet, identities.recoverCredential(&graph, &secrets, .{
+    const recovery_challenge = try identities.recoveryChallenge(authority, synced.id, phone, handle_replacement_credential_identity);
+    const recovery_unlock = try createLocalUnlockProof(user, phone, "zigos.dev", &recovery_challenge, .recovery_key, 5, 10, phone_identity);
+    try std.testing.expectError(error.RecoveryThresholdNotMet, identities.recoverCredential(&graph, identity_keys.at(authority, 6), .{
         .credential_id = synced.id,
         .recovery_device = phone,
         .relying_party_id = "zigos.dev",
-        .challenge = "recover-1",
         .local_unlock = recovery_unlock,
-        .threshold = 2,
-        .replacement_credential_identity = replacement_credential_identity,
-        .tick = 6,
+        .replacement_key_handle_id = handle_replacement_credential_identity,
     }));
 
-    const laptop_recovery_unlock = try createLocalUnlockProof(user, laptop, "zigos.dev", "recover-1", .recovery_key, 5, 10, laptop_identity);
+    const laptop_recovery_unlock = try createLocalUnlockProof(user, laptop, "zigos.dev", &recovery_challenge, .recovery_key, 5, 10, laptop_identity);
     const approvals = [_]RecoveryApproval{
         .{
             .device = laptop,
             .local_unlock = laptop_recovery_unlock,
         },
     };
-    const recovered = try identities.recoverCredential(&graph, &secrets, .{
+    const recovered = try identities.recoverCredential(&graph, identity_keys.at(authority, 6), .{
         .credential_id = synced.id,
         .recovery_device = phone,
         .relying_party_id = "zigos.dev",
-        .challenge = "recover-1",
         .local_unlock = recovery_unlock,
-        .threshold = 2,
         .approvals = &approvals,
-        .replacement_credential_identity = replacement_credential_identity,
-        .tick = 6,
+        .replacement_key_handle_id = handle_replacement_credential_identity,
     });
     try std.testing.expectEqual(phone, recovered.primary_device);
     try std.testing.expectEqual(@as(u32, 2), recovered.credential_generation);
@@ -980,15 +1082,14 @@ test "os identity recovers synced credentials through trusted device graph" {
     try std.testing.expect(!std.mem.eql(u8, first_digest[0..], recovered.credential_digest[0..]));
 
     const unlock = try createLocalUnlockProof(user, phone, "zigos.dev", "nonce-2", .device_pin, 7, 11, phone_identity);
-    const assertion = try identities.assertCredential(&graph, .{
+    const assertion = try identities.assertCredential(&graph, identity_keys.at(authority, 8), .{
         .credential_id = synced.id,
         .device = phone,
         .relying_party_id = "zigos.dev",
         .origin = "https://zigos.dev",
         .challenge = "nonce-2",
         .local_unlock = unlock,
-        .credential_identity = replacement_credential_identity,
-        .tick = 8,
+        .key_handle_id = handle_replacement_credential_identity,
     });
     try std.testing.expectEqual(@as(u32, 2), assertion.credential_generation);
     try std.testing.expect(assertion.hardware_backed_credential);
@@ -996,23 +1097,23 @@ test "os identity recovers synced credentials through trusted device graph" {
     try std.testing.expectEqual(@as(u64, 1), assertion.unlock_age_ticks);
 
     const bound_recovery_unlock = try createLocalUnlockProof(user, phone, "admin.zigos.dev", "recover-bound", .recovery_key, 9, 12, phone_identity);
-    try std.testing.expectError(error.DeviceBoundRecoveryDenied, identities.recoverCredential(&graph, &secrets, .{
+    try std.testing.expectError(error.DeviceBoundRecoveryDenied, identities.recoverCredential(&graph, identity_keys.at(authority, 10), .{
         .credential_id = bound.id,
         .recovery_device = phone,
         .relying_party_id = "admin.zigos.dev",
-        .challenge = "recover-bound",
         .local_unlock = bound_recovery_unlock,
-        .replacement_credential_identity = replacement_credential_identity,
-        .tick = 10,
+        .replacement_key_handle_id = handle_replacement_credential_identity,
     }));
 }
 
 test "os identity keeps dense credentials searchable and rejects full tables before secret import" {
     var graph = device_graph.Graph.init();
-    var secrets = secure_secret_store.Store.init();
+    var secrets = vault_service.Service.init();
+    const policies = policy_object.Directory.init();
     secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 851 };
+    const authority = identity_keys.context(&secrets, &policies, user);
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 861 };
     const user_identity = signing.SignerIdentity{
         .label = "full-user",
@@ -1032,14 +1133,14 @@ test "os identity keeps dense credentials searchable and rejects full tables bef
             .label = "full-passkey",
             .seed = signing.seedFromByte(@intCast(0x10 + index)),
         };
-        const credential = try identities.registerCredential(&graph, &secrets, .{
+        const handle_credential_identity = try identity_keys.provision(authority, user, credential_identity);
+        const credential = try identities.registerCredential(&graph, identity_keys.at(authority, 20 + @as(u64, @intCast(index))), .{
             .owner = user,
             .device = laptop,
             .relying_party_id = "full.example",
             .label = "full-passkey",
             .scope = .synced,
-            .credential_identity = credential_identity,
-            .tick = 20 + @as(u64, @intCast(index)),
+            .key_handle_id = handle_credential_identity,
         });
         try std.testing.expectEqual(credential.id, identities.findCredentialConst(credential.id).?.id);
     }
@@ -1048,17 +1149,13 @@ test "os identity keeps dense credentials searchable and rejects full tables bef
     try std.testing.expectEqual(@as(u64, 1), identities.findCredentialConst(1).?.id);
     try std.testing.expectEqual(@as(u64, MAX_CREDENTIALS), identities.findCredentialConst(MAX_CREDENTIALS).?.id);
     try std.testing.expect(identities.findCredentialConst(MAX_CREDENTIALS + 1) == null);
-    try std.testing.expectError(error.CredentialTableFull, identities.registerCredential(&graph, &secrets, .{
+    try std.testing.expectError(error.CredentialTableFull, identities.registerCredential(&graph, identity_keys.at(authority, 99), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "full.example",
         .label = "overflow-passkey",
         .scope = .synced,
-        .credential_identity = .{
-            .label = "overflow-passkey",
-            .seed = signing.seedFromByte(0xE1),
-        },
-        .tick = 99,
+        .key_handle_id = 0,
     }));
     try std.testing.expectEqual(@as(usize, MAX_CREDENTIALS), identities.countCredentials());
     try std.testing.expect(@sizeOf(Store) <= STORE_SIZE_CEILING_BYTES);
@@ -1066,10 +1163,12 @@ test "os identity keeps dense credentials searchable and rejects full tables bef
 
 test "os identity requires fresh local unlock and primary device for device-bound credentials" {
     var graph = device_graph.Graph.init();
-    var secrets = secure_secret_store.Store.init();
+    var secrets = vault_service.Service.init();
+    const policies = policy_object.Directory.init();
     secrets.attachHardwareProvider(testHardwareProvider());
     var identities = Store.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 901 };
+    const authority = identity_keys.context(&secrets, &policies, user);
     const laptop = principal.PrincipalId{ .kind = .device, .serial = 911 };
     const phone = principal.PrincipalId{ .kind = .device, .serial = 912 };
     const user_identity = signing.SignerIdentity{
@@ -1088,40 +1187,298 @@ test "os identity requires fresh local unlock and primary device for device-boun
         .label = "bound-passkey",
         .seed = signing.seedFromByte(0xC4),
     };
+    const handle_credential_identity = try identity_keys.provision(authority, user, credential_identity);
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
     _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
     _ = try graph.enrollDevice(user, phone, "phone", user_identity, phone_identity, 2);
-    const credential = try identities.registerCredential(&graph, &secrets, .{
+    const credential = try identities.registerCredential(&graph, identity_keys.at(authority, 3), .{
         .owner = user,
         .device = laptop,
         .relying_party_id = "device.example",
         .label = "device-bound-passkey",
         .scope = .device_bound,
-        .credential_identity = credential_identity,
-        .tick = 3,
+        .key_handle_id = handle_credential_identity,
     });
     const phone_unlock = try createLocalUnlockProof(user, phone, "device.example", "nonce-3", .biometric, 4, 8, phone_identity);
-    try std.testing.expectError(error.DeviceBoundCredentialWrongDevice, identities.assertCredential(&graph, .{
+    try std.testing.expectError(error.DeviceBoundCredentialWrongDevice, identities.assertCredential(&graph, identity_keys.at(authority, 5), .{
         .credential_id = credential.id,
         .device = phone,
         .relying_party_id = "device.example",
         .origin = "https://device.example",
         .challenge = "nonce-3",
         .local_unlock = phone_unlock,
-        .credential_identity = credential_identity,
-        .tick = 5,
+        .key_handle_id = handle_credential_identity,
     }));
 
     const expired_unlock = try createLocalUnlockProof(user, laptop, "device.example", "nonce-4", .biometric, 4, 5, laptop_identity);
-    try std.testing.expectError(error.LocalUnlockExpired, identities.assertCredential(&graph, .{
+    try std.testing.expectError(error.LocalUnlockExpired, identities.assertCredential(&graph, identity_keys.at(authority, 6), .{
         .credential_id = credential.id,
         .device = laptop,
         .relying_party_id = "device.example",
         .origin = "https://device.example",
         .challenge = "nonce-4",
         .local_unlock = expired_unlock,
-        .credential_identity = credential_identity,
-        .tick = 6,
+        .key_handle_id = handle_credential_identity,
     }));
+}
+
+const VaultIdentityFixture = if (@import("builtin").is_test) struct {
+    graph: device_graph.Graph = device_graph.Graph.init(),
+    vault: vault_service.Service = vault_service.Service.init(),
+    policies: policy_object.Directory = policy_object.Directory.init(),
+    identities: Store = Store.init(),
+    handle_id: u64 = 0,
+    credential_id: u64 = 0,
+
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1201 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 1202 };
+    const owner_key = signing.SignerIdentity{ .label = "identity-test-owner", .seed = @splat(0x51) };
+    const device_key = signing.SignerIdentity{ .label = "identity-test-device", .seed = @splat(0x52) };
+    const credential_key = signing.SignerIdentity{ .label = "identity-test-credential", .seed = @splat(0x53) };
+
+    fn init() !VaultIdentityFixture {
+        var self = VaultIdentityFixture{};
+        self.vault.attachHardwareProvider(testHardwareProvider());
+        _ = try self.graph.ensureUserRoot(owner, "owner", owner_key);
+        _ = try self.graph.enrollDevice(owner, device, "device", owner_key, device_key, 1);
+        self.handle_id = try identity_keys.provision(self.authority(1), owner, credential_key);
+        const record = try self.identities.registerCredential(&self.graph, self.authority(2), .{
+            .owner = owner,
+            .device = device,
+            .relying_party_id = "accounts.example",
+            .label = "account",
+            .key_handle_id = self.handle_id,
+        });
+        self.credential_id = record.id;
+        return self;
+    }
+
+    fn authority(self: *VaultIdentityFixture, tick: u64) VaultAuthority {
+        return identity_keys.at(identity_keys.context(&self.vault, &self.policies, owner), tick);
+    }
+
+    fn request(self: *const VaultIdentityFixture) !AssertionRequest {
+        return .{
+            .credential_id = self.credential_id,
+            .device = device,
+            .relying_party_id = "accounts.example",
+            .origin = "https://accounts.example",
+            .challenge = "nonce",
+            .local_unlock = try createLocalUnlockProof(owner, device, "accounts.example", "nonce", .device_pin, 2, 2000, device_key),
+            .key_handle_id = self.handle_id,
+        };
+    }
+} else void;
+
+test "os identity signs every assertion claim through the sealed vault key" {
+    try std.testing.expect(!@hasField(AssertionRequest, "credential_identity"));
+    try std.testing.expect(!@hasField(RegisterCredentialRequest, "credential_identity"));
+    try std.testing.expect(!@hasField(RecoveryRequest, "replacement_credential_identity"));
+    try std.testing.expect(!@hasField(RecoveryRequest, "threshold"));
+    try std.testing.expect(!@hasField(AssertionRequest, "tick"));
+    var fixture = try VaultIdentityFixture.init();
+    const request = try fixture.request();
+    const assertion = try fixture.identities.assertCredential(&fixture.graph, fixture.authority(3), request);
+    const record = fixture.identities.findCredential(fixture.credential_id).?;
+    try std.testing.expect(verifyAssertion(&assertion, &record.credential_public_key));
+    try std.testing.expectEqual(@as(u64, 1), assertion.assertion_counter);
+    var changed = assertion;
+    changed.assertion_counter += 1;
+    try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
+    changed = assertion;
+    changed.credential_generation += 1;
+    try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
+    changed = assertion;
+    changed.device_trust_generation += 1;
+    try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
+    changed = assertion;
+    changed.unlock_age_ticks += 1;
+    try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
+    inline for (.{ "local_unlock_verified", "phishing_resistant", "hardware_backed_credential", "device_platform_backed", "primary_device_assertion" }) |field| {
+        changed = assertion;
+        @field(changed, field) = !@field(changed, field);
+        try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
+    }
+    inline for (.{ "relying_party_id", "origin", "challenge" }) |field| {
+        changed = assertion;
+        @field(changed, field)[0] ^= 1;
+        try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
+    }
+    changed = assertion;
+    changed.challenge_len = MAX_CHALLENGE_BYTES + 1;
+    try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
+    const wrong_key = [_]u8{0x91} ** signing.PUBLIC_KEY_BYTES;
+    try std.testing.expect(!verifyAssertion(&assertion, &wrong_key));
+}
+
+test "os identity vault denials leave assertion counters and timestamps unchanged" {
+    var fixture = try VaultIdentityFixture.init();
+    const request = try fixture.request();
+    const record = fixture.identities.findCredential(fixture.credential_id).?;
+    const before = record.*;
+    var authority = fixture.authority(3);
+    authority.holder.serial += 1;
+    try std.testing.expectError(error.HandleHolderMismatch, fixture.identities.assertCredential(&fixture.graph, authority, request));
+    authority = fixture.authority(3);
+    authority.holder.kind = .app;
+    try std.testing.expectError(error.InvalidIdentityAuthority, fixture.identities.assertCredential(&fixture.graph, authority, request));
+    try std.testing.expectError(error.HandleHolderMismatch, fixture.vault.signDigest(&fixture.policies, authority.subjects, .{
+        .holder = authority.holder,
+        .task_id = authority.task_id,
+        .handle_id = fixture.handle_id,
+        .digest = @splat(0x11),
+        .now_ticks = 3,
+    }, null));
+    authority = fixture.authority(3);
+    authority.task_id += 1;
+    try std.testing.expectError(error.HandleHolderMismatch, fixture.identities.assertCredential(&fixture.graph, authority, request));
+    try std.testing.expectError(error.HandleExpired, fixture.identities.assertCredential(&fixture.graph, fixture.authority(1001), request));
+    fixture.vault.attachHardwareProvider(.{});
+    try std.testing.expectError(error.HardwareProviderUnavailable, fixture.identities.assertCredential(&fixture.graph, fixture.authority(3), request));
+    fixture.vault.attachHardwareProvider(testHardwareProvider());
+    var other = request;
+    // Even the same seed imported as another secret cannot substitute for the
+    // credential's specific secret id and sealed binding.
+    other.key_handle_id = try identity_keys.provision(fixture.authority(3), VaultIdentityFixture.owner, VaultIdentityFixture.credential_key);
+    try std.testing.expectError(error.CredentialKeyBindingMismatch, fixture.identities.assertCredential(&fixture.graph, fixture.authority(4), other));
+    try std.testing.expectEqualDeep(before, record.*);
+    record.assertion_count = std.math.maxInt(u64);
+    try std.testing.expectError(error.CredentialCounterExhausted, fixture.identities.assertCredential(&fixture.graph, fixture.authority(4), request));
+    record.* = before;
+    try fixture.vault.revoke(.{
+        .subject = VaultIdentityFixture.owner,
+        .task_id = 1,
+        .handle_id = fixture.handle_id,
+        .secret_id = record.secret_id,
+        .expected_holder = fixture.authority(4).holder,
+        .expected_holder_task_id = 1,
+        .now_ticks = 4,
+    }, null);
+    try std.testing.expectError(error.HandleRevoked, fixture.identities.assertCredential(&fixture.graph, fixture.authority(5), request));
+    try std.testing.expectEqualDeep(before, record.*);
+}
+
+test "os identity rechecks both credential and vault policy before returning assertions" {
+    var fixture = try VaultIdentityFixture.init();
+    const request = try fixture.request();
+    const policy_key = signing.SignerIdentity{ .label = "identity-policy", .seed = @splat(0x61) };
+    for (0..2) |variant| {
+        fixture.policies = policy_object.Directory.init();
+        _ = try fixture.policies.create(.{
+            .scope = .user,
+            .subject_id = VaultIdentityFixture.owner.serial,
+            .issuer = .{ .kind = .policy_authority, .serial = 1200 },
+            .label = "identity policy",
+            .credential_assertions_allowed = variant == 1,
+            .secret_vault_allowed = variant == 0,
+        }, policy_key);
+        try std.testing.expectError(error.PolicyDenied, fixture.identities.assertCredential(&fixture.graph, fixture.authority(3), request));
+        try std.testing.expectEqual(@as(u64, 0), fixture.identities.findCredential(fixture.credential_id).?.assertion_count);
+    }
+}
+
+test "os identity rejects malformed origins unlock lengths and expiry boundaries" {
+    var fixture = try VaultIdentityFixture.init();
+    const original = try fixture.request();
+    const invalid_origins = [_][]const u8{
+        "https://accounts.example:443@evil.example", "https://accounts.example/path",  "https://accounts.example?query",
+        "https://accounts.example:65536",            "https://accounts.example:0",     "https://accounts.example:+443",
+        "https://accounts.example:",                 "https://accounts.example:0443",  "https://accounts.example.",
+        "https://.accounts.example",                 "https://evil..accounts.example", "https://-bad.accounts.example",
+        "https://bad-.accounts.example",             "https://evilaccounts.example",   "https://accounts.example.evil",
+        "http://accounts.example",                   "https://ACCOUNTS.EXAMPLE",
+    };
+    for (invalid_origins) |origin| {
+        var request = original;
+        request.origin = origin;
+        try std.testing.expectError(error.PhishingOriginRejected, fixture.identities.assertCredential(&fixture.graph, fixture.authority(3), request));
+    }
+    var malformed = original;
+    malformed.local_unlock.?.relying_party_id_len = MAX_RP_ID_BYTES + 1;
+    try std.testing.expectError(error.InvalidLocalUnlock, fixture.identities.assertCredential(&fixture.graph, fixture.authority(3), malformed));
+    malformed = original;
+    malformed.local_unlock.?.challenge_len = MAX_CHALLENGE_BYTES + 1;
+    try std.testing.expectError(error.InvalidLocalUnlock, fixture.identities.assertCredential(&fixture.graph, fixture.authority(3), malformed));
+    try std.testing.expectError(error.LocalUnlockExpired, fixture.identities.assertCredential(&fixture.graph, fixture.authority(2000), original));
+    try std.testing.expectEqual(@as(u64, 0), fixture.identities.findCredential(fixture.credential_id).?.assertion_count);
+    for ([_][]const u8{ "https://accounts.example", "https://login.accounts.example", "https://accounts.example:443", "https://accounts.example:8443" }) |origin| {
+        var request = original;
+        request.origin = origin;
+        const assertion = try fixture.identities.assertCredential(&fixture.graph, fixture.authority(3), request);
+        try std.testing.expect(verifyAssertion(&assertion, &fixture.identities.findCredential(fixture.credential_id).?.credential_public_key));
+    }
+}
+
+test "os identity registration rejects foreign exportable and software key custody" {
+    var fixture = try VaultIdentityFixture.init();
+    const before = fixture.identities.credential_count;
+    const owner = VaultIdentityFixture.owner;
+    for (0..3) |variant| {
+        const secret_owner = if (variant == 0) principal.PrincipalId{ .kind = .user, .serial = owner.serial + 1 } else owner;
+        const secret = try fixture.vault.importSecret(&fixture.policies, .{}, .{
+            .owner = secret_owner,
+            .task_id = 1,
+            .label = "other credential",
+            .raw = &VaultIdentityFixture.credential_key.seed,
+            .hardware_backed = variant != 1,
+            .exportable = variant == 2,
+            .now_ticks = 2,
+        }, null);
+        const handle = try fixture.vault.lendHandle(&fixture.policies, .{}, .{
+            .owner = secret_owner,
+            .holder = fixture.authority(2).holder,
+            .task_id = 1,
+            .secret_id = secret.id,
+            .expires_at_ticks = 20,
+            .now_ticks = 2,
+        }, null);
+        const request = RegisterCredentialRequest{
+            .owner = owner,
+            .device = VaultIdentityFixture.device,
+            .relying_party_id = "accounts.example",
+            .label = "other",
+            .key_handle_id = handle.id,
+        };
+        if (variant == 0) {
+            try std.testing.expectError(error.SecretOwnerMismatch, fixture.identities.registerCredential(&fixture.graph, fixture.authority(3), request));
+        } else {
+            try std.testing.expectError(error.CredentialKeyCustodyRequired, fixture.identities.registerCredential(&fixture.graph, fixture.authority(3), request));
+        }
+        try std.testing.expectEqual(before, fixture.identities.credential_count);
+    }
+}
+
+test "os identity recovery binds approval to the replacement key and generation atomically" {
+    var fixture = try VaultIdentityFixture.init();
+    const owner = VaultIdentityFixture.owner;
+    const device = VaultIdentityFixture.device;
+    const replacement = try identity_keys.provision(fixture.authority(2), owner, .{ .label = "replacement", .seed = @splat(0x71) });
+    const other = try identity_keys.provision(fixture.authority(2), owner, .{ .label = "other", .seed = @splat(0x72) });
+    const record = fixture.identities.findCredential(fixture.credential_id).?;
+    const before = record.*;
+    const challenge = try fixture.identities.recoveryChallenge(fixture.authority(2), record.id, device, replacement);
+    var request = RecoveryRequest{
+        .credential_id = record.id,
+        .recovery_device = device,
+        .relying_party_id = "accounts.example",
+        .local_unlock = try createLocalUnlockProof(owner, device, "accounts.example", &challenge, .recovery_key, 2, 10, VaultIdentityFixture.device_key),
+        .replacement_key_handle_id = other,
+    };
+    try std.testing.expectError(error.InvalidLocalUnlock, fixture.identities.recoverCredential(&fixture.graph, fixture.authority(3), request));
+    request.replacement_key_handle_id = replacement;
+    fixture.vault.attachHardwareProvider(.{});
+    try std.testing.expectError(error.HardwareProviderUnavailable, fixture.identities.recoverCredential(&fixture.graph, fixture.authority(3), request));
+    try std.testing.expectEqualDeep(before, record.*);
+    fixture.vault.attachHardwareProvider(testHardwareProvider());
+    const recovered = try fixture.identities.recoverCredential(&fixture.graph, fixture.authority(3), request);
+    try std.testing.expectEqual(@as(u32, 2), recovered.credential_generation);
+    try std.testing.expect(!std.mem.eql(u8, &before.credential_public_key, &recovered.credential_public_key));
+    try std.testing.expectError(error.InvalidLocalUnlock, fixture.identities.recoverCredential(&fixture.graph, fixture.authority(4), request));
+    var assertion_request = try fixture.request();
+    try std.testing.expectError(error.CredentialKeyBindingMismatch, fixture.identities.assertCredential(&fixture.graph, fixture.authority(4), assertion_request));
+    assertion_request.key_handle_id = replacement;
+    const assertion = try fixture.identities.assertCredential(&fixture.graph, fixture.authority(4), assertion_request);
+    try std.testing.expect(verifyAssertion(&assertion, &recovered.credential_public_key));
+    try std.testing.expect(!verifyAssertion(&assertion, &before.credential_public_key));
 }

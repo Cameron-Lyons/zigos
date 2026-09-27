@@ -15,6 +15,12 @@ const MAX_CHECKPOINT_ATTEMPTS: u8 = 2;
 const shares_root_volume = builtin.target.os.tag == .freestanding;
 const CheckpointVolume = if (shares_root_volume) void else storage_volume.Volume;
 
+pub const DurabilityError = storage_volume.Error || error{
+    NoBackingDevice,
+    CheckpointDeferred,
+    CheckpointPending,
+};
+
 pub const CheckpointStore = struct {
     store: object_store.Store = object_store.Store.init(),
     workspaces: workspace.Directory = workspace.Directory.init(),
@@ -155,6 +161,29 @@ pub fn flushCheckpoint(service: anytype) void {
     service.checkpoint_store.last_checkpoint_generation = result.generation;
     service.checkpoint_store.last_checkpoint_error = null;
     service.checkpoint_store.dirty = false;
+}
+
+// A clean RAM snapshot is not a durability acknowledgement. Explicit saves
+// require an attached device and a complete transaction boundary, including
+// when automatic checkpointing is disabled for a batch or verification run.
+pub fn requireDurableBoundary(service: anytype) DurabilityError!void {
+    if (service.deferred_checkpoint_count != 0 or service.checkpoint_batch_depth != 0) return error.CheckpointDeferred;
+    const volume = service.checkpoint_store.volumePtr();
+    if (comptime !shares_root_volume) {
+        if (storage_volume.hasAttachedDevice()) volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+    }
+    if (!volume.hasAttachedDevice()) return error.NoBackingDevice;
+}
+
+pub fn checkpointDurable(service: anytype) DurabilityError!u64 {
+    try requireDurableBoundary(service);
+    // A reloaded store has no in-memory receipt yet. saveToVolume can verify
+    // the existing generation without adding another version or checkpoint.
+    if (service.checkpoint_store.last_checkpoint_generation == 0) service.checkpoint_store.dirty = true;
+    flushCheckpoint(service);
+    if (service.checkpoint_store.last_checkpoint_error) |err| return err;
+    if (service.checkpoint_store.dirty or service.checkpoint_store.last_checkpoint_generation == 0) return error.CheckpointPending;
+    return service.checkpoint_store.last_checkpoint_generation;
 }
 
 fn retryableCheckpointError(err: storage_volume.Error) bool {

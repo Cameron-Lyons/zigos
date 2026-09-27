@@ -262,7 +262,7 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 8), abi.ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 10), abi.ABI_VERSION);
     const storage_interface_id = typed_component_abi.interfaceIdForService(.storage_object);
     try registry.register(55, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
     const connection = try registry.connect(storage_interface_id);
@@ -568,13 +568,15 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
         .endpoint_id = 99,
         .endpoint_capability_id = 100,
     });
-    var kernel = native_kernel.Kernel.init(
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(
         spec_support.policyAuthority(1),
         &runtime,
         &capabilities,
         &endpoints,
         &shared,
     );
+    defer kernel.deinit();
     var port = component_port.KernelPort.init(&kernel);
 
     const session_task = try runtime.createTask(.{
