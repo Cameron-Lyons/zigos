@@ -5,8 +5,6 @@ const runtime = @import("userspace_runtime");
 const Entry = service_entry.Main(.{ .service = @as(runtime.ServiceKind, @enumFromInt(build_options.service_kind)) });
 pub const panic = Entry.panic;
 
-export var zigos_userspace_yield_counter: u32 = 0;
-
 export fn zigos_userspace_contract_main() callconv(.c) noreturn {
     Entry.main();
 }

@@ -202,6 +202,7 @@ pub const notes_daily_driver_typed_recovery_ok = "ZIGOS:NOTES_DAILY:TYPED_RECOVE
 pub const notes_daily_driver_typed_loop_complete = "ZIGOS:NOTES_DAILY:TYPED_LOOP:COMPLETE";
 pub const document_channel_userspace_open = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_OPEN:PASS";
 pub const document_channel_userspace_save = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_SAVE:PASS";
+pub const document_channel_sibling_editors = "ZIGOS:DOCUMENT_CHANNEL:SIBLING_EDITORS:PASS";
 pub const document_channel_retirement = "ZIGOS:DOCUMENT_CHANNEL:RETIREMENT:PASS";
 pub const notes_daily_driver_complete = "ZIGOS:NOTES_DAILY:COMPLETE";
 

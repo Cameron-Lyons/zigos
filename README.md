@@ -46,10 +46,13 @@ requests.
   authority, owns the channel's metadata, and publishes the opening binding
   before the app's first instruction. A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels
-  queued saves when either endpoint or task is retired. Boot verification drives
-  the Notes ELF through document load, modeled keyboard input, a durable save,
-  and channel teardown. Connecting this opener to the interactive launcher and
-  moving the storage core into its userspace service remain open.
+  queued saves when either endpoint or task is retired. Editors keep their text
+  and save state on each task's stack, and prepared bindings survive sibling
+  dispatches through the shared mailbox. Boot verification runs two Notes tasks
+  with distinct documents through modeled keyboard input, independent durable
+  saves, and continued editing after one task retires. Connecting this opener
+  to the interactive launcher and moving the storage core into its userspace
+  service remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
   checks instruction availability and success, bounds retries, rejects a stuck
   source, erases temporary seed buffers, and stops boot if seeding fails. Runtime

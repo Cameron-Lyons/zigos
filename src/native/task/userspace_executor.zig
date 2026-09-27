@@ -759,7 +759,8 @@ pub const Executor = struct {
     }
 
     // Publish an opened document before the first instruction of a fresh app.
-    // Initializing here avoids retaining another binding in every mapping.
+    // Capture it immediately: a sibling may use the shared mailbox before this
+    // task's first dispatch.
     pub fn bindInitialDocument(
         self: *Executor,
         catalog: *userspace_loader.Catalog,
@@ -784,12 +785,12 @@ pub const Executor = struct {
         if (!image.elf_file.isPresent() or image.bootstrap_mailbox_address == 0) return false;
         self.init();
         const mapping = (self.ensureMaterialized(address_space, image) catch return false).entry;
-        if (mapping.resume_valid or mapping.mailbox_publication_cache.initialized) return false;
+        if (mapping.resume_valid or mapping.initial_mailbox_prepared or mapping.mailbox_publication_cache.initialized) return false;
         var update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks) orelse return false;
         update.document = binding;
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-        defer freestanding.paging.switchToKernelAddressSpace();
-        writeBootstrapMailbox(update);
+        const mailbox = kernelPublishedMailbox(update, null);
+        freestanding.paging.writeOwnedUserRange(&mapping.address_space.?, update.address, std.mem.asBytes(&mailbox)) catch return false;
+        storeCapturedMailbox(mapping, mailbox);
         mapping.initial_mailbox_prepared = true;
         return true;
     }
@@ -2226,6 +2227,35 @@ test "mailbox snapshot ignores a sibling task identity" {
         .version = 0,
         .task_id = 7,
     }, 7));
+}
+
+test "prepared document survives a sibling dispatch before first launch" {
+    const binding = userspace_bootstrap_mailbox.DocumentBinding{
+        .endpoint_capability_id = 10,
+        .service_endpoint_id = 11,
+        .object_id = 12,
+        .version_id = 13,
+    };
+    var update = BootstrapMailboxUpdate{
+        .address = 0x4000,
+        .preserve_runtime_state = false,
+        .detail = @intFromEnum(userspace_bootstrap_mailbox.Detail.ui),
+        .heartbeat_increment = 1,
+        .authorities = .{ .bootstrap_capability_id = 101 },
+        .task_id = 1,
+        .ui_surface_id = 2,
+        .document = binding,
+    };
+    const prepared = kernelPublishedMailbox(update, null);
+    const sibling = userspace_bootstrap_mailbox.Mailbox{ .task_id = 2 };
+    update.document = .{};
+    update.preserve_runtime_state = true;
+    update.authorities.input_capability_id = 102;
+    const restored = kernelPublishedMailbox(update, preservedMailboxBytes(sibling, prepared, update));
+    try std.testing.expectEqualDeep(binding, restored.document);
+    try std.testing.expectEqual(@as(u64, 1), restored.task_id);
+    try std.testing.expectEqual(@as(u64, 102), restored.input_capability_id);
+    try std.testing.expectEqual(@as(u64, 0), restored.ui_state_revision);
 }
 
 test "shared-group stacks walk to the next free slot" {
