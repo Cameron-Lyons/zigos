@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=scripts/qemu-harness.sh
 source "$SCRIPT_DIR/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"
@@ -44,7 +45,7 @@ start_tpm() {
   "$SWTPM_BIN" socket --tpm2 --tpmstate "dir=$TPM_WORK/state" \
     --ctrl "type=unixio,path=$TPM_WORK/control.sock" >"$LOG_DIR/$name.swtpm.log" 2>&1 &
   TPM_PID=$!
-  for attempt in {1..50}; do
+  for ((attempt = 0; attempt < 50; attempt++)); do
     if [ -S "$TPM_WORK/control.sock" ] && kill -0 "$TPM_PID" 2>/dev/null; then
       return 0
     fi

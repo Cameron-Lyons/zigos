@@ -166,7 +166,8 @@ assert_fresh_boot_instances() {
 
 assert_entropy_baseline_rejection() (
   local log_path="${BASE_LOG_PATH}.no-rdseed.log"
-  export QEMU_CPU_MODEL="$(qemu_harness_cpu_model),-rdseed"
+  QEMU_CPU_MODEL="$(qemu_harness_cpu_model),-rdseed"
+  export QEMU_CPU_MODEL
   qemu_harness_run_native_store_until_marker \
     "$KERNEL_PATH" "$NATIVE_STORE_IMAGE" "$log_path" \
     "ZIGOS:CPU:BASELINE:MODERN_X86_64:REJECTED" "$ZIGOS_NATIVE_SECONDS"
