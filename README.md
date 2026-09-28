@@ -142,7 +142,11 @@ requests.
   authenticated responses are checked before decryption. Objects require 256-bit
   authorization supplied by the caller and remain bound to their TPM and parent.
   The client erases temporary material, flushes transient objects and sessions,
-  and returns zeroed key output on failure. It expects empty owner-hierarchy
+  and returns zeroed key output on failure. Authenticated NV operations use the
+  same encrypted sessions, accept only full records up to 256 bytes, validate the
+  index public area and changing Name, and erase failed read output. Index reads
+  and writes require a separate caller authorization; no owner read/write, index
+  deletion, or implicit redefinition is exposed. It expects empty owner-hierarchy
   authorization and does not enforce a PCR policy.
   The secret store now retains authenticated encrypted blobs instead of digest-only
   placeholders. A TPM adapter wraps fresh data keys and protects up to 96 bytes
@@ -180,14 +184,24 @@ requests.
   now checkpoints up to 16 sealed records and 16 credentials together, preserves
   key IDs, export policy, assertion counters, recovery generations and revocations,
   and restores them atomically without leases or unlock proofs. The durable
-  identity service returns assertions only after their counters reach disk.
-  Failed checkpoints block further identity changes until an explicit flush
-  succeeds; retries reuse the pending version. Restore
-  requires an enrollment-supplied public-key pin and checks an authenticated
-  generation floor; rollback protection needs that floor outside the native disk.
-  Production authorization provisioning, catalog trust-pin enrollment,
-  rollback-resistant freshness storage, trusted PIN/biometric verification and
-  session-lifecycle integration, and userspace request dispatch remain open.
+  identity service returns assertions only after their counters reach disk and,
+  when attached, its external freshness anchor. Failed checkpoints block further
+  identity changes until an explicit flush succeeds; retries reuse the pending
+  version. A 136-byte authenticated TPM NV record binds the owner, catalog ID,
+  signing key, optional device-root pin, generation, and exact payload digest.
+  Restore reads these pins independently of the native volume and rejects both
+  older catalogs and different signed payloads at the same generation before
+  unsealing. Disk commits precede NV updates. A lost NV-write reply retains the
+  pending version; a fresh client can authenticate the committed record and finish
+  the retry without another NV write. This uses ordinary protected NV storage,
+  with serialized software enforcing generation advancement, not a hardware
+  monotonic counter. Enrollment is explicit, and missing or redefined indexes
+  never trigger automatic reprovisioning. A reboot between disk and NV commits
+  fails closed on a digest mismatch; automated recovery of that interrupted
+  enrollment/checkpoint remains open. Production authorization provisioning,
+  catalog trust-pin enrollment, physical TPM persistence validation, trusted
+  PIN/biometric verification and session-lifecycle integration, and userspace
+  request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   creation, recovery from the native disk after restarting the VM and swtpm,
   repeated handle cleanup, bad authorization, private-blob tampering, response
@@ -206,7 +220,11 @@ requests.
   It also resumes an assertion counter after reboot and refuses a credential
   revoked before shutdown. The cold boot saves an unlock proof; the reboot rejects
   replay at matching relative ticks and rejects replacing its signed context with
-  the new session. Catalog format v4 includes the authenticated device graph and rejects older snapshots.
+  the new session. Both catalog pins now live in authenticated NV records. The
+  gate checks wrong NV authorization, duplicate definition, encrypted traffic,
+  corrupt read/write response MACs, and reconciliation of an accepted write with
+  a lost reply. It restores the cold disk snapshot while retaining the newer TPM
+  state and requires rejection before vault restore. Catalog format v4 includes the authenticated device graph and rejects older snapshots.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
@@ -254,7 +272,7 @@ requests.
   recovery remain open.
   Host tests join and rotate separate vaults and disks; the TPM cold/reboot proof
   restores two device vaults and catalogs on the same guest TPM and rejects the
-  retired device key. Production approval, enrollment transport, trusted root-pin provisioning and rollback-resistant floors remain open.
+  retired device key. Production approval, enrollment transport, trusted root-pin and authorization provisioning, interrupted-checkpoint recovery, and physical TPM validation remain open.
   The two-node gate uses modern VirtIO PCI networking with bounded 32-entry
   queues, separate DMA permissions, VT-d isolation and remapped MSI-X.
   Both guests must transmit and receive encrypted native frames and observe

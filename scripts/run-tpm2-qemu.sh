@@ -84,14 +84,14 @@ run_boot() {
       echo "TPM2 sealing result mismatch for $name" >&2
       return 1
     fi
-    local vault_marker="${sealing_marker/:SEAL:/:VAULT:}"
+    local vault_marker="${5:-${sealing_marker/:SEAL:/:VAULT:}}"
     if [ "$(grep -c '^ZIGOS:TPM2:VAULT:' "$log")" -ne 1 ] || ! grep -Fxq "$vault_marker" "$log"; then
       cat "$log" >&2
       echo "TPM2 vault result mismatch for $name" >&2
       return 1
     fi
     local expected_proofs=1 proof
-    if [[ "$sealing_marker" == *:WRONG_DEVICE ]]; then expected_proofs=0; fi
+    if [[ "$vault_marker" == *:WRONG_DEVICE || "$vault_marker" == *:ROLLBACK_REJECTED ]]; then expected_proofs=0; fi
     for proof in IDENTITY:SIGNED KEYGEN:DISTINCT DOCUMENT:SIGNING PEER:AUTHENTICATED; do
       if [ "$(grep -c "^ZIGOS:TPM2:${proof%%:*}:" "$log" || true)" -ne "$expected_proofs" ] ||
         { [ "$expected_proofs" -eq 1 ] && ! grep -Fxq "ZIGOS:TPM2:$proof" "$log"; }; then
@@ -119,6 +119,27 @@ run_boot() {
       echo "TPM2 unlock replay result mismatch for $name" >&2
       return 1
     fi
+    local anchor_marker="ZIGOS:TPM2:ANCHOR:PROVISIONED" anchor_count=1 nv_count=0 retry_count=0
+    case "$name" in
+      cold) nv_count=1 ;;
+      reboot) anchor_marker='ZIGOS:TPM2:ANCHOR:ADVANCED'; retry_count=1 ;;
+      rollback) anchor_marker='ZIGOS:TPM2:ANCHOR:ROLLBACK_REJECTED' ;;
+      different-tpm) anchor_count=0 ;;
+    esac
+    if [ "$(grep -c '^ZIGOS:TPM2:ANCHOR:' "$log" || true)" -ne "$anchor_count" ] ||
+      { [ "$anchor_count" -eq 1 ] && ! grep -Fxq "$anchor_marker" "$log"; } ||
+      [ "$(grep -c '^ZIGOS:TPM2:NV:' "$log" || true)" -ne "$nv_count" ] ||
+      { [ "$nv_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:NV:AUTHENTICATED' "$log"; }; then
+      cat "$log" >&2
+      echo "TPM2 vault anchor result mismatch for $name" >&2
+      return 1
+    fi
+    if [ "$(grep -c '^ZIGOS:TPM2:ANCHOR_RETRY:' "$log" || true)" -ne "$retry_count" ] ||
+      { [ "$retry_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:ANCHOR_RETRY:RECONCILED' "$log"; }; then
+      cat "$log" >&2
+      echo "TPM2 ambiguous anchor write mismatch for $name" >&2
+      return 1
+    fi
   else
     bash "$SCRIPT_DIR/check-production-boot-log.sh" "$log"
   fi
@@ -128,10 +149,14 @@ run_boot() {
 bash "$SCRIPT_DIR/build-native-store.sh" "$STORE_IMAGE" 8 reset
 if [ "$MODE" = sealing ]; then
   run_boot cold tpm-crb 'ZIGOS:TPM2:CRB_READY' 'ZIGOS:TPM2:SEAL:CREATED'
-  # Give both restart cases the same persisted sealed object. Verification
+  # Give each restart case the same persisted sealed object. Verification
   # fixtures mutate other records on each boot and are not a soak workload.
   cp --sparse=always "$STORE_IMAGE" "$TPM_WORK/sealed-store.img"
   run_boot reboot tpm-crb 'ZIGOS:TPM2:CRB_READY' 'ZIGOS:TPM2:SEAL:RECOVERED'
+  # Keep the advanced TPM state while rolling the disk back to its old catalog.
+  # The sealed key remains valid; the independent NV anchor must reject restore.
+  cp --sparse=always "$TPM_WORK/sealed-store.img" "$STORE_IMAGE"
+  run_boot rollback tpm-crb 'ZIGOS:TPM2:CRB_READY' 'ZIGOS:TPM2:SEAL:RECOVERED' 'ZIGOS:TPM2:VAULT:ROLLBACK_REJECTED'
   # Restore that disk snapshot and replace the TPM, including its owner seed.
   cp --sparse=always "$TPM_WORK/sealed-store.img" "$STORE_IMAGE"
   mv "$TPM_WORK/state" "$TPM_WORK/original-state"

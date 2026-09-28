@@ -41,6 +41,22 @@ pub const Trust = struct {
     public_key: signing.PublicKey,
     minimum_generation: u64 = 1,
     device_root_pin: ?signing.PublicKey = null,
+    payload_digest: ?hash.Digest = null,
+};
+
+pub const Checkpoint = struct {
+    object_id: u64,
+    owner: principal.PrincipalId,
+    public_key: signing.PublicKey,
+    generation: u64,
+    payload_digest: hash.Digest,
+};
+
+// Borrowed, serialized durable freshness boundary. Advance is idempotent for
+// the same checkpoint; failures keep Session.pending and withhold the receipt.
+pub const Anchor = struct {
+    context: *anyopaque,
+    advance_fn: *const fn (*anyopaque, Checkpoint) anyerror!void,
 };
 
 pub const Receipt = struct {
@@ -62,6 +78,7 @@ const Pending = struct {
 // caller serializes vault/storage access and provides bounded scratch storage.
 pub const Session = struct {
     pending: ?Pending = null,
+    anchor: ?*const Anchor = null,
 
     pub fn save(self: *Session, storage: *storage_service.Service, state: State, signer: object_signer.Signer, object_id: u64, expected_version_id: u64, now_ticks: u64, scratch: *[MAX_BYTES]u8) !Receipt {
         const service = state.vault;
@@ -114,6 +131,13 @@ pub const Session = struct {
             };
         }
         const generation = try storage.checkpointDurable();
+        if (self.anchor) |anchor| try anchor.advance_fn(anchor.context, .{
+            .object_id = object_id,
+            .owner = signer.key.authority.?.owner,
+            .public_key = storage.latestVersion(object_id).?.metadata.signature.publicKeySlice()[0..signing.PUBLIC_KEY_BYTES].*,
+            .generation = next_generation,
+            .payload_digest = self.pending.?.payload_digest,
+        });
         const receipt = Receipt{ .version_id = self.pending.?.version_id, .catalog_generation = next_generation, .checkpoint_generation = generation };
         self.pending = null;
         return receipt;
@@ -126,6 +150,16 @@ pub fn restore(storage: *const storage_service.Service, state: State, trust: Tru
     if (state.identities.credential_count != 0 or !destination.store.empty() or destination.handles.countInUse() != 0 or
         destination.store.handles.countInUse() != 0) return error.VaultNotEmpty;
     if (state.devices) |devices| if (!graph_snapshot.empty(devices)) return error.GraphNotEmpty;
+    const verified = try readTrusted(storage, trust, scratch);
+    try decode(&destination.store, state.identities, state.devices, trust.device_root_pin, trust.object_id, trust.owner, verified.payload);
+    return verified.checkpoint.generation;
+}
+
+pub fn inspect(storage: *const storage_service.Service, trust: Trust, scratch: *[MAX_BYTES]u8) !Checkpoint {
+    return (try readTrusted(storage, trust, scratch)).checkpoint;
+}
+
+fn readTrusted(storage: *const storage_service.Service, trust: Trust, scratch: *[MAX_BYTES]u8) !struct { checkpoint: Checkpoint, payload: []const u8 } {
     const version = storage.latestVersion(trust.object_id) orelse return error.VaultCatalogMissing;
     if (version.object_type != .secret or !std.mem.eql(u8, version.metadata.contentTypeSlice(), CONTENT_TYPE) or
         !std.mem.eql(u8, version.metadata.labelSlice(), label) or
@@ -135,8 +169,10 @@ pub fn restore(storage: *const storage_service.Service, state: State, trust: Tru
     var reader = Reader{ .buffer = payload };
     const catalog_header = try header(&reader, trust.object_id);
     if (catalog_header.generation < trust.minimum_generation) return error.VaultCatalogRollback;
-    try decode(&destination.store, state.identities, state.devices, trust.device_root_pin, trust.object_id, trust.owner, payload);
-    return catalog_header.generation;
+    var digest: hash.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
+    if (trust.payload_digest) |expected| if (!std.mem.eql(u8, &expected, &digest)) return error.VaultCatalogAnchorMismatch;
+    return .{ .payload = payload, .checkpoint = .{ .object_id = trust.object_id, .owner = trust.owner, .public_key = trust.public_key, .generation = catalog_header.generation, .payload_digest = digest } };
 }
 
 fn encode(store: *const secrets.Store, identities: *const identity.Store, devices: ?*const graph.Graph, object_id: u64, generation: u64, owner: principal.PrincipalId, scratch: []u8) ![]const u8 {
@@ -269,7 +305,7 @@ fn decode(store: *secrets.Store, identities: *identity.Store, devices: ?*graph.G
 const empty_secret = secrets.Store.init().secrets[0];
 
 comptime {
-    if (MAX_BYTES > objects.MAX_PAYLOAD_BYTES or @sizeOf(Session) > 104)
+    if (MAX_BYTES > objects.MAX_PAYLOAD_BYTES or @sizeOf(Session) > 112)
         @compileError("vault catalog exceeds bounded checkpoint storage");
 }
 
@@ -425,6 +461,26 @@ test "vault catalog rejects incomplete framing and rolls back a later failed uns
     scratch[payload.len - 5] ^= 1;
     try decode(&destination, &identities, null, null, test_object_id, test_owner, payload);
     try std.testing.expectEqual(@as(u8, 2), destination.secret_count);
+}
+
+test "vault catalog anchor rejects a different signed payload at the same generation" {
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var identities = identity.Store.init();
+    var fixture = SigningFixture{};
+    const signer = try prepare(&fixture, &device.service);
+    var scratch: [MAX_BYTES]u8 = undefined;
+    var session = Session{};
+    const receipt = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 2, &scratch);
+    var trust = try testTrust();
+    trust.payload_digest = (try inspect(&device.service, trust, &scratch)).payload_digest;
+    fixture.service.store.secrets[0].label[0] ^= 1;
+    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch);
+    const metadata = try objects.signMetadata(durable.signer, label, CONTENT_TYPE, .secret, payload, 3);
+    _ = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = payload, .metadata = metadata, .parent_version_id = ids.version(receipt.version_id) });
+    var recovered = vault.Service.init();
+    try std.testing.expectError(error.VaultCatalogAnchorMismatch, restore(&device.service, .{ .vault = &recovered, .identities = &identities }, trust, &scratch));
+    try std.testing.expect(recovered.store.empty() and identities.credential_count == 0);
 }
 
 test "vault catalog refuses non-durable saves before publishing a version" {

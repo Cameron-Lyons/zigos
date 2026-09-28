@@ -20,6 +20,9 @@ const content_type = "application/x-zigos-tpm-sealing-proof";
 const Io = struct {
     known_key: ?*const sealing.Key = null,
     corrupt_unseal: bool = false,
+    corrupt_nv_read: bool = false,
+    corrupt_nv_write: bool = false,
+    nv_writes: usize = 0,
     corrupted: bool = false,
 
     pub fn random(_: *@This(), out: []u8) !void {
@@ -30,11 +33,16 @@ const Io = struct {
         if (self.known_key) |key| {
             if (std.mem.indexOf(u8, command, key) != null) return error.PlaintextKey;
         }
+        if (std.mem.indexOf(u8, command, "ZGVAnch1") != null) return error.PlaintextAnchor;
+        if (std.mem.readInt(u32, command[6..10], .big) == 0x137) self.nv_writes += 1;
         const reply = try hardware.execute(command, response, timeout_ms);
         if (self.known_key) |key| {
             if (std.mem.indexOf(u8, reply, key) != null) return error.PlaintextKey;
         }
-        if (self.corrupt_unseal and std.mem.readInt(u32, command[6..10], .big) == 0x15e and
+        if (std.mem.indexOf(u8, reply, "ZGVAnch1") != null) return error.PlaintextAnchor;
+        if (((self.corrupt_unseal and std.mem.readInt(u32, command[6..10], .big) == 0x15e) or
+            (self.corrupt_nv_read and std.mem.readInt(u32, command[6..10], .big) == 0x14e) or
+            (self.corrupt_nv_write and std.mem.readInt(u32, command[6..10], .big) == 0x137)) and
             std.mem.readInt(u32, reply[6..10], .big) == 0)
         {
             reply[reply.len - 1] ^= 1;
@@ -126,10 +134,12 @@ fn runWithClient(manager: anytype, client: *sealing.Client, io: *Io) !void {
     wrong_auth[0] ^= 1;
     var denied: sealing.Key = @splat(0xaa);
     defer std.crypto.secureZero(u8, &denied);
-    if (client.unseal(io, blob.slice(), &wrong_auth, &denied)) |_| return error.AcceptedWrongAuthorization else |err| {
+    // Keep intentional wrong-auth attempts on the cold boot. Repeating them
+    // across rollback boots would test DA lockout instead of vault freshness.
+    if (!restored) if (client.unseal(io, blob.slice(), &wrong_auth, &denied)) |_| return error.AcceptedWrongAuthorization else |err| {
         if (err != error.TpmError or client.last_tpm_error != authorization_failure or
             !std.mem.allEqual(u8, &denied, 0)) return error.BadAuthorizationFailure;
-    }
+    };
     var damaged = blob;
     damaged.bytes[42] ^= 1; // opaque private integrity digest, after the length fields
     denied = @splat(0xaa);

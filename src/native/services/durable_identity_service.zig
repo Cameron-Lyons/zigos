@@ -205,7 +205,7 @@ pub const Service = struct {
 };
 
 comptime {
-    if (@sizeOf(Service) > 208) @compileError("durable identity service exceeds bounded coordination state");
+    if (@sizeOf(Service) > 216) @compileError("durable identity service exceeds bounded coordination state");
 }
 
 const std = @import("std");
@@ -339,6 +339,53 @@ test "durable identity retains its counter when the catalog key binding changes"
     _ = try fixture.service.flush(4, &scratch);
     const assertion = try fixture.service.assertCredential(&fixture.devices, fixture.authority(5), try fixture.request(), &scratch);
     try std.testing.expectEqual(@as(u64, 2), assertion.assertion_counter);
+}
+
+test "durable identity withholds assertions until the external anchor accepts the durable checkpoint" {
+    const Gate = struct {
+        var calls: usize = 0;
+        var fail: bool = true;
+        var last: ?catalog.Checkpoint = null;
+        fn advance(_: *anyopaque, checkpoint: catalog.Checkpoint) !void {
+            calls += 1;
+            if (last) |previous| try std.testing.expectEqualDeep(previous, checkpoint);
+            last = checkpoint;
+            if (fail) return error.AnchorUnavailable;
+        }
+    };
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var fixture = Fixture{};
+    try fixture.init(&device.service);
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    try fixture.register(&scratch);
+    const anchor = catalog.Anchor{ .context = &fixture, .advance_fn = Gate.advance };
+    fixture.service.checkpoint.anchor = &anchor;
+    Gate.calls = 0;
+    Gate.fail = true;
+    Gate.last = null;
+    device.fail_flushes = true;
+    try std.testing.expectError(error.DurabilityBarrierFailed, fixture.service.assertCredential(&fixture.devices, fixture.authority(3), try fixture.request(), &scratch));
+    try std.testing.expectEqual(@as(usize, 0), Gate.calls);
+    device.fail_flushes = false;
+    try std.testing.expectError(error.AnchorUnavailable, fixture.service.flush(4, &scratch));
+    try std.testing.expectEqual(@as(usize, 1), Gate.calls);
+    try std.testing.expect(fixture.service.dirty and fixture.service.checkpoint.pending != null);
+    try std.testing.expectEqualSlices(u8, device.image, device.durable_image);
+    try std.testing.expectError(error.IdentityCheckpointPending, fixture.service.assertCredential(&fixture.devices, fixture.authority(4), try fixture.request(), &scratch));
+    try std.testing.expectError(error.IdentityCheckpointPending, fixture.service.revokeCredential(1, 4, &scratch));
+    const count = device.service.versionCount();
+    const version = fixture.service.checkpoint.pending.?.version_id;
+    Gate.fail = false;
+    const receipt = try fixture.service.flush(4, &scratch);
+    try std.testing.expectEqual(version, receipt.version_id);
+    try std.testing.expectEqual(count, device.service.versionCount());
+    try std.testing.expectEqual(@as(usize, 2), Gate.calls);
+    const checkpoint = Gate.last.?;
+    device.crash();
+    try std.testing.expectEqualDeep(checkpoint, try catalog.inspect(&device.service, .{ .object_id = checkpoint.object_id, .owner = checkpoint.owner, .public_key = checkpoint.public_key, .minimum_generation = checkpoint.generation, .payload_digest = checkpoint.payload_digest }, &scratch));
+    try fixture.restore(&device.service, &scratch);
+    try std.testing.expectEqual(@as(u64, 1), fixture.identities.findCredentialConst(1).?.assertion_count);
 }
 
 test "durable identity failed revocations cannot be bypassed while a checkpoint is pending" {

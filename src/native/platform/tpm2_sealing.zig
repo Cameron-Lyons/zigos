@@ -16,6 +16,25 @@ const CREATE: u32 = 0x153;
 const LOAD: u32 = 0x157;
 const UNSEAL: u32 = 0x15e;
 const FLUSH: u32 = 0x165;
+const NV_DEFINE: u32 = 0x12a;
+const NV_READ_PUBLIC: u32 = 0x169;
+const NV_READ: u32 = 0x14e;
+const NV_WRITE: u32 = 0x137;
+const NV_ATTRIBUTES: u32 = 0x0004_1004; // AUTHREAD, AUTHWRITE, WRITEALL; dictionary attack protected
+const NV_WRITTEN: u32 = 0x2000_0000;
+pub const MAX_NV_BYTES = 256;
+
+// Caller allocates an application index. No undefine, clear, owner read/write,
+// partial write, or implicit provisioning operation is exposed.
+pub const NvSpace = struct {
+    index: u32,
+    size: u16,
+
+    fn validate(self: NvSpace) !void {
+        if (self.index < 0x0180_0000 or self.index > 0x0180_ffff or self.size == 0 or self.size > MAX_NV_BYTES)
+            return error.InvalidNvSpace;
+    }
+};
 const PRIMARY_PREFIX = [_]u8{
     0, 0x23, 0, 0x0b, 0, 3, 0, 0x72, 0, 0, // ECC, SHA256, restricted storage parent, no policy
     0, 6, 0, 0x80, 0, 0x43, 0, 0x10, 0, 3, 0, 0x10, // AES128 CFB, NULL scheme, P256, NULL KDF
@@ -59,7 +78,7 @@ const Reply = struct {
 
 // A caller owns each Client exclusively and supplies execute(command, response,
 // timeout_ms) and random(out). The kernel adapter uses CRB and its seeded CSPRNG.
-// No ownership changes, persistent TPM objects, NV writes, or hierarchy clears.
+// No ownership changes, persistent TPM objects, index deletion, or hierarchy clears.
 // The owner hierarchy must have empty authorization. Objects require a separate
 // 256-bit caller authorization, are fixed to this TPM/parent, and use dictionary
 // attack protection. PCR policy and user-auth provisioning belong to the caller.
@@ -202,6 +221,90 @@ pub const Client = struct {
         out.* = key;
     }
 
+    // Explicit enrollment only. Existing indexes are never replaced. A failed
+    // definition/write requires caller recovery, never an automatic redefinition.
+    pub fn nvDefine(self: *Client, io: anytype, space: NvSpace, auth: *const Key) !void {
+        try self.ready(auth);
+        try space.validate();
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [50]u8 = undefined;
+        defer std.crypto.secureZero(u8, &parameters);
+        var w = wire.Writer{ .bytes = &parameters };
+        try w.sized(auth);
+        try w.int(u16, 14);
+        try w.int(u32, space.index);
+        try w.int(u16, 0x0b);
+        try w.int(u32, NV_ATTRIBUTES);
+        try w.sized("");
+        try w.int(u16, space.size);
+        const reply = try self.authorizedHandles(io, &session, NV_DEFINE, &.{OWNER}, &.{&.{ 0x40, 0, 0, 1 }}, "", parameters[0..w.pos], 0x21, false);
+        if (reply.parameters.len != 0) return error.InvalidResponse;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
+    pub fn nvRead(self: *Client, io: anytype, space: NvSpace, auth: *const Key, out: []u8) !void {
+        std.crypto.secureZero(u8, out);
+        errdefer std.crypto.secureZero(u8, out);
+        try self.ready(auth);
+        try space.validate();
+        if (out.len != space.size) return error.InvalidNvSpace;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        const public = try self.nvPublic(io, space);
+        if (!public.written) return error.NvUninitialized;
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [4]u8 = undefined;
+        var w = wire.Writer{ .bytes = &parameters };
+        try w.int(u16, space.size);
+        try w.int(u16, 0);
+        const reply = try self.authorizedHandles(io, &session, NV_READ, &.{ space.index, space.index }, &.{ &public.name, &public.name }, auth, &parameters, 0x41, false);
+        var r = wire.Reader{ .bytes = reply.parameters };
+        const data = try r.sized();
+        if (data.len != out.len) return error.InvalidResponse;
+        try r.end();
+        @memcpy(out, data);
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
+    pub fn nvWrite(self: *Client, io: anytype, space: NvSpace, auth: *const Key, data: []const u8) !void {
+        try self.ready(auth);
+        try space.validate();
+        if (data.len != space.size) return error.InvalidNvSpace;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        // WRITTEN changes the index Name on its first write. Never cache it.
+        const public = try self.nvPublic(io, space);
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [MAX_NV_BYTES + 4]u8 = undefined;
+        defer std.crypto.secureZero(u8, &parameters);
+        var w = wire.Writer{ .bytes = &parameters };
+        try w.sized(data);
+        try w.int(u16, 0);
+        const reply = try self.authorizedHandles(io, &session, NV_WRITE, &.{ space.index, space.index }, &.{ &public.name, &public.name }, auth, parameters[0..w.pos], 0x21, false);
+        if (reply.parameters.len != 0) return error.InvalidResponse;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
+    fn nvPublic(self: *Client, io: anytype, space: NvSpace) !NvPublic {
+        var w = wire.Writer{ .bytes = &self.command };
+        try w.begin(0x8001, NV_READ_PUBLIC);
+        try w.int(u32, space.index);
+        const reply = self.exchange(io, w.finish(), 0x8001, false, 2000) catch |err| {
+            // TPM_RC_HANDLE, handle 1. Other errors must not become absence.
+            if (err == error.TpmError and self.last_tpm_error == 0x18b) return error.NvIndexMissing;
+            return err;
+        };
+        return parseNvPublic(reply.parameters, space);
+    }
+
     fn rejectProtocolFailure(self: *Client, err: anyerror) void {
         if (err == error.InvalidResponse or err == error.IntegrityFailure) self.failed = true;
     }
@@ -283,6 +386,11 @@ pub const Client = struct {
     }
 
     fn authorized(self: *Client, io: anytype, session: *Session, code: u32, handle: u32, name: *const Name, auth: []const u8, parameters: []u8, attributes: u8, has_handle: bool) !Reply {
+        return self.authorizedHandles(io, session, code, &.{handle}, &.{name}, auth, parameters, attributes, has_handle);
+    }
+
+    fn authorizedHandles(self: *Client, io: anytype, session: *Session, code: u32, handles: []const u32, names: []const []const u8, auth: []const u8, parameters: []u8, attributes: u8, has_handle: bool) !Reply {
+        std.debug.assert(handles.len == names.len and handles.len > 0 and handles.len <= 2 and auth.len <= 32);
         var value: [64]u8 = @splat(0);
         defer std.crypto.secureZero(u8, &value);
         @memcpy(value[0..32], &session.key);
@@ -302,14 +410,14 @@ pub const Client = struct {
         std.mem.writeInt(u32, &cc, code, .big);
         var hash = Sha256.init(.{});
         hash.update(&cc);
-        hash.update(name);
+        for (names) |name| hash.update(name);
         hash.update(parameters);
         const cp_hash = hash.finalResult();
         var mac = crypto.authHmac(session_value, &cp_hash, &nonce, &session.nonce, attributes);
         defer std.crypto.secureZero(u8, &mac);
         var w = wire.Writer{ .bytes = &self.command };
         try w.begin(0x8002, code);
-        try w.int(u32, handle);
+        for (handles) |handle| try w.int(u32, handle);
         try w.int(u32, 73);
         try w.int(u32, session.handle);
         try w.sized(&nonce);
@@ -347,6 +455,23 @@ pub const Client = struct {
 };
 
 const BlobFields = struct { private: []const u8, public: []const u8 };
+const NvPublic = struct { name: Name, written: bool };
+
+fn parseNvPublic(bytes: []const u8, space: NvSpace) !NvPublic {
+    var r = wire.Reader{ .bytes = bytes };
+    const public = try r.sized();
+    var p = wire.Reader{ .bytes = public };
+    if (try p.int(u32) != space.index or try p.int(u16) != 0x0b) return error.InvalidResponse;
+    const attributes = try p.int(u32);
+    if (attributes & ~NV_WRITTEN != NV_ATTRIBUTES or (try p.sized()).len != 0 or
+        try p.int(u16) != space.size) return error.InvalidResponse;
+    try p.end();
+    const name = objectName(public);
+    if (!std.mem.eql(u8, try r.sized(), &name)) return error.IntegrityFailure;
+    try r.end();
+    return .{ .name = name, .written = attributes & NV_WRITTEN != 0 };
+}
+
 fn parseBlob(blob: []const u8, parent_name: *const Name) Error!BlobFields {
     if (blob.len > MAX_BLOB_BYTES) return error.InvalidBlob;
     var r = wire.Reader{ .bytes = blob };
@@ -413,6 +538,47 @@ test "TPM unseal rejects invalid callers without exposing old output or touching
     client.failed = true;
     try std.testing.expectError(error.Failed, client.unseal(&io, "", &auth, &out));
     try std.testing.expectEqual(@as(usize, 0), io.calls);
+}
+
+test "TPM NV validates callers and full record bounds before touching hardware" {
+    var client = Client{ .parent = 0x8000_0000 };
+    var io = RejectIo{};
+    const auth: Key = @splat(1);
+    const space = NvSpace{ .index = 0x0180_1234, .size = 32 };
+    var out: Key = @splat(0xaa);
+    try std.testing.expectError(error.InvalidAuthorization, client.nvRead(&io, space, &(@as(Key, @splat(0))), &out));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvRead(&io, space, &auth, out[0..31]));
+    try std.testing.expectEqual(@as(Key, @splat(0)), out);
+    try std.testing.expectError(error.InvalidNvSpace, client.nvWrite(&io, space, &auth, "short"));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = 0x0100_0000, .size = 32 }, &auth));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = MAX_NV_BYTES + 1 }, &auth));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 0 }, &auth));
+    try std.testing.expectEqual(@as(usize, 0), io.calls);
+}
+
+test "TPM NV public parsing rejects weaker access policy altered names and noncanonical framing" {
+    const space = NvSpace{ .index = 0x0180_1234, .size = 136 };
+    var bytes: [53]u8 = @splat(0);
+    for ([_]u32{ NV_ATTRIBUTES, NV_ATTRIBUTES | NV_WRITTEN }) |attributes| {
+        var w = wire.Writer{ .bytes = &bytes };
+        try w.int(u16, 14);
+        try w.int(u32, space.index);
+        try w.int(u16, 0x0b);
+        try w.int(u32, attributes);
+        try w.sized("");
+        try w.int(u16, space.size);
+        try w.sized(&objectName(bytes[2..16]));
+        const public = try parseNvPublic(bytes[0..w.pos], space);
+        try std.testing.expectEqual(attributes & NV_WRITTEN != 0, public.written);
+        for (0..w.pos) |len| try std.testing.expectError(error.InvalidResponse, parseNvPublic(bytes[0..len], space));
+        try std.testing.expectError(error.InvalidResponse, parseNvPublic(&bytes, space));
+        for ([_]usize{ 5, 7, 9, 10, 11, 13, 15, 18 }) |offset| {
+            var changed = bytes;
+            changed[offset] ^= 1;
+            const result = parseNvPublic(changed[0..w.pos], space);
+            if (offset == 18) try std.testing.expectError(error.IntegrityFailure, result) else try std.testing.expectError(error.InvalidResponse, result);
+        }
+    }
 }
 
 test "TPM sealed blob parser rejects truncation overflow trailing bytes and weakened object templates" {
