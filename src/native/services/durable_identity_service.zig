@@ -117,6 +117,47 @@ pub const Service = struct {
         if (changed or self.version_id == 0) _ = try self.flush(now, scratch);
     }
 
+    pub fn retireRotatedDeviceKey(self: *Service, proposal: *const graph.RotationProposal, key: sealed.Key, successor: sealed.Key, now: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        const authority = key.authority orelse return error.InvalidIdentityAuthority;
+        try self.requireEnrollmentKey(proposal.owner, key, now);
+        try self.requireEnrollmentKey(proposal.owner, successor, now);
+        try proposal.validate();
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        const current = try devices.authenticatedDevice(proposal.device, proposal.root_pin);
+        if (!current.owner.eql(proposal.owner) or current.key_rotation_generation != proposal.previous_generation + 1 or
+            current.overlay_id != proposal.overlay_id or !std.mem.eql(u8, current.labelSlice(), proposal.label[0..proposal.label_len]) or
+            !std.mem.eql(u8, &current.enrollment_signature.public_key, &proposal.consent_signature.public_key) or
+            !std.mem.eql(u8, &current.enrollment_signature.value, &proposal.consent_signature.value) or
+            !std.mem.eql(u8, &current.device_signature.value, &proposal.device_signature.value) or
+            !std.mem.eql(u8, &current.device_signature.public_key, &proposal.device_signature.public_key) or
+            !std.mem.eql(u8, &proposal.device_signature.public_key, &(try successor.publicKey(now))) or
+            !std.mem.eql(u8, &proposal.previous_key, &(try key.publicKey(now)))) return error.InvalidRotationSignature;
+        const secret_id = self.state.vault.findHandleConst(key.handle_id).?.secret_id;
+        const signer_id = self.state.vault.findHandleConst(self.signer.key.handle_id).?.secret_id;
+        if (secret_id == signer_id) return error.SigningKeyInUse;
+        for (self.state.identities.credentials[0..self.state.identities.credential_count]) |credential| {
+            if (credential.secret_id == secret_id) return error.SigningKeyInUse;
+        }
+        const public_key = try key.publicKey(now);
+        {
+            for (devices.user_roots.slots) |slot| {
+                if (!slot.in_use) continue;
+                const root = try devices.authenticatedRoot(slot.root.principal_id, slot.root.root_signature.public_key);
+                if (std.mem.eql(u8, &root.root_signature.public_key, &public_key)) return error.SigningKeyInUse;
+            }
+            for (devices.devices.slots) |slot| {
+                if (!slot.in_use) continue;
+                const root = devices.findUserRootConst(slot.device.owner) orelse return error.RootNotFound;
+                const record = try devices.authenticatedRecord(slot.device.principal_id, root.root_signature.public_key);
+                if (record.isTrusted() and std.mem.eql(u8, &record.device_signature.public_key, &public_key)) return error.SigningKeyInUse;
+            }
+        }
+        try self.state.vault.retireSecret(authority.policies, authority.subjects, .{ .owner = authority.owner, .task_id = authority.task_id, .secret_id = secret_id, .now_ticks = now }, authority.audit);
+        // The latest checkpoint omits retired ciphertext and retains its ID
+        // generation. Historical encrypted versions are not securely erased.
+        _ = try self.flush(now, scratch);
+    }
+
     pub fn publishEnrollment(self: *const Service, owner: principal.PrincipalId, root_key: sealed.Key, now: u64, buffer: []u8) ![]const u8 {
         try self.requireEnrollmentKey(owner, root_key, now);
         if (self.version_id == 0) return error.IdentityCheckpointRequired;
@@ -279,7 +320,7 @@ test "durable identity withholds failed assertions and blocks mutation until ret
     }
 }
 
-test "durable identity retains its counter when catalog signing fails before version publication" {
+test "durable identity retains its counter when the catalog key binding changes" {
     const device = try durable.Fixture.init(true);
     defer device.deinit();
     var fixture = Fixture{};
@@ -289,7 +330,7 @@ test "durable identity retains its counter when catalog signing fails before ver
     const before = device.service.versionCount();
     const root = &fixture.keys.service.store.secrets[0].material.sealed;
     root.bytes[root.len - 1] ^= 1;
-    try std.testing.expectError(error.InvalidSealedSecret, fixture.service.assertCredential(&fixture.devices, fixture.authority(3), try fixture.request(), &scratch));
+    try std.testing.expectError(error.VaultCatalogKeyRollback, fixture.service.assertCredential(&fixture.devices, fixture.authority(3), try fixture.request(), &scratch));
     try std.testing.expectEqual(before, device.service.versionCount());
     try std.testing.expectEqual(@as(u64, 1), fixture.identities.findCredentialConst(1).?.assertion_count);
     try std.testing.expect(fixture.service.checkpoint.pending == null and fixture.service.dirty);

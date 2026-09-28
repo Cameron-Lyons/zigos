@@ -3521,7 +3521,7 @@ fn validateSecretVaultHardwareProviderBoundary(
         "pub fn signDigest",
         "pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true",
         "const secret = &self.secrets[slot_index]",
-        "dense secret imports append into pre-zeroed slots",
+        "secret imports reuse pre-zeroed inactive slots",
         "self.secret_count += 1",
         "secure secret store requires a hardware provider before hardware-backed imports",
     };

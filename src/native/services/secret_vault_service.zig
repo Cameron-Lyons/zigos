@@ -106,6 +106,13 @@ pub const RevokeRequest = struct {
     detail: []const u8 = "",
 };
 
+pub const RetireRequest = struct {
+    owner: principal.PrincipalId,
+    task_id: u64,
+    secret_id: u64,
+    now_ticks: u64,
+};
+
 pub const VaultHandle = struct {
     id: u64 = 0,
     store_handle_id: u64 = 0,
@@ -197,15 +204,15 @@ pub const Service = struct {
         }
         errdefer recordGeneration(ledger, request, 0, false) catch {};
         if (request.label.len > secure_secret_store.MAX_LABEL_BYTES) return error.LabelTooLong;
-        const slot_index = self.store.secret_count;
-        if (slot_index >= secure_secret_store.MAX_SECRETS) return error.SecretTableFull;
+        const slot_index = try self.store.nextSecretSlot();
+        const previous_count = self.store.secret_count;
         // Serialized service calls keep this slot private until the audit has
         // succeeded. Roll back on audit failure without consuming a secret id.
         const unused_slot = self.store.secrets[slot_index];
         const secret = try self.store.generateSigningKey(request.owner, request.label);
         errdefer {
             self.store.secrets[slot_index] = unused_slot;
-            self.store.secret_count = slot_index;
+            self.store.secret_count = previous_count;
         }
         try recordGeneration(ledger, request, secret.id, true);
         return secret;
@@ -459,6 +466,23 @@ pub const Service = struct {
         }
         try recordRevoke(ledger, request, false, false);
         return error.VaultHandleNotFound;
+    }
+
+    // The durable caller must first reject references that still require this
+    // key. Retiring removes all live leases and reclaims its physical slot.
+    pub fn retireSecret(self: *Service, policies: *const policy_object.Directory, subjects: policy_object.SubjectSet, request: RetireRequest, ledger: ?*event_ledger.Ledger) Error!void {
+        const secret = self.store.describeSecret(request.secret_id) orelse return error.SecretNotFound;
+        if (!secret.owner.eql(request.owner)) return error.SecretOwnerMismatch;
+        const decision = policies.secretVaultDecision(subjects, .{ .operation = .retire, .hardware_backed = secret.hardware_backed });
+        if (ledger) |log| try log.recordSecretVault(request.owner, request.task_id, request.secret_id, 0, decision.allowed, secret.hardware_backed, false, false, true, request.now_ticks, "retire secret");
+        if (!decision.allowed) return error.PolicyDenied;
+        try self.store.retireSecret(request.secret_id);
+        for (&self.handles.slots) |*slot| {
+            if (!slot.in_use or slot.handle.secret_id != request.secret_id) continue;
+            const id = slot.handle.id;
+            _ = self.markRevoked(&slot.handle);
+            _ = self.handles.removeHandle(.{ .value = id });
+        }
     }
 
     pub fn findHandle(self: *Service, handle_id: u64) ?*VaultHandle {
@@ -1356,4 +1380,47 @@ test "signing key generation rolls back unpublished state when the audit cannot 
     try std.testing.expectEqual(@as(u8, 1), generator.calls);
     const secret = try service.generateSigningKey(&policies, .{}, request, null);
     try std.testing.expectEqual(@as(u64, 1), secret.id);
+}
+
+test "key retirement requires owner policy and audit before removing every lease" {
+    const storage_service = @import("../storage/storage_service.zig");
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 940 };
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 941 };
+    const subjects = policy_object.SubjectSet{ .user_id = owner.serial };
+    var service = Service.init();
+    var policies = policy_object.Directory.init();
+    const first = (try service.store.importSecret(owner, "first", "private", false, true)).id;
+    const sibling = (try service.store.importSecret(owner, "sibling", "kept", false, true)).id;
+    const first_handle = (try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 30, .secret_id = first, .expires_at_ticks = 100, .now_ticks = 1, .allow_raw_export = true }, null)).*;
+    _ = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 31, .secret_id = first, .expires_at_ticks = 100, .now_ticks = 1 }, null);
+    const sibling_handle = (try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 30, .secret_id = sibling, .expires_at_ticks = 100, .now_ticks = 1, .allow_raw_export = true }, null)).*;
+    const request = RetireRequest{ .owner = owner, .task_id = 30, .secret_id = first, .now_ticks = 2 };
+    const before = service;
+    var foreign = request;
+    foreign.owner = holder;
+    try std.testing.expectError(error.SecretOwnerMismatch, service.retireSecret(&policies, subjects, foreign, null));
+    _ = try policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 942 }, .label = "deny retirement", .secret_vault_allowed = false }, .{ .label = "policy", .seed = @splat(0xa1) });
+    try std.testing.expectError(error.PolicyDenied, service.retireSecret(&policies, subjects, request, null));
+    policies = .init();
+    var checkpoint = storage_service.CheckpointStore{};
+    var storage = storage_service.Service.initWithStore(943, 944, owner, &checkpoint);
+    var ledger = event_ledger.Ledger.init();
+    ledger.storage = &storage;
+    ledger.workspace_id = 99;
+    try std.testing.expectError(error.WorkspaceNotFound, service.retireSecret(&policies, subjects, request, &ledger));
+    try std.testing.expectEqualDeep(before, service);
+    try service.retireSecret(&policies, subjects, request, null);
+    try std.testing.expectEqual(@as(usize, 1), service.activeHandleCount());
+    try std.testing.expectEqual(@as(usize, 1), service.handles.countInUse());
+    try std.testing.expectEqual(@as(usize, 1), service.store.handles.countInUse());
+    try std.testing.expect(service.findHandleConst(first_handle.id) == null);
+    try std.testing.expect(service.store.describeHandle(first_handle.store_handle_id) == null);
+    var out: secure_secret_store.Value = undefined;
+    defer std.crypto.secureZero(u8, &out);
+    try std.testing.expectEqualStrings("kept", try service.exportRaw(&policies, subjects, .{ .holder = holder, .task_id = 30, .handle_id = sibling_handle.id, .now_ticks = 3 }, null, &out));
+    const replacement = try service.store.importSecret(owner, "replacement", "new", false, true);
+    try std.testing.expectEqual(@as(u64, 17), replacement.id);
+    _ = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 30, .secret_id = replacement.id, .expires_at_ticks = 100, .now_ticks = 3 }, null);
+    try std.testing.expectError(error.VaultHandleNotFound, service.exportRaw(&policies, subjects, .{ .holder = holder, .task_id = 30, .handle_id = first_handle.id, .now_ticks = 3 }, null, &out));
+    try std.testing.expect(std.mem.allEqual(u8, &out, 0));
 }

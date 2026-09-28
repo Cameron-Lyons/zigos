@@ -156,12 +156,13 @@ requests.
   wrong service tasks, and revoked handles. It also signs document metadata
   with the recovered sealed key and rejects signing after lease revocation.
   The reboot restores three generated keys and a 96-byte exportable secret through
-  the primary catalog and both device-key generations through a separate vault
-  catalog, checks that no leases survived, then lends fresh authority.
+  the primary catalog and the remote catalog signer plus current device key through
+  a separate catalog. Two rotations retire the predecessors and reuse a secret
+  slot with a new ID; reboot rejects the old IDs and restores no leases.
   It also resumes an assertion counter after reboot and refuses a credential
   revoked before shutdown. The cold boot saves an unlock proof; the reboot rejects
   replay at matching relative ticks and rejects replacing its signed context with
-  the new session. Catalog format v3 includes the authenticated device graph and rejects older snapshots.
+  the new session. Catalog format v4 includes the authenticated device graph and rejects older snapshots.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
@@ -199,7 +200,14 @@ requests.
   The device checkpoints both keys before sending the request; owner approval and
   local import then commit the new generation. Stale and competing requests fail,
   matching approval and import retries do not write again, and old channels retire
-  when the graph changes.
+  when the graph changes. The root certificate binds the exact predecessor consent
+  and successor proof. After durable import, retirement removes every old lease
+  and the current sealed record, preserving a slot generation in catalog v4.
+  Reused slots receive new IDs; catalog signers, credential keys, owner roots and
+  active device keys remain protected. Host tests cover 20 rotations, exhausted
+  generations and failures at both storage barriers without raising memory ceilings.
+  Historical encrypted checkpoints are retained; secure erasure and lost-key
+  recovery remain open.
   Host tests join and rotate separate vaults and disks; the TPM cold/reboot proof
   restores two device vaults and catalogs on the same guest TPM and rejects the
   retired device key. Production approval, enrollment transport, trusted root-pin provisioning and rollback-resistant floors remain open.

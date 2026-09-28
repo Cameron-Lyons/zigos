@@ -223,6 +223,8 @@ pub const DeviceRecord = struct {
     trust_generation: u32 = 1,
     key_rotation_generation: u32 = 1,
     device_signature: manifest.Signature = .{},
+    // Owner enrollment at generation 1; predecessor consent for public rotations.
+    // The root rotation certificate binds this consent to the exact successor.
     enrollment_signature: manifest.Signature = .{},
     rotation_signature: manifest.Signature = .{},
     revocation_signature: manifest.Signature = .{},
@@ -542,15 +544,19 @@ pub const Graph = struct {
         // no second mutation; older requests cannot advance it again.
         if (current.key_rotation_generation == next_generation and
             std.mem.eql(u8, &current.device_signature.public_key, &proposal.device_signature.public_key) and
-            std.mem.eql(u8, &current.device_signature.value, &proposal.device_signature.value)) return false;
+            std.mem.eql(u8, &current.device_signature.value, &proposal.device_signature.value) and
+            std.mem.eql(u8, &current.enrollment_signature.public_key, &proposal.consent_signature.public_key) and
+            std.mem.eql(u8, &current.enrollment_signature.value, &proposal.consent_signature.value)) return false;
         if (current.key_rotation_generation != proposal.previous_generation or
             !std.mem.eql(u8, &current.device_signature.public_key, &proposal.previous_key)) return error.InvalidRotationSignature;
         var buffer: [ROTATION_MESSAGE_BUFFER_BYTES]u8 = undefined;
-        const message = rotationMessage(&buffer, proposal.owner, proposal.device, proposal.overlay_id, next_generation, &proposal.device_signature.public_key) catch return error.InvalidRotationSignature;
+        const message = rotationMessage(&buffer, proposal.owner, proposal.device, proposal.label[0..proposal.label_len], proposal.overlay_id, next_generation, &proposal.device_signature, &proposal.consent_signature) catch return error.InvalidRotationSignature;
         const signature = try signIdentity(root_key, message, now);
         const record = self.findDevice(proposal.device).?;
         record.device_signature = proposal.device_signature;
         record.device_signature.signer = "device-graph";
+        record.enrollment_signature = proposal.consent_signature;
+        record.enrollment_signature.signer = "device-graph";
         record.rotation_signature = signature;
         clearPlatformKeyBinding(record);
         record.key_rotation_generation = next_generation;
@@ -595,14 +601,17 @@ pub const Graph = struct {
             &rotation_message_buffer,
             user_principal,
             device_principal,
+            record.labelSlice(),
             record.overlay_id,
             next_generation,
-            device_signature.publicKeySlice(),
+            &device_signature,
+            null,
         ) catch return error.InvalidRotationSignature;
         const rotation_signature = try signIdentity(authorizer, rotation_message, tick);
         if (!signing.verify(rotation_signature, rotation_message)) return error.InvalidRotationSignature;
 
         record.device_signature = device_signature;
+        record.enrollment_signature = .{};
         record.rotation_signature = rotation_signature;
         if (next_platform_key) |binding| {
             applyPlatformKeyBinding(record, binding);
@@ -726,7 +735,11 @@ pub const Graph = struct {
             const message = enrollmentMessage(&buffer, record.owner, record.principal_id, record.labelSlice(), record.overlay_id, 1, &record.device_signature.public_key) catch return error.InvalidEnrollmentSignature;
             if (!verifyPinnedSignature(record.enrollment_signature, message, root_pin)) return error.InvalidEnrollmentSignature;
         } else {
-            const message = rotationMessage(&buffer, record.owner, record.principal_id, record.overlay_id, record.key_rotation_generation, &record.device_signature.public_key) catch return error.InvalidRotationSignature;
+            const continuity = if (record.enrollment_signature.isPresent()) &record.enrollment_signature else null;
+            if (continuity) |proof| {
+                if (proof.format != .ed25519 or proof.public_key_len != signing.PUBLIC_KEY_BYTES or proof.value_len != signing.SIGNATURE_BYTES) return error.InvalidRotationSignature;
+            }
+            const message = rotationMessage(&buffer, record.owner, record.principal_id, record.labelSlice(), record.overlay_id, record.key_rotation_generation, &record.device_signature, continuity) catch return error.InvalidRotationSignature;
             if (!verifyPinnedSignature(record.rotation_signature, message, root_pin)) return error.InvalidRotationSignature;
         }
         if (record.status == .revoked) {
@@ -1002,16 +1015,29 @@ fn rotationMessage(
     buffer: []u8,
     user_principal: principal.PrincipalId,
     device_principal: principal.PrincipalId,
+    label: []const u8,
     overlay_id: u64,
     generation: u32,
-    device_public_key: []const u8,
+    device_signature: *const manifest.Signature,
+    continuity: ?*const manifest.Signature,
 ) error{NoSpaceLeft}![]const u8 {
-    const prefix = std.fmt.bufPrint(
-        buffer,
-        "rotate:{d}:{d}:{d}:{d}:",
-        .{ user_principal.serial, device_principal.serial, overlay_id, generation },
-    ) catch return error.NoSpaceLeft;
-    return appendHex(buffer, prefix.len, device_public_key);
+    if (buffer.len < crypto_hash.digest_bytes) return error.NoSpaceLeft;
+    var hash = crypto_hash.init();
+    crypto_hash.updateBytes(&hash, "protocol", "zigos.device-rotation-approval.v2");
+    crypto_hash.updateInt(&hash, "owner", user_principal.serial);
+    crypto_hash.updateInt(&hash, "device", device_principal.serial);
+    crypto_hash.updateBytes(&hash, "label", label);
+    crypto_hash.updateInt(&hash, "overlay", overlay_id);
+    crypto_hash.updateInt(&hash, "generation", generation);
+    crypto_hash.updateBytes(&hash, "next-key", device_signature.publicKeySlice());
+    crypto_hash.updateBytes(&hash, "next-proof", device_signature.valueSlice());
+    crypto_hash.updateBool(&hash, "has-predecessor", continuity != null);
+    if (continuity) |proof| {
+        crypto_hash.updateBytes(&hash, "previous-key", proof.publicKeySlice());
+        crypto_hash.updateBytes(&hash, "previous-consent", proof.valueSlice());
+    }
+    @memcpy(buffer[0..crypto_hash.digest_bytes], &crypto_hash.finalize(&hash));
+    return buffer[0..crypto_hash.digest_bytes];
 }
 
 fn revocationMessage(
@@ -1041,6 +1067,40 @@ fn deriveOverlayId(device_principal: principal.PrincipalId, label: []const u8) u
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_principal.serial);
     hash = native_util.fnv1a64WithSeed(hash, label);
     return hash;
+}
+
+test "device graph rotation approval binds the exact predecessor consent" {
+    const Fixture = @import("../../tests/fixtures/document_signer.zig").Fixture;
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    var fixtures: [4]Fixture = undefined;
+    var keys: [4]sealed.Key = undefined;
+    for (&fixtures, 0..) |*fixture, i| {
+        const signer = try fixture.init(owner, .{ .kind = .service, .serial = 3 }, 1, .{ .label = "rotation fixture", .seed = @splat(@as(u8, @intCast(0x31 + i))) });
+        keys[i] = signer.key;
+    }
+    var graph = Graph.init();
+    _ = try graph.ensureSealedUserRoot(owner, "owner", keys[0], 1);
+    _ = try graph.enrollSealedDevice(owner, device, "device", keys[0], keys[1], 1);
+    const pin = try keys[0].publicKey(1);
+    const proposal = try RotationProposal.create(&graph, device, pin, keys[1], keys[2], 2);
+    try std.testing.expect(try graph.approveRotation(&proposal, keys[0], 2));
+    try std.testing.expect(!try graph.approveRotation(&proposal, keys[0], 3));
+    const approved = graph;
+
+    // A different key can sign a valid proposal for the same successor, but
+    // cannot substitute its consent for the predecessor approved by the root.
+    var substituted = proposal;
+    substituted.previous_key = try keys[3].publicKey(3);
+    substituted.consent_signature = try keys[3].signMessage(&substituted.consentDigest(), 3);
+    try substituted.validate();
+    try std.testing.expectError(error.InvalidRotationSignature, graph.approveRotation(&substituted, keys[0], 3));
+    try std.testing.expectEqualDeep(approved, graph);
+    graph.findDevice(device).?.enrollment_signature = substituted.consent_signature;
+    try std.testing.expectError(error.InvalidRotationSignature, graph.authenticatedDevice(device, pin));
+    graph = approved;
+    graph.findDevice(device).?.enrollment_signature = .{};
+    try std.testing.expectError(error.InvalidRotationSignature, graph.authenticatedDevice(device, pin));
 }
 
 test "device graph rejects rotation signed by a different user root" {

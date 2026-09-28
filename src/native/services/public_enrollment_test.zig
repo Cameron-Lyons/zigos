@@ -75,20 +75,18 @@ const Node = struct {
         _ = try catalog.restore(&n.disk.service, n.service.state, .{ .object_id = 1000, .owner = owner, .public_key = n.catalog_pin, .device_root_pin = n.pin }, &n.scratch);
         try std.testing.expectEqual(@as(usize, 0), n.keys.service.activeHandleCount());
         n.service = .{ .state = n.service.state, .storage = &n.disk.service, .signer = .{ .key = try n.lease(1) }, .object_id = 1000, .version_id = n.disk.service.latestVersion(@as(u64, 1000)).?.id.raw() };
-        n.local_key = try n.lease(2);
         n.root_key = if (is_issuer) try n.lease(3) else null;
         if (n.devices.findDeviceConst(n.local)) |record| {
-            if (!std.mem.eql(u8, &record.device_signature.public_key, &(try n.local_key.publicKey(1)))) {
-                for (3..@as(usize, n.keys.service.store.secret_count) + 1) |id| {
-                    const key = try n.lease(id);
-                    if (std.mem.eql(u8, &record.device_signature.public_key, &(try key.publicKey(1)))) {
-                        n.local_key = key;
-                        return;
-                    }
+            for (n.keys.service.store.secrets) |secret| {
+                if (!@import("../platform/secure_secret_store.zig").isLiveId(secret.id)) continue;
+                const key = try n.lease(secret.id);
+                if (std.mem.eql(u8, &record.device_signature.public_key, &(try key.publicKey(1)))) {
+                    n.local_key = key;
+                    return;
                 }
-                return error.MissingLocalDeviceKey;
             }
-        }
+            if (record.status == .revoked) n.local_key = .{} else return error.MissingLocalDeviceKey;
+        } else n.local_key = try n.lease(2);
     }
 
     fn request(n: *Node, pin: signing.PublicKey) !graph.EnrollmentProposal {
@@ -132,6 +130,11 @@ const Node = struct {
     fn approveRotation(n: *Node, proposal: *const graph.RotationProposal) !void {
         n.disk.activate();
         try n.service.approveDeviceRotation(proposal, n.root_key.?, 4, &n.scratch);
+    }
+
+    fn retireRotation(n: *Node, proposal: *const graph.RotationProposal, old_key: sealed.Key, next_key: sealed.Key) !void {
+        n.disk.activate();
+        try n.service.retireRotatedDeviceKey(proposal, old_key, next_key, 5, &n.scratch);
     }
 
     fn revoke(n: *Node, device: principal.PrincipalId) !void {
@@ -557,4 +560,113 @@ test "public rotation preserves recoverable keys through every prepare approve a
         try b.accept(try a.publish(&publication));
         try connect(a, b);
     };
+}
+
+test "key retirement permits repeated durable rotation beyond vault capacity without reusing identities" {
+    const a = try Node.init(10, alice, true);
+    defer a.deinit();
+    const b = try Node.init(50, bob, false);
+    defer b.deinit();
+    var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+    _ = try enroll(a, b, &publication);
+    var retired_ids: [20]u64 = undefined;
+    for (&retired_ids, 0..) |*retired, i| {
+        const old = b.local_key;
+        retired.* = b.keys.service.findHandleConst(old.handle_id).?.secret_id;
+        const next = try b.generate("replacement");
+        const proposal = try b.prepareRotation(next);
+        try std.testing.expectError(error.InvalidRotationSignature, b.retireRotation(&proposal, old, next));
+        try a.approveRotation(&proposal);
+        b.local_key = next;
+        try b.accept(try a.publish(&publication));
+        try b.retireRotation(&proposal, old, next);
+        try std.testing.expectEqual(@as(u8, 2), b.keys.service.store.secret_count);
+        try std.testing.expectError(error.VaultHandleNotFound, old.validate(5));
+        for (retired_ids[0 .. i + 1]) |id| {
+            try std.testing.expect(b.keys.service.store.describeSecret(id) == null);
+            try std.testing.expectError(error.SecretNotFound, b.lease(id));
+        }
+        if (i % 4 == 0) {
+            try a.restore();
+            try b.restore();
+            try connect(a, b);
+        }
+    }
+    try b.restore();
+    try connect(a, b);
+    try std.testing.expectEqual(@as(u32, 21), b.devices.findDeviceConst(bob).?.key_rotation_generation);
+}
+
+test "key retirement crosses both durable barriers and preserves the approved successor" {
+    for (1..3) |barrier| for (0..2) |retry| {
+        const a = try Node.init(10, alice, true);
+        defer a.deinit();
+        const b = try Node.init(50, bob, false);
+        defer b.deinit();
+        var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+        _ = try enroll(a, b, &publication);
+        const old = b.local_key;
+        const next = try b.generate("replacement");
+        const proposal = try b.prepareRotation(next);
+        try a.approveRotation(&proposal);
+        b.local_key = next;
+        try b.accept(try a.publish(&publication));
+        b.disk.fail_flush_from = b.disk.flushes + barrier;
+        try std.testing.expectError(error.DurabilityBarrierFailed, b.retireRotation(&proposal, old, next));
+        try std.testing.expectError(error.VaultHandleNotFound, old.validate(5));
+        try std.testing.expectError(error.IdentityCheckpointPending, b.graphView());
+        const versions = b.disk.service.versionCount();
+        b.disk.fail_flush_from = null;
+        if (retry == 1) {
+            try b.flush();
+            try std.testing.expectEqual(versions, b.disk.service.versionCount());
+        }
+        try b.restore();
+        try std.testing.expectEqual(@as(u8, if (retry == 1) 2 else 3), b.keys.service.store.secret_count);
+        if (retry == 0) try b.retireRotation(&proposal, try b.lease(2), b.local_key);
+        const replacement = try b.generate("reuse");
+        const id = b.keys.service.findHandleConst(replacement.handle_id).?.secret_id;
+        try std.testing.expectEqual(@as(u64, 18), id);
+        try std.testing.expectError(error.SecretNotFound, b.lease(2));
+        try connect(a, b);
+    };
+}
+
+test "key retirement protects the catalog signer credentials and owner root" {
+    for (0..3) |binding| {
+        const a = try Node.init(10, alice, true);
+        defer a.deinit();
+        const b = try Node.init(50, bob, false);
+        defer b.deinit();
+        var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+        _ = try enroll(a, b, &publication);
+        const local = if (binding == 2) a else b;
+        if (binding != 1) {
+            // Deliberately share a device identity with a still-required signer.
+            const shared = if (binding == 0) try b.lease(1) else a.root_key.?;
+            const first = try local.prepareRotation(shared);
+            try a.approveRotation(&first);
+            local.local_key = shared;
+            if (binding == 0) try b.accept(try a.publish(&publication));
+        } else {
+            b.disk.activate();
+            const unlock_session = @import("../../tests/fixtures/identity_vault.zig").unlock_session;
+            _ = try b.service.registerCredential(&b.devices, .{ .vault = &b.keys.service, .policies = &b.keys.policies, .subjects = b.keys.authority.subjects, .holder = b.disk.service.owner, .task_id = b.disk.service.task_id, .now_ticks = 3, .unlock_session = &unlock_session }, .{ .owner = owner, .device = bob, .relying_party_id = "retirement.example", .label = "retained credential", .key_handle_id = b.local_key.handle_id }, &b.scratch);
+        }
+        const old = local.local_key;
+        const next = try local.generate("replacement");
+        const proposal = try local.prepareRotation(next);
+        try a.approveRotation(&proposal);
+        local.local_key = next;
+        if (binding != 2) try b.accept(try a.publish(&publication));
+        const versions = local.disk.service.versionCount();
+        try std.testing.expectError(error.SigningKeyInUse, local.retireRotation(&proposal, old, next));
+        try std.testing.expectEqual(versions, local.disk.service.versionCount());
+        try old.validate(5);
+        if (binding == 1) {
+            local.disk.activate();
+            try local.service.revokeCredential(1, 5, &local.scratch);
+            try std.testing.expectError(error.SigningKeyInUse, local.retireRotation(&proposal, old, next));
+        }
+    }
 }

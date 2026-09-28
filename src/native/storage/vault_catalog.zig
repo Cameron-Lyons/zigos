@@ -16,9 +16,9 @@ const graph_snapshot = @import("../sync/device_graph_snapshot.zig");
 
 pub const CONTENT_TYPE = "application/x-zigos-vault-catalog";
 const label = "Sealed vault catalog";
-const magic = "ZGVault3";
-const format_version: u16 = 3;
-const header_bytes = 27;
+const magic = "ZGVault4";
+const format_version: u16 = 4;
+const header_bytes = 27 + 8 * secrets.MAX_SECRETS;
 pub const MAX_BYTES = header_bytes + secrets.MAX_SECRETS * (13 + secrets.MAX_LABEL_BYTES + sealing.MAX_BLOB_BYTES) + 2 + identity.MAX_SNAPSHOT_BYTES + graph_snapshot.MAX_BYTES;
 const CodecError = error{ InvalidVaultCatalog, VaultCatalogTooLarge };
 const Writer = cursor.Writer(CodecError, error.VaultCatalogTooLarge);
@@ -79,6 +79,7 @@ pub const Session = struct {
                 previous_key = version.metadata.signature.publicKeySlice()[0..signing.PUBLIC_KEY_BYTES].*;
                 var reader = Reader{ .buffer = old };
                 const old_header = try header(&reader, object_id);
+                try requireKeyExtension(&reader, old_header, &service.store, signer.key.authority.?.owner);
                 break :blk std.math.add(u64, old_header.generation, 1) catch return error.VaultCatalogGenerationExhausted;
             }
             break :blk @as(u64, 1);
@@ -122,7 +123,7 @@ pub const Session = struct {
 pub fn restore(storage: *const storage_service.Service, state: State, trust: Trust, scratch: *[MAX_BYTES]u8) !u64 {
     const destination = state.vault;
     // Never replace a live store or rewind its generational lease arenas.
-    if (state.identities.credential_count != 0 or destination.store.secret_count != 0 or destination.handles.countInUse() != 0 or
+    if (state.identities.credential_count != 0 or !destination.store.empty() or destination.handles.countInUse() != 0 or
         destination.store.handles.countInUse() != 0) return error.VaultNotEmpty;
     if (state.devices) |devices| if (!graph_snapshot.empty(devices)) return error.GraphNotEmpty;
     const version = storage.latestVersion(trust.object_id) orelse return error.VaultCatalogMissing;
@@ -146,8 +147,16 @@ fn encode(store: *const secrets.Store, identities: *const identity.Store, device
     try writer.writeU64(object_id);
     try writer.writeU64(generation);
     try writer.writeByte(store.secret_count);
-    for (store.secrets[0..store.secret_count], 0..) |*secret, index| {
-        if (secret.id != index + 1 or !secret.owner.eql(owner) or secret.label_len > secrets.MAX_LABEL_BYTES or
+    var live: usize = 0;
+    for (store.secrets, 0..) |secret, index| {
+        if (secret.id != 0 and secrets.slotForId(secret.id) != index) return error.InvalidVaultCatalog;
+        if (secrets.isLiveId(secret.id)) live += 1;
+        try writer.writeU64(secret.id);
+    }
+    if (live != store.secret_count) return error.InvalidVaultCatalog;
+    for (&store.secrets) |*secret| {
+        if (!secrets.isLiveId(secret.id)) continue;
+        if (!secret.owner.eql(owner) or secret.label_len > secrets.MAX_LABEL_BYTES or
             !secret.hardware_backed or !secret.hardware_provider_used or secret.resident_material or
             !secret.sealed_digest_present) return error.InvalidVaultCatalog;
         const blob = secret.sealedBlob() orelse return error.InvalidVaultCatalog;
@@ -169,13 +178,23 @@ fn encode(store: *const secrets.Store, identities: *const identity.Store, device
     return scratch[0..writer.offset];
 }
 
-fn header(reader: *Reader, object_id: u64) !struct { count: u8, generation: u64 } {
+const Header = struct { count: u8, generation: u64, slot_ids: [secrets.MAX_SECRETS]u64 };
+
+fn header(reader: *Reader, object_id: u64) !Header {
     if (object_id == 0 or !std.mem.eql(u8, try reader.readSlice(magic.len), magic) or
         try reader.readU16() != format_version or try reader.readU64() != object_id) return error.InvalidVaultCatalog;
     const generation = try reader.readU64();
     const count = try reader.readByte();
     if (generation == 0 or count == 0 or count > secrets.MAX_SECRETS) return error.InvalidVaultCatalog;
-    return .{ .count = count, .generation = generation };
+    var result = Header{ .count = count, .generation = generation, .slot_ids = undefined };
+    var live: usize = 0;
+    for (&result.slot_ids, 0..) |*id, index| {
+        id.* = try reader.readU64();
+        if (id.* != 0 and secrets.slotForId(id.*) != index) return error.InvalidVaultCatalog;
+        if (secrets.isLiveId(id.*)) live += 1;
+    }
+    if (live != count) return error.InvalidVaultCatalog;
+    return result;
 }
 
 const Record = struct {
@@ -199,11 +218,32 @@ fn readRecord(reader: *Reader, owner: principal.PrincipalId) !Record {
     return .{ .owner = record_owner, .name = name, .exportable = exportable == 1, .blob = try reader.readSlice(blob_len) };
 }
 
+// A new signed checkpoint cannot forget an issued generation, resurrect a
+// retired ID, or replace the immutable sealed binding under a still-live ID.
+fn requireKeyExtension(reader: *Reader, saved: Header, store: *const secrets.Store, owner: principal.PrincipalId) !void {
+    for (saved.slot_ids, 0..) |old_id, index| {
+        const current = &store.secrets[index];
+        const old_generation = old_id & secrets.MAX_SECRET_ID;
+        const new_generation = current.id & secrets.MAX_SECRET_ID;
+        if (new_generation < old_generation or
+            (old_id != 0 and !secrets.isLiveId(old_id) and secrets.isLiveId(current.id) and new_generation == old_generation)) return error.VaultCatalogKeyRollback;
+        if (!secrets.isLiveId(old_id)) continue;
+        const record = try readRecord(reader, owner);
+        if (current.id != old_id) continue;
+        const blob = current.sealedBlob() orelse return error.VaultCatalogKeyRollback;
+        if (!current.owner.eql(record.owner) or current.label_len > secrets.MAX_LABEL_BYTES or
+            !std.mem.eql(u8, current.labelSlice(), record.name) or current.exportable != record.exportable or
+            !std.mem.eql(u8, blob, record.blob)) return error.VaultCatalogKeyRollback;
+    }
+}
+
 fn decode(store: *secrets.Store, identities: *identity.Store, devices: ?*graph.Graph, root_pin: ?signing.PublicKey, object_id: u64, owner: principal.PrincipalId, payload: []const u8) !void {
     // Validate the complete canonical framing before touching the hardware.
     var reader = Reader{ .buffer = payload };
-    const count = (try header(&reader, object_id)).count;
-    for (0..count) |_| _ = try readRecord(&reader, owner);
+    const saved = try header(&reader, object_id);
+    for (saved.slot_ids) |id| if (secrets.isLiveId(id)) {
+        _ = try readRecord(&reader, owner);
+    };
     const credentials = try reader.readSlice(try reader.readU16());
     identity.validateSnapshot(owner, credentials) catch return error.InvalidVaultCatalog;
     var candidate = graph.Graph.init();
@@ -215,13 +255,12 @@ fn decode(store: *secrets.Store, identities: *identity.Store, devices: ?*graph.G
     reader.offset = header_bytes;
     // A later unseal may fail even after earlier records authenticated. Roll
     // back every unpublished slot; neither raw keys nor leases survive restore.
-    errdefer {
-        for (store.secrets[0..store.secret_count]) |*secret| secret.* = empty_secret;
-        store.secret_count = 0;
-    }
-    for (0..count) |_| {
-        const record = try readRecord(&reader, owner);
-        _ = try store.restoreSealed(record.owner, record.name, record.blob, record.exportable);
+    errdefer store.clearUnpublished();
+    for (saved.slot_ids, 0..) |id, index| {
+        if (secrets.isLiveId(id)) {
+            const record = try readRecord(&reader, owner);
+            _ = try store.restoreSealedAt(id, record.owner, record.name, record.blob, record.exportable);
+        } else store.secrets[index].id = id;
     }
     try identities.restoreSnapshot(owner, store, credentials);
     if (devices) |destination| destination.* = candidate;
@@ -323,7 +362,7 @@ test "vault catalog authenticates its trust pin owner and signed generation" {
     const second = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, first.version_id, 3, &scratch);
     var foreign_fixture = SigningFixture{};
     const foreign_signer = try foreign_fixture.init(test_owner, device.service.owner, device.service.task_id, .{ .label = "foreign", .seed = @splat(0xee) });
-    try std.testing.expectError(error.UntrustedVaultCatalog, session.save(&device.service, .{ .vault = &foreign_fixture.service, .identities = &identities }, foreign_signer, test_object_id, second.version_id, 4, &scratch));
+    try std.testing.expectError(error.VaultCatalogKeyRollback, session.save(&device.service, .{ .vault = &foreign_fixture.service, .identities = &identities }, foreign_signer, test_object_id, second.version_id, 4, &scratch));
     try std.testing.expectEqual(second.version_id, device.service.latestVersion(test_object_id).?.id.raw());
     var recovered = vault.Service.init();
     recovered.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
@@ -357,8 +396,13 @@ test "vault catalog rejects incomplete framing and rolls back a later failed uns
     }
     const mutations = [_]struct { offset: usize, value: u8 }{
         .{ .offset = 8, .value = 0 }, // Unknown format.
+        .{ .offset = 7, .value = '3' }, // Older catalogs have no retirement generations.
         .{ .offset = 26, .value = 0 }, // Empty catalog.
         .{ .offset = 26, .value = secrets.MAX_SECRETS + 1 },
+        .{ .offset = 27, .value = 2 }, // A key ID cannot name a different slot.
+        .{ .offset = 27 + 8, .value = 1 }, // Duplicate ID.
+        .{ .offset = 27 + 7, .value = 0x80 }, // Retired entry conflicts with live count.
+        .{ .offset = 27 + 2 * 8 + 7, .value = 0x80 }, // Tombstone with a zero ID.
         .{ .offset = header_bytes, .value = 255 }, // Unknown principal kind.
         .{ .offset = header_bytes + 1, .value = 2 }, // Foreign owner.
         .{ .offset = header_bytes + 9, .value = secrets.MAX_LABEL_BYTES + 1 },
@@ -444,4 +488,48 @@ test "vault catalog round trips the full vault with maximum envelopes across sto
         try std.testing.expectEqual(before.id, after.id);
         try std.testing.expectEqualSlices(u8, before.sealedBlob().?, after.sealedBlob().?);
     }
+}
+
+test "vault catalog retains retired slot generations and rejects resurrection on save and restore" {
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var identities = identity.Store.init();
+    var fixture = SigningFixture{};
+    const signer = try prepare(&fixture, &device.service);
+    const retired = (try fixture.service.store.importSecret(test_owner, "retired", "old", true, true)).*;
+    const kept = try fixture.service.store.importSecret(test_owner, "kept", "survivor", true, true);
+    try fixture.service.store.retireSecret(retired.id);
+    var scratch: [MAX_BYTES]u8 = undefined;
+    var session = Session{};
+    const state = State{ .vault = &fixture.service, .identities = &identities };
+    const receipt = try session.save(&device.service, state, signer, test_object_id, 0, 2, &scratch);
+    const tombstone = fixture.service.store.secrets[1];
+    fixture.service.store.secrets[1] = retired;
+    fixture.service.store.secret_count += 1;
+    try std.testing.expectError(error.VaultCatalogKeyRollback, session.save(&device.service, state, signer, test_object_id, receipt.version_id, 2, &scratch));
+    fixture.service.store.secrets[1] = empty_secret;
+    fixture.service.store.secret_count -= 1;
+    try std.testing.expectError(error.VaultCatalogKeyRollback, session.save(&device.service, state, signer, test_object_id, receipt.version_id, 2, &scratch));
+    fixture.service.store.secrets[1] = tombstone;
+    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch);
+    const blob = kept.sealedBlob().?;
+    const offset = std.mem.indexOf(u8, payload, blob).?;
+    scratch[offset + blob.len - 1] ^= 1;
+    var partial = secrets.Store.init();
+    partial.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
+    try std.testing.expectError(error.InvalidSealedSecret, decode(&partial, &identities, null, null, test_object_id, test_owner, payload));
+    try std.testing.expect(partial.empty());
+    device.crash();
+    var recovered = vault.Service.init();
+    recovered.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
+    _ = try restore(&device.service, .{ .vault = &recovered, .identities = &identities }, try testTrust(), &scratch);
+    try std.testing.expectEqual(@as(u8, 2), recovered.store.secret_count);
+    try std.testing.expect(recovered.store.describeSecret(2) == null);
+    try std.testing.expect(recovered.store.describeSecret(3) != null);
+    const next = try recovered.store.importSecret(test_owner, "replacement", "new", true, true);
+    try std.testing.expectEqual(@as(u64, 18), next.id);
+    var used = vault.Service.init();
+    _ = try used.store.importSecret(test_owner, "temporary", "old", false, true);
+    try used.store.retireSecret(1);
+    try std.testing.expectError(error.VaultNotEmpty, restore(&device.service, .{ .vault = &used, .identities = &identities }, try testTrust(), &scratch));
 }
