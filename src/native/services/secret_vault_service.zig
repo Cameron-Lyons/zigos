@@ -157,6 +157,15 @@ pub const Service = struct {
         self.store.attachHardwareProvider(provider);
     }
 
+    // Session teardown cannot depend on policy, audit capacity, or hardware.
+    // Preserve both arenas' generations across subsequent catalog restores.
+    pub fn unload(self: *Service) void {
+        self.handles.reset();
+        self.active_handle_count = 0;
+        self.next_reusable_handle = 0;
+        self.store.unload();
+    }
+
     pub fn importSecret(
         self: *Service,
         policies: *const policy_object.Directory,
@@ -703,6 +712,42 @@ fn recordRevoke(
 
 fn testHardwareProvider() secure_secret_store.HardwareSealProvider {
     return @import("../../tests/fixtures/secret_provider.zig").provider();
+}
+
+test "secret vault unload preserves stale lease rejection across repeated restores" {
+    const Fixture = @import("../../tests/fixtures/document_signer.zig").Fixture;
+    var fixture = Fixture{};
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 2 };
+    const key = try fixture.init(owner, holder, 3, .{ .label = "unload", .seed = @splat(0x57) });
+    const original = fixture.service.findHandleConst(key.key.handle_id).?.*;
+    const record = fixture.service.store.describeSecret(original.secret_id).?.*;
+    const context = secure_secret_store.ExportContext{ .holder = holder, .task_id = 3 };
+    var previous = original;
+    _ = try fixture.service.store.importSecret(owner, "resident value", &(@as(secure_secret_store.Value, @splat(0x98))), false, false);
+    for (0..MAX_HANDLES * 3) |_| {
+        fixture.service.unload();
+        fixture.service.unload();
+        try std.testing.expect(fixture.service.store.empty());
+        try std.testing.expectEqual(@as(usize, 0), fixture.service.activeHandleCount());
+        try std.testing.expect(fixture.service.store.hardware_provider.operations == null);
+        for (fixture.service.store.secrets) |secret| {
+            try std.testing.expectEqual(@as(u8, 0), secret.material.raw.len);
+            try std.testing.expect(std.mem.allEqual(u8, &secret.material.raw.bytes, 0));
+        }
+        try std.testing.expectError(error.VaultHandleNotFound, key.key.validate(1));
+        try std.testing.expectError(error.HandleNotFound, fixture.service.store.signMessage(original.store_handle_id, context, "stale"));
+        fixture.service.attachHardwareProvider(testHardwareProvider());
+        _ = try fixture.service.store.restoreSealedAt(record.id, owner, record.labelSlice(), record.sealedBlob().?, false);
+        const fresh = (try fixture.service.lendHandle(&fixture.policies, fixture.authority.subjects, .{ .owner = owner, .holder = holder, .task_id = 3, .secret_id = record.id, .now_ticks = 1, .expires_at_ticks = 10 }, null)).*;
+        try std.testing.expect(fresh.id != previous.id and fresh.store_handle_id != previous.store_handle_id);
+        try std.testing.expect(fixture.service.findHandleConst(previous.id) == null);
+        try std.testing.expectError(error.VaultHandleNotFound, key.key.validate(1));
+        try std.testing.expectError(error.HandleNotFound, fixture.service.store.signMessage(original.store_handle_id, context, "stale"));
+        const signature = try fixture.service.store.signMessage(fresh.store_handle_id, context, "fresh");
+        try std.testing.expect(@import("../core/signing.zig").verify(signature, "fresh"));
+        previous = fresh;
+    }
 }
 
 test "secret vault stores active handle count in capacity-sized metadata" {

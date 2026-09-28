@@ -386,7 +386,15 @@ pub const Store = struct {
         self.secret_count -= 1;
     }
 
-    // Only for aborting an unpublished catalog restore into an empty store.
+    // Drop session authority without rewinding handle generations. Secret IDs
+    // may be restored from an authenticated catalog; old leases must stay dead.
+    pub fn unload(self: *Store) void {
+        self.hardware_provider = .{};
+        self.handles.reset();
+        self.clearUnpublished();
+    }
+
+    // For an unpublished restore or a store whose leases were all invalidated.
     pub fn clearUnpublished(self: *Store) void {
         std.debug.assert(self.handles.countInUse() == 0);
         for (&self.secrets) |*secret| {

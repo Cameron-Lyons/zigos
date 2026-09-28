@@ -80,6 +80,14 @@ run_boot() {
   fi
   if [ -n "$sealing_marker" ]; then
     local pin_marker='ZIGOS:TPM2:PIN:VERIFIED'
+    local session_proofs=1
+    if [ "$name" = different-tpm ]; then session_proofs=0; fi
+    if [ "$(grep -c '^ZIGOS:TPM2:SESSION:' "$log" || true)" -ne "$session_proofs" ] ||
+      { [ "$session_proofs" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:SESSION:VERIFIED' "$log"; }; then
+      cat "$log" >&2
+      echo "TPM2 identity session mismatch for $name" >&2
+      return 1
+    fi
     if [ "$name" = different-tpm ]; then pin_marker='ZIGOS:TPM2:PIN:WRONG_DEVICE'; fi
     if [ "$(grep -c '^ZIGOS:TPM2:PIN:' "$log" || true)" -ne 1 ] || ! grep -Fxq "$pin_marker" "$log"; then
       cat "$log" >&2
@@ -196,6 +204,7 @@ run_interrupted_enrollment() {
   stop_tpm
   if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
     ! grep -Fxq 'ZIGOS:TPM2:PIN:RECOVERED' "$log" ||
+    ! grep -Fxq 'ZIGOS:TPM2:SESSION:VERIFIED' "$log" ||
     [ "$(grep -c '^ZIGOS:TPM2:PIN:' "$log" || true)" -ne 1 ] ||
     [ "$(grep -c '^ZIGOS:TPM2:ENROLLMENT_RECOVERY:' "$log" || true)" -ne 1 ] ||
     grep -Eq '^ZIGOS:TPM2:(SEAL|IDENTITY|VAULT):|FAIL' "$log"; then

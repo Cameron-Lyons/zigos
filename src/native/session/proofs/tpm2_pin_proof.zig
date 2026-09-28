@@ -65,15 +65,11 @@ pub fn run(manager: anytype, io: anytype) !void {
         defer std.crypto.secureZero(u8, &recovered);
         try capsule.unlock(&client, io, &trusted_digest, pin, &recovered);
         if (!std.crypto.timing_safe.eql(tpm.Key, key, recovered)) return error.RecoveredWrongPinKey;
+        try @import("identity_session_proof.zig").provision(manager, io, &client, &capsule, &key);
         for (0..3) |_| {
-            recovered = @splat(0xaa);
-            if (capsule.unlock(&client, io, &trusted_digest, "73019429", &recovered)) |_| return error.AcceptedWrongPin else |err| {
-                if (err != error.PinRejected or !std.mem.allEqual(u8, &recovered, 0)) return error.BadPinRejection;
-            }
+            try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, "73019429", error.PinRejected);
         }
-        if (capsule.unlock(&client, io, &trusted_digest, pin, &recovered)) |_| return error.BypassedPinLockout else |err| {
-            if (err != error.PinLockedOut or !std.mem.allEqual(u8, &recovered, 0)) return error.BadPinLockout;
-        }
+        try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, pin, error.PinLockedOut);
         const x86 = @import("../../../arch/x86.zig");
         x86.cli();
         console.print("ZIGOS:TPM2:PIN:LOCKED\n");
@@ -105,5 +101,6 @@ pub fn run(manager: anytype, io: anytype) !void {
     var actual: tpm.Key = undefined;
     Sha256.hash(&key, &actual, .{});
     if (!std.crypto.timing_safe.eql(tpm.Key, expected_key, actual)) return error.RecoveredWrongPinKey;
+    try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, pin, null);
     console.print(if (lockout_persisted) "ZIGOS:TPM2:PIN:RECOVERED\n" else "ZIGOS:TPM2:PIN:VERIFIED\n");
 }

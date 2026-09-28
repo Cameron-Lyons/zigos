@@ -575,6 +575,7 @@ pub const UnlockRequest = struct {
     relying_party_id: []const u8,
     challenge: []const u8,
     method: UnlockMethod,
+    verified_at_ticks: u64,
     expires_at_ticks: u64,
     key_handle_id: u64,
 };
@@ -583,9 +584,12 @@ pub const UnlockRequest = struct {
 // device-key lease stays in that service; this API does not verify a PIN or a
 // biometric and is not an app request boundary.
 pub fn issueLocalUnlockProof(graph: *const device_graph.Graph, authority: VaultAuthority, request: UnlockRequest) Error!LocalUnlockProof {
+    // Signing a new challenge must not refresh the age of an earlier PIN or
+    // biometric verification. Lease checks still use the current service time.
+    if (request.verified_at_ticks > authority.now_ticks or authority.now_ticks >= request.expires_at_ticks) return error.LocalUnlockExpired;
     const device = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
     _ = try signingSecret(authority, request.key_handle_id, request.owner);
-    var proof = try makeLocalUnlockProof(try authority.unlock_session.binding(), request.owner, request.device, request.relying_party_id, request.challenge, request.method, authority.now_ticks, request.expires_at_ticks);
+    var proof = try makeLocalUnlockProof(try authority.unlock_session.binding(), request.owner, request.device, request.relying_party_id, request.challenge, request.method, request.verified_at_ticks, request.expires_at_ticks);
     const digest = localUnlockDigest(&proof);
     const signature = try signThroughVault(authority, request.key_handle_id, &digest);
     if (signature.value_len != signing.SIGNATURE_BYTES or !std.mem.eql(u8, signature.publicKeySlice(), device.device_signature.publicKeySlice())) return error.InvalidLocalUnlock;
@@ -1506,8 +1510,13 @@ test "os identity binds unlock signatures to live sessions and rejects proof tra
 test "os identity issues unlock proofs only through the enrolled device key lease" {
     var fixture = try VaultIdentityFixture.init();
     const device_handle = try identity_keys.provision(fixture.authority(3), VaultIdentityFixture.owner, VaultIdentityFixture.device_key);
-    const request = UnlockRequest{ .owner = VaultIdentityFixture.owner, .device = VaultIdentityFixture.device, .relying_party_id = "accounts.example", .challenge = "nonce", .method = .device_pin, .expires_at_ticks = 20, .key_handle_id = device_handle };
+    const request = UnlockRequest{ .owner = VaultIdentityFixture.owner, .device = VaultIdentityFixture.device, .relying_party_id = "accounts.example", .challenge = "nonce", .method = .device_pin, .verified_at_ticks = 2, .expires_at_ticks = 20, .key_handle_id = device_handle };
     const proof = try issueLocalUnlockProof(&fixture.graph, fixture.authority(3), request);
+    try std.testing.expectEqual(@as(u64, 2), proof.issued_at_ticks);
+    var future = request;
+    future.verified_at_ticks = 4;
+    try std.testing.expectError(error.LocalUnlockExpired, issueLocalUnlockProof(&fixture.graph, fixture.authority(3), future));
+    try std.testing.expectError(error.LocalUnlockExpired, issueLocalUnlockProof(&fixture.graph, fixture.authority(20), request));
     var assertion = try fixture.request();
     assertion.local_unlock = proof;
     _ = try fixture.identities.assertCredential(&fixture.graph, fixture.authority(4), assertion);

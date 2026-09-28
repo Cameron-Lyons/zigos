@@ -204,6 +204,19 @@ requests.
   explicit administrator recovery, and a lost authorization-change response.
   The primitive requires trusted enrollment and separately retained administrator
   authorization; it does not supply the first-user UI or an input trust path.
+  A bounded identity-session owner now connects PIN verification to authenticated
+  NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
+  nonce before activation. Lock synchronously invalidates both lease tables,
+  detaches the hardware provider, erases authorization and loaded secrets, and
+  clears credentials and device state without depending on TPM cleanup or disk
+  writes. Handle generations survive lock/reopen, so copied signing leases stay
+  invalid even when the same catalog is restored. Unlock proofs retain the PIN's
+  original verification time. Session operations lock on expiry or a backwards
+  service clock; the desktop owner must also check idle deadlines. QEMU covers
+  rejected PINs, failed anchor/key/entropy checks,
+  stale proofs and handles, and durable counter recovery after locking with a
+  lost NV-write response. Coordination adds at most 4 KiB, borrows existing stores,
+  and reuses private credential leases for repeated assertions.
   Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog
@@ -240,7 +253,7 @@ requests.
   the definition/first-write crash gap without another object or normal-checkpoint
   NV write. Production authorization provisioning and first-user enrollment UI,
   physical TPM persistence validation, trusted PIN input, biometric verification,
-  session-lifecycle integration, and userspace
+  desktop lock/unlock event integration, and userspace
   request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   interrupted initial enrollment, recovery from the native disk after restarting

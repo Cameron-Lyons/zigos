@@ -11,8 +11,8 @@ const object_signer = @import("../../storage/sealed_object_signer.zig");
 const console = @import("../../../kernel/utils/console.zig");
 
 // Disposable verification enrollment, deliberately interrupted before its first
-// NV write. It runs before the other TPM proofs so their cold/reboot cases stay
-// independent. Production enrollment never receives this fixture authorization.
+// NV write. Its cold/reboot cases are independent of the PIN/session fixture.
+// Production enrollment never receives this fixture authorization.
 const owner = principal.PrincipalId{ .kind = .user, .serial = 0x703 };
 const index: u32 = 0x0180_7013;
 const object_id: u64 = 0x7010003;
@@ -40,9 +40,10 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         _ = try session.save(storage, .{ .vault = &service, .identities = &identities }, signer, object_id, 0, 3, &scratch);
         const candidate = try catalog.inspectEnrollment(storage, object_id, owner, &scratch);
         var anchor = Anchor{ .client = &client, .io = io, .authorization = authorization, .index = index, .current = .{ .checkpoint = candidate.checkpoint, .device_root_pin = candidate.device_root_pin } };
+        const writes = io.nv_writes;
         io.interrupt_nv_write = true;
         if (anchor.provision(storage, &scratch)) |_| return error.EnrollmentWasNotInterrupted else |err| {
-            if (err != error.InterruptedVaultCheckpoint or !client.failed or io.nv_writes != 0) return error.BadEnrollmentInterruption;
+            if (err != error.InterruptedVaultCheckpoint or !client.failed or io.nv_writes != writes) return error.BadEnrollmentInterruption;
         }
         const x86 = @import("../../../arch/x86.zig");
         x86.cli();
