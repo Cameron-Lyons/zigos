@@ -2,7 +2,7 @@
 //! uses fresh independent key pairs; no traffic key is installed by the harness.
 const std = @import("std");
 const channel_mod = @import("../sync/peer_channel.zig");
-const device_graph = @import("../sync/device_graph.zig");
+const sync_service = @import("../sync/sync_service.zig");
 const network = @import("../drivers/network_driver_task.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
@@ -10,7 +10,7 @@ const support = @import("scenario_support.zig");
 const markers = @import("../../kernel/boot/markers.zig");
 const confirmation = "zigos peer channel confirmed";
 
-pub fn run(graph: *const device_graph.Graph, local_mac: [6]u8, peer_mac: [6]u8, laptop: principal.PrincipalId, tablet: principal.PrincipalId) bool {
+pub fn run(context: *support.Context, service: *sync_service.Service, local_mac: [6]u8, peer_mac: [6]u8, laptop: principal.PrincipalId, tablet: principal.PrincipalId) bool {
     if (@import("builtin").target.os.tag != .freestanding) return false;
     const clock = @import("../../kernel/timer/tsc_clock.zig");
     const x86 = @import("../../arch/x86.zig");
@@ -22,7 +22,7 @@ pub fn run(graph: *const device_graph.Graph, local_mac: [6]u8, peer_mac: [6]u8, 
         signing.SignerIdentity{ .label = "local-device", .seed = signing.seedFromByte(0x92) }
     else
         signing.SignerIdentity{ .label = "tablet-device-v2", .seed = signing.seedFromByte(0x94) };
-    var channel = channel_mod.Channel.init(graph, signing.publicKey(support.user_root_signer) catch return false, if (initiator) laptop else tablet, if (initiator) tablet else laptop, signer, if (initiator) .initiator else .responder) catch |err| {
+    var channel = channel_mod.Channel.init(service.deviceGraph(), signing.publicKey(support.user_root_signer) catch return false, if (initiator) laptop else tablet, if (initiator) tablet else laptop, signer, if (initiator) .initiator else .responder) catch |err| {
         support.common.printBootMarker(@errorName(err));
         return false;
     };
@@ -33,17 +33,18 @@ pub fn run(graph: *const device_graph.Graph, local_mac: [6]u8, peer_mac: [6]u8, 
     var last_handshake_len: usize = 0;
     if (initiator) {
         outgoing_len = (channel.writeHandshake(&outgoing) catch return false).len;
-        if (!network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len])) return false;
+        _ = network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len]);
     }
     var received: [1500]u8 = undefined;
     var plaintext: [channel_mod.MAX_PAYLOAD]u8 = undefined;
     defer std.crypto.secureZero(u8, &plaintext);
     var confirmed = false;
-    var grace = clock.afterMilliseconds(30_000);
     const deadline = clock.afterMilliseconds(30_000);
     var resend = clock.afterMilliseconds(20);
     while (!deadline.expired()) {
-        if (confirmed and grace.expired() and @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount() != 0) {
+        if (confirmed) {
+            if (!@import("peer_object_proof.zig").run(context, service, &channel, peer_mac, initiator, outgoing[0..outgoing_len])) return false;
+            if (@import("../../kernel/drivers/virtio_net_hw.zig").interruptCount() == 0) return false;
             support.common.printBootMarker(markers.sync_peer_authenticated);
             support.common.printBootMarker(markers.sync_peer_ciphertext_rejected);
             support.common.printBootMarker(markers.sync_peer_replay_rejected);
@@ -51,7 +52,7 @@ pub fn run(graph: *const device_graph.Graph, local_mac: [6]u8, peer_mac: [6]u8, 
             return true;
         }
         if (resend.expired()) {
-            if (outgoing_len != 0 and !network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len])) return false;
+            if (outgoing_len != 0) _ = network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len]);
             resend = clock.afterMilliseconds(20);
         }
         const result = network.receiveActiveFrame(&received);
@@ -66,7 +67,9 @@ pub fn run(graph: *const device_graph.Graph, local_mac: [6]u8, peer_mac: [6]u8, 
             // Retransmission repeats the exact encrypted bytes. It never runs
             // the handshake again with a reused ephemeral key or AEAD nonce.
             if (last_handshake_len == frame.len and std.mem.eql(u8, last_handshake[0..last_handshake_len], frame)) {
-                if (!network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len])) return false;
+                // A peer may have queued many retries while this guest was
+                // booting. Let the bounded timer resend our cached reply;
+                // answering each duplicate would amplify that burst.
                 continue;
             }
             channel.readHandshake(frame) catch |err| {
@@ -79,7 +82,7 @@ pub fn run(graph: *const device_graph.Graph, local_mac: [6]u8, peer_mac: [6]u8, 
                 (channel.seal(&outgoing, confirmation) catch return false).len
             else
                 (channel.writeHandshake(&outgoing) catch return false).len;
-            if (!network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len])) return false;
+            _ = network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len]);
             continue;
         }
         if (!channel.established()) continue;
@@ -102,10 +105,9 @@ pub fn run(graph: *const device_graph.Graph, local_mac: [6]u8, peer_mac: [6]u8, 
         }
         if (!confirmed) {
             confirmed = true;
-            grace = clock.afterMilliseconds(200);
             if (initiator) outgoing_len = (channel.seal(&outgoing, confirmation) catch return false).len;
         }
-        if (!network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len])) return false;
+        _ = network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len]);
     }
     support.common.printBootMarker("ZIGOS:SYNC:PEER_CHANNEL:TIMEOUT");
     return false;

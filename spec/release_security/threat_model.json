@@ -71,10 +71,10 @@
       "id": "TM-007",
       "domain": "sync-trust",
       "abuse_case": "A remote node replays, duplicates, or redirects sync frames without a trusted platform root.",
-      "mitigation": "Device graph authorization, durable replay rejection and policy remain test backed. Noise XX channels certify fresh X25519 keys with graph-authenticated Ed25519 device identities rooted in an independent pin. Both QEMU guests decrypt remote traffic and reject tampering and replay. Directional keys, complete datagram-header authentication, a bounded replay bitmap, erasure and live trust rechecks protect the channel. Production identity custody, network-service admission and object authorization remain release blockers.",
-      "negative_tests": ["src/native/core/noise_xx.zig", "src/native/sync/peer_channel.zig", "src/native/sync/device_graph.zig", "src/native/sync/sync_service_test.zig", "scripts/run-sync-two-node-qemu.sh"],
+      "mitigation": "Device graph authorization, durable replay rejection and policy remain test backed. Noise XX channels certify fresh X25519 keys with graph-authenticated Ed25519 device identities rooted in an independent pin. Both QEMU guests decrypt remote traffic and reject tampering and replay. Directional keys, complete datagram-header authentication, a bounded replay bitmap, erasure and live trust rechecks protect the channel. The bounded object receiver independently checks locally bound capabilities, writable network shares and selective policy before staging, rejects stale version writes, erases revoked or expired transfers, and issues receipts only after durable checkpoints. The two-guest gate reloads a received object from the target disk before acknowledging it. Production identity custody, network-service admission, continuous convergence and typed secret/collection/event-stream protocols remain release blockers.",
+      "negative_tests": ["src/native/core/noise_xx.zig", "src/native/sync/peer_channel.zig", "src/native/sync/object_transfer_test.zig", "src/native/sync/device_graph.zig", "src/native/sync/sync_service_test.zig", "scripts/run-sync-two-node-qemu.sh"],
       "residual_risk_owner": "sync-owner",
-      "residual_risk_decision": "blocked-pending-production-peer-identity-and-object-admission"
+      "residual_risk_decision": "blocked-pending-production-peer-identity-and-service-admission"
     },
     {
       "id": "TM-008",

@@ -559,7 +559,7 @@ fn proveNativeDriverPacketCapture(
     if (@import("builtin").target.os.tag == .freestanding and
         @import("../drivers/device_inventory.zig").recordForClass(.network_adapter).source == .virtio_net_inventory)
     {
-        complete = @import("peer_channel_proof.zig").run(sync_service.deviceGraph(), local_mac, peer_mac, local_device_principal, tablet_device_principal);
+        complete = @import("peer_channel_proof.zig").run(context, sync_service, local_mac, peer_mac, local_device_principal, tablet_device_principal);
         return complete;
     }
     complete = true;

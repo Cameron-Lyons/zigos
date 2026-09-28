@@ -385,6 +385,7 @@ pub const sync_two_node_required = [_][]const u8{
     boot_markers.sync_peer_authenticated,
     boot_markers.sync_peer_ciphertext_rejected,
     boot_markers.sync_peer_replay_rejected,
+    boot_markers.sync_peer_object_durable,
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
     boot_markers.kernel_role_verification,
@@ -631,6 +632,7 @@ test "native smoke gate requires two-node sync transport proof markers" {
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_authenticated));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_ciphertext_rejected));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_replay_rejected));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_object_durable));
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:VIRTIO_NET:DMA_AND_MSIX_READY"));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_malformed_packet_rejected));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_reconnect_ok));
