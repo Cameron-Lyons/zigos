@@ -71,7 +71,7 @@
         "current_evidence": [
           "QEMU smoke paths include service startup, permission review, tampered artifacts, rollback-slot failure, recovery proof, storage durability, sync two-node, and driver restart gates.",
           "Recovery entry now rejects duplicate action lists and zero boot ticks, while break-glass recovery requires bounded single-line audit reasons before recording approval.",
-          "The release-security-preflight target aggregates native smoke tamper profiles, storage durability, driver restart, recovery, sync two-node, TPM transport/sealing/ownership, both UEFI QEMU paths, and unified-image firmware authentication/tamper rejection before candidate generation; the final verify-only release-security-gate seals the frozen candidate with the real RNUC15CRSU7 proof."
+          "The release-security-preflight target aggregates native smoke tamper profiles, storage durability, driver restart, recovery, sync two-node, TPM transport/sealing/ownership/quotes, both UEFI QEMU paths, and unified-image firmware authentication/tamper rejection before candidate generation; the final verify-only release-security-gate seals the frozen candidate with the real RNUC15CRSU7 proof."
         ],
         "open_gaps": [],
         "graduation_criteria": [
@@ -484,12 +484,16 @@
         "src/boot/tcg_event_log.zig",
         "src/boot/tpm_pcr.zig",
         "src/kernel/platform/tpm_boot.zig",
+        "src/native/platform/tpm2_quote.zig",
+        "src/native/platform/tpm2_sealing.zig",
+        "src/native/session/proofs/tpm2_quote_proof.zig",
         "scripts/run-unified-efi-qemu.sh",
         "scripts/prepare-unified-efi-test.py"
       ],
       "current_evidence": [
         "Native EFI images embed the exact stripped kernel ELF and command line. The loader rejects unsafe ELF layouts, reserves destination pages before copying, allocates the early heap through firmware, and carries SHA-256 payload measurements plus explicit firmware authentication status into the kernel. Runtime measurement snapshots and fixture-signed manifests establish consistency only; unsigned QEMU boots report unverified_boot and cannot produce remote attestations. The kernel loads at 32 MiB to avoid low firmware ACPI NVS/runtime allocations. The frame allocator reserves the exact kernel and separately allocated heap ranges while retaining free gaps. Firmware authentication requires enforcing Secure Boot state. The former serialized bootloader-provided provenance value is rejected rather than upgraded.",
         "TCG2 firmware extends SHA-256 PCR 11 with a versioned kernel/options/authentication descriptor, copies a bounded event-log prefix into reserved memory, and verifies its replay against a firmware TPM read. After CRB initialization the kernel independently replays the copied log and checks the live PCR before emitting BOOT_MEASUREMENT:VERIFIED. Missing protocols remain unmeasured; partial extensions, unsupported SHA-256 banks, truncated logs, malformed algorithm tables and changed PCR values fail rather than upgrading provenance. Host tests cover framing, multiple banks, earlier events, duplicate measurements, altered payloads and copied-log reservations. Disposable TPM cold/reboot and Secure Boot cases exercise the actual firmware and native PCR reads.",
+        "The TPM client creates restricted ECDSA P-256/SHA-256 attestation keys under its enrolled storage parent using encrypted salted HMAC sessions. Quote generation requires an independently pinned public identity; verification checks the exact PCR 11 selection, expected digest, qualified signer, nonce and ECDSA signature. Verifier-owned challenges use caller entropy and monotonic time, expire within one minute, reject clock rollback and cannot succeed twice. Cold/reboot QEMU runs recover wrapped keys, exceed transient resource capacity without leaks, and reject stale challenges, wrong authorization, altered enrollment, private-blob corruption and damaged session HMACs. TPM replacement rejects the independently authenticated parent pin. The enrollment authority in that proof remains a verification-only fixture excluded from production kernels.",
         "Remote attestation refuses both emulator-rooted and unverified measured state and requires a provisioned non-software root.",
         "A/B base selection, rollback, post-activation health markers, and selector-derived power-cycle rollback proof are covered by host logic, QEMU smoke evidence before native-ready, and required real-hardware proof markers.",
         "The native smoke target now includes negative QEMU runs that reject a tampered boot artifact manifest, direct bootloader-measurement digest mutation, direct kernel/userspace-image/policy/driver-set measurement tampering, and a rollback target whose slot measurement no longer verifies before the boot can reach native-ready.",
@@ -514,7 +518,7 @@
         "No local FIPS 204 ML-DSA implementation exists; the production path is the ml-dsa-65 external provider profile with FIPS validation metadata, and Ed25519 remains the only local signing profile until that provider is linked.",
         "Release artifact signing, measurement snapshot, and update rollback now have provider-bound smoke-level tamper rejection, selector-derived power-cycle rollback proof, and QEMU rollback markers, but they are not yet tied to a real TPM, secure-enclave, HSM, or KMS deployment or captured on real hardware.",
         "Production unified-image signing and firmware signer enrollment remain unprovisioned. Secure Boot state is local provenance, not a TPM PCR quote, release signer identity, or hardware anti-rollback policy; those bindings and physical-machine captures remain open. Public fixture manifest keys are not production release authorities.",
-        "PCR 11 replay and reads establish local measurement consistency only. The retained event log stops before ExitBootServices; complete final-event collection, TPM attestation-key enrollment, nonce-bound quote verification and PCR-bound secret policies remain open."
+        "PCR 11 replay and reads establish local measurement consistency only. Nonce-bound quotes now verify the pinned key and expected PCR value, but operational key enrollment, manufacturer/EK certification, release-policy approval of PCR values and integration with the remote attestation service remain open. The retained event log stops before ExitBootServices; complete final-event collection and PCR-bound secret policies remain open."
       ],
       "graduation_criteria": [
         "Introduce a hardware-root abstraction that supports TPM and secure enclave backed quote/sign operations without exposing root seed material.",
@@ -533,7 +537,8 @@
         "./scripts/zig.sh build spec-conformance",
         "./scripts/zig.sh build zigos-native-smoke-test",
         "./scripts/zig.sh build recovery-qemu-test",
-        "./scripts/zig.sh build unified-efi-qemu-test"
+        "./scripts/zig.sh build unified-efi-qemu-test",
+        "./scripts/zig.sh build tpm2-quote-qemu-test"
       ]
     },
     {
@@ -622,7 +627,7 @@
       ],
       "production_gaps": [
         "The repo can now emit the shipped production kernel's early NUC identity/ACPI evidence and the verification kernel's exhaustive subsystem PASS and concrete hardware fact markers only when the corresponding facts are present, but neither required real RNUC15CRSU7 boot log has been captured.",
-        "UEFI handoff still depends on the GRUB production and verification ISO paths, and neither has been proven on the selected NUC firmware.",
+        "Production and verification media now boot native unified EFI images with embedded kernel and options; neither has been proven on the selected NUC firmware.",
         "ACPI 2 RSDP, XSDT, MADT, MCFG, DMAR, APIC timer interrupt proof modeling, FADT discovery, and suspend/resume proof modeling are wired into post-paging mapped proof capture. NVMe second-stage translation, deny-all interrupt remapping, register or queued invalidation, primary fault-record decoding, and controlled blocked-write proof are programmed and proof-gated on the selected target, but a fresh archived real-machine capture is still pending. NUC APIC timer marker recording rejects modeled-only LAPIC timer proof without hardware register/interrupt evidence, and NUC suspend/resume marker recording rejects modeled-only ACPI suspend proof without hardware power-transition evidence, but no real DMAR/enforcement capture, LAPIC timer interrupt run, PCIe ECAM inventory, or suspend/resume cycle has been captured on the target hardware.",
         "The framebuffer descriptor validator is wired to Multiboot/GOP-style framebuffer handoff, native compositor presentation is proof-gated in the modeled framebuffer, and the kernel GOP marker now rejects modeled-only framebuffer samples without hardware GOP scanout evidence, but the native profile now maps the firmware framebuffer and renders compositor-owned surfaces through bounded damaged-cell updates, but real GOP ownership and rendering still need capture on HDMI/framebuffer output.",
         "Crash record formatting and recovered-record persistence proof are tested, and NUC crash marker recording now rejects modeled-only persistence without hardware reboot-persistence evidence, but real crash records are not yet written before reboot or consumed by a recovery boot on the target hardware.",

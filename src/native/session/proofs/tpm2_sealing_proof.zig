@@ -33,6 +33,7 @@ const Io = struct {
     last_failed_command: u32 = 0,
     last_tpm_error: u32 = 0,
     corrupt_unseal: bool = false,
+    corrupt_quote: bool = false,
     corrupt_nv_read: bool = false,
     corrupt_nv_write: bool = false,
     interrupt_nv_write: bool = false,
@@ -80,7 +81,8 @@ const Io = struct {
             if (std.mem.indexOf(u8, reply, key) != null) return error.PlaintextKey;
         }
         if (std.mem.indexOf(u8, reply, "ZGVAnch1") != null) return error.PlaintextAnchor;
-        if (((self.corrupt_persistence and code == 0x120) or
+        if (((self.corrupt_quote and code == 0x158) or
+            (self.corrupt_persistence and code == 0x120) or
             (self.corrupt_parent_public and code == 0x173 and std.mem.readInt(u16, reply[0..2], .big) == 0x8002) or
             (self.corrupt_lockout_change and std.mem.readInt(u32, command[6..10], .big) == 0x129) or
             (self.corrupt_unseal and std.mem.readInt(u32, command[6..10], .big) == 0x15e) or
@@ -100,6 +102,14 @@ pub fn run(manager: anytype) !void {
     try runTransportProof();
     var io = Io{};
     const handoff = @import("../../../kernel/boot/handoff.zig");
+    if (handoff.capturedInfo()) |info| if (handoff.commandLineHasFlag(info, "tpm_quote_proof")) {
+        @import("tpm2_quote_proof.zig").run(manager, &io) catch |err| {
+            var line: [128]u8 = undefined;
+            console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:QUOTE:FAIL {s} command={x} code={x}\n", .{ @errorName(err), io.last_failed_command, io.last_tpm_error }) catch "ZIGOS:TPM2:QUOTE:FAIL\n");
+            return err;
+        };
+        return;
+    };
     if (handoff.capturedInfo()) |info| if (handoff.commandLineHasFlag(info, "tpm_ownership_proof")) {
         @import("tpm2_ownership_proof.zig").run(manager, &io) catch |err| {
             var line: [128]u8 = undefined;

@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"
 MODE="${2:-transport}"
-case "$MODE" in transport|sealing|ownership) ;; *) echo "Unknown TPM test mode: $MODE" >&2; exit 2 ;; esac
+case "$MODE" in transport|sealing|ownership|quote) ;; *) echo "Unknown TPM test mode: $MODE" >&2; exit 2 ;; esac
 SWTPM_BIN="${SWTPM_BIN:-swtpm}"
 if ! command -v "$SWTPM_BIN" >/dev/null 2>&1; then
   echo "swtpm is required for TPM2 device validation; set SWTPM_BIN or install swtpm." >&2
@@ -21,6 +21,7 @@ BASE_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
 LOG_DIR="$ROOT_DIR/build/tpm2-qemu"
 if [ "$MODE" = sealing ]; then LOG_DIR="$ROOT_DIR/build/tpm2-sealing-qemu"; fi
 if [ "$MODE" = ownership ]; then LOG_DIR="$ROOT_DIR/build/tpm2-ownership-qemu"; fi
+if [ "$MODE" = quote ]; then LOG_DIR="$ROOT_DIR/build/tpm2-quote-qemu"; fi
 STORE_IMAGE="$LOG_DIR/native-store.img"
 mkdir -p "$TPM_WORK/state" "$LOG_DIR"
 
@@ -296,8 +297,32 @@ run_ownership_boot() {
   echo "TPM2 QEMU ownership $name: PASS"
 }
 
+run_quote_boot() {
+  local name="$1" marker="$2" log="$LOG_DIR/$1.log"
+  start_tpm "$name"
+  export QEMU_EXTRA_ARGS="$BASE_EXTRA_ARGS -chardev socket,id=zigos_tpm_socket,path=$TPM_WORK/control.sock -tpmdev emulator,id=zigos_tpm,chardev=zigos_tpm_socket -device tpm-crb,tpmdev=zigos_tpm"
+  qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" 'ZIGOS:NATIVE:READY' "${TPM2_QEMU_SECONDS:-90}"
+  stop_tpm
+  check_transport_proof "$log"
+  if [ "$(grep -c '^ZIGOS:TPM2:QUOTE:' "$log" || true)" -ne 1 ] ||
+    ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log"; then
+    cat "$log" >&2
+    echo "TPM2 quote proof failed for $name" >&2
+    return 1
+  fi
+  echo "TPM2 QEMU quote $name: PASS"
+}
+
 bash "$SCRIPT_DIR/build-native-store.sh" "$STORE_IMAGE" 8 reset
-if [ "$MODE" = ownership ]; then
+if [ "$MODE" = quote ]; then
+  run_quote_boot cold 'ZIGOS:TPM2:QUOTE:CREATED'
+  cp --sparse=always "$STORE_IMAGE" "$TPM_WORK/quote-store.img"
+  run_quote_boot reboot 'ZIGOS:TPM2:QUOTE:RECOVERED'
+  cp --sparse=always "$TPM_WORK/quote-store.img" "$STORE_IMAGE"
+  mv "$TPM_WORK/state" "$TPM_WORK/original-state"
+  mkdir "$TPM_WORK/state"
+  run_quote_boot replacement 'ZIGOS:TPM2:QUOTE:WRONG_DEVICE'
+elif [ "$MODE" = ownership ]; then
   # The build graph supplies a unified EFI image with the ownership selector.
   run_ownership_boot interrupted 'ZIGOS:TPM2:OWNER:INTERRUPTED'
   run_ownership_boot enrolled 'ZIGOS:TPM2:OWNER:ENROLLED'

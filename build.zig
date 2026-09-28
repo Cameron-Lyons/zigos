@@ -180,6 +180,11 @@ pub fn build(b: *std.Build) void {
     tpm2_ownership_step.dependOn(&tpm2_ownership_cmd.step);
     tpm2_ownership_step.dependOn(kernel_role_check_step);
 
+    const tpm2_quote_cmd = qemu_build.addTpm2QuoteQemuCommand(b, kernels.zigos_native_verification, userspace_images);
+    const tpm2_quote_step = b.step("tpm2-quote-qemu-test", "Verify pinned TPM attestation keys and nonce-bound PCR quotes across reboot and TPM replacement");
+    tpm2_quote_step.dependOn(&tpm2_quote_cmd.step);
+    tpm2_quote_step.dependOn(kernel_role_check_step);
+
     const zigos_native_smoke_test_cmd = qemu_build.addNativeSmokeCommand(
         b,
         kernels.zigos_native_verification,
@@ -455,6 +460,7 @@ pub fn build(b: *std.Build) void {
     release_security_preflight_step.dependOn(tpm2_qemu_step);
     release_security_preflight_step.dependOn(tpm2_sealing_step);
     release_security_preflight_step.dependOn(tpm2_ownership_step);
+    release_security_preflight_step.dependOn(tpm2_quote_step);
     release_security_preflight_step.dependOn(uefi_qemu_step);
     release_security_preflight_step.dependOn(unified_efi_step);
     release_security_preflight_step.dependOn(verification_uefi_qemu_step);

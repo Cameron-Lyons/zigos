@@ -100,6 +100,14 @@ jobs:
       command: ./scripts/zig.sh build -Doptimize=ReleaseFast x86_64-long-mode-entry-check x86_64-userspace-launch-check
       timeout-minutes: 30
 
+  tpm-quotes:
+    needs: zig-toolchain
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: TPM Quotes
+      command: TPM2_QEMU_SECONDS=180 ./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-quote-qemu-test
+      timeout-minutes: 20
+
   benchmark:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-summary-command.yml

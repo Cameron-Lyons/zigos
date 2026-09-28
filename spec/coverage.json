@@ -1233,6 +1233,22 @@
         {
           "file": "src/kernel/memory/firmware_memory_map.zig",
           "name": "copied TPM event log remains reserved and malformed extents fail before mutation"
+        },
+        {
+          "file": "src/native/platform/tpm2_quote.zig",
+          "name": "TPM quote rejects every truncated or altered byte and trailing data"
+        },
+        {
+          "file": "src/native/platform/tpm2_quote.zig",
+          "name": "TPM quote rejects correctly signed incompatible claims and weakened key templates"
+        },
+        {
+          "file": "src/native/platform/tpm2_quote.zig",
+          "name": "TPM quote challenge rejects replay expiry cancellation clock rollback and failed entropy"
+        },
+        {
+          "file": "src/native/platform/tpm2_sealing.zig",
+          "name": "TPM quote client validates pinned enrollment and clears failed outputs before hardware access"
         }
       ]
     },

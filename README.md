@@ -826,9 +826,25 @@ Malformed logs, missing SHA-256 support, partial extensions, and mismatches stop
 that measured boot. Absence of the firmware protocol permits an unmeasured boot;
 it cannot produce the `BOOT_MEASUREMENT:VERIFIED` checkpoint.
 This local consistency check uses the [TCG2 firmware protocol](https://trustedcomputinggroup.org/resource/tcg-efi-protocol-specification/).
-The snapshot precedes ExitBootServices and is not a complete final firmware log
-or a nonce-bound TPM quote. Attestation-key enrollment, quote verification, and
-PCR-bound secret policies remain open.
+The snapshot precedes ExitBootServices and is not a complete final firmware log.
+
+The TPM client can create a restricted ECDSA P-256 attestation key under an
+independently enrolled storage parent. Its private scalar stays inside the TPM;
+the stored blob is encrypted and bound to that parent. Creation protects the
+caller authorization through the existing salted, encrypted HMAC session.
+Quotes require the separately pinned public key and qualified Name, a fresh
+32-byte challenge, and an expected SHA-256 PCR 11 value. The verifier checks the
+exact selection, digest, attestation type, challenge, signature, and bounded
+framing. Verifier-owned challenges expire within one minute, reject clock
+rollback, and can succeed only once. Invalid quotes publish no accepted result;
+client failures clear output and clean up known transient keys and sessions.
+`./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-quote-qemu-test` exercises real
+TPM commands, cold boot, recovered keys, replay, wrong authorization, substituted
+keys, damaged blobs/responses, and TPM replacement using disposable swtpm state.
+Its enrollment authority is a verification-only fixture. Operational attestation
+key enrollment, manufacturer/EK certification, release-policy approval of PCR
+values, connection to remote attestation services, and PCR-bound secret policies
+remain open; a valid signature alone does not establish those trust decisions.
 
 `./scripts/zig.sh build unified-efi-qemu-test` checks firmware authorization of
 the complete EFI image, rejection of changes to either embedded payload, and
