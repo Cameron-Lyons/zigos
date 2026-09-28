@@ -144,6 +144,37 @@ test "sync port requires service-scoped authority before device graph mutation" 
     try std.testing.expectEqualStrings("owner", root.labelSlice());
 }
 
+test "sync port capability does not grant another users device root authority" {
+    const service_owner = principal.PrincipalId{ .kind = .service, .serial = 850 };
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 851 };
+    const other_owner = principal.PrincipalId{ .kind = .user, .serial = 852 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 853 };
+    const new_device = principal.PrincipalId{ .kind = .device, .serial = 854 };
+    const root_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0x85) };
+    const other_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0x86) };
+    const device_key = signing.SignerIdentity{ .label = "device", .seed = @splat(0x87) };
+    var resident = ResidentState{};
+    var service = Service.initWithResidentState(8500, 8501, service_owner, &resident);
+    var capabilities = capability.CapabilityTable.init();
+    const access = try mintSyncServiceAuthority(&capabilities, &service, service_owner);
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+    const authority = syncAuthority(&service, service_owner, access, 10);
+    _ = try port.ensureUserRoot(authority, owner, "owner", root_key);
+    _ = try port.ensureUserRoot(authority, other_owner, "other", other_key);
+    _ = try port.enrollTrustedDevice(authority, owner, device, "device", root_key, device_key, 1);
+    const before = resident.persisted_state.graph;
+    try std.testing.expectError(error.RootAuthorityMismatch, port.enrollTrustedDevice(authority, owner, new_device, "new", other_key, other_key, 2));
+    try std.testing.expectError(error.RootAuthorityMismatch, port.rotateDeviceKey(authority, owner, device, other_key, other_key, 2));
+    try std.testing.expectError(error.RootAuthorityMismatch, port.revokeTrustedDevice(authority, owner, device, other_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, port.enrollTrustedDevice(authority, other_owner, device, "device", other_key, device_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, port.rotateDeviceKey(authority, other_owner, device, other_key, other_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, port.revokeTrustedDevice(authority, other_owner, device, other_key, 2));
+    try std.testing.expectEqualDeep(before, resident.persisted_state.graph);
+    // The same capability and the actual owner's key still authorize rotation.
+    const rotated = try port.rotateDeviceKey(authority, owner, device, root_key, other_key, 3);
+    try std.testing.expectEqual(@as(u32, 2), rotated.key_rotation_generation);
+}
+
 test "sync service configuration errors preserve live policy and overlay records" {
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_250 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 8_251 };

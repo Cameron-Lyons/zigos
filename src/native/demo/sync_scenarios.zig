@@ -37,10 +37,7 @@ pub fn run(
     const local_device_principal = support.default_local_device_principal;
     const tablet_device_principal = support.default_tablet_device_principal;
     const phone_device_principal = principal.PrincipalId{ .kind = .device, .serial = 3 };
-    const user_root_signer = signing.SignerIdentity{
-        .label = "zigos-user-root",
-        .seed = signing.seedFromByte(0x91),
-    };
+    const user_root_signer = support.user_root_signer;
     const local_device_signer = signing.SignerIdentity{
         .label = "local-device",
         .seed = signing.seedFromByte(0x92),

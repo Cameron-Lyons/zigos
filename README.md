@@ -184,6 +184,16 @@ requests.
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
   two-node QEMU proof runs with separate native stores.
+  Device graph mutations verify the stored user-root signature, require the
+  matching root key, and check device ownership. A sync-service capability alone
+  cannot enroll, rotate, or revoke another user's devices. Enrollment retries
+  must match the current device key, label, and platform binding; key changes
+  use explicit rotation. Exhausted generations and rejected mutations leave the
+  graph unchanged. Production root enrollment and sealed graph-signing keys
+  remain open.
+  The two-node gate currently fails its driver packet-capture requirement:
+  its emulated e1000 adapter does not activate the current I225-LM driver path.
+  It needs a supported modern virtual NIC with receive/transmit evidence.
 - The driver model treats storage, network, USB controllers, GPU/display,
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA

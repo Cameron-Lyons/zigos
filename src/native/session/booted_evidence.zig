@@ -243,10 +243,7 @@ const notes_daily_policy_signer = signing.SignerIdentity{
     .label = "zigos-notes-daily-policy",
     .seed = signing.seedFromByte(0xd2),
 };
-const notes_daily_user_signer = signing.SignerIdentity{
-    .label = "zigos-notes-daily-user",
-    .seed = signing.seedFromByte(0xd3),
-};
+const notes_daily_user_signer = scenario_support.user_root_signer;
 const notes_daily_primary_device_signer = signing.SignerIdentity{
     .label = "zigos-notes-daily-primary",
     .seed = signing.seedFromByte(0xd4),

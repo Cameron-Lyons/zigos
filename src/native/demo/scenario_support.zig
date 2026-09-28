@@ -38,6 +38,12 @@ pub const diagnostic_ledger_signer = signing.SignerIdentity{
     .label = "zigos-diagnostic-ledger",
     .seed = signing.seedFromByte(0x84),
 };
+// Shared verification root for the session user. Journeys that reuse this
+// principal must preserve its enrolled key across scenarios and reboots.
+pub const user_root_signer = signing.SignerIdentity{
+    .label = "zigos-user-root",
+    .seed = signing.seedFromByte(0x91),
+};
 
 pub const Context = struct {
     capability_table: *capability.CapabilityTable,

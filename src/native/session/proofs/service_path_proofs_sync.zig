@@ -185,6 +185,13 @@ pub fn proveBootedSyncServicePath(
 
     _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, laptop, "laptop", user_signer, laptop_signer, 106);
+    const enrolled_laptop = sync_instance.findDeviceRecord(laptop).?.*;
+    // A live service capability does not authorize a different signing key to
+    // enroll peers, replace a trusted device key, or revoke the owner's device.
+    try std.testing.expectError(error.RootAuthorityMismatch, sync_port.enrollTrustedDevice(sync_authority, user, tablet, "tablet", laptop_signer, tablet_signer, 107));
+    try std.testing.expectError(error.RootAuthorityMismatch, sync_port.rotateDeviceKey(sync_authority, user, laptop, tablet_signer, tablet_signer, 107));
+    try std.testing.expectError(error.RootAuthorityMismatch, sync_port.revokeTrustedDevice(sync_authority, user, laptop, tablet_signer, 107));
+    try std.testing.expectEqualDeep(enrolled_laptop, sync_instance.findDeviceRecord(laptop).?.*);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, tablet, "tablet", user_signer, tablet_signer, 107);
     _ = try peer_port.ensureUserRoot(peer_authority, user, "owner", user_signer);
     _ = try peer_port.enrollTrustedDevice(peer_authority, user, laptop, "laptop", user_signer, laptop_signer, 112);

@@ -167,6 +167,9 @@ pub const Error = error{
     AlreadyRevoked,
     DeviceNotFound,
     DeviceTableFull,
+    DeviceOwnerMismatch,
+    DeviceEnrollmentMismatch,
+    DeviceGenerationExhausted,
     InvalidEnrollmentSignature,
     InvalidPrincipalKind,
     InvalidRootSignature,
@@ -177,6 +180,7 @@ pub const Error = error{
     PlatformKeyDowngradeDenied,
     PlatformRootDeviceMismatch,
     RootNotFound,
+    RootAuthorityMismatch,
     SoftwareDeviceKeyRejected,
     SyntheticPlatformRoot,
     UnverifiedPlatformRoot,
@@ -243,7 +247,7 @@ pub const Graph = struct {
         identity: signing.SignerIdentity,
     ) Error!*UserRootRecord {
         if (user_principal.kind != .user) return error.InvalidPrincipalKind;
-        if (self.findUserRoot(user_principal)) |existing| return existing;
+        if (self.findUserRoot(user_principal) != null) return self.requireRootAuthority(user_principal, identity);
         if (self.user_roots.countInUse() >= MAX_USER_ROOTS) return error.UserRootTableFull;
 
         var root = zeroUserRoot();
@@ -253,6 +257,7 @@ pub const Graph = struct {
         var message_buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = rootMessage(&message_buffer, user_principal, label) catch return error.InvalidRootSignature;
         root.root_signature = signing.sign(identity, message) catch return error.InvalidRootSignature;
+        if (!signing.verify(root.root_signature, message)) return error.InvalidRootSignature;
 
         const slot_index = self.installUserRootRecord(root) orelse return error.UserRootTableFull;
         return &self.user_roots.slots[slot_index].root;
@@ -294,10 +299,12 @@ pub const Graph = struct {
         tick: u64,
     ) Error!*DeviceRecord {
         if (user_principal.kind != .user or device_principal.kind != .device) return error.InvalidPrincipalKind;
-        _ = self.findUserRoot(user_principal) orelse return error.RootNotFound;
+        _ = try self.requireRootAuthority(user_principal, authorizer);
 
         if (self.findDevice(device_principal)) |existing| {
+            if (!existing.owner.eql(user_principal)) return error.DeviceOwnerMismatch;
             if (existing.status == .revoked) return error.AlreadyRevoked;
+            try requireSameEnrollment(existing, label, device_identity, platform_key);
             return existing;
         }
         if (self.devices.countInUse() >= MAX_DEVICES) return error.DeviceTableFull;
@@ -318,6 +325,7 @@ pub const Graph = struct {
             1,
         ) catch return error.InvalidDeviceSignature;
         device.device_signature = signing.sign(device_identity, device_message) catch return error.InvalidDeviceSignature;
+        if (!signing.verify(device.device_signature, device_message)) return error.InvalidDeviceSignature;
         if (platform_key) |binding_request| {
             applyPlatformKeyBinding(&device, try buildPlatformKeyBinding(device_principal, device_identity, device.device_signature, binding_request));
         }
@@ -333,6 +341,7 @@ pub const Graph = struct {
             device.device_signature.publicKeySlice(),
         ) catch return error.InvalidEnrollmentSignature;
         device.enrollment_signature = signing.sign(authorizer, enrollment_message) catch return error.InvalidEnrollmentSignature;
+        if (!signing.verify(device.enrollment_signature, enrollment_message)) return error.InvalidEnrollmentSignature;
 
         device.last_rotated_at_ticks = tick;
         const slot_index = self.installDeviceRecord(device) orelse return error.DeviceTableFull;
@@ -372,12 +381,13 @@ pub const Graph = struct {
         tick: u64,
     ) Error!*DeviceRecord {
         if (user_principal.kind != .user or device_principal.kind != .device) return error.InvalidPrincipalKind;
-        _ = self.findUserRoot(user_principal) orelse return error.RootNotFound;
+        _ = try self.requireRootAuthority(user_principal, authorizer);
         const record = self.findDevice(device_principal) orelse return error.DeviceNotFound;
+        if (!record.owner.eql(user_principal)) return error.DeviceOwnerMismatch;
         if (record.status == .revoked) return error.AlreadyRevoked;
         if (record.usesPlatformBackedKey() and platform_key == null) return error.PlatformKeyDowngradeDenied;
 
-        const next_generation = record.key_rotation_generation + 1;
+        const next_generation = std.math.add(u32, record.key_rotation_generation, 1) catch return error.DeviceGenerationExhausted;
         var device_message_buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const device_message = deviceMessage(
             &device_message_buffer,
@@ -387,6 +397,7 @@ pub const Graph = struct {
             next_generation,
         ) catch return error.InvalidDeviceSignature;
         const device_signature = signing.sign(next_device_identity, device_message) catch return error.InvalidDeviceSignature;
+        if (!signing.verify(device_signature, device_message)) return error.InvalidDeviceSignature;
         const next_platform_key = if (platform_key) |binding_request|
             try buildPlatformKeyBinding(device_principal, next_device_identity, device_signature, binding_request)
         else
@@ -402,6 +413,7 @@ pub const Graph = struct {
             device_signature.publicKeySlice(),
         ) catch return error.InvalidRotationSignature;
         const rotation_signature = signing.sign(authorizer, rotation_message) catch return error.InvalidRotationSignature;
+        if (!signing.verify(rotation_signature, rotation_message)) return error.InvalidRotationSignature;
 
         record.device_signature = device_signature;
         record.rotation_signature = rotation_signature;
@@ -423,9 +435,11 @@ pub const Graph = struct {
         tick: u64,
     ) Error!void {
         if (user_principal.kind != .user or device_principal.kind != .device) return error.InvalidPrincipalKind;
-        _ = self.findUserRoot(user_principal) orelse return error.RootNotFound;
+        _ = try self.requireRootAuthority(user_principal, authorizer);
         const record = self.findDevice(device_principal) orelse return error.DeviceNotFound;
+        if (!record.owner.eql(user_principal)) return error.DeviceOwnerMismatch;
         if (record.status == .revoked) return error.AlreadyRevoked;
+        const next_generation = std.math.add(u32, record.trust_generation, 1) catch return error.DeviceGenerationExhausted;
 
         var message_buffer: [REVOCATION_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = revocationMessage(
@@ -435,10 +449,12 @@ pub const Graph = struct {
             record.overlay_id,
             tick,
         ) catch return error.InvalidEnrollmentSignature;
-        record.revocation_signature = signing.sign(authorizer, message) catch return error.InvalidEnrollmentSignature;
+        const signature = signing.sign(authorizer, message) catch return error.InvalidEnrollmentSignature;
+        if (!signing.verify(signature, message)) return error.InvalidEnrollmentSignature;
 
+        record.revocation_signature = signature;
         record.status = .revoked;
-        record.trust_generation += 1;
+        record.trust_generation = next_generation;
         record.revoked_at_ticks = tick;
         if (self.trusted_device_count == 0) native_util.impossibleByInvariant("trusted device count covers trusted records");
         self.trusted_device_count -= 1;
@@ -448,6 +464,21 @@ pub const Graph = struct {
         const slot = self.user_roots.get(graphPrincipalKey(user_principal)) orelse return null;
         if (!slot.root.principal_id.eql(user_principal)) return null;
         return &slot.root;
+    }
+
+    // Service capabilities authorize access to this graph, not control over
+    // every enrolled user. Every mutation must also prove the user's root key.
+    fn requireRootAuthority(self: *Graph, user: principal.PrincipalId, authorizer: signing.SignerIdentity) Error!*UserRootRecord {
+        const root = self.findUserRoot(user) orelse return error.RootNotFound;
+        if (root.label_len > MAX_LABEL_BYTES or root.root_signature.format != .ed25519 or
+            root.root_signature.public_key_len != signing.PUBLIC_KEY_BYTES or
+            root.root_signature.value_len != signing.SIGNATURE_BYTES) return error.InvalidRootSignature;
+        var message_buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        const message = rootMessage(&message_buffer, user, root.labelSlice()) catch return error.InvalidRootSignature;
+        if (!signing.verify(root.root_signature, message)) return error.InvalidRootSignature;
+        const public_key = signing.publicKey(authorizer) catch return error.RootAuthorityMismatch;
+        if (!std.mem.eql(u8, &public_key, &root.root_signature.public_key)) return error.RootAuthorityMismatch;
+        return root;
     }
 
     pub fn findDevice(self: *Graph, device_principal: principal.PrincipalId) ?*DeviceRecord {
@@ -543,6 +574,27 @@ const ResolvedPlatformKeyBinding = struct {
     root_digest: crypto_hash.Digest,
 };
 
+// Enrollment retries may repeat the current binding. Key changes require the
+// rotation path so generations, signatures and platform custody stay coherent.
+fn requireSameEnrollment(record: *const DeviceRecord, label: []const u8, identity: signing.SignerIdentity, platform_key: ?PlatformKeyBindingRequest) Error!void {
+    if (record.label_len > MAX_LABEL_BYTES or !std.mem.eql(u8, record.labelSlice(), label)) return error.DeviceEnrollmentMismatch;
+    const key = signing.publicKey(identity) catch return error.InvalidDeviceSignature;
+    if (record.device_signature.format != .ed25519 or record.device_signature.public_key_len != signing.PUBLIC_KEY_BYTES or
+        !std.mem.eql(u8, &record.device_signature.public_key, &key)) return error.DeviceEnrollmentMismatch;
+    var message_buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
+    const message = deviceMessage(&message_buffer, record.principal_id, label, record.overlay_id, record.key_rotation_generation) catch return error.InvalidDeviceSignature;
+    if (record.device_signature.value_len != signing.SIGNATURE_BYTES or !signing.verify(record.device_signature, message)) return error.InvalidDeviceSignature;
+    if (record.usesPlatformBackedKey() and platform_key == null) return error.PlatformKeyDowngradeDenied;
+    if (platform_key) |request| {
+        const binding = try buildPlatformKeyBinding(record.principal_id, identity, record.device_signature, request);
+        if (!record.platform_key_bound or record.device_key_origin != binding.origin or
+            record.platform_key_label_len != binding.label_len or !std.mem.eql(u8, &record.platform_key_label, &binding.label) or
+            !std.mem.eql(u8, &record.platform_key_digest, &binding.digest) or
+            record.platform_root_generation != binding.root_generation or record.platform_root_provenance != binding.root_provenance or
+            !std.mem.eql(u8, &record.platform_root_digest, &binding.root_digest)) return error.DeviceEnrollmentMismatch;
+    }
+}
+
 fn buildPlatformKeyBinding(
     device_principal: principal.PrincipalId,
     device_identity: signing.SignerIdentity,
@@ -552,7 +604,8 @@ fn buildPlatformKeyBinding(
     if (!isPlatformBackedOrigin(request.root.origin)) return error.SoftwareDeviceKeyRejected;
     if (!request.root.device_principal.eql(device_principal)) return error.PlatformRootDeviceMismatch;
     if (request.root.root_provenance != .bootloader_provided) return error.SyntheticPlatformRoot;
-    if (std.mem.allEqual(u8, &request.root.root_digest, 0)) return error.UnverifiedPlatformRoot;
+    if (request.root.boot_generation == 0 or std.mem.allEqual(u8, &request.root.root_digest, 0)) return error.UnverifiedPlatformRoot;
+    if (request.root.label_len > MAX_LABEL_BYTES) return error.LabelTooLong;
     const public_key = signing.publicKey(device_identity) catch return error.InvalidPlatformKeyBinding;
     if (!std.mem.eql(u8, device_signature.publicKeySlice(), &public_key)) return error.InvalidPlatformKeyBinding;
     const sealed_digest = platformRootSealDigest(device_principal, &request.root, &public_key, device_signature.valueSlice());
@@ -716,6 +769,117 @@ fn deriveOverlayId(device_principal: principal.PrincipalId, label: []const u8) u
     return hash;
 }
 
+test "device graph rejects rotation signed by a different user root" {
+    var graph = Graph.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    const root_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0x21) };
+    const device_key = signing.SignerIdentity{ .label = "device", .seed = @splat(0x22) };
+    const attacker = signing.SignerIdentity{ .label = "root", .seed = @splat(0x23) };
+    _ = try graph.ensureUserRoot(owner, "owner", root_key);
+    _ = try graph.enrollDevice(owner, device, "device", root_key, device_key, 1);
+    const before = graph;
+    try std.testing.expectError(error.RootAuthorityMismatch, graph.rotateDeviceKey(owner, device, attacker, attacker, 2));
+    try std.testing.expectEqualDeep(before, graph);
+}
+
+const MutationFixture = if (@import("builtin").is_test) struct {
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    const other_owner = principal.PrincipalId{ .kind = .user, .serial = 3 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 2 };
+    const other_device = principal.PrincipalId{ .kind = .device, .serial = 4 };
+    const root_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0x21) };
+    const device_key = signing.SignerIdentity{ .label = "device", .seed = @splat(0x22) };
+    // A matching signer label conveys no root authority.
+    const other_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0x23) };
+
+    fn init() !Graph {
+        var graph = Graph.init();
+        _ = try graph.ensureUserRoot(owner, "owner", root_key);
+        _ = try graph.ensureUserRoot(other_owner, "other", other_key);
+        _ = try graph.enrollDevice(owner, device, "device", root_key, device_key, 1);
+        return graph;
+    }
+} else struct {};
+
+test "device graph requires root authority for enrollment retries and revocation" {
+    const f = MutationFixture;
+    var graph = try f.init();
+    const before = graph;
+    try std.testing.expectError(error.RootAuthorityMismatch, graph.ensureUserRoot(f.owner, "owner", f.other_key));
+    try std.testing.expectError(error.RootAuthorityMismatch, graph.enrollDevice(f.owner, f.other_device, "other", f.other_key, f.other_key, 2));
+    try std.testing.expectError(error.RootAuthorityMismatch, graph.enrollDevice(f.owner, f.device, "device", f.other_key, f.device_key, 2));
+    try std.testing.expectError(error.RootAuthorityMismatch, graph.revokeDevice(f.owner, f.device, f.other_key, 2));
+    try std.testing.expectEqualDeep(before, graph);
+    // Labels may change without changing authority; the cryptographic key is pinned.
+    var alias = f.root_key;
+    alias.label = "renamed signer";
+    _ = try graph.ensureUserRoot(f.owner, "owner", alias);
+    _ = try graph.enrollDevice(f.owner, f.device, "device", alias, f.device_key, 2);
+    try std.testing.expectEqualDeep(before, graph);
+    try graph.revokeDevice(f.owner, f.device, alias, 3);
+    try std.testing.expectEqual(@as(usize, 0), graph.trustedDeviceCount());
+}
+
+test "device graph denies cross owner enrollment rotation and revocation" {
+    const f = MutationFixture;
+    var graph = try f.init();
+    const before = graph;
+    try std.testing.expectError(error.DeviceOwnerMismatch, graph.enrollDevice(f.other_owner, f.device, "device", f.other_key, f.device_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, graph.rotateDeviceKey(f.other_owner, f.device, f.other_key, f.other_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, graph.revokeDevice(f.other_owner, f.device, f.other_key, 2));
+    try std.testing.expectEqualDeep(before, graph);
+}
+
+test "device graph rejects conflicting enrollment without replacing keys or labels" {
+    const f = MutationFixture;
+    var graph = try f.init();
+    const before = graph;
+    try std.testing.expectError(error.DeviceEnrollmentMismatch, graph.enrollDevice(f.owner, f.device, "device", f.root_key, f.other_key, 2));
+    try std.testing.expectError(error.DeviceEnrollmentMismatch, graph.enrollDevice(f.owner, f.device, "renamed", f.root_key, f.device_key, 2));
+    try std.testing.expectEqualDeep(before, graph);
+    _ = try graph.rotateDeviceKey(f.owner, f.device, f.root_key, f.other_key, 3);
+    const rotated = graph;
+    _ = try graph.enrollDevice(f.owner, f.device, "device", f.root_key, f.other_key, 4);
+    try std.testing.expectEqualDeep(rotated, graph);
+    graph.findDevice(f.device).?.device_signature.value[0] ^= 1;
+    const malformed = graph;
+    try std.testing.expectError(error.InvalidDeviceSignature, graph.enrollDevice(f.owner, f.device, "device", f.root_key, f.other_key, 4));
+    try std.testing.expectEqualDeep(malformed, graph);
+}
+
+test "device graph rejects exhausted generations before changing signed state" {
+    const f = MutationFixture;
+    var graph = try f.init();
+    const device = graph.findDevice(f.device).?;
+    device.key_rotation_generation = std.math.maxInt(u32);
+    device.trust_generation = std.math.maxInt(u32);
+    const before = graph;
+    try std.testing.expectError(error.DeviceGenerationExhausted, graph.rotateDeviceKey(f.owner, f.device, f.root_key, f.other_key, 2));
+    try std.testing.expectError(error.DeviceGenerationExhausted, graph.revokeDevice(f.owner, f.device, f.root_key, 2));
+    try std.testing.expectEqualDeep(before, graph);
+}
+
+test "device graph rejects malformed root metadata before trusting its authorizer" {
+    const f = MutationFixture;
+    for (0..4) |variant| {
+        var graph = try f.init();
+        const root = graph.findUserRoot(f.owner).?;
+        switch (variant) {
+            0 => root.root_signature.value[0] ^= 1,
+            1 => root.root_signature.public_key_len = 255,
+            2 => root.root_signature.value_len = 255,
+            else => root.label_len = 255,
+        }
+        const before = graph;
+        try std.testing.expectError(error.InvalidRootSignature, graph.ensureUserRoot(f.owner, "owner", f.root_key));
+        try std.testing.expectError(error.InvalidRootSignature, graph.enrollDevice(f.owner, f.other_device, "other", f.root_key, f.other_key, 2));
+        try std.testing.expectError(error.InvalidRootSignature, graph.rotateDeviceKey(f.owner, f.device, f.root_key, f.other_key, 2));
+        try std.testing.expectError(error.InvalidRootSignature, graph.revokeDevice(f.owner, f.device, f.root_key, 2));
+        try std.testing.expectEqualDeep(before, graph);
+    }
+}
+
 test "device graph roots user principals and manages enrollment rotation and revocation" {
     var graph = Graph.init();
     const user = principal.PrincipalId{ .kind = .user, .serial = 1 };
@@ -831,6 +995,19 @@ test "device graph binds platform-backed device keys and rejects synthetic downg
     try std.testing.expectEqual(@as(u64, 61), laptop_record.platform_root_generation);
     try std.testing.expectEqualSlices(u8, boot.root_digest[0..], laptop_record.platform_root_digest[0..]);
     const first_digest = laptop_record.platform_key_digest;
+
+    const enrolled = graph;
+    _ = try graph.enrollPlatformBackedDevice(user, laptop, "laptop", user_identity, laptop_identity, .{ .root = laptop_root }, 21);
+    try std.testing.expectError(error.PlatformKeyDowngradeDenied, graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 21));
+    const changed_root = try PlatformDeviceRoot.fromBootRecord(laptop, .secure_enclave, "laptop-bootloader-key", &rotated_boot);
+    try std.testing.expectError(error.DeviceEnrollmentMismatch, graph.enrollPlatformBackedDevice(user, laptop, "laptop", user_identity, laptop_identity, .{ .root = changed_root }, 21));
+    var malformed_root = laptop_root;
+    malformed_root.label_len = 255;
+    try std.testing.expectError(error.LabelTooLong, graph.enrollPlatformBackedDevice(user, laptop, "laptop", user_identity, laptop_identity, .{ .root = malformed_root }, 21));
+    malformed_root = laptop_root;
+    malformed_root.boot_generation = 0;
+    try std.testing.expectError(error.UnverifiedPlatformRoot, graph.rotatePlatformBackedDeviceKey(user, laptop, user_identity, rotated_laptop_identity, .{ .root = malformed_root }, 21));
+    try std.testing.expectEqualDeep(enrolled, graph);
 
     try std.testing.expectError(error.PlatformKeyDowngradeDenied, graph.rotateDeviceKey(user, laptop, user_identity, rotated_laptop_identity, 30));
     const rotated_root = try PlatformDeviceRoot.fromBootRecord(laptop, .tpm, "laptop-tpm-key", &rotated_boot);
