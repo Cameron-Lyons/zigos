@@ -12,7 +12,7 @@ const manifest = @import("../policy/manifest.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const input_router_mod = @import("../platform/input_router.zig");
-const trusted_pin = @import("../platform/trusted_pin_entry.zig");
+const trusted_auth = @import("../platform/trusted_auth_entry.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_util = @import("../core/util.zig");
@@ -500,7 +500,7 @@ pub const SessionManager = struct {
         self.input_router.bindHardwareSource(source);
     }
 
-    pub fn bindTrustedAuthentication(self: *SessionManager, entry: *trusted_pin.Entry, now_ticks: u64) void {
+    pub fn bindTrustedAuthentication(self: *SessionManager, entry: *trusted_auth.Entry, now_ticks: u64) void {
         self.input_router.bindTrustedEntry(entry, now_ticks);
         _ = desktop_display.present(self.compositorSessionPtr());
     }

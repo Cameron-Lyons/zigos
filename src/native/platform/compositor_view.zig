@@ -109,32 +109,41 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
     }
 }
 
-fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_pin_entry.zig").View) void {
+fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_auth_entry.zig").View) void {
     if (frame.rows < 10) return;
+    const recovering = authentication.method == .recovery;
     frame.fillRow(2, .selected);
-    frame.put(1, 2, "Unlock Zigos", .selected);
-    frame.put(0, 4, "Enter your device PIN", .body);
-    const mask = "********************************";
-    frame.put(0, 6, mask[0..@min(authentication.digits, mask.len)], .accent);
+    frame.put(1, 2, if (recovering) "Recover Zigos" else "Unlock Zigos", .selected);
+    frame.put(0, 4, if (recovering) "Enter your recovery key" else "Enter your device PIN", .body);
+    const mask = "*" ** @import("trusted_auth_entry.zig").MAX_ENTRY_BYTES;
+    frame.put(0, 6, mask[0..@min(authentication.characters, mask.len)], .accent);
     const message = switch (authentication.status) {
         .hidden, .entering => "",
-        .too_short => "Enter at least 6 digits.",
-        .too_long => "PIN is too long. Press Esc to start again.",
-        .pending, .verifying => "Unlocking...",
+        .too_short => if (recovering) "Enter all 56 recovery characters." else "Enter at least 6 digits.",
+        .too_long => "Entry is too long. Press Esc to start again.",
+        .invalid_code => "Check your recovery key for typing errors.",
+        .pending, .verifying => if (recovering) "Recovering..." else "Unlocking...",
         .cancelling => "Finishing cancelled attempt...",
-        .rejected => "PIN not recognized. Try again.",
-        .locked_out => "Too many attempts. Wait or use device recovery.",
+        .rejected => if (recovering) "Recovery key not recognized. Try again." else "PIN not recognized. Try again.",
+        .locked_out => if (authentication.recovery_available) "Too many attempts. Wait or press Ctrl+R for recovery." else "Too many attempts. Wait before trying again.",
         .unavailable => "Sign-in unavailable. Press Ctrl+Alt+Delete to retry.",
     };
     frame.put(0, 8, message, if (authentication.status == .pending or authentication.status == .verifying) .body else .warning);
-    frame.put(0, frame.rows - 1, "Enter  Unlock  |  Esc  Clear PIN", .muted);
+    frame.put(0, frame.rows - 1, if (authentication.status == .pending or authentication.status == .verifying or authentication.status == .cancelling)
+        "Esc  Cancel"
+    else if (recovering)
+        "Enter  Recover  |  Esc  Clear  |  Ctrl+R  PIN"
+    else if (authentication.recovery_available)
+        "Enter  Unlock  |  Esc  Clear  |  Ctrl+R  Recovery"
+    else
+        "Enter  Unlock  |  Esc  Clear PIN", .muted);
 }
 
 test "desktop view gives trusted authentication exclusive masked chrome" {
     const std = @import("std");
     var session = compositor.Session.init();
     defer session.deinit();
-    var authentication = @import("trusted_pin_entry.zig").View{ .status = .entering, .digits = 8 };
+    var authentication = @import("trusted_auth_entry.zig").View{ .status = .entering, .characters = 8 };
     session.authentication_view = &authentication;
     var frame = try scanout.Frame.init(60, 20);
     frame.put(0, 12, "Previous private document", .body);
@@ -147,6 +156,17 @@ test "desktop view gives trusted authentication exclusive masked chrome" {
     authentication.status = .verifying;
     render(&frame, &session, app);
     try expectText(&frame, 0, 8, "Unlocking...");
+    authentication.method = .recovery;
+    authentication.characters = 56;
+    render(&frame, &session, app);
+    try expectText(&frame, 1, 2, "Recover Zigos");
+    try expectText(&frame, 0, 6, "*" ** 56);
+    try expectText(&frame, 0, 8, "Recovering...");
+    authentication.status = .invalid_code;
+    authentication.characters = 0;
+    render(&frame, &session, app);
+    try expectText(&frame, 0, 8, "Check your recovery key for typing errors.");
+    for (frame.cells[6 * frame.columns ..][0..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
     authentication.status = .hidden;
     render(&frame, &session, app);
     try expectText(&frame, 0, 5, "No open tasks.");

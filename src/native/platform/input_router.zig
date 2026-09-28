@@ -6,7 +6,7 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const input_driver_task = @import("../drivers/input_driver_task.zig");
 const compositor_session = @import("compositor_session.zig");
-const trusted_pin = @import("trusted_pin_entry.zig");
+const trusted_auth = @import("trusted_auth_entry.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const root = @import("root");
 
@@ -131,7 +131,7 @@ pub const Router = struct {
     last_event_sequence: u64 = 0,
     routing_epoch: u64 = 1,
     reports_accepted: usize = 0,
-    trusted_entry: ?*trusted_pin.Entry = null,
+    trusted_entry: ?*trusted_auth.Entry = null,
     trusted_revision: u64 = 0,
     drain_until_neutral: bool = false,
     released_since_boundary: bool = false,
@@ -227,7 +227,7 @@ pub const Router = struct {
 
     // Native service binding only. Apps cannot request this through the input
     // ABI. Binding always locks the authenticator and discards old gestures.
-    pub fn bindTrustedEntry(self: *Router, entry: *trusted_pin.Entry, now_ticks: u64) void {
+    pub fn bindTrustedEntry(self: *Router, entry: *trusted_auth.Entry, now_ticks: u64) void {
         self.clearTrustedEntry();
         self.trusted_entry = entry;
         entry.lock(now_ticks);
@@ -315,7 +315,12 @@ pub const Router = struct {
                 }
                 if (!keyboard.saw_neutral) continue;
                 if (entry.capturing()) {
-                    for (decoded.slice()) |event| entry.handle(event, now_ticks);
+                    for (decoded.slice()) |event| {
+                        const revision = entry.revision;
+                        entry.handle(event, now_ticks);
+                        // A mode or authority change ends this report too.
+                        if (entry.revision != revision) break;
+                    }
                     events_routed += decoded.count;
                     self.synchronizeTrustedInput();
                     continue;
@@ -753,8 +758,8 @@ test "input router isolates trusted PIN entry and drains both routing boundaries
     defer compositor.deinit();
     var router = Router{};
     defer router.deinit();
-    var backend = @import("../../tests/fixtures/pin_authenticator.zig").Fixture{};
-    var entry = trusted_pin.Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 50 };
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
+    var entry = trusted_auth.Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 50 };
     router.bindCompositor(&compositor, 99);
     router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
     test_feed = .{};
@@ -772,7 +777,7 @@ test "input router isolates trusted PIN entry and drains both routing boundaries
     test_feed.reports[1] = makeTestReport(3, 1, 0, &.{});
     test_feed.count = 2;
     _ = router.service(3, 16);
-    try std.testing.expectEqual(@as(u8, 0), entry.view.digits);
+    try std.testing.expectEqual(@as(u8, 0), entry.view.characters);
     try std.testing.expect(!router.drain_until_neutral);
     var sequence: u64 = 3;
     for (backend.expected) |byte| {
@@ -795,8 +800,8 @@ test "input router isolates trusted PIN entry and drains both routing boundaries
     test_feed.reports[2] = makeTestReport(sequence, 1, 0, &.{ 0x28, 0x1e }); // Submit ignores trailing key.
     test_feed.count = 3;
     _ = router.service(5, 16);
-    try std.testing.expectEqual(trusted_pin.Status.pending, entry.view.status);
-    try std.testing.expectEqual(@as(u8, 8), entry.view.digits);
+    try std.testing.expectEqual(trusted_auth.Status.pending, entry.view.status);
+    try std.testing.expectEqual(@as(u8, 8), entry.view.characters);
     try std.testing.expect(entry.prepareVerification(5));
     entry.verify(5);
     try std.testing.expect(backend.active);
@@ -827,7 +832,7 @@ test "input router isolates trusted PIN entry and drains both routing boundaries
     _ = router.service(8, 16);
     try std.testing.expect(entry.capturing() and !backend.active);
     try std.testing.expect(router.pollForTask(99) == null);
-    try std.testing.expectEqual(@as(u8, 0), entry.view.digits);
+    try std.testing.expectEqual(@as(u8, 0), entry.view.characters);
     for (backend.expected) |byte| entry.handle(.{ .kind = .text, .data = byte }, 9);
     entry.handle(.{ .kind = .activate }, 9);
     try std.testing.expect(entry.prepareVerification(9));
@@ -855,14 +860,55 @@ test "input router isolates trusted PIN entry and drains both routing boundaries
     test_feed.reports[1] = makeTestReport(sequence, 0, 0, &.{0x1f}); // Broken transport identity.
     test_feed.count = 2;
     _ = router.service(13, 16);
-    try std.testing.expectEqual(trusted_pin.Status.unavailable, entry.view.status);
-    try std.testing.expect(std.mem.allEqual(u8, &entry.pin, 0));
+    try std.testing.expectEqual(trusted_auth.Status.unavailable, entry.view.status);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
     try std.testing.expect(router.pollForTask(99) == null);
     compositor.reset();
     try std.testing.expect(compositor.authentication_view == &entry.view);
     router.clearHardwareSource();
-    try std.testing.expectEqual(trusted_pin.Status.unavailable, entry.view.status);
-    try std.testing.expect(std.mem.allEqual(u8, &entry.pin, 0));
+    try std.testing.expectEqual(trusted_auth.Status.unavailable, entry.view.status);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
+}
+
+test "input router isolates recovery method boundaries and discards same-report trailing keys" {
+    var compositor = compositor_session.Session.init();
+    defer compositor.deinit();
+    var router = Router{};
+    defer router.deinit();
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{ .recovery_available = true };
+    var entry = trusted_auth.Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 50 };
+    router.bindCompositor(&compositor, 99);
+    router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+    router.bindTrustedEntry(&entry, 1);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(1, 1, 0, &.{});
+    test_feed.count = 1;
+    _ = router.service(1, 16);
+    const old_epoch = router.routing_epoch;
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(2, 1, 1, &.{ 0x15, 0x28 }); // Ctrl+R then Enter in one report.
+    test_feed.reports[1] = makeTestReport(3, 1, 0, &.{0x1e}); // Old queued input is discarded too.
+    test_feed.reports[2] = makeTestReport(4, 1, 0, &.{});
+    test_feed.count = 3;
+    _ = router.service(2, 16);
+    try std.testing.expect(entry.view.method == .recovery and entry.view.status == .entering);
+    try std.testing.expect(router.routing_epoch > old_epoch and !router.drain_until_neutral);
+    try std.testing.expect(entry.view.characters == 0 and router.queued_event_count == 0);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(5, 1, 0, &.{0x04}); // Lowercase a is normalized privately.
+    test_feed.reports[1] = makeTestReport(6, 1, 0, &.{});
+    test_feed.count = 2;
+    _ = router.service(3, 16);
+    try std.testing.expect(entry.view.characters == 1 and entry.value[0] == 'A');
+    try std.testing.expect(router.pollForTask(99) == null and router.pollWakeTarget() == null);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(7, 1, 1, &.{0x15});
+    test_feed.reports[1] = makeTestReport(8, 1, 0, &.{});
+    test_feed.count = 2;
+    _ = router.service(4, 16);
+    try std.testing.expect(entry.view.method == .pin and entry.view.characters == 0);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
+    try std.testing.expect(router.pollForTask(99) == null and router.pollWakeTarget() == null);
 }
 
 fn pollTestReport() ?xhci.HardwareBootKeyboardReport {

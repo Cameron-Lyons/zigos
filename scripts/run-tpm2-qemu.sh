@@ -267,7 +267,11 @@ run_ownership_boot() {
   if [ "$(grep -c '^ZIGOS:TPM2:OWNER:' "$log" || true)" -ne 1 ] ||
     ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log" ||
     [ "$(grep -c '^ZIGOS:TPM2:RECOVERY:' "$log" || true)" -ne "$recovery_count" ] ||
-    { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY:VERIFIED' "$log"; }; then
+    { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY:VERIFIED' "$log"; } ||
+    [ "$(grep -c '^ZIGOS:TPM2:RECOVERY_INPUT:' "$log" || true)" -ne "$recovery_count" ] ||
+    [ "$(grep -c '^ZIGOS:TPM2:RECOVERY_WORKER:' "$log" || true)" -ne "$recovery_count" ] ||
+    { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY_INPUT:VERIFIED' "$log"; } ||
+    { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY_WORKER:VERIFIED' "$log"; }; then
     cat "$log" >&2
     echo "TPM2 owner proof failed for $name" >&2
     return 1

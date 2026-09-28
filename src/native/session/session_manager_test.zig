@@ -32,8 +32,8 @@ fn noFocusedInputTestProof() ?xhci.InputProof {
 }
 
 test "session manager authentication deadlines wake and revoke without keyboard activity" {
-    var backend = @import("../../tests/fixtures/pin_authenticator.zig").Fixture{};
-    var entry = @import("../platform/trusted_pin_entry.zig").Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 20 };
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
+    var entry = @import("../platform/trusted_auth_entry.zig").Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 20 };
     const manager = try std.testing.allocator.create(session_manager.SessionManager);
     defer std.testing.allocator.destroy(manager);
     manager.* = .init();
@@ -43,7 +43,7 @@ test "session manager authentication deadlines wake and revoke without keyboard 
     entry.handle(.{ .kind = .text, .data = '7' }, 2);
     try std.testing.expectEqual(@as(?u64, 22), manager.nextServiceWake());
     manager.serviceAuthenticationClock(22);
-    try std.testing.expect(std.mem.allEqual(u8, &entry.pin, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
     try std.testing.expect(manager.nextServiceWake() == null);
     for (backend.expected) |byte| entry.handle(.{ .kind = .text, .data = byte }, 23);
     entry.handle(.{ .kind = .activate }, 24);

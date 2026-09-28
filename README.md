@@ -224,7 +224,7 @@ requests.
   invalidates its leases and replay domain. The session retains no recovery key
   or owner/lockout authorization. This restores access on the original TPM; it
   cannot recover keys after that TPM is cleared or lost. Enrollment-root binding,
-  first-user and recovery UI, and independent recovery-key export remain open.
+  first-user provisioning UI, and independent recovery-key export remain open.
   A bounded identity-session owner now connects PIN verification to authenticated
   NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
   nonce before activation. Lock synchronously invalidates both lease tables,
@@ -238,19 +238,26 @@ requests.
   stale proofs and handles, and durable counter recovery after locking with a
   lost NV-write response. Coordination adds at most 4 KiB, borrows existing stores,
   and reuses private credential leases for repeated assertions.
-  Native trusted PIN entry now intercepts hardware reports before task switching
+  Native trusted authentication entry now intercepts hardware reports before task switching
   or app inbox delivery. Entry and exit drain queued reports and wait for a fresh
   key release; each keyboard retains its own held-key suppression. Ctrl+Alt+Delete
   locks the attached identity session through this native path. The framebuffer
   renders a separate masked prompt above all app content, and compositor reset
-  preserves its live attachment without checkpointing it. PIN buffers are bounded
-  to 32 bytes and erased after submission, interruption, cancellation, or timeout.
+  preserves its live attachment without checkpointing it. Ctrl+R switches between
+  PIN and recovery when an authenticated recovery package is attached. Recovery
+  uses 56 base32 characters with a domain-separated 24-bit typo checksum;
+  lowercase and printed four-character groups are accepted at the input boundary.
+  The checksum detects typing errors; package authentication verifies the key.
+  Mode changes erase partial input, discard the rest of the current report and
+  queued reports, and require a fresh key release. PINs remain bounded to 32
+  digits; entry storage is bounded to 56 bytes and erased after submission,
+  interruption, cancellation, or timeout.
   Paste and application shortcuts cannot reach the prompt. Authentication and
-  PIN-entry deadlines participate in the desktop wake schedule, with expiry
+  secret-entry deadlines participate in the desktop wake schedule, with expiry
   checked before userspace dispatch. QEMU connects modeled HID reports through
   the normal router and framebuffer to the real TPM verifier, including rejected
   PINs, lock/reopen, and expiry. Trusted enrollment still must attach the session
-  owner at production boot. PIN verification now runs on a lazy 128 KiB guarded,
+  owner at production boot. PIN and recovery verification run on a lazy 128 KiB guarded,
   supervisor-only NX stack. The worker yields at TPM command boundaries and device
   waits so the native loop can service input, display and userspace tasks. The
   transport's bounded begin/poll/cancel engine releases its lock on every entry;
@@ -258,7 +265,7 @@ requests.
   cancellation finishes an active command so cleanup can identify created TPM
   handles, permits only handle flushes afterward, and prevents late activation.
   The prompt stays locked during cleanup. Actual time, current policy and the
-  pinned catalog are rechecked before success; the PIN copy and complete worker
+  pinned catalog are rechecked before success; private input and the complete worker
   stack are erased on completion. Ordinary lock and Escape do not wait for TPM
   cleanup. Exclusive teardown drains pending work before releasing borrowed
   stores; owners can cancel and service it before detaching. Host tests cover
@@ -266,7 +273,16 @@ requests.
   TPM proofs check userspace dispatch while suspended, input and scanout between
   polls, protected stack pages,
   cancellation before and after catalog restore, resource cleanup, reopen and
-  expiry. First-user provisioning and physical input validation remain open.
+  expiry. Recovery decodes into the same private 32-byte worker buffer; malformed
+  codes and unauthenticated packages issue no TPM commands. Ownership reboot
+  proofs exercise real TPM recovery through modeled HID input, masking, userspace
+  dispatch during device waits, cancellation, cleanup, reopen and expiry.
+  A new scheduler activation now receives its configured CPU budget even when
+  the previous interaction left partial credit. Duplicate wakes of a ready task
+  do not add credit, and explicit refills retain their exact amount. This prevents
+  a compositor from reading a new action and exhausting its leftover budget
+  before it can send the decision. First-user provisioning and physical input
+  validation remain open.
   Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog

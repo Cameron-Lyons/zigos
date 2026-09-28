@@ -116,7 +116,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     const boot = @import("../../../kernel/platform/secure_random.zig").bootInstanceId();
     var scratch: [catalog.MAX_BYTES]u8 = undefined;
     if (expected_rejection) |expected| {
-        try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, expected);
+        try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null, expected);
         try requireLocked(&session);
         return;
     }
@@ -197,7 +197,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     }
     try requireLocked(&session);
     try session.close();
-    try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null);
+    try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null, null);
     console.print("ZIGOS:TPM2:SESSION:VERIFIED\n");
 }
 
@@ -241,6 +241,19 @@ pub fn runRecovery(manager: anytype, io: anytype, record: *const @import("../../
     try requireLocked(&session);
     session.enrollment = record.enrollment;
     if (io.commands != commands or io.da_resets != resets) return error.UntrustedRecoveryReachedTpm;
+    const codec = @import("../../platform/recovery_key.zig");
+    var code: [codec.DISPLAY_BYTES]u8 = undefined;
+    defer std.crypto.secureZero(u8, &code);
+    try codec.format(recovery_key, &code);
+    code[0] = if (code[0] == '0') '1' else '0';
+    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, error.InvalidRecoveryCode);
+    try codec.format(&wrong_key, &code);
+    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, error.RecoveryAuthenticationFailed);
+    if (io.commands != commands or io.da_resets != resets) return error.UntrustedRecoveryInputReachedTpm;
+    try codec.format(recovery_key, &code);
+    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, null);
+    try session.close();
+    const successful_resets = io.da_resets;
     io.corrupt_nv_read = true;
     if (session.unlockRecovery(&record.capsule, &package.bytes, recovery_key, boot, 1, 100, &scratch)) |_| return error.AcceptedCorruptRecoveryAnchor else |err| {
         if (err != error.IntegrityFailure) return err;
@@ -255,7 +268,7 @@ pub fn runRecovery(manager: anytype, io: anytype, record: *const @import("../../
     try requireLocked(&session);
     try session.unlockRecovery(&record.capsule, &package.bytes, recovery_key, boot, 10, 100, &scratch);
     const proof = try session.issueUnlockProof("session.example", "recover", 11, 90);
-    if (proof.method != .recovery_key or proof.issued_at_ticks != 10 or io.da_resets != resets + 3) return error.InvalidRecoveryAuthority;
+    if (proof.method != .recovery_key or proof.issued_at_ticks != 10 or io.da_resets != successful_resets + 3) return error.InvalidRecoveryAuthority;
     const credential = identities.findCredentialConst(1) orelse return error.MissingSessionCredential;
     const public_key = credential.credential_public_key;
     const previous_count = credential.assertion_count;
@@ -317,16 +330,30 @@ const ProofClock = struct {
 };
 const timer = @import("../../../kernel/timer/timer.zig");
 
-fn typePin(manager: anytype, pin: []const u8, clock: ProofClock) !void {
+fn typeAuthentication(manager: anytype, value: []const u8, recovering: bool, clock: ProofClock) !void {
     const router = manager.inputRouterPtr();
     sendInput(manager, 0, 0, clock.now());
-    for (pin) |digit| {
-        sendInput(manager, if (digit == '0') 0x27 else digit - '1' + 0x1e, 0, clock.now());
+    if (recovering) {
+        sendInput(manager, 0x15, 1, clock.now()); // Ctrl+R selects recovery in the trusted prompt.
         sendInput(manager, 0, 0, clock.now());
-        if (router.queued_event_count != 0 or router.pollWakeTarget() != null) return error.LeakedPinInput;
     }
-    const frame = @import("../../../kernel/platform/framebuffer_hw.zig").frame() orelse return error.MissingPinFrame;
-    for (0..pin.len) |i| if (frame.cells[6 * frame.columns + i].character != '*') return error.UnmaskedPinInput;
+    var characters: usize = 0;
+    for (value) |byte| {
+        const usage: u8 = switch (byte) {
+            '0' => 0x27,
+            '1'...'9' => byte - '1' + 0x1e,
+            'A'...'Z' => byte - 'A' + 0x04, // Lowercase input exercises normalization.
+            '-' => 0x2d,
+            ' ' => 0x2c,
+            else => return error.InvalidProofInput,
+        };
+        sendInput(manager, usage, 0, clock.now());
+        sendInput(manager, 0, 0, clock.now());
+        if (byte != '-' and byte != ' ') characters += 1;
+        if (router.queued_event_count != 0 or router.pollWakeTarget() != null) return error.LeakedAuthenticationInput;
+    }
+    const frame = @import("../../../kernel/platform/framebuffer_hw.zig").frame() orelse return error.MissingAuthenticationFrame;
+    for (0..characters) |i| if (frame.cells[6 * frame.columns + i].character != '*') return error.UnmaskedAuthenticationInput;
     sendInput(manager, 0x28, 0, clock.now());
 }
 
@@ -334,16 +361,17 @@ fn serviceAttempt(manager: anytype, entry: anytype, clock: ProofClock) !void {
     if (clock.now() - clock.epoch > 3000) return error.AuthenticationWorkerTimeout;
     manager.serviceAuthenticationClock(clock.now());
     // Input and scanout keep working between TPM polls, without forwarding keys
-    // to apps or retaining the submitted PIN in the entry or public view.
+    // to apps or retaining the submitted secret in the entry or public view.
     sendInput(manager, 0, 0, clock.now());
-    if (!std.mem.allEqual(u8, &entry.pin, 0) or entry.view.digits != 0 or manager.inputRouterPtr().queued_event_count != 0) return error.RetainedSubmittedPin;
+    if (!std.mem.allEqual(u8, &entry.value, 0) or entry.view.characters != 0 or manager.inputRouterPtr().queued_event_count != 0) return error.RetainedSubmittedSecret;
     @import("../../../kernel/utils/spin.zig").hint();
 }
 
-fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod.Capsule, pin: []const u8, boot: [16]u8, scratch: *[catalog.MAX_BYTES]u8, rejection: ?anyerror) !void {
-    const entry_mod = @import("../../platform/trusted_pin_entry.zig");
-    const Adapter = @import("../../services/identity_pin_authenticator.zig").Adapter(@TypeOf(session.io.*));
-    var adapter = Adapter{ .session = session, .capsule = capsule, .boot_instance = boot, .lifetime_ticks = 1000, .scratch = scratch };
+fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod.Capsule, value: []const u8, boot: [16]u8, scratch: *[catalog.MAX_BYTES]u8, package: ?*const @import("../../services/identity_recovery.zig").Package, rejection: ?anyerror) !void {
+    const entry_mod = @import("../../platform/trusted_auth_entry.zig");
+    const Adapter = @import("../../services/identity_authenticator.zig").Adapter(@TypeOf(session.io.*));
+    const recovering = package != null;
+    var adapter = Adapter{ .session = session, .capsule = capsule, .recovery_package = package, .boot_instance = boot, .lifetime_ticks = 1000, .scratch = scratch };
     defer adapter.deinit() catch @panic("authentication proof released a live worker");
     var entry = entry_mod.Entry{ .authenticator = adapter.authenticator(), .input_timeout_ticks = 50 };
     const clock = ProofClock.init();
@@ -361,7 +389,14 @@ fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod
         if (previous_source) |source| router.bindHardwareSource(source) else router.clearHardwareSource();
         input_report = null;
     }
-    try typePin(manager, pin, clock);
+    try typeAuthentication(manager, value, recovering, clock);
+    if (rejection != null and (rejection.? == error.InvalidRecoveryCode or rejection.? == error.RecoveryAuthenticationFailed)) {
+        if (entry.busy() or entry.view.status != (if (rejection.? == error.InvalidRecoveryCode) entry_mod.Status.invalid_code else .rejected)) return error.BadTrustedRecoveryRejection;
+        try requireLocked(session);
+        if (!std.mem.allEqual(u8, &entry.value, 0) or !std.mem.allEqual(u8, &adapter.value, 0)) return error.RetainedAuthenticationSecrets;
+        if (adapter.stack) |stack| if (!std.mem.allEqual(u8, stack.bytes, 0)) return error.RetainedAuthenticationSecrets;
+        return;
+    }
     if (!entry.busy() or entry.view.status != .verifying) return error.AuthenticationDidNotYield;
     if (!session.io.interrupt_rejection_proved) return error.MissingInterruptRejection;
     if (!adapter.stack.?.guardsPresent()) return error.UnprotectedAuthenticationStack;
@@ -384,11 +419,12 @@ fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod
     if (entry.capturing() or !session.replay.active) return error.TrustedPinDidNotUnlock;
     const old_key = session.device_key;
     const proof = try session.issueUnlockProof("session.example", "trusted entry", clock.now(), session.expires_at_ticks);
+    if (proof.method != (if (recovering) identity.UnlockMethod.recovery_key else .device_pin)) return error.WrongTrustedAuthenticationMethod;
     if (proof.issued_at_ticks != adapter.started_at) return error.WrongTrustedPinTime;
     sendInput(manager, 0, 0, clock.now());
     sendInput(manager, 0x4c, 5, clock.now()); // Ctrl+Alt+Delete revokes locally.
     try requireLocked(session);
-    if (!entry.capturing()) return error.TrustedAttentionDidNotLock;
+    if (!entry.capturing() or entry.view.method != .pin) return error.TrustedAttentionDidNotLock;
     if (old_key.validate(clock.now())) |_| return error.RetainedTrustedInputKey else |err| {
         if (err != error.VaultHandleNotFound) return err;
     }
@@ -396,7 +432,7 @@ fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod
     // Both paths must unwind resource cleanup before allowing another attempt.
     try session.close();
     for (0..2) |stage| {
-        try typePin(manager, pin, clock);
+        try typeAuthentication(manager, value, recovering, clock);
         while (entry.busy() and (if (stage == 0) session.client.parent == 0 else session.state.vault.store.empty())) try serviceAttempt(manager, &entry, clock);
         if (!entry.busy() or session.replay.active) return error.MissedCancellationBoundary;
         sendInput(manager, 0x29, 0, clock.now()); // Escape cancels without blocking input.
@@ -405,7 +441,7 @@ fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod
         try requireLocked(session);
         if (session.client.parent != 0 or !std.mem.allEqual(u8, adapter.stack.?.bytes, 0) or !std.mem.allEqual(u8, &adapter.value, 0)) return error.RetainedCancelledWorker;
     }
-    try typePin(manager, pin, clock);
+    try typeAuthentication(manager, value, recovering, clock);
     while (entry.busy()) try serviceAttempt(manager, &entry, clock);
     if (entry.capturing() or !session.replay.active) return error.TrustedPinDidNotUnlock;
     const deadline = session.expires_at_ticks;
@@ -413,6 +449,11 @@ fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod
     manager.serviceAuthenticationClock(deadline);
     try requireLocked(session);
     if (!entry.capturing() or router.queued_event_count != 0) return error.MissedAuthenticationDeadline;
-    console.print("ZIGOS:TPM2:PIN_WORKER:VERIFIED\n");
-    console.print("ZIGOS:TPM2:PIN_INPUT:VERIFIED\n");
+    if (recovering) {
+        console.print("ZIGOS:TPM2:RECOVERY_WORKER:VERIFIED\n");
+        console.print("ZIGOS:TPM2:RECOVERY_INPUT:VERIFIED\n");
+    } else {
+        console.print("ZIGOS:TPM2:PIN_WORKER:VERIFIED\n");
+        console.print("ZIGOS:TPM2:PIN_INPUT:VERIFIED\n");
+    }
 }
