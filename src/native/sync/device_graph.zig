@@ -139,6 +139,63 @@ pub const EnrollmentProposal = struct {
     }
 };
 
+// Continuity from the current device key, plus possession of its successor.
+// The owner still approves the change with the independently pinned root key.
+pub const RotationProposal = struct {
+    owner: principal.PrincipalId,
+    device: principal.PrincipalId,
+    label_len: u8,
+    label: [MAX_LABEL_BYTES]u8,
+    overlay_id: u64,
+    previous_generation: u32,
+    root_pin: signing.PublicKey,
+    previous_key: signing.PublicKey,
+    device_signature: manifest.Signature,
+    consent_signature: manifest.Signature,
+
+    pub fn create(devices: *const Graph, device: principal.PrincipalId, pin: signing.PublicKey, current_key: sealed.Key, next_key: sealed.Key, now: u64) Error!RotationProposal {
+        const record = try devices.authenticatedDevice(device, pin);
+        if (record.usesPlatformBackedKey()) return error.PlatformKeyDowngradeDenied;
+        try requireSealedOwner(current_key, record.owner, now);
+        try requireSealedOwner(next_key, record.owner, now);
+        const current_public = try current_key.publicKey(now);
+        if (!std.mem.eql(u8, &current_public, &record.device_signature.public_key)) return error.InvalidRotationSignature;
+        const next_generation = std.math.add(u32, record.key_rotation_generation, 1) catch return error.DeviceGenerationExhausted;
+        var result = RotationProposal{ .owner = record.owner, .device = device, .label_len = record.label_len, .label = record.label, .overlay_id = record.overlay_id, .previous_generation = record.key_rotation_generation, .root_pin = pin, .previous_key = current_public, .device_signature = .{}, .consent_signature = .{} };
+        var buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        result.device_signature = try signIdentity(next_key, deviceMessage(&buffer, device, record.labelSlice(), record.overlay_id, next_generation) catch return error.InvalidDeviceSignature, now);
+        if (std.mem.eql(u8, &result.previous_key, &result.device_signature.public_key)) return error.DeviceEnrollmentMismatch;
+        result.consent_signature = try signIdentity(current_key, &result.consentDigest(), now);
+        return result;
+    }
+
+    pub fn validate(self: *const RotationProposal) Error!void {
+        if (self.owner.kind != .user or self.owner.serial == 0 or self.device.kind != .device or self.device.serial == 0) return error.InvalidPrincipalKind;
+        if (self.label_len > MAX_LABEL_BYTES or self.overlay_id == 0 or self.previous_generation == 0) return error.InvalidRotationSignature;
+        const next_generation = std.math.add(u32, self.previous_generation, 1) catch return error.DeviceGenerationExhausted;
+        if (std.mem.eql(u8, &self.previous_key, &self.device_signature.public_key)) return error.DeviceEnrollmentMismatch;
+        var buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        const message = deviceMessage(&buffer, self.device, self.label[0..self.label_len], self.overlay_id, next_generation) catch return error.InvalidDeviceSignature;
+        if (!verifyPinnedSignature(self.device_signature, message, self.device_signature.public_key) or
+            !verifyPinnedSignature(self.consent_signature, &self.consentDigest(), self.previous_key)) return error.InvalidRotationSignature;
+    }
+
+    fn consentDigest(self: *const RotationProposal) crypto_hash.Digest {
+        var hash = crypto_hash.init();
+        crypto_hash.updateBytes(&hash, "protocol", "zigos.device-key-rotation.v1");
+        crypto_hash.updateInt(&hash, "owner", self.owner.serial);
+        crypto_hash.updateInt(&hash, "device", self.device.serial);
+        crypto_hash.updateBytes(&hash, "root-pin", &self.root_pin);
+        crypto_hash.updateBytes(&hash, "label", self.label[0..self.label_len]);
+        crypto_hash.updateInt(&hash, "overlay", self.overlay_id);
+        crypto_hash.updateInt(&hash, "previous-generation", self.previous_generation);
+        crypto_hash.updateBytes(&hash, "previous-key", &self.previous_key);
+        crypto_hash.updateBytes(&hash, "next-key", &self.device_signature.public_key);
+        crypto_hash.updateBytes(&hash, "next-proof", &self.device_signature.value);
+        return crypto_hash.finalize(&hash);
+    }
+};
+
 pub const UserRootRecord = struct {
     principal_id: principal.PrincipalId,
     label_len: u8,
@@ -469,6 +526,36 @@ pub const Graph = struct {
         try requireSealedOwner(root_key, user, now_ticks);
         try requireSealedOwner(device_key, user, now_ticks);
         return self.rotateDeviceKeyInternal(user, device, root_key, device_key, null, now_ticks);
+    }
+
+    pub fn approveRotation(self: *Graph, proposal: *const RotationProposal, root_key: sealed.Key, now: u64) Error!bool {
+        try proposal.validate();
+        try requireSealedOwner(root_key, proposal.owner, now);
+        const root = try self.requireRootAuthority(proposal.owner, root_key, now);
+        if (!std.mem.eql(u8, &root.root_signature.public_key, &proposal.root_pin)) return error.RootAuthorityMismatch;
+        const current = try self.authenticatedDevice(proposal.device, proposal.root_pin);
+        if (!current.owner.eql(proposal.owner)) return error.DeviceOwnerMismatch;
+        if (current.usesPlatformBackedKey()) return error.PlatformKeyDowngradeDenied;
+        if (current.overlay_id != proposal.overlay_id or !std.mem.eql(u8, current.labelSlice(), proposal.label[0..proposal.label_len])) return error.DeviceEnrollmentMismatch;
+        const next_generation = proposal.previous_generation + 1; // validate rejects exhaustion.
+        // An authenticated successor already installed by this root requires
+        // no second mutation; older requests cannot advance it again.
+        if (current.key_rotation_generation == next_generation and
+            std.mem.eql(u8, &current.device_signature.public_key, &proposal.device_signature.public_key) and
+            std.mem.eql(u8, &current.device_signature.value, &proposal.device_signature.value)) return false;
+        if (current.key_rotation_generation != proposal.previous_generation or
+            !std.mem.eql(u8, &current.device_signature.public_key, &proposal.previous_key)) return error.InvalidRotationSignature;
+        var buffer: [ROTATION_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        const message = rotationMessage(&buffer, proposal.owner, proposal.device, proposal.overlay_id, next_generation, &proposal.device_signature.public_key) catch return error.InvalidRotationSignature;
+        const signature = try signIdentity(root_key, message, now);
+        const record = self.findDevice(proposal.device).?;
+        record.device_signature = proposal.device_signature;
+        record.device_signature.signer = "device-graph";
+        record.rotation_signature = signature;
+        clearPlatformKeyBinding(record);
+        record.key_rotation_generation = next_generation;
+        record.last_rotated_at_ticks = now;
+        return true;
     }
 
     fn rotateDeviceKeyInternal(

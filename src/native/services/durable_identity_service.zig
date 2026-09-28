@@ -99,6 +99,24 @@ pub const Service = struct {
         if (!existed or self.version_id == 0) _ = try self.flush(now, scratch);
     }
 
+    pub fn prepareDeviceRotation(self: *Service, owner: principal.PrincipalId, device: principal.PrincipalId, pin: signing.PublicKey, current_key: sealed.Key, next_key: sealed.Key, now: u64, scratch: *[catalog.MAX_BYTES]u8) !graph.RotationProposal {
+        try self.requireEnrollmentKey(owner, current_key, now);
+        try self.requireEnrollmentKey(owner, next_key, now);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        const proposal = try graph.RotationProposal.create(devices, device, pin, current_key, next_key, now);
+        // Keep both keys durable while the authority approves the public change.
+        // No request escapes if the replacement key checkpoint fails.
+        _ = try self.flush(now, scratch);
+        return proposal;
+    }
+
+    pub fn approveDeviceRotation(self: *Service, proposal: *const graph.RotationProposal, root_key: sealed.Key, now: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        try self.requireEnrollmentKey(proposal.owner, root_key, now);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        const changed = try devices.approveRotation(proposal, root_key, now);
+        if (changed or self.version_id == 0) _ = try self.flush(now, scratch);
+    }
+
     pub fn publishEnrollment(self: *const Service, owner: principal.PrincipalId, root_key: sealed.Key, now: u64, buffer: []u8) ![]const u8 {
         try self.requireEnrollmentKey(owner, root_key, now);
         if (self.version_id == 0) return error.IdentityCheckpointRequired;

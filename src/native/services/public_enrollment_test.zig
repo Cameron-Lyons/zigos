@@ -77,6 +77,18 @@ const Node = struct {
         n.service = .{ .state = n.service.state, .storage = &n.disk.service, .signer = .{ .key = try n.lease(1) }, .object_id = 1000, .version_id = n.disk.service.latestVersion(@as(u64, 1000)).?.id.raw() };
         n.local_key = try n.lease(2);
         n.root_key = if (is_issuer) try n.lease(3) else null;
+        if (n.devices.findDeviceConst(n.local)) |record| {
+            if (!std.mem.eql(u8, &record.device_signature.public_key, &(try n.local_key.publicKey(1)))) {
+                for (3..@as(usize, n.keys.service.store.secret_count) + 1) |id| {
+                    const key = try n.lease(id);
+                    if (std.mem.eql(u8, &record.device_signature.public_key, &(try key.publicKey(1)))) {
+                        n.local_key = key;
+                        return;
+                    }
+                }
+                return error.MissingLocalDeviceKey;
+            }
+        }
     }
 
     fn request(n: *Node, pin: signing.PublicKey) !graph.EnrollmentProposal {
@@ -108,6 +120,18 @@ const Node = struct {
     fn rotate(n: *Node, key: sealed.Key) !void {
         n.disk.activate();
         try n.service.rotateDeviceKey(owner, n.local, n.root_key.?, key, 4, &n.scratch);
+    }
+
+    fn prepareRotation(n: *Node, key: sealed.Key) !graph.RotationProposal {
+        n.disk.activate();
+        const proposal = try n.service.prepareDeviceRotation(owner, n.local, n.pin, n.local_key, key, 4, &n.scratch);
+        var wire: [enrollment.MAX_ROTATION_BYTES]u8 = undefined;
+        return enrollment.decodeRotation(try enrollment.encodeRotation(&proposal, &wire));
+    }
+
+    fn approveRotation(n: *Node, proposal: *const graph.RotationProposal) !void {
+        n.disk.activate();
+        try n.service.approveDeviceRotation(proposal, n.root_key.?, 4, &n.scratch);
     }
 
     fn revoke(n: *Node, device: principal.PrincipalId) !void {
@@ -346,5 +370,191 @@ test "public enrollment imports cross both crash barriers with local keys unchan
         try std.testing.expectEqual(@as(u8, 2), b.keys.service.store.secret_count);
         try std.testing.expectEqual(if (retry == 1) @as(usize, 2) else 0, b.devices.trustedDeviceCount());
         if (retry == 1) try connect(a, b);
+    };
+}
+
+test "public rotation retains separate key custody and authenticates after both nodes reopen" {
+    const a = try Node.init(10, alice, true);
+    defer a.deinit();
+    const b = try Node.init(50, bob, false);
+    defer b.deinit();
+    var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+    _ = try enroll(a, b, &publication);
+    const next = try b.generate("replacement");
+    const proposal = try b.prepareRotation(next);
+    try b.restore(); // The successor survives before the authority sees it.
+    try std.testing.expectEqual(@as(u32, 1), b.devices.findDeviceConst(bob).?.key_rotation_generation);
+    var source = try peer.Channel.init(try a.graphView(), a.pin, alice, bob, a.local_key, .initiator, 4);
+    defer source.close();
+    var target = try peer.Channel.init(try b.graphView(), b.pin, bob, alice, b.local_key, .responder, 4);
+    defer target.close();
+    var wire: [peer.MAX_FRAME]u8 = @splat(0xaa);
+    try target.readHandshake(try source.writeHandshake(&wire, 4), 4);
+    try source.readHandshake(try target.writeHandshake(&wire, 4), 4);
+    try target.readHandshake(try source.writeHandshake(&wire, 4), 4);
+    try a.approveRotation(&proposal);
+    try std.testing.expectError(error.TrustChanged, source.seal(&wire, "retired", 5));
+    try std.testing.expect(!source.established());
+    try std.testing.expect(std.mem.allEqual(u8, &wire, 0));
+    const versions = a.disk.service.versionCount();
+    try a.approveRotation(&proposal);
+    try std.testing.expectEqual(versions, a.disk.service.versionCount());
+    const bytes = try a.publish(&publication);
+    try std.testing.expectError(error.InvalidIdentityAuthority, b.accept(bytes));
+    b.local_key = try b.lease(3);
+    try b.accept(bytes);
+    try std.testing.expectError(error.TrustChanged, target.seal(&wire, "retired", 5));
+    try std.testing.expect(!target.established());
+    try std.testing.expect(std.mem.allEqual(u8, &wire, 0));
+    try connect(a, b);
+    try a.restore();
+    try b.restore();
+    try std.testing.expectEqual(@as(u8, 3), a.keys.service.store.secret_count);
+    try std.testing.expectEqual(@as(u8, 3), b.keys.service.store.secret_count);
+    try std.testing.expectEqual(@as(u32, 2), b.devices.findDeviceConst(bob).?.key_rotation_generation);
+    try std.testing.expectError(error.IdentityMismatch, peer.Channel.init(try b.graphView(), b.pin, bob, alice, try b.lease(2), .responder, 5));
+    try connect(a, b);
+}
+
+test "public rotation authenticates every request byte and its exact framing" {
+    const a = try Node.init(10, alice, true);
+    defer a.deinit();
+    const b = try Node.init(50, bob, false);
+    defer b.deinit();
+    var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+    _ = try enroll(a, b, &publication);
+    const proposal = try b.prepareRotation(try b.generate("replacement"));
+    var wire: [enrollment.MAX_ROTATION_BYTES]u8 = undefined;
+    const encoded = try enrollment.encodeRotation(&proposal, &wire);
+    var damaged: [enrollment.MAX_ROTATION_BYTES + 1]u8 = undefined;
+    for (0..encoded.len) |i| {
+        @memcpy(damaged[0..encoded.len], encoded);
+        damaged[i] ^= 1;
+        if (enrollment.decodeRotation(damaged[0..encoded.len])) |_| return error.AcceptedCorruptRotation else |_| {}
+        if (enrollment.decodeRotation(encoded[0..i])) |_| return error.AcceptedTruncatedRotation else |_| {}
+    }
+    @memcpy(damaged[0..encoded.len], encoded);
+    damaged[encoded.len] = 0;
+    try std.testing.expectError(error.InvalidEnrollment, enrollment.decodeRotation(damaged[0 .. encoded.len + 1]));
+    try std.testing.expectError(error.EnrollmentTooLarge, enrollment.encodeRotation(&proposal, wire[0 .. encoded.len - 1]));
+    try std.testing.expectError(error.InvalidEnrollment, enrollment.decodeProposal(encoded));
+    var redirected = proposal;
+    redirected.root_pin[0] ^= 1;
+    try std.testing.expectError(error.InvalidRotationSignature, a.approveRotation(&redirected));
+    redirected = proposal;
+    redirected.previous_generation = std.math.maxInt(u32);
+    try std.testing.expectError(error.DeviceGenerationExhausted, redirected.validate());
+    try std.testing.expectEqual(@as(u32, 1), a.devices.findDeviceConst(bob).?.key_rotation_generation);
+}
+
+test "public rotation rejects stale competing and revoked transitions" {
+    const a = try Node.init(10, alice, true);
+    defer a.deinit();
+    const b = try Node.init(50, bob, false);
+    defer b.deinit();
+    var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+    _ = try enroll(a, b, &publication);
+    const next = try b.generate("replacement");
+    const first = try b.prepareRotation(next);
+    const competing_key = try b.generate("competing");
+    const competing = try b.prepareRotation(competing_key);
+    try a.approveRotation(&first);
+    const versions = a.disk.service.versionCount();
+    try std.testing.expectError(error.InvalidRotationSignature, a.approveRotation(&competing));
+    try std.testing.expectEqual(versions, a.disk.service.versionCount());
+    b.local_key = next;
+    try b.accept(try a.publish(&publication));
+    const second = try b.prepareRotation(competing_key);
+    try a.approveRotation(&second);
+    try std.testing.expectError(error.InvalidRotationSignature, a.approveRotation(&first));
+    b.local_key = competing_key;
+    try b.accept(try a.publish(&publication));
+    const third = try b.prepareRotation(try b.generate("third"));
+    try a.revoke(bob);
+    try std.testing.expectError(error.AlreadyRevoked, a.approveRotation(&third));
+    try b.accept(try a.publish(&publication));
+    try std.testing.expectError(error.AlreadyRevoked, b.prepareRotation(next));
+    try b.restore();
+    try std.testing.expectError(error.AlreadyRevoked, b.devices.authenticatedDevice(bob, b.pin));
+}
+
+test "public rotation requires local current and replacement leases before checkpointing" {
+    const a = try Node.init(10, alice, true);
+    defer a.deinit();
+    const b = try Node.init(50, bob, false);
+    defer b.deinit();
+    var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+    _ = try enroll(a, b, &publication);
+    const versions = b.disk.service.versionCount();
+    try std.testing.expectError(error.InvalidIdentityAuthority, b.prepareRotation(a.local_key));
+    try std.testing.expectError(error.DeviceEnrollmentMismatch, b.prepareRotation(b.local_key));
+    const next = try b.generate("replacement");
+    const current = b.local_key;
+    b.local_key = next;
+    try std.testing.expectError(error.InvalidRotationSignature, b.prepareRotation(current));
+    b.local_key = current;
+    try std.testing.expectEqual(versions, b.disk.service.versionCount());
+    const proposal = try b.prepareRotation(next);
+    a.disk.activate();
+    try std.testing.expectError(error.RootAuthorityMismatch, a.service.approveDeviceRotation(&proposal, a.local_key, 4, &a.scratch));
+    a.devices.findDevice(bob).?.platform_key_bound = true;
+    a.devices.findDevice(bob).?.device_key_origin = .tpm;
+    try std.testing.expectError(error.PlatformKeyDowngradeDenied, a.approveRotation(&proposal));
+    b.devices.findDevice(bob).?.platform_key_bound = true;
+    b.devices.findDevice(bob).?.device_key_origin = .tpm;
+    try std.testing.expectError(error.PlatformKeyDowngradeDenied, b.prepareRotation(next));
+    b.devices.findDevice(bob).?.platform_key_bound = false;
+    b.devices.findDevice(bob).?.device_key_origin = .software;
+    try b.keys.service.revoke(.{ .subject = owner, .task_id = b.disk.service.task_id, .handle_id = next.handle_id, .secret_id = 3, .expected_holder = b.disk.service.owner, .expected_holder_task_id = b.disk.service.task_id, .now_ticks = 4 }, null);
+    try std.testing.expectError(error.HandleRevoked, b.prepareRotation(next));
+    try std.testing.expectEqual(@as(u32, 1), a.devices.findDeviceConst(bob).?.key_rotation_generation);
+}
+
+test "public rotation preserves recoverable keys through every prepare approve and import crash barrier" {
+    for (0..3) |phase| for (1..3) |barrier| for (0..2) |retry| {
+        const a = try Node.init(10, alice, true);
+        defer a.deinit();
+        const b = try Node.init(50, bob, false);
+        defer b.deinit();
+        var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
+        _ = try enroll(a, b, &publication);
+        var next = try b.generate("replacement");
+        const failing = if (phase == 1) a else b;
+        if (phase == 0) {
+            b.disk.fail_flush_from = b.disk.flushes + barrier;
+            try std.testing.expectError(error.DurabilityBarrierFailed, b.prepareRotation(next));
+        } else {
+            const proposal = try b.prepareRotation(next);
+            if (phase == 1) {
+                a.disk.fail_flush_from = a.disk.flushes + barrier;
+                try std.testing.expectError(error.DurabilityBarrierFailed, a.approveRotation(&proposal));
+                try std.testing.expectError(error.IdentityCheckpointPending, a.publish(&publication));
+            } else {
+                try a.approveRotation(&proposal);
+                const bytes = try a.publish(&publication);
+                b.disk.fail_flush_from = b.disk.flushes + barrier;
+                b.local_key = next;
+                try std.testing.expectError(error.DurabilityBarrierFailed, b.accept(bytes));
+            }
+        }
+        const versions = failing.disk.service.versionCount();
+        try std.testing.expectError(error.IdentityCheckpointPending, failing.graphView());
+        failing.disk.fail_flush_from = null;
+        if (retry == 1) {
+            try failing.flush();
+            try std.testing.expectEqual(versions, failing.disk.service.versionCount());
+        }
+        try a.restore();
+        try b.restore();
+        try std.testing.expectEqual(@as(u8, if (phase == 0 and retry == 0) 2 else 3), b.keys.service.store.secret_count);
+        try std.testing.expectEqual(@as(u32, if (phase == 2 and retry == 1) 2 else 1), b.devices.findDeviceConst(bob).?.key_rotation_generation);
+        if (phase == 0 and retry == 0) next = try b.generate("replacement") else next = try b.lease(3);
+        if (a.devices.findDeviceConst(bob).?.key_rotation_generation == 1) {
+            const proposal = try b.prepareRotation(next);
+            try a.approveRotation(&proposal);
+        }
+        b.local_key = next;
+        try b.accept(try a.publish(&publication));
+        try connect(a, b);
     };
 }

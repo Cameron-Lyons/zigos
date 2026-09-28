@@ -43,16 +43,18 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     // workload. Production must obtain the pin from trusted enrollment state.
     var expected_key: signing.PublicKey = undefined;
     var root_pin: signing.PublicKey = undefined;
+    var remote_catalog_pin: signing.PublicKey = undefined;
     var catalog_scratch: [catalog.MAX_BYTES]u8 = undefined;
     var secret: *const secrets.SecretRecord = undefined;
     if (restored) {
         const version = storage.latestVersion(found[0].object_id) orelse return error.MissingVaultProof;
         const bytes = try storage.versionPayload(version);
-        if (bytes.len != expected_key.len + root_pin.len or !version.metadata.verifyFor(.secret, bytes) or
+        if (bytes.len != expected_key.len + root_pin.len + remote_catalog_pin.len or !version.metadata.verifyFor(.secret, bytes) or
             !std.mem.eql(u8, version.metadata.signature.publicKeySlice(), &(try signing.publicKey(signer)))) return error.InvalidVaultProof;
         @memcpy(&expected_key, bytes[0..32]);
         @memcpy(&root_pin, bytes[32..64]);
-        const generation = catalog.restore(storage, .{ .vault = &service, .identities = &identities, .devices = &peer_graph }, .{ .object_id = catalog_object_id, .owner = owner, .public_key = expected_key, .minimum_generation = 5, .device_root_pin = root_pin }, &catalog_scratch) catch |err| {
+        @memcpy(&remote_catalog_pin, bytes[64..96]);
+        const generation = catalog.restore(storage, .{ .vault = &service, .identities = &identities, .devices = &peer_graph }, .{ .object_id = catalog_object_id, .owner = owner, .public_key = expected_key, .minimum_generation = 6, .device_root_pin = root_pin }, &catalog_scratch) catch |err| {
             if (err != error.InvalidSealedSecret) return err;
             if (service.store.secret_count != 0 or identities.credential_count != 0) return error.PublishedForeignSecret;
             service.attachHardwareProvider(.{});
@@ -60,7 +62,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             console.print("ZIGOS:TPM2:VAULT:WRONG_DEVICE\n");
             return;
         };
-        if (generation != 5 or identities.credential_count != 2 or service.store.secret_count != 4 or service.activeHandleCount() != 0 or
+        if (generation != 6 or identities.credential_count != 2 or service.store.secret_count != 4 or service.activeHandleCount() != 0 or
             service.store.handles.countInUse() != 0) return error.InvalidRestoredVault;
         secret = service.store.describeSecret(1) orelse return error.MissingVaultProof;
         const portable_lease = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = app, .task_id = 5, .secret_id = 4, .expires_at_ticks = 10, .now_ticks = 1, .allow_raw_export = true }, null);
@@ -102,14 +104,15 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     try unlock_session.begin(@import("../../../kernel/platform/secure_random.zig").bootInstanceId(), io);
     try proveIdentityAssertions(&durable_identities, &policies, secret.id, &expected_key, restored, &catalog_scratch, &unlock_session);
     try proveDocumentSigning(&service, &policies, secret.id, &expected_key);
-    try provePeerAuthentication(&durable_identities, adapter.provider(), &policies, secret.id, &expected_key, &root_pin, restored, &catalog_scratch);
+    try provePeerAuthentication(&durable_identities, adapter.provider(), &policies, secret.id, &expected_key, &root_pin, &remote_catalog_pin, restored, &catalog_scratch);
     if (!restored) {
         const previous = storage.checkpoint_enabled;
         storage.checkpoint_enabled = false;
         defer storage.checkpoint_enabled = previous;
-        var pins: [64]u8 = undefined;
+        var pins: [96]u8 = undefined;
         @memcpy(pins[0..32], &expected_key);
         @memcpy(pins[32..64], &root_pin);
+        @memcpy(pins[64..96], &remote_catalog_pin);
         _ = try storage.putLocallySignedVersion(.{ .object_type = .secret, .payload = &pins, .signer = signer, .label = label, .content_type = content_type, .created_at_ticks = 1 });
     }
     var out: secrets.Value = @splat(0xaa);
@@ -209,7 +212,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     }
     if (!restored) {
         const receipt = try durable_identities.flush(7, &catalog_scratch);
-        if (receipt.catalog_generation != 5 or receipt.checkpoint_generation == 0) return error.InvalidVaultCheckpoint;
+        if (receipt.catalog_generation != 6 or receipt.checkpoint_generation == 0) return error.InvalidVaultCheckpoint;
         console.print("ZIGOS:TPM2:CATALOG:COMMITTED\n");
     }
     service.attachHardwareProvider(.{});
@@ -242,7 +245,7 @@ fn proveDocumentSigning(service: *vault.Service, policies: *const policy.Directo
 // All peer signing keys are generated and restored through the real TPM
 // provider. The separate enrollment-proof object pins their public roots only
 // for this verification workload; production pin provisioning remains external.
-fn provePeerAuthentication(durable: *durable_identity.Service, hardware: secrets.HardwareSealProvider, policies: *const policy.Directory, secret_id: u64, expected_key: *const signing.PublicKey, root_pin: *signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8) !void {
+fn provePeerAuthentication(durable: *durable_identity.Service, hardware: secrets.HardwareSealProvider, policies: *const policy.Directory, secret_id: u64, expected_key: *const signing.PublicKey, root_pin: *signing.PublicKey, remote_catalog_pin: *signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8) !void {
     const sealed = @import("../../services/sealed_signing_key.zig");
     const peer = @import("../../sync/peer_channel.zig");
     const enrollment = @import("../../sync/device_enrollment.zig");
@@ -267,7 +270,7 @@ fn provePeerAuthentication(durable: *durable_identity.Service, hardware: secrets
         try durable.ensureUserRoot(owner, "peer owner", keys[0], 3, scratch);
         try durable.enrollDevice(owner, local, "local", keys[0], keys[1], 3, scratch);
     }
-    // The remote vault owns only its own private key. Both vaults use the real
+    // The remote vault owns its current and replacement private keys. Both vaults use the real
     // TPM in this guest, but have separate catalogs and public graph copies.
     const remote_catalog_id: u64 = 0x7010002;
     var remote_vault = vault.Service.init();
@@ -277,28 +280,55 @@ fn provePeerAuthentication(durable: *durable_identity.Service, hardware: secrets
     var remote_graph = device_graph.Graph.init();
     const remote_state = catalog.State{ .vault = &remote_vault, .identities = &remote_identities, .devices = &remote_graph };
     if (restored) {
-        const record = try (try durable.deviceGraph(3)).authenticatedDevice(remote, root_pin.*);
-        const generation = try catalog.restore(durable.storage, remote_state, .{ .object_id = remote_catalog_id, .owner = owner, .public_key = record.device_signature.public_key, .minimum_generation = 1, .device_root_pin = root_pin.* }, scratch);
-        if (generation != 1 or remote_vault.activeHandleCount() != 0 or remote_vault.store.handles.countInUse() != 0) return error.InvalidRemoteVault;
+        const generation = try catalog.restore(durable.storage, remote_state, .{ .object_id = remote_catalog_id, .owner = owner, .public_key = remote_catalog_pin.*, .minimum_generation = 3, .device_root_pin = root_pin.* }, scratch);
+        if (generation != 3 or remote_vault.activeHandleCount() != 0 or remote_vault.store.handles.countInUse() != 0) return error.InvalidRemoteVault;
     } else {
         const other = try remote_vault.generateSigningKey(policies, subjects, .{ .owner = owner, .task_id = 8, .label = "peer remote", .now_ticks = 3 }, null);
         if (other.id != 1) return error.InvalidPeerKeyIds;
     }
-    if (remote_vault.store.secret_count != 1 or service.store.secret_count != @as(u8, if (restored) 4 else 2)) return error.SharedPeerPrivateKeys;
+    if (remote_vault.store.secret_count != @as(u8, if (restored) 2 else 1) or service.store.secret_count != @as(u8, if (restored) 4 else 2)) return error.SharedPeerPrivateKeys;
     var remote_authority = sealed.Authority{ .service = &remote_vault, .policies = policies, .subjects = subjects, .owner = owner, .holder = holder, .task_id = 8 };
     const remote_handle = try remote_vault.lendHandle(policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 8, .secret_id = 1, .expires_at_ticks = 10, .now_ticks = 3 }, null);
-    const remote_key = try sealed.Key.bind(&remote_authority, remote_handle.id, 3);
+    const previous_key = try sealed.Key.bind(&remote_authority, remote_handle.id, 3);
+    var remote_key = previous_key;
+    if (!restored) remote_catalog_pin.* = try previous_key.publicKey(3);
     const remote_catalog_handle = try remote_vault.lendHandle(policies, subjects, .{ .owner = owner, .holder = durable.storage.owner, .task_id = durable.storage.task_id, .secret_id = 1, .expires_at_ticks = 10, .now_ticks = 3 }, null);
     var remote_catalog_authority = object_signer.Authority{ .service = &remote_vault, .policies = policies, .subjects = subjects, .owner = owner, .holder = durable.storage.owner, .task_id = durable.storage.task_id };
     const remote_signer = try object_signer.Signer.bind(&remote_catalog_authority, remote_catalog_handle.id, 3);
     var remote_durable = durable_identity.Service{ .state = remote_state, .storage = durable.storage, .signer = remote_signer, .object_id = remote_catalog_id, .version_id = if (restored) durable.storage.latestVersion(remote_catalog_id).?.id.raw() else 0 };
-    var proposal_wire: [enrollment.MAX_PROPOSAL_BYTES]u8 = undefined;
-    const proposal = try device_graph.EnrollmentProposal.create(owner, remote, "remote", root_pin.*, remote_key, 3);
-    const received = try enrollment.decodeProposal(try enrollment.encodeProposal(&proposal, &proposal_wire));
-    try durable.approveEnrollment(&received, keys[0], 3, scratch);
     var publication: [enrollment.MAX_PUBLICATION_BYTES]u8 = undefined;
-    try remote_durable.acceptEnrollment(owner, remote, remote_key, root_pin.*, try durable.publishEnrollment(owner, keys[0], 3, &publication), 3, scratch);
-    if (durable.storage.latestVersion(remote_catalog_id).?.parentCount() != 0) return error.DuplicateRemoteEnrollment;
+    if (!restored) {
+        var proposal_wire: [enrollment.MAX_PROPOSAL_BYTES]u8 = undefined;
+        const proposal = try device_graph.EnrollmentProposal.create(owner, remote, "remote", root_pin.*, remote_key, 3);
+        const received = try enrollment.decodeProposal(try enrollment.encodeProposal(&proposal, &proposal_wire));
+        try durable.approveEnrollment(&received, keys[0], 3, scratch);
+        try remote_durable.acceptEnrollment(owner, remote, remote_key, root_pin.*, try durable.publishEnrollment(owner, keys[0], 3, &publication), 3, scratch);
+        const replacement = try remote_vault.generateSigningKey(policies, subjects, .{ .owner = owner, .task_id = 8, .label = "peer replacement", .now_ticks = 3 }, null);
+        if (replacement.id != 2) return error.InvalidPeerKeyIds;
+    }
+    const replacement_handle = try remote_vault.lendHandle(policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 8, .secret_id = 2, .expires_at_ticks = 10, .now_ticks = 3 }, null);
+    remote_key = try sealed.Key.bind(&remote_authority, replacement_handle.id, 3);
+    if (!restored) {
+        const rotation = try remote_durable.prepareDeviceRotation(owner, remote, root_pin.*, previous_key, remote_key, 3, scratch);
+        var rotation_wire: [enrollment.MAX_ROTATION_BYTES]u8 = undefined;
+        const received = try enrollment.decodeRotation(try enrollment.encodeRotation(&rotation, &rotation_wire));
+        try durable.approveDeviceRotation(&received, keys[0], 3, scratch);
+        const approved_version = durable.version_id;
+        try durable.approveDeviceRotation(&received, keys[0], 3, scratch);
+        if (durable.version_id != approved_version) return error.DuplicateRotationApproval;
+    }
+    const bytes = try durable.publishEnrollment(owner, keys[0], 3, &publication);
+    try remote_durable.acceptEnrollment(owner, remote, remote_key, root_pin.*, bytes, 3, scratch);
+    const imported_version = remote_durable.version_id;
+    try remote_durable.acceptEnrollment(owner, remote, remote_key, root_pin.*, bytes, 3, scratch);
+    if (remote_durable.version_id != imported_version or remote_vault.store.secret_count != 2) return error.DuplicateRemoteEnrollment;
+    const remote_record = try remote_graph.authenticatedDevice(remote, root_pin.*);
+    if (remote_record.key_rotation_generation != 2 or !std.mem.eql(u8, &remote_record.device_signature.public_key, &(try remote_key.publicKey(3)))) return error.WrongPeerSigningKey;
+    if (peer.Channel.init(&remote_graph, root_pin.*, remote, local, previous_key, .responder, 3)) |old| {
+        var retired = old;
+        retired.close();
+        return error.AcceptedRetiredPeerKey;
+    } else |err| if (err != error.IdentityMismatch) return err;
     const graph = try durable.deviceGraph(3);
     const enrolled = try graph.authenticatedDevice(local, root_pin.*);
     if (!std.mem.eql(u8, enrolled.device_signature.publicKeySlice(), expected_key)) return error.WrongPeerSigningKey;
@@ -321,6 +351,7 @@ fn provePeerAuthentication(durable: *durable_identity.Service, hardware: secrets
     console.print("ZIGOS:TPM2:PEER:AUTHENTICATED\n");
     console.print(if (restored) "ZIGOS:TPM2:ENROLLMENT:RESTORED\n" else "ZIGOS:TPM2:ENROLLMENT:COMMITTED\n");
     console.print(if (restored) "ZIGOS:TPM2:PUBLIC_ENROLLMENT:RESTORED\n" else "ZIGOS:TPM2:PUBLIC_ENROLLMENT:COMMITTED\n");
+    console.print(if (restored) "ZIGOS:TPM2:PUBLIC_ROTATION:RESTORED\n" else "ZIGOS:TPM2:PUBLIC_ROTATION:COMMITTED\n");
 }
 
 // The graph and unlock proof are explicit verification fixtures. Credential

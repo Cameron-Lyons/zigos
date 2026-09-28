@@ -12,6 +12,7 @@ const sealed = @import("../services/sealed_signing_key.zig");
 const manifest = @import("../policy/manifest.zig");
 
 pub const MAX_PROPOSAL_BYTES = 5 + 16 + 1 + graph.MAX_LABEL_BYTES + 8 + 32 + 32 + 64 + 64;
+pub const MAX_ROTATION_BYTES = MAX_PROPOSAL_BYTES + 4 + 32;
 pub const MAX_PUBLICATION_BYTES = 5 + 8 + 2 + snapshot.MAX_BYTES + 64;
 pub const Error = snapshot.Error || error{ InvalidEnrollment, EnrollmentTooLarge, EnrollmentRollback };
 const Writer = cursor.Writer(Error, error.EnrollmentTooLarge);
@@ -20,6 +21,8 @@ const Reader = cursor.Reader(Error, error.InvalidEnrollment);
 comptime {
     if (MAX_PROPOSAL_BYTES > 270 or MAX_PUBLICATION_BYTES > 5043 or @sizeOf(graph.EnrollmentProposal) > 384)
         @compileError("public enrollment exceeds its bounded exchange state");
+    if (MAX_ROTATION_BYTES > 306 or @sizeOf(graph.RotationProposal) > 416)
+        @compileError("public rotation exceeds its bounded exchange state");
 }
 
 pub fn encodeProposal(proposal: *const graph.EnrollmentProposal, buffer: []u8) Error![]const u8 {
@@ -59,6 +62,55 @@ pub fn decodeProposal(bytes: []const u8) Error!graph.EnrollmentProposal {
     try reader.readBytes(&proposal.device_signature.public_key);
     try reader.readBytes(&proposal.device_signature.value);
     proposal.consent_signature.public_key = proposal.device_signature.public_key;
+    try reader.readBytes(&proposal.consent_signature.value);
+    if (!reader.eof()) return error.InvalidEnrollment;
+    try proposal.validate();
+    return proposal;
+}
+
+pub fn encodeRotation(proposal: *const graph.RotationProposal, buffer: []u8) Error![]const u8 {
+    try proposal.validate();
+    var writer = Writer{ .buffer = buffer };
+    try writer.writeBytes("ZGKR1");
+    try writer.writeU64(proposal.owner.serial);
+    try writer.writeU64(proposal.device.serial);
+    try writer.writeByte(proposal.label_len);
+    try writer.writeBytes(proposal.label[0..proposal.label_len]);
+    try writer.writeU64(proposal.overlay_id);
+    try writer.writeU32(proposal.previous_generation);
+    try writer.writeBytes(&proposal.root_pin);
+    try writer.writeBytes(&proposal.previous_key);
+    try writer.writeBytes(&proposal.device_signature.public_key);
+    try writer.writeBytes(&proposal.device_signature.value);
+    try writer.writeBytes(&proposal.consent_signature.value);
+    return buffer[0..writer.offset];
+}
+
+pub fn decodeRotation(bytes: []const u8) Error!graph.RotationProposal {
+    if (bytes.len > MAX_ROTATION_BYTES) return error.InvalidEnrollment;
+    var reader = Reader{ .buffer = bytes };
+    if (!std.mem.eql(u8, try reader.readSlice(5), "ZGKR1")) return error.InvalidEnrollment;
+    var proposal = graph.RotationProposal{
+        .owner = .{ .kind = .user, .serial = try reader.readU64() },
+        .device = .{ .kind = .device, .serial = try reader.readU64() },
+        .label_len = try reader.readByte(),
+        .label = @splat(0),
+        .overlay_id = 0,
+        .previous_generation = 0,
+        .root_pin = undefined,
+        .previous_key = undefined,
+        .device_signature = signature(),
+        .consent_signature = signature(),
+    };
+    if (proposal.label_len > graph.MAX_LABEL_BYTES) return error.InvalidEnrollment;
+    try reader.readBytes(proposal.label[0..proposal.label_len]);
+    proposal.overlay_id = try reader.readU64();
+    proposal.previous_generation = try reader.readU32();
+    try reader.readBytes(&proposal.root_pin);
+    try reader.readBytes(&proposal.previous_key);
+    try reader.readBytes(&proposal.device_signature.public_key);
+    try reader.readBytes(&proposal.device_signature.value);
+    proposal.consent_signature.public_key = proposal.previous_key;
     try reader.readBytes(&proposal.consent_signature.value);
     if (!reader.eof()) return error.InvalidEnrollment;
     try proposal.validate();

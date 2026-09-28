@@ -156,8 +156,8 @@ requests.
   wrong service tasks, and revoked handles. It also signs document metadata
   with the recovered sealed key and rejects signing after lease revocation.
   The reboot restores three generated keys and a 96-byte exportable secret through
-  the primary catalog and a device key through a separate vault catalog, checks
-  that no leases survived, then lends fresh authority.
+  the primary catalog and both device-key generations through a separate vault
+  catalog, checks that no leases survived, then lends fresh authority.
   It also resumes an assertion counter after reboot and refuses a credential
   revoked before shutdown. The cold boot saves an unlock proof; the reboot rejects
   replay at matching relative ticks and rejects replacing its signed context with
@@ -195,9 +195,14 @@ requests.
   pinned owner root while retaining its private key in its own vault. The authority
   approves the public record and publishes a signed graph; import checks the local
   key, preserves observed rotations and revocations, and checkpoints before use.
-  Host tests join separate vaults and disks; the TPM cold/reboot proof restores two
-  device vaults and catalogs on the same guest TPM. Production approval, enrollment
-  transport, trusted root-pin provisioning and rollback-resistant floors remain open.
+  Public rotation binds consent from the current key to proof of its successor.
+  The device checkpoints both keys before sending the request; owner approval and
+  local import then commit the new generation. Stale and competing requests fail,
+  matching approval and import retries do not write again, and old channels retire
+  when the graph changes.
+  Host tests join and rotate separate vaults and disks; the TPM cold/reboot proof
+  restores two device vaults and catalogs on the same guest TPM and rejects the
+  retired device key. Production approval, enrollment transport, trusted root-pin provisioning and rollback-resistant floors remain open.
   The two-node gate uses modern VirtIO PCI networking with bounded 32-entry
   queues, separate DMA permissions, VT-d isolation and remapped MSI-X.
   Both guests must transmit and receive encrypted native frames and observe
