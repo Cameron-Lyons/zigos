@@ -726,15 +726,17 @@ pub const SessionManager = struct {
                 return;
             }
             if (builtin.target.os.tag == .freestanding) {
+                // Recover identity checkpoints before unrelated verification
+                // journeys can persist another round of workspace mutations.
+                @import("proofs/tpm2_sealing_proof.zig").run(self) catch {
+                    self.failBoot();
+                    return;
+                };
                 const booted_evidence = @import("booted_evidence.zig");
                 if (!booted_evidence.runProduction(self, &graph)) {
                     self.failBoot();
                     return;
                 }
-                @import("proofs/tpm2_sealing_proof.zig").run(self) catch {
-                    self.failBoot();
-                    return;
-                };
             }
         }
         stack_watermark.reportPeak();

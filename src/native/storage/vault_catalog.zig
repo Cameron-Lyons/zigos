@@ -16,9 +16,9 @@ const graph_snapshot = @import("../sync/device_graph_snapshot.zig");
 
 pub const CONTENT_TYPE = "application/x-zigos-vault-catalog";
 const label = "Sealed vault catalog";
-const magic = "ZGVault4";
-const format_version: u16 = 4;
-const header_bytes = 27 + 8 * secrets.MAX_SECRETS;
+const magic = "ZGVault5";
+const format_version: u16 = 5;
+const header_bytes = 27 + 8 * secrets.MAX_SECRETS + hash.digest_bytes;
 pub const MAX_BYTES = header_bytes + secrets.MAX_SECRETS * (13 + secrets.MAX_LABEL_BYTES + sealing.MAX_BLOB_BYTES) + 2 + identity.MAX_SNAPSHOT_BYTES + graph_snapshot.MAX_BYTES;
 const CodecError = error{ InvalidVaultCatalog, VaultCatalogTooLarge };
 const Writer = cursor.Writer(CodecError, error.VaultCatalogTooLarge);
@@ -56,7 +56,7 @@ pub const Checkpoint = struct {
 // the same checkpoint; failures keep Session.pending and withhold the receipt.
 pub const Anchor = struct {
     context: *anyopaque,
-    advance_fn: *const fn (*anyopaque, Checkpoint) anyerror!void,
+    advance_fn: *const fn (*anyopaque, Checkpoint, hash.Digest) anyerror!void,
 };
 
 pub const Receipt = struct {
@@ -87,7 +87,15 @@ pub const Session = struct {
         try storage.requireDurableBoundary();
         const head = storage.latestVersion(object_id);
         var previous_key: ?signing.PublicKey = null;
-        const next_generation = if (self.pending) |pending| pending.catalog_generation else blk: {
+        var previous_digest: hash.Digest = @splat(0);
+        const next_generation = if (self.pending) |pending| blk: {
+            if (head == null or head.?.id.raw() != pending.version_id) return error.VaultCatalogChanged;
+            const saved = try storage.versionPayloadInto(head.?, scratch);
+            if (!head.?.metadata.verifyFor(.secret, saved)) return error.UntrustedVaultCatalog;
+            var reader = Reader{ .buffer = saved };
+            previous_digest = (try header(&reader, object_id)).previous_digest;
+            break :blk pending.catalog_generation;
+        } else blk: {
             if ((if (head) |version| version.id.raw() else @as(u64, 0)) != expected_version_id) return error.VaultCatalogChanged;
             if (head) |version| {
                 if (version.object_type != .secret or !std.mem.eql(u8, version.metadata.contentTypeSlice(), CONTENT_TYPE)) return error.VaultCatalogChanged;
@@ -97,11 +105,12 @@ pub const Session = struct {
                 var reader = Reader{ .buffer = old };
                 const old_header = try header(&reader, object_id);
                 try requireKeyExtension(&reader, old_header, &service.store, signer.key.authority.?.owner);
+                std.crypto.hash.sha2.Sha256.hash(old, &previous_digest, .{});
                 break :blk std.math.add(u64, old_header.generation, 1) catch return error.VaultCatalogGenerationExhausted;
             }
             break :blk @as(u64, 1);
         };
-        const payload = try encode(&service.store, state.identities, state.devices, object_id, next_generation, signer.key.authority.?.owner, scratch);
+        const payload = try encode(&service.store, state.identities, state.devices, object_id, next_generation, previous_digest, signer.key.authority.?.owner, scratch);
         var digest: hash.Digest = undefined;
         std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
         if (self.pending) |pending| {
@@ -137,7 +146,7 @@ pub const Session = struct {
             .public_key = storage.latestVersion(object_id).?.metadata.signature.publicKeySlice()[0..signing.PUBLIC_KEY_BYTES].*,
             .generation = next_generation,
             .payload_digest = self.pending.?.payload_digest,
-        });
+        }, previous_digest);
         const receipt = Receipt{ .version_id = self.pending.?.version_id, .catalog_generation = next_generation, .checkpoint_generation = generation };
         self.pending = null;
         return receipt;
@@ -159,7 +168,20 @@ pub fn inspect(storage: *const storage_service.Service, trust: Trust, scratch: *
     return (try readTrusted(storage, trust, scratch)).checkpoint;
 }
 
-fn readTrusted(storage: *const storage_service.Service, trust: Trust, scratch: *[MAX_BYTES]u8) !struct { checkpoint: Checkpoint, payload: []const u8 } {
+// Recover only one signed, direct successor of an independently pinned digest.
+// Unsigned object-store parent/version identifiers are never recovery authority.
+pub fn inspectSuccessor(storage: *const storage_service.Service, trust: Trust, scratch: *[MAX_BYTES]u8) !Checkpoint {
+    const parent_digest = trust.payload_digest orelse return error.VaultAnchorRequired;
+    const next_generation = std.math.add(u64, trust.minimum_generation, 1) catch return error.VaultCatalogGenerationExhausted;
+    var successor_trust = trust;
+    successor_trust.minimum_generation = next_generation;
+    successor_trust.payload_digest = null;
+    const verified = try readTrusted(storage, successor_trust, scratch);
+    if (verified.checkpoint.generation != next_generation or !std.mem.eql(u8, &parent_digest, &verified.previous_digest)) return error.VaultCatalogAnchorMismatch;
+    return verified.checkpoint;
+}
+
+fn readTrusted(storage: *const storage_service.Service, trust: Trust, scratch: *[MAX_BYTES]u8) !struct { checkpoint: Checkpoint, previous_digest: hash.Digest, payload: []const u8 } {
     const version = storage.latestVersion(trust.object_id) orelse return error.VaultCatalogMissing;
     if (version.object_type != .secret or !std.mem.eql(u8, version.metadata.contentTypeSlice(), CONTENT_TYPE) or
         !std.mem.eql(u8, version.metadata.labelSlice(), label) or
@@ -172,11 +194,12 @@ fn readTrusted(storage: *const storage_service.Service, trust: Trust, scratch: *
     var digest: hash.Digest = undefined;
     std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
     if (trust.payload_digest) |expected| if (!std.mem.eql(u8, &expected, &digest)) return error.VaultCatalogAnchorMismatch;
-    return .{ .payload = payload, .checkpoint = .{ .object_id = trust.object_id, .owner = trust.owner, .public_key = trust.public_key, .generation = catalog_header.generation, .payload_digest = digest } };
+    return .{ .payload = payload, .previous_digest = catalog_header.previous_digest, .checkpoint = .{ .object_id = trust.object_id, .owner = trust.owner, .public_key = trust.public_key, .generation = catalog_header.generation, .payload_digest = digest } };
 }
 
-fn encode(store: *const secrets.Store, identities: *const identity.Store, devices: ?*const graph.Graph, object_id: u64, generation: u64, owner: principal.PrincipalId, scratch: []u8) ![]const u8 {
+fn encode(store: *const secrets.Store, identities: *const identity.Store, devices: ?*const graph.Graph, object_id: u64, generation: u64, previous_digest: hash.Digest, owner: principal.PrincipalId, scratch: []u8) ![]const u8 {
     if (object_id == 0 or generation == 0 or owner.serial == 0 or store.secret_count == 0 or store.secret_count > secrets.MAX_SECRETS) return error.InvalidVaultCatalog;
+    if ((generation == 1) != std.mem.allEqual(u8, &previous_digest, 0)) return error.InvalidVaultCatalog;
     var writer = Writer{ .buffer = scratch };
     try writer.writeBytes(magic);
     try writer.writeU16(format_version);
@@ -190,6 +213,7 @@ fn encode(store: *const secrets.Store, identities: *const identity.Store, device
         try writer.writeU64(secret.id);
     }
     if (live != store.secret_count) return error.InvalidVaultCatalog;
+    try writer.writeBytes(&previous_digest);
     for (&store.secrets) |*secret| {
         if (!secrets.isLiveId(secret.id)) continue;
         if (!secret.owner.eql(owner) or secret.label_len > secrets.MAX_LABEL_BYTES or
@@ -214,7 +238,7 @@ fn encode(store: *const secrets.Store, identities: *const identity.Store, device
     return scratch[0..writer.offset];
 }
 
-const Header = struct { count: u8, generation: u64, slot_ids: [secrets.MAX_SECRETS]u64 };
+const Header = struct { count: u8, generation: u64, previous_digest: hash.Digest, slot_ids: [secrets.MAX_SECRETS]u64 };
 
 fn header(reader: *Reader, object_id: u64) !Header {
     if (object_id == 0 or !std.mem.eql(u8, try reader.readSlice(magic.len), magic) or
@@ -222,7 +246,7 @@ fn header(reader: *Reader, object_id: u64) !Header {
     const generation = try reader.readU64();
     const count = try reader.readByte();
     if (generation == 0 or count == 0 or count > secrets.MAX_SECRETS) return error.InvalidVaultCatalog;
-    var result = Header{ .count = count, .generation = generation, .slot_ids = undefined };
+    var result = Header{ .count = count, .generation = generation, .previous_digest = undefined, .slot_ids = undefined };
     var live: usize = 0;
     for (&result.slot_ids, 0..) |*id, index| {
         id.* = try reader.readU64();
@@ -230,6 +254,8 @@ fn header(reader: *Reader, object_id: u64) !Header {
         if (secrets.isLiveId(id.*)) live += 1;
     }
     if (live != count) return error.InvalidVaultCatalog;
+    @memcpy(&result.previous_digest, try reader.readSlice(hash.digest_bytes));
+    if ((generation == 1) != std.mem.allEqual(u8, &result.previous_digest, 0)) return error.InvalidVaultCatalog;
     return result;
 }
 
@@ -423,7 +449,7 @@ test "vault catalog rejects incomplete framing and rolls back a later failed uns
     _ = try fixture.init(test_owner, .{ .kind = .service, .serial = 2 }, 3, durable.signer);
     _ = try fixture.service.importSecret(&fixture.policies, fixture.authority.subjects, .{ .owner = test_owner, .task_id = 3, .label = "second", .raw = "another secret", .now_ticks = 1 }, null);
     var scratch: [MAX_BYTES]u8 = undefined;
-    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch);
+    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, @splat(0), test_owner, &scratch);
     var destination = secrets.Store.init();
     destination.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
     for (0..payload.len) |len| {
@@ -432,7 +458,7 @@ test "vault catalog rejects incomplete framing and rolls back a later failed uns
     }
     const mutations = [_]struct { offset: usize, value: u8 }{
         .{ .offset = 8, .value = 0 }, // Unknown format.
-        .{ .offset = 7, .value = '3' }, // Older catalogs have no retirement generations.
+        .{ .offset = 7, .value = '4' }, // Older catalogs have no signed predecessor digest.
         .{ .offset = 26, .value = 0 }, // Empty catalog.
         .{ .offset = 26, .value = secrets.MAX_SECRETS + 1 },
         .{ .offset = 27, .value = 2 }, // A key ID cannot name a different slot.
@@ -475,12 +501,77 @@ test "vault catalog anchor rejects a different signed payload at the same genera
     var trust = try testTrust();
     trust.payload_digest = (try inspect(&device.service, trust, &scratch)).payload_digest;
     fixture.service.store.secrets[0].label[0] ^= 1;
-    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch);
+    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, @splat(0), test_owner, &scratch);
     const metadata = try objects.signMetadata(durable.signer, label, CONTENT_TYPE, .secret, payload, 3);
     _ = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = payload, .metadata = metadata, .parent_version_id = ids.version(receipt.version_id) });
     var recovered = vault.Service.init();
     try std.testing.expectError(error.VaultCatalogAnchorMismatch, restore(&device.service, .{ .vault = &recovered, .identities = &identities }, trust, &scratch));
     try std.testing.expect(recovered.store.empty() and identities.credential_count == 0);
+}
+
+test "vault catalog recovery authenticates one direct successor without trusting version links" {
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var identities = identity.Store.init();
+    var fixture = SigningFixture{};
+    const signer = try prepare(&fixture, &device.service);
+    var scratch: [MAX_BYTES]u8 = undefined;
+    var session = Session{};
+    const state = State{ .vault = &fixture.service, .identities = &identities };
+    const first = try session.save(&device.service, state, signer, test_object_id, 0, 2, &scratch);
+    var trust = try testTrust();
+    trust.payload_digest = (try inspect(&device.service, trust, &scratch)).payload_digest;
+    _ = try fixture.service.store.importSecret(test_owner, "successor", "new", true, false);
+    const second = try session.save(&device.service, state, signer, test_object_id, first.version_id, 3, &scratch);
+    // Only the volume survives this restart; the external pin remains generation 1.
+    device.crash();
+    try std.testing.expectError(error.VaultCatalogAnchorMismatch, inspect(&device.service, trust, &scratch));
+    const recovered = try inspectSuccessor(&device.service, trust, &scratch);
+    try std.testing.expectEqual(@as(u64, 2), recovered.generation);
+    const head = device.service.latestVersion(test_object_id).?.*;
+    const payload = try device.service.versionPayloadInto(&head, &scratch);
+    _ = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = payload, .metadata = head.metadata, .parent_version_id = null });
+    try std.testing.expectEqualDeep(recovered, try inspectSuccessor(&device.service, trust, &scratch));
+    trust.minimum_generation = recovered.generation;
+    trust.payload_digest = recovered.payload_digest;
+    var destination = vault.Service.init();
+    destination.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
+    try std.testing.expectEqual(@as(u64, 2), try restore(&device.service, .{ .vault = &destination, .identities = &identities }, trust, &scratch));
+    try std.testing.expectEqual(@as(u8, 2), destination.store.secret_count);
+    try std.testing.expect(second.version_id != device.service.latestVersion(test_object_id).?.id.raw());
+}
+
+test "vault catalog recovery rejects signed forks skipped generations stale heads and unpinned trust" {
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var identities = identity.Store.init();
+    var fixture = SigningFixture{};
+    const signer = try prepare(&fixture, &device.service);
+    var scratch: [MAX_BYTES]u8 = undefined;
+    var session = Session{};
+    _ = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 2, &scratch);
+    var trust = try testTrust();
+    try std.testing.expectError(error.VaultAnchorRequired, inspectSuccessor(&device.service, trust, &scratch));
+    trust.payload_digest = (try inspect(&device.service, trust, &scratch)).payload_digest;
+    try std.testing.expectError(error.VaultCatalogRollback, inspectSuccessor(&device.service, trust, &scratch));
+    for (0..4) |variant| {
+        var previous = trust.payload_digest.?;
+        if (variant == 0) previous[0] ^= 1;
+        const generation: u64 = if (variant == 1) 3 else 2;
+        const payload = try encode(&fixture.service.store, &identities, null, test_object_id, generation, previous, test_owner, &scratch);
+        const authority = if (variant == 2) signing.SignerIdentity{ .label = "foreign", .seed = @splat(0xaa) } else durable.signer;
+        const metadata = try objects.signMetadata(authority, label, CONTENT_TYPE, .secret, payload, 3);
+        // A plausible unsigned parent pointer cannot authenticate a false link.
+        _ = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = payload, .metadata = metadata, .parent_version_id = device.service.latestVersion(test_object_id).?.id });
+        if (variant == 3) device.service.store.latestVersion(test_object_id).?.metadata.signature.value[0] ^= 1;
+        if (variant < 2) {
+            try std.testing.expectError(error.VaultCatalogAnchorMismatch, inspectSuccessor(&device.service, trust, &scratch));
+        } else try std.testing.expectError(error.UntrustedVaultCatalog, inspectSuccessor(&device.service, trust, &scratch));
+    }
+    trust.minimum_generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.VaultCatalogGenerationExhausted, inspectSuccessor(&device.service, trust, &scratch));
+    try std.testing.expectError(error.InvalidVaultCatalog, encode(&fixture.service.store, &identities, null, test_object_id, 2, @splat(0), test_owner, &scratch));
+    try std.testing.expectError(error.InvalidVaultCatalog, encode(&fixture.service.store, &identities, null, test_object_id, 1, @splat(1), test_owner, &scratch));
 }
 
 test "vault catalog refuses non-durable saves before publishing a version" {
@@ -532,7 +623,7 @@ test "vault catalog round trips the full vault with maximum envelopes across sto
         _ = try fixture.service.store.importSecret(test_owner, &name, &value, true, false);
     }
     var scratch: [MAX_BYTES]u8 = undefined;
-    try std.testing.expect((try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch)).len > objects.MAX_INLINE_PAYLOAD_BYTES);
+    try std.testing.expect((try encode(&fixture.service.store, &identities, null, test_object_id, 1, @splat(0), test_owner, &scratch)).len > objects.MAX_INLINE_PAYLOAD_BYTES);
     var session = Session{};
     _ = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 1, &scratch);
     device.crash();
@@ -567,7 +658,7 @@ test "vault catalog retains retired slot generations and rejects resurrection on
     fixture.service.store.secret_count -= 1;
     try std.testing.expectError(error.VaultCatalogKeyRollback, session.save(&device.service, state, signer, test_object_id, receipt.version_id, 2, &scratch));
     fixture.service.store.secrets[1] = tombstone;
-    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch);
+    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, @splat(0), test_owner, &scratch);
     const blob = kept.sealedBlob().?;
     const offset = std.mem.indexOf(u8, payload, blob).?;
     scratch[offset + blob.len - 1] ^= 1;

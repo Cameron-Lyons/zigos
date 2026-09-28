@@ -346,7 +346,7 @@ test "durable identity withholds assertions until the external anchor accepts th
         var calls: usize = 0;
         var fail: bool = true;
         var last: ?catalog.Checkpoint = null;
-        fn advance(_: *anyopaque, checkpoint: catalog.Checkpoint) !void {
+        fn advance(_: *anyopaque, checkpoint: catalog.Checkpoint, _: @import("../core/crypto_hash.zig").Digest) !void {
             calls += 1;
             if (last) |previous| try std.testing.expectEqualDeep(previous, checkpoint);
             last = checkpoint;

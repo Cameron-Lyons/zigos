@@ -196,9 +196,14 @@ requests.
   the retry without another NV write. This uses ordinary protected NV storage,
   with serialized software enforcing generation advancement, not a hardware
   monotonic counter. Enrollment is explicit, and missing or redefined indexes
-  never trigger automatic reprovisioning. A reboot between disk and NV commits
-  fails closed on a digest mismatch; automated recovery of that interrupted
-  enrollment/checkpoint remains open. Production authorization provisioning,
+  never trigger automatic reprovisioning. Catalog v5 signs the preceding catalog's
+  SHA-256 digest. After an interrupted disk/NV commit, recovery accepts exactly
+  one signed successor whose predecessor digest matches the TPM pin, confirms
+  disk durability, and advances NV before restoring secrets. Unrelated histories,
+  skipped generations, unsigned version links, and older snapshots cannot authorize
+  recovery. Normal saves still use one NV write, with unchanged 136-byte anchors
+  and 112-byte checkpoint coordination state. Interrupted first enrollment still
+  needs explicit recovery. Production authorization provisioning,
   catalog trust-pin enrollment, physical TPM persistence validation, trusted
   PIN/biometric verification and session-lifecycle integration, and userspace
   request dispatch remain open.
@@ -224,7 +229,11 @@ requests.
   gate checks wrong NV authorization, duplicate definition, encrypted traffic,
   corrupt read/write response MACs, and reconciliation of an accepted write with
   a lost reply. It restores the cold disk snapshot while retaining the newer TPM
-  state and requires rejection before vault restore. Catalog format v4 includes the authenticated device graph and rejects older snapshots.
+  state and requires rejection before vault restore. Another boot halts with
+  interrupts disabled after the disk commit but before NV_Write is sent. Restarting
+  both VM and TPM then completes that signed checkpoint, restores its credential
+  counter, and resumes assertions. Catalog format v5 includes the authenticated
+  device graph and predecessor digest and rejects older snapshots.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
@@ -264,7 +273,7 @@ requests.
   matching approval and import retries do not write again, and old channels retire
   when the graph changes. The root certificate binds the exact predecessor consent
   and successor proof. After durable import, retirement removes every old lease
-  and the current sealed record, preserving a slot generation in catalog v4.
+  and the current sealed record, preserving a slot generation in catalog v5.
   Reused slots receive new IDs; catalog signers, credential keys, owner roots and
   active device keys remain protected. Host tests cover 20 rotations, exhausted
   generations and failures at both storage barriers without raising memory ceilings.
@@ -272,7 +281,7 @@ requests.
   recovery remain open.
   Host tests join and rotate separate vaults and disks; the TPM cold/reboot proof
   restores two device vaults and catalogs on the same guest TPM and rejects the
-  retired device key. Production approval, enrollment transport, trusted root-pin and authorization provisioning, interrupted-checkpoint recovery, and physical TPM validation remain open.
+  retired device key. Production approval, enrollment transport, trusted root-pin and authorization provisioning, interrupted first-enrollment recovery, and physical TPM validation remain open.
   The two-node gate uses modern VirtIO PCI networking with bounded 32-entry
   queues, separate DMA permissions, VT-d isolation and remapped MSI-X.
   Both guests must transmit and receive encrypted native frames and observe

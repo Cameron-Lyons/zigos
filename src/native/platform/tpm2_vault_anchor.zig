@@ -3,6 +3,8 @@ const tpm = @import("tpm2_sealing.zig");
 const catalog = @import("../storage/vault_catalog.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const hash = @import("../core/crypto_hash.zig");
+const storage_service = @import("../storage/storage_service.zig");
 
 pub const RECORD_BYTES = 136;
 
@@ -51,12 +53,15 @@ pub const Record = struct {
         return record;
     }
 
-    fn successor(self: Record, checkpoint: catalog.Checkpoint) !Record {
+    fn successor(self: Record, checkpoint: catalog.Checkpoint, previous_digest: hash.Digest) !Record {
         if (checkpoint.object_id != self.checkpoint.object_id or !checkpoint.owner.eql(self.checkpoint.owner) or
             !std.mem.eql(u8, &checkpoint.public_key, &self.checkpoint.public_key)) return error.VaultAnchorBindingChanged;
         if (checkpoint.generation == self.checkpoint.generation) {
             if (!std.mem.eql(u8, &checkpoint.payload_digest, &self.checkpoint.payload_digest)) return error.VaultCatalogAnchorMismatch;
-        } else if (checkpoint.generation != (std.math.add(u64, self.checkpoint.generation, 1) catch return error.VaultCatalogGenerationExhausted)) return error.VaultCatalogRollback;
+        } else {
+            if (checkpoint.generation != (std.math.add(u64, self.checkpoint.generation, 1) catch return error.VaultCatalogGenerationExhausted)) return error.VaultCatalogRollback;
+            if (!std.mem.eql(u8, &previous_digest, &self.checkpoint.payload_digest)) return error.VaultCatalogAnchorMismatch;
+        }
         const next = Record{ .checkpoint = checkpoint, .device_root_pin = self.device_root_pin };
         _ = try next.encode();
         return next;
@@ -98,9 +103,23 @@ pub fn Backend(comptime Io: type) type {
             return .{ .context = self, .advance_fn = advance };
         }
 
-        fn advance(context: *anyopaque, checkpoint: catalog.Checkpoint) !void {
+        // Start with a freshly read authenticated record. A reboot may leave
+        // exactly one durable signed successor ahead of NV. Authenticate its
+        // predecessor link, confirm disk durability, and finish the same update
+        // before the caller restores any secrets or publishes identity state.
+        pub fn recover(self: *Self, storage: *const storage_service.Service, scratch: *[catalog.MAX_BYTES]u8) !void {
+            _ = catalog.inspect(storage, self.current.trust(), scratch) catch |err| {
+                if (err != error.VaultCatalogAnchorMismatch) return err;
+                const checkpoint = try catalog.inspectSuccessor(storage, self.current.trust(), scratch);
+                _ = try storage.checkpointDurable();
+                try advance(self, checkpoint, self.current.checkpoint.payload_digest);
+                return;
+            };
+        }
+
+        fn advance(context: *anyopaque, checkpoint: catalog.Checkpoint, previous_digest: hash.Digest) !void {
             const self: *Self = @ptrCast(@alignCast(context));
-            const next = try self.current.successor(checkpoint);
+            const next = try self.current.successor(checkpoint, previous_digest);
             const actual = try read(self.client, self.io, self.authorization, self.index);
             const expected_bytes = try self.current.encode();
             const actual_bytes = try actual.encode();
@@ -128,15 +147,58 @@ test "TPM vault anchor codec rejects malformed records and binds freshness to ex
     }
     var changed = initial.checkpoint;
     changed.generation = 6;
-    try std.testing.expectError(error.VaultCatalogRollback, initial.successor(changed));
+    try std.testing.expectError(error.VaultCatalogRollback, initial.successor(changed, initial.checkpoint.payload_digest));
     changed.generation = 9;
-    try std.testing.expectError(error.VaultCatalogRollback, initial.successor(changed));
+    try std.testing.expectError(error.VaultCatalogRollback, initial.successor(changed, initial.checkpoint.payload_digest));
     changed = initial.checkpoint;
     changed.payload_digest[0] ^= 1;
-    try std.testing.expectError(error.VaultCatalogAnchorMismatch, initial.successor(changed));
+    try std.testing.expectError(error.VaultCatalogAnchorMismatch, initial.successor(changed, initial.checkpoint.payload_digest));
     changed.generation += 1;
-    const next = try initial.successor(changed);
+    try std.testing.expectError(error.VaultCatalogAnchorMismatch, initial.successor(changed, @splat(0xee)));
+    const next = try initial.successor(changed, initial.checkpoint.payload_digest);
     try std.testing.expectEqualDeep(initial.device_root_pin, next.device_root_pin);
     changed.public_key[0] ^= 1;
-    try std.testing.expectError(error.VaultAnchorBindingChanged, initial.successor(changed));
+    try std.testing.expectError(error.VaultAnchorBindingChanged, initial.successor(changed, initial.checkpoint.payload_digest));
+}
+
+test "TPM vault recovery requires durable disk state and retains its pin when hardware fails" {
+    const durable = @import("../storage/document_save_test.zig");
+    const SigningFixture = @import("../../tests/fixtures/document_signer.zig").Fixture;
+    const identity = @import("os_identity.zig");
+    const Io = struct {
+        pub fn random(_: *@This(), _: []u8) !void {
+            return error.UnexpectedHardwareAccess;
+        }
+        pub fn execute(_: *@This(), _: []const u8, _: []u8, _: u32) ![]u8 {
+            return error.UnexpectedHardwareAccess;
+        }
+    };
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    var fixture = SigningFixture{};
+    const signer = try fixture.init(owner, device.service.owner, device.service.task_id, durable.signer);
+    var identities = identity.Store.init();
+    const state = catalog.State{ .vault = &fixture.service, .identities = &identities };
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    var session = catalog.Session{};
+    const first = try session.save(&device.service, state, signer, 1000, 0, 2, &scratch);
+    const checkpoint = try catalog.inspect(&device.service, .{ .object_id = 1000, .owner = owner, .public_key = try signing.publicKey(durable.signer) }, &scratch);
+    var client = tpm.Client{};
+    var io = Io{};
+    const auth: tpm.Key = @splat(1);
+    var backend = Backend(Io){ .client = &client, .io = &io, .authorization = &auth, .index = 0x0180_1234, .current = .{ .checkpoint = checkpoint } };
+    // An exact pinned head needs no NV update, even after reboot.
+    device.crash();
+    try backend.recover(&device.service, &scratch);
+    device.fail_flushes = true;
+    try std.testing.expectError(error.DurabilityBarrierFailed, session.save(&device.service, state, signer, 1000, first.version_id, 3, &scratch));
+    try std.testing.expectError(error.DurabilityBarrierFailed, backend.recover(&device.service, &scratch));
+    try std.testing.expectEqualDeep(checkpoint, backend.current.checkpoint);
+    device.fail_flushes = false;
+    // The disk can now commit, but unavailable TPM state must withhold the pin.
+    try std.testing.expectError(error.NotInitialized, backend.recover(&device.service, &scratch));
+    try std.testing.expectEqualDeep(checkpoint, backend.current.checkpoint);
+    device.crash();
+    try std.testing.expectEqual(@as(u64, 2), (try catalog.inspectSuccessor(&device.service, backend.current.trust(), &scratch)).generation);
 }

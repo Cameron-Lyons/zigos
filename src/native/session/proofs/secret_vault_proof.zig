@@ -40,7 +40,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     const storage = manager.storageServicePtr();
     const AnchorBackend = nv_anchor.Backend(@TypeOf(io.*));
     const restored = storage.latestVersion(catalog_object_id) != null;
-    const trusted = AnchorBackend.read(&client, io, authorization, local_index) catch |err| blk: {
+    var trusted = AnchorBackend.read(&client, io, authorization, local_index) catch |err| blk: {
         if (err != error.NvIndexMissing) return err;
         break :blk @as(?nv_anchor.Record, null);
     };
@@ -54,10 +54,23 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         return;
     }
     const remote_trusted: ?nv_anchor.Record = if (restored) try AnchorBackend.read(&client, io, authorization, remote_index) else null;
+    var catalog_scratch: [catalog.MAX_BYTES]u8 = undefined;
+    var anchor_backend: AnchorBackend = undefined;
+    if (trusted) |record| {
+        anchor_backend = .{ .client = &client, .io = io, .authorization = authorization, .index = local_index, .current = record };
+        anchor_backend.recover(storage, &catalog_scratch) catch |err| {
+            if (err != error.VaultCatalogRollback and err != error.VaultCatalogAnchorMismatch) return err;
+            if (!service.store.empty() or identities.credential_count != 0) return error.PublishedRolledBackSecret;
+            console.print("ZIGOS:TPM2:ANCHOR:ROLLBACK_REJECTED\nZIGOS:TPM2:VAULT:ROLLBACK_REJECTED\n");
+            return;
+        };
+        trusted = anchor_backend.current;
+        if (trusted.?.checkpoint.generation != record.checkpoint.generation)
+            console.print("ZIGOS:TPM2:ANCHOR_RECOVERY:COMMITTED\n");
+    }
     var expected_key: signing.PublicKey = undefined;
     var root_pin: signing.PublicKey = undefined;
     var remote_catalog_pin: signing.PublicKey = undefined;
-    var catalog_scratch: [catalog.MAX_BYTES]u8 = undefined;
     var secret: *const secrets.SecretRecord = undefined;
     if (restored) {
         const local = trusted.?;
@@ -66,16 +79,9 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         expected_key = local.checkpoint.public_key;
         root_pin = local.device_root_pin orelse return error.InvalidVaultProof;
         remote_catalog_pin = remote_trusted.?.checkpoint.public_key;
-        // Validate both anchored heads before publishing any recovered secret.
-        _ = catalog.inspect(storage, local.trust(), &catalog_scratch) catch |err| {
-            if (err != error.VaultCatalogRollback and err != error.VaultCatalogAnchorMismatch) return err;
-            if (!service.store.empty() or identities.credential_count != 0) return error.PublishedRolledBackSecret;
-            console.print("ZIGOS:TPM2:ANCHOR:ROLLBACK_REJECTED\nZIGOS:TPM2:VAULT:ROLLBACK_REJECTED\n");
-            return;
-        };
         _ = try catalog.inspect(storage, remote_trusted.?.trust(), &catalog_scratch);
         const generation = try catalog.restore(storage, .{ .vault = &service, .identities = &identities, .devices = &peer_graph }, local.trust(), &catalog_scratch);
-        if (generation != 7 or identities.credential_count != 2 or service.store.secret_count != 4 or service.activeHandleCount() != 0 or
+        if ((generation != 7 and generation != 8) or identities.credential_count != 2 or service.store.secret_count != 4 or service.activeHandleCount() != 0 or
             service.store.handles.countInUse() != 0) return error.InvalidRestoredVault;
         secret = service.store.describeSecret(1) orelse return error.MissingVaultProof;
         const portable_lease = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = app, .task_id = 5, .secret_id = 4, .expires_at_ticks = 10, .now_ticks = 1, .allow_raw_export = true }, null);
@@ -113,7 +119,6 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     var catalog_authority = object_signer.Authority{ .service = &service, .policies = &policies, .subjects = subjects, .owner = owner, .holder = storage.owner, .task_id = storage.task_id };
     const catalog_signer = try object_signer.Signer.bind(&catalog_authority, catalog_handle.id, 2);
     var durable_identities = durable_identity.Service{ .state = .{ .vault = &service, .identities = &identities, .devices = &peer_graph }, .storage = storage, .signer = catalog_signer, .object_id = catalog_object_id, .version_id = if (restored) storage.latestVersion(catalog_object_id).?.id.raw() else 0 };
-    var anchor_backend: AnchorBackend = undefined;
     var anchor_interface: catalog.Anchor = undefined;
     if (trusted) |record| {
         anchor_backend = .{ .client = &client, .io = io, .authorization = authorization, .index = local_index, .current = record };
@@ -122,7 +127,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     }
     var unlock_session = identity.unlock_context.Session{};
     try unlock_session.begin(@import("../../../kernel/platform/secure_random.zig").bootInstanceId(), io);
-    try proveIdentityAssertions(&durable_identities, &policies, secret.id, &expected_key, restored, &catalog_scratch, &unlock_session, io, &client);
+    try proveIdentityAssertions(&durable_identities, &policies, secret.id, &expected_key, restored, &catalog_scratch, &unlock_session, io, &client, if (trusted) |record| record.checkpoint.generation else 0);
     try proveDocumentSigning(&service, &policies, secret.id, &expected_key);
     try provePeerAuthentication(&durable_identities, adapter.provider(), &policies, secret.id, &expected_key, &root_pin, &remote_catalog_pin, remote_trusted, restored, &catalog_scratch);
     var out: secrets.Value = @splat(0xaa);
@@ -392,7 +397,7 @@ fn provePeerAuthentication(durable: *durable_identity.Service, hardware: secrets
 
 // The graph and unlock proof are explicit verification fixtures. Credential
 // signatures use the recovered real TPM-backed key, without a caller seed.
-fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const policy.Directory, secret_id: u64, expected_public_key: *const signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8, unlock_session: *identity.unlock_context.Session, io: anytype, client: *tpm.Client) !void {
+fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const policy.Directory, secret_id: u64, expected_public_key: *const signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8, unlock_session: *identity.unlock_context.Session, io: anytype, client: *tpm.Client, start_generation: u64) !void {
     const service = durable.state.vault;
     const identities = durable.state.identities;
     const identity_service = principal.PrincipalId{ .kind = .service, .serial = 0x703 };
@@ -426,7 +431,7 @@ fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const 
         try identities.revokeCredential(revoked.id, 3);
     }
     const credential = identities.findCredentialConst(1) orelse return error.MissingCredential;
-    var expected_counter: u64 = if (restored) 2 else 1;
+    var expected_counter: u64 = if (restored) (if (start_generation == 7) @as(u64, 2) else 3) else 1;
     if (credential.assertion_count != expected_counter - 1 or identities.findCredentialConst(2).?.status != .revoked) return error.LostCredentialState;
     if (!std.mem.eql(u8, &credential.credential_public_key, expected_public_key)) return error.IdentityKeyChanged;
     const request = identity.AssertionRequest{
@@ -439,6 +444,21 @@ fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const 
         .key_handle_id = handle.id,
     };
     try proveUnlockReplay(durable, &graph, authority, request, restored, scratch);
+    if (restored and start_generation == 7) {
+        // Stop after the catalog reaches disk and before the TPM sees NV_Write.
+        // The harness terminates both VM and emulator here, then boots this disk
+        // with the old TPM state. No signature or service receipt has escaped.
+        const writes = io.nv_writes;
+        io.interrupt_nv_write = true;
+        if (durable.assertCredential(&graph, authority, request, scratch)) |_| return error.PublishedInterruptedAssertion else |err| {
+            if (err != error.InterruptedVaultCheckpoint or !client.failed or !durable.dirty or
+                durable.checkpoint.pending == null or io.nv_writes != writes) return error.BadInterruptedCheckpoint;
+        }
+        const x86 = @import("../../../arch/x86.zig");
+        x86.cli();
+        console.print("ZIGOS:TPM2:ANCHOR_RECOVERY:INTERRUPTED\n");
+        while (true) x86.hlt();
+    }
     if (restored) {
         // The device commits, then the transport corrupts only the response MAC.
         // No assertion may escape; the exact pending catalog must survive retry.

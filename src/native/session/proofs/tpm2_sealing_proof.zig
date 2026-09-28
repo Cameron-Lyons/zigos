@@ -22,6 +22,7 @@ const Io = struct {
     corrupt_unseal: bool = false,
     corrupt_nv_read: bool = false,
     corrupt_nv_write: bool = false,
+    interrupt_nv_write: bool = false,
     nv_writes: usize = 0,
     corrupted: bool = false,
 
@@ -34,7 +35,10 @@ const Io = struct {
             if (std.mem.indexOf(u8, command, key) != null) return error.PlaintextKey;
         }
         if (std.mem.indexOf(u8, command, "ZGVAnch1") != null) return error.PlaintextAnchor;
-        if (std.mem.readInt(u32, command[6..10], .big) == 0x137) self.nv_writes += 1;
+        if (std.mem.readInt(u32, command[6..10], .big) == 0x137) {
+            if (self.interrupt_nv_write) return error.InterruptedVaultCheckpoint;
+            self.nv_writes += 1;
+        }
         const reply = try hardware.execute(command, response, timeout_ms);
         if (self.known_key) |key| {
             if (std.mem.indexOf(u8, reply, key) != null) return error.PlaintextKey;

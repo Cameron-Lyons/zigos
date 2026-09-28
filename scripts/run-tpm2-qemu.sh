@@ -140,10 +140,36 @@ run_boot() {
       echo "TPM2 ambiguous anchor write mismatch for $name" >&2
       return 1
     fi
+    if [ "$(grep -c '^ZIGOS:TPM2:ANCHOR_RECOVERY:' "$log" || true)" -ne "$retry_count" ] ||
+      { [ "$retry_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:ANCHOR_RECOVERY:COMMITTED' "$log"; }; then
+      cat "$log" >&2
+      echo "TPM2 interrupted checkpoint recovery mismatch for $name" >&2
+      return 1
+    fi
   else
     bash "$SCRIPT_DIR/check-production-boot-log.sh" "$log"
   fi
   echo "TPM2 QEMU $name: PASS"
+}
+
+run_interrupted_checkpoint() {
+  local log="$LOG_DIR/interrupted-checkpoint.log"
+  start_tpm interrupted-checkpoint
+  export QEMU_EXTRA_ARGS="$BASE_EXTRA_ARGS -chardev socket,id=zigos_tpm_socket,path=$TPM_WORK/control.sock -tpmdev emulator,id=zigos_tpm,chardev=zigos_tpm_socket -device tpm-crb,tpmdev=zigos_tpm"
+  # The proof disables interrupts and halts at this boundary, so stopping the
+  # guest cannot race a successful NV write or an acknowledged assertion.
+  qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" \
+    'ZIGOS:TPM2:ANCHOR_RECOVERY:INTERRUPTED' "${TPM2_QEMU_SECONDS:-90}"
+  stop_tpm
+  if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
+    ! grep -Fxq 'ZIGOS:TPM2:SEAL:RECOVERED' "$log" ||
+    [ "$(grep -c '^ZIGOS:TPM2:ANCHOR_RECOVERY:' "$log" || true)" -ne 1 ] ||
+    grep -Eq '^ZIGOS:TPM2:(IDENTITY|VAULT):|FAIL' "$log"; then
+    cat "$log" >&2
+    echo 'TPM2 interrupted checkpoint did not stop before acknowledgement' >&2
+    return 1
+  fi
+  echo 'TPM2 QEMU interrupted checkpoint: PASS'
 }
 
 bash "$SCRIPT_DIR/build-native-store.sh" "$STORE_IMAGE" 8 reset
@@ -152,6 +178,7 @@ if [ "$MODE" = sealing ]; then
   # Give each restart case the same persisted sealed object. Verification
   # fixtures mutate other records on each boot and are not a soak workload.
   cp --sparse=always "$STORE_IMAGE" "$TPM_WORK/sealed-store.img"
+  run_interrupted_checkpoint
   run_boot reboot tpm-crb 'ZIGOS:TPM2:CRB_READY' 'ZIGOS:TPM2:SEAL:RECOVERED'
   # Keep the advanced TPM state while rolling the disk back to its old catalog.
   # The sealed key remains valid; the independent NV anchor must reject restore.
