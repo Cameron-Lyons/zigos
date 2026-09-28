@@ -124,7 +124,9 @@ pub const Service = struct {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: missing foreground session");
             return error.MissingForegroundSession;
         }
-        if (request.destination_task_id == 0 or request.destination_task_id == request.source_task_id) {
+        if (request.source_task_id == 0 or request.destination_task_id == 0 or
+            (request.destination_task_id == request.source_task_id and !request.subject.eql(request.destination)))
+        {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: invalid destination");
             return error.InvalidDestination;
         }
@@ -229,6 +231,10 @@ pub const Service = struct {
         try recordRead(ledger, request, true, request.detail);
         @memcpy(output[0..payload_len], grant.payloadSlice());
         grant.consumed = true;
+        if (grant.read_once) {
+            @memset(&grant.payload, 0);
+            grant.payload_len = 0;
+        }
         return output[0..payload_len];
     }
 

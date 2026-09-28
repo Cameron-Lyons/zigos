@@ -55,7 +55,7 @@ pub fn run() noreturn {
         }
         if (xhci_driver_task.lifecyclePending()) {
             timer.armSchedulerTick();
-        } else if (session_manager.peerNextWake()) |deadline| {
+        } else if (session_manager.nextServiceWake()) |deadline| {
             timer.armWakeAt(deadline);
         } else {
             timer.disarmSchedulerTick();

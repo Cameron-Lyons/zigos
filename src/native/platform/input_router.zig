@@ -127,6 +127,7 @@ pub const Router = struct {
     // ordering belongs to this router's lifetime, including source replacement
     // while applications retain their last received sequence.
     last_event_sequence: u64 = 0,
+    routing_epoch: u64 = 1,
     reports_accepted: usize = 0,
 
     comptime {
@@ -156,6 +157,7 @@ pub const Router = struct {
     }
 
     pub fn deinit(self: *Router) void {
+        self.routing_epoch +|= 1;
         self.dropAllInboxes();
         if (comptime heap_backed_event_slots) {
             if (self.event_slots) |slots| {
@@ -172,6 +174,7 @@ pub const Router = struct {
     }
 
     pub fn bindHardwareSource(self: *Router, source: HardwareReportSource) void {
+        self.routing_epoch +|= 1;
         self.dropAllInboxes();
         self.source = source;
         self.last_report_sequence = 0;
@@ -179,6 +182,7 @@ pub const Router = struct {
     }
 
     pub fn clearHardwareSource(self: *Router) void {
+        self.routing_epoch +|= 1;
         self.dropAllInboxes();
         self.source = null;
         self.last_report_sequence = 0;
@@ -193,6 +197,7 @@ pub const Router = struct {
         if (self.compositor != null and
             (self.compositor.? != compositor or self.compositor_task_id != compositor_task_id))
         {
+            self.routing_epoch +|= 1;
             self.dropAllInboxes();
         }
         self.compositor = compositor;
@@ -200,6 +205,7 @@ pub const Router = struct {
     }
 
     pub fn clearCompositor(self: *Router) void {
+        self.routing_epoch +|= 1;
         self.compositor = null;
         self.compositor_task_id = 0;
         self.dropAllInboxes();
@@ -310,6 +316,7 @@ pub const Router = struct {
     ) bool {
         switch (event.kind) {
             .task_switch_next, .task_switch_previous => {
+                self.routing_epoch +|= 1;
                 _ = compositor.switchVisible(if (event.kind == .task_switch_next) .next else .previous) catch {
                     return false;
                 };
@@ -622,6 +629,9 @@ fn inputByte(kind: input_driver_task.EventKind) u8 {
         .select_all => abi.InputByte.select_all,
         .undo => abi.InputByte.undo,
         .redo => abi.InputByte.redo,
+        .copy => abi.InputByte.copy,
+        .cut => abi.InputByte.cut,
+        .paste => abi.InputByte.paste,
     };
 }
 

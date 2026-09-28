@@ -13,6 +13,10 @@ pub const Fixture = struct {
     authority: object_signer.Authority = undefined,
 
     pub fn init(self: *Fixture, owner: principal.PrincipalId, holder: principal.PrincipalId, task_id: u64, signer: signing.SignerIdentity) !object_signer.Signer {
+        return self.initWithClipboard(owner, holder, task_id, signer, false);
+    }
+
+    pub fn initWithClipboard(self: *Fixture, owner: principal.PrincipalId, holder: principal.PrincipalId, task_id: u64, signer: signing.SignerIdentity, clipboard_allowed: bool) !object_signer.Signer {
         self.* = .{};
         self.service.attachHardwareProvider(@import("secret_provider.zig").provider());
         _ = try self.policies.create(.{
@@ -21,6 +25,7 @@ pub const Fixture = struct {
             .issuer = .{ .kind = .policy_authority, .serial = 1 },
             .label = "document signing fixture",
             .secret_vault_allowed = true,
+            .clipboard_allowed = clipboard_allowed,
             .require_hardware_backed_secrets = true,
             .deny_secret_raw_export = true,
             .max_secret_handle_lease_ticks = std.math.maxInt(u64),

@@ -16,6 +16,45 @@ const document_channel = @import("document_channel.zig");
 const protocol = ipc.protocol;
 const Client = @import("../../userspace/document_client.zig").Client;
 
+test "clipboard document authorization rechecks signed workspace policy and existing read write grants" {
+    const document_sessions = @import("../session/document_sessions.zig");
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.channel.close(0);
+    var sessions = document_sessions.Sessions{};
+    defer sessions.deinit(0);
+    _ = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
+    // The default signing fixture authorizes its key, not clipboard access.
+    try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, false, 10));
+    sessions.closeTask(fixture.app_task_id, 0);
+    fixture.open_request.signer = try fixture.signing_fixture.initWithClipboard(
+        .{ .kind = .user, .serial = 1 },
+        fixture.device.service.owner,
+        fixture.device.service.task_id,
+        durable.signer,
+        true,
+    );
+    _ = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
+    try std.testing.expect(sessions.allowsClipboard(fixture.app_task_id, false, 10));
+    try std.testing.expect(sessions.allowsClipboard(fixture.app_task_id, true, 10));
+    try std.testing.expect(sessions.allowsClipboard(fixture.app_task_id, false, 100));
+    try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, false, 101));
+    _ = try fixture.signing_fixture.policies.create(.{
+        .scope = .workspace,
+        .subject_id = fixture.device.workspace_id,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .label = "private workspace",
+        .clipboard_allowed = false,
+    }, durable.signer);
+    try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, false, 10));
+    try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, true, 10));
+    // Removing the restrictive overlay still cannot revive revoked authority.
+    fixture.signing_fixture.policies = .init();
+    try fixture.capabilities.revokeGrant(fixture.write_capability);
+    try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, false, 10));
+    try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, true, 10));
+}
+
 const Fixture = struct {
     device: *durable.Fixture,
     signing_fixture: @import("../../tests/fixtures/document_signer.zig").Fixture = .{},

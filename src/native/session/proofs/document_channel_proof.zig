@@ -45,7 +45,7 @@ const EditorSession = struct {
 pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     const storage = manager.storageServicePtr();
     var signing_fixture = @import("../../../tests/fixtures/document_signer.zig").Fixture{};
-    const document_key = try signing_fixture.init(graph.state.ids.session_user, storage.owner, storage.task_id, signer);
+    const document_key = try signing_fixture.initWithClipboard(graph.state.ids.session_user, storage.owner, storage.task_id, signer, true);
     const original = try storage.resolve(workspace_id, path);
     const version = storage.version(original.version_id.raw()) orelse return error.MissingVersion;
     const payload = try storage.versionPayload(version);
@@ -86,7 +86,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try awaitPresentation(manager, first, expected[0..original_length], 0);
     try awaitPresentation(manager, second, sibling_text, 0);
     // A running editor's mailbox cannot be overwritten by another open.
-    if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.capabilityTablePtr(), first.task_id, first.binding, 0)) return error.RunningMailboxRebound;
+    if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.capabilityTablePtr(), first.task_id, first.binding, .{}, 0)) return error.RunningMailboxRebound;
     common.printBootMarker(boot_markers.document_channel_userspace_open);
 
     const checkpoint_generation = storage.checkpoint_store.last_checkpoint_generation;
@@ -104,6 +104,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try awaitPresentation(manager, first, expected[0 .. original_length + 1], 1);
     try expectStored(manager, workspace_id, path, expected[0 .. original_length + 1], original.version_id.raw());
 
+    try clipboardBetweenEditors(manager, first, second, expected[0 .. original_length + 1]);
     try expectChannelRetired(manager, first);
     const frames_before_retirement = paging.frameStats();
     retireEditor(manager, first);
@@ -207,7 +208,7 @@ fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path
         manager.surfacePresentationCapabilityForTask(launched.task_id, 0) == null) return error.InitialUiAuthorityMissing;
     const stats = manager.userspaceSchedulerPtr().taskDispatchStats(launched.task_id) orelse return error.EditorNotScheduled;
     if (!stats.queued_ready or stats.dispatch_count != 0) return error.EditorDispatchedBeforeActivation;
-    if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.capabilityTablePtr(), launched.task_id, launched.binding, 0)) return error.PreparedMailboxRebound;
+    if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.capabilityTablePtr(), launched.task_id, launched.binding, .{}, 0)) return error.PreparedMailboxRebound;
     return .{ .task_id = launched.task_id, .surface_id = surface_id, .window_id = launched.window_id, .binding = launched.binding, .document_capability_id = prepared.request.authority.capability_id };
 }
 
@@ -300,6 +301,7 @@ fn expectLaunchRollback(manager: anytype, graph: anytype, workspace_id: u64, doc
 
 fn retireEditor(manager: anytype, editor: EditorSession) void {
     const now_ticks = timer.getTicks();
+    manager.clipboard.closeTask(editor.task_id, now_ticks);
     manager.documents.closeTask(editor.task_id, now_ticks);
     _ = manager.compositorSessionPtr().closeWindowsForTask(editor.task_id);
     _ = manager.runtimePtr().terminateTask(editor.task_id, now_ticks) catch false;
@@ -416,6 +418,7 @@ fn pressKeys(manager: anytype, editor: EditorSession, usages: []const u8, modifi
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse continue;
         if (state.input_event_count != before.input_event_count + usages.len or state.ui_presented_revision != state.ui_state_revision) continue;
+        if (manager.clipboard.transferPendingForTask(editor.task_id)) continue;
         if (state.last_input_sequence <= before.last_input_sequence) return error.InputSequenceReused;
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
@@ -462,6 +465,23 @@ fn expectBatchedInputAndSourceRestart(manager: anytype, editor: EditorSession) !
     try pressCursorKey(manager, editor, 0x0A, 0, undo_edited_text ++ "abcdefg", 11, true);
     try pressCursorKey(manager, editor, 0x1D, 1, undo_edited_text, 4, false);
     common.printBootMarker(boot_markers.document_input_ordering);
+}
+
+fn clipboardBetweenEditors(manager: anytype, first: EditorSession, second: EditorSession, first_text: []const u8) !void {
+    _ = try manager.compositorSessionPtr().switchView(first.window_id);
+    try pressSelectionKey(manager, first, 0x04, 1, first_text, @intCast(first_text.len), 0, false);
+    try pressSelectionKey(manager, first, 0x06, 1, first_text, @intCast(first_text.len), 0, false);
+    _ = try manager.compositorSessionPtr().switchView(second.window_id);
+    const original = sibling_text ++ "b";
+    try pressSelectionKey(manager, second, 0x04, 1, original, original.len, 0, false);
+    try pressCursorKey(manager, second, 0x19, 1, first_text, @intCast(first_text.len), true);
+    try pressSelectionKey(manager, second, 0x1D, 1, original, original.len, 0, false);
+    try pressCursorKey(manager, second, 0x1B, 1, "", 0, true);
+    try pressCursorKey(manager, second, 0x19, 1, original, original.len, true);
+    try pressCursorKey(manager, second, 0x1D, 1, "", 0, true);
+    try pressSelectionKey(manager, second, 0x1D, 1, original, original.len, 0, false);
+    try pressCursorKey(manager, second, 0x4F, 0, original, original.len, false);
+    common.printBootMarker(boot_markers.document_clipboard);
 }
 
 fn undoAndSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {

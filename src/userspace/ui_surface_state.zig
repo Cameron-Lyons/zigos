@@ -106,6 +106,9 @@ pub const State = struct {
             abi.InputByte.select_all,
             abi.InputByte.undo,
             abi.InputByte.redo,
+            abi.InputByte.copy,
+            abi.InputByte.cut,
+            abi.InputByte.paste,
             => {},
             else => return .rejected,
         }
@@ -128,6 +131,7 @@ pub const State = struct {
             abi.InputByte.select_all => self.selectAll(),
             abi.InputByte.undo => self.restoreEdit(false),
             abi.InputByte.redo => self.restoreEdit(true),
+            abi.InputByte.copy, abi.InputByte.cut, abi.InputByte.paste => false,
             abi.InputByte.commit_text => self.commit(),
             abi.InputByte.focus_next => self.moveFocus(true),
             abi.InputByte.focus_previous => self.moveFocus(false),
@@ -218,7 +222,42 @@ pub const State = struct {
         return self.history.revision();
     }
 
+    pub fn selectionSlice(self: *const State) []const u8 {
+        return self.text[self.selectionStart()..self.selectionEnd()];
+    }
+
+    // Clipboard bytes are staged outside the document. Publish one edit only
+    // after the complete transfer succeeds, retaining the draft on overflow.
+    pub fn replaceSelection(self: *State, bytes: []const u8) bool {
+        if (self.model != .notes or !@import("clipboard_protocol.zig").validText(bytes)) return false;
+        const start = self.selectionStart();
+        const end = self.selectionEnd();
+        const remaining = self.text_length - (end - start);
+        if (bytes.len > self.text.len - remaining) {
+            if (self.noteOverflow()) self.revision +|= 1;
+            return false;
+        }
+        if (start == end and bytes.len == 0) return true;
+        const new_end = start + bytes.len;
+        const new_length = remaining + bytes.len;
+        self.history.remember(@intCast(start), self.text[start..end], bytes, self.cursor, self.selection_anchor, false);
+        if (new_end > end) {
+            std.mem.copyBackwards(u8, self.text[new_end..new_length], self.text[end..self.text_length]);
+        } else {
+            std.mem.copyForwards(u8, self.text[new_end..new_length], self.text[end..self.text_length]);
+            @memset(self.text[new_length..self.text_length], 0);
+        }
+        @memcpy(self.text[start..new_end], bytes);
+        self.text_length = @intCast(new_length);
+        self.cursor = @intCast(new_end);
+        self.selection_anchor = self.cursor;
+        self.edited();
+        self.revision +|= 1;
+        return true;
+    }
+
     fn edited(self: *State) void {
+        self.flags.clipboard_failed = false;
         self.vertical_column = NO_VERTICAL_COLUMN;
         self.flags.dirty = true;
         self.flags.input_overflow = false;

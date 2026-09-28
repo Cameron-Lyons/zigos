@@ -3890,7 +3890,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 15",
+        "pub const ABI_VERSION: u16 = 16",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -4019,7 +4019,7 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.surface_present" },
         .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
-        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 9" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 10" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 256" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "heartbeat_increment: u32 = 1" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.surface_present)" },

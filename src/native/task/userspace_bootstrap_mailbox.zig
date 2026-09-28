@@ -1,8 +1,8 @@
 const std = @import("std");
 
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 9;
-pub const MAILBOX_RESERVED_BYTES: usize = 2;
+pub const VERSION: u16 = 10;
+pub const MAILBOX_RESERVED_BYTES: usize = 1;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
 pub const PROOF_SYSCALL_POINTER_DENIED_PULSE: u16 = 0x41;
@@ -63,7 +63,8 @@ pub const UiStateFlags = packed struct(u8) {
     input_overflow: bool = false,
     loading: bool = false,
     load_failed: bool = false,
-    _reserved: u2 = 0,
+    clipboard_failed: bool = false,
+    _reserved: u1 = 0,
 };
 
 pub fn yieldDisposition(raw: u32) ?YieldDisposition {
@@ -131,12 +132,35 @@ pub const UiChannel = extern union {
     launcher: LauncherBinding,
 };
 
+pub const ClipboardBinding = extern struct {
+    endpoint_capability_id: u64 = 0,
+    service_endpoint_id: u64 = 0,
+    _reserved: [2]u64 = .{ 0, 0 },
+
+    pub fn isValid(self: ClipboardBinding) bool {
+        return self.endpoint_capability_id != 0 and self.service_endpoint_id != 0 and
+            self._reserved[0] == 0 and self._reserved[1] == 0;
+    }
+};
+
+pub const ServiceTelemetry = extern struct {
+    state_hash: u64 = 0,
+    endpoint_id: u64 = 0,
+    peer_endpoint_id: u64 = 0,
+    ipc_roundtrips: u16 = 0,
+    _reserved: u16 = 0,
+    status_flags: u32 = 0,
+};
+pub const AuxiliaryKind = enum(u8) { none, service, clipboard, _ };
+pub const Auxiliary = extern union { service: ServiceTelemetry, clipboard: ClipboardBinding };
+
 pub const Mailbox = extern struct {
     version: u16 = VERSION,
     stage: u8 = @intFromEnum(Stage.boot),
     detail: u8 = @intFromEnum(Detail.unknown),
     fault_code: u8 = 0,
     ui_channel_kind: UiChannelKind = .none,
+    auxiliary_kind: AuxiliaryKind = .none,
     _reserved0: [MAILBOX_RESERVED_BYTES]u8 = [_]u8{0} ** MAILBOX_RESERVED_BYTES,
     authority_capability_id: u64 = 0,
     task_id: u64 = 0,
@@ -145,11 +169,7 @@ pub const Mailbox = extern struct {
     service_kind: u8 = @intFromEnum(ServiceKind.generic),
     service_ready: u8 = 0,
     service_operation_count: u16 = 0,
-    service_state_hash: u64 = 0,
-    service_endpoint_id: u64 = 0,
-    service_peer_endpoint_id: u64 = 0,
-    service_ipc_roundtrips: u16 = 0,
-    service_status_flags: u32 = 0,
+    auxiliary: Auxiliary = .{ .service = .{} },
     last_counter: u32 = 0,
     heartbeat_increment: u32 = 1,
     input_capability_id: u64 = 0,
@@ -185,6 +205,10 @@ pub const Mailbox = extern struct {
 
     pub fn launcherBinding(self: Mailbox) LauncherBinding {
         return if (self.ui_channel_kind == .launcher) self.ui_channel.launcher else .{};
+    }
+
+    pub fn clipboardBinding(self: Mailbox) ClipboardBinding {
+        return if (self.auxiliary_kind == .clipboard) self.auxiliary.clipboard else .{};
     }
 };
 
@@ -236,14 +260,15 @@ test "userspace yield dispositions reject unknown scheduler requests" {
 
 test "mailbox records userspace service readiness separately from generic heartbeat" {
     var mailbox = Mailbox{};
+    mailbox.auxiliary_kind = .service;
     mailbox.service_kind = @intFromEnum(ServiceKind.storage);
     mailbox.service_ready = 1;
     mailbox.service_operation_count = 3;
-    mailbox.service_state_hash = 0xA5;
-    mailbox.service_endpoint_id = 10;
-    mailbox.service_peer_endpoint_id = 11;
-    mailbox.service_ipc_roundtrips = 3;
-    mailbox.service_status_flags = @bitCast(ServiceStatusFlags{
+    mailbox.auxiliary.service.state_hash = 0xA5;
+    mailbox.auxiliary.service.endpoint_id = 10;
+    mailbox.auxiliary.service.peer_endpoint_id = 11;
+    mailbox.auxiliary.service.ipc_roundtrips = 3;
+    mailbox.auxiliary.service.status_flags = @bitCast(ServiceStatusFlags{
         .endpoint_created = true,
         .loopback_connected = true,
         .request_received = true,
@@ -254,12 +279,23 @@ test "mailbox records userspace service readiness separately from generic heartb
     try @import("std").testing.expectEqual(ServiceKind.storage, @as(ServiceKind, @enumFromInt(mailbox.service_kind)));
     try @import("std").testing.expectEqual(@as(u8, 1), mailbox.service_ready);
     try @import("std").testing.expectEqual(@as(u16, 3), mailbox.service_operation_count);
-    try @import("std").testing.expectEqual(@as(u64, 0xA5), mailbox.service_state_hash);
-    try @import("std").testing.expectEqual(@as(u64, 10), mailbox.service_endpoint_id);
-    try @import("std").testing.expectEqual(@as(u64, 11), mailbox.service_peer_endpoint_id);
-    try @import("std").testing.expectEqual(@as(u16, 3), mailbox.service_ipc_roundtrips);
-    const flags: ServiceStatusFlags = @bitCast(mailbox.service_status_flags);
+    try @import("std").testing.expectEqual(@as(u64, 0xA5), mailbox.auxiliary.service.state_hash);
+    try @import("std").testing.expectEqual(@as(u64, 10), mailbox.auxiliary.service.endpoint_id);
+    try @import("std").testing.expectEqual(@as(u64, 11), mailbox.auxiliary.service.peer_endpoint_id);
+    try @import("std").testing.expectEqual(@as(u16, 3), mailbox.auxiliary.service.ipc_roundtrips);
+    const flags: ServiceStatusFlags = @bitCast(mailbox.auxiliary.service.status_flags);
     try @import("std").testing.expect(flags.all_operations_completed);
+}
+
+test "mailbox isolates clipboard binding from service telemetry within the fixed ABI" {
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Auxiliary));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(Mailbox, "auxiliary"));
+    var state = Mailbox{ .auxiliary_kind = .service, .auxiliary = .{ .service = .{ .state_hash = 1, .endpoint_id = 2 } } };
+    try std.testing.expect(!state.clipboardBinding().isValid());
+    state.auxiliary_kind = .clipboard;
+    state.auxiliary = .{ .clipboard = .{ .endpoint_capability_id = 3, .service_endpoint_id = 4 } };
+    try std.testing.expect(state.clipboardBinding().isValid());
+    try std.testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
 }
 
 test "mailbox records focused input consumption without architecture-dependent padding" {

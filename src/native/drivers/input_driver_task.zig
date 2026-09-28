@@ -45,6 +45,9 @@ pub const EventKind = enum(u8) {
     select_all,
     undo,
     redo,
+    copy,
+    cut,
+    paste,
 };
 
 pub const KeyboardEvent = struct {
@@ -140,6 +143,14 @@ fn eventForUsage(usage: u8, modifiers: u8) ?KeyboardEvent {
     }
 
     return switch (usage) {
+        0x06, 0x1B, 0x19 => if (control and !shift and !alt and !gui)
+            .{ .kind = switch (usage) {
+                0x06 => .copy,
+                0x1B => .cut,
+                else => .paste,
+            } }
+        else
+            textEvent(usage, shift, control or alt or gui),
         0x1D => if (control and !alt and !gui)
             .{ .kind = if (shift) .redo else .undo }
         else

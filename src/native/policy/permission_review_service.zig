@@ -166,6 +166,9 @@ pub const CommandInput = struct {
             .select_all,
             .undo,
             .redo,
+            .copy,
+            .cut,
+            .paste,
             => {},
         }
         return false;

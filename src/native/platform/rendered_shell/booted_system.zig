@@ -248,6 +248,9 @@ pub const BootedSystem = struct {
             .select_all,
             .undo,
             .redo,
+            .copy,
+            .cut,
+            .paste,
             => self.result(.tick, false),
         };
     }

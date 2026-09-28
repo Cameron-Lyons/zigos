@@ -78,6 +78,8 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
             if (flags.input_overflow) frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
             if (flags.recovery_visible) frame.put(0, frame.rows - 2, "Recovery requested", .warning);
         }
+        if (state.model == .notes and flags.clipboard_failed)
+            frame.put(0, frame.rows - 2, "Clipboard action unavailable. Your draft is unchanged.", .warning);
         if (state.model == .notes and state.save_state == .saved and !flags.dirty and flags.input_overflow)
             frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
     } else {

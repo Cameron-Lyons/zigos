@@ -44,6 +44,7 @@ const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const document_sessions = @import("document_sessions.zig");
 const document_launcher = @import("document_launcher.zig");
+const clipboard_sessions = @import("clipboard_sessions.zig");
 const desktop_display = @import("../platform/desktop_display.zig");
 const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
@@ -119,6 +120,7 @@ pub const SessionManager = struct {
     input_router: input_router_mod.Router = .{},
     surface_authority_scanned_lifecycle_generation: u64 = 0,
     documents: document_sessions.Sessions = .{},
+    clipboard: clipboard_sessions.Sessions = .{},
     launcher: document_launcher.Launcher = .{},
     peers: peer_admission.Sessions = .{},
     peer_handshakes: peer_handshake.Handshakes = .{},
@@ -145,6 +147,7 @@ pub const SessionManager = struct {
         self.peer_handshakes.deinit();
         self.peers.deinit();
         self.launcher.deinit(self, 0);
+        self.clipboard.deinit(0);
         self.documents.deinit(0);
         self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
@@ -297,16 +300,17 @@ pub const SessionManager = struct {
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
+        const copied = self.clipboard.service(self, now_ticks);
         const serviced = self.documents.service(now_ticks);
         const launched = self.launcher.service(self, now_ticks);
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
-        if (serviced or launched or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
-        return serviced or launched or dispatched or peer_work != 0;
+        if (copied or serviced or launched or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
+        return copied or serviced or launched or dispatched or peer_work != 0;
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
-        return self.peer_connections.hasReadyWork() or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        return self.peer_connections.hasReadyWork() or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
     pub const DocumentTask = struct {
@@ -337,6 +341,7 @@ pub const SessionManager = struct {
         const port = self.kernelPort() orelse return error.KernelUnavailable;
         const binding = try self.documents.open(port, self.storageServicePtr(), request, now_ticks);
         const window = try self.compositorSessionPtr().openDocumentView(task, request.workspace_id, request.path);
+        const clipboard = try self.clipboard.open(self, task.id, now_ticks);
         _ = self.ensureFocusedInputCapabilityForResolvedTask(task, self.capabilityTablePtr(), now_ticks) orelse return error.InputAuthorityUnavailable;
         _ = self.ensureSurfacePresentationCapabilityForResolvedTask(task, now_ticks) orelse return error.SurfaceAuthorityUnavailable;
         if (!self.runtime_context.userspace_executor.bindInitialDocument(
@@ -345,6 +350,7 @@ pub const SessionManager = struct {
             self.capabilityTablePtr(),
             request.authority.task_id,
             binding,
+            clipboard,
             now_ticks,
         )) return error.DocumentLaunchUnavailable;
         if (!self.userspaceSchedulerPtr().registerTask(task.id)) return error.SchedulerUnavailable;
@@ -367,6 +373,7 @@ pub const SessionManager = struct {
 
     fn retirePreparedDocumentTask(self: *SessionManager, task: *task_runtime.TaskRecord, now_ticks: u64) void {
         const task_id = task.id;
+        self.clipboard.closeTask(task_id, now_ticks);
         self.documents.closeTask(task_id, now_ticks);
         _ = self.compositorSessionPtr().closeWindowsForTask(task_id);
         _ = self.input_router.dropForTask(task_id);
@@ -428,10 +435,12 @@ pub const SessionManager = struct {
         if (!self.peers.hasSessions() and !self.peer_handshakes.hasSessions()) network_driver.reserveReceivePrefix(null);
     }
 
-    pub fn peerNextWake(self: *const SessionManager) ?u64 {
-        const peer_wake = self.peers.nextWake();
-        const handshake_wake = self.peer_handshakes.nextWake() orelse return peer_wake;
-        return if (peer_wake) |wake| @min(wake, handshake_wake) else handshake_wake;
+    pub fn nextServiceWake(self: *const SessionManager) ?u64 {
+        var wake: ?u64 = null;
+        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.clipboard.nextWake() }) |candidate| {
+            if (candidate) |deadline| wake = if (wake) |value| @min(value, deadline) else deadline;
+        }
+        return wake;
     }
 
     fn peerFramesPending(self: *const SessionManager) bool {
@@ -870,6 +879,7 @@ pub const SessionManager = struct {
     }
 
     pub fn bindFocusedInputRouting(self: *SessionManager, graph: *const ServiceGraph) bool {
+        self.clipboard.owner_task_id = graph.service_bindings.bindingFor(.secure_pasteboard).task_id;
         const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
         const compositor_task = self.runtimePtr().find(compositor_task_id) orelse return false;
         self.input_router.bindCompositor(
@@ -877,7 +887,7 @@ pub const SessionManager = struct {
             compositor_task_id,
         );
         self.kernel_context.kernel_instance.bindFocusedInputReceiver(.{
-            .context = &self.input_router,
+            .context = self,
             .poll = pollFocusedInputForKernel,
         });
         self.kernel_context.kernel_instance.bindSurfacePresentationReceiver(.{
@@ -1008,7 +1018,7 @@ pub const SessionManager = struct {
                 mailbox.stage,
                 mailbox.last_counter,
                 mailbox.service_operation_count,
-                mailbox.service_status_flags,
+                mailbox.auxiliary.service.status_flags,
                 mailbox.ui_state_revision,
                 mailbox.ui_presented_revision,
                 mailbox.ui_presentation_failures,
@@ -1037,6 +1047,7 @@ pub const SessionManager = struct {
         self.peers.deinit();
         network_driver.reserveReceivePrefix(null);
         self.launcher.deinit(self, 0);
+        self.clipboard.deinit(0);
         self.documents.deinit(0);
         self.initialized = false;
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
@@ -1066,8 +1077,10 @@ pub const SessionManager = struct {
 const initial_session_manager = SessionManager{};
 
 fn pollFocusedInputForKernel(context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor {
-    const router: *input_router_mod.Router = @ptrCast(@alignCast(context));
-    return router.pollAbiForTask(task_id);
+    const manager: *SessionManager = @ptrCast(@alignCast(context));
+    const event = manager.input_router.pollAbiForTask(task_id) orelse return null;
+    manager.clipboard.observe(manager, event);
+    return event;
 }
 
 fn sessionHasTaskSurfaceWindow(

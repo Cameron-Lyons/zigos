@@ -143,6 +143,6 @@ pub fn networkWorkPending() bool {
     return default_manager.networkWorkPending();
 }
 
-pub fn peerNextWake() ?u64 {
-    return default_manager.peerNextWake();
+pub fn nextServiceWake() ?u64 {
+    return default_manager.nextServiceWake();
 }

@@ -100,8 +100,15 @@ requests.
   1 KiB of changed text within a 1,920-byte budget. Typing groups break at spaces,
   navigation, and saves; a new edit after undo discards the redo branch. Save
   receipts track content revisions, so a delayed save cannot mark another draft
-  clean. Unicode text, navigation by visual wrapped rows, and clipboard
-  operations remain open. Selection and save feedback fit within the
+  clean. Ctrl+C, Ctrl+X, and Ctrl+V transfer selected text between Notes editors
+  through native endpoints when document policy permits clipboard access. Each
+  transfer requires a newly delivered foreground keyboard gesture; focus changes,
+  suspension, expiry, and revoked document authority cancel pending transfers.
+  Cut removes text only after acknowledgement, and paste applies the complete
+  payload as one undoable edit. Transfers accept up to 512 bytes; copied content
+  expires after five minutes or when its source document authority is lost.
+  Unicode text and navigation by visual wrapped rows remain open. Selection,
+  clipboard failure feedback, and save feedback fit within the
   unchanged 528-byte text snapshot. Boot verification reads back mapped device
   pixels for the launcher, edited Notes text, selection and undo/redo results, save
   progress, durable success, and a denied save after revocation. A production

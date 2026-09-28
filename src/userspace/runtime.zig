@@ -115,6 +115,7 @@ const UiRuntime = struct {
     launcher: launcher_client.Client = .{},
     surface: ui_surface_state.State = .{},
     document: document_editor.Editor = .{},
+    clipboard: @import("clipboard_client.zig").Client = .{},
 };
 
 const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
@@ -280,13 +281,14 @@ fn publishServiceReady(comptime service_kind: ServiceKind, detail: mailbox.Detai
     var failure_code: u8 = 0x21;
     const proof = runServiceStartupIpc(service_kind, &failure_code) orelse signalFault(detail, failure_code);
     zigos_userspace_bootstrap.service_kind = @intFromEnum(service_kind);
+    zigos_userspace_bootstrap.auxiliary_kind = .service;
     zigos_userspace_bootstrap.service_ready = 1;
     zigos_userspace_bootstrap.service_operation_count = proof.operation_count;
-    zigos_userspace_bootstrap.service_state_hash = proof.state_hash;
-    zigos_userspace_bootstrap.service_endpoint_id = proof.service_endpoint_id;
-    zigos_userspace_bootstrap.service_peer_endpoint_id = proof.peer_endpoint_id;
-    zigos_userspace_bootstrap.service_ipc_roundtrips = proof.roundtrips;
-    zigos_userspace_bootstrap.service_status_flags = @bitCast(proof.flags);
+    zigos_userspace_bootstrap.auxiliary.service.state_hash = proof.state_hash;
+    zigos_userspace_bootstrap.auxiliary.service.endpoint_id = proof.service_endpoint_id;
+    zigos_userspace_bootstrap.auxiliary.service.peer_endpoint_id = proof.peer_endpoint_id;
+    zigos_userspace_bootstrap.auxiliary.service.ipc_roundtrips = proof.roundtrips;
+    zigos_userspace_bootstrap.auxiliary.service.status_flags = @bitCast(proof.flags);
     publishState(.service_ready, detail, proof.operation_count);
 }
 
@@ -620,6 +622,7 @@ const InputDrain = struct {
 
 fn drainFocusedInput(ui: *UiRuntime, comptime saves_documents: bool) InputDrain {
     if (comptime saves_documents) {
+        if (ui.clipboard.pending()) return .{};
         if (!ui.document.canEdit(zigos_userspace_bootstrap.documentBinding(), &ui.surface)) return .{};
     }
     const input_capability_id = zigos_userspace_bootstrap.input_capability_id;
@@ -632,6 +635,9 @@ fn drainFocusedInput(ui: *UiRuntime, comptime saves_documents: bool) InputDrain 
         if (response.present == 0) return .{};
         received += 1;
         _ = recordInputEvent(ui, &zigos_userspace_bootstrap, response.event, saves_documents);
+        if (comptime saves_documents) {
+            if (ui.clipboard.pending()) return .{};
+        }
     }
     return .{ .exhausted = false };
 }
@@ -648,6 +654,7 @@ fn recordInputEvent(ui: *UiRuntime, state: *mailbox.Mailbox, event: abi.InputEve
     if (ui.surface.model == .compositor) ui.launcher.recordActivation(event, &ui.surface);
     if (comptime saves_documents) {
         if (event.length != 0 and event.bytes[0] == abi.InputByte.commit_text) ui.document.requestSave(state.documentBinding(), &ui.surface);
+        ui.clipboard.start(state.clipboardBinding(), &ui.surface, event);
     }
     return true;
 }
@@ -744,13 +751,14 @@ fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
             const launcher_work = if (ui.surface.model == .compositor) ui.launcher.step(zigos_userspace_bootstrap.launcherBinding(), &ui.surface, DocumentTransport{}) else false;
             const input = drainFocusedInput(ui, saves_documents);
+            const clipboard_work = if (comptime saves_documents) ui.clipboard.step(&ui.surface, DocumentTransport{}) else false;
             const document_work = if (comptime saves_documents) work: {
                 const pending = ui.document.step(zigos_userspace_bootstrap.documentBinding(), &ui.surface, DocumentTransport{});
                 break :work pending;
             } else false;
             if (zigos_userspace_bootstrap.ui_state_revision != ui.surface.revision) publishUiState(&zigos_userspace_bootstrap, &ui.surface);
             _ = presentUiState(&zigos_userspace_bootstrap, &ui.surface);
-            break :wait if (input.exhausted and !document_work and !launcher_work and !ui.launcher.hasUnsentDecision()) blk: {
+            break :wait if (input.exhausted and !document_work and !clipboard_work and !launcher_work and !ui.launcher.hasUnsentDecision()) blk: {
                 parkUntilEvent();
                 break :blk .wait_for_event;
             } else .runnable;

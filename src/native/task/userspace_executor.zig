@@ -769,6 +769,7 @@ pub const Executor = struct {
         capability_table: *const capability.CapabilityTable,
         task_id: u64,
         binding: userspace_bootstrap_mailbox.DocumentBinding,
+        clipboard: userspace_bootstrap_mailbox.ClipboardBinding,
         now_ticks: u64,
     ) bool {
         if (builtin.target.os.tag != .freestanding) return false;
@@ -789,7 +790,15 @@ pub const Executor = struct {
         if (mapping.resume_valid or mapping.initial_mailbox_prepared or mapping.mailbox_publication_cache.initialized) return false;
         var update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks) orelse return false;
         update.document = binding;
-        const mailbox = kernelPublishedMailbox(update, null);
+        var mailbox = kernelPublishedMailbox(update, null);
+        if (clipboard.isValid()) {
+            if (!task.hasCapability(clipboard.endpoint_capability_id)) return false;
+            const transport = capability_table.requireUsable(clipboard.endpoint_capability_id, now_ticks) catch return false;
+            if (!transport.holder.eql(task.owner) or transport.scope.task_id != task_id or
+                transport.target.kind != .endpoint or !transport.rights.has(.endpoint_send) or !transport.rights.has(.endpoint_recv)) return false;
+            mailbox.auxiliary_kind = .clipboard;
+            mailbox.auxiliary = .{ .clipboard = clipboard };
+        }
         freestanding.paging.writeOwnedUserRange(&mapping.address_space.?, update.address, std.mem.asBytes(&mailbox)) catch return false;
         storeCapturedMailbox(mapping, mailbox);
         mapping.initial_mailbox_prepared = true;
