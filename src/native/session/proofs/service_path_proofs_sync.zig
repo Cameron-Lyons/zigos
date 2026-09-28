@@ -734,7 +734,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
     try stack.bindPeerLink(target_device, .{ 0x02, 0x5A, 0x47, 0, 0, 2 });
-    const connection = try stack.openServiceIdentity(&broker, .{
+    var connection = try stack.openServiceIdentity(&broker, .{
         .task_id = network_service_task.id,
         .principal_id = network_service_task.owner,
         .capability_id = policy_capability.id,
@@ -753,6 +753,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         },
         .now_ticks = 121,
     }, source_device, target_device);
+    defer connection.deinit();
     try std.testing.expect(connection.attestation_required);
     try std.testing.expect(connection.identity_pinned);
     try std.testing.expectEqualStrings("overlay.service-path.notes", connection.serviceIdentitySlice());
@@ -811,7 +812,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     }, source_device));
     try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, discovery_stack.last_denial_reason);
 
-    const discovery_connection = try discovery_stack.openLocalDiscovery(&broker, .{
+    var discovery_connection = try discovery_stack.openLocalDiscovery(&broker, .{
         .task_id = network_service_task.id,
         .principal_id = network_service_task.owner,
         .capability_id = discovery_capability.id,
@@ -819,6 +820,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         .evidence = .{ .destination = .{ .discovery_class = "printer" } },
         .now_ticks = 124,
     }, source_device);
+    defer discovery_connection.deinit();
     try std.testing.expect(discovery_connection.scoped_discovery);
     try std.testing.expectEqualStrings("printer", discovery_connection.discoveryClassSlice());
 

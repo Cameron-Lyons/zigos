@@ -460,6 +460,7 @@ fn proveNativeDriverPacketCapture(
         .evidence = .{ .destination = .{ .domain = "relay.zigos.dev" } },
         .now_ticks = 302,
     }, context.sync_task_id, context.network_service_id, local_device_principal, tablet_device_principal, "relay.zigos.dev") catch return false;
+    defer connection.deinit();
 
     const driver_tx_before = network_driver_task.activeDriverTransmitCount();
     stage = "first_transmit";
@@ -477,7 +478,7 @@ fn proveNativeDriverPacketCapture(
     const driver_frame = network_driver_task.lastActiveDriverFrame();
     if (driver_frame.len == 0 or !std.mem.eql(u8, captured.slice(), driver_frame)) return false;
 
-    const view = native_transport.assertLastCapturedFrame(.{
+    const view = native_transport.assertLastCapturedFrame(&connection.session, .{
         .session_id = connection.session.id,
         .sequence = delivery.sequence,
         .source_task_id = connection.source_task_id,
@@ -502,7 +503,7 @@ fn proveNativeDriverPacketCapture(
     stage = "malformed_packet";
     malformed_packet.bytes[0] ^= 0x55;
     var malformed_rejected = false;
-    _ = sync_transport.decodeNativeSyncFrame(malformed_packet.slice()) catch |err| {
+    _ = sync_transport.decodeNativeSyncFrame(&connection.session, malformed_packet.slice()) catch |err| {
         if (err != error.NativeTransportMalformedFrame) return false;
         malformed_rejected = true;
     };
@@ -585,7 +586,10 @@ fn proveNativeDriverPacketCapture(
             const result = network_driver_task.receiveActiveFrame(&received);
             if (result.status == .failed) return false;
             if (result.status == .frame) {
-                const peer_frame = sync_transport.decodeNativeSyncFrame(received[0..result.length]) catch continue;
+                // This stage proves only physical frame delivery. The peer has
+                // its own random traffic key; remote key establishment and
+                // authenticated object admission are separate release work.
+                const peer_frame = sync_transport.inspectNativeSyncFrame(received[0..result.length]) catch continue;
                 if (!peer_frame.encrypted() or !peer_frame.egressAllowed() or containsBootedNativeSyncPlaintext(received[0..result.length])) return false;
                 // Finish with a reply after observing the peer, so both guests
                 // can complete even when the first boot's packets were dropped.

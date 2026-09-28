@@ -36,6 +36,7 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(tsc_deadline);
     std.testing.refAllDecls(abi);
     std.testing.refAllDecls(crypto_hash);
+    _ = @import("../../native/core/transport_crypto.zig");
     std.testing.refAllDecls(ids);
     std.testing.refAllDecls(indexed_arena);
     std.testing.refAllDecls(native_smoke_markers);

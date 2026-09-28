@@ -71,10 +71,10 @@
       "id": "TM-007",
       "domain": "sync-trust",
       "abuse_case": "A remote node replays, duplicates, or redirects sync frames without a trusted platform root.",
-      "mitigation": "Device graph enrollment, durable transport frames, private overlay policy, and replay rejection are test backed.",
-      "negative_tests": ["src/native/sync/sync_service_test.zig", "scripts/run-sync-two-node-qemu.sh"],
+      "mitigation": "Device graph authorization, durable replay rejection and policy remain test backed. Packet encryption uses XChaCha20-Poly1305 with fresh CSPRNG secrets/nonces; native sync v4 also authenticates sequence and task routing with HMAC-SHA256. Malformed or unauthenticated packets cannot expose plaintext through the decrypt API. Diagnostic wire inspection grants no peer trust. Authenticated remote key establishment and network-to-storage admission remain release blockers.",
+      "negative_tests": ["src/native/core/transport_crypto.zig", "src/native/sync/sync_transport.zig", "src/native/sync/sync_service_test.zig", "scripts/run-sync-two-node-qemu.sh"],
       "residual_risk_owner": "sync-owner",
-      "residual_risk_decision": "accepted-for-release-with-two-node-and-fuzzed-record-gates"
+      "residual_risk_decision": "blocked-pending-authenticated-key-establishment-and-inbound-admission"
     },
     {
       "id": "TM-008",

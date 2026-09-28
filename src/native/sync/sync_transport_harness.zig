@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const transport_crypto = @import("../core/transport_crypto.zig");
 const attestation_service = @import("../platform/attestation_service.zig");
 const capability = @import("../kernel_api/capability.zig");
 const crypto_hash = @import("../core/crypto_hash.zig");
@@ -48,7 +49,7 @@ comptime {
     }
 }
 
-pub const Error = error{
+pub const Error = transport_crypto.Error || error{
     EgressDenied,
     PacketEmpty,
     PacketTooLarge,
@@ -68,11 +69,11 @@ pub const EncryptedPacket = struct {
     transport: sync_state.TransportMode,
     policy_id: u64,
     capability_id: u64,
-    source_device: principal.PrincipalId,
-    target_device: principal.PrincipalId,
+    source_serial: u64,
+    target_serial: u64,
     ciphertext_len: u16,
     ciphertext: [MAX_PACKET_BYTES]u8,
-    payload_digest: crypto_hash.Digest,
+    authentication: transport_crypto.Authentication,
     encrypted: bool,
     egress_allowed: bool,
 
@@ -209,8 +210,8 @@ pub const Relay = struct {
         const slot = &queue.packets.slots[slot_index];
         if (!slot.in_use) native_util.impossibleByInvariant("relay session index points at a free packet");
         if (slot.packet.session_id != session.id or
-            !slot.packet.target_device.eql(session.target_device) or
-            !slot.packet.source_device.eql(session.source_device))
+            slot.packet.target_serial != session.target_device.serial or
+            slot.packet.source_serial != session.source_device.serial)
         {
             native_util.impossibleByInvariant("relay session index points at the wrong packet");
         }
@@ -327,8 +328,8 @@ pub const BootedOverlayRelayService = struct {
             frame.packet.transport != session.transport or
             frame.packet.policy_id != session.policy_id or
             frame.packet.capability_id != session.capability_id or
-            !frame.packet.source_device.eql(session.source_device) or
-            !frame.packet.target_device.eql(session.target_device))
+            frame.packet.source_serial != session.source_device.serial or
+            frame.packet.target_serial != session.target_device.serial)
         {
             return self.reject(error.PacketTargetMismatch);
         }
@@ -379,7 +380,7 @@ fn relayPacketSlotId(slot: *const RelayPacketSlot) u64 {
 }
 
 fn relayPacketSessionKey(packet: EncryptedPacket) u64 {
-    return relaySessionKey(packet.session_id, packet.source_device, packet.target_device);
+    return relaySessionKey(packet.session_id, .{ .kind = .device, .serial = packet.source_serial }, .{ .kind = .device, .serial = packet.target_serial });
 }
 
 fn relaySessionKey(session_id: u64, source_device: principal.PrincipalId, target_device: principal.PrincipalId) u64 {
@@ -418,6 +419,10 @@ pub const TransportSession = struct {
     attestation_verifier_metadata_digest_present: bool = false,
     attestation_verifier_metadata_digest_bound: bool = false,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
+
+    pub fn deinit(self: *TransportSession) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+    }
 
     pub fn relayDomainSlice(self: *const TransportSession) []const u8 {
         return self.relay_domain[0..@as(usize, self.relay_domain_len)];
@@ -563,17 +568,16 @@ pub const Harness = struct {
             .transport = session.transport,
             .policy_id = session.policy_id,
             .capability_id = session.capability_id,
-            .source_device = session.source_device,
-            .target_device = session.target_device,
+            .source_serial = session.source_device.serial,
+            .target_serial = session.target_device.serial,
             .ciphertext_len = @intCast(plaintext.len),
             .ciphertext = [_]u8{0} ** MAX_PACKET_BYTES,
-            .payload_digest = digestPayload(session, plaintext),
+            .authentication = undefined,
             .encrypted = true,
             .egress_allowed = session.egress_decision.allowed,
         };
-        for (plaintext, 0..) |byte, index| {
-            packet.ciphertext[index] = byte ^ session.key[index % session.key.len];
-        }
+        const context = packetContext(&packet);
+        packet.authentication = try transport_crypto.seal(packet.ciphertext[0..plaintext.len], plaintext, session.key, &context);
         self.encrypted_packets +|= 1;
         return packet;
     }
@@ -632,7 +636,7 @@ pub const Harness = struct {
             .capability_id = request.capability_id,
             .source_device = source_device,
             .target_device = target_device,
-            .key = deriveSessionKey(transport, trust_posture, request, source_device, target_device, relay_domain),
+            .key = try transport_crypto.freshKey(sessionContext(transport, trust_posture, request, source_device, target_device, relay_domain)),
             .egress_decision = decision,
             .trust_posture = trust_posture,
             .verified_remote_attestation = request.evidence.verified_remote_attestation,
@@ -738,6 +742,7 @@ pub fn signPacket(
     packet: EncryptedPacket,
     identity: signing.SignerIdentity,
 ) Error!SignedEncryptedFrame {
+    if (packet.ciphertext_len == 0 or packet.ciphertext_len > MAX_PACKET_BYTES) return error.PacketTooLarge;
     const digest = packetDigest(packet);
     return .{
         .packet = packet,
@@ -747,12 +752,13 @@ pub fn signPacket(
 }
 
 pub fn verifySignedFrame(frame: *const SignedEncryptedFrame) bool {
+    if (frame.packet.ciphertext_len == 0 or frame.packet.ciphertext_len > MAX_PACKET_BYTES) return false;
     const expected_digest = packetDigest(frame.packet);
     if (!std.mem.eql(u8, &expected_digest, &frame.packet_digest)) return false;
     return signing.verify(frame.signature, &frame.packet_digest);
 }
 
-fn deriveSessionKey(
+fn sessionContext(
     transport: sync_state.TransportMode,
     trust_posture: SessionTrustPosture,
     request: network_policy.EgressConnectionRequest,
@@ -798,11 +804,18 @@ fn sessionTrustPosture(
     return .local_lab_only;
 }
 
-fn digestPayload(session: *const TransportSession, plaintext: []const u8) crypto_hash.Digest {
+fn packetContext(packet: *const EncryptedPacket) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateInt(&hasher, "session", session.id);
-    crypto_hash.updateBytes(&hasher, "key", &session.key);
-    crypto_hash.updateBytes(&hasher, "plaintext", plaintext);
+    crypto_hash.updateBytes(&hasher, "protocol", "zigos.sync.packet.v4");
+    crypto_hash.updateInt(&hasher, "session", packet.session_id);
+    crypto_hash.updateEnum(&hasher, "transport", packet.transport);
+    crypto_hash.updateInt(&hasher, "policy", packet.policy_id);
+    crypto_hash.updateInt(&hasher, "capability", packet.capability_id);
+    crypto_hash.updateInt(&hasher, "source-device", packet.source_serial);
+    crypto_hash.updateInt(&hasher, "target-device", packet.target_serial);
+    crypto_hash.updateInt(&hasher, "length", packet.ciphertext_len);
+    crypto_hash.updateBool(&hasher, "encrypted", packet.encrypted);
+    crypto_hash.updateBool(&hasher, "egress-allowed", packet.egress_allowed);
     return crypto_hash.finalize(&hasher);
 }
 
@@ -812,18 +825,13 @@ pub fn packetDigest(packet: EncryptedPacket) crypto_hash.Digest {
     crypto_hash.updateEnum(&hasher, "transport", packet.transport);
     crypto_hash.updateInt(&hasher, "policy", packet.policy_id);
     crypto_hash.updateInt(&hasher, "capability", packet.capability_id);
-    updatePrincipal(&hasher, "source", packet.source_device);
-    updatePrincipal(&hasher, "target", packet.target_device);
+    crypto_hash.updateInt(&hasher, "source-device", packet.source_serial);
+    crypto_hash.updateInt(&hasher, "target-device", packet.target_serial);
     crypto_hash.updateBytes(&hasher, "ciphertext", packet.ciphertextSlice());
-    crypto_hash.updateBytes(&hasher, "payload-digest", &packet.payload_digest);
+    crypto_hash.updateBytes(&hasher, "authentication", &packet.authentication);
     crypto_hash.updateBool(&hasher, "encrypted", packet.encrypted);
     crypto_hash.updateBool(&hasher, "egress-allowed", packet.egress_allowed);
     return crypto_hash.finalize(&hasher);
-}
-
-fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principal.PrincipalId) void {
-    const bytes = value.keyBytes();
-    crypto_hash.updateBytes(hasher, tag, &bytes);
 }
 
 fn validateSessionRequest(
@@ -859,29 +867,25 @@ fn decryptPacket(
     packet: EncryptedPacket,
     plaintext_out: []u8,
 ) Error![]const u8 {
+    errdefer std.crypto.secureZero(u8, plaintext_out[0..@min(plaintext_out.len, MAX_PACKET_BYTES)]);
     try validateSessionForCrypto(session);
     if (!packet.encrypted or !packet.egress_allowed) return error.EgressDenied;
     if (packet.session_id != session.id or
         packet.transport != session.transport or
         packet.policy_id != session.policy_id or
         packet.capability_id != session.capability_id or
-        !packet.target_device.eql(session.target_device) or
-        !packet.source_device.eql(session.source_device))
+        packet.target_serial != session.target_device.serial or
+        packet.source_serial != session.source_device.serial)
     {
         return error.PacketTargetMismatch;
     }
     const ciphertext_len: usize = @intCast(packet.ciphertext_len);
+    if (ciphertext_len == 0) return error.PacketEmpty;
     if (ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
     if (ciphertext_len > plaintext_out.len) return error.PacketTooLarge;
-    var index: usize = 0;
-    while (index < ciphertext_len) : (index += 1) {
-        plaintext_out[index] = packet.ciphertext[index] ^ session.key[index % session.key.len];
-    }
     const plaintext = plaintext_out[0..ciphertext_len];
-    const expected_digest = digestPayload(session, plaintext);
-    if (!std.mem.eql(u8, &expected_digest, &packet.payload_digest)) {
-        return error.PacketAuthenticationFailed;
-    }
+    const context = packetContext(&packet);
+    transport_crypto.open(plaintext, packet.ciphertextSlice(), packet.authentication, session.key, &context) catch return error.PacketAuthenticationFailed;
     return plaintext;
 }
 
@@ -898,6 +902,7 @@ pub fn decryptSignedFrame(
     frame: *const SignedEncryptedFrame,
     plaintext_out: []u8,
 ) Error![]const u8 {
+    errdefer std.crypto.secureZero(u8, plaintext_out[0..@min(plaintext_out.len, MAX_PACKET_BYTES)]);
     if (!verifySignedFrame(frame)) return error.PacketAuthenticationFailed;
     return decryptPacket(session, frame.packet, plaintext_out);
 }
@@ -1112,7 +1117,7 @@ test "booted overlay relay service rejects unauthorized relay and target changes
     try std.testing.expectError(error.EgressDenied, relay_service.submitSignedFrame(78, &session, blocked_frame));
     try std.testing.expectError(error.EgressDenied, relay_service.submitSignedFrame(0, &session, blocked_frame));
     var tampered_packet = try harness.encryptPacket(&session, "target change");
-    tampered_packet.target_device = other_target;
+    tampered_packet.target_serial = other_target.serial;
     const tampered_frame = try signPacket(tampered_packet, signer_identity);
     try std.testing.expectError(error.PacketTargetMismatch, relay_service.submitSignedFrame(77, &session, tampered_frame));
     try std.testing.expectEqual(@as(usize, 1), relay_service.accepted_packets);
@@ -1299,8 +1304,8 @@ test "encrypted transport harness binds device sessions to attested identity and
 
     const packet = try harness.encryptPacket(&session, "local sync");
     try std.testing.expect(packet.encrypted);
-    try std.testing.expectEqual(source, packet.source_device);
-    try std.testing.expectEqual(target, packet.target_device);
+    try std.testing.expectEqual(source.serial, packet.source_serial);
+    try std.testing.expectEqual(target.serial, packet.target_serial);
 
     var plaintext_buffer: [MAX_PACKET_BYTES]u8 = undefined;
     var forged_packet = packet;
@@ -1316,7 +1321,7 @@ test "encrypted transport harness binds device sessions to attested identity and
     forged_packet.capability_id += 1;
     try std.testing.expectError(error.PacketTargetMismatch, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
     forged_packet = packet;
-    forged_packet.source_device = other_target;
+    forged_packet.source_serial = other_target.serial;
     try std.testing.expectError(error.PacketTargetMismatch, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
     forged_packet = packet;
     forged_packet.encrypted = false;
@@ -1324,6 +1329,17 @@ test "encrypted transport harness binds device sessions to attested identity and
     forged_packet = packet;
     forged_packet.ciphertext_len = MAX_PACKET_BYTES + 1;
     try std.testing.expectError(error.PacketTooLarge, decryptForSession(&session, forged_packet, plaintext_buffer[0..]));
+    const packet_signer = signing.SignerIdentity{ .label = "transport-bounds", .seed = signing.seedFromByte(0x54) };
+    var malformed_signed = try signPacket(packet, packet_signer);
+    malformed_signed.packet.ciphertext_len = MAX_PACKET_BYTES + 1;
+    @memset(&plaintext_buffer, 0xa5);
+    try std.testing.expectError(error.PacketAuthenticationFailed, decryptSignedFrame(&session, &malformed_signed, &plaintext_buffer));
+    try std.testing.expect(std.mem.allEqual(u8, &plaintext_buffer, 0));
+    try std.testing.expectError(error.PacketTooLarge, signPacket(forged_packet, packet_signer));
+    var retired_session = session;
+    retired_session.deinit();
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&retired_session), 0));
+    try std.testing.expectError(error.EgressDenied, harness.encryptPacket(&retired_session, "retired"));
 
     try std.testing.expectEqual(@as(usize, 4), harness.created_sessions);
     try std.testing.expectEqual(@as(usize, 1), harness.denied_sessions);
@@ -1447,12 +1463,14 @@ test "compact relay metadata preserves exact packet and domain capacities" {
     try std.testing.expectEqual(@as(usize, EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES), @sizeOf(EmulatedNativeTransport));
     try std.testing.expect(relay_queue_layout.heap_backs_queue_on_freestanding);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), relay_queue_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 7_000), relay_queue_layout.backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 6_992), relay_queue_layout.freestanding_resident_savings_bytes);
+    try std.testing.expectEqual(@as(usize, 6_872), relay_queue_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 6_864), relay_queue_layout.freestanding_resident_savings_bytes);
     try std.testing.expect(relay_queue_layout.uses_packet_arena);
     try std.testing.expect(relay_queue_layout.uses_session_index);
-    try std.testing.expectEqual(@as(usize, RELAY_SIZE_CEILING_BYTES), @sizeOf(Relay));
-    try std.testing.expectEqual(@as(usize, BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES), @sizeOf(BootedOverlayRelayService));
+    try std.testing.expect(@sizeOf(Relay) <= RELAY_SIZE_CEILING_BYTES);
+    try std.testing.expectEqual(@as(usize, if (builtin.target.os.tag == .freestanding) 16 else 6880), @sizeOf(Relay));
+    try std.testing.expect(@sizeOf(BootedOverlayRelayService) <= BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES);
+    try std.testing.expectEqual(@as(usize, if (builtin.target.os.tag == .freestanding) 112 else 6976), @sizeOf(BootedOverlayRelayService));
 
     const packet_bytes = [_]u8{0xA5} ** MAX_PACKET_BYTES;
     var packet = std.mem.zeroes(EncryptedPacket);

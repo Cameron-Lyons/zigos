@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const transport_crypto = @import("../core/transport_crypto.zig");
 const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
@@ -218,8 +219,8 @@ pub const SERVICE_IDENTITY_FRAME_SIZE_CEILING_BYTES: usize = 320;
 pub const LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES: usize = 192;
 pub const LOCAL_DISCOVERY_FRAME_SIZE_CEILING_BYTES: usize = 288;
 pub const QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES: usize = 1_502;
-const SERVICE_IDENTITY_FRAME_MAGIC = "ZGNI";
-const DISCOVERY_FRAME_MAGIC = "ZGND";
+const SERVICE_IDENTITY_FRAME_MAGIC = "ZGN2";
+const DISCOVERY_FRAME_MAGIC = "ZGD2";
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PayloadTooLarge);
 
 comptime {
@@ -234,7 +235,7 @@ comptime {
     }
 }
 
-pub const Error = error{
+pub const Error = transport_crypto.Error || error{
     EgressDenied,
     TransmitFailed,
     PayloadTooLarge,
@@ -269,6 +270,10 @@ pub const NativeServiceIdentityConnection = struct {
     identity_pinned: bool,
     egress_decision: network_policy.EgressDecision,
 
+    pub fn deinit(self: *NativeServiceIdentityConnection) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+    }
+
     pub fn serviceIdentitySlice(self: *const NativeServiceIdentityConnection) []const u8 {
         return self.service_identity[0..@as(usize, self.service_identity_len)];
     }
@@ -287,11 +292,9 @@ pub const NativeServiceIdentityFrameFlags = packed struct(u8) {
 
 pub const NativeServiceIdentityFrame = struct {
     connection_id: u64,
-    policy_id: u64,
-    capability_id: u64,
     payload_len: u8,
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
-    payload_digest: crypto_hash.Digest,
+    authentication: transport_crypto.Authentication,
     peer_root_digest: crypto_hash.Digest,
     flags: NativeServiceIdentityFrameFlags,
     attestation_request_digest: crypto_hash.Digest,
@@ -316,6 +319,10 @@ pub const NativeLocalDiscoveryConnection = struct {
     scoped_discovery: bool,
     egress_decision: network_policy.EgressDecision,
 
+    pub fn deinit(self: *NativeLocalDiscoveryConnection) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+    }
+
     pub fn discoveryClassSlice(self: *const NativeLocalDiscoveryConnection) []const u8 {
         return self.discovery_class[0..@as(usize, self.discovery_class_len)];
     }
@@ -323,11 +330,9 @@ pub const NativeLocalDiscoveryConnection = struct {
 
 pub const NativeLocalDiscoveryFrame = struct {
     connection_id: u64,
-    policy_id: u64,
-    capability_id: u64,
     probe_len: u8,
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
-    probe_digest: crypto_hash.Digest,
+    authentication: transport_crypto.Authentication,
     discovery_class_len: u8 = 0,
     discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     encrypted: bool,
@@ -417,7 +422,7 @@ pub const NativeNetworkStack = struct {
             .egress_decision = decision,
         };
         connection.service_identity_len = @intCast(native_util.copyTextExact(&connection.service_identity, service_identity) catch return error.ServiceIdentityTooLong);
-        connection.key = nativeConnectionKey(&connection);
+        connection.key = try transport_crypto.freshKey(nativeConnectionContext(&connection));
         self.opened_connections += 1;
         return connection;
     }
@@ -494,7 +499,7 @@ pub const NativeNetworkStack = struct {
             .egress_decision = decision,
         };
         connection.discovery_class_len = @intCast(native_util.copyTextExact(&connection.discovery_class, discovery_class) catch return error.DiscoveryClassTooLong);
-        connection.key = nativeDiscoveryKey(&connection);
+        connection.key = try transport_crypto.freshKey(nativeDiscoveryContext(&connection));
         self.opened_connections += 1;
         return connection;
     }
@@ -510,11 +515,9 @@ pub const NativeNetworkStack = struct {
 
         var frame = NativeServiceIdentityFrame{
             .connection_id = connection.id,
-            .policy_id = connection.policy_id,
-            .capability_id = connection.capability_id,
             .payload_len = @intCast(payload.len),
             .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
-            .payload_digest = nativePayloadDigest(connection, payload),
+            .authentication = undefined,
             .peer_root_digest = connection.peer_root_digest,
             .flags = .{
                 .encrypted = true,
@@ -529,7 +532,8 @@ pub const NativeNetworkStack = struct {
             .attestation_request_digest = connection.attestation_request_digest,
             .attestation_verifier_metadata_digest = connection.attestation_verifier_metadata_digest,
         };
-        applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
+        const context = nativeConnectionContext(connection);
+        frame.authentication = try transport_crypto.seal(frame.ciphertext[0..payload.len], payload, connection.key, &context);
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeNativeFrame(wire_frame[0..], connection, &frame);
@@ -580,17 +584,16 @@ pub const NativeNetworkStack = struct {
 
         var frame = NativeLocalDiscoveryFrame{
             .connection_id = connection.id,
-            .policy_id = connection.policy_id,
-            .capability_id = connection.capability_id,
             .probe_len = @intCast(payload.len),
             .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
-            .probe_digest = nativeDiscoveryDigest(connection, payload),
+            .authentication = undefined,
             .encrypted = true,
             .egress_allowed = true,
             .scoped_discovery = true,
         };
         frame.discovery_class_len = @intCast(native_util.copyTextExact(&frame.discovery_class, connection.discoveryClassSlice()) catch return error.DiscoveryClassTooLong);
-        applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
+        const context = nativeDiscoveryContext(connection);
+        frame.authentication = try transport_crypto.seal(frame.ciphertext[0..payload.len], payload, connection.key, &context);
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeDiscoveryFrame(wire_frame[0..], connection, &frame);
@@ -968,8 +971,9 @@ fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budg
     return service;
 }
 
-fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypto_hash.Digest {
+fn nativeConnectionContext(connection: *const NativeServiceIdentityConnection) crypto_hash.Digest {
     var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "protocol", SERVICE_IDENTITY_FRAME_MAGIC);
     crypto_hash.updateInt(&hasher, "connection", connection.id);
     crypto_hash.updateInt(&hasher, "policy", connection.policy_id);
     crypto_hash.updateInt(&hasher, "capability", connection.capability_id);
@@ -992,29 +996,15 @@ fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypt
     return crypto_hash.finalize(&hasher);
 }
 
-fn nativePayloadDigest(connection: *const NativeServiceIdentityConnection, payload: []const u8) crypto_hash.Digest {
+fn nativeDiscoveryContext(connection: *const NativeLocalDiscoveryConnection) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "key", &connection.key);
-    crypto_hash.updateBytes(&hasher, "payload", payload);
-    return crypto_hash.finalize(&hasher);
-}
-
-fn nativeDiscoveryKey(connection: *const NativeLocalDiscoveryConnection) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "protocol", DISCOVERY_FRAME_MAGIC);
     crypto_hash.updateInt(&hasher, "connection", connection.id);
     crypto_hash.updateInt(&hasher, "policy", connection.policy_id);
     crypto_hash.updateInt(&hasher, "capability", connection.capability_id);
     updatePrincipal(&hasher, "source", connection.source_device);
     crypto_hash.updateBytes(&hasher, "source-mac", &connection.source_mac);
     crypto_hash.updateBytes(&hasher, "discovery-class", connection.discoveryClassSlice());
-    return crypto_hash.finalize(&hasher);
-}
-
-fn nativeDiscoveryDigest(connection: *const NativeLocalDiscoveryConnection, payload: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "key", &connection.key);
-    crypto_hash.updateBytes(&hasher, "discovery-class", connection.discoveryClassSlice());
-    crypto_hash.updateBytes(&hasher, "payload", payload);
     return crypto_hash.finalize(&hasher);
 }
 
@@ -1027,12 +1017,12 @@ fn encodeNativeFrame(
         buffer,
         SERVICE_IDENTITY_FRAME_MAGIC,
         frame.connection_id,
-        frame.policy_id,
-        frame.capability_id,
+        connection.policy_id,
+        connection.capability_id,
         &connection.source_mac,
         connection.serviceIdentitySlice(),
         frame.ciphertextSlice(),
-        &frame.payload_digest,
+        &frame.authentication,
     );
 }
 
@@ -1045,12 +1035,12 @@ fn encodeDiscoveryFrame(
         buffer,
         DISCOVERY_FRAME_MAGIC,
         frame.connection_id,
-        frame.policy_id,
-        frame.capability_id,
+        connection.policy_id,
+        connection.capability_id,
         &connection.source_mac,
         connection.discoveryClassSlice(),
         frame.ciphertextSlice(),
-        &frame.probe_digest,
+        &frame.authentication,
     );
 }
 
@@ -1081,16 +1071,6 @@ fn encodeWireFrame(
     try writer.writeBytes(ciphertext);
     try writer.writeBytes(digest);
     return buffer[0..writer.offset];
-}
-
-fn applyModeledKeystream(
-    ciphertext: *[MAX_NATIVE_PAYLOAD_BYTES]u8,
-    payload: []const u8,
-    key: *const crypto_hash.Digest,
-) void {
-    for (payload, 0..) |byte, index| {
-        ciphertext[index] = byte ^ key[index % key.len];
-    }
 }
 
 fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principal.PrincipalId) void {
@@ -1154,9 +1134,9 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryFrame, "discovery_class_len"));
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(ReceiveResult));
     try std.testing.expectEqual(@as(usize, 320), @sizeOf(NativeServiceIdentityConnection));
-    try std.testing.expectEqual(@as(usize, 320), @sizeOf(NativeServiceIdentityFrame));
+    try std.testing.expectEqual(@as(usize, 312), @sizeOf(NativeServiceIdentityFrame));
     try std.testing.expectEqual(@as(usize, 192), @sizeOf(NativeLocalDiscoveryConnection));
-    try std.testing.expectEqual(@as(usize, 288), @sizeOf(NativeLocalDiscoveryFrame));
+    try std.testing.expectEqual(@as(usize, 280), @sizeOf(NativeLocalDiscoveryFrame));
     try std.testing.expectEqual(@as(usize, 1_502), bounded_metadata_layout.queued_receive_frame_size_bytes);
     try std.testing.expectEqual(@as(usize, 48_064), bounded_metadata_layout.receive_queue_size_bytes);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), bounded_metadata_layout.freestanding_receive_queue_handle_size_bytes);
@@ -1666,6 +1646,14 @@ test "native network stack gates service identity packets on attested policy cap
 
     const frame = try stack.sendServiceIdentityFrame(&connection, "native payload");
     try std.testing.expectEqualSlices(u8, &target_mac, &Harness.last_destination);
+    var opened: ["native payload".len]u8 = undefined;
+    const context = nativeConnectionContext(&connection);
+    try transport_crypto.open(&opened, frame.ciphertextSlice(), frame.authentication, connection.key, &context);
+    try std.testing.expectEqualStrings("native payload", &opened);
+    var changed_context = context;
+    changed_context[0] ^= 1;
+    try std.testing.expectError(error.AuthenticationFailed, transport_crypto.open(&opened, frame.ciphertextSlice(), frame.authentication, connection.key, &changed_context));
+    try std.testing.expect(std.mem.allEqual(u8, &opened, 0));
     try std.testing.expect(frame.flags.encrypted);
     try std.testing.expect(frame.flags.egress_allowed);
     try std.testing.expect(frame.flags.attested);

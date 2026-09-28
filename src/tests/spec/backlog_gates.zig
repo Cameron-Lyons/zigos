@@ -152,7 +152,7 @@ pub fn networkTransportHardeningGate() !void {
     try std.testing.expect(signed_delivery.network_delivered);
     try std.testing.expectEqual(@as(usize, 1), Driver.send_count);
     try std.testing.expectEqualSlices(u8, &target_mac, &Driver.last_destination);
-    const captured = try native_transport.assertLastCapturedFrame(.{
+    const captured = try native_transport.assertLastCapturedFrame(&connection.session, .{
         .session_id = connection.session.id,
         .sequence = signed_delivery.sequence,
         .source_task_id = connection.source_task_id,

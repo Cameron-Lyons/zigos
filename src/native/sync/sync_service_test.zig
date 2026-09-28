@@ -1090,7 +1090,9 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     var tampered = signed_frame;
     tampered.packet.ciphertext[0] ^= 0x01;
     try std.testing.expect(!sync_transport.verifySignedFrame(&tampered));
-    try std.testing.expectError(error.PacketAuthenticationFailed, sync_transport.decryptSignedFrame(&relay_session, &tampered, authenticated_buffer[0..]));
+    var rejected_buffer = [_]u8{0xa5} ** sync_transport.MAX_PACKET_BYTES;
+    try std.testing.expectError(error.PacketAuthenticationFailed, sync_transport.decryptSignedFrame(&relay_session, &tampered, rejected_buffer[0..]));
+    try std.testing.expect(std.mem.allEqual(u8, &rejected_buffer, 0));
 
     const delimiter = std.mem.indexOfScalar(u8, authenticated, '|') orelse return error.MissingPayloadDelimiter;
     const replicated_path = authenticated[0..delimiter];

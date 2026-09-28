@@ -441,7 +441,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
 
             var broker = self.service.egressBroker(network_capabilities);
             var transport = sync_transport.Harness.init();
-            _ = try transport.openRelay(&broker, .{
+            var session = try transport.openRelay(&broker, .{
                 .task_id = self.service.task_id,
                 .principal_id = self.service.owner,
                 .capability_id = request.relay_capability_id,
@@ -449,6 +449,7 @@ pub fn SyncPortWith(comptime ServiceType: type) type {
                 .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
                 .now_ticks = request.tick,
             }, request.from_device, request.to_device, policy.relayDomainSlice());
+            defer session.deinit();
         }
 
         fn authorizeWorkspaceAnyShare(

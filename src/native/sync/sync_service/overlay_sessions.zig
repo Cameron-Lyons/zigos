@@ -30,6 +30,7 @@ pub fn sendOverlayRelayFrameViaService(
         .evidence = .{ .destination = .{ .domain = policy.relayDomainSlice() } },
         .now_ticks = request.tick,
     }, service.task_id, relay_service.task_id, request.from_device, request.to_device, policy.relayDomainSlice());
+    defer connection.deinit();
     const overlay_session = try service.openOverlaySession(
         request.workspace_id,
         request.from_device,
@@ -48,18 +49,18 @@ pub fn sendOverlayRelayFrameViaService(
         (try transport.receive(&connection)).payload();
     if (!std.mem.eql(u8, delivered, request.payload)) return error.PacketAuthenticationFailed;
 
-    return overlayRelayFrameResult(overlay_session, connection.session, delivery.signed_frame, delivered.len);
+    return overlayRelayFrameResult(overlay_session, connection.session.id, delivery.signed_frame, delivered.len);
 }
 
 fn overlayRelayFrameResult(
     overlay_session: *const OverlaySession,
-    transport_session: sync_transport.TransportSession,
+    transport_session_id: u64,
     signed_frame: sync_transport.SignedEncryptedFrame,
     delivered_len: usize,
 ) Error!OverlayRelayFrameResult {
     var result = OverlayRelayFrameResult{
         .overlay_session_id = overlay_session.session_id,
-        .transport_session_id = transport_session.id,
+        .transport_session_id = transport_session_id,
         .usage = overlay_session.usage,
         .encrypted = overlay_session.encrypted and signed_frame.packet.encrypted,
         .relay_encrypted = overlay_session.relay_encrypted,
