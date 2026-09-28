@@ -1,5 +1,5 @@
 const std = @import("std");
-const document_signer = @import("../../native/storage/document_signer.zig");
+const object_signer = @import("../../native/storage/sealed_object_signer.zig");
 const vault = @import("../../native/services/secret_vault_service.zig");
 const policy = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
@@ -10,9 +10,9 @@ const signing = @import("../../native/core/signing.zig");
 pub const Fixture = struct {
     service: vault.Service = .init(),
     policies: policy.Directory = .init(),
-    authority: document_signer.Authority = undefined,
+    authority: object_signer.Authority = undefined,
 
-    pub fn init(self: *Fixture, owner: principal.PrincipalId, holder: principal.PrincipalId, task_id: u64, signer: signing.SignerIdentity) !document_signer.Signer {
+    pub fn init(self: *Fixture, owner: principal.PrincipalId, holder: principal.PrincipalId, task_id: u64, signer: signing.SignerIdentity) !object_signer.Signer {
         self.* = .{};
         self.service.attachHardwareProvider(@import("secret_provider.zig").provider());
         _ = try self.policies.create(.{
@@ -35,6 +35,6 @@ pub const Fixture = struct {
             .expires_at_ticks = std.math.maxInt(u64),
             .now_ticks = 0,
         }, null);
-        return document_signer.Signer.bind(&self.authority, handle.id, 0);
+        return object_signer.Signer.bind(&self.authority, handle.id, 0);
     }
 };

@@ -9,13 +9,16 @@ const signing = @import("../../core/signing.zig");
 const identity = @import("../../platform/os_identity.zig");
 const device_graph = @import("../../sync/device_graph.zig");
 const objects = @import("../../storage/object_store.zig");
+const catalog = @import("../../storage/vault_catalog.zig");
+const object_signer = @import("../../storage/sealed_object_signer.zig");
 const console = @import("../../../kernel/utils/console.zig");
 
 // Verification-only identities and authorization are supplied by the TPM proof.
 const owner = principal.PrincipalId{ .kind = .user, .serial = 0x701 };
 const app = principal.PrincipalId{ .kind = .app, .serial = 0x702 };
 const label = "vault-signing-proof";
-const content_type = "application/x-zigos-tpm-vault-proof";
+const content_type = "application/x-zigos-tpm-vault-enrollment-proof";
+const catalog_object_id: u64 = 0x7010001;
 const signer = signing.SignerIdentity{ .label = label, .seed = @splat(0xb8) };
 
 pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
@@ -33,16 +36,18 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     const found = storage.queryObjects(.{ .object_type = .secret, .content_type = content_type }, &matches);
     if (found.len > 1) return error.DuplicateVaultProof;
     const restored = found.len == 1;
-    var payload: [32 + @import("../../platform/secret_sealing.zig").MAX_BLOB_BYTES]u8 = undefined;
-    var payload_len: usize = 0;
+    // The public fixture signer anchors enrollment only in this verification
+    // workload. Production must obtain the pin from trusted enrollment state.
+    var expected_key: signing.PublicKey = undefined;
+    var catalog_scratch: [catalog.MAX_BYTES]u8 = undefined;
     var secret: *const secrets.SecretRecord = undefined;
     if (restored) {
         const version = storage.latestVersion(found[0].object_id) orelse return error.MissingVaultProof;
         const bytes = try storage.versionPayload(version);
-        if (bytes.len < 32 or bytes.len > payload.len) return error.InvalidVaultProof;
-        @memcpy(payload[0..bytes.len], bytes);
-        payload_len = bytes.len;
-        secret = service.store.restoreSealed(owner, label, payload[32..payload_len], false) catch |err| {
+        if (bytes.len != expected_key.len or !version.metadata.verifyFor(.secret, bytes) or
+            !std.mem.eql(u8, version.metadata.signature.publicKeySlice(), &(try signing.publicKey(signer)))) return error.InvalidVaultProof;
+        @memcpy(&expected_key, bytes);
+        const generation = catalog.restore(storage, &service, .{ .object_id = catalog_object_id, .owner = owner, .public_key = expected_key }, &catalog_scratch) catch |err| {
             if (err != error.InvalidSealedSecret) return err;
             if (service.store.secret_count != 0) return error.PublishedForeignSecret;
             service.attachHardwareProvider(.{});
@@ -50,6 +55,16 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             console.print("ZIGOS:TPM2:VAULT:WRONG_DEVICE\n");
             return;
         };
+        if (generation != 1 or service.store.secret_count != 3 or service.activeHandleCount() != 0 or
+            service.store.handles.countInUse() != 0) return error.InvalidRestoredVault;
+        secret = service.store.describeSecret(1) orelse return error.MissingVaultProof;
+        const portable_lease = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = app, .task_id = 5, .secret_id = 3, .expires_at_ticks = 10, .now_ticks = 1, .allow_raw_export = true }, null);
+        var recovered_bytes: secrets.Value = undefined;
+        defer std.crypto.secureZero(u8, &recovered_bytes);
+        const recovered_value = try service.exportRaw(&policies, subjects, .{ .holder = app, .task_id = 5, .handle_id = portable_lease.id, .now_ticks = 1 }, null, &recovered_bytes);
+        if (recovered_value.len != secrets.MAX_VALUE_BYTES) return error.InvalidRestoredVault;
+        for (recovered_value, 0..) |byte, i| if (byte != i) return error.InvalidRestoredVault;
+        console.print("ZIGOS:TPM2:CATALOG:RESTORED\n");
     } else {
         secret = try service.generateSigningKey(&policies, subjects, .{
             .owner = owner,
@@ -57,9 +72,6 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             .label = label,
             .now_ticks = 1,
         }, null);
-        const blob = secret.sealedBlob() orelse return error.MissingVaultBlob;
-        @memcpy(payload[32..][0..blob.len], blob);
-        payload_len = 32 + blob.len;
     }
     if (secret.resident_material) return error.ResidentVaultMaterial;
     const handle = try service.lendHandle(&policies, subjects, .{
@@ -75,10 +87,10 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     const signature = try service.signDigest(&policies, subjects, request, null);
     if (!signing.verify(signature, &request.digest)) return error.InvalidVaultSignature;
     if (restored) {
-        if (!std.mem.eql(u8, signature.publicKeySlice(), payload[0..32])) return error.RecoveredWrongVaultKey;
-    } else @memcpy(payload[0..32], signature.publicKeySlice());
-    try proveIdentityAssertions(&service, &policies, secret.id, payload[0..32]);
-    try proveDocumentSigning(&service, &policies, secret.id, payload[0..32]);
+        if (!std.mem.eql(u8, signature.publicKeySlice(), &expected_key)) return error.RecoveredWrongVaultKey;
+    } else @memcpy(&expected_key, signature.publicKeySlice());
+    try proveIdentityAssertions(&service, &policies, secret.id, &expected_key);
+    try proveDocumentSigning(&service, &policies, secret.id, &expected_key);
     var out: secrets.Value = @splat(0xaa);
     defer std.crypto.secureZero(u8, &out);
     if (service.exportRaw(&policies, subjects, .{ .holder = app, .task_id = 5, .handle_id = handle.id, .now_ticks = 3 }, null, &out)) |_| {
@@ -94,9 +106,10 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     if (service.signDigest(&policies, subjects, wrong, null)) |_| return error.SignedAfterExpiry else |err| {
         if (err != error.HandleExpired) return err;
     }
+    const initial_count = service.store.secret_count;
     for (0..3) |variant| {
-        if (service.store.restoreSealed(if (variant == 0) app else owner, if (variant == 1) "wrong label" else label, payload[32..payload_len], variant == 2)) |_| return error.AcceptedChangedVaultBinding else |err| {
-            if (err != error.InvalidSealedSecret or service.store.secret_count != 1) return error.BadVaultBindingDenial;
+        if (service.store.restoreSealed(if (variant == 0) app else owner, if (variant == 1) "wrong label" else label, secret.sealedBlob().?, variant == 2)) |_| return error.AcceptedChangedVaultBinding else |err| {
+            if (err != error.InvalidSealedSecret or service.store.secret_count != initial_count) return error.BadVaultBindingDenial;
         }
     }
     // Generate again with identical owner/label and require a different public
@@ -173,27 +186,32 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     if (service.signDigest(&policies, subjects, request, null)) |_| return error.SignedAfterRevocation else |err| {
         if (err != error.HandleRevoked) return err;
     }
-    service.attachHardwareProvider(.{});
-    try client.close(io);
     if (!restored) {
+        const previous = storage.checkpoint_enabled;
+        storage.checkpoint_enabled = false;
+        defer storage.checkpoint_enabled = previous;
         _ = try storage.putLocallySignedVersion(.{
             .object_type = .secret,
-            .payload = payload[0..payload_len],
+            .payload = &expected_key,
             .signer = signer,
             .label = label,
             .content_type = content_type,
             .created_at_ticks = 1,
         });
-        const previous = storage.checkpoint_enabled;
-        storage.checkpoint_enabled = true;
-        defer storage.checkpoint_enabled = previous;
-        _ = try storage.checkpointDurable();
+        const catalog_handle = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = storage.owner, .task_id = storage.task_id, .secret_id = secret.id, .expires_at_ticks = 20, .now_ticks = 6 }, null);
+        var authority = object_signer.Authority{ .service = &service, .policies = &policies, .subjects = subjects, .owner = owner, .holder = storage.owner, .task_id = storage.task_id };
+        const catalog_signer = try object_signer.Signer.bind(&authority, catalog_handle.id, 6);
+        var checkpoint = catalog.Session{};
+        const receipt = try checkpoint.save(storage, &service, catalog_signer, catalog_object_id, 0, 7, &catalog_scratch);
+        if (receipt.catalog_generation != 1 or receipt.checkpoint_generation == 0) return error.InvalidVaultCheckpoint;
+        console.print("ZIGOS:TPM2:CATALOG:COMMITTED\n");
     }
+    service.attachHardwareProvider(.{});
+    try client.close(io);
     console.print(if (restored) "ZIGOS:TPM2:VAULT:RECOVERED\n" else "ZIGOS:TPM2:VAULT:CREATED\n");
 }
 
 fn proveDocumentSigning(service: *vault.Service, policies: *const policy.Directory, secret_id: u64, expected_key: *const signing.PublicKey) !void {
-    const document_signer = @import("../../storage/document_signer.zig");
     const holder = principal.PrincipalId{ .kind = .service, .serial = 0x705 };
     const handle = try service.lendHandle(policies, .{ .user_id = owner.serial }, .{
         .owner = owner,
@@ -203,8 +221,8 @@ fn proveDocumentSigning(service: *vault.Service, policies: *const policy.Directo
         .expires_at_ticks = 10,
         .now_ticks = 2,
     }, null);
-    var authority = document_signer.Authority{ .service = service, .policies = policies, .subjects = .{ .user_id = owner.serial }, .owner = owner, .holder = holder, .task_id = 7 };
-    const document_key = try document_signer.Signer.bind(&authority, handle.id, 3);
+    var authority = object_signer.Authority{ .service = service, .policies = policies, .subjects = .{ .user_id = owner.serial }, .owner = owner, .holder = holder, .task_id = 7 };
+    const document_key = try object_signer.Signer.bind(&authority, handle.id, 3);
     const metadata = try document_key.signMetadata("documents/sealed.md", "TPM-backed document", 3);
     if (!metadata.verifyFor(.document, "TPM-backed document") or
         !std.mem.eql(u8, metadata.signature.publicKeySlice(), expected_key)) return error.InvalidDocumentSignature;

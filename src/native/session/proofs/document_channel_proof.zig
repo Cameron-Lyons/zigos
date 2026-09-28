@@ -8,7 +8,7 @@ const signing = @import("../../core/signing.zig");
 const userspace_launch = @import("../../task/userspace_launch.zig");
 const userspace_executor = @import("../../task/userspace_executor.zig");
 const document_sessions = @import("../document_sessions.zig");
-const document_signer = @import("../../storage/document_signer.zig");
+const object_signer = @import("../../storage/sealed_object_signer.zig");
 const object_store = @import("../../storage/object_store.zig");
 const workspace = @import("../../storage/workspace.zig");
 const paging = @import("../../../kernel/memory/paging64.zig");
@@ -148,7 +148,7 @@ fn chooseOffer(manager: anytype, prepared: PreparedEditor, cancel: bool) !void {
     if (manager.servicePendingInputWork(timer.getTicks()) != @as(usize, if (cancel) 2 else 1)) return error.LaunchInputNotRouted;
 }
 
-fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: document_signer.Signer) !EditorSession {
+fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer) !EditorSession {
     const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C1, document_key);
     errdefer manager.cancelPreparedDocumentTask(prepared.task_id, timer.getTicks()) catch {};
     try chooseOffer(manager, prepared, false);
@@ -165,7 +165,7 @@ fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, docum
     return error.LaunchDecisionTimedOut;
 }
 
-fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: document_signer.Signer) !void {
+fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer) !void {
     const compositor = manager.compositorSessionPtr();
     const windows_before = compositor.window_count;
     const focus_before = compositor.active_window_id;
@@ -191,7 +191,7 @@ fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, doc
     return error.CancelDecisionTimedOut;
 }
 
-fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64, document_key: document_signer.Signer) !EditorSession {
+fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64, document_key: object_signer.Signer) !EditorSession {
     const prepared = try prepareEditor(manager, graph, workspace_id, document_path, surface_id, document_key);
     const launched = try manager.activateDocumentTask(prepared.request, 0);
     if (manager.focusedInputCapabilityForTask(launched.task_id, 0) == null or
@@ -202,7 +202,7 @@ fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path
     return .{ .task_id = launched.task_id, .surface_id = surface_id, .window_id = launched.window_id, .binding = launched.binding, .document_capability_id = prepared.request.authority.capability_id };
 }
 
-fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64, document_key: document_signer.Signer) !PreparedEditor {
+fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64, document_key: object_signer.Signer) !PreparedEditor {
     const storage = manager.storageServicePtr();
     const runtime = manager.runtimePtr();
     const capabilities = manager.capabilityTablePtr();
@@ -259,7 +259,7 @@ fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_p
     } };
 }
 
-fn expectLaunchRollback(manager: anytype, graph: anytype, workspace_id: u64, document_key: document_signer.Signer) !void {
+fn expectLaunchRollback(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer) !void {
     const runtime = manager.runtimePtr();
     const capabilities = manager.capabilityTablePtr();
     const endpoints = manager.kernelPort().?.kernel.endpoint_table;

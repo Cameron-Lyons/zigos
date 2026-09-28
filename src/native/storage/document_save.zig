@@ -4,9 +4,9 @@ const ids = @import("../core/ids.zig");
 const object_store = @import("object_store.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("storage_service.zig");
-const document_signer = @import("document_signer.zig");
+const object_signer = @import("sealed_object_signer.zig");
 
-pub const Request = RequestFor(document_signer.Signer);
+pub const Request = RequestFor(object_signer.Signer);
 pub const VerificationRequest = RequestFor(signing.SignerIdentity);
 
 fn RequestFor(comptime Signer: type) type {
@@ -59,7 +59,7 @@ pub const Session = struct {
     }
 
     fn saveImpl(self: *Session, storage: *storage_service.Service, request: anytype) !Receipt {
-        const uses_vault = @TypeOf(request.signer) == document_signer.Signer;
+        const uses_vault = @TypeOf(request.signer) == object_signer.Signer;
         if (uses_vault) try request.signer.validate(request.tick);
         try storage.requireDurableBoundary();
         const workspace_id = ids.workspace(request.workspace_id);
@@ -151,7 +151,7 @@ fn pathDigest(path: []const u8) crypto_hash.Digest {
 fn requestDigest(request: anytype) !crypto_hash.Digest {
     var hash = crypto_hash.init();
     crypto_hash.updateBytes(&hash, "payload", request.payload);
-    if (@TypeOf(request.signer) == document_signer.Signer) {
+    if (@TypeOf(request.signer) == object_signer.Signer) {
         crypto_hash.updateBytes(&hash, "signer-sealed-key", &request.signer.sealed_digest);
     } else {
         crypto_hash.updateBytes(&hash, "signer-label", request.signer.label);

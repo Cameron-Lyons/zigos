@@ -7,7 +7,7 @@ const secrets = @import("../platform/secure_secret_store.zig");
 const ledger = @import("../platform/event_ledger.zig");
 const objects = @import("object_store.zig");
 
-// Session-owned, stable for the lifetime of every dependent document channel.
+// Session-owned, stable for the lifetime of every dependent storage operation.
 // Requests carry a lease and ciphertext binding, never a seed or raw key.
 pub const Authority = struct {
     service: *vault.Service,
@@ -58,13 +58,17 @@ pub const Signer = struct {
     }
 
     pub fn signMetadata(self: Signer, path: []const u8, payload: []const u8, now_ticks: u64) !objects.SignedMetadata {
+        return self.signObjectMetadata(path, "text/markdown", .document, payload, now_ticks);
+    }
+
+    pub fn signObjectMetadata(self: Signer, label: []const u8, content_type: []const u8, object_type: objects.ObjectType, payload: []const u8, now_ticks: u64) !objects.SignedMetadata {
         try self.validate(now_ticks);
         const authority = self.authority.?;
-        var metadata = try objects.SignedMetadata.init(path, "text/markdown", .{}, now_ticks);
+        var metadata = try objects.SignedMetadata.init(label, content_type, .{}, now_ticks);
         var buffer: [objects.MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
-        const message = try metadata.signingMessage(&buffer, .document, payload);
+        const message = try metadata.signingMessage(&buffer, object_type, payload);
         metadata.signature = try authority.service.signMessage(authority.policies, authority.subjects, self.request(now_ticks), message, authority.audit);
-        if (!metadata.verifyFor(.document, payload)) return error.InvalidDocumentSignature;
+        if (!metadata.verifyFor(object_type, payload)) return error.InvalidObjectSignature;
         return metadata;
     }
 };

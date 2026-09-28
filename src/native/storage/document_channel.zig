@@ -2,7 +2,7 @@ const std = @import("std");
 const component_port = @import("../kernel_api/component_port.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
 const ids = @import("../core/ids.zig");
-const document_signer = @import("document_signer.zig");
+const object_signer = @import("sealed_object_signer.zig");
 const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const ipc = @import("document_save_ipc.zig");
 const storage_service = @import("storage_service.zig");
@@ -14,7 +14,7 @@ pub const OpenRequest = struct {
     server_bootstrap_capability_id: u64,
     workspace_id: u64,
     path: []const u8,
-    signer: document_signer.Signer,
+    signer: object_signer.Signer,
 };
 
 // Initialize and retain in stable storage. The server borrows only this

@@ -2,7 +2,7 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const document_save = @import("document_save.zig");
-const document_signer = @import("document_signer.zig");
+const object_signer = @import("sealed_object_signer.zig");
 const storage_service = @import("storage_service.zig");
 pub const protocol = @import("../../userspace/document_protocol.zig");
 
@@ -16,7 +16,7 @@ pub const Binding = struct {
     workspace_id: u64,
     path: []const u8,
     object_id: u64,
-    signer: document_signer.Signer,
+    signer: object_signer.Signer,
 };
 
 const Attempt = struct {
