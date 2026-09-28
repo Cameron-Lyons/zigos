@@ -377,16 +377,16 @@ pub const SessionManager = struct {
         return service.frames_queued;
     }
 
-    pub fn attachPeerReceiver(self: *SessionManager, session: *peer_admission.Session, now_ticks: u64) !void {
-        if (!self.runtime_context.constructed or session.receiver.capabilities != self.capabilityTablePtr() or
-            session.receiver.store != self.storageServicePtr() or !self.peerTasksActive(session)) return error.PeerAdmissionDenied;
+    pub fn attachPeerSession(self: *SessionManager, session: *peer_admission.Session, now_ticks: u64) !void {
+        if (!self.runtime_context.constructed or session.capabilityTable() != self.capabilityTablePtr() or
+            session.storageService() != self.storageServicePtr() or !self.peerTasksActive(session)) return error.PeerAdmissionDenied;
         if (self.peer_handshakes.contains(session.channel.local, session.channel.remote)) return error.PeerAlreadyAdmitted;
         try self.peers.attach(session, now_ticks);
         network_driver.reserveReceivePrefix(peer_channel.MAGIC.*);
         self.peer_dispatch_tick = now_ticks;
     }
 
-    pub fn detachPeerReceiver(self: *SessionManager, session: *peer_admission.Session) void {
+    pub fn detachPeerSession(self: *SessionManager, session: *peer_admission.Session) void {
         self.peers.detach(session);
         self.refreshPeerReservation();
     }
@@ -437,10 +437,10 @@ pub const SessionManager = struct {
 
     fn peerTasksActive(self: *const SessionManager, session: *const peer_admission.Session) bool {
         const runtime = self.runtime_context.taskRuntimeConst() orelse return false;
-        const sync_task = runtime.findConst(session.receiver.sync.task_id) orelse return false;
-        const storage_task = runtime.findConst(session.receiver.store.task_id) orelse return false;
+        const sync_task = runtime.findConst(session.syncService().task_id) orelse return false;
+        const storage_task = runtime.findConst(session.storageService().task_id) orelse return false;
         return sync_task.state == .active and storage_task.state == .active and
-            sync_task.owner.eql(session.receiver.sync.owner) and storage_task.owner.eql(session.receiver.store.owner);
+            sync_task.owner.eql(session.syncService().owner) and storage_task.owner.eql(session.storageService().owner);
     }
 
     pub fn servicePeerWork(self: *SessionManager, now_ticks: u64) usize {

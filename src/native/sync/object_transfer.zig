@@ -27,6 +27,13 @@ pub const Begin = struct {
     digest: [32]u8,
 };
 
+pub const Offer = struct {
+    workspace_id: u64,
+    object_id: u64,
+    version_id: u64,
+    limit: u32,
+};
+
 pub const Progress = struct {
     id: u64,
     received: u32,
@@ -195,32 +202,16 @@ pub const Receiver = struct {
     }
 
     fn authorize(self: *Receiver, channel: *const channel_mod.Channel, now: u64) !workspace.Entry {
-        if (channel.graph != self.sync.deviceGraph() or channel.local != self.binding.local_device or channel.remote != self.binding.peer_device) return error.PermissionDenied;
-        const grant = try self.capabilities.requireUsable(self.binding.peer_capability_id, now);
-        if (grant.holder.kind != .device or grant.holder.serial != channel.remote or grant.target.kind != .object or grant.target.id != self.binding.object_id or
-            grant.scope.workspace_id == null or grant.scope.workspace_id.? != self.binding.workspace_id or !grant.scope.broker_only or grant.scope.local_only or !grant.rights.has(.object_write)) return error.PermissionDenied;
-        if (grant.scope.task_id) |task| if (task != self.sync.task_id) return error.PermissionDenied;
-        const record = self.store.findWorkspaceRecordConst(self.binding.workspace_id) orelse return error.WorkspaceNotFound;
-        const policy = self.sync.findWorkspacePolicy(self.binding.workspace_id) orelse return error.WorkspacePolicyNotFound;
-        const peer = self.sync.findDeviceRecord(.{ .kind = .device, .serial = channel.remote }) orelse return error.DeviceNotFound;
-        if (!policy.owner.eql(record.owner) or !peer.owner.eql(record.owner)) return error.PermissionDenied;
-        try self.sync.authorizeTransport(policy, self.binding.transport, null);
-        const entry = try self.store.findEntryForObject(self.binding.workspace_id, self.binding.object_id);
-        if (!policy.matchesPath(entry.pathSlice()) or !self.store.workspaceHasAccess(self.binding.workspace_id, .{
-            .principal_id = grant.holder,
-            .object_id = entry.object_id,
-            .path = entry.pathSlice(),
-            .wants_write = true,
-            .network_scope = if (self.binding.transport == .relay_assisted) .relay_assisted else .trusted_overlay,
-            .now_ticks = now,
-        })) return error.PermissionDenied;
-        // Collections, event streams and secret objects require their typed
-        // transactional/secret protocols; byte replacement cannot invoke them.
-        switch (entry.object_type) {
-            .blob, .document, .media_asset, .model_artifact => {},
-            else => return error.UnsupportedObjectType,
-        }
-        return entry;
+        return authorizeObject(self.store, self.sync, self.capabilities, self.binding, channel, now, true);
+    }
+
+    pub fn currentProgress(self: *const Receiver) ?Progress {
+        return if (self.transfer) |active| progress(active) else null;
+    }
+
+    pub fn offer(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: sealed_signer.Signer) !Offer {
+        const entry = try self.validate(channel, authority, signer);
+        return .{ .workspace_id = self.binding.workspace_id, .object_id = self.binding.object_id, .version_id = entry.version_id.raw(), .limit = @intCast(@min(self.scratch.len, objects.MAX_PAYLOAD_BYTES)) };
     }
 
     fn current(self: *Receiver, id: u64) !*Transfer {
@@ -239,6 +230,36 @@ pub const Receiver = struct {
         self.transfer = null;
     }
 };
+
+// Both directions bind the local object and peer before reading or writing.
+pub fn authorizeObject(store: *storage.Service, service: *sync_service.Service, capabilities: *const capability.CapabilityTable, binding: Binding, channel: *const channel_mod.Channel, now: u64, wants_write: bool) !workspace.Entry {
+    if (channel.graph != service.deviceGraph() or channel.local != binding.local_device or channel.remote != binding.peer_device) return error.PermissionDenied;
+    const grant = try capabilities.requireUsable(binding.peer_capability_id, now);
+    if (grant.holder.kind != .device or grant.holder.serial != channel.remote or grant.target.kind != .object or grant.target.id != binding.object_id or
+        grant.scope.workspace_id == null or grant.scope.workspace_id.? != binding.workspace_id or !grant.scope.broker_only or grant.scope.local_only or !grant.rights.has(if (wants_write) .object_write else .object_read)) return error.PermissionDenied;
+    if (grant.scope.task_id) |task| if (task != service.task_id) return error.PermissionDenied;
+    const record = store.findWorkspaceRecordConst(binding.workspace_id) orelse return error.WorkspaceNotFound;
+    const policy = service.findWorkspacePolicy(binding.workspace_id) orelse return error.WorkspacePolicyNotFound;
+    const peer = service.findDeviceRecord(.{ .kind = .device, .serial = channel.remote }) orelse return error.DeviceNotFound;
+    if (!policy.owner.eql(record.owner) or !peer.owner.eql(record.owner)) return error.PermissionDenied;
+    try service.authorizeTransport(policy, binding.transport, null);
+    const entry = try store.findEntryForObject(binding.workspace_id, binding.object_id);
+    if (!policy.matchesPath(entry.pathSlice()) or !store.workspaceHasAccess(binding.workspace_id, .{
+        .principal_id = grant.holder,
+        .object_id = entry.object_id,
+        .path = entry.pathSlice(),
+        .wants_write = wants_write,
+        .network_scope = if (binding.transport == .relay_assisted) .relay_assisted else .trusted_overlay,
+        .now_ticks = now,
+    })) return error.PermissionDenied;
+    // Collections, event streams and secret objects require their typed
+    // transactional/secret protocols; byte replacement cannot invoke them.
+    switch (entry.object_type) {
+        .blob, .document, .media_asset, .model_artifact => {},
+        else => return error.UnsupportedObjectType,
+    }
+    return entry;
+}
 
 fn deadline(now: u64) !u64 {
     return std.math.add(u64, now, MAX_IDLE_TICKS) catch error.TransferExpired;
@@ -261,6 +282,24 @@ pub fn versionDigest(store: *const storage.Service, version: *const objects.Vers
     var result: [32]u8 = undefined;
     hasher.final(&result);
     return result;
+}
+
+pub fn encodeOffer(buffer: []u8, offer: Offer) WireError![]const u8 {
+    var writer = Writer{ .buffer = buffer };
+    try writer.writeByte(5);
+    try writer.writeU64(offer.workspace_id);
+    try writer.writeU64(offer.object_id);
+    try writer.writeU64(offer.version_id);
+    try writer.writeU32(offer.limit);
+    return buffer[0..writer.offset];
+}
+
+pub fn decodeOffer(bytes: []const u8) WireError!Offer {
+    var reader = Reader{ .buffer = bytes };
+    if (try reader.readByte() != 5) return error.MalformedTransfer;
+    const offer = Offer{ .workspace_id = try reader.readU64(), .object_id = try reader.readU64(), .version_id = try reader.readU64(), .limit = try reader.readU32() };
+    if (!reader.eof() or offer.workspace_id == 0 or offer.object_id == 0 or offer.version_id == 0 or offer.limit > objects.MAX_PAYLOAD_BYTES) return error.MalformedTransfer;
+    return offer;
 }
 
 pub fn encodeBegin(buffer: []u8, request: Begin) WireError![]const u8 {

@@ -3,6 +3,10 @@
 const std = @import("std");
 const peer = @import("peer_channel.zig");
 const transfer = @import("object_transfer.zig");
+const sender_mod = @import("object_sender.zig");
+const storage_mod = @import("../storage/storage_service.zig");
+const sync_mod = @import("sync_service.zig");
+const capability_mod = @import("../kernel_api/capability.zig");
 const signer_mod = @import("../storage/sealed_object_signer.zig");
 const authority_mod = @import("../services/service_authority.zig");
 
@@ -12,12 +16,14 @@ pub const MAX_FRAMES_PER_TICK = 8;
 pub const RETRY_TICKS: u64 = 2;
 pub const MAX_LIFETIME_TICKS: u64 = 3_000;
 
-// The caller owns stable channel/receiver/scratch/authority state until detach.
+// The caller owns stable channel/endpoint/scratch/authority state until detach.
 // A local registration consumes no packet-driven allocation or table growth.
 pub const Session = struct {
     channel: *peer.Channel,
-    receiver: *transfer.Receiver,
-    signer: signer_mod.Signer,
+    endpoint: union(enum) {
+        receiver: struct { receiver: *transfer.Receiver, signer: signer_mod.Signer },
+        sender: *sender_mod.Sender,
+    },
     capability_id: u64,
     peer_mac: [6]u8,
     expires_at: u64,
@@ -29,18 +35,74 @@ pub const Session = struct {
     outgoing_len: u16 = 0,
     incoming: [peer.MAX_FRAME]u8 = @splat(0),
     outgoing: [peer.MAX_FRAME]u8 = @splat(0),
-    last_progress: ?transfer.Progress = null,
+    offering: bool = false,
 
     pub fn init(channel: *peer.Channel, receiver: *transfer.Receiver, signer: signer_mod.Signer, authority: authority_mod.Context, peer_mac: [6]u8, expires_at: u64) !Session {
+        try validateRegistration(channel, authority, peer_mac, expires_at);
+        _ = try receiver.validate(channel, authority, signer);
+        return .{ .channel = channel, .endpoint = .{ .receiver = .{ .receiver = receiver, .signer = signer } }, .capability_id = authority.capability_id, .peer_mac = peer_mac, .expires_at = expires_at };
+    }
+
+    pub fn initOffering(channel: *peer.Channel, receiver: *transfer.Receiver, signer: signer_mod.Signer, authority: authority_mod.Context, peer_mac: [6]u8, expires_at: u64) !Session {
+        var session = try init(channel, receiver, signer, authority, peer_mac, expires_at);
+        session.offering = true;
+        return session;
+    }
+
+    pub fn initSender(channel: *peer.Channel, sender: *sender_mod.Sender, authority: authority_mod.Context, peer_mac: [6]u8, expires_at: u64, confirmation: []const u8) !Session {
+        try validateRegistration(channel, authority, peer_mac, expires_at);
+        try sender.validate(channel, authority);
+        if (!sender.waitingForOffer()) return error.InvalidState;
+        var session = Session{ .channel = channel, .endpoint = .{ .sender = sender }, .capability_id = authority.capability_id, .peer_mac = peer_mac, .expires_at = expires_at };
+        if (confirmation.len != 0) {
+            if (confirmation.len <= peer.DATA_HEADER + 16 or confirmation.len > peer.MAX_FRAME or
+                !std.mem.eql(u8, confirmation[0..4], peer.MAGIC) or confirmation[4] != peer.VERSION or confirmation[5] != 4 or
+                std.mem.readInt(u64, confirmation[6..14], .little) != channel.local or std.mem.readInt(u64, confirmation[14..22], .little) != channel.remote or
+                !std.mem.eql(u8, confirmation[peer.HEADER..][0..16], channel.crypto.transport.hash[0..16]) or
+                std.mem.readInt(u64, confirmation[peer.HEADER + 16 ..][0..8], .little) != 0) return error.InvalidConfirmation;
+            @memcpy(session.outgoing[0..confirmation.len], confirmation);
+            session.outgoing_len = @intCast(confirmation.len);
+        }
+        return session;
+    }
+
+    fn validateRegistration(channel: *peer.Channel, authority: authority_mod.Context, peer_mac: [6]u8, expires_at: u64) !void {
         if (channel.signer.authority == null) return error.SealedSigningKeyRequired;
         if (expires_at <= authority.now_ticks or expires_at - authority.now_ticks > MAX_LIFETIME_TICKS) return error.InvalidPeerLifetime;
         if (peer_mac[0] & 1 != 0 or std.mem.allEqual(u8, &peer_mac, 0)) return error.InvalidPeerAddress;
-        _ = try receiver.validate(channel, authority, signer);
-        return .{ .channel = channel, .receiver = receiver, .signer = signer, .capability_id = authority.capability_id, .peer_mac = peer_mac, .expires_at = expires_at };
+    }
+
+    pub fn storageService(self: *const Session) *storage_mod.Service {
+        return switch (self.endpoint) {
+            .receiver => |r| r.receiver.store,
+            .sender => |sender| sender.store,
+        };
+    }
+
+    pub fn syncService(self: *const Session) *sync_mod.Service {
+        return switch (self.endpoint) {
+            .receiver => |r| r.receiver.sync,
+            .sender => |sender| sender.sync,
+        };
+    }
+
+    pub fn capabilityTable(self: *const Session) *const capability_mod.CapabilityTable {
+        return switch (self.endpoint) {
+            .receiver => |r| r.receiver.capabilities,
+            .sender => |sender| sender.capabilities,
+        };
+    }
+
+    pub fn lastProgress(self: *const Session) ?transfer.Progress {
+        return switch (self.endpoint) {
+            .receiver => |r| r.receiver.currentProgress(),
+            .sender => |sender| sender.receipt,
+        };
     }
 
     fn currentAuthority(self: *const Session, now: u64) authority_mod.Context {
-        return .{ .task_id = self.receiver.sync.task_id, .principal = self.receiver.sync.owner, .capability_id = self.capability_id, .now_ticks = now };
+        const service = self.syncService();
+        return .{ .task_id = service.task_id, .principal = service.owner, .capability_id = self.capability_id, .now_ticks = now };
     }
 
     fn validate(self: *Session, now: u64) bool {
@@ -49,16 +111,24 @@ pub const Session = struct {
             self.close();
             return false;
         }
-        self.receiver.expire(now);
-        _ = self.receiver.validate(self.channel, self.currentAuthority(now), self.signer) catch {
-            self.close();
-            return false;
-        };
+        switch (self.endpoint) {
+            .receiver => |r| {
+                r.receiver.expire(now);
+                _ = r.receiver.validate(self.channel, self.currentAuthority(now), r.signer) catch {
+                    self.close();
+                    return false;
+                };
+            },
+            .sender => |sender| sender.validate(self.channel, self.currentAuthority(now)) catch {
+                self.close();
+                return false;
+            },
+        }
         return true;
     }
 
     fn admit(self: *Session, frame: []const u8, now: u64) bool {
-        if (!self.active or now >= self.expires_at or self.incoming_len != 0 or self.outgoing_len != 0) return false;
+        if (!self.active or now >= self.expires_at or self.incoming_len != 0 or (self.outgoing_len != 0 and !self.offering and !self.waitingForOffer())) return false;
         if (self.budget_tick != now) {
             self.budget_tick = now;
             self.admitted_this_tick = 0;
@@ -72,19 +142,35 @@ pub const Session = struct {
 
     pub fn close(self: *Session) void {
         if (!self.active) return;
-        self.receiver.reset();
+        switch (self.endpoint) {
+            .receiver => |r| r.receiver.reset(),
+            .sender => |sender| sender.reset(),
+        }
         self.channel.close();
         std.crypto.secureZero(u8, &self.incoming);
         std.crypto.secureZero(u8, &self.outgoing);
-        self.signer = .{};
+        if (self.endpoint == .receiver) self.endpoint.receiver.signer = .{};
         self.incoming_len = 0;
         self.outgoing_len = 0;
-        self.last_progress = null;
+        self.offering = false;
         self.active = false;
     }
 
+    fn waitingForOffer(self: *const Session) bool {
+        return self.endpoint == .sender and self.endpoint.sender.waitingForOffer();
+    }
+
+    fn needsEncoding(self: *const Session) bool {
+        return self.offering or (self.endpoint == .sender and self.endpoint.sender.hasRequest());
+    }
+
     fn ready(self: *const Session, now: u64) bool {
-        return self.active and (self.incoming_len != 0 or (self.outgoing_len != 0 and now >= self.retry_at));
+        return self.active and (self.incoming_len != 0 or (now >= self.retry_at and (self.outgoing_len != 0 or self.needsEncoding())));
+    }
+
+    fn clearOutgoing(self: *Session) void {
+        std.crypto.secureZero(u8, &self.outgoing);
+        self.outgoing_len = 0;
     }
 
     fn runOnce(self: *Session, now: u64, send: anytype) bool {
@@ -93,29 +179,68 @@ pub const Session = struct {
                 std.crypto.secureZero(u8, &self.incoming);
                 self.incoming_len = 0;
             }
-            const progress = self.receiver.receive(self.channel, self.currentAuthority(now), self.signer, self.incoming[0..self.incoming_len]) catch {
-                _ = self.validate(now);
-                return true;
-            };
+            switch (self.endpoint) {
+                .receiver => |r| {
+                    const progress = r.receiver.receive(self.channel, self.currentAuthority(now), r.signer, self.incoming[0..self.incoming_len]) catch {
+                        _ = self.validate(now);
+                        return true;
+                    };
+                    self.offering = false;
+                    var plaintext: [peer.MAX_PAYLOAD]u8 = undefined;
+                    defer std.crypto.secureZero(u8, &plaintext);
+                    const response = transfer.encodeProgress(&plaintext, progress) catch unreachable;
+                    const packet = self.channel.seal(&self.outgoing, response, now) catch {
+                        self.close();
+                        return true;
+                    };
+                    self.outgoing_len = @intCast(packet.len);
+                    self.retry_at = now;
+                },
+                .sender => |sender| {
+                    const advanced = sender.receive(self.channel, self.currentAuthority(now), self.incoming[0..self.incoming_len]) catch {
+                        _ = self.validate(now);
+                        return true;
+                    };
+                    if (advanced) {
+                        self.clearOutgoing();
+                        self.retry_at = now;
+                    }
+                },
+            }
+            return true;
+        }
+        if (self.outgoing_len == 0 and self.needsEncoding() and now >= self.retry_at) {
             var plaintext: [peer.MAX_PAYLOAD]u8 = undefined;
             defer std.crypto.secureZero(u8, &plaintext);
-            const response = transfer.encodeProgress(&plaintext, progress) catch unreachable;
+            const response = switch (self.endpoint) {
+                .receiver => |r| blk: {
+                    const offer = r.receiver.offer(self.channel, self.currentAuthority(now), r.signer) catch {
+                        self.close();
+                        return true;
+                    };
+                    break :blk transfer.encodeOffer(&plaintext, offer) catch unreachable;
+                },
+                .sender => |sender| sender.encode(self.channel, self.currentAuthority(now), &plaintext) catch {
+                    self.close();
+                    return true;
+                },
+            };
             const packet = self.channel.seal(&self.outgoing, response, now) catch {
                 self.close();
                 return true;
             };
-            self.last_progress = progress;
             self.outgoing_len = @intCast(packet.len);
-            self.retry_at = now;
             return true;
         }
         if (self.outgoing_len != 0 and now >= self.retry_at) {
-            // Backpressure repeats cached ciphertext without advancing a nonce.
-            // validate() runs before every attempt, including delayed replies.
-            if (send(self.peer_mac, self.outgoing[0..self.outgoing_len])) {
-                std.crypto.secureZero(u8, &self.outgoing);
-                self.outgoing_len = 0;
-            } else self.retry_at = std.math.add(u64, now, RETRY_TICKS) catch self.expires_at;
+            // Driver backpressure repeats ciphertext without advancing nonces.
+            // After accepted application sends, a timed retry is newly sealed
+            // so the receiver can authenticate and answer the idempotent request.
+            if (send(self.peer_mac, self.outgoing[0..self.outgoing_len]) and !self.waitingForOffer()) {
+                if (self.endpoint == .sender) self.endpoint.sender.markSent();
+                self.clearOutgoing();
+            }
+            self.retry_at = std.math.add(u64, now, RETRY_TICKS) catch self.expires_at;
             return true;
         }
         return false;
@@ -201,8 +326,10 @@ pub const Sessions = struct {
         for (self.slots) |maybe| if (maybe) |session| {
             if (!session.active) continue;
             var deadline = session.expires_at;
-            if (session.outgoing_len != 0) deadline = @min(deadline, session.retry_at);
-            if (session.receiver.transfer) |active| deadline = @min(deadline, active.deadline);
+            if (session.outgoing_len != 0 or session.needsEncoding()) deadline = @min(deadline, session.retry_at);
+            if (session.endpoint == .receiver) {
+                if (session.endpoint.receiver.receiver.transfer) |active| deadline = @min(deadline, active.deadline);
+            }
             next = if (next) |old| @min(old, deadline) else deadline;
         };
         return next;
