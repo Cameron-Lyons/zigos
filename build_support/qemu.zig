@@ -186,6 +186,7 @@ pub fn addStorageDurabilityQemuCommand(
         "build/storage-durability-qemu.log",
         "build/native-store-storage-durability.img",
     });
+    command.addArg(b.fmt("{d}", .{@import("../src/native/storage/volume/layout.zig").sector_size}));
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
