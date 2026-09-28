@@ -2603,10 +2603,19 @@ fn benchmarkSloFocusedInput(iteration: u32) u64 {
         .vendor_id = 0x046D,
         .product_id = 0xC31C,
     };
-    report.bytes[2] = 0x04;
+    // Alternate pressed keys so each report releases the previous key and
+    // produces one new transition. Repeating a held key measures empty polls.
+    const usage: u8 = if (slo_input_context.sequence & 1 == 0) 0x04 else 0x05;
+    report.bytes[2] = usage;
     slo_input_context.pending = report;
     const routed = slo_input_context.router.service(slo_input_context.sequence, 1);
-    const event = slo_input_context.router.pollForTask(slo_input_context.task_id) orelse return 0;
+    const event = slo_input_context.router.pollForTask(slo_input_context.task_id) orelse
+        benchmark_reporting.benchStepFailure("focused input delivery", error.InputNotDelivered);
+    if (routed != 1 or event.sequence == 0 or event.task_id != slo_input_context.task_id or
+        event.event.kind != .text or event.event.data != 'a' + (usage - 0x04))
+    {
+        benchmark_reporting.benchStepFailure("focused input delivery", error.InputMismatch);
+    }
     return routed + event.sequence + event.task_id;
 }
 

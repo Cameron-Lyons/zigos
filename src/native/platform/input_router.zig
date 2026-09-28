@@ -122,7 +122,11 @@ pub const Router = struct {
     free_event_head: u8 = NO_EVENT_INDEX,
     event_pool_initialized: bool = false,
     queued_event_count: u8 = 0,
-    last_sequence: u64 = 0,
+    last_report_sequence: u64 = 0,
+    // Report replay protection belongs to the bound hardware source. Event
+    // ordering belongs to this router's lifetime, including source replacement
+    // while applications retain their last received sequence.
+    last_event_sequence: u64 = 0,
     reports_accepted: usize = 0,
 
     comptime {
@@ -170,14 +174,14 @@ pub const Router = struct {
     pub fn bindHardwareSource(self: *Router, source: HardwareReportSource) void {
         self.dropAllInboxes();
         self.source = source;
-        self.last_sequence = 0;
+        self.last_report_sequence = 0;
         self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
     }
 
     pub fn clearHardwareSource(self: *Router) void {
         self.dropAllInboxes();
         self.source = null;
-        self.last_sequence = 0;
+        self.last_report_sequence = 0;
         self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
     }
 
@@ -211,14 +215,14 @@ pub const Router = struct {
             const report = source.poll_report() orelse break;
 
             if (!validTopology(report)) continue;
-            if (self.last_sequence != 0 and report.sequence <= self.last_sequence) {
+            if (report.sequence <= self.last_report_sequence) {
                 continue;
             }
-            self.last_sequence = report.sequence;
+            self.last_report_sequence = report.sequence;
 
             const keyboard = self.keyboardFor(report) orelse continue;
             const decoded = keyboard.decoder.decode(report.bytes) catch continue;
-            self.reports_accepted += 1;
+            self.reports_accepted +|= 1;
 
             for (decoded.slice()) |event| {
                 if (self.routeEvent(compositor, report, event, now_ticks)) {
@@ -330,8 +334,9 @@ pub const Router = struct {
             self.compositor_task_id;
         if (target_task_id == 0) return false;
 
+        const sequence = std.math.add(u64, self.last_event_sequence, 1) catch return false;
         const routed = RoutedKeyboardEvent{
-            .sequence = report.sequence,
+            .sequence = sequence,
             .tick = now_ticks,
             .window_id = if (active) |window| window.id else 0,
             .task_id = target_task_id,
@@ -346,6 +351,7 @@ pub const Router = struct {
         const event_index = self.allocateEvent() orelse return false;
         const event_slots = self.eventSlots() orelse
             native_util.impossibleByInvariant("allocated input events retain their slot backing");
+        self.last_event_sequence = sequence;
         const was_empty = inbox.count == 0;
         event_slots[event_index] = .{ .event = routed };
         if (inbox.tail == NO_EVENT_INDEX) {
@@ -662,6 +668,85 @@ fn testTaskBudget() task_runtime.ResourceBudget {
     };
 }
 
+test "input router numbers every decoded key independently of hardware reports" {
+    var compositor = compositor_session.Session.init();
+    var router = Router{};
+    defer router.deinit();
+    router.bindCompositor(&compositor, 99);
+    router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(80, 1, 0, &.{ 0x04, 0x05, 0x06, 0x07, 0x08, 0x09 });
+    test_feed.reports[1] = makeTestReport(81, 2, 0, &.{ 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F });
+    test_feed.reports[2] = makeTestReport(81, 2, 0, &.{0x10}); // Replayed report.
+    test_feed.reports[3] = makeTestReport(82, 1, 0, &.{}); // Release is not an event.
+    test_feed.reports[4] = makeTestReport(83, 1, 0, &.{0x10});
+    test_feed.count = 5;
+    try std.testing.expectEqual(@as(usize, 13), router.service(42, DEFAULT_REPORT_BUDGET));
+    var previous: u64 = 0;
+    for ("abcdefghijklm", 0..) |byte, index| {
+        const event = router.pollAbiForTask(99).?;
+        try std.testing.expect(event.sequence > previous);
+        try std.testing.expectEqual(@as(u64, 42), event.tick);
+        try std.testing.expectEqual(@as(u8, if (index >= 6 and index < 12) 2 else 1), event.slot_id);
+        try std.testing.expectEqual(abi.InputByte.text, event.bytes[0]);
+        try std.testing.expectEqual(byte, event.bytes[1]);
+        previous = event.sequence;
+    }
+    try std.testing.expect(router.pollAbiForTask(99) == null);
+    try std.testing.expectEqual(@as(usize, 4), router.reports_accepted);
+}
+
+test "input router keeps event ordering across source and compositor rebinding" {
+    var compositors = [_]compositor_session.Session{ .init(), .init() };
+    var router = Router{};
+    defer router.deinit();
+    var previous: u64 = 0;
+    for (0..5) |index| {
+        switch (index) {
+            2 => router.clearHardwareSource(),
+            3 => router.clearCompositor(),
+            4 => router.deinit(),
+            else => {},
+        }
+        router.bindCompositor(&compositors[index % 2], 99);
+        router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+        test_feed = .{};
+        // A replacement source can start at one while the app is still alive.
+        test_feed.reports[0] = makeTestReport(if (index == 0) 500 else 1, 1, 0, &.{ 0x04, 0x05 });
+        test_feed.count = 1;
+        try std.testing.expectEqual(@as(usize, 2), router.service(42, DEFAULT_REPORT_BUDGET));
+        const event = router.pollAbiForTask(99).?;
+        try std.testing.expect(event.sequence > previous);
+        previous = event.sequence;
+        // Rebinding must discard the remaining key and its wake notification.
+        try std.testing.expectEqual(@as(usize, 1), router.queuedForTask(99));
+    }
+}
+
+test "input router exhausts event identities without wrapping or resetting them" {
+    var compositor = compositor_session.Session.init();
+    var router = Router{ .last_event_sequence = std.math.maxInt(u64) - 1 };
+    defer router.deinit();
+    router.bindCompositor(&compositor, 99);
+    router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(1, 1, 0, &.{ 0x04, 0x05 });
+    test_feed.count = 1;
+    try std.testing.expectEqual(@as(usize, 1), router.service(42, DEFAULT_REPORT_BUDGET));
+    const event = router.pollAbiForTask(99).?;
+    try std.testing.expectEqual(std.math.maxInt(u64), event.sequence);
+    try std.testing.expectEqual(@as(u8, 'a'), event.bytes[1]);
+    try std.testing.expect(router.pollAbiForTask(99) == null);
+    router.deinit();
+    router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+    test_feed.cursor = 0;
+    try std.testing.expectEqual(@as(usize, 0), router.service(43, DEFAULT_REPORT_BUDGET));
+    try std.testing.expect(router.pollAbiForTask(99) == null);
+    try std.testing.expect(router.pollWakeTarget() == null);
+    try std.testing.expectEqual(@as(usize, 0), router.inboxes.countInUse());
+    try std.testing.expectEqual(@as(u8, 0), router.queued_event_count);
+}
+
 test "input router delivers cursor editing semantics only to the focused task" {
     var runtime = task_runtime.Runtime.init();
     const app = try runtime.createTask(.{
@@ -946,11 +1031,18 @@ test "input router keeps compositor switching responsive when a focused inbox is
     try std.testing.expectEqual(second_window.id, compositor.active_window_id);
     try std.testing.expect(!router.routeEvent(&compositor, report, .{ .kind = .text, .data = 'd' }, 45));
 
-    try std.testing.expect(router.pollForTask(third.id) != null);
+    var previous_sequence = router.pollForTask(third.id).?.sequence;
     try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .data = 'd' }, 46));
     try std.testing.expectEqual(@as(u8, MAX_QUEUED_EVENTS), router.queued_event_count);
 
     try std.testing.expectEqual(@as(usize, MAX_EVENTS_PER_INBOX - 1), router.dropForTask(third.id));
     try std.testing.expectEqual(@as(usize, 0), router.queuedForTask(third.id));
     try std.testing.expectEqual(@as(u8, MAX_EVENTS_PER_INBOX + 1), router.queued_event_count);
+    for (0..MAX_EVENTS_PER_INBOX) |_| {
+        const event = router.pollForTask(first.id).?;
+        try std.testing.expect(event.sequence > previous_sequence);
+        previous_sequence = event.sequence;
+    }
+    try std.testing.expect(router.pollForTask(second.id).?.sequence > previous_sequence);
+    try std.testing.expectEqual(@as(u8, 0), router.queued_event_count);
 }

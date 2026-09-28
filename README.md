@@ -357,9 +357,14 @@ measures reuse and allocation under fragmentation, including exhaustion.
 - Focused hardware input crosses the native ABI as bounded semantic events.
   The compositor routes each event to one task, the session grants a dedicated
   task-scoped receive capability, and UI processes drain a fixed event budget
-  without sharing router memory or raw HID reports. Once that budget reaches an
-  empty queue, the process yields with an event-wait disposition and stays off
-  the ready queue until focused work wakes it. Each UI process keeps an
+  without sharing router memory or raw HID reports. Each decoded key receives a
+  distinct, increasing event number, including keys from the same HID report.
+  Source replacement resets report replay checks while preserving event ordering
+  for surviving tasks; exhausted event numbers stop delivery without wrapping.
+  The focused-input benchmark generates a new key transition on every iteration
+  and verifies delivery before counting the operation.
+  Once the queue is empty, the process yields with an event-wait disposition and
+  stays off the ready queue until focused work wakes it. Each UI process keeps an
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.

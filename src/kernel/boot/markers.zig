@@ -224,6 +224,7 @@ pub const document_channel_userspace_open = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_OP
 pub const document_channel_userspace_save = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_SAVE:PASS";
 pub const document_surface_pixels = "ZIGOS:DOCUMENT:SURFACE_PIXELS:PASS";
 pub const document_save_feedback = "ZIGOS:DOCUMENT:SAVE_FEEDBACK:PASS";
+pub const document_input_ordering = "ZIGOS:DOCUMENT:INPUT_ORDERING:PASS";
 pub const document_channel_sibling_editors = "ZIGOS:DOCUMENT_CHANNEL:SIBLING_EDITORS:PASS";
 pub const document_channel_retirement = "ZIGOS:DOCUMENT_CHANNEL:RETIREMENT:PASS";
 pub const notes_daily_driver_complete = "ZIGOS:NOTES_DAILY:COMPLETE";

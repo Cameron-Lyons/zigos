@@ -26,6 +26,7 @@ var report_cursor: u8 = 0;
 var report_sequence: u64 = 0;
 var report_usage: u8 = 0x04;
 var report_modifiers: u8 = 0;
+var report_keys: [6]u8 = [_]u8{0} ** 6;
 var report_mode: enum { edit, open, cancel, key } = .edit;
 const cursor_edited_text = "aS\ncond editorb";
 const selection_edited_text = "Q\nb";
@@ -115,6 +116,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try editAtCursorAndSave(manager, second, workspace_id);
     try selectAndSave(manager, second, workspace_id);
     try undoAndSave(manager, second, workspace_id);
+    try expectBatchedInputAndSourceRestart(manager, second);
     common.printBootMarker(boot_markers.document_channel_sibling_editors);
     try expectDeniedSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_save_feedback);
@@ -397,16 +399,24 @@ fn selectAndSave(manager: anytype, editor: EditorSession, workspace_id: u64) !vo
 }
 
 fn pressSelectionKey(manager: anytype, editor: EditorSession, usage: u8, modifiers: u8, expected: []const u8, cursor: u16, anchor: u16, dirty: bool) !void {
+    try pressKeys(manager, editor, &.{usage}, modifiers, expected, cursor, anchor, dirty);
+}
+
+fn pressKeys(manager: anytype, editor: EditorSession, usages: []const u8, modifiers: u8, expected: []const u8, cursor: u16, anchor: u16, dirty: bool) !void {
     const before = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse return error.EditorMailboxMissing;
     report_cursor = 0;
     report_mode = .key;
-    report_usage = usage;
+    report_usage = usages[0];
+    report_keys = [_]u8{0} ** 6;
+    @memcpy(report_keys[0..usages.len], usages);
+    defer report_keys = [_]u8{0} ** 6;
     report_modifiers = modifiers;
-    if (manager.servicePendingInputWork(timer.getTicks()) != 1) return error.CursorInputNotRouted;
+    if (manager.servicePendingInputWork(timer.getTicks()) != usages.len) return error.CursorInputNotRouted;
     for (0..512) |_| {
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse continue;
-        if (state.input_event_count != before.input_event_count + 1 or state.ui_presented_revision != state.ui_state_revision) continue;
+        if (state.input_event_count != before.input_event_count + usages.len or state.ui_presented_revision != state.ui_state_revision) continue;
+        if (state.last_input_sequence <= before.last_input_sequence) return error.InputSequenceReused;
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
         const flags: mailbox_abi.UiStateFlags = @bitCast(text.state.flags);
@@ -439,6 +449,19 @@ fn pressSelectionKey(manager: anytype, editor: EditorSession, usage: u8, modifie
         return;
     }
     return error.CursorEditTimedOut;
+}
+
+fn expectBatchedInputAndSourceRestart(manager: anytype, editor: EditorSession) !void {
+    // All six new keys arrive in one HID report. Every event must reach the
+    // running editor, not just the first event with that report's identity.
+    try pressKeys(manager, editor, &.{ 0x04, 0x05, 0x06, 0x07, 0x08, 0x09 }, 0, undo_edited_text ++ "abcdef", 10, 10, true);
+    // Restart the source's report clock while the same task retains its state.
+    manager.inputRouterPtr().clearHardwareSource();
+    report_sequence = 0;
+    manager.inputRouterPtr().bindHardwareSource(.{ .poll_report = nextReport, .input_proof = noHardwareProof });
+    try pressCursorKey(manager, editor, 0x0A, 0, undo_edited_text ++ "abcdefg", 11, true);
+    try pressCursorKey(manager, editor, 0x1D, 1, undo_edited_text, 4, false);
+    common.printBootMarker(boot_markers.document_input_ordering);
 }
 
 fn undoAndSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {
@@ -583,6 +606,7 @@ fn nextReport() ?xhci.HardwareBootKeyboardReport {
         .cancel => 0x2B,
     };
     if (report_cursor == 0 and report_mode == .key) report.bytes[0] = report_modifiers;
+    if (report_cursor == 0 and report_mode == .key and report_keys[0] != 0) @memcpy(report.bytes[2..8], &report_keys);
     if (report_cursor == 2) {
         report.bytes[0] = if (report_mode == .edit) 0x01 else 0;
         report.bytes[2] = 0x28;

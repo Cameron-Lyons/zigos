@@ -202,6 +202,9 @@ pub const AccountingDescriptor = extern struct {
 };
 
 pub const InputEventDescriptor = extern struct {
+    // Nonzero, strictly increasing per routed event for the session lifetime.
+    // Several events may originate in one hardware report; replacing that
+    // source does not restart the event sequence of surviving tasks.
     sequence: u64,
     tick: u64,
     window_id: u64,
