@@ -53,7 +53,7 @@ pub fn main() uefi.Status {
     ) catch return bootFailure("heap-reservation", .out_of_resources);
     defer boot.freePages(heap_pages) catch {};
     const boot_image = efi_handoff.image_info.Info.measure(kernel_bytes, cmdline, authenticated, @intFromPtr(heap_pages.ptr));
-    const measurement = tcg2.capture(boot, boot_image) catch return bootFailure("tpm-measurement", .security_violation);
+    var measurement = tcg2.capture(boot, system_table, boot_image) catch return bootFailure("tpm-measurement", .security_violation);
     defer if (measurement) |captured| boot.freePages(captured.pages) catch {};
 
     const handoff_pages = boot.allocatePages(
@@ -87,7 +87,7 @@ pub fn main() uefi.Status {
                 else => bootFailure("map-invalid", .out_of_resources),
             };
         };
-        _ = efi_handoff.encode(handoff_bytes, .{
+        var request = efi_handoff.Request{
             .cmdline = cmdline,
             .mmap = mmap_entries[0..mmap_count],
             .framebuffer = framebuffer,
@@ -95,12 +95,42 @@ pub fn main() uefi.Status {
             .acpi_rsdp = rsdp,
             .boot_image = boot_image,
             .boot_tpm = if (measurement) |captured| captured.info else null,
-        }) catch return .load_error;
+        };
+        _ = efi_handoff.encode(handoff_bytes, request) catch return .load_error;
         boot.exitBootServices(uefi.handle, map_slice.info.key) catch continue;
-        // No firmware calls, allocations, or fallible work after this point.
+        // No firmware calls or allocations after this point. Keep the firmware
+        // mappings until its final events have been copied into owned low pages.
+        asm volatile ("cli" ::: .{ .memory = true });
+        if (measurement) |*captured| {
+            captured.finish(boot_image) catch haltAfterExit();
+            request.boot_tpm = captured.info;
+            // This exact-sized encoding already succeeded before firmware exit.
+            _ = efi_handoff.encode(handoff_bytes, request) catch haltAfterExit();
+        }
         enterKernel(image.entry, info_addr);
     }
     return .aborted;
+}
+
+fn haltAfterExit() noreturn {
+    // The firmware console is gone. Report through the x86 debug serial port
+    // with a bounded wait, then stop without running boot-service defers.
+    for ("EFI:FAIL:tpm-final-events\r\n") |byte| {
+        for (0..10_000) |_| {
+            const status = asm volatile ("inb %[port], %[result]"
+                : [result] "={al}" (-> u8),
+                : [port] "{dx}" (@as(u16, 0x3fd)),
+            );
+            if (status & 0x20 != 0) break;
+            asm volatile ("pause");
+        }
+        asm volatile ("outb %[value], %[port]"
+            :
+            : [value] "{al}" (byte),
+              [port] "{dx}" (@as(u16, 0x3f8)),
+        );
+    }
+    while (true) asm volatile ("hlt");
 }
 
 fn bootFailure(comptime stage: []const u8, status: uefi.Status) uefi.Status {

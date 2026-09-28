@@ -408,7 +408,7 @@ test "EFI image provenance rejects duplicates and invalid encoded claims" {
 
 test "EFI TPM log handoff rejects duplicate and malformed measurement tags" {
     const efi_handoff = @import("../../boot/efi_handoff.zig");
-    const info = tpm_info.Info{ .log_address = 0x4000000, .log_bytes = 4096, .pcr11 = @splat(7) };
+    const info = tpm_info.Info{ .log_address = 0x4000000, .log_bytes = 4096, .final_events = 2, .pcr11 = @splat(7) };
     var bytes: [144]u8 = undefined;
     const encoded = try efi_handoff.encode(&bytes, .{ .boot_tpm = info });
     try std.testing.expectEqualDeep(info, (try parse(encoded, 0x1000)).boot_tpm.?);
@@ -418,6 +418,6 @@ test "EFI TPM log handoff rejects duplicate and malformed measurement tags" {
     writeU32(bytes[0..4], bytes.len);
     try std.testing.expectError(error.DuplicateTag, parse(&bytes, 0x1000));
     _ = try efi_handoff.encode(&bytes, .{ .boot_tpm = info });
-    writeU32(bytes[20..24], 2);
+    writeU32(bytes[20..24], 1);
     try std.testing.expectError(error.InvalidTag, parse(bytes[0..encoded.len], 0x1000));
 }

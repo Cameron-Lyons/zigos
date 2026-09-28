@@ -379,7 +379,7 @@ test "copied TPM event log remains reserved and malformed extents fail before mu
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
     var info = testInfo(1 << 6, 3 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, 0);
-    info.boot_tpm = .{ .log_address = 0x100000, .log_bytes = 2 * TEST_PAGE_SIZE + 1, .pcr11 = @splat(7) };
+    info.boot_tpm = .{ .log_address = 0x100000, .log_bytes = 2 * TEST_PAGE_SIZE + 1, .final_events = 2, .pcr11 = @splat(7) };
     try reserveLiveHandoffRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, TEST_PAGE_SIZE, info);
     for (0..3) |index| try std.testing.expect(allocator.isReserved(0x100000 + index * TEST_PAGE_SIZE));
     try std.testing.expect(!allocator.isReserved(0x100000 - TEST_PAGE_SIZE));

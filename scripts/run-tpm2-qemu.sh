@@ -75,7 +75,9 @@ check_transport_proof() {
 check_boot_measurement() {
   local log="$1"
   if [ "$(grep -c '^ZIGOS:TPM2:BOOT_MEASUREMENT:' "$log" || true)" -ne 1 ] ||
-    ! grep -Fxq 'ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED' "$log"; then
+    ! grep -Fxq 'ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED' "$log" ||
+    [ "$(grep -c '^ZIGOS:TPM2:FINAL_EVENTS:' "$log" || true)" -ne 1 ] ||
+    ! grep -Fxq 'ZIGOS:TPM2:FINAL_EVENTS:VERIFIED' "$log"; then
     cat "$log" >&2
     echo 'TPM2 live boot measurement mismatch' >&2
     return 1

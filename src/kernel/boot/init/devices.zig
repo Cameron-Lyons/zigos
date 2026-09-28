@@ -70,6 +70,7 @@ pub fn init() void {
             const measured = @import("../../platform/tpm_boot.zig").verify() catch
                 @panic("TPM boot measurement does not match the firmware event log");
             console.print(if (measured) "ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED\n" else "ZIGOS:TPM2:BOOT_MEASUREMENT:UNAVAILABLE\n");
+            if (measured) console.print("ZIGOS:TPM2:FINAL_EVENTS:VERIFIED\n");
         } else |err| {
             console.print("ZIGOS:TPM2:UNAVAILABLE ");
             console.print(@errorName(err));

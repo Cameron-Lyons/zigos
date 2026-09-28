@@ -8,6 +8,8 @@ match its independently supplied SHA-256 pin.
 
 The production firmware settings must record `secure_boot=enabled`, and the
 production capture must contain `ZIGOS:PLATFORM:BOOT_IMAGE:FIRMWARE_AUTHENTICATED`.
+It must also contain `ZIGOS:TPM2:FINAL_EVENTS:VERIFIED`, emitted after the copied
+firmware exit events and loader measurement match live PCR 5 and PCR 11 reads.
 Unsigned local media cannot satisfy the production proof. Firmware must authorize
 the complete unified EFI executable, including its embedded kernel and command
 line. Enrollment and signing of release images remain a separate release task.

@@ -29,4 +29,5 @@ test "native host root imports domain test suites" {
     std.testing.refAllDecls(tools);
     std.testing.refAllDecls(efi_elf);
     std.testing.refAllDecls(@import("../../boot/efi_handoff.zig"));
+    std.testing.refAllDecls(@import("../../boot/efi_tcg2.zig"));
 }

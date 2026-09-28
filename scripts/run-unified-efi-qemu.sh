@@ -86,6 +86,7 @@ run_case() {
   else
     grep -Fqx 'ZIGOS:NATIVE:READY' "$log"
     grep -Fqx 'ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED' "$log"
+    grep -Fqx 'ZIGOS:TPM2:FINAL_EVENTS:VERIFIED' "$log"
     grep -Fqx "ZIGOS:PLATFORM:BOOT_IMAGE:$expected" "$log"
     if grep -Eq 'PANIC|:FAIL|System Halted' "$log"; then return 1; fi
     if [[ "$expected" == UNVERIFIED ]]; then

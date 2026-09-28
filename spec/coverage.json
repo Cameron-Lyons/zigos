@@ -1167,7 +1167,12 @@
         "src/boot/efi_stub.zig",
         "src/boot/efi_elf.zig",
         "src/boot/image_info.zig",
-        "scripts/run-unified-efi-qemu.sh"
+        "scripts/run-unified-efi-qemu.sh",
+        "src/boot/efi_tcg2.zig",
+        "src/boot/tcg_event_log.zig",
+        "src/boot/tpm_pcr.zig",
+        "src/boot/tpm_info.zig",
+        "src/kernel/platform/tpm_boot.zig"
       ],
       "negative_tests": [
         {
@@ -1249,6 +1254,26 @@
         {
           "file": "src/native/platform/tpm2_sealing.zig",
           "name": "TPM quote client validates pinned enrollment and clears failed outputs before hardware access"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 final events merge once with prior readers and retain exit retry measurements"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 final events reject changed overlap malformed counts truncation and overflow atomically"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 exit replay requires authenticated final invocation and success with exact scope"
+        },
+        {
+          "file": "src/boot/efi_tcg2.zig",
+          "name": "TCG2 firmware log bounds reject free device missing and overflowing memory"
+        },
+        {
+          "file": "src/boot/efi_tcg2.zig",
+          "name": "TCG2 final table discovery requires one bounded unambiguous firmware entry"
         }
       ]
     },

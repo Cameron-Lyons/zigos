@@ -820,13 +820,24 @@ authority, prove TPM PCR values, or enforce rollback protection.
 When firmware provides TCG2 with an active SHA-256 bank, the loader extends
 PCR 11 with a versioned description of the exact kernel and command-line hashes
 and the firmware authentication state. It copies the event-log prefix through
-that event into reserved memory, capped at 256 KiB. The kernel replays PCR 11
-and compares it with both the handoff and a live TPM read after CRB initialization.
-Malformed logs, missing SHA-256 support, partial extensions, and mismatches stop
-that measured boot. Absence of the firmware protocol permits an unmeasured boot;
-it cannot produce the `BOOT_MEASUREMENT:VERIFIED` checkpoint.
+that event into reserved memory, capped at 256 KiB. After successful
+`ExitBootServices`, it appends the firmware's final events without allocation or
+firmware calls. Events already captured by an earlier log reader must match an
+exact suffix of the prefix and are not copied twice. Both firmware sources are
+bounded by their allocated memory descriptors; malformed counts, changed overlap,
+truncation and capacity overflow stop boot.
+The kernel replays PCR 11 and compares it with both the handoff and a live TPM
+read after CRB initialization. It also requires digest-authenticated firmware
+exit invocation and success events in the appended portion, retains failed-exit
+retries, and compares the complete PCR 5 replay with a live read. Handoff version 2
+rejects the former pre-exit scope without growing its 56-byte payload. QEMU gates
+require `FINAL_EVENTS:VERIFIED` alongside the boot-measurement checkpoint.
+Missing SHA-256 support, partial extensions, and mismatches stop that measured
+boot. Absence of the firmware protocol permits an unmeasured boot; it cannot
+produce either verified checkpoint.
 This local consistency check uses the [TCG2 firmware protocol](https://trustedcomputinggroup.org/resource/tcg-efi-protocol-specification/).
-The snapshot precedes ExitBootServices and is not a complete final firmware log.
+Only PCR 5 and PCR 11 are verified here. This does not establish a remote trust
+policy, manufacturer identity, or physical-machine validation.
 
 The TPM client can create a restricted ECDSA P-256 attestation key under an
 independently enrolled storage parent. Its private scalar stays inside the TPM;

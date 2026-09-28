@@ -1,6 +1,5 @@
-//! Bounded TCG2 event-log prefix through the loader's boot measurement.
-//! This snapshot precedes ExitBootServices. It is not a TPM quote or the final
-//! firmware log; callers must compare its PCR 11 replay with the live TPM.
+//! Bounded TCG2 log with exact final-table reconciliation after firmware exit.
+//! A copied log is local evidence; compare PCR replays with the live TPM.
 const std = @import("std");
 const image_info = @import("image_info.zig");
 pub const pcr = @import("tpm_pcr.zig");
@@ -8,6 +7,11 @@ pub const MAX_BYTES = 256 * 1024;
 pub const MAX_ALGORITHMS = 8;
 pub const EV_NO_ACTION = 3;
 pub const EV_EVENT_TAG = 6;
+pub const EV_EFI_ACTION = 0x8000_0007;
+pub const EXIT_INVOCATION = "Exit Boot Services Invocation";
+pub const EXIT_SUCCESS = "Exit Boot Services Returned with Success";
+pub const EXIT_FAILURE = "Exit Boot Services Returned with Failure";
+pub const MAX_FINAL_EVENTS = MAX_BYTES / 16;
 pub const BOOT_EVENT_ID: u32 = 0x5a470001;
 pub const DESCRIPTION_BYTES = 80;
 pub const EVENT_BYTES = 18 + 8 + DESCRIPTION_BYTES;
@@ -110,6 +114,8 @@ pub const Iterator = struct {
             if (id == pcr.SHA256) digest = bytes[0..32].*;
         }
         const data = try self.reader.take(try self.reader.int(u32));
+        // EDK II reserves a final EV_NO_ACTION record to report overflow.
+        if (kind == EV_NO_ACTION and std.mem.eql(u8, data, "TCG Event Log Truncated\x00")) return error.InvalidEventLog;
         return .{ .index = index, .kind = kind, .sha256 = digest, .data = data };
     }
 };
@@ -149,6 +155,95 @@ pub fn replay(bytes: []const u8, info: image_info.Info) Error!pcr.Digest {
         result = pcr.extend(result, digest);
     }
     if (!found) return error.BootMeasurementMismatch;
+    return result;
+}
+
+// The final table starts mirroring events at the FIRST GetEventLog call, which
+// can precede this loader. Its already-recorded events must be an exact suffix
+// of our snapshot, starting at an event boundary. Preserve that commitment and
+// append only later complete events after ExitBootServices. No allocation, no
+// inferred padding, and no output mutation until every length is validated.
+// https://trustedcomputinggroup.org/resource/tcg-efi-protocol-specification/
+pub const FinalSnapshot = struct {
+    count: u64,
+    bytes: usize,
+    digest: pcr.Digest,
+
+    pub fn init(prefix: []const u8, table: []const u8) Error!FinalSnapshot {
+        const layout = try finalLayout(prefix, table);
+        const duplicate = table[16..layout.bytes];
+        var iter = try Iterator.init(prefix);
+        if (duplicate.len > prefix.len - iter.reader.pos) return error.InvalidEventLog;
+        const boundary = prefix.len - duplicate.len;
+        while (iter.reader.pos < boundary) _ = try iter.next() orelse return error.InvalidEventLog;
+        if (iter.reader.pos != boundary or !std.mem.eql(u8, prefix[boundary..], duplicate)) return error.InvalidEventLog;
+        return .{ .count = layout.count, .bytes = layout.bytes, .digest = digestBytes(duplicate) };
+    }
+
+    pub fn merge(self: FinalSnapshot, buffer: []u8, prefix_bytes: usize, table: []const u8) Error!struct { bytes: usize, events: u32 } {
+        if (prefix_bytes > @min(buffer.len, MAX_BYTES) or self.bytes < 16 or self.bytes > table.len) return error.InvalidEventLog;
+        const layout = try finalLayout(buffer[0..prefix_bytes], table);
+        if (layout.count < self.count or layout.bytes < self.bytes or
+            !std.mem.eql(u8, &self.digest, &digestBytes(table[16..self.bytes]))) return error.InvalidEventLog;
+        const added = table[self.bytes..layout.bytes];
+        if (added.len > @min(buffer.len, MAX_BYTES) - prefix_bytes) return error.InvalidEventLog;
+        @memcpy(buffer[prefix_bytes..][0..added.len], added);
+        return .{ .bytes = prefix_bytes + added.len, .events = @intCast(layout.count - self.count) };
+    }
+};
+
+fn finalLayout(prefix: []const u8, table: []const u8) Error!struct { count: u64, bytes: usize } {
+    if (table.len < 16 or table.len > MAX_BYTES or std.mem.readInt(u64, table[0..8], .little) != 1) return error.InvalidEventLog;
+    const count = std.mem.readInt(u64, table[8..16], .little);
+    if (count > MAX_FINAL_EVENTS) return error.InvalidEventLog;
+    var iter = try Iterator.init(prefix);
+    iter.reader = .{ .bytes = table, .pos = 16 };
+    for (0..@intCast(count)) |_| _ = try iter.next() orelse return error.InvalidEventLog;
+    return .{ .count = count, .bytes = iter.reader.pos };
+}
+
+fn digestBytes(bytes: []const u8) pcr.Digest {
+    var result: pcr.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &result, .{});
+    return result;
+}
+
+// PCR 5 binds firmware's boot-control events, including ExitBootServices.
+// Require a digest-authenticated successful exit in the appended final events,
+// then compare this replay with PCR_Read after the kernel owns the TPM.
+pub fn replayExit(bytes: []const u8, final_events: u32) Error!pcr.Digest {
+    var counter = try Iterator.init(bytes);
+    var count: usize = 0;
+    while (try counter.next()) |_| count += 1;
+    if (final_events < 2 or final_events > count) return error.BootMeasurementMismatch;
+    const boundary = count - final_events;
+    var iter = try Iterator.init(bytes);
+    var ordinal: usize = 0;
+    var invoked = false;
+    var succeeded = false;
+    var result: pcr.Digest = @splat(0);
+    while (try iter.next()) |entry| : (ordinal += 1) {
+        if (entry.index != 5 or entry.kind == EV_NO_ACTION) continue;
+        const digest = entry.sha256 orelse return error.InvalidEventLog;
+        result = pcr.extend(result, digest);
+        if (entry.kind != EV_EFI_ACTION) continue;
+        const invocation = std.mem.eql(u8, entry.data, EXIT_INVOCATION);
+        const success = std.mem.eql(u8, entry.data, EXIT_SUCCESS);
+        const failure = std.mem.eql(u8, entry.data, EXIT_FAILURE);
+        if (!invocation and !success and !failure) continue;
+        if (!std.mem.eql(u8, &digest, &digestBytes(entry.data))) return error.BootMeasurementMismatch;
+        if (ordinal < boundary) continue;
+        if (succeeded) return error.BootMeasurementMismatch;
+        if (invocation) {
+            if (invoked) return error.BootMeasurementMismatch;
+            invoked = true;
+        } else {
+            if (!invoked) return error.BootMeasurementMismatch;
+            invoked = false;
+            succeeded = success;
+        }
+    }
+    if (!succeeded) return error.BootMeasurementMismatch;
     return result;
 }
 
@@ -268,4 +363,128 @@ test "TCG2 log handles multiple digest banks and rejects duplicate or unknown al
     buffer[115] = 4;
     buffer[64] = pcr.SHA256;
     try std.testing.expectError(error.InvalidEventLog, replay(multiple, info));
+}
+
+fn appendFixture(out: []u8, offset: usize, index: u32, kind: u32, data: []const u8) usize {
+    const bytes = out[offset..][0 .. 50 + data.len];
+    @memset(bytes, 0);
+    std.mem.writeInt(u32, bytes[0..4], index, .little);
+    std.mem.writeInt(u32, bytes[4..8], kind, .little);
+    bytes[8] = 1;
+    bytes[12] = pcr.SHA256;
+    @memcpy(bytes[14..46], &digestBytes(data));
+    std.mem.writeInt(u32, bytes[46..50], @intCast(data.len), .little);
+    @memcpy(bytes[50..], data);
+    return offset + bytes.len;
+}
+
+test "TCG2 final events merge once with prior readers and retain exit retry measurements" {
+    const info = image_info.Info.measure("kernel", "cmdline", false, 0x4000000);
+    for (0..2) |prior_reader| {
+        var buffer: [1024]u8 = undefined;
+        const prefix = fixture(info, &buffer);
+        const original_pcr = try replay(prefix, info);
+        var table: [1024]u8 = @splat(0);
+        table[0] = 1;
+        table[8] = @intCast(prior_reader);
+        var end: usize = 16;
+        if (prior_reader != 0) {
+            @memcpy(table[end..][0 .. prefix.len - 65], prefix[65..]);
+            end += prefix.len - 65;
+        }
+        const snapshot = try FinalSnapshot.init(prefix, &table);
+        var expected: pcr.Digest = @splat(0);
+        for ([_][]const u8{ EXIT_INVOCATION, EXIT_FAILURE, EXIT_INVOCATION, EXIT_SUCCESS }) |data| {
+            end = appendFixture(&table, end, 5, EV_EFI_ACTION, data);
+            expected = pcr.extend(expected, digestBytes(data));
+        }
+        end = appendFixture(&table, end, 7, EV_EVENT_TAG, "later firmware event");
+        table[8] += 5;
+        const merged = try snapshot.merge(&buffer, prefix.len, &table);
+        try std.testing.expectEqual(@as(u32, 5), merged.events);
+        try std.testing.expectEqual(prefix.len + end - snapshot.bytes, merged.bytes);
+        try std.testing.expectEqual(original_pcr, try replay(buffer[0..merged.bytes], info));
+        try std.testing.expectEqual(expected, try replayExit(buffer[0..merged.bytes], merged.events));
+        // Repeating the pure copy at the same retained boundary is idempotent.
+        const again = try snapshot.merge(&buffer, prefix.len, &table);
+        try std.testing.expectEqualDeep(merged, again);
+    }
+}
+
+test "TCG2 final events reject changed overlap malformed counts truncation and overflow atomically" {
+    const info = image_info.Info.measure("kernel", "cmdline", false, 0x4000000);
+    var original: [1024]u8 = undefined;
+    const prefix = fixture(info, &original);
+    var table: [1024]u8 = @splat(0);
+    table[0] = 1;
+    table[8] = 1;
+    @memcpy(table[16..][0 .. prefix.len - 65], prefix[65..]);
+    const overlap_end = 16 + prefix.len - 65;
+    const snapshot = try FinalSnapshot.init(prefix, &table);
+    var end = appendFixture(&table, overlap_end, 5, EV_EFI_ACTION, EXIT_INVOCATION);
+    end = appendFixture(&table, end, 5, EV_EFI_ACTION, EXIT_SUCCESS);
+    table[8] = 3;
+    for (0..end) |length| {
+        var buffer = original;
+        try std.testing.expectError(error.InvalidEventLog, snapshot.merge(&buffer, prefix.len, table[0..length]));
+        try std.testing.expectEqualSlices(u8, &original, &buffer);
+    }
+    for (0..5) |fault| {
+        var damaged = table;
+        switch (fault) {
+            0 => damaged[0] = 2,
+            1 => damaged[8] = 0,
+            2 => std.mem.writeInt(u64, damaged[8..16], std.math.maxInt(u64), .little),
+            3 => damaged[32] ^= 1, // changed previously copied digest
+            4 => damaged[overlap_end + 12] = 0xff, // unknown final-event digest
+            else => unreachable,
+        }
+        var buffer = original;
+        try std.testing.expectError(error.InvalidEventLog, snapshot.merge(&buffer, prefix.len, &damaged));
+        try std.testing.expectEqualSlices(u8, &original, &buffer);
+    }
+    var short = original;
+    try std.testing.expectError(error.InvalidEventLog, snapshot.merge(short[0 .. prefix.len + end - overlap_end - 1], prefix.len, &table));
+    try std.testing.expectEqualSlices(u8, &original, &short);
+    table[8] = 1;
+    table[32] ^= 1;
+    try std.testing.expectError(error.InvalidEventLog, FinalSnapshot.init(prefix, &table));
+    table[32] ^= 1;
+    table[8] = 2;
+    _ = appendFixture(&table, overlap_end, 0, EV_NO_ACTION, "TCG Event Log Truncated\x00");
+    try std.testing.expectError(error.InvalidEventLog, snapshot.merge(&short, prefix.len, &table));
+}
+
+test "TCG2 exit replay requires authenticated final invocation and success with exact scope" {
+    const info = image_info.Info.measure("kernel", "cmdline", false, 0x4000000);
+    var original: [1024]u8 = undefined;
+    const prefix = fixture(info, &original);
+    const invocation_end = appendFixture(&original, prefix.len, 5, EV_EFI_ACTION, EXIT_INVOCATION);
+    const end = appendFixture(&original, invocation_end, 5, EV_EFI_ACTION, EXIT_SUCCESS);
+    _ = try replayExit(original[0..end], 2);
+    try std.testing.expectError(error.BootMeasurementMismatch, replayExit(original[0..end], 0));
+    try std.testing.expectError(error.BootMeasurementMismatch, replayExit(original[0..end], 1));
+    try std.testing.expectError(error.BootMeasurementMismatch, replayExit(original[0..end], 4));
+    for (0..6) |fault| {
+        var buffer = original;
+        var size = end;
+        var events: u32 = 2;
+        switch (fault) {
+            0 => buffer[prefix.len + 14] ^= 1,
+            1 => buffer[invocation_end + 50] ^= 1,
+            2 => buffer[prefix.len] = 7,
+            3 => size = appendFixture(&buffer, invocation_end, 5, EV_EFI_ACTION, EXIT_FAILURE),
+            4 => {
+                size = appendFixture(&buffer, end, 5, EV_EFI_ACTION, EXIT_FAILURE);
+                events = 3;
+            },
+            5 => buffer[invocation_end + 4] = EV_NO_ACTION,
+            else => unreachable,
+        }
+        try std.testing.expectError(error.BootMeasurementMismatch, replayExit(buffer[0..size], events));
+    }
+    // Dropping an unrelated PCR 5 event changes the live replay too.
+    var buffer = original;
+    const size = appendFixture(&buffer, end, 5, EV_EVENT_TAG, "firmware control event");
+    try std.testing.expect(!std.mem.eql(u8, &(try replayExit(original[0..end], 2)), &(try replayExit(buffer[0..size], 3))));
 }

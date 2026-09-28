@@ -66,6 +66,7 @@ ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED
 ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT
 ZIGOS:PLATFORM:BOOT_IMAGE:FIRMWARE_AUTHENTICATED
 ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED
+ZIGOS:TPM2:FINAL_EVENTS:VERIFIED
 # The checker parses the one structured checkpoint line and requires this
 # state, a numeric generation, error=none, and checkpoint-before-ready order.
 ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false
