@@ -43,6 +43,7 @@ pub fn initialize(discovery: crb.Discovery) Error!u32 {
 // borrowed buffers and transport slot across calls without retaining a spinlock.
 fn acquire() Error!void {
     if (interrupt_context.active()) return error.InterruptContext;
+    if (!@import("../../native/task/tpm_worker_lease.zig").allowsCurrent()) return error.Busy;
     if (!lock.tryAcquire()) return error.Busy;
 }
 

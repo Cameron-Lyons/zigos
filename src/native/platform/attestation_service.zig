@@ -907,12 +907,30 @@ pub const Service = struct {
     ) !void {
         out.* = .{};
         errdefer out.* = .{};
+        const request = challenge.*;
+        const enrollment = enrolled.*;
+        try self.validateTpmAttestationRequest(&enrollment, &request);
+        const qualifying_data = request.qualifyingData();
+        try client.quoteAttestation(io, blob, auth, &enrollment.identity, &qualifying_data, &request.approved_pcr11, out);
+        const Publication = struct {
+            pub fn publish(_: @This()) !void {}
+        };
+        try self.finishTpmAttestationRequest(&enrollment, &request, Publication{});
+    }
+
+    pub fn validateTpmAttestationRequest(self: *const Service, enrolled: *const tpm.Enrollment, challenge: *const tpm.Challenge) !void {
         try challenge.validate(enrolled);
         if (!self.device.eql(enrolled.device)) return error.RootIdentityMismatch;
         if (self.isRootGenerationRevoked(enrolled.generation)) return error.RootGenerationRevoked;
         try self.validateRemoteChallenge(challenge.request.remotePartySlice(), challenge.request.nonceSlice(), challenge.request.user_visible);
-        const qualifying_data = challenge.qualifyingData();
-        try client.quoteAttestation(io, blob, auth, &enrolled.identity, &qualifying_data, &challenge.approved_pcr11, out);
+    }
+
+    // Trusted native quote owners call this only after the client verifies the
+    // TPM response. Publication must not yield; failed delivery leaves nonce and
+    // visibility history untouched. Recheck policy after all hardware waits.
+    pub fn finishTpmAttestationRequest(self: *Service, enrolled: *const tpm.Enrollment, challenge: *const tpm.Challenge, publication: anytype) !void {
+        try self.validateTpmAttestationRequest(enrolled, challenge);
+        try publication.publish();
         self.recordVisibleRequest(challenge.request.remotePartySlice(), challenge.request.nonceSlice());
     }
 

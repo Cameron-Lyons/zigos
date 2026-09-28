@@ -35,6 +35,7 @@ const peer_handshake = @import("../sync/peer_handshake.zig");
 const peer_connections = @import("../sync/peer_connections.zig");
 const peer_channel = @import("../sync/peer_channel.zig");
 const tpm_attestation = @import("../platform/tpm_attestation.zig");
+const peer_quote = @import("../services/peer_attestation_worker.zig");
 const network_driver = @import("../drivers/network_driver_task.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
@@ -129,6 +130,7 @@ pub const SessionManager = struct {
     peer_connections: peer_connections.Connections = .{},
     peer_dispatch_tick: u64 = 0,
     peer_dispatch_pool: u2 = 0,
+    peer_quote_worker: ?peer_quote.Interface = null,
 
     pub fn init() SessionManager {
         return initial_session_manager;
@@ -144,6 +146,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.clearPeerAttestationWorker();
         // Revoke and drain authentication before any borrowed service is freed.
         self.input_router.clearTrustedEntry();
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
@@ -299,6 +302,7 @@ pub const SessionManager = struct {
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
         if (!self.runtime_context.constructed) return false;
         const peer_work = self.servicePeerWork(now_ticks);
+        const quote_work = self.servicePeerAttestationWork(now_ticks);
         const runtime = self.runtime_context.taskRuntime().?;
         const pruned = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
@@ -309,12 +313,12 @@ pub const SessionManager = struct {
         const launched = self.launcher.service(self, now_ticks);
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
         if (copied or serviced or launched or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
-        return copied or serviced or launched or dispatched or peer_work != 0;
+        return copied or serviced or launched or dispatched or peer_work != 0 or quote_work;
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
-        return self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(self.peer_dispatch_tick) or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        return self.peerQuoteReady() or self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(self.peer_dispatch_tick) or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
     pub const DocumentTask = struct {
@@ -411,6 +415,52 @@ pub const SessionManager = struct {
         self.refreshPeerReservation();
     }
 
+    // Trusted native provisioning supplies this borrowed worker. Reset drains
+    // it before releasing services; ordinary peer revocation remains nonblocking.
+    pub fn bindPeerAttestationWorker(self: *SessionManager, worker: peer_quote.Interface) void {
+        self.clearPeerAttestationWorker();
+        self.peer_quote_worker = worker;
+    }
+
+    pub fn clearPeerAttestationWorker(self: *SessionManager) void {
+        if (self.peer_quote_worker) |worker| worker.operations.quiesce(worker.context);
+        self.peer_quote_worker = null;
+    }
+
+    pub fn servicePeerAttestationWork(self: *SessionManager, now_ticks: u64) bool {
+        const worker = self.peer_quote_worker orelse return false;
+        return worker.operations.service(worker.context, self.peerQuoteOwner(), now_ticks);
+    }
+
+    fn peerQuoteReady(self: *const SessionManager) bool {
+        const worker = self.peer_quote_worker orelse return false;
+        return worker.operations.ready(worker.context, self.peerQuoteOwner(), self.peer_dispatch_tick);
+    }
+
+    fn peerQuoteOwner(self: *const SessionManager) peer_quote.Owner {
+        return .{ .context = @constCast(self), .next_fn = nextPeerQuote, .challenge_fn = getPeerQuote, .complete_fn = finishPeerQuote, .release_fn = abandonPeerQuote };
+    }
+
+    fn nextPeerQuote(context: *anyopaque, device: u64, start: usize) ?peer_connections.Handle {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        return self.peer_connections.nextAttestationQuote(device, start);
+    }
+
+    fn getPeerQuote(context: *anyopaque, handle: peer_connections.Handle, now: u64) ?tpm_attestation.Challenge {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        return self.peerAttestationChallenge(handle, now);
+    }
+
+    fn finishPeerQuote(context: *anyopaque, handle: peer_connections.Handle, response: *const tpm_attestation.Response, now: u64) anyerror!void {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        try self.completePeerAttestation(handle, response, now);
+    }
+
+    fn abandonPeerQuote(context: *anyopaque, handle: peer_connections.Handle) void {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        self.releasePeerConnection(handle) catch {};
+    }
+
     pub fn peerAttestationChallenge(self: *SessionManager, handle: peer_connections.Handle, now_ticks: u64) ?tpm_attestation.Challenge {
         self.retirePeerConnections();
         defer self.refreshPeerReservation();
@@ -429,7 +479,7 @@ pub const SessionManager = struct {
 
     pub fn nextServiceWake(self: *const SessionManager) ?u64 {
         var wake: ?u64 = null;
-        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.peer_connections.nextWake(), self.clipboard.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null }) |candidate| {
+        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.peer_connections.nextWake(), if (self.peer_quote_worker) |worker| worker.operations.next_wake(worker.context) else null, self.clipboard.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null }) |candidate| {
             if (candidate) |deadline| wake = if (wake) |value| @min(value, deadline) else deadline;
         }
         return wake;
@@ -1064,6 +1114,7 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.clearPeerAttestationWorker();
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
         self.peer_handshakes.deinit();
         self.peers.deinit();

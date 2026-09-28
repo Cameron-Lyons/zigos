@@ -1260,7 +1260,9 @@
         "src/native/platform/tpm_attestation.zig",
         "src/native/platform/tpm_attestation_wire.zig",
         "src/native/sync/peer_attestation.zig",
-        "src/native/sync/peer_connections.zig"
+        "src/native/sync/peer_connections.zig",
+        "src/native/services/peer_attestation_worker.zig",
+        "src/native/task/tpm_worker_lease.zig"
       ],
       "negative_tests": [
         {
@@ -1346,6 +1348,38 @@
         {
           "file": "src/native/sync/peer_connections_test.zig",
           "name": "session manager peer connections reject completions before another dispatcher visit after owner loss"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker rejects invalid local authority before allocation or hardware"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker drains borrowed buffers through cancellation revocation expiry and stale handles"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker scheduler avoids polling twice per tick and retires failed jobs"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker detach drains before freeing stacks and preserves unpublished history"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation publication checks current policy and commits history only after delivery"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation workers serialize complete TPM jobs and queued cancellation never touches another borrow"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker binding runs outside packet dispatch and detaches on boot failure"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation cancelled cleanup observes later clock rollback without stranding buffers"
         }
       ]
     },

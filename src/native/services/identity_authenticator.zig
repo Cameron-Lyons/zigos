@@ -11,6 +11,7 @@ const recovery_key = @import("../platform/recovery_key.zig");
 const catalog = @import("../storage/vault_catalog.zig");
 const cooperative = @import("../task/cooperative_worker.zig");
 const guarded = @import("../task/guarded_worker_stack.zig");
+const tpm_lease = @import("../task/tpm_worker_lease.zig");
 
 pub fn Adapter(comptime Io: type) type {
     return struct {
@@ -108,6 +109,11 @@ pub fn Adapter(comptime Io: type) type {
             defer std.crypto.secureZero(u8, &self.value);
             defer self.value_len = 0;
             defer self.method = .pin;
+            while (!(tpm_lease.tryAcquire() catch |err| {
+                self.failure = err;
+                return;
+            })) self.worker.yield();
+            defer tpm_lease.release();
             self.authenticate() catch |err| {
                 // Every borrowed command has returned. Close can yield for
                 // FlushContext; do not publish failure until cleanup completes.

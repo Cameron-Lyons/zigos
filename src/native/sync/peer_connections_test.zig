@@ -374,6 +374,8 @@ test "peer connections delayed attestation cannot revive released expired revoke
             if (challenge != null) break;
         }
         const request = challenge orelse return error.MissingQuoteWork;
+        try std.testing.expectEqual(f.handles[1], f.owners.nextAttestationQuote(22, std.math.maxInt(usize)).?);
+        try std.testing.expect(f.owners.nextAttestationQuote(11, 0) == null);
         const response = try quote.testing.QuoteFixture.initFor(request.qualifyingData(), request.approved_pcr11);
         try std.testing.expect(!f.sessions.hasSessions());
         try std.testing.expectError(error.PeerAlreadyAdmitted, f.owners.open(&f.handshakes, &f.sessions, f.request(false)));

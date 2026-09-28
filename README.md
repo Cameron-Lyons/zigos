@@ -874,6 +874,21 @@ Host tests cover fragment failures and durable transfer. The swtpm cold/reboot
 proof carries an actual quote between two Noise endpoints in one guest;
 attestation across independently enrolled machines still needs validation.
 
+A locally bound quote worker now retrieves pending challenges and publishes
+responses through those connection handles. It owns its TPM client and a private
+snapshot of the supplied credentials, executes on a guarded stack, yields at
+hardware waits, and polls at most once per tick. It rechecks the credential
+lease, enrollment, service policy and connection before delivery. Cancellation
+retains borrowed command buffers until cleanup finishes; late or rejected
+completion leaves visible-request and nonce history unchanged. PIN/recovery and
+quote workers serialize complete TPM operations through a shared lease, so a
+queued cancellation cannot disturb another worker's command or loaded objects.
+Reset and boot failure drain the worker before releasing its dependencies.
+The swtpm proof cancels before quoting and after evidence exists, rejects a
+completed delivery, then retries successfully with the same challenge. Native
+provisioning must supply the enrolled key, encrypted blob, parent pin and
+revocable authorization; the worker installs no default credentials.
+
 Remote attestation service signatures bind the complete verifier request and
 the provider's actual metadata digest through a domain-separated context.
 Changing policy, key restrictions, revocations, or metadata invalidates the

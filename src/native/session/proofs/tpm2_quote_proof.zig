@@ -94,7 +94,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         if (!std.mem.allEqual(u8, &client.command, 0) or !std.mem.allEqual(u8, &client.response, 0)) return error.ResidentQuoteAuthorization;
     }
     try proveRemoteAttestation(&client, io, blob.slice(), enrolled, measured.pcr11);
-    try provePeerExchange(&client, io, blob.slice(), enrolled, measured.pcr11);
+    try provePeerExchange(manager, &client, io, blob.slice(), enrolled, measured.pcr11);
     var changed = enrolled;
     changed.qualified_name[2] ^= 1;
     const commands = io.commands;
@@ -223,7 +223,7 @@ fn proveRemoteAttestation(client: *tpm.Client, io: anytype, blob: []const u8, id
 
 // A real TPM quote crosses two independently established channel endpoints.
 // The disposable verifier still uses a fixture enrollment authority and PCR policy.
-fn provePeerExchange(client: *tpm.Client, io: anytype, blob: []const u8, identity: quote.Identity, pcr: tpm.Key) !void {
+fn provePeerExchange(manager: anytype, client: *tpm.Client, io: anytype, blob: []const u8, identity: quote.Identity, pcr: tpm.Key) !void {
     const peer = @import("../../sync/peer_channel.zig");
     const exchange = @import("../../sync/peer_attestation.zig");
     const graph_mod = @import("../../sync/device_graph.zig");
@@ -247,10 +247,10 @@ fn provePeerExchange(client: *tpm.Client, io: anytype, blob: []const u8, identit
     try a.readHandshake(try b.writeHandshake(&frame, 20), 20);
     try b.readHandshake(try a.writeHandshake(&frame, 20), 20);
     const enrollment = try attestation.tpm.Enrollment.init(target, identity, 2, "peer-quote-root");
-    var pending = try attestation.tpm.Pending.init(io, enrollment, pcr, .{ .remote_party = "peer.quote.proof", .policy_label = "peer-quote-policy" }, 200, 1000);
-    var verifier = try exchange.Exchange.init(&a, .{ .verify = &pending }, "", 20, 120);
+    var pending = try attestation.tpm.Pending.init(io, enrollment, pcr, .{ .remote_party = "peer.quote.proof", .policy_label = "peer-quote-policy" }, 200, 30_000);
+    var verifier = try exchange.Exchange.init(&a, .{ .verify = &pending }, "", 20, 3020);
     defer verifier.close();
-    var prover = try exchange.Exchange.init(&b, .{ .prove = &enrollment }, "", 20, 120);
+    var prover = try exchange.Exchange.init(&b, .{ .prove = &enrollment }, "", 20, 3020);
     defer prover.close();
     // Reverse fragments, including a repeated ciphertext, without any TPM I/O.
     const commands = io.commands;
@@ -263,23 +263,107 @@ fn provePeerExchange(client: *tpm.Client, io: anytype, blob: []const u8, identit
         }
     }
     if (io.commands != commands or prover.ready() or verifier.ready()) return error.PrematurePeerAttestation;
-    const challenge = prover.quoteChallenge(21) orelse return error.MissingPeerQuoteChallenge;
     var service = attestation.Service.init(target);
-    var response = attestation.tpm.Response{};
-    try service.respondToTpmAttestationRequest(client, io, blob, &auth, &enrollment, &challenge, &response);
-    try prover.completeQuote(&response, 22);
+    const completed_at = try proveQuoteWorker(manager, io, .{ .handle = client.parent, .name = client.parent_name }, blob, enrollment, &prover, &service);
     index = prover.outgoing_count;
     while (index != 0) {
         index -= 1;
-        if (!verifier.admit(prover.outgoing[index][0..prover.outgoing_lens[index]], 23) or !verifier.service(23, @splat(0), rejectPeerSend)) return error.PeerQuoteNotAdmitted;
+        if (!verifier.admit(prover.outgoing[index][0..prover.outgoing_lens[index]], completed_at) or !verifier.service(completed_at, @splat(0), rejectPeerSend)) return error.PeerQuoteNotAdmitted;
     }
     if (!verifier.ready() or prover.ready() or verifier.accepted == null or service.visible_request_count != 1) return error.PeerQuoteNotVerified;
-    if (!prover.admit(verifier.outgoing[0][0..verifier.outgoing_lens[0]], 24) or !prover.service(24, @splat(0), rejectPeerSend) or !prover.ready()) return error.PeerQuoteNotAcknowledged;
+    if (!prover.admit(verifier.outgoing[0][0..verifier.outgoing_lens[0]], completed_at) or !prover.service(completed_at, @splat(0), rejectPeerSend) or !prover.ready()) return error.PeerQuoteNotAcknowledged;
     var plaintext: [peer.MAX_PAYLOAD]u8 = undefined;
-    if (!std.mem.eql(u8, "attested peer transfer", try b.open(&plaintext, try a.seal(&frame, "attested peer transfer", 25), 25))) return error.PeerQuoteChannelFailed;
+    if (!std.mem.eql(u8, "attested peer transfer", try b.open(&plaintext, try a.seal(&frame, "attested peer transfer", completed_at), completed_at))) return error.PeerQuoteChannelFailed;
     console.print("ZIGOS:TPM2:PEER_ATTESTATION:VERIFIED\n");
 }
 
 fn rejectPeerSend(_: [6]u8, _: []const u8) bool {
     return false;
+}
+
+fn proveQuoteWorker(manager: anytype, io: anytype, parent: tpm.PersistentParent, blob: []const u8, enrollment: attestation.tpm.Enrollment, prover: *@import("../../sync/peer_attestation.zig").Exchange, service: *attestation.Service) !u64 {
+    const worker_mod = @import("../../services/peer_attestation_worker.zig");
+    const cooperative = @import("../../task/cooperative_worker.zig");
+    const connections = @import("../../sync/peer_connections.zig");
+    const timer = @import("../../../kernel/timer/timer.zig");
+    const clock = @import("../../../kernel/timer/tsc_clock.zig");
+    const Owner = struct {
+        prover: *@import("../../sync/peer_attestation.zig").Exchange,
+        reject_delivery: bool = false,
+        fn next(context: *anyopaque, _: u64, _: usize) ?connections.Handle {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return if (self.prover.needsQuote()) @enumFromInt(1) else null;
+        }
+        fn get(context: *anyopaque, _: connections.Handle, now: u64) ?attestation.tpm.Challenge {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.prover.quoteChallenge(now);
+        }
+        fn complete(context: *anyopaque, _: connections.Handle, response: *const attestation.tpm.Response, now: u64) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.reject_delivery) return error.PublicationRejected;
+            try self.prover.completeQuote(response, now);
+        }
+        fn release(context: *anyopaque, _: connections.Handle) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.prover.close();
+        }
+    };
+    var context = Owner{ .prover = prover };
+    const owner = worker_mod.Owner{ .context = &context, .next_fn = Owner.next, .challenge_fn = Owner.get, .complete_fn = Owner.complete, .release_fn = Owner.release };
+    var credentials = worker_mod.Credentials{ .enrollment = enrollment, .parent = parent, .blob = .{ .len = @intCast(blob.len) }, .authorization = auth, .expires_at_ticks = 3020 };
+    defer credentials.revoke();
+    @memcpy(credentials.blob.bytes[0..blob.len], blob);
+    var worker = worker_mod.Worker(@TypeOf(io.*)){ .io = io, .credentials = &credentials, .service = service };
+    const interface = worker.interface();
+    defer {
+        interface.operations.quiesce(interface.context);
+        worker.deinit() catch unreachable;
+    }
+    // Boot verification may run with timer interrupts disabled. Match the
+    // trusted-input proof's elapsed invariant clock, expressed in service ticks.
+    const tick = clock.afterMilliseconds(timer.MILLISECONDS_PER_TICK).value;
+    var now: u64 = 21;
+    var suspended: usize = 0;
+    const scheduler = manager.userspaceSchedulerPtr();
+    const task_id = manager.storageServicePtr().task_id;
+    // Cancel both before Quote and after verified evidence exists, then reject
+    // delivery. None may consume the nonce or leave transient TPM resources.
+    for (0..4) |attempt| {
+        context.reject_delivery = attempt == 2;
+        io.last_command = 0;
+        try worker.start(owner, @enumFromInt(1), now);
+        const dispatch_before = (scheduler.taskDispatchStats(task_id) orelse return error.MissingQuotePeerTask).dispatch_count;
+        _ = scheduler.wakeTask(task_id, .external_event, 0, now);
+        const deadline = clock.afterMilliseconds(20_000);
+        var cancelled = false;
+        while (!deadline.expired()) {
+            now = 21 + (@import("../../../arch/x86.zig").rdtsc() -% tick.start_ticks) / tick.interval_ticks;
+            const finished = worker.poll(owner, now) catch |err| {
+                if (attempt == 3 or err != (if (attempt == 2) error.PublicationRejected else error.Cancelled) or (attempt < 2 and !cancelled)) return err;
+                if (service.visible_request_count != 0 or !prover.needsQuote()) return error.CancelledQuotePublished;
+                break;
+            };
+            if (finished) {
+                if (attempt != 3) return error.MissedQuoteCancellation;
+                break;
+            }
+            if (cooperative.current() != null or !worker.stack.?.guardsPresent()) return error.UnsafeQuoteWorkerStack;
+            suspended += 1;
+            if ((attempt == 0 and io.last_command == 0x158) or (attempt == 1 and worker.evidence.len != 0 and io.last_command == 0x165)) {
+                worker.cancel();
+                cancelled = true;
+            }
+            _ = manager.runUserspaceScheduler(now);
+            _ = manager.servicePendingInputWork(now);
+            @import("../../../kernel/utils/spin.zig").hint();
+        }
+        if (worker.busy()) return error.QuoteWorkerTimeout;
+        if (scheduler.taskDispatchStats(task_id).?.dispatch_count == dispatch_before) return error.QuoteBlockedUserspace;
+        if (worker.handle != null or !std.mem.allEqual(u8, worker.stack.?.bytes, 0) or
+            !std.mem.allEqual(u8, std.mem.asBytes(&worker.snapshot), 0) or worker.evidence.len != 0 or
+            !std.mem.allEqual(u8, &worker.evidence.bytes, 0)) return error.IncompleteQuoteWorker;
+    }
+    if (suspended < 8 or service.visible_request_count != 1 or prover.needsQuote()) return error.MissingQuoteWorkerProgress;
+    console.print("ZIGOS:TPM2:QUOTE_WORKER:VERIFIED\n");
+    return now;
 }

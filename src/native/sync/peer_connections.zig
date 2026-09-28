@@ -283,6 +283,17 @@ pub const Connections = struct {
         };
     }
 
+    pub fn nextAttestationQuote(self: *const Connections, local_device: u64, start: usize) ?Handle {
+        for (0..MAX_CONNECTIONS) |offset| {
+            const index = (start % MAX_CONNECTIONS + offset) % MAX_CONNECTIONS;
+            const slot = self.slots[index];
+            const c = slot.connection orelse continue;
+            const p = c.preflight orelse continue;
+            if (c.channel.local == local_device and p.started and p.exchange.needsQuote()) return @enumFromInt((slot.generation << 2) | index);
+        }
+        return null;
+    }
+
     pub fn attestationChallenge(self: *Connections, handle: Handle, now: u64) ?tpm.Challenge {
         const c = self.resolve(handle) orelse return null;
         if (!validatePreflight(c, now)) return null;

@@ -31,6 +31,7 @@ const Io = struct {
     commands: usize = 0,
     da_resets: usize = 0,
     last_failed_command: u32 = 0,
+    last_command: u32 = 0,
     last_tpm_error: u32 = 0,
     corrupt_unseal: bool = false,
     corrupt_quote: bool = false,
@@ -57,6 +58,7 @@ const Io = struct {
             self.nv_writes += 1;
         }
         const code = std.mem.readInt(u32, command[6..10], .big);
+        self.last_command = code;
         self.commands += 1;
         if (code == 0x139) self.da_resets += 1;
         if (code == 0x120) self.persist_commands += 1;
