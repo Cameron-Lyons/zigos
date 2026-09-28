@@ -1,4 +1,5 @@
 const std = @import("std");
+const durable_identity_service = @import("../../native/services/durable_identity_service.zig");
 
 const agent_delegation_service = @import("../../native/services/agent_delegation_service.zig");
 const attention_broker_service = @import("../../native/services/attention_broker_service.zig");
@@ -19,6 +20,7 @@ const typed_component_abi = @import("../../native/services/typed_component_abi.z
 const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
 
 test "service host tests import native service modules" {
+    std.testing.refAllDecls(durable_identity_service);
     std.testing.refAllDecls(component_abi_schema);
     std.testing.refAllDecls(agent_delegation_service);
     std.testing.refAllDecls(attention_broker_service);

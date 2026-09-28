@@ -100,14 +100,17 @@ run_boot() {
         return 1
       fi
     done
-    local catalog_marker="ZIGOS:TPM2:CATALOG:COMMITTED"
-    if [ "$name" = reboot ]; then catalog_marker="ZIGOS:TPM2:CATALOG:RESTORED"; fi
-    if [ "$(grep -c '^ZIGOS:TPM2:CATALOG:' "$log" || true)" -ne "$expected_proofs" ] ||
-      { [ "$expected_proofs" -eq 1 ] && ! grep -Fxq "$catalog_marker" "$log"; }; then
-      cat "$log" >&2
-      echo "TPM2 vault catalog result mismatch for $name" >&2
-      return 1
-    fi
+    local durable_kind durable_marker
+    for durable_kind in CATALOG CREDENTIALS; do
+      durable_marker="ZIGOS:TPM2:$durable_kind:COMMITTED"
+      if [ "$name" = reboot ]; then durable_marker="ZIGOS:TPM2:$durable_kind:RESTORED"; fi
+      if [ "$(grep -c "^ZIGOS:TPM2:$durable_kind:" "$log" || true)" -ne "$expected_proofs" ] ||
+        { [ "$expected_proofs" -eq 1 ] && ! grep -Fxq "$durable_marker" "$log"; }; then
+        cat "$log" >&2
+        echo "TPM2 $durable_kind durability result mismatch for $name" >&2
+        return 1
+      fi
+    done
   else
     bash "$SCRIPT_DIR/check-production-boot-log.sh" "$log"
   fi

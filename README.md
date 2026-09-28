@@ -127,13 +127,16 @@ requests.
   threshold, replacement key, and credential generation. Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog
-  now checkpoints up to 16 sealed records, preserves their
-  IDs and export policy, and restores them atomically without leases. Saves
-  acknowledge a device barrier and retry without adding another version. Restore
+  now checkpoints up to 16 sealed records and 16 credentials together, preserves
+  key IDs, export policy, assertion counters, recovery generations and revocations,
+  and restores them atomically without leases or unlock proofs. The durable
+  identity service returns assertions only after their counters reach disk.
+  Failed checkpoints block further identity changes until an explicit flush
+  succeeds; retries reuse the pending version. Restore
   requires an enrollment-supplied public-key pin and checks an authenticated
   generation floor; rollback protection needs that floor outside the native disk.
-  Production authorization provisioning, catalog trust-pin enrollment and freshness
-  storage, durable identity indexing, trusted unlock issuance, and userspace
+  Production authorization provisioning, catalog trust-pin enrollment,
+  rollback-resistant freshness storage, trusted unlock issuance, and userspace
   request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   creation, recovery from the native disk after restarting the VM and swtpm,
@@ -148,6 +151,8 @@ requests.
   with the recovered sealed key and rejects signing after lease revocation.
   The reboot restores two generated keys and a 96-byte exportable secret through
   the durable catalog, checks that no leases survived, then lends fresh authority.
+  It also resumes an assertion counter after reboot and refuses a credential
+  revoked before shutdown. Catalog format v2 rejects older snapshots.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).

@@ -11,6 +11,7 @@ const device_graph = @import("../../sync/device_graph.zig");
 const objects = @import("../../storage/object_store.zig");
 const catalog = @import("../../storage/vault_catalog.zig");
 const object_signer = @import("../../storage/sealed_object_signer.zig");
+const durable_identity = @import("../../services/durable_identity_service.zig");
 const console = @import("../../../kernel/utils/console.zig");
 
 // Verification-only identities and authorization are supplied by the TPM proof.
@@ -27,6 +28,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     try client.initialize(io);
     var adapter = backend.Backend(@TypeOf(io.*)){ .client = &client, .io = io, .authorization = authorization };
     var service = vault.Service.init();
+    var identities = identity.Store.init();
     service.attachHardwareProvider(adapter.provider());
     defer service.attachHardwareProvider(.{});
     var policies = policy.Directory.init();
@@ -47,15 +49,15 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         if (bytes.len != expected_key.len or !version.metadata.verifyFor(.secret, bytes) or
             !std.mem.eql(u8, version.metadata.signature.publicKeySlice(), &(try signing.publicKey(signer)))) return error.InvalidVaultProof;
         @memcpy(&expected_key, bytes);
-        const generation = catalog.restore(storage, &service, .{ .object_id = catalog_object_id, .owner = owner, .public_key = expected_key }, &catalog_scratch) catch |err| {
+        const generation = catalog.restore(storage, .{ .vault = &service, .identities = &identities }, .{ .object_id = catalog_object_id, .owner = owner, .public_key = expected_key, .minimum_generation = 2 }, &catalog_scratch) catch |err| {
             if (err != error.InvalidSealedSecret) return err;
-            if (service.store.secret_count != 0) return error.PublishedForeignSecret;
+            if (service.store.secret_count != 0 or identities.credential_count != 0) return error.PublishedForeignSecret;
             service.attachHardwareProvider(.{});
             try client.close(io);
             console.print("ZIGOS:TPM2:VAULT:WRONG_DEVICE\n");
             return;
         };
-        if (generation != 1 or service.store.secret_count != 3 or service.activeHandleCount() != 0 or
+        if (generation != 2 or identities.credential_count != 2 or service.store.secret_count != 3 or service.activeHandleCount() != 0 or
             service.store.handles.countInUse() != 0) return error.InvalidRestoredVault;
         secret = service.store.describeSecret(1) orelse return error.MissingVaultProof;
         const portable_lease = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = app, .task_id = 5, .secret_id = 3, .expires_at_ticks = 10, .now_ticks = 1, .allow_raw_export = true }, null);
@@ -89,7 +91,17 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     if (restored) {
         if (!std.mem.eql(u8, signature.publicKeySlice(), &expected_key)) return error.RecoveredWrongVaultKey;
     } else @memcpy(&expected_key, signature.publicKeySlice());
-    try proveIdentityAssertions(&service, &policies, secret.id, &expected_key);
+    if (!restored) {
+        const previous = storage.checkpoint_enabled;
+        storage.checkpoint_enabled = false;
+        defer storage.checkpoint_enabled = previous;
+        _ = try storage.putLocallySignedVersion(.{ .object_type = .secret, .payload = &expected_key, .signer = signer, .label = label, .content_type = content_type, .created_at_ticks = 1 });
+    }
+    const catalog_handle = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = storage.owner, .task_id = storage.task_id, .secret_id = secret.id, .expires_at_ticks = 20, .now_ticks = 2 }, null);
+    var catalog_authority = object_signer.Authority{ .service = &service, .policies = &policies, .subjects = subjects, .owner = owner, .holder = storage.owner, .task_id = storage.task_id };
+    const catalog_signer = try object_signer.Signer.bind(&catalog_authority, catalog_handle.id, 2);
+    var durable_identities = durable_identity.Service{ .state = .{ .vault = &service, .identities = &identities }, .storage = storage, .signer = catalog_signer, .object_id = catalog_object_id, .version_id = if (restored) storage.latestVersion(catalog_object_id).?.id.raw() else 0 };
+    try proveIdentityAssertions(&durable_identities, &policies, secret.id, &expected_key, restored, &catalog_scratch);
     try proveDocumentSigning(&service, &policies, secret.id, &expected_key);
     var out: secrets.Value = @splat(0xaa);
     defer std.crypto.secureZero(u8, &out);
@@ -187,23 +199,8 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         if (err != error.HandleRevoked) return err;
     }
     if (!restored) {
-        const previous = storage.checkpoint_enabled;
-        storage.checkpoint_enabled = false;
-        defer storage.checkpoint_enabled = previous;
-        _ = try storage.putLocallySignedVersion(.{
-            .object_type = .secret,
-            .payload = &expected_key,
-            .signer = signer,
-            .label = label,
-            .content_type = content_type,
-            .created_at_ticks = 1,
-        });
-        const catalog_handle = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = storage.owner, .task_id = storage.task_id, .secret_id = secret.id, .expires_at_ticks = 20, .now_ticks = 6 }, null);
-        var authority = object_signer.Authority{ .service = &service, .policies = &policies, .subjects = subjects, .owner = owner, .holder = storage.owner, .task_id = storage.task_id };
-        const catalog_signer = try object_signer.Signer.bind(&authority, catalog_handle.id, 6);
-        var checkpoint = catalog.Session{};
-        const receipt = try checkpoint.save(storage, &service, catalog_signer, catalog_object_id, 0, 7, &catalog_scratch);
-        if (receipt.catalog_generation != 1 or receipt.checkpoint_generation == 0) return error.InvalidVaultCheckpoint;
+        const receipt = try durable_identities.flush(7, &catalog_scratch);
+        if (receipt.catalog_generation != 2 or receipt.checkpoint_generation == 0) return error.InvalidVaultCheckpoint;
         console.print("ZIGOS:TPM2:CATALOG:COMMITTED\n");
     }
     service.attachHardwareProvider(.{});
@@ -235,7 +232,9 @@ fn proveDocumentSigning(service: *vault.Service, policies: *const policy.Directo
 
 // The graph and unlock proof are explicit verification fixtures. Credential
 // signatures use the recovered real TPM-backed key, without a caller seed.
-fn proveIdentityAssertions(service: *vault.Service, policies: *const policy.Directory, secret_id: u64, expected_public_key: *const signing.PublicKey) !void {
+fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const policy.Directory, secret_id: u64, expected_public_key: *const signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8) !void {
+    const service = durable.state.vault;
+    const identities = durable.state.identities;
     const identity_service = principal.PrincipalId{ .kind = .service, .serial = 0x703 };
     const device = principal.PrincipalId{ .kind = .device, .serial = 0x704 };
     const owner_signer = signing.SignerIdentity{ .label = "identity-proof-owner", .seed = @splat(0xc1) };
@@ -252,7 +251,6 @@ fn proveIdentityAssertions(service: *vault.Service, policies: *const policy.Dire
     var graph = device_graph.Graph.init();
     _ = try graph.ensureUserRoot(owner, "owner", owner_signer);
     _ = try graph.enrollDevice(owner, device, "device", owner_signer, device_signer, 1);
-    var identities = identity.Store.init();
     var authority = identity.VaultAuthority{
         .vault = service,
         .policies = policies,
@@ -261,13 +259,14 @@ fn proveIdentityAssertions(service: *vault.Service, policies: *const policy.Dire
         .task_id = 6,
         .now_ticks = 3,
     };
-    const credential = try identities.registerCredential(&graph, authority, .{
-        .owner = owner,
-        .device = device,
-        .relying_party_id = "identity.example",
-        .label = "TPM identity proof",
-        .key_handle_id = handle.id,
-    });
+    if (!restored) {
+        _ = try identities.registerCredential(&graph, authority, .{ .owner = owner, .device = device, .relying_party_id = "identity.example", .label = "TPM identity proof", .key_handle_id = handle.id });
+        const revoked = try identities.registerCredential(&graph, authority, .{ .owner = owner, .device = device, .relying_party_id = "revoked.example", .label = "TPM revoked credential", .key_handle_id = handle.id });
+        try identities.revokeCredential(revoked.id, 3);
+    }
+    const credential = identities.findCredentialConst(1) orelse return error.MissingCredential;
+    const expected_counter: u64 = if (restored) 2 else 1;
+    if (credential.assertion_count != expected_counter - 1 or identities.findCredentialConst(2).?.status != .revoked) return error.LostCredentialState;
     if (!std.mem.eql(u8, &credential.credential_public_key, expected_public_key)) return error.IdentityKeyChanged;
     const request = identity.AssertionRequest{
         .credential_id = credential.id,
@@ -278,8 +277,13 @@ fn proveIdentityAssertions(service: *vault.Service, policies: *const policy.Dire
         .local_unlock = try identity.createLocalUnlockProof(owner, device, "identity.example", "identity-proof", .device_pin, 2, 20, device_signer),
         .key_handle_id = handle.id,
     };
-    const assertion = try identities.assertCredential(&graph, authority, request);
-    if (!identity.verifyAssertion(&assertion, expected_public_key) or !assertion.hardware_backed_credential or assertion.assertion_counter != 1) return error.BadIdentityAssertion;
+    const assertion = try durable.assertCredential(&graph, authority, request, scratch);
+    if (!identity.verifyAssertion(&assertion, expected_public_key) or !assertion.hardware_backed_credential or assertion.assertion_counter != expected_counter) return error.BadIdentityAssertion;
+    var revoked_request = request;
+    revoked_request.credential_id = 2;
+    if (durable.assertCredential(&graph, authority, revoked_request, scratch)) |_| return error.RevokedCredentialRestored else |err| {
+        if (err != error.CredentialRevoked) return err;
+    }
     var tampered = assertion;
     tampered.assertion_counter += 1;
     if (identity.verifyAssertion(&tampered, expected_public_key)) return error.UnboundIdentityCounter;
@@ -305,6 +309,7 @@ fn proveIdentityAssertions(service: *vault.Service, policies: *const policy.Dire
     if (identities.assertCredential(&graph, authority, request)) |_| return error.IdentitySignedAfterRevocation else |err| {
         if (err != error.HandleRevoked) return err;
     }
-    if (credential.assertion_count != 1 or credential.last_asserted_at_ticks != 3) return error.MutatedDeniedIdentityAssertion;
+    if (credential.assertion_count != expected_counter or credential.last_asserted_at_ticks != 3) return error.MutatedDeniedIdentityAssertion;
     console.print("ZIGOS:TPM2:IDENTITY:SIGNED\n");
+    console.print(if (restored) "ZIGOS:TPM2:CREDENTIALS:RESTORED\n" else "ZIGOS:TPM2:CREDENTIALS:COMMITTED\n");
 }

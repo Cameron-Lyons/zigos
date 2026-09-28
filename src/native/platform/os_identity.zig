@@ -9,12 +9,17 @@ const signing = @import("../core/signing.zig");
 const vault_service = @import("../services/secret_vault_service.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const event_ledger = @import("event_ledger.zig");
+const binary_cursor = @import("binary_cursor");
 
 pub const MAX_CREDENTIALS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_RP_ID_BYTES: usize = 64;
 pub const MAX_ORIGIN_BYTES: usize = 96;
 pub const MAX_CHALLENGE_BYTES: usize = 64;
+pub const MAX_SNAPSHOT_BYTES: usize = 1 + MAX_CREDENTIALS * (139 + MAX_RP_ID_BYTES + MAX_LABEL_BYTES);
+pub const SnapshotError = error{ InvalidIdentitySnapshot, IdentitySnapshotTooLarge, IdentityStoreNotEmpty };
+const SnapshotWriter = binary_cursor.Writer(SnapshotError, error.IdentitySnapshotTooLarge);
+const SnapshotReader = binary_cursor.Reader(SnapshotError, error.InvalidIdentitySnapshot);
 pub const DIRECT_CREDENTIAL_LOOKUP = true;
 pub const DENSE_CREDENTIAL_TABLE = true;
 pub const COMPACT_CREDENTIAL_METADATA = true;
@@ -255,6 +260,57 @@ pub const Store = struct {
         return .{};
     }
 
+    // The enclosing vault catalog authenticates these bytes and commits them
+    // with their sealed keys. No lease or unlock proof enters the snapshot.
+    pub fn encodeSnapshot(self: *const Store, owner: principal.PrincipalId, secrets: *const secure_secret_store.Store, out: []u8) SnapshotError![]const u8 {
+        if (self.credential_count > MAX_CREDENTIALS) return error.InvalidIdentitySnapshot;
+        var writer = SnapshotWriter{ .buffer = out };
+        try writer.writeByte(self.credential_count);
+        for (self.credentials[0..self.credential_count], 0..) |*record, index| {
+            if (record.id != index + 1) return error.InvalidIdentitySnapshot;
+            try validateSnapshotRecord(record, owner);
+            try validateSnapshotKey(record, secrets);
+            const digest = snapshotCredentialDigest(record);
+            if (!std.mem.eql(u8, &digest, &record.credential_digest)) return error.InvalidIdentitySnapshot;
+            try writer.writeBytes(&record.owner.keyBytes());
+            try writer.writeBytes(&record.primary_device.keyBytes());
+            try writer.writeByte(@intFromEnum(record.scope));
+            try writer.writeByte(record.recovery_threshold);
+            try writer.writeByte(@intFromEnum(record.status));
+            try writer.writeByte(record.relying_party_id_len);
+            try writer.writeBytes(record.relyingPartySlice());
+            try writer.writeByte(record.label_len);
+            try writer.writeBytes(record.labelSlice());
+            try writer.writeU64(record.secret_id);
+            try writer.writeBytes(&record.sealed_secret_digest);
+            try writer.writeBytes(&record.credential_public_key);
+            try writer.writeU32(record.credential_generation);
+            try writer.writeU64(record.assertion_count);
+            try writer.writeU64(record.created_at_ticks);
+            try writer.writeU64(record.last_asserted_at_ticks);
+            try writer.writeU64(record.recovered_at_ticks);
+            try writer.writeU64(record.revoked_at_ticks);
+        }
+        return out[0..writer.offset];
+    }
+
+    pub fn restoreSnapshot(self: *Store, owner: principal.PrincipalId, secrets: *const secure_secret_store.Store, bytes: []const u8) SnapshotError!void {
+        if (self.credential_count != 0) return error.IdentityStoreNotEmpty;
+        try validateSnapshot(owner, bytes);
+        var reader = SnapshotReader{ .buffer = bytes };
+        const count = try reader.readByte();
+        errdefer {
+            for (self.credentials[0..self.credential_count]) |*record| record.* = zeroCredential();
+            self.credential_count = 0;
+        }
+        for (0..count) |index| {
+            const record = try readSnapshotRecord(&reader, owner, index + 1);
+            try validateSnapshotKey(&record, secrets);
+            self.credentials[index] = record;
+            self.credential_count += 1;
+        }
+    }
+
     pub fn registerCredential(
         self: *Store,
         graph: *const device_graph.Graph,
@@ -442,6 +498,70 @@ pub const Store = struct {
         return if (self.credentials[slot_index].id == credential_id) slot_index else null;
     }
 };
+
+pub fn validateSnapshot(owner: principal.PrincipalId, bytes: []const u8) SnapshotError!void {
+    var reader = SnapshotReader{ .buffer = bytes };
+    const count = try reader.readByte();
+    if (count > MAX_CREDENTIALS) return error.InvalidIdentitySnapshot;
+    for (0..count) |index| _ = try readSnapshotRecord(&reader, owner, index + 1);
+    if (!reader.eof()) return error.InvalidIdentitySnapshot;
+}
+
+fn readSnapshotRecord(reader: *SnapshotReader, owner: principal.PrincipalId, id: u64) SnapshotError!CredentialRecord {
+    var record = zeroCredential();
+    record.id = id;
+    record.owner = try readSnapshotPrincipal(reader);
+    record.primary_device = try readSnapshotPrincipal(reader);
+    record.scope = std.enums.fromInt(CredentialScope, try reader.readByte()) orelse return error.InvalidIdentitySnapshot;
+    record.recovery_threshold = try reader.readByte();
+    record.status = std.enums.fromInt(CredentialStatus, try reader.readByte()) orelse return error.InvalidIdentitySnapshot;
+    record.relying_party_id_len = try reader.readByte();
+    if (record.relying_party_id_len > MAX_RP_ID_BYTES) return error.InvalidIdentitySnapshot;
+    try reader.readBytes(record.relying_party_id[0..record.relying_party_id_len]);
+    record.label_len = try reader.readByte();
+    if (record.label_len > MAX_LABEL_BYTES) return error.InvalidIdentitySnapshot;
+    try reader.readBytes(record.label[0..record.label_len]);
+    record.secret_id = try reader.readU64();
+    try reader.readBytes(&record.sealed_secret_digest);
+    try reader.readBytes(&record.credential_public_key);
+    record.credential_generation = try reader.readU32();
+    record.assertion_count = try reader.readU64();
+    record.created_at_ticks = try reader.readU64();
+    record.last_asserted_at_ticks = try reader.readU64();
+    record.recovered_at_ticks = try reader.readU64();
+    record.revoked_at_ticks = try reader.readU64();
+    record.synced_to_device_graph = record.scope == .synced;
+    record.hardware_backed_credential = true;
+    record.sealed_credential_secret = true;
+    try validateSnapshotRecord(&record, owner);
+    record.credential_digest = snapshotCredentialDigest(&record);
+    return record;
+}
+
+fn readSnapshotPrincipal(reader: *SnapshotReader) SnapshotError!principal.PrincipalId {
+    const kind = std.enums.fromInt(principal.PrincipalKind, try reader.readByte()) orelse return error.InvalidIdentitySnapshot;
+    return .{ .kind = kind, .serial = try reader.readU64() };
+}
+
+fn snapshotCredentialDigest(record: *const CredentialRecord) crypto_hash.Digest {
+    return credentialDigest(record.owner, record.primary_device, record.scope, record.relyingPartySlice(), &record.credential_public_key, &record.sealed_secret_digest, record.credential_generation, record.recovery_threshold);
+}
+
+fn validateSnapshotRecord(record: *const CredentialRecord, owner: principal.PrincipalId) SnapshotError!void {
+    if (owner.serial == 0 or !record.owner.eql(owner) or record.primary_device.kind != .device or record.primary_device.serial == 0 or
+        record.relying_party_id_len > MAX_RP_ID_BYTES or record.label_len > MAX_LABEL_BYTES or record.secret_id == 0 or
+        record.credential_generation == 0 or record.recovery_threshold == 0 or record.recovery_threshold > device_graph.MAX_DEVICES or
+        !record.local_unlock_required or !record.phishing_resistant or !record.hardware_backed_credential or !record.sealed_credential_secret or
+        record.synced_to_device_graph != (record.scope == .synced)) return error.InvalidIdentitySnapshot;
+    if (!validDnsName(record.relyingPartySlice())) return error.InvalidIdentitySnapshot;
+}
+
+fn validateSnapshotKey(record: *const CredentialRecord, secrets: *const secure_secret_store.Store) SnapshotError!void {
+    const secret = secrets.describeSecret(record.secret_id) orelse return error.InvalidIdentitySnapshot;
+    if (!secret.owner.eql(record.owner) or !secret.hardware_backed or !secret.hardware_provider_used or secret.exportable or
+        secret.resident_material or !secret.sealed_digest_present or secret.sealedBlob() == null or
+        !std.mem.eql(u8, &secret.sealed_digest, &record.sealed_secret_digest)) return error.InvalidIdentitySnapshot;
+}
 
 pub fn createLocalUnlockProof(
     owner: principal.PrincipalId,
@@ -1310,6 +1430,70 @@ test "os identity signs every assertion claim through the sealed vault key" {
     try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
     const wrong_key = [_]u8{0x91} ** signing.PUBLIC_KEY_BYTES;
     try std.testing.expect(!verifyAssertion(&assertion, &wrong_key));
+}
+
+test "os identity snapshot preserves counters revocations and complete table bounds" {
+    var fixture = try VaultIdentityFixture.init();
+    const base = fixture.identities.credentials[0];
+    for (&fixture.identities.credentials, 0..) |*record, index| {
+        record.* = base;
+        record.id = index + 1;
+        record.status = if (index % 2 == 0) .active else .revoked;
+        record.assertion_count = std.math.maxInt(u64) - index;
+        record.credential_generation = @intCast(index + 1);
+        record.relying_party_id_len = MAX_RP_ID_BYTES;
+        @memset(&record.relying_party_id, 'a');
+        record.relying_party_id[MAX_RP_ID_BYTES - 2] = '.';
+        record.label_len = MAX_LABEL_BYTES;
+        @memset(&record.label, 'k');
+        record.credential_digest = snapshotCredentialDigest(record);
+    }
+    fixture.identities.credential_count = MAX_CREDENTIALS;
+    var buffer: [MAX_SNAPSHOT_BYTES]u8 = undefined;
+    const bytes = try fixture.identities.encodeSnapshot(VaultIdentityFixture.owner, &fixture.vault.store, &buffer);
+    try std.testing.expectEqual(MAX_SNAPSHOT_BYTES, bytes.len);
+    var recovered = Store.init();
+    try recovered.restoreSnapshot(VaultIdentityFixture.owner, &fixture.vault.store, bytes);
+    try std.testing.expectEqualDeep(fixture.identities, recovered);
+    try std.testing.expectError(error.IdentityStoreNotEmpty, recovered.restoreSnapshot(VaultIdentityFixture.owner, &fixture.vault.store, bytes));
+}
+
+test "os identity snapshot rejects truncated noncanonical and mismatched key state" {
+    var fixture = try VaultIdentityFixture.init();
+    var buffer: [MAX_SNAPSHOT_BYTES]u8 = undefined;
+    const bytes = try fixture.identities.encodeSnapshot(VaultIdentityFixture.owner, &fixture.vault.store, &buffer);
+    for (0..bytes.len) |len| try std.testing.expectError(error.InvalidIdentitySnapshot, validateSnapshot(VaultIdentityFixture.owner, bytes[0..len]));
+    const mutations = [_]struct { offset: usize, value: u8 }{
+        .{ .offset = 0, .value = MAX_CREDENTIALS + 1 },
+        .{ .offset = 1, .value = 255 }, // Owner kind.
+        .{ .offset = 10, .value = 255 }, // Device kind.
+        .{ .offset = 19, .value = 255 }, // Scope.
+        .{ .offset = 20, .value = 0 }, // Recovery threshold.
+        .{ .offset = 21, .value = 255 }, // Status.
+        .{ .offset = 22, .value = MAX_RP_ID_BYTES + 1 },
+    };
+    for (mutations) |mutation| {
+        const original = buffer[mutation.offset];
+        buffer[mutation.offset] = mutation.value;
+        try std.testing.expectError(error.InvalidIdentitySnapshot, validateSnapshot(VaultIdentityFixture.owner, bytes));
+        buffer[mutation.offset] = original;
+    }
+    buffer[bytes.len] = 0;
+    try std.testing.expectError(error.InvalidIdentitySnapshot, validateSnapshot(VaultIdentityFixture.owner, buffer[0 .. bytes.len + 1]));
+    fixture.vault.store.secrets[0].sealed_digest[0] ^= 1;
+    var recovered = Store.init();
+    try std.testing.expectError(error.InvalidIdentitySnapshot, recovered.restoreSnapshot(VaultIdentityFixture.owner, &fixture.vault.store, bytes));
+    try std.testing.expectEqual(@as(u8, 0), recovered.credential_count);
+    fixture.vault.store.secrets[0].sealed_digest[0] ^= 1;
+    fixture.identities.credentials[1] = fixture.identities.credentials[0];
+    fixture.identities.credentials[1].id = 2;
+    fixture.identities.credential_count = 2;
+    const pair = try fixture.identities.encodeSnapshot(VaultIdentityFixture.owner, &fixture.vault.store, &buffer);
+    const last_digest = std.mem.lastIndexOf(u8, pair, &fixture.identities.credentials[1].sealed_secret_digest).?;
+    buffer[last_digest] ^= 1;
+    try std.testing.expectError(error.InvalidIdentitySnapshot, recovered.restoreSnapshot(VaultIdentityFixture.owner, &fixture.vault.store, pair));
+    try std.testing.expectEqual(@as(u8, 0), recovered.credential_count);
+    try std.testing.expectEqualDeep(zeroCredential(), recovered.credentials[0]);
 }
 
 test "os identity vault denials leave assertion counters and timestamps unchanged" {

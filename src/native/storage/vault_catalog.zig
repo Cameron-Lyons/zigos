@@ -10,16 +10,24 @@ const vault = @import("../services/secret_vault_service.zig");
 const objects = @import("object_store.zig");
 const storage_service = @import("storage_service.zig");
 const object_signer = @import("sealed_object_signer.zig");
+const identity = @import("../platform/os_identity.zig");
 
 pub const CONTENT_TYPE = "application/x-zigos-vault-catalog";
 const label = "Sealed vault catalog";
-const magic = "ZGVault1";
-const format_version: u16 = 1;
+const magic = "ZGVault2";
+const format_version: u16 = 2;
 const header_bytes = 27;
-pub const MAX_BYTES = header_bytes + secrets.MAX_SECRETS * (13 + secrets.MAX_LABEL_BYTES + sealing.MAX_BLOB_BYTES);
+pub const MAX_BYTES = header_bytes + secrets.MAX_SECRETS * (13 + secrets.MAX_LABEL_BYTES + sealing.MAX_BLOB_BYTES) + identity.MAX_SNAPSHOT_BYTES;
 const CodecError = error{ InvalidVaultCatalog, VaultCatalogTooLarge };
 const Writer = cursor.Writer(CodecError, error.VaultCatalogTooLarge);
 const Reader = cursor.Reader(CodecError, error.InvalidVaultCatalog);
+
+// One authenticated checkpoint binds credential counters, revocations and key
+// generations to exactly the sealed-key table they reference.
+pub const State = struct {
+    vault: *vault.Service,
+    identities: *identity.Store,
+};
 
 // Supplied by trusted enrollment state, never learned from the catalog being
 // opened. The generation floor must live outside a rollbackable volume if disk
@@ -51,7 +59,8 @@ const Pending = struct {
 pub const Session = struct {
     pending: ?Pending = null,
 
-    pub fn save(self: *Session, storage: *storage_service.Service, service: *vault.Service, signer: object_signer.Signer, object_id: u64, expected_version_id: u64, now_ticks: u64, scratch: *[MAX_BYTES]u8) !Receipt {
+    pub fn save(self: *Session, storage: *storage_service.Service, state: State, signer: object_signer.Signer, object_id: u64, expected_version_id: u64, now_ticks: u64, scratch: *[MAX_BYTES]u8) !Receipt {
+        const service = state.vault;
         try signer.validateService(storage.owner, storage.task_id, now_ticks);
         if (signer.authority.?.service != service) return error.InvalidSigningAuthority;
         try storage.requireDurableBoundary();
@@ -70,7 +79,7 @@ pub const Session = struct {
             }
             break :blk @as(u64, 1);
         };
-        const payload = try encode(&service.store, object_id, next_generation, signer.authority.?.owner, scratch);
+        const payload = try encode(&service.store, state.identities, object_id, next_generation, signer.authority.?.owner, scratch);
         var digest: hash.Digest = undefined;
         std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
         if (self.pending) |pending| {
@@ -106,9 +115,10 @@ pub const Session = struct {
     }
 };
 
-pub fn restore(storage: *const storage_service.Service, destination: *vault.Service, trust: Trust, scratch: *[MAX_BYTES]u8) !u64 {
+pub fn restore(storage: *const storage_service.Service, state: State, trust: Trust, scratch: *[MAX_BYTES]u8) !u64 {
+    const destination = state.vault;
     // Never replace a live store or rewind its generational lease arenas.
-    if (destination.store.secret_count != 0 or destination.handles.countInUse() != 0 or
+    if (state.identities.credential_count != 0 or destination.store.secret_count != 0 or destination.handles.countInUse() != 0 or
         destination.store.handles.countInUse() != 0) return error.VaultNotEmpty;
     const version = storage.latestVersion(trust.object_id) orelse return error.VaultCatalogMissing;
     if (version.object_type != .secret or !std.mem.eql(u8, version.metadata.contentTypeSlice(), CONTENT_TYPE) or
@@ -119,11 +129,11 @@ pub fn restore(storage: *const storage_service.Service, destination: *vault.Serv
     var reader = Reader{ .buffer = payload };
     const catalog_header = try header(&reader, trust.object_id);
     if (catalog_header.generation < trust.minimum_generation) return error.VaultCatalogRollback;
-    try decode(&destination.store, trust.object_id, trust.owner, payload);
+    try decode(&destination.store, state.identities, trust.object_id, trust.owner, payload);
     return catalog_header.generation;
 }
 
-fn encode(store: *const secrets.Store, object_id: u64, generation: u64, owner: principal.PrincipalId, scratch: []u8) ![]const u8 {
+fn encode(store: *const secrets.Store, identities: *const identity.Store, object_id: u64, generation: u64, owner: principal.PrincipalId, scratch: []u8) ![]const u8 {
     if (object_id == 0 or generation == 0 or owner.serial == 0 or store.secret_count == 0 or store.secret_count > secrets.MAX_SECRETS) return error.InvalidVaultCatalog;
     var writer = Writer{ .buffer = scratch };
     try writer.writeBytes(magic);
@@ -144,6 +154,8 @@ fn encode(store: *const secrets.Store, object_id: u64, generation: u64, owner: p
         try writer.writeU16(@intCast(blob.len));
         try writer.writeBytes(blob);
     }
+    const credentials = try identities.encodeSnapshot(owner, store, scratch[writer.offset..]);
+    writer.offset += credentials.len;
     return scratch[0..writer.offset];
 }
 
@@ -177,12 +189,13 @@ fn readRecord(reader: *Reader, owner: principal.PrincipalId) !Record {
     return .{ .owner = record_owner, .name = name, .exportable = exportable == 1, .blob = try reader.readSlice(blob_len) };
 }
 
-fn decode(store: *secrets.Store, object_id: u64, owner: principal.PrincipalId, payload: []const u8) !void {
+fn decode(store: *secrets.Store, identities: *identity.Store, object_id: u64, owner: principal.PrincipalId, payload: []const u8) !void {
     // Validate the complete canonical framing before touching the hardware.
     var reader = Reader{ .buffer = payload };
     const count = (try header(&reader, object_id)).count;
     for (0..count) |_| _ = try readRecord(&reader, owner);
-    if (!reader.eof()) return error.InvalidVaultCatalog;
+    const credentials = payload[reader.offset..];
+    identity.validateSnapshot(owner, credentials) catch return error.InvalidVaultCatalog;
     reader.offset = header_bytes;
     // A later unseal may fail even after earlier records authenticated. Roll
     // back every unpublished slot; neither raw keys nor leases survive restore.
@@ -194,6 +207,7 @@ fn decode(store: *secrets.Store, object_id: u64, owner: principal.PrincipalId, p
         const record = try readRecord(&reader, owner);
         _ = try store.restoreSealed(record.owner, record.name, record.blob, record.exportable);
     }
+    try identities.restoreSnapshot(owner, store, credentials);
 }
 
 const empty_secret = secrets.Store.init().secrets[0];
@@ -219,19 +233,20 @@ fn testTrust() !Trust {
 test "vault catalog persists sealed IDs and restores no leases after a crash" {
     const device = try durable.Fixture.init(true);
     defer device.deinit();
+    var identities = identity.Store.init();
     var fixture = SigningFixture{};
     const signer = try prepare(&fixture, &device.service);
     const portable = [_]u8{0x27} ** secrets.MAX_VALUE_BYTES;
     _ = try fixture.service.store.importSecret(test_owner, "portable", &portable, true, true);
     var scratch: [MAX_BYTES]u8 = undefined;
     var session = Session{};
-    const receipt = try session.save(&device.service, &fixture.service, signer, test_object_id, 0, 2, &scratch);
+    const receipt = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 2, &scratch);
     try std.testing.expectEqual(@as(u64, 1), receipt.catalog_generation);
     try std.testing.expect(receipt.checkpoint_generation != 0);
     device.crash();
     var recovered = vault.Service.init();
     recovered.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
-    try std.testing.expectEqual(@as(u64, 1), try restore(&device.service, &recovered, try testTrust(), &scratch));
+    try std.testing.expectEqual(@as(u64, 1), try restore(&device.service, .{ .vault = &recovered, .identities = &identities }, try testTrust(), &scratch));
     try std.testing.expectEqual(@as(u8, 2), recovered.store.secret_count);
     try std.testing.expectEqual(@as(usize, 0), recovered.handles.countInUse());
     try std.testing.expectEqual(@as(usize, 0), recovered.store.handles.countInUse());
@@ -245,79 +260,82 @@ test "vault catalog persists sealed IDs and restores no leases after a crash" {
     const signature = try recovered.signMessage(&fixture.policies, fixture.authority.subjects, .{ .holder = handle.holder, .task_id = handle.task_id, .handle_id = handle.id, .now_ticks = 4 }, "recovered", null);
     try std.testing.expect(signing.verify(signature, "recovered"));
     try std.testing.expectEqualSlices(u8, &(try testTrust()).public_key, signature.publicKeySlice());
-    try std.testing.expectError(error.VaultNotEmpty, restore(&device.service, &recovered, try testTrust(), &scratch));
+    try std.testing.expectError(error.VaultNotEmpty, restore(&device.service, .{ .vault = &recovered, .identities = &identities }, try testTrust(), &scratch));
 }
 
 test "vault catalog retries a failed barrier without another version and rechecks its lease" {
     const device = try durable.Fixture.init(true);
     defer device.deinit();
+    var identities = identity.Store.init();
     var fixture = SigningFixture{};
     const signer = try prepare(&fixture, &device.service);
     var scratch: [MAX_BYTES]u8 = undefined;
     var session = Session{};
     device.fail_flushes = true;
-    try std.testing.expectError(error.DurabilityBarrierFailed, session.save(&device.service, &fixture.service, signer, test_object_id, 0, 2, &scratch));
+    try std.testing.expectError(error.DurabilityBarrierFailed, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 2, &scratch));
     const count = device.service.versionCount();
     const version_id = session.pending.?.version_id;
     fixture.service.findHandle(signer.handle_id).?.revoked = true;
     device.fail_flushes = false;
-    try std.testing.expectError(error.HandleRevoked, session.save(&device.service, &fixture.service, signer, test_object_id, 0, 3, &scratch));
+    try std.testing.expectError(error.HandleRevoked, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 3, &scratch));
     fixture.service.findHandle(signer.handle_id).?.revoked = false;
     fixture.service.store.secrets[0].label[0] ^= 1;
-    try std.testing.expectError(error.PendingVaultCheckpoint, session.save(&device.service, &fixture.service, signer, test_object_id, 0, 3, &scratch));
+    try std.testing.expectError(error.PendingVaultCheckpoint, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 3, &scratch));
     fixture.service.store.secrets[0].label[0] ^= 1;
-    const receipt = try session.save(&device.service, &fixture.service, signer, test_object_id, 0, 3, &scratch);
+    const receipt = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 3, &scratch);
     try std.testing.expectEqual(version_id, receipt.version_id);
     try std.testing.expectEqual(count, device.service.versionCount());
     try std.testing.expect(session.pending == null);
-    try std.testing.expectError(error.VaultCatalogChanged, session.save(&device.service, &fixture.service, signer, test_object_id, 0, 4, &scratch));
-    const second = try session.save(&device.service, &fixture.service, signer, test_object_id, version_id, 4, &scratch);
+    try std.testing.expectError(error.VaultCatalogChanged, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 4, &scratch));
+    const second = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, version_id, 4, &scratch);
     try std.testing.expectEqual(@as(u64, 2), second.catalog_generation);
 }
 
 test "vault catalog authenticates its trust pin owner and signed generation" {
     const device = try durable.Fixture.init(true);
     defer device.deinit();
+    var identities = identity.Store.init();
     var fixture = SigningFixture{};
     const signer = try prepare(&fixture, &device.service);
     var scratch: [MAX_BYTES]u8 = undefined;
     var session = Session{};
-    const first = try session.save(&device.service, &fixture.service, signer, test_object_id, 0, 2, &scratch);
+    const first = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 2, &scratch);
     const original = device.service.version(first.version_id).?.*;
     var saved: [MAX_BYTES]u8 = undefined;
     const old_payload = try device.service.versionPayloadInto(&original, &saved);
-    const second = try session.save(&device.service, &fixture.service, signer, test_object_id, first.version_id, 3, &scratch);
+    const second = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, first.version_id, 3, &scratch);
     var foreign_fixture = SigningFixture{};
     const foreign_signer = try foreign_fixture.init(test_owner, device.service.owner, device.service.task_id, .{ .label = "foreign", .seed = @splat(0xee) });
-    try std.testing.expectError(error.UntrustedVaultCatalog, session.save(&device.service, &foreign_fixture.service, foreign_signer, test_object_id, second.version_id, 4, &scratch));
+    try std.testing.expectError(error.UntrustedVaultCatalog, session.save(&device.service, .{ .vault = &foreign_fixture.service, .identities = &identities }, foreign_signer, test_object_id, second.version_id, 4, &scratch));
     try std.testing.expectEqual(second.version_id, device.service.latestVersion(test_object_id).?.id.raw());
     var recovered = vault.Service.init();
     recovered.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
     var trust = try testTrust();
     trust.public_key[0] ^= 1;
-    try std.testing.expectError(error.UntrustedVaultCatalog, restore(&device.service, &recovered, trust, &scratch));
+    try std.testing.expectError(error.UntrustedVaultCatalog, restore(&device.service, .{ .vault = &recovered, .identities = &identities }, trust, &scratch));
     trust = try testTrust();
     trust.owner.serial += 1;
-    try std.testing.expectError(error.InvalidVaultCatalog, restore(&device.service, &recovered, trust, &scratch));
+    try std.testing.expectError(error.InvalidVaultCatalog, restore(&device.service, .{ .vault = &recovered, .identities = &identities }, trust, &scratch));
     // Replaying authentic old bytes as a newer object-store version must not
     // evade the externally supplied floor on the signed catalog generation.
     _ = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = old_payload, .metadata = original.metadata, .parent_version_id = ids.version(second.version_id) });
     trust = try testTrust();
     trust.minimum_generation = 2;
-    try std.testing.expectError(error.VaultCatalogRollback, restore(&device.service, &recovered, trust, &scratch));
+    try std.testing.expectError(error.VaultCatalogRollback, restore(&device.service, .{ .vault = &recovered, .identities = &identities }, trust, &scratch));
     try std.testing.expectEqual(@as(u8, 0), recovered.store.secret_count);
 }
 
 test "vault catalog rejects incomplete framing and rolls back a later failed unseal" {
+    var identities = identity.Store.init();
     var fixture = SigningFixture{};
     _ = try fixture.init(test_owner, .{ .kind = .service, .serial = 2 }, 3, durable.signer);
     _ = try fixture.service.importSecret(&fixture.policies, fixture.authority.subjects, .{ .owner = test_owner, .task_id = 3, .label = "second", .raw = "another secret", .now_ticks = 1 }, null);
     var scratch: [MAX_BYTES]u8 = undefined;
-    const payload = try encode(&fixture.service.store, test_object_id, 1, test_owner, &scratch);
+    const payload = try encode(&fixture.service.store, &identities, test_object_id, 1, test_owner, &scratch);
     var destination = secrets.Store.init();
     destination.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
     for (0..payload.len) |len| {
-        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, test_object_id, test_owner, payload[0..len]));
+        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id, test_owner, payload[0..len]));
         try std.testing.expectEqual(@as(u8, 0), destination.secret_count);
     }
     const mutations = [_]struct { offset: usize, value: u8 }{
@@ -332,31 +350,32 @@ test "vault catalog rejects incomplete framing and rolls back a later failed uns
     for (mutations) |mutation| {
         const original = scratch[mutation.offset];
         scratch[mutation.offset] = mutation.value;
-        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, test_object_id, test_owner, payload));
+        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id, test_owner, payload));
         try std.testing.expectEqual(@as(u8, 0), destination.secret_count);
         scratch[mutation.offset] = original;
     }
     scratch[payload.len] = 0;
-    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, test_object_id, test_owner, scratch[0 .. payload.len + 1]));
-    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, test_object_id + 1, test_owner, payload));
-    scratch[payload.len - 1] ^= 1;
-    try std.testing.expectError(error.InvalidSealedSecret, decode(&destination, test_object_id, test_owner, payload));
+    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id, test_owner, scratch[0 .. payload.len + 1]));
+    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id + 1, test_owner, payload));
+    scratch[payload.len - 2] ^= 1;
+    try std.testing.expectError(error.InvalidSealedSecret, decode(&destination, &identities, test_object_id, test_owner, payload));
     try std.testing.expectEqual(@as(u8, 0), destination.secret_count);
     try std.testing.expectEqualDeep(empty_secret, destination.secrets[0]);
-    scratch[payload.len - 1] ^= 1;
-    try decode(&destination, test_object_id, test_owner, payload);
+    scratch[payload.len - 2] ^= 1;
+    try decode(&destination, &identities, test_object_id, test_owner, payload);
     try std.testing.expectEqual(@as(u8, 2), destination.secret_count);
 }
 
 test "vault catalog refuses non-durable saves before publishing a version" {
     const device = try durable.Fixture.init(false);
     defer device.deinit();
+    var identities = identity.Store.init();
     var fixture = SigningFixture{};
     const signer = try prepare(&fixture, &device.service);
     var scratch: [MAX_BYTES]u8 = undefined;
     var session = Session{};
     const count = device.service.versionCount();
-    try std.testing.expectError(error.NoBackingDevice, session.save(&device.service, &fixture.service, signer, test_object_id, 0, 1, &scratch));
+    try std.testing.expectError(error.NoBackingDevice, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 1, &scratch));
     try std.testing.expectEqual(count, device.service.versionCount());
     try std.testing.expect(session.pending == null);
 }
@@ -364,18 +383,19 @@ test "vault catalog refuses non-durable saves before publishing a version" {
 test "vault catalog restores the previous complete catalog after an interrupted update" {
     const device = try durable.Fixture.init(true);
     defer device.deinit();
+    var identities = identity.Store.init();
     var fixture = SigningFixture{};
     const signer = try prepare(&fixture, &device.service);
     var scratch: [MAX_BYTES]u8 = undefined;
     var session = Session{};
-    const first = try session.save(&device.service, &fixture.service, signer, test_object_id, 0, 1, &scratch);
+    const first = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 1, &scratch);
     _ = try fixture.service.store.importSecret(test_owner, "uncommitted", "new key", true, false);
     device.fail_flushes = true;
-    try std.testing.expectError(error.DurabilityBarrierFailed, session.save(&device.service, &fixture.service, signer, test_object_id, first.version_id, 2, &scratch));
+    try std.testing.expectError(error.DurabilityBarrierFailed, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, first.version_id, 2, &scratch));
     device.crash();
     var recovered = vault.Service.init();
     recovered.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
-    try std.testing.expectEqual(@as(u64, 1), try restore(&device.service, &recovered, try testTrust(), &scratch));
+    try std.testing.expectEqual(@as(u64, 1), try restore(&device.service, .{ .vault = &recovered, .identities = &identities }, try testTrust(), &scratch));
     try std.testing.expectEqual(@as(u8, 1), recovered.store.secret_count);
     try std.testing.expect(recovered.store.describeSecret(2) == null);
 }
@@ -383,6 +403,7 @@ test "vault catalog restores the previous complete catalog after an interrupted 
 test "vault catalog round trips the full vault with maximum envelopes across storage pages" {
     const device = try durable.Fixture.init(true);
     defer device.deinit();
+    var identities = identity.Store.init();
     var fixture = SigningFixture{};
     const signer = try prepare(&fixture, &device.service);
     const provider = @import("../../tests/fixtures/secret_provider.zig").maximumEnvelopeProvider();
@@ -394,13 +415,13 @@ test "vault catalog round trips the full vault with maximum envelopes across sto
         _ = try fixture.service.store.importSecret(test_owner, &name, &value, true, false);
     }
     var scratch: [MAX_BYTES]u8 = undefined;
-    try std.testing.expect((try encode(&fixture.service.store, test_object_id, 1, test_owner, &scratch)).len > objects.MAX_INLINE_PAYLOAD_BYTES);
+    try std.testing.expect((try encode(&fixture.service.store, &identities, test_object_id, 1, test_owner, &scratch)).len > objects.MAX_INLINE_PAYLOAD_BYTES);
     var session = Session{};
-    _ = try session.save(&device.service, &fixture.service, signer, test_object_id, 0, 1, &scratch);
+    _ = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 1, &scratch);
     device.crash();
     var recovered = vault.Service.init();
     recovered.attachHardwareProvider(provider);
-    _ = try restore(&device.service, &recovered, try testTrust(), &scratch);
+    _ = try restore(&device.service, .{ .vault = &recovered, .identities = &identities }, try testTrust(), &scratch);
     try std.testing.expectEqual(secrets.MAX_SECRETS, recovered.store.secret_count);
     for (&fixture.service.store.secrets, &recovered.store.secrets) |*before, *after| {
         try std.testing.expectEqual(before.id, after.id);
