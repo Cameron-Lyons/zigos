@@ -87,6 +87,7 @@ const Fixture = if (@import("builtin").is_test) struct {
     devices: graph.Graph = .init(),
     service: Service = undefined,
     credential_handle: u64 = 0,
+    unlock_session: identity.unlock_context.Session = @import("../../tests/fixtures/identity_vault.zig").unlock_session,
 
     const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
     const device = principal.PrincipalId{ .kind = .device, .serial = 2 };
@@ -114,7 +115,7 @@ const Fixture = if (@import("builtin").is_test) struct {
     }
 
     fn authority(self: *Fixture, tick: u64) identity.VaultAuthority {
-        return .{ .vault = &self.keys.service, .policies = &self.keys.policies, .subjects = self.keys.authority.subjects, .holder = holder, .task_id = 600, .now_ticks = tick };
+        return .{ .vault = &self.keys.service, .policies = &self.keys.policies, .subjects = self.keys.authority.subjects, .holder = holder, .task_id = 600, .now_ticks = tick, .unlock_session = &self.unlock_session };
     }
 
     fn register(self: *Fixture, scratch: *[catalog.MAX_BYTES]u8) !void {
@@ -122,11 +123,13 @@ const Fixture = if (@import("builtin").is_test) struct {
     }
 
     fn request(self: *Fixture) !identity.AssertionRequest {
-        return .{ .credential_id = 1, .device = device, .relying_party_id = "accounts.example", .origin = "https://accounts.example", .challenge = "nonce", .key_handle_id = self.credential_handle, .local_unlock = try identity.createLocalUnlockProof(owner, device, "accounts.example", "nonce", .device_pin, 1, 1000, device_key) };
+        return .{ .credential_id = 1, .device = device, .relying_party_id = "accounts.example", .origin = "https://accounts.example", .challenge = "nonce", .key_handle_id = self.credential_handle, .local_unlock = try identity.createLocalUnlockProofForVerification(try self.unlock_session.binding(), owner, device, "accounts.example", "nonce", .device_pin, 1, 1000, device_key) };
     }
 
     fn restore(self: *Fixture, storage: *storage_service.Service, scratch: *[catalog.MAX_BYTES]u8) !void {
-        // Model process loss: discard every live handle and runtime identity.
+        // Model process loss: discard live handles, identity state and proof scope.
+        self.unlock_session.current.boot_instance[0] +%= 1;
+        self.unlock_session.current.session_nonce[0] +%= 1;
         self.keys.service = .init();
         self.keys.service.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
         self.identities = .init();
@@ -234,7 +237,7 @@ test "durable identity checkpoints replacement keys together with recovery gener
         _ = try fixture.service.assertCredential(&fixture.devices, fixture.authority(2), try fixture.request(), &scratch);
         const replacement = try fixture.addKey(.{ .label = "replacement", .seed = @splat(0x44) });
         const challenge = try fixture.identities.recoveryChallenge(fixture.authority(3), 1, Fixture.device, replacement);
-        const request = identity.RecoveryRequest{ .credential_id = 1, .recovery_device = Fixture.device, .relying_party_id = "accounts.example", .replacement_key_handle_id = replacement, .local_unlock = try identity.createLocalUnlockProof(Fixture.owner, Fixture.device, "accounts.example", &challenge, .recovery_key, 2, 1000, Fixture.device_key) };
+        const request = identity.RecoveryRequest{ .credential_id = 1, .recovery_device = Fixture.device, .relying_party_id = "accounts.example", .replacement_key_handle_id = replacement, .local_unlock = try identity.createLocalUnlockProofForVerification(try fixture.unlock_session.binding(), Fixture.owner, Fixture.device, "accounts.example", &challenge, .recovery_key, 2, 1000, Fixture.device_key) };
         device.fail_flushes = variant == 1;
         if (variant == 1) {
             try std.testing.expectError(error.DurabilityBarrierFailed, fixture.service.recoverCredential(&fixture.devices, fixture.authority(3), request, &scratch));

@@ -124,7 +124,13 @@ requests.
   carry handles instead of credential seeds. Each vault operation checks current
   vault policy, and assertions also recheck credential policy. Assertion signatures
   bind counters and security claims, and recovery approvals bind the registered
-  threshold, replacement key, and credential generation. Origin validation
+  threshold, replacement key, and credential generation. Unlock signatures also
+  bind the current boot ID and a fresh service-owned session nonce; locking or
+  restarting the verifier invalidates old proofs even when relative clocks reset.
+  Proofs carry only the fixed Ed25519 signature and use the enrolled device key
+  for verification, keeping existing request-size limits intact. A trusted
+  authenticator can issue proofs through a private sealed device-key lease;
+  software-seed issuance is restricted to verification builds. Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog
   now checkpoints up to 16 sealed records and 16 credentials together, preserves
@@ -136,8 +142,8 @@ requests.
   requires an enrollment-supplied public-key pin and checks an authenticated
   generation floor; rollback protection needs that floor outside the native disk.
   Production authorization provisioning, catalog trust-pin enrollment,
-  rollback-resistant freshness storage, trusted unlock issuance, and userspace
-  request dispatch remain open.
+  rollback-resistant freshness storage, trusted PIN/biometric verification and
+  session-lifecycle integration, and userspace request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   creation, recovery from the native disk after restarting the VM and swtpm,
   repeated handle cleanup, bad authorization, private-blob tampering, response
@@ -152,7 +158,9 @@ requests.
   The reboot restores two generated keys and a 96-byte exportable secret through
   the durable catalog, checks that no leases survived, then lends fresh authority.
   It also resumes an assertion counter after reboot and refuses a credential
-  revoked before shutdown. Catalog format v2 rejects older snapshots.
+  revoked before shutdown. The cold boot saves an unlock proof; the reboot rejects
+  replay at matching relative ticks and rejects replacing its signed context with
+  the new session. Catalog format v2 rejects older snapshots.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).

@@ -4,10 +4,13 @@ const policy = @import("../../native/policy/policy_object.zig");
 const principal = @import("../../native/core/principal.zig");
 const signing = @import("../../native/core/signing.zig");
 
+// Public replay domain used only by host tests and verification workloads.
+pub const unlock_session = identity.unlock_context.Session{ .current = .{ .boot_instance = @splat(0x61), .session_nonce = @splat(0x62) }, .active = true };
+
 // Explicit test/verification provisioning. The caller attaches a provider;
 // identity requests receive only the resulting leased handle.
 pub fn context(service: *vault.Service, policies: *const policy.Directory, owner: principal.PrincipalId) identity.VaultAuthority {
-    return .{ .vault = service, .policies = policies, .subjects = .{ .user_id = owner.serial }, .holder = .{ .kind = .service, .serial = 0x4944 }, .task_id = 1, .now_ticks = 0 };
+    return .{ .vault = service, .policies = policies, .subjects = .{ .user_id = owner.serial }, .holder = .{ .kind = .service, .serial = 0x4944 }, .task_id = 1, .now_ticks = 0, .unlock_session = &unlock_session };
 }
 
 pub fn at(authority: identity.VaultAuthority, tick: u64) identity.VaultAuthority {

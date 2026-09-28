@@ -10,6 +10,7 @@ const vault_service = @import("../services/secret_vault_service.zig");
 const policy_object = @import("../policy/policy_object.zig");
 const event_ledger = @import("event_ledger.zig");
 const binary_cursor = @import("binary_cursor");
+pub const unlock_context = @import("unlock_context.zig");
 
 pub const MAX_CREDENTIALS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -68,6 +69,7 @@ pub const VaultAuthority = struct {
     holder: principal.PrincipalId,
     task_id: u64,
     now_ticks: u64,
+    unlock_session: *const unlock_context.Session,
     ledger: ?*event_ledger.Ledger = null,
 };
 
@@ -87,11 +89,14 @@ pub const LocalUnlockProof = struct {
     method: UnlockMethod,
     issued_at_ticks: u64,
     expires_at_ticks: u64,
+    context: unlock_context.Binding,
     relying_party_id_len: u8,
     relying_party_id: [MAX_RP_ID_BYTES]u8,
     challenge_len: u8,
     challenge: [MAX_CHALLENGE_BYTES]u8,
-    signature: manifest.Signature = .{},
+    // The verifier selects the device key from its trusted graph. Neither a
+    // signer label nor a duplicate public key belongs in an unlock proof.
+    signature: [signing.SIGNATURE_BYTES]u8 = @splat(0),
 
     pub fn relyingPartySlice(self: *const LocalUnlockProof) []const u8 {
         return self.relying_party_id[0..@as(usize, self.relying_party_id_len)];
@@ -241,7 +246,8 @@ pub const Error = error{
     RecoveryApprovalDuplicate,
     RecoveryThresholdNotMet,
     RelyingPartyTooLong,
-} || vault_service.Error || device_graph.Error;
+    TrustedUnlockRequired,
+} || vault_service.Error || device_graph.Error || unlock_context.Error;
 
 pub const Store = struct {
     credentials: [MAX_CREDENTIALS]CredentialRecord = [_]CredentialRecord{zeroCredential()} ** MAX_CREDENTIALS,
@@ -375,7 +381,7 @@ pub const Store = struct {
         if (!originMatchesRelyingParty(request.origin, credential.relyingPartySlice())) return error.PhishingOriginRejected;
 
         const unlock = request.local_unlock orelse return error.LocalUnlockRequired;
-        try verifyLocalUnlock(graph, credential, request.device, unlock, request.challenge, authority.now_ticks);
+        try verifyLocalUnlock(graph, credential, request.device, unlock, request.challenge, authority.now_ticks, authority.unlock_session);
         const secret = try signingSecret(authority, request.key_handle_id, credential.owner);
         if (secret.id != credential.secret_id or !std.mem.eql(u8, &secret.sealed_digest, &credential.sealed_secret_digest)) return error.CredentialKeyBindingMismatch;
         const next_counter = std.math.add(u64, credential.assertion_count, 1) catch return error.CredentialCounterExhausted;
@@ -449,7 +455,7 @@ pub const Store = struct {
         const generation = std.math.add(u32, credential.credential_generation, 1) catch return error.CredentialCounterExhausted;
         const secret = try signingSecret(authority, request.replacement_key_handle_id, credential.owner);
         const challenge = recoveryIntentDigest(credential, request.recovery_device, secret);
-        try verifyRecoveryThreshold(graph, credential, request, &challenge, authority.now_ticks);
+        try verifyRecoveryThreshold(graph, credential, request, &challenge, authority.now_ticks, authority.unlock_session);
         var replacement = credential.*;
         replacement.primary_device = request.recovery_device;
         replacement.secret_id = secret.id;
@@ -563,7 +569,33 @@ fn validateSnapshotKey(record: *const CredentialRecord, secrets: *const secure_s
         !std.mem.eql(u8, &secret.sealed_digest, &record.sealed_secret_digest)) return error.InvalidIdentitySnapshot;
 }
 
-pub fn createLocalUnlockProof(
+pub const UnlockRequest = struct {
+    owner: principal.PrincipalId,
+    device: principal.PrincipalId,
+    relying_party_id: []const u8,
+    challenge: []const u8,
+    method: UnlockMethod,
+    expires_at_ticks: u64,
+    key_handle_id: u64,
+};
+
+// Called only by a trusted authenticator after local verification. The private
+// device-key lease stays in that service; this API does not verify a PIN or a
+// biometric and is not an app request boundary.
+pub fn issueLocalUnlockProof(graph: *const device_graph.Graph, authority: VaultAuthority, request: UnlockRequest) Error!LocalUnlockProof {
+    const device = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
+    _ = try signingSecret(authority, request.key_handle_id, request.owner);
+    var proof = try makeLocalUnlockProof(try authority.unlock_session.binding(), request.owner, request.device, request.relying_party_id, request.challenge, request.method, authority.now_ticks, request.expires_at_ticks);
+    const digest = localUnlockDigest(&proof);
+    const signature = try signThroughVault(authority, request.key_handle_id, &digest);
+    if (signature.value_len != signing.SIGNATURE_BYTES or !std.mem.eql(u8, signature.publicKeySlice(), device.device_signature.publicKeySlice())) return error.InvalidLocalUnlock;
+    proof.signature = signature.value[0..signing.SIGNATURE_BYTES].*;
+    try verifyUnlockSignature(device, &proof);
+    return proof;
+}
+
+pub fn createLocalUnlockProofForVerification(
+    context: unlock_context.Binding,
     owner: principal.PrincipalId,
     device: principal.PrincipalId,
     relying_party_id: []const u8,
@@ -573,32 +605,44 @@ pub fn createLocalUnlockProof(
     expires_at_ticks: u64,
     device_identity: signing.SignerIdentity,
 ) Error!LocalUnlockProof {
+    if (comptime @import("builtin").os.tag == .freestanding) {
+        if (comptime !@import("../../kernel/config.zig").includesVerificationEvidence()) return error.TrustedUnlockRequired;
+    }
+    var proof = try makeLocalUnlockProof(context, owner, device, relying_party_id, challenge, method, issued_at_ticks, expires_at_ticks);
+    const signature = signing.sign(device_identity, &localUnlockDigest(&proof)) catch return error.InvalidLocalUnlock;
+    proof.signature = signature.value[0..signing.SIGNATURE_BYTES].*;
+    return proof;
+}
+
+fn makeLocalUnlockProof(
+    context: unlock_context.Binding,
+    owner: principal.PrincipalId,
+    device: principal.PrincipalId,
+    relying_party_id: []const u8,
+    challenge: []const u8,
+    method: UnlockMethod,
+    issued_at_ticks: u64,
+    expires_at_ticks: u64,
+) Error!LocalUnlockProof {
+    if (!context.valid()) return error.InvalidUnlockContext;
     if (expires_at_ticks <= issued_at_ticks) return error.LocalUnlockExpired;
+    if (relying_party_id.len > MAX_RP_ID_BYTES) return error.RelyingPartyTooLong;
+    if (!validDnsName(relying_party_id)) return error.InvalidRelyingParty;
+    if (challenge.len == 0) return error.InvalidChallenge;
     var proof = LocalUnlockProof{
         .owner = owner,
         .device = device,
         .method = method,
         .issued_at_ticks = issued_at_ticks,
         .expires_at_ticks = expires_at_ticks,
+        .context = context,
         .relying_party_id_len = 0,
         .relying_party_id = [_]u8{0} ** MAX_RP_ID_BYTES,
         .challenge_len = 0,
         .challenge = [_]u8{0} ** MAX_CHALLENGE_BYTES,
-        .signature = .{},
     };
     proof.relying_party_id_len = @intCast(native_util.copyTextExact(&proof.relying_party_id, relying_party_id) catch return error.RelyingPartyTooLong);
     proof.challenge_len = @intCast(native_util.copyTextExact(&proof.challenge, challenge) catch return error.ChallengeTooLong);
-    const digest = localUnlockDigest(
-        proof.owner,
-        proof.device,
-        proof.relyingPartySlice(),
-        proof.challengeSlice(),
-        proof.method,
-        proof.issued_at_ticks,
-        proof.expires_at_ticks,
-    );
-    proof.signature = signing.sign(device_identity, &digest) catch return error.InvalidLocalUnlock;
-    if (!signing.verify(proof.signature, &digest)) return error.InvalidLocalUnlock;
     return proof;
 }
 
@@ -609,25 +653,24 @@ fn verifyLocalUnlock(
     proof: LocalUnlockProof,
     challenge: []const u8,
     tick: u64,
+    session: *const unlock_context.Session,
 ) Error!void {
     if (proof.relying_party_id_len > MAX_RP_ID_BYTES or proof.challenge_len > MAX_CHALLENGE_BYTES) return error.InvalidLocalUnlock;
+    try session.require(proof.context);
     if (!proof.owner.eql(credential.owner) or !proof.device.eql(device)) return error.InvalidLocalUnlock;
     if (!std.mem.eql(u8, proof.relyingPartySlice(), credential.relyingPartySlice())) return error.InvalidLocalUnlock;
     if (!std.mem.eql(u8, proof.challengeSlice(), challenge)) return error.InvalidLocalUnlock;
     if (tick < proof.issued_at_ticks or tick >= proof.expires_at_ticks) return error.LocalUnlockExpired;
 
     const device_record = try requireTrustedDeviceForOwner(graph, credential.owner, device);
-    const digest = localUnlockDigest(
-        proof.owner,
-        proof.device,
-        proof.relyingPartySlice(),
-        proof.challengeSlice(),
-        proof.method,
-        proof.issued_at_ticks,
-        proof.expires_at_ticks,
-    );
-    if (!std.mem.eql(u8, proof.signature.publicKeySlice(), device_record.device_signature.publicKeySlice())) return error.InvalidLocalUnlock;
-    if (!signing.verify(proof.signature, &digest)) return error.InvalidLocalUnlock;
+    try verifyUnlockSignature(device_record, &proof);
+}
+
+fn verifyUnlockSignature(device: *const device_graph.DeviceRecord, proof: *const LocalUnlockProof) Error!void {
+    const key = device.device_signature.publicKeySlice();
+    if (device.device_signature.format != .ed25519 or key.len != signing.PUBLIC_KEY_BYTES) return error.InvalidLocalUnlock;
+    const signature = manifest.Signature{ .public_key = key[0..signing.PUBLIC_KEY_BYTES].*, .public_key_len = signing.PUBLIC_KEY_BYTES, .value = proof.signature, .value_len = signing.SIGNATURE_BYTES };
+    if (!signing.verify(signature, &localUnlockDigest(proof))) return error.InvalidLocalUnlock;
 }
 
 fn requireCredentialDevice(
@@ -648,6 +691,7 @@ fn verifyRecoveryThreshold(
     request: RecoveryRequest,
     challenge: []const u8,
     tick: u64,
+    session: *const unlock_context.Session,
 ) Error!void {
     var trusted_devices: [device_graph.MAX_DEVICES]principal.PrincipalId = undefined;
     var trusted_device_count: usize = 0;
@@ -659,6 +703,7 @@ fn verifyRecoveryThreshold(
         request.local_unlock,
         challenge,
         tick,
+        session,
     );
     trusted_devices[trusted_device_count] = request.recovery_device;
     trusted_device_count += 1;
@@ -672,6 +717,7 @@ fn verifyRecoveryThreshold(
             approval.local_unlock,
             challenge,
             tick,
+            session,
         );
         if (trusted_device_count >= trusted_devices.len) return error.RecoveryThresholdNotMet;
         trusted_devices[trusted_device_count] = approval.device;
@@ -688,9 +734,10 @@ fn verifyRecoveryApproval(
     unlock: LocalUnlockProof,
     challenge: []const u8,
     tick: u64,
+    session: *const unlock_context.Session,
 ) Error!void {
     _ = try requireTrustedDeviceForOwner(graph, credential.owner, device);
-    try verifyLocalUnlock(graph, credential, device, unlock, challenge, tick);
+    try verifyLocalUnlock(graph, credential, device, unlock, challenge, tick, session);
 }
 
 fn containsPrincipal(haystack: []const principal.PrincipalId, needle: principal.PrincipalId) bool {
@@ -769,25 +816,20 @@ fn credentialDigest(
     return crypto_hash.finalize(&hasher);
 }
 
-fn localUnlockDigest(
-    owner: principal.PrincipalId,
-    device: principal.PrincipalId,
-    relying_party_id: []const u8,
-    challenge: []const u8,
-    method: UnlockMethod,
-    issued_at_ticks: u64,
-    expires_at_ticks: u64,
-) crypto_hash.Digest {
+fn localUnlockDigest(proof: *const LocalUnlockProof) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateEnum(&hasher, "owner-kind", owner.kind);
-    crypto_hash.updateInt(&hasher, "owner-serial", owner.serial);
-    crypto_hash.updateEnum(&hasher, "device-kind", device.kind);
-    crypto_hash.updateInt(&hasher, "device-serial", device.serial);
-    crypto_hash.updateBytes(&hasher, "relying-party-id", relying_party_id);
-    crypto_hash.updateBytes(&hasher, "challenge", challenge);
-    crypto_hash.updateEnum(&hasher, "unlock-method", method);
-    crypto_hash.updateInt(&hasher, "issued-at", issued_at_ticks);
-    crypto_hash.updateInt(&hasher, "expires-at", expires_at_ticks);
+    crypto_hash.updateBytes(&hasher, "domain", "zigos.identity.local-unlock.v2");
+    crypto_hash.updateBytes(&hasher, "boot-instance", &proof.context.boot_instance);
+    crypto_hash.updateBytes(&hasher, "session-nonce", &proof.context.session_nonce);
+    crypto_hash.updateEnum(&hasher, "owner-kind", proof.owner.kind);
+    crypto_hash.updateInt(&hasher, "owner-serial", proof.owner.serial);
+    crypto_hash.updateEnum(&hasher, "device-kind", proof.device.kind);
+    crypto_hash.updateInt(&hasher, "device-serial", proof.device.serial);
+    crypto_hash.updateBytes(&hasher, "relying-party-id", proof.relyingPartySlice());
+    crypto_hash.updateBytes(&hasher, "challenge", proof.challengeSlice());
+    crypto_hash.updateEnum(&hasher, "unlock-method", proof.method);
+    crypto_hash.updateInt(&hasher, "issued-at", proof.issued_at_ticks);
+    crypto_hash.updateInt(&hasher, "expires-at", proof.expires_at_ticks);
     return crypto_hash.finalize(&hasher);
 }
 
@@ -975,7 +1017,7 @@ test "os identity creates passkey credentials and rejects phishing origins" {
     try std.testing.expect(credential.isRecoverableThroughDeviceGraph());
     try std.testing.expect(!std.mem.allEqual(u8, &credential.sealed_secret_digest, 0));
 
-    const unlock = try createLocalUnlockProof(user, laptop, "accounts.example", "nonce-1", .biometric, 3, 8, laptop_identity);
+    const unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, laptop, "accounts.example", "nonce-1", .biometric, 3, 8, laptop_identity);
     const assertion = try identities.assertCredential(&graph, identity_keys.at(authority, 4), .{
         .credential_id = credential.id,
         .device = laptop,
@@ -1172,7 +1214,7 @@ test "os identity recovers synced credentials through trusted device graph" {
     });
 
     const recovery_challenge = try identities.recoveryChallenge(authority, synced.id, phone, handle_replacement_credential_identity);
-    const recovery_unlock = try createLocalUnlockProof(user, phone, "zigos.dev", &recovery_challenge, .recovery_key, 5, 10, phone_identity);
+    const recovery_unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "zigos.dev", &recovery_challenge, .recovery_key, 5, 10, phone_identity);
     try std.testing.expectError(error.RecoveryThresholdNotMet, identities.recoverCredential(&graph, identity_keys.at(authority, 6), .{
         .credential_id = synced.id,
         .recovery_device = phone,
@@ -1181,7 +1223,7 @@ test "os identity recovers synced credentials through trusted device graph" {
         .replacement_key_handle_id = handle_replacement_credential_identity,
     }));
 
-    const laptop_recovery_unlock = try createLocalUnlockProof(user, laptop, "zigos.dev", &recovery_challenge, .recovery_key, 5, 10, laptop_identity);
+    const laptop_recovery_unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, laptop, "zigos.dev", &recovery_challenge, .recovery_key, 5, 10, laptop_identity);
     const approvals = [_]RecoveryApproval{
         .{
             .device = laptop,
@@ -1201,7 +1243,7 @@ test "os identity recovers synced credentials through trusted device graph" {
     try std.testing.expectEqual(@as(u64, 6), recovered.recovered_at_ticks);
     try std.testing.expect(!std.mem.eql(u8, first_digest[0..], recovered.credential_digest[0..]));
 
-    const unlock = try createLocalUnlockProof(user, phone, "zigos.dev", "nonce-2", .device_pin, 7, 11, phone_identity);
+    const unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "zigos.dev", "nonce-2", .device_pin, 7, 11, phone_identity);
     const assertion = try identities.assertCredential(&graph, identity_keys.at(authority, 8), .{
         .credential_id = synced.id,
         .device = phone,
@@ -1216,7 +1258,7 @@ test "os identity recovers synced credentials through trusted device graph" {
     try std.testing.expect(assertion.primary_device_assertion);
     try std.testing.expectEqual(@as(u64, 1), assertion.unlock_age_ticks);
 
-    const bound_recovery_unlock = try createLocalUnlockProof(user, phone, "admin.zigos.dev", "recover-bound", .recovery_key, 9, 12, phone_identity);
+    const bound_recovery_unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "admin.zigos.dev", "recover-bound", .recovery_key, 9, 12, phone_identity);
     try std.testing.expectError(error.DeviceBoundRecoveryDenied, identities.recoverCredential(&graph, identity_keys.at(authority, 10), .{
         .credential_id = bound.id,
         .recovery_device = phone,
@@ -1320,7 +1362,7 @@ test "os identity requires fresh local unlock and primary device for device-boun
         .scope = .device_bound,
         .key_handle_id = handle_credential_identity,
     });
-    const phone_unlock = try createLocalUnlockProof(user, phone, "device.example", "nonce-3", .biometric, 4, 8, phone_identity);
+    const phone_unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "device.example", "nonce-3", .biometric, 4, 8, phone_identity);
     try std.testing.expectError(error.DeviceBoundCredentialWrongDevice, identities.assertCredential(&graph, identity_keys.at(authority, 5), .{
         .credential_id = credential.id,
         .device = phone,
@@ -1331,7 +1373,7 @@ test "os identity requires fresh local unlock and primary device for device-boun
         .key_handle_id = handle_credential_identity,
     }));
 
-    const expired_unlock = try createLocalUnlockProof(user, laptop, "device.example", "nonce-4", .biometric, 4, 5, laptop_identity);
+    const expired_unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, laptop, "device.example", "nonce-4", .biometric, 4, 5, laptop_identity);
     try std.testing.expectError(error.LocalUnlockExpired, identities.assertCredential(&graph, identity_keys.at(authority, 6), .{
         .credential_id = credential.id,
         .device = laptop,
@@ -1350,6 +1392,7 @@ const VaultIdentityFixture = if (@import("builtin").is_test) struct {
     identities: Store = Store.init(),
     handle_id: u64 = 0,
     credential_id: u64 = 0,
+    unlock_session: unlock_context.Session = identity_keys.unlock_session,
 
     const owner = principal.PrincipalId{ .kind = .user, .serial = 1201 };
     const device = principal.PrincipalId{ .kind = .device, .serial = 1202 };
@@ -1375,7 +1418,9 @@ const VaultIdentityFixture = if (@import("builtin").is_test) struct {
     }
 
     fn authority(self: *VaultIdentityFixture, tick: u64) VaultAuthority {
-        return identity_keys.at(identity_keys.context(&self.vault, &self.policies, owner), tick);
+        var result = identity_keys.at(identity_keys.context(&self.vault, &self.policies, owner), tick);
+        result.unlock_session = &self.unlock_session;
+        return result;
     }
 
     fn request(self: *const VaultIdentityFixture) !AssertionRequest {
@@ -1385,7 +1430,7 @@ const VaultIdentityFixture = if (@import("builtin").is_test) struct {
             .relying_party_id = "accounts.example",
             .origin = "https://accounts.example",
             .challenge = "nonce",
-            .local_unlock = try createLocalUnlockProof(owner, device, "accounts.example", "nonce", .device_pin, 2, 2000, device_key),
+            .local_unlock = try createLocalUnlockProofForVerification(try self.unlock_session.binding(), owner, device, "accounts.example", "nonce", .device_pin, 2, 2000, device_key),
             .key_handle_id = self.handle_id,
         };
     }
@@ -1430,6 +1475,76 @@ test "os identity signs every assertion claim through the sealed vault key" {
     try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
     const wrong_key = [_]u8{0x91} ** signing.PUBLIC_KEY_BYTES;
     try std.testing.expect(!verifyAssertion(&assertion, &wrong_key));
+}
+
+test "os identity rejects an unlock proof captured before a verifier restart" {
+    var before = try VaultIdentityFixture.init();
+    const old_request = try before.request();
+    _ = try before.identities.assertCredential(&before.graph, before.authority(3), old_request);
+    var after = try VaultIdentityFixture.init();
+    after.unlock_session.current.boot_instance[0] ^= 1;
+    try std.testing.expectError(error.UnlockContextMismatch, after.identities.assertCredential(&after.graph, after.authority(3), old_request));
+}
+
+test "os identity binds unlock signatures to live sessions and rejects proof transplantation" {
+    var fixture = try VaultIdentityFixture.init();
+    const request = try fixture.request();
+    const captured_authority = fixture.authority(3);
+    fixture.unlock_session.lock();
+    try std.testing.expectError(error.UnlockContextUnavailable, fixture.identities.assertCredential(&fixture.graph, captured_authority, request));
+    fixture.unlock_session.current.session_nonce[0] ^= 1;
+    fixture.unlock_session.active = true;
+    try std.testing.expectError(error.UnlockContextMismatch, fixture.identities.assertCredential(&fixture.graph, captured_authority, request));
+    var transplanted = request;
+    transplanted.local_unlock.?.context = try fixture.unlock_session.binding();
+    try std.testing.expectError(error.InvalidLocalUnlock, fixture.identities.assertCredential(&fixture.graph, captured_authority, transplanted));
+    try std.testing.expectEqual(@as(u64, 0), fixture.identities.findCredentialConst(1).?.assertion_count);
+    const accepted = try fixture.identities.assertCredential(&fixture.graph, captured_authority, try fixture.request());
+    try std.testing.expectEqual(@as(u64, 1), accepted.assertion_counter);
+}
+
+test "os identity issues unlock proofs only through the enrolled device key lease" {
+    var fixture = try VaultIdentityFixture.init();
+    const device_handle = try identity_keys.provision(fixture.authority(3), VaultIdentityFixture.owner, VaultIdentityFixture.device_key);
+    const request = UnlockRequest{ .owner = VaultIdentityFixture.owner, .device = VaultIdentityFixture.device, .relying_party_id = "accounts.example", .challenge = "nonce", .method = .device_pin, .expires_at_ticks = 20, .key_handle_id = device_handle };
+    const proof = try issueLocalUnlockProof(&fixture.graph, fixture.authority(3), request);
+    var assertion = try fixture.request();
+    assertion.local_unlock = proof;
+    _ = try fixture.identities.assertCredential(&fixture.graph, fixture.authority(4), assertion);
+    var wrong_key = request;
+    wrong_key.key_handle_id = fixture.handle_id;
+    try std.testing.expectError(error.InvalidLocalUnlock, issueLocalUnlockProof(&fixture.graph, fixture.authority(3), wrong_key));
+    fixture.vault.findHandle(device_handle).?.expires_at_ticks = 3;
+    try std.testing.expectError(error.HandleExpired, issueLocalUnlockProof(&fixture.graph, fixture.authority(3), request));
+    fixture.vault.findHandle(device_handle).?.expires_at_ticks = 100;
+    fixture.vault.findHandle(device_handle).?.revoked = true;
+    try std.testing.expectError(error.HandleRevoked, issueLocalUnlockProof(&fixture.graph, fixture.authority(3), request));
+    fixture.unlock_session.lock();
+    try std.testing.expectError(error.UnlockContextUnavailable, issueLocalUnlockProof(&fixture.graph, fixture.authority(3), request));
+}
+
+test "os identity recovery requires every approval to bind the current verifier session" {
+    var fixture = try VaultIdentityFixture.init();
+    const owner = VaultIdentityFixture.owner;
+    const device = VaultIdentityFixture.device;
+    const phone = principal.PrincipalId{ .kind = .device, .serial = 1203 };
+    const phone_key = signing.SignerIdentity{ .label = "phone", .seed = @splat(0x65) };
+    _ = try fixture.graph.enrollDevice(owner, phone, "phone", VaultIdentityFixture.owner_key, phone_key, 2);
+    fixture.identities = .init();
+    _ = try fixture.identities.registerCredential(&fixture.graph, fixture.authority(2), .{ .owner = owner, .device = device, .relying_party_id = "accounts.example", .label = "account", .recovery_threshold = 2, .key_handle_id = fixture.handle_id });
+    const replacement = try identity_keys.provision(fixture.authority(2), owner, .{ .label = "replacement", .seed = @splat(0x71) });
+    const challenge = try fixture.identities.recoveryChallenge(fixture.authority(3), 1, device, replacement);
+    const old_phone = try createLocalUnlockProofForVerification(try fixture.unlock_session.binding(), owner, phone, "accounts.example", &challenge, .recovery_key, 2, 10, phone_key);
+    fixture.unlock_session.current.session_nonce[0] ^= 1;
+    var approvals = [_]RecoveryApproval{.{ .device = phone, .local_unlock = old_phone }};
+    const request = RecoveryRequest{ .credential_id = 1, .recovery_device = device, .relying_party_id = "accounts.example", .replacement_key_handle_id = replacement, .approvals = &approvals, .local_unlock = try createLocalUnlockProofForVerification(try fixture.unlock_session.binding(), owner, device, "accounts.example", &challenge, .recovery_key, 2, 10, VaultIdentityFixture.device_key) };
+    try std.testing.expectError(error.UnlockContextMismatch, fixture.identities.recoverCredential(&fixture.graph, fixture.authority(3), request));
+    approvals[0].local_unlock.context = try fixture.unlock_session.binding();
+    try std.testing.expectError(error.InvalidLocalUnlock, fixture.identities.recoverCredential(&fixture.graph, fixture.authority(3), request));
+    try std.testing.expectEqual(@as(u32, 1), fixture.identities.findCredentialConst(1).?.credential_generation);
+    approvals[0].local_unlock = try createLocalUnlockProofForVerification(try fixture.unlock_session.binding(), owner, phone, "accounts.example", &challenge, .recovery_key, 2, 10, phone_key);
+    const recovered = try fixture.identities.recoverCredential(&fixture.graph, fixture.authority(3), request);
+    try std.testing.expectEqual(@as(u32, 2), recovered.credential_generation);
 }
 
 test "os identity snapshot preserves counters revocations and complete table bounds" {
@@ -1646,7 +1761,7 @@ test "os identity recovery binds approval to the replacement key and generation 
         .credential_id = record.id,
         .recovery_device = device,
         .relying_party_id = "accounts.example",
-        .local_unlock = try createLocalUnlockProof(owner, device, "accounts.example", &challenge, .recovery_key, 2, 10, VaultIdentityFixture.device_key),
+        .local_unlock = try createLocalUnlockProofForVerification(identity_keys.unlock_session.current, owner, device, "accounts.example", &challenge, .recovery_key, 2, 10, VaultIdentityFixture.device_key),
         .replacement_key_handle_id = other,
     };
     try std.testing.expectError(error.InvalidLocalUnlock, fixture.identities.recoverCredential(&fixture.graph, fixture.authority(3), request));

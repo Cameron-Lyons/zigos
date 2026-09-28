@@ -111,6 +111,14 @@ run_boot() {
         return 1
       fi
     done
+    local unlock_marker="ZIGOS:TPM2:UNLOCK:BOUND"
+    if [ "$name" = reboot ]; then unlock_marker="ZIGOS:TPM2:UNLOCK:REPLAY_REJECTED"; fi
+    if [ "$(grep -c '^ZIGOS:TPM2:UNLOCK:' "$log" || true)" -ne "$expected_proofs" ] ||
+      { [ "$expected_proofs" -eq 1 ] && ! grep -Fxq "$unlock_marker" "$log"; }; then
+      cat "$log" >&2
+      echo "TPM2 unlock replay result mismatch for $name" >&2
+      return 1
+    fi
   else
     bash "$SCRIPT_DIR/check-production-boot-log.sh" "$log"
   fi

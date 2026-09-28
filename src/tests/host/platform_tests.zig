@@ -15,6 +15,7 @@ const native_ux = @import("../../native/platform/native_ux.zig");
 const os_contract = @import("../../native/platform/os_contract.zig");
 const contract_2026 = @import("../../native/contract_2026.zig");
 const os_identity = @import("../../native/platform/os_identity.zig");
+const unlock_context = @import("../../native/platform/unlock_context.zig");
 const platform_policy_signals = @import("../../native/platform/platform_policy_signals.zig");
 const recovery_environment = @import("../../native/platform/recovery_environment.zig");
 const rendered_shell = @import("../../native/platform/rendered_shell.zig");
@@ -37,6 +38,7 @@ test "platform host tests import native platform modules" {
     std.testing.refAllDecls(os_contract);
     std.testing.refAllDecls(contract_2026);
     std.testing.refAllDecls(os_identity);
+    std.testing.refAllDecls(unlock_context);
     std.testing.refAllDecls(platform_policy_signals);
     std.testing.refAllDecls(recovery_environment);
     std.testing.refAllDecls(rendered_shell);

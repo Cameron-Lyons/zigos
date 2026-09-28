@@ -101,7 +101,9 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     var catalog_authority = object_signer.Authority{ .service = &service, .policies = &policies, .subjects = subjects, .owner = owner, .holder = storage.owner, .task_id = storage.task_id };
     const catalog_signer = try object_signer.Signer.bind(&catalog_authority, catalog_handle.id, 2);
     var durable_identities = durable_identity.Service{ .state = .{ .vault = &service, .identities = &identities }, .storage = storage, .signer = catalog_signer, .object_id = catalog_object_id, .version_id = if (restored) storage.latestVersion(catalog_object_id).?.id.raw() else 0 };
-    try proveIdentityAssertions(&durable_identities, &policies, secret.id, &expected_key, restored, &catalog_scratch);
+    var unlock_session = identity.unlock_context.Session{};
+    try unlock_session.begin(@import("../../../kernel/platform/secure_random.zig").bootInstanceId(), io);
+    try proveIdentityAssertions(&durable_identities, &policies, secret.id, &expected_key, restored, &catalog_scratch, &unlock_session);
     try proveDocumentSigning(&service, &policies, secret.id, &expected_key);
     var out: secrets.Value = @splat(0xaa);
     defer std.crypto.secureZero(u8, &out);
@@ -232,7 +234,7 @@ fn proveDocumentSigning(service: *vault.Service, policies: *const policy.Directo
 
 // The graph and unlock proof are explicit verification fixtures. Credential
 // signatures use the recovered real TPM-backed key, without a caller seed.
-fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const policy.Directory, secret_id: u64, expected_public_key: *const signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8) !void {
+fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const policy.Directory, secret_id: u64, expected_public_key: *const signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8, unlock_session: *identity.unlock_context.Session) !void {
     const service = durable.state.vault;
     const identities = durable.state.identities;
     const identity_service = principal.PrincipalId{ .kind = .service, .serial = 0x703 };
@@ -258,6 +260,7 @@ fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const 
         .holder = identity_service,
         .task_id = 6,
         .now_ticks = 3,
+        .unlock_session = unlock_session,
     };
     if (!restored) {
         _ = try identities.registerCredential(&graph, authority, .{ .owner = owner, .device = device, .relying_party_id = "identity.example", .label = "TPM identity proof", .key_handle_id = handle.id });
@@ -274,9 +277,10 @@ fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const 
         .relying_party_id = "identity.example",
         .origin = "https://identity.example",
         .challenge = "identity-proof",
-        .local_unlock = try identity.createLocalUnlockProof(owner, device, "identity.example", "identity-proof", .device_pin, 2, 20, device_signer),
+        .local_unlock = try identity.createLocalUnlockProofForVerification(try unlock_session.binding(), owner, device, "identity.example", "identity-proof", .device_pin, 2, 20, device_signer),
         .key_handle_id = handle.id,
     };
+    try proveUnlockReplay(durable, &graph, authority, request, restored, scratch);
     const assertion = try durable.assertCredential(&graph, authority, request, scratch);
     if (!identity.verifyAssertion(&assertion, expected_public_key) or !assertion.hardware_backed_credential or assertion.assertion_counter != expected_counter) return error.BadIdentityAssertion;
     var revoked_request = request;
@@ -310,6 +314,50 @@ fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const 
         if (err != error.HandleRevoked) return err;
     }
     if (credential.assertion_count != expected_counter or credential.last_asserted_at_ticks != 3) return error.MutatedDeniedIdentityAssertion;
+    unlock_session.lock();
+    if (durable.assertCredential(&graph, authority, request, scratch)) |_| return error.SignedWhileLocked else |err| {
+        if (err != error.UnlockContextUnavailable) return err;
+    }
     console.print("ZIGOS:TPM2:IDENTITY:SIGNED\n");
     console.print(if (restored) "ZIGOS:TPM2:CREDENTIALS:RESTORED\n" else "ZIGOS:TPM2:CREDENTIALS:COMMITTED\n");
+}
+
+fn proveUnlockReplay(durable: *durable_identity.Service, graph: *const device_graph.Graph, authority: identity.VaultAuthority, request: identity.AssertionRequest, restored: bool, scratch: *[catalog.MAX_BYTES]u8) !void {
+    const replay_type = "application/x-zigos-unlock-replay-proof";
+    var matches: [2]objects.ObjectQueryResult = undefined;
+    const found = durable.storage.queryObjects(.{ .object_type = .secret, .content_type = replay_type }, &matches);
+    if (found.len != @as(usize, if (restored) 1 else 0)) return error.InvalidUnlockReplayFixture;
+    if (restored) {
+        const version = durable.storage.latestVersion(found[0].object_id).?;
+        const bytes = try durable.storage.versionPayload(version);
+        if (bytes.len != 96 or !version.metadata.verifyFor(.secret, bytes) or
+            !std.mem.eql(u8, version.metadata.signature.publicKeySlice(), &(try signing.publicKey(signer)))) return error.InvalidUnlockReplayFixture;
+        var replay = request;
+        @memcpy(&replay.local_unlock.?.context.boot_instance, bytes[0..16]);
+        @memcpy(&replay.local_unlock.?.context.session_nonce, bytes[16..32]);
+        @memcpy(&replay.local_unlock.?.signature, bytes[32..96]);
+        const before = durable.state.identities.findCredentialConst(request.credential_id).?.assertion_count;
+        // Identical challenge and still-valid relative ticks deliberately model
+        // the old clock-reset vulnerability using the previous boot's signature.
+        if (durable.assertCredential(graph, authority, replay, scratch)) |_| return error.AcceptedPreviousBootUnlock else |err| {
+            if (err != error.UnlockContextMismatch) return err;
+        }
+        replay.local_unlock.?.context = try authority.unlock_session.binding();
+        if (durable.assertCredential(graph, authority, replay, scratch)) |_| return error.AcceptedTransplantedUnlock else |err| {
+            if (err != error.InvalidLocalUnlock) return err;
+        }
+        if (durable.dirty or durable.state.identities.findCredentialConst(request.credential_id).?.assertion_count != before) return error.MutatedReplayedUnlock;
+        console.print("ZIGOS:TPM2:UNLOCK:REPLAY_REJECTED\n");
+    } else {
+        var bytes: [96]u8 = undefined;
+        const proof = request.local_unlock.?;
+        @memcpy(bytes[0..16], &proof.context.boot_instance);
+        @memcpy(bytes[16..32], &proof.context.session_nonce);
+        @memcpy(bytes[32..96], &proof.signature);
+        const previous = durable.storage.checkpoint_enabled;
+        durable.storage.checkpoint_enabled = false;
+        defer durable.storage.checkpoint_enabled = previous;
+        _ = try durable.storage.putLocallySignedVersion(.{ .object_type = .secret, .payload = &bytes, .signer = signer, .label = "unlock replay fixture", .content_type = replay_type, .created_at_ticks = 2 });
+        console.print("ZIGOS:TPM2:UNLOCK:BOUND\n");
+    }
 }
