@@ -20,7 +20,7 @@ const root_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0xa1) }
 const alice_key = signing.SignerIdentity{ .label = "alice", .seed = @splat(0xa2) };
 const bob_key = signing.SignerIdentity{ .label = "bob", .seed = @splat(0xa3) };
 
-const Fixture = struct {
+pub const Fixture = struct {
     disk: *durable.Fixture,
     service: sync.Service,
     capabilities: capability.CapabilityTable = .init(),
@@ -35,7 +35,7 @@ const Fixture = struct {
     receiver: transfer.Receiver = undefined,
     scratch: [4096]u8 = @splat(0),
 
-    fn init() !*Fixture {
+    pub fn init() !*Fixture {
         const self = try std.testing.allocator.create(Fixture);
         errdefer std.testing.allocator.destroy(self);
         const disk = try durable.Fixture.init(true);
@@ -97,7 +97,7 @@ const Fixture = struct {
         try self.recipient.readHandshake(try self.sender.writeHandshake(&wire, 20), 20);
     }
 
-    fn deinit(self: *Fixture) void {
+    pub fn deinit(self: *Fixture) void {
         self.receiver.reset();
         self.sender.close();
         self.recipient.close();

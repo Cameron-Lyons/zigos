@@ -79,6 +79,10 @@ pub const Channel = struct {
         return self.crypto == .transport;
     }
 
+    pub fn validate(self: *Channel, now_ticks: u64) Error!void {
+        try self.requireTrust(now_ticks);
+    }
+
     pub fn writeHandshake(self: *Channel, output: []u8, now_ticks: u64) Error![]const u8 {
         errdefer self.close();
         errdefer std.crypto.secureZero(u8, output[0..@min(output.len, MAX_FRAME)]);

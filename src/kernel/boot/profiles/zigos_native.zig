@@ -36,7 +36,7 @@ pub fn run() noreturn {
                 _ = session_manager.wakeUserspaceTask(bound_task_id, now_ticks);
             }
         }
-        if (pending.network) {
+        if (pending.network or session_manager.networkWorkPending()) {
             _ = session_manager.servicePendingNetworkWork(now_ticks);
         }
         _ = session_manager.runUserspaceScheduler(now_ticks);
@@ -48,13 +48,15 @@ pub fn run() noreturn {
 
         x86.cli();
         const ready_tasks = session_manager.userspaceSchedulerHasReadyTasks();
-        if (event_wake.any() or ready_tasks) {
+        if (event_wake.any() or ready_tasks or session_manager.networkWorkPending()) {
             if (ready_tasks) timer.armSchedulerTick();
             x86.sti();
             continue;
         }
         if (xhci_driver_task.lifecyclePending()) {
             timer.armSchedulerTick();
+        } else if (session_manager.peerNextWake()) |deadline| {
+            timer.armWakeAt(deadline);
         } else {
             timer.disarmSchedulerTick();
             if (!reported_scheduler_idle) {

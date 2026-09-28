@@ -142,3 +142,7 @@ pub fn wakeUserspaceTask(task_id: u64, now_ticks: u64) bool {
 pub fn networkWorkPending() bool {
     return default_manager.networkWorkPending();
 }
+
+pub fn peerNextWake() ?u64 {
+    return default_manager.peerNextWake();
+}

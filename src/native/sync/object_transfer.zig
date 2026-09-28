@@ -68,26 +68,31 @@ pub const Receiver = struct {
     transfer: ?Transfer = null,
 
     pub fn receive(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: sealed_signer.Signer, frame: []const u8) !Progress {
-        signer.validateService(self.store.owner, self.store.task_id, authority.now_ticks) catch |err| {
-            self.reset();
-            return err;
-        };
+        const entry = try self.validate(channel, authority, signer);
+        return self.receiveImpl(channel, authority, signer, frame, entry);
+    }
+
+    // Admission and cached reply transmission use the same local authority
+    // checks as writes. No peer-selected capability or object enters here.
+    pub fn validate(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: sealed_signer.Signer) !workspace.Entry {
+        errdefer self.reset();
+        try signer.validateService(self.store.owner, self.store.task_id, authority.now_ticks);
         const owner = (self.store.findWorkspaceRecordConst(self.binding.workspace_id) orelse return error.WorkspaceNotFound).owner;
-        if (!signer.key.authority.?.owner.eql(owner)) {
-            self.reset();
-            return error.PermissionDenied;
-        }
-        return self.receiveImpl(channel, authority, signer, frame);
+        if (!signer.key.authority.?.owner.eql(owner) or authority.now_ticks == 0 or
+            authority.task_id != self.sync.task_id or !authority.principal.eql(self.sync.owner)) return error.PermissionDenied;
+        _ = try service_authority.requireServiceAuthority(self.capabilities, self.sync.service_id, authority, .endpoint_connect);
+        try channel.validate(authority.now_ticks);
+        if (!channel.established()) return error.InvalidState;
+        const entry = try self.authorize(channel, authority.now_ticks);
+        try self.store.requireDurableBoundary();
+        return entry;
     }
 
     pub fn receiveForVerification(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: signing.SignerIdentity, frame: []const u8) !Progress {
         if (comptime @import("builtin").os.tag == .freestanding) {
             if (comptime !@import("../../kernel/config.zig").includesVerificationEvidence()) return error.SealedSigningKeyRequired;
         }
-        return self.receiveImpl(channel, authority, signer, frame);
-    }
-
-    fn receiveImpl(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: anytype, frame: []const u8) !Progress {
+        errdefer self.reset();
         if (authority.now_ticks == 0 or authority.task_id != self.sync.task_id or !authority.principal.eql(self.sync.owner)) {
             self.reset();
             return error.PermissionDenied;
@@ -96,6 +101,12 @@ pub const Receiver = struct {
             self.reset();
             return err;
         };
+        const entry = try self.authorize(channel, authority.now_ticks);
+        try self.store.requireDurableBoundary();
+        return self.receiveImpl(channel, authority, signer, frame, entry);
+    }
+
+    fn receiveImpl(self: *Receiver, channel: *channel_mod.Channel, authority: service_authority.Context, signer: anytype, frame: []const u8, entry: workspace.Entry) !Progress {
         self.expire(authority.now_ticks);
         var plaintext: [channel_mod.MAX_PAYLOAD]u8 = undefined;
         defer std.crypto.secureZero(u8, &plaintext);
@@ -103,11 +114,6 @@ pub const Receiver = struct {
             if (!channel.established()) self.reset();
             return err;
         };
-        const entry = self.authorize(channel, authority.now_ticks) catch |err| {
-            self.reset();
-            return err;
-        };
-        try self.store.requireDurableBoundary();
         var reader = Reader{ .buffer = message };
         const kind = try reader.readByte();
         const id = try reader.readU64();

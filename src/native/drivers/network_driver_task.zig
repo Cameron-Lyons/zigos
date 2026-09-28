@@ -693,7 +693,14 @@ pub const ReceiveServiceResult = struct {
     failed: bool = false,
 };
 
+var reserved_receive_prefix: ?[4]u8 = null;
+
+pub fn reserveReceivePrefix(prefix: ?[4]u8) void {
+    reserved_receive_prefix = prefix;
+}
+
 pub fn reset() void {
+    reserved_receive_prefix = null;
     active_device = null;
     active_service_id = 0;
     active_task_id = 0;
@@ -879,6 +886,7 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         active_driver_rx_failure_count += 1;
         return .{ .status = .failed };
     };
+    discardConsumedReceiveHeads(queue);
     if (receive_queue_count == 0) {
         const service = serviceReceiveFrames(device, queue, 1);
         if (receive_queue_count == 0) {
@@ -888,12 +896,22 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         }
     }
 
-    const queue_head: usize = receive_queue_head;
+    var queue_head: usize = receive_queue_head;
+    if (reserved_receive_prefix) |prefix| {
+        // A reserved packet must not hide unrelated traffic from its reader.
+        for (0..receive_queue_count) |offset| {
+            const index = (@as(usize, receive_queue_head) + offset) % RECEIVE_QUEUE_CAPACITY;
+            const candidate = &queue[index];
+            if (candidate.length != 0 and !std.mem.startsWith(u8, candidate.bytes[0..candidate.length], &prefix)) {
+                queue_head = index;
+                break;
+            }
+        } else return .{ .status = .empty };
+    }
     const frame = &queue[queue_head];
     defer {
         frame.length = 0;
-        receive_queue_head = @intCast((queue_head + 1) % RECEIVE_QUEUE_CAPACITY);
-        receive_queue_count -= 1;
+        discardConsumedReceiveHeads(queue);
     }
     if (frame.length > output.len) {
         active_driver_rx_drop_count += 1;
@@ -901,6 +919,46 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
     }
     @memcpy(output[0..frame.length], frame.bytes[0..frame.length]);
     return .{ .status = .frame, .length = frame.length };
+}
+
+// Route a protocol out of the deferred queue without polling hardware or
+// moving unrelated packets. Holes are reclaimed when the FIFO head advances.
+pub fn receiveQueuedFrameWithPrefix(prefix: []const u8, output: []u8) ReceiveResult {
+    const queue = receiveQueue() orelse return .{ .status = .empty };
+    if (prefix.len == 0) return .{ .status = .empty };
+    for (0..receive_queue_count) |offset| {
+        const index = (@as(usize, receive_queue_head) + offset) % RECEIVE_QUEUE_CAPACITY;
+        const frame = &queue[index];
+        if (frame.length == 0 or !std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) continue;
+        defer {
+            frame.length = 0;
+            discardConsumedReceiveHeads(queue);
+        }
+        if (frame.length > output.len) {
+            active_driver_rx_drop_count += 1;
+            return .{ .status = .dropped };
+        }
+        @memcpy(output[0..frame.length], frame.bytes[0..frame.length]);
+        return .{ .status = .frame, .length = frame.length };
+    }
+    return .{ .status = .empty };
+}
+
+pub fn hasQueuedFrameWithPrefix(prefix: []const u8) bool {
+    const queue = receiveQueue() orelse return false;
+    if (prefix.len == 0) return false;
+    for (0..receive_queue_count) |offset| {
+        const frame = &queue[(@as(usize, receive_queue_head) + offset) % RECEIVE_QUEUE_CAPACITY];
+        if (frame.length != 0 and std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) return true;
+    }
+    return false;
+}
+
+fn discardConsumedReceiveHeads(queue: *ReceiveQueue) void {
+    while (receive_queue_count != 0 and queue[receive_queue_head].length == 0) {
+        receive_queue_head = @intCast((receive_queue_head + 1) % RECEIVE_QUEUE_CAPACITY);
+        receive_queue_count -= 1;
+    }
 }
 
 pub fn servicePendingReceiveFrames(budget: usize) ReceiveServiceResult {
@@ -1368,6 +1426,51 @@ test "pending network work is budgeted into the deferred receive queue" {
     try std.testing.expectEqualStrings("frame-2", output[0..third.length]);
     try std.testing.expectEqual(@as(usize, 3), activeDriverReceiveCount());
     try std.testing.expectEqualStrings("frame-2", lastActiveDriverReceivedFrame());
+}
+
+test "deferred receive protocol routing preserves unrelated frames across holes and ring wrap" {
+    const Harness = struct {
+        const frames = [_][]const u8{ "before", "ZGNPpeer", "between", "ZGNPoversized", "after" };
+        var next: usize = 0;
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+        fn pending() bool {
+            return next < frames.len;
+        }
+        fn receive(out: []u8) ReceiveResult {
+            if (!pending()) return .{ .status = .empty };
+            const bytes = frames[next];
+            next += 1;
+            if (out.len < bytes.len) return .{ .status = .dropped };
+            @memcpy(out[0..bytes.len], bytes);
+            return .{ .status = .frame, .length = @intCast(bytes.len) };
+        }
+    };
+    reset();
+    defer reset();
+    const device = NetworkDevice{ .send = Harness.send, .receive = Harness.receive, .workPending = Harness.pending, .getMacAddress = Harness.mac };
+    try std.testing.expect(activateDevice(&device, 10));
+    reserveReceivePrefix("ZGNP".*);
+    var out: [32]u8 = undefined;
+    for (0..40) |_| {
+        Harness.next = 0;
+        try std.testing.expectEqual(@as(usize, 5), servicePendingReceiveFrames(5).frames_queued);
+        try std.testing.expectEqualStrings("before", out[0..receiveActiveFrame(&out).length]);
+        // The generic reader passes a reserved head without taking its packet.
+        try std.testing.expectEqualStrings("between", out[0..receiveActiveFrame(&out).length]);
+        try std.testing.expect(hasQueuedFrameWithPrefix("ZGNP"));
+        const selected = receiveQueuedFrameWithPrefix("ZGNP", &out);
+        try std.testing.expectEqualStrings("ZGNPpeer", out[0..selected.length]);
+        try std.testing.expectEqualStrings("after", out[0..receiveActiveFrame(&out).length]);
+        try std.testing.expectEqual(ReceiveStatus.empty, receiveActiveFrame(&out).status);
+        try std.testing.expectEqual(ReceiveStatus.dropped, receiveQueuedFrameWithPrefix("ZGNP", out[0..1]).status);
+        try std.testing.expect(!hasQueuedFrameWithPrefix("ZGNP"));
+        try std.testing.expectEqual(@as(usize, 0), queuedReceiveFrameCount());
+    }
 }
 
 test "deferred receive service drains hardware when the software queue is full" {

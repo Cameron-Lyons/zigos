@@ -149,6 +149,8 @@ assert_marker_group "$NODE_A_LOG" "node A"
 assert_marker_group "$NODE_B_LOG" "node B"
 grep -Fq 'ZIGOS:SYNC:PEER_OBJECT:ACKNOWLEDGED' "$NODE_A_LOG"
 grep -Fq 'ZIGOS:SYNC:PEER_OBJECT:REOPENED' "$NODE_B_LOG"
+grep -Fq 'ZIGOS:SYNC:PEER_OBJECT:ADMITTED' "$NODE_B_LOG"
+grep -Fq 'ZIGOS:SYNC:PEER_OBJECT:RETIRED' "$NODE_B_LOG"
 
 {
   printf '=== SYNC TWO NODE: NODE A listen=127.0.0.1:%s ===\n' "$SYNC_TWO_NODE_PORT"

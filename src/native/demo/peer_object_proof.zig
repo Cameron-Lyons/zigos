@@ -2,6 +2,8 @@
 //! the source generates the payload; the target learns it from Noise packets.
 const std = @import("std");
 const channel_mod = @import("../sync/peer_channel.zig");
+const admission = @import("../sync/peer_admission.zig");
+const timer = @import("../../kernel/timer/timer.zig");
 const transfer = @import("../sync/object_transfer.zig");
 const sync = @import("../sync/sync_service.zig");
 const storage = @import("../storage/storage_service.zig");
@@ -76,24 +78,37 @@ fn execute(context: *support.Context, service: *sync.Service, channel: *channel_
     try writer.writeU64(created.object_id.raw());
     try writer.writeU64(created.version_id.raw());
     try writer.writeU32(payload_length);
-    var response: [channel_mod.MAX_PAYLOAD]u8 = undefined;
-    var incoming: [1500]u8 = undefined;
+    var admitted = try admission.Session.init(channel, &receiver, storage_key, authority, peer_mac, 311 + admission.MAX_LIFETIME_TICKS);
+    const manager = @import("../session/session_manager.zig").system();
+    try manager.attachPeerReceiver(&admitted, 311);
+    defer manager.detachPeerReceiver(&admitted);
+    timer.synchronize();
+    const start_tick = timer.getTicks();
+    support.common.printBootMarker(markers.sync_peer_object_admitted);
     var started = false;
     var reopened = false;
     var grace = clock.afterMilliseconds(30_000);
     const deadline = clock.afterMilliseconds(30_000);
     var resend = clock.afterMilliseconds(1);
     while (!deadline.expired()) {
-        if (reopened and grace.expired()) return;
+        timer.synchronize();
+        const now = 311 + (timer.getTicks() - start_tick);
+        if (reopened and grace.expired()) {
+            if (!try context.runtime.suspendTask(service.task_id, now)) return error.PeerTaskNotSuspended;
+            defer _ = context.runtime.resumeTask(service.task_id, now) catch false;
+            _ = manager.servicePeerWork(now);
+            if (admitted.active or channel.established() or manager.peers.hasSessions()) return error.PeerTaskNotRetired;
+            support.common.printBootMarker(markers.sync_peer_object_retired);
+            return;
+        }
         if (!started and resend.expired()) {
             try send(channel, peer_mac, &offer);
             resend = clock.afterMilliseconds(20);
         }
-        const frame = try receive(&incoming) orelse continue;
-        const progress = receiver.receive(channel, authority, storage_key, frame) catch |err| {
-            if (err == error.ReplayRejected) continue;
-            return err;
-        };
+        _ = manager.servicePendingNetworkWork(now);
+        _ = manager.servicePeerWork(now);
+        if (!admitted.active) return error.PeerAdmissionRetired;
+        const progress = admitted.last_progress orelse continue;
         started = true;
         if (progress.durable() and !reopened) {
             const expected = receiver.transfer.?.request.digest;
@@ -108,7 +123,8 @@ fn execute(context: *support.Context, service: *sync.Service, channel: *channel_
             grace = clock.afterMilliseconds(500);
             support.common.printBootMarker(markers.sync_peer_object_reopened);
         }
-        try send(channel, peer_mac, try transfer.encodeProgress(&response, progress));
+        // The dispatcher sends this sealed receipt on its next visit. Reopen
+        // first so the gate still proves durable bytes before acknowledgment.
     }
     return error.ObjectTransferTimeout;
 }

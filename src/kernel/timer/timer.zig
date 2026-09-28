@@ -115,6 +115,22 @@ pub fn disarmSchedulerTick() void {
     x86.writeMsr(IA32_TSC_DEADLINE_MSR, 0);
 }
 
+// Service deadlines need one wake, not a periodic scheduler tick while idle.
+pub fn armWakeAt(deadline_ticks: u64) void {
+    if (active_mode != .tsc_deadline) return;
+    const now = x86.rdtsc();
+    synchronizeTicks(now);
+    scheduler_tick_enabled = false;
+    x86.writeMsr(IA32_TSC_DEADLINE_MSR, wakeDeadline(tsc_epoch, now, tsc_ticks_per_tick, deadline_ticks));
+}
+
+fn wakeDeadline(epoch: u64, now: u64, per_tick: u64, deadline: u64) u64 {
+    const current = elapsedTicks(epoch, now, per_tick);
+    const periods = if (deadline > current) deadline - current - 1 else 0;
+    const cycles = std.math.mul(u64, periods, per_tick) catch std.math.maxInt(u64) / 2;
+    return nextTickDeadline(epoch, now, per_tick) +% @min(cycles, std.math.maxInt(u64) / 2);
+}
+
 pub fn handleInterrupt() void {
     switch (active_mode) {
         .tsc_deadline => {
@@ -183,4 +199,13 @@ test "invariant TSC tick math tolerates counter wrap" {
     const epoch = std.math.maxInt(u64) - 49;
     try std.testing.expectEqual(@as(u64, 4), elapsedTicks(epoch, 50, 25));
     try std.testing.expectEqual(@as(u64, 75), nextTickDeadline(epoch, 50, 25));
+}
+
+test "invariant TSC service deadlines stay phase aligned without periodic polling" {
+    try std.testing.expectEqual(@as(u64, 1_300), wakeDeadline(1_000, 1_099, 100, 3));
+    try std.testing.expectEqual(@as(u64, 1_100), wakeDeadline(1_000, 1_099, 100, 0));
+    try std.testing.expectEqual(@as(u64, 1_200), wakeDeadline(1_000, 1_100, 100, 1));
+    try std.testing.expectEqual(@as(u64, 100), wakeDeadline(std.math.maxInt(u64) - 49, 50, 25, 6));
+    const distant = wakeDeadline(1_000, 1_099, 100, std.math.maxInt(u64));
+    try std.testing.expect(distant > 1_099);
 }

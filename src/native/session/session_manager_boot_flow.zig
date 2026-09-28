@@ -29,6 +29,9 @@ const storage_durability_qemu = @import("../storage/storage_durability_qemu.zig"
 const storage_service_mod = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const peer_admission = @import("../sync/peer_admission.zig");
+const peer_channel = @import("../sync/peer_channel.zig");
+const network_driver = @import("../drivers/network_driver_task.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -115,6 +118,8 @@ pub const SessionManager = struct {
     surface_authority_scanned_lifecycle_generation: u64 = 0,
     documents: document_sessions.Sessions = .{},
     launcher: document_launcher.Launcher = .{},
+    peers: peer_admission.Sessions = .{},
+    peer_dispatch_tick: u64 = 0,
 
     pub fn init() SessionManager {
         return initial_session_manager;
@@ -130,6 +135,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.peers.deinit();
         self.launcher.deinit(self, 0);
         self.documents.deinit(0);
         self.kernel_context.resetPort();
@@ -276,6 +282,7 @@ pub const SessionManager = struct {
 
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
         if (!self.runtime_context.constructed) return false;
+        const peer_work = self.servicePeerWork(now_ticks);
         const runtime = self.runtime_context.taskRuntime().?;
         const pruned = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
@@ -285,12 +292,12 @@ pub const SessionManager = struct {
         const launched = self.launcher.service(self, now_ticks);
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
         if (serviced or launched or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
-        return serviced or launched or dispatched;
+        return serviced or launched or dispatched or peer_work != 0;
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
-        return self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        return self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
     pub const DocumentTask = struct {
@@ -364,6 +371,55 @@ pub const SessionManager = struct {
             _ = self.wakeUserspaceTask(task_id, now_ticks);
         }
         return service.frames_queued;
+    }
+
+    pub fn attachPeerReceiver(self: *SessionManager, session: *peer_admission.Session, now_ticks: u64) !void {
+        if (!self.runtime_context.constructed or session.receiver.capabilities != self.capabilityTablePtr() or
+            session.receiver.store != self.storageServicePtr() or !self.peerTasksActive(session)) return error.PeerAdmissionDenied;
+        try self.peers.attach(session, now_ticks);
+        network_driver.reserveReceivePrefix(peer_channel.MAGIC.*);
+        self.peer_dispatch_tick = now_ticks;
+    }
+
+    pub fn detachPeerReceiver(self: *SessionManager, session: *peer_admission.Session) void {
+        self.peers.detach(session);
+        if (!self.peers.hasSessions()) network_driver.reserveReceivePrefix(null);
+    }
+
+    pub fn peerNextWake(self: *const SessionManager) ?u64 {
+        return self.peers.nextWake();
+    }
+
+    fn peerFramesPending(self: *const SessionManager) bool {
+        return self.peers.hasSessions() and network_driver.hasQueuedFrameWithPrefix(peer_channel.MAGIC);
+    }
+
+    fn peerTasksActive(self: *const SessionManager, session: *const peer_admission.Session) bool {
+        const runtime = self.runtime_context.taskRuntimeConst() orelse return false;
+        const sync_task = runtime.findConst(session.receiver.sync.task_id) orelse return false;
+        const storage_task = runtime.findConst(session.receiver.store.task_id) orelse return false;
+        return sync_task.state == .active and storage_task.state == .active and
+            sync_task.owner.eql(session.receiver.sync.owner) and storage_task.owner.eql(session.receiver.store.owner);
+    }
+
+    pub fn servicePeerWork(self: *SessionManager, now_ticks: u64) usize {
+        self.peer_dispatch_tick = now_ticks;
+        if (!self.peers.hasSessions()) return 0;
+        for (&self.peers.slots) |*slot| if (slot.*) |session| {
+            if (!self.peerTasksActive(session) or !network_driver.hasActiveDevice()) {
+                session.close();
+                slot.* = null;
+            }
+        };
+        var frame: [peer_channel.MAX_FRAME]u8 = undefined;
+        for (0..NETWORK_RECEIVE_SERVICE_BUDGET) |_| {
+            const result = network_driver.receiveQueuedFrameWithPrefix(peer_channel.MAGIC, &frame);
+            if (result.status == .empty) break;
+            if (result.status == .frame) _ = self.peers.admit(frame[0..result.length], now_ticks);
+        }
+        const work = self.peers.service(now_ticks, network_driver.sendActiveFrame);
+        if (!self.peers.hasSessions()) network_driver.reserveReceivePrefix(null);
+        return work;
     }
 
     pub fn wakeUserspaceTask(self: *SessionManager, task_id: u64, now_ticks: u64) bool {
@@ -900,6 +956,8 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.peers.deinit();
+        network_driver.reserveReceivePrefix(null);
         self.launcher.deinit(self, 0);
         self.documents.deinit(0);
         self.initialized = false;
