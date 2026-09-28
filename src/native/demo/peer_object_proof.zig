@@ -144,6 +144,7 @@ fn sendObject(channel: *channel_mod.Channel, peer_mac: [6]u8, payload: []const u
             if (outgoing_len == 0) {
                 // Help the responder finish the channel confirmation if its
                 // first copy was lost. This repeats cached ciphertext only.
+                try channel.validate(311);
                 _ = network.sendActiveFrame(peer_mac, confirmation);
             } else try send(channel, peer_mac, outgoing[0..outgoing_len]);
             resend = clock.afterMilliseconds(20);

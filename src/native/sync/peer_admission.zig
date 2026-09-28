@@ -170,6 +170,11 @@ pub const Sessions = struct {
     }
 
     pub fn service(self: *Sessions, now: u64, send: anytype) usize {
+        return self.serviceBudget(now, send, DISPATCH_BUDGET);
+    }
+
+    pub fn serviceBudget(self: *Sessions, now: u64, send: anytype, budget: usize) usize {
+        if (budget == 0) return 0;
         var work: usize = 0;
         for (0..MAX_SESSIONS) |_| {
             const index = self.cursor;
@@ -181,7 +186,7 @@ pub const Sessions = struct {
             }
             if (session.runOnce(now, send)) work += 1;
             if (!session.active) self.slots[index] = null;
-            if (work == DISPATCH_BUDGET) break;
+            if (work == @min(budget, DISPATCH_BUDGET)) break;
         }
         return work;
     }

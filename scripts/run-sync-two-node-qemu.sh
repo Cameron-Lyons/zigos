@@ -147,6 +147,11 @@ assert_log_healthy "$NODE_A_LOG" "node A"
 assert_log_healthy "$NODE_B_LOG" "node B"
 assert_marker_group "$NODE_A_LOG" "node A"
 assert_marker_group "$NODE_B_LOG" "node B"
+for peer_log in "$NODE_A_LOG" "$NODE_B_LOG"; do
+  grep -Fq 'ZIGOS:SYNC:PEER_CHANNEL:ADMITTED' "$peer_log"
+  grep -Fq 'ZIGOS:SYNC:PEER_CHANNEL:COMPLETED' "$peer_log"
+  grep -Fq 'ZIGOS:SYNC:PEER_CHANNEL:SUSPENDED_RETIRED' "$peer_log"
+done
 grep -Fq 'ZIGOS:SYNC:PEER_OBJECT:ACKNOWLEDGED' "$NODE_A_LOG"
 grep -Fq 'ZIGOS:SYNC:PEER_OBJECT:REOPENED' "$NODE_B_LOG"
 grep -Fq 'ZIGOS:SYNC:PEER_OBJECT:ADMITTED' "$NODE_B_LOG"

@@ -211,6 +211,8 @@ pub const MAX_NATIVE_PAYLOAD_BYTES: usize = 160;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
 pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
 pub const RECEIVE_QUEUE_CAPACITY: usize = 32;
+const RESERVED_RECEIVE_CAPACITY: usize = 8;
+const ReceiveMask = std.meta.Int(.unsigned, RECEIVE_QUEUE_CAPACITY);
 pub const HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING = true;
 pub const RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const RECEIVE_RESULT_SIZE_CEILING_BYTES: usize = 4;
@@ -669,8 +671,9 @@ comptime {
     }
 }
 var receive_queue: ReceiveQueueBacking = if (heap_backed_receive_queue) null else [_]QueuedReceiveFrame{.{}} ** RECEIVE_QUEUE_CAPACITY;
-var receive_queue_head: u8 = 0;
-var receive_queue_tail: u8 = 0;
+var receive_queue_order: [RECEIVE_QUEUE_CAPACITY]u8 = @splat(0);
+var receive_queue_occupied: ReceiveMask = 0;
+var receive_reserved_count: u8 = 0;
 var receive_queue_count: u8 = 0;
 
 pub const bounded_metadata_layout = .{
@@ -680,8 +683,7 @@ pub const bounded_metadata_layout = .{
     .heap_backs_receive_queue_on_freestanding = HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING,
     .uses_compact_active_frame_lengths = @TypeOf(last_active_driver_frame_len) == u16 and
         @TypeOf(last_active_driver_rx_frame_len) == u16,
-    .uses_compact_receive_queue_indices = @TypeOf(receive_queue_head) == u8 and
-        @TypeOf(receive_queue_tail) == u8 and
+    .uses_compact_receive_queue_indices = @TypeOf(receive_queue_order[0]) == u8 and
         @TypeOf(receive_queue_count) == u8,
     .receive_overflow_scratch_bytes = 0,
 };
@@ -697,6 +699,32 @@ var reserved_receive_prefix: ?[4]u8 = null;
 
 pub fn reserveReceivePrefix(prefix: ?[4]u8) void {
     reserved_receive_prefix = prefix;
+    receive_reserved_count = 0;
+    const queue = receiveQueue() orelse return;
+    if (prefix == null) return;
+    for (receive_queue_order[0..receive_queue_count]) |index| {
+        if (reservedFrame(queue[index].bytes[0..queue[index].length])) receive_reserved_count += 1;
+    }
+    // Preserve the oldest packets in each class when a reservation starts.
+    // Neither stalled consumer can consume the other class's reserved slots.
+    var position: usize = receive_queue_count;
+    while (position != 0) {
+        position -= 1;
+        const frame = &queue[receive_queue_order[position]];
+        const excess = if (reservedFrame(frame.bytes[0..frame.length]))
+            receive_reserved_count > RESERVED_RECEIVE_CAPACITY
+        else
+            receive_queue_count - receive_reserved_count > RECEIVE_QUEUE_CAPACITY - RESERVED_RECEIVE_CAPACITY;
+        if (excess) {
+            removeQueuedFrame(queue, position);
+            active_driver_rx_drop_count += 1;
+        }
+    }
+}
+
+fn reservedFrame(frame: []const u8) bool {
+    const prefix = reserved_receive_prefix orelse return false;
+    return std.mem.startsWith(u8, frame, &prefix);
 }
 
 pub fn reset() void {
@@ -803,15 +831,17 @@ fn ensureReceiveQueue() ?*ReceiveQueue {
 }
 
 fn resetReceiveQueue(queue: *ReceiveQueue) void {
-    receive_queue_head = 0;
-    receive_queue_tail = 0;
+    receive_queue_order = @splat(0);
+    receive_queue_occupied = 0;
+    receive_reserved_count = 0;
     receive_queue_count = 0;
     for (queue) |*frame| frame.length = 0;
 }
 
 fn releaseReceiveQueue() void {
-    receive_queue_head = 0;
-    receive_queue_tail = 0;
+    receive_queue_order = @splat(0);
+    receive_queue_occupied = 0;
+    receive_reserved_count = 0;
     receive_queue_count = 0;
     if (comptime heap_backed_receive_queue) {
         if (receive_queue) |queue| {
@@ -886,7 +916,6 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         active_driver_rx_failure_count += 1;
         return .{ .status = .failed };
     };
-    discardConsumedReceiveHeads(queue);
     if (receive_queue_count == 0) {
         const service = serviceReceiveFrames(device, queue, 1);
         if (receive_queue_count == 0) {
@@ -896,23 +925,19 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         }
     }
 
-    var queue_head: usize = receive_queue_head;
-    if (reserved_receive_prefix) |prefix| {
+    var position: usize = 0;
+    if (reserved_receive_prefix != null) {
         // A reserved packet must not hide unrelated traffic from its reader.
-        for (0..receive_queue_count) |offset| {
-            const index = (@as(usize, receive_queue_head) + offset) % RECEIVE_QUEUE_CAPACITY;
+        for (receive_queue_order[0..receive_queue_count], 0..) |index, offset| {
             const candidate = &queue[index];
-            if (candidate.length != 0 and !std.mem.startsWith(u8, candidate.bytes[0..candidate.length], &prefix)) {
-                queue_head = index;
+            if (!reservedFrame(candidate.bytes[0..candidate.length])) {
+                position = offset;
                 break;
             }
         } else return .{ .status = .empty };
     }
-    const frame = &queue[queue_head];
-    defer {
-        frame.length = 0;
-        discardConsumedReceiveHeads(queue);
-    }
+    const frame = &queue[receive_queue_order[position]];
+    defer removeQueuedFrame(queue, position);
     if (frame.length > output.len) {
         active_driver_rx_drop_count += 1;
         return .{ .status = .dropped };
@@ -922,18 +947,14 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
 }
 
 // Route a protocol out of the deferred queue without polling hardware or
-// moving unrelated packets. Holes are reclaimed when the FIFO head advances.
+// moving unrelated packets. Only the compact order indexes move on removal.
 pub fn receiveQueuedFrameWithPrefix(prefix: []const u8, output: []u8) ReceiveResult {
     const queue = receiveQueue() orelse return .{ .status = .empty };
     if (prefix.len == 0) return .{ .status = .empty };
-    for (0..receive_queue_count) |offset| {
-        const index = (@as(usize, receive_queue_head) + offset) % RECEIVE_QUEUE_CAPACITY;
+    for (receive_queue_order[0..receive_queue_count], 0..) |index, position| {
         const frame = &queue[index];
-        if (frame.length == 0 or !std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) continue;
-        defer {
-            frame.length = 0;
-            discardConsumedReceiveHeads(queue);
-        }
+        if (!std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) continue;
+        defer removeQueuedFrame(queue, position);
         if (frame.length > output.len) {
             active_driver_rx_drop_count += 1;
             return .{ .status = .dropped };
@@ -947,18 +968,22 @@ pub fn receiveQueuedFrameWithPrefix(prefix: []const u8, output: []u8) ReceiveRes
 pub fn hasQueuedFrameWithPrefix(prefix: []const u8) bool {
     const queue = receiveQueue() orelse return false;
     if (prefix.len == 0) return false;
-    for (0..receive_queue_count) |offset| {
-        const frame = &queue[(@as(usize, receive_queue_head) + offset) % RECEIVE_QUEUE_CAPACITY];
-        if (frame.length != 0 and std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) return true;
+    for (receive_queue_order[0..receive_queue_count]) |index| {
+        const frame = &queue[index];
+        if (std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) return true;
     }
     return false;
 }
 
-fn discardConsumedReceiveHeads(queue: *ReceiveQueue) void {
-    while (receive_queue_count != 0 and queue[receive_queue_head].length == 0) {
-        receive_queue_head = @intCast((receive_queue_head + 1) % RECEIVE_QUEUE_CAPACITY);
-        receive_queue_count -= 1;
-    }
+fn removeQueuedFrame(queue: *ReceiveQueue, position: usize) void {
+    const index = receive_queue_order[position];
+    const frame = &queue[index];
+    if (reservedFrame(frame.bytes[0..frame.length])) receive_reserved_count -= 1;
+    frame.length = 0;
+    receive_queue_occupied &= ~(@as(ReceiveMask, 1) << @intCast(index));
+    std.mem.copyForwards(u8, receive_queue_order[position .. receive_queue_count - 1], receive_queue_order[position + 1 .. receive_queue_count]);
+    receive_queue_count -= 1;
+    receive_queue_order[receive_queue_count] = 0;
 }
 
 pub fn servicePendingReceiveFrames(budget: usize) ReceiveServiceResult {
@@ -975,7 +1000,7 @@ fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budg
     var service = ReceiveServiceResult{};
     while (service.polls < budget) {
         const queue_has_space = receive_queue_count < RECEIVE_QUEUE_CAPACITY;
-        const queue_tail: usize = receive_queue_tail;
+        const queue_tail: usize = if (queue_has_space) @ctz(~receive_queue_occupied) else 0;
         const output = if (queue_has_space)
             queue[queue_tail].bytes[0..]
         else
@@ -1016,9 +1041,21 @@ fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budg
                     continue;
                 }
                 const frame = &queue[queue_tail];
+                const reserved = reservedFrame(frame.bytes[0..result.length]);
+                if (reserved_receive_prefix != null and (if (reserved)
+                    receive_reserved_count >= RESERVED_RECEIVE_CAPACITY
+                else
+                    receive_queue_count - receive_reserved_count >= RECEIVE_QUEUE_CAPACITY - RESERVED_RECEIVE_CAPACITY))
+                {
+                    active_driver_rx_drop_count += 1;
+                    service.dropped += 1;
+                    continue;
+                }
                 frame.length = result.length;
-                receive_queue_tail = @intCast((queue_tail + 1) % RECEIVE_QUEUE_CAPACITY);
+                receive_queue_order[receive_queue_count] = @intCast(queue_tail);
+                receive_queue_occupied |= @as(ReceiveMask, 1) << @intCast(queue_tail);
                 receive_queue_count += 1;
+                if (reserved) receive_reserved_count += 1;
                 active_driver_rx_count += 1;
                 last_active_driver_rx_frame_len = result.length;
                 @memcpy(last_active_driver_rx_frame[0..result.length], frame.bytes[0..result.length]);
@@ -1428,7 +1465,7 @@ test "pending network work is budgeted into the deferred receive queue" {
     try std.testing.expectEqualStrings("frame-2", lastActiveDriverReceivedFrame());
 }
 
-test "deferred receive protocol routing preserves unrelated frames across holes and ring wrap" {
+test "deferred receive protocol routing preserves unrelated frames across slot reuse" {
     const Harness = struct {
         const frames = [_][]const u8{ "before", "ZGNPpeer", "between", "ZGNPoversized", "after" };
         var next: usize = 0;
@@ -1898,4 +1935,111 @@ test "native network stack requires scoped local discovery before discovery broa
     try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
     try std.testing.expect(Harness.last_frame_len > "who-has-printer".len);
+}
+
+test "deferred receive peer traffic reuses slots behind a stalled generic consumer" {
+    const Harness = struct {
+        var next: []const u8 = "";
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+        fn pending() bool {
+            return next.len != 0;
+        }
+        fn receive(out: []u8) ReceiveResult {
+            const frame = next;
+            next = "";
+            if (frame.len == 0) return .{ .status = .empty };
+            if (out.len < frame.len) return .{ .status = .dropped };
+            @memcpy(out[0..frame.len], frame);
+            return .{ .status = .frame, .length = @intCast(frame.len) };
+        }
+    };
+    reset();
+    defer reset();
+    const device = NetworkDevice{ .send = Harness.send, .receive = Harness.receive, .workPending = Harness.pending, .getMacAddress = Harness.mac };
+    try std.testing.expect(activateDevice(&device, 10));
+    reserveReceivePrefix("ZGNP".*);
+    Harness.next = "unrelated pending";
+    try std.testing.expectEqual(@as(usize, 1), servicePendingReceiveFrames(1).frames_queued);
+    var out: [32]u8 = undefined;
+    for (0..RECEIVE_QUEUE_CAPACITY * 3) |_| {
+        Harness.next = "ZGNPpeer";
+        try std.testing.expectEqual(@as(usize, 1), servicePendingReceiveFrames(1).frames_queued);
+        try std.testing.expectEqualStrings("ZGNPpeer", out[0..receiveQueuedFrameWithPrefix("ZGNP", &out).length]);
+    }
+    try std.testing.expectEqual(@as(usize, 1), queuedReceiveFrameCount());
+    try std.testing.expectEqualStrings("unrelated pending", out[0..receiveActiveFrame(&out).length]);
+}
+
+test "deferred receive reservations isolate capacity while preserving each traffic class order" {
+    const Harness = struct {
+        var next: []const u8 = "";
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+        fn pending() bool {
+            return next.len != 0;
+        }
+        fn receive(out: []u8) ReceiveResult {
+            const frame = next;
+            next = "";
+            if (frame.len == 0) return .{ .status = .empty };
+            if (out.len < frame.len) return .{ .status = .dropped };
+            @memcpy(out[0..frame.len], frame);
+            return .{ .status = .frame, .length = @intCast(frame.len) };
+        }
+    };
+    reset();
+    defer reset();
+    const device = NetworkDevice{ .send = Harness.send, .receive = Harness.receive, .workPending = Harness.pending, .getMacAddress = Harness.mac };
+    try std.testing.expect(activateDevice(&device, 10));
+    var ordinary = [_]u8{ 'o', 't', 'h', 'e', 'r', 0 };
+    for (0..RECEIVE_QUEUE_CAPACITY) |i| {
+        ordinary[5] = @intCast(i);
+        Harness.next = &ordinary;
+        try std.testing.expectEqual(@as(usize, 1), servicePendingReceiveFrames(1).frames_queued);
+    }
+    reserveReceivePrefix("ZGNP".*);
+    const generic_capacity = RECEIVE_QUEUE_CAPACITY - RESERVED_RECEIVE_CAPACITY;
+    try std.testing.expectEqual(generic_capacity, queuedReceiveFrameCount());
+    var native = [_]u8{ 'Z', 'G', 'N', 'P', 0 };
+    for (0..RESERVED_RECEIVE_CAPACITY + 1) |i| {
+        native[4] = @intCast(i);
+        Harness.next = &native;
+        const result = servicePendingReceiveFrames(1);
+        try std.testing.expectEqual(@as(usize, if (i < RESERVED_RECEIVE_CAPACITY) 1 else 0), result.frames_queued);
+        try std.testing.expectEqual(@as(usize, if (i < RESERVED_RECEIVE_CAPACITY) 0 else 1), result.dropped);
+    }
+    var out: [32]u8 = undefined;
+    for (0..generic_capacity) |i| {
+        const result = receiveActiveFrame(&out);
+        try std.testing.expectEqual(@as(u16, 6), result.length);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), out[5]);
+    }
+    // Keep the reserved class stalled while unrelated traffic fills and drains.
+    for (0..RECEIVE_QUEUE_CAPACITY) |i| {
+        ordinary[5] = @intCast(i);
+        Harness.next = &ordinary;
+        try std.testing.expectEqual(@as(usize, if (i < generic_capacity) 1 else 0), servicePendingReceiveFrames(1).frames_queued);
+    }
+    for (0..generic_capacity) |i| {
+        const result = receiveActiveFrame(&out);
+        try std.testing.expectEqual(@as(u16, 6), result.length);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), out[5]);
+    }
+    try std.testing.expectEqual(ReceiveStatus.empty, receiveActiveFrame(&out).status);
+    reserveReceivePrefix(null);
+    for (0..RESERVED_RECEIVE_CAPACITY) |i| {
+        const result = receiveActiveFrame(&out);
+        try std.testing.expectEqual(@as(u16, 5), result.length);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), out[4]);
+    }
+    try std.testing.expectEqual(@as(usize, 0), queuedReceiveFrameCount());
 }
