@@ -11,22 +11,25 @@ const objects = @import("object_store.zig");
 const storage_service = @import("storage_service.zig");
 const object_signer = @import("sealed_object_signer.zig");
 const identity = @import("../platform/os_identity.zig");
+const graph = @import("../sync/device_graph.zig");
+const graph_snapshot = @import("../sync/device_graph_snapshot.zig");
 
 pub const CONTENT_TYPE = "application/x-zigos-vault-catalog";
 const label = "Sealed vault catalog";
-const magic = "ZGVault2";
-const format_version: u16 = 2;
+const magic = "ZGVault3";
+const format_version: u16 = 3;
 const header_bytes = 27;
-pub const MAX_BYTES = header_bytes + secrets.MAX_SECRETS * (13 + secrets.MAX_LABEL_BYTES + sealing.MAX_BLOB_BYTES) + identity.MAX_SNAPSHOT_BYTES;
+pub const MAX_BYTES = header_bytes + secrets.MAX_SECRETS * (13 + secrets.MAX_LABEL_BYTES + sealing.MAX_BLOB_BYTES) + 2 + identity.MAX_SNAPSHOT_BYTES + graph_snapshot.MAX_BYTES;
 const CodecError = error{ InvalidVaultCatalog, VaultCatalogTooLarge };
 const Writer = cursor.Writer(CodecError, error.VaultCatalogTooLarge);
 const Reader = cursor.Reader(CodecError, error.InvalidVaultCatalog);
 
 // One authenticated checkpoint binds credential counters, revocations and key
-// generations to exactly the sealed-key table they reference.
+// generations and device enrollment to the same sealed-key table.
 pub const State = struct {
     vault: *vault.Service,
     identities: *identity.Store,
+    devices: ?*graph.Graph = null,
 };
 
 // Supplied by trusted enrollment state, never learned from the catalog being
@@ -37,6 +40,7 @@ pub const Trust = struct {
     owner: principal.PrincipalId,
     public_key: signing.PublicKey,
     minimum_generation: u64 = 1,
+    device_root_pin: ?signing.PublicKey = null,
 };
 
 pub const Receipt = struct {
@@ -79,7 +83,7 @@ pub const Session = struct {
             }
             break :blk @as(u64, 1);
         };
-        const payload = try encode(&service.store, state.identities, object_id, next_generation, signer.key.authority.?.owner, scratch);
+        const payload = try encode(&service.store, state.identities, state.devices, object_id, next_generation, signer.key.authority.?.owner, scratch);
         var digest: hash.Digest = undefined;
         std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
         if (self.pending) |pending| {
@@ -120,6 +124,7 @@ pub fn restore(storage: *const storage_service.Service, state: State, trust: Tru
     // Never replace a live store or rewind its generational lease arenas.
     if (state.identities.credential_count != 0 or destination.store.secret_count != 0 or destination.handles.countInUse() != 0 or
         destination.store.handles.countInUse() != 0) return error.VaultNotEmpty;
+    if (state.devices) |devices| if (!graph_snapshot.empty(devices)) return error.GraphNotEmpty;
     const version = storage.latestVersion(trust.object_id) orelse return error.VaultCatalogMissing;
     if (version.object_type != .secret or !std.mem.eql(u8, version.metadata.contentTypeSlice(), CONTENT_TYPE) or
         !std.mem.eql(u8, version.metadata.labelSlice(), label) or
@@ -129,11 +134,11 @@ pub fn restore(storage: *const storage_service.Service, state: State, trust: Tru
     var reader = Reader{ .buffer = payload };
     const catalog_header = try header(&reader, trust.object_id);
     if (catalog_header.generation < trust.minimum_generation) return error.VaultCatalogRollback;
-    try decode(&destination.store, state.identities, trust.object_id, trust.owner, payload);
+    try decode(&destination.store, state.identities, state.devices, trust.device_root_pin, trust.object_id, trust.owner, payload);
     return catalog_header.generation;
 }
 
-fn encode(store: *const secrets.Store, identities: *const identity.Store, object_id: u64, generation: u64, owner: principal.PrincipalId, scratch: []u8) ![]const u8 {
+fn encode(store: *const secrets.Store, identities: *const identity.Store, devices: ?*const graph.Graph, object_id: u64, generation: u64, owner: principal.PrincipalId, scratch: []u8) ![]const u8 {
     if (object_id == 0 or generation == 0 or owner.serial == 0 or store.secret_count == 0 or store.secret_count > secrets.MAX_SECRETS) return error.InvalidVaultCatalog;
     var writer = Writer{ .buffer = scratch };
     try writer.writeBytes(magic);
@@ -154,8 +159,13 @@ fn encode(store: *const secrets.Store, identities: *const identity.Store, object
         try writer.writeU16(@intCast(blob.len));
         try writer.writeBytes(blob);
     }
+    const size_offset = writer.offset;
+    try writer.writeU16(0);
     const credentials = try identities.encodeSnapshot(owner, store, scratch[writer.offset..]);
     writer.offset += credentials.len;
+    std.mem.writeInt(u16, scratch[size_offset..][0..2], @intCast(credentials.len), .little);
+    const enrollment = try graph_snapshot.encode(devices, owner, scratch[writer.offset..]);
+    writer.offset += enrollment.len;
     return scratch[0..writer.offset];
 }
 
@@ -189,13 +199,19 @@ fn readRecord(reader: *Reader, owner: principal.PrincipalId) !Record {
     return .{ .owner = record_owner, .name = name, .exportable = exportable == 1, .blob = try reader.readSlice(blob_len) };
 }
 
-fn decode(store: *secrets.Store, identities: *identity.Store, object_id: u64, owner: principal.PrincipalId, payload: []const u8) !void {
+fn decode(store: *secrets.Store, identities: *identity.Store, devices: ?*graph.Graph, root_pin: ?signing.PublicKey, object_id: u64, owner: principal.PrincipalId, payload: []const u8) !void {
     // Validate the complete canonical framing before touching the hardware.
     var reader = Reader{ .buffer = payload };
     const count = (try header(&reader, object_id)).count;
     for (0..count) |_| _ = try readRecord(&reader, owner);
-    const credentials = payload[reader.offset..];
+    const credentials = try reader.readSlice(try reader.readU16());
     identity.validateSnapshot(owner, credentials) catch return error.InvalidVaultCatalog;
+    var candidate = graph.Graph.init();
+    graph_snapshot.decode(&candidate, owner, root_pin, payload[reader.offset..]) catch |err| {
+        if (err == error.InvalidGraphSnapshot) return error.InvalidVaultCatalog;
+        return err;
+    };
+    if (devices == null and !graph_snapshot.empty(&candidate)) return error.GraphDestinationRequired;
     reader.offset = header_bytes;
     // A later unseal may fail even after earlier records authenticated. Roll
     // back every unpublished slot; neither raw keys nor leases survive restore.
@@ -208,6 +224,7 @@ fn decode(store: *secrets.Store, identities: *identity.Store, object_id: u64, ow
         _ = try store.restoreSealed(record.owner, record.name, record.blob, record.exportable);
     }
     try identities.restoreSnapshot(owner, store, credentials);
+    if (devices) |destination| destination.* = candidate;
 }
 
 const empty_secret = secrets.Store.init().secrets[0];
@@ -331,11 +348,11 @@ test "vault catalog rejects incomplete framing and rolls back a later failed uns
     _ = try fixture.init(test_owner, .{ .kind = .service, .serial = 2 }, 3, durable.signer);
     _ = try fixture.service.importSecret(&fixture.policies, fixture.authority.subjects, .{ .owner = test_owner, .task_id = 3, .label = "second", .raw = "another secret", .now_ticks = 1 }, null);
     var scratch: [MAX_BYTES]u8 = undefined;
-    const payload = try encode(&fixture.service.store, &identities, test_object_id, 1, test_owner, &scratch);
+    const payload = try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch);
     var destination = secrets.Store.init();
     destination.attachHardwareProvider(@import("../../tests/fixtures/secret_provider.zig").provider());
     for (0..payload.len) |len| {
-        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id, test_owner, payload[0..len]));
+        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, null, null, test_object_id, test_owner, payload[0..len]));
         try std.testing.expectEqual(@as(u8, 0), destination.secret_count);
     }
     const mutations = [_]struct { offset: usize, value: u8 }{
@@ -350,19 +367,19 @@ test "vault catalog rejects incomplete framing and rolls back a later failed uns
     for (mutations) |mutation| {
         const original = scratch[mutation.offset];
         scratch[mutation.offset] = mutation.value;
-        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id, test_owner, payload));
+        try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, null, null, test_object_id, test_owner, payload));
         try std.testing.expectEqual(@as(u8, 0), destination.secret_count);
         scratch[mutation.offset] = original;
     }
     scratch[payload.len] = 0;
-    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id, test_owner, scratch[0 .. payload.len + 1]));
-    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, test_object_id + 1, test_owner, payload));
-    scratch[payload.len - 2] ^= 1;
-    try std.testing.expectError(error.InvalidSealedSecret, decode(&destination, &identities, test_object_id, test_owner, payload));
+    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, null, null, test_object_id, test_owner, scratch[0 .. payload.len + 1]));
+    try std.testing.expectError(error.InvalidVaultCatalog, decode(&destination, &identities, null, null, test_object_id + 1, test_owner, payload));
+    scratch[payload.len - 5] ^= 1;
+    try std.testing.expectError(error.InvalidSealedSecret, decode(&destination, &identities, null, null, test_object_id, test_owner, payload));
     try std.testing.expectEqual(@as(u8, 0), destination.secret_count);
     try std.testing.expectEqualDeep(empty_secret, destination.secrets[0]);
-    scratch[payload.len - 2] ^= 1;
-    try decode(&destination, &identities, test_object_id, test_owner, payload);
+    scratch[payload.len - 5] ^= 1;
+    try decode(&destination, &identities, null, null, test_object_id, test_owner, payload);
     try std.testing.expectEqual(@as(u8, 2), destination.secret_count);
 }
 
@@ -415,7 +432,7 @@ test "vault catalog round trips the full vault with maximum envelopes across sto
         _ = try fixture.service.store.importSecret(test_owner, &name, &value, true, false);
     }
     var scratch: [MAX_BYTES]u8 = undefined;
-    try std.testing.expect((try encode(&fixture.service.store, &identities, test_object_id, 1, test_owner, &scratch)).len > objects.MAX_INLINE_PAYLOAD_BYTES);
+    try std.testing.expect((try encode(&fixture.service.store, &identities, null, test_object_id, 1, test_owner, &scratch)).len > objects.MAX_INLINE_PAYLOAD_BYTES);
     var session = Session{};
     _ = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 1, &scratch);
     device.crash();

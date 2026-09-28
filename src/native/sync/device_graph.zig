@@ -533,16 +533,28 @@ pub const Graph = struct {
     // The root pin comes from the caller's trusted enrollment boundary, never
     // from a remote certificate or the record being verified.
     pub fn authenticatedDevice(self: *const Graph, device_principal: principal.PrincipalId, root_pin: signing.PublicKey) Error!*const DeviceRecord {
-        const record = self.findDeviceConst(device_principal) orelse return error.DeviceNotFound;
+        const record = try self.authenticatedRecord(device_principal, root_pin);
         if (!record.isTrusted()) return error.AlreadyRevoked;
+        return record;
+    }
+
+    pub fn authenticatedRoot(self: *const Graph, owner: principal.PrincipalId, root_pin: signing.PublicKey) Error!*const UserRootRecord {
+        const root = self.findUserRootConst(owner) orelse return error.RootNotFound;
+        if (owner.kind != .user or owner.serial == 0 or root.label_len > MAX_LABEL_BYTES) return error.InvalidRootSignature;
+        var buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        const message = rootMessage(&buffer, owner, root.labelSlice()) catch return error.InvalidRootSignature;
+        if (!verifyPinnedSignature(root.root_signature, message, root_pin)) return error.InvalidRootSignature;
+        return root;
+    }
+
+    // Snapshot restoration must authenticate revoked records too, without
+    // granting them permission to open a live channel.
+    pub fn authenticatedRecord(self: *const Graph, device_principal: principal.PrincipalId, root_pin: signing.PublicKey) Error!*const DeviceRecord {
+        const record = self.findDeviceConst(device_principal) orelse return error.DeviceNotFound;
         if (record.principal_id.kind != .device or record.principal_id.serial == 0 or record.owner.kind != .user or record.owner.serial == 0) return error.InvalidPrincipalKind;
         if (record.label_len > MAX_LABEL_BYTES or record.key_rotation_generation == 0 or record.trust_generation == 0 or record.overlay_id == 0) return error.InvalidDeviceSignature;
-        const root_slot = self.user_roots.getConst(graphPrincipalKey(record.owner)) orelse return error.RootNotFound;
-        const root = &root_slot.root;
-        if (!root.principal_id.eql(record.owner) or root.label_len > MAX_LABEL_BYTES) return error.InvalidRootSignature;
+        _ = try self.authenticatedRoot(record.owner, root_pin);
         var buffer: [ENROLLMENT_MESSAGE_BUFFER_BYTES]u8 = undefined;
-        const root_message = rootMessage(&buffer, record.owner, root.labelSlice()) catch return error.InvalidRootSignature;
-        if (!verifyPinnedSignature(root.root_signature, root_message, root_pin)) return error.InvalidRootSignature;
         const device_message = deviceMessage(&buffer, record.principal_id, record.labelSlice(), record.overlay_id, record.key_rotation_generation) catch return error.InvalidDeviceSignature;
         if (!verifyPinnedSignature(record.device_signature, device_message, record.device_signature.public_key)) return error.InvalidDeviceSignature;
         if (record.key_rotation_generation == 1) {
@@ -552,6 +564,11 @@ pub const Graph = struct {
             const message = rotationMessage(&buffer, record.owner, record.principal_id, record.overlay_id, record.key_rotation_generation, &record.device_signature.public_key) catch return error.InvalidRotationSignature;
             if (!verifyPinnedSignature(record.rotation_signature, message, root_pin)) return error.InvalidRotationSignature;
         }
+        if (record.status == .revoked) {
+            if (record.trust_generation != 2) return error.InvalidEnrollmentSignature;
+            const message = revocationMessage(&buffer, record.owner, record.principal_id, record.overlay_id, record.revoked_at_ticks) catch return error.InvalidEnrollmentSignature;
+            if (!verifyPinnedSignature(record.revocation_signature, message, root_pin)) return error.InvalidEnrollmentSignature;
+        } else if (record.trust_generation != 1 or record.revoked_at_ticks != 0 or record.revocation_signature.isPresent()) return error.InvalidEnrollmentSignature;
         return record;
     }
 
@@ -638,8 +655,11 @@ fn requireSealedOwner(key: sealed.Key, owner: principal.PrincipalId, tick: u64) 
 }
 
 fn signIdentity(identity: anytype, message: []const u8, tick: u64) Error!manifest.Signature {
-    if (@TypeOf(identity) == sealed.Key) return identity.signMessage(message, tick);
-    return signing.sign(identity, message) catch error.InvalidSigningKey;
+    var signature = if (@TypeOf(identity) == sealed.Key) try identity.signMessage(message, tick) else signing.sign(identity, message) catch return error.InvalidSigningKey;
+    // The diagnostic label is not signed authority. Keep graph records valid
+    // after a temporary signing lease or its vault has been retired.
+    signature.signer = "device-graph";
+    return signature;
 }
 
 fn identityPublicKey(identity: anytype, tick: u64) Error!signing.PublicKey {

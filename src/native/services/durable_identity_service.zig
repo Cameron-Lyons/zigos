@@ -4,6 +4,7 @@ const principal = @import("../core/principal.zig");
 const catalog = @import("../storage/vault_catalog.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const object_signer = @import("../storage/sealed_object_signer.zig");
+const sealed = @import("sealed_signing_key.zig");
 
 // Trusted native service boundary. All borrowed state stays at stable addresses
 // and operations are serialized. A failed checkpoint withholds the result and
@@ -58,6 +59,50 @@ pub const Service = struct {
         try self.requireReady(credential.owner, now_ticks);
         try self.state.identities.revokeCredential(credential_id, now_ticks);
         _ = try self.flush(now_ticks, scratch);
+    }
+
+    pub fn deviceGraph(self: *const Service, now_ticks: u64) !*const graph.Graph {
+        const owner = self.signer.key.authority orelse return error.InvalidIdentityAuthority;
+        try self.requireReady(owner.owner, now_ticks);
+        return self.state.devices orelse error.GraphDestinationRequired;
+    }
+
+    pub fn ensureUserRoot(self: *Service, owner: principal.PrincipalId, label: []const u8, key: sealed.Key, now_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        try self.requireEnrollmentKey(owner, key, now_ticks);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        _ = try devices.ensureSealedUserRoot(owner, label, key, now_ticks);
+        _ = try self.flush(now_ticks, scratch);
+    }
+
+    pub fn enrollDevice(self: *Service, owner: principal.PrincipalId, device: principal.PrincipalId, label: []const u8, root_key: sealed.Key, device_key: sealed.Key, now_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        try self.requireEnrollmentKey(owner, root_key, now_ticks);
+        try self.requireEnrollmentKey(owner, device_key, now_ticks);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        _ = try devices.enrollSealedDevice(owner, device, label, root_key, device_key, now_ticks);
+        _ = try self.flush(now_ticks, scratch);
+    }
+
+    pub fn rotateDeviceKey(self: *Service, owner: principal.PrincipalId, device: principal.PrincipalId, root_key: sealed.Key, device_key: sealed.Key, now_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        try self.requireEnrollmentKey(owner, root_key, now_ticks);
+        try self.requireEnrollmentKey(owner, device_key, now_ticks);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        _ = try devices.rotateSealedDeviceKey(owner, device, root_key, device_key, now_ticks);
+        _ = try self.flush(now_ticks, scratch);
+    }
+
+    pub fn revokeDevice(self: *Service, owner: principal.PrincipalId, device: principal.PrincipalId, root_key: sealed.Key, now_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        try self.requireEnrollmentKey(owner, root_key, now_ticks);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        try devices.revokeSealedDevice(owner, device, root_key, now_ticks);
+        _ = try self.flush(now_ticks, scratch);
+    }
+
+    fn requireEnrollmentKey(self: *const Service, owner: principal.PrincipalId, key: sealed.Key, now_ticks: u64) !void {
+        try self.requireReady(owner, now_ticks);
+        try key.validate(now_ticks);
+        // New signing keys must be in the same vault that this checkpoint
+        // commits. A graph must never outlive an unpersisted sibling vault.
+        if (key.authority.?.service != self.state.vault or !key.authority.?.owner.eql(owner)) return error.InvalidIdentityAuthority;
     }
 
     fn requireReady(self: *const Service, owner: principal.PrincipalId, now_ticks: u64) !void {

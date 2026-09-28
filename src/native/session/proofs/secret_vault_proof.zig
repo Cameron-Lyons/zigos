@@ -29,6 +29,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     var adapter = backend.Backend(@TypeOf(io.*)){ .client = &client, .io = io, .authorization = authorization };
     var service = vault.Service.init();
     var identities = identity.Store.init();
+    var peer_graph = device_graph.Graph.init();
     service.attachHardwareProvider(adapter.provider());
     defer service.attachHardwareProvider(.{});
     var policies = policy.Directory.init();
@@ -41,15 +42,17 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     // The public fixture signer anchors enrollment only in this verification
     // workload. Production must obtain the pin from trusted enrollment state.
     var expected_key: signing.PublicKey = undefined;
+    var root_pin: signing.PublicKey = undefined;
     var catalog_scratch: [catalog.MAX_BYTES]u8 = undefined;
     var secret: *const secrets.SecretRecord = undefined;
     if (restored) {
         const version = storage.latestVersion(found[0].object_id) orelse return error.MissingVaultProof;
         const bytes = try storage.versionPayload(version);
-        if (bytes.len != expected_key.len or !version.metadata.verifyFor(.secret, bytes) or
+        if (bytes.len != expected_key.len + root_pin.len or !version.metadata.verifyFor(.secret, bytes) or
             !std.mem.eql(u8, version.metadata.signature.publicKeySlice(), &(try signing.publicKey(signer)))) return error.InvalidVaultProof;
-        @memcpy(&expected_key, bytes);
-        const generation = catalog.restore(storage, .{ .vault = &service, .identities = &identities }, .{ .object_id = catalog_object_id, .owner = owner, .public_key = expected_key, .minimum_generation = 2 }, &catalog_scratch) catch |err| {
+        @memcpy(&expected_key, bytes[0..32]);
+        @memcpy(&root_pin, bytes[32..64]);
+        const generation = catalog.restore(storage, .{ .vault = &service, .identities = &identities, .devices = &peer_graph }, .{ .object_id = catalog_object_id, .owner = owner, .public_key = expected_key, .minimum_generation = 5, .device_root_pin = root_pin }, &catalog_scratch) catch |err| {
             if (err != error.InvalidSealedSecret) return err;
             if (service.store.secret_count != 0 or identities.credential_count != 0) return error.PublishedForeignSecret;
             service.attachHardwareProvider(.{});
@@ -57,10 +60,10 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             console.print("ZIGOS:TPM2:VAULT:WRONG_DEVICE\n");
             return;
         };
-        if (generation != 2 or identities.credential_count != 2 or service.store.secret_count != 3 or service.activeHandleCount() != 0 or
+        if (generation != 5 or identities.credential_count != 2 or service.store.secret_count != 5 or service.activeHandleCount() != 0 or
             service.store.handles.countInUse() != 0) return error.InvalidRestoredVault;
         secret = service.store.describeSecret(1) orelse return error.MissingVaultProof;
-        const portable_lease = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = app, .task_id = 5, .secret_id = 3, .expires_at_ticks = 10, .now_ticks = 1, .allow_raw_export = true }, null);
+        const portable_lease = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = app, .task_id = 5, .secret_id = 5, .expires_at_ticks = 10, .now_ticks = 1, .allow_raw_export = true }, null);
         var recovered_bytes: secrets.Value = undefined;
         defer std.crypto.secureZero(u8, &recovered_bytes);
         const recovered_value = try service.exportRaw(&policies, subjects, .{ .holder = app, .task_id = 5, .handle_id = portable_lease.id, .now_ticks = 1 }, null, &recovered_bytes);
@@ -91,21 +94,24 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     if (restored) {
         if (!std.mem.eql(u8, signature.publicKeySlice(), &expected_key)) return error.RecoveredWrongVaultKey;
     } else @memcpy(&expected_key, signature.publicKeySlice());
-    if (!restored) {
-        const previous = storage.checkpoint_enabled;
-        storage.checkpoint_enabled = false;
-        defer storage.checkpoint_enabled = previous;
-        _ = try storage.putLocallySignedVersion(.{ .object_type = .secret, .payload = &expected_key, .signer = signer, .label = label, .content_type = content_type, .created_at_ticks = 1 });
-    }
     const catalog_handle = try service.lendHandle(&policies, subjects, .{ .owner = owner, .holder = storage.owner, .task_id = storage.task_id, .secret_id = secret.id, .expires_at_ticks = 20, .now_ticks = 2 }, null);
     var catalog_authority = object_signer.Authority{ .service = &service, .policies = &policies, .subjects = subjects, .owner = owner, .holder = storage.owner, .task_id = storage.task_id };
     const catalog_signer = try object_signer.Signer.bind(&catalog_authority, catalog_handle.id, 2);
-    var durable_identities = durable_identity.Service{ .state = .{ .vault = &service, .identities = &identities }, .storage = storage, .signer = catalog_signer, .object_id = catalog_object_id, .version_id = if (restored) storage.latestVersion(catalog_object_id).?.id.raw() else 0 };
+    var durable_identities = durable_identity.Service{ .state = .{ .vault = &service, .identities = &identities, .devices = &peer_graph }, .storage = storage, .signer = catalog_signer, .object_id = catalog_object_id, .version_id = if (restored) storage.latestVersion(catalog_object_id).?.id.raw() else 0 };
     var unlock_session = identity.unlock_context.Session{};
     try unlock_session.begin(@import("../../../kernel/platform/secure_random.zig").bootInstanceId(), io);
     try proveIdentityAssertions(&durable_identities, &policies, secret.id, &expected_key, restored, &catalog_scratch, &unlock_session);
     try proveDocumentSigning(&service, &policies, secret.id, &expected_key);
-    try provePeerAuthentication(&service, &policies, secret.id, &expected_key);
+    try provePeerAuthentication(&durable_identities, &policies, secret.id, &expected_key, &root_pin, restored, &catalog_scratch);
+    if (!restored) {
+        const previous = storage.checkpoint_enabled;
+        storage.checkpoint_enabled = false;
+        defer storage.checkpoint_enabled = previous;
+        var pins: [64]u8 = undefined;
+        @memcpy(pins[0..32], &expected_key);
+        @memcpy(pins[32..64], &root_pin);
+        _ = try storage.putLocallySignedVersion(.{ .object_type = .secret, .payload = &pins, .signer = signer, .label = label, .content_type = content_type, .created_at_ticks = 1 });
+    }
     var out: secrets.Value = @splat(0xaa);
     defer std.crypto.secureZero(u8, &out);
     if (service.exportRaw(&policies, subjects, .{ .holder = app, .task_id = 5, .handle_id = handle.id, .now_ticks = 3 }, null, &out)) |_| {
@@ -203,7 +209,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     }
     if (!restored) {
         const receipt = try durable_identities.flush(7, &catalog_scratch);
-        if (receipt.catalog_generation != 2 or receipt.checkpoint_generation == 0) return error.InvalidVaultCheckpoint;
+        if (receipt.catalog_generation != 5 or receipt.checkpoint_generation == 0) return error.InvalidVaultCheckpoint;
         console.print("ZIGOS:TPM2:CATALOG:COMMITTED\n");
     }
     service.attachHardwareProvider(.{});
@@ -233,43 +239,41 @@ fn proveDocumentSigning(service: *vault.Service, policies: *const policy.Directo
     console.print("ZIGOS:TPM2:DOCUMENT:SIGNING\n");
 }
 
-// The device key is generated by the TPM-backed provider on cold boot and
-// restored from the signed catalog on reboot. Root and other-peer seeds are
-// explicit enrollment fixtures, imported through the same real TPM provider.
-fn provePeerAuthentication(service: *vault.Service, policies: *const policy.Directory, secret_id: u64, expected_key: *const signing.PublicKey) !void {
+// All peer signing keys are generated and restored through the real TPM
+// provider. The separate enrollment-proof object pins their public roots only
+// for this verification workload; production pin provisioning remains external.
+fn provePeerAuthentication(durable: *durable_identity.Service, policies: *const policy.Directory, secret_id: u64, expected_key: *const signing.PublicKey, root_pin: *signing.PublicKey, restored: bool, scratch: *[catalog.MAX_BYTES]u8) !void {
     const sealed = @import("../../services/sealed_signing_key.zig");
     const peer = @import("../../sync/peer_channel.zig");
+    const service = durable.state.vault;
     const holder = principal.PrincipalId{ .kind = .service, .serial = 0x706 };
     const local = principal.PrincipalId{ .kind = .device, .serial = 0x707 };
     const remote = principal.PrincipalId{ .kind = .device, .serial = 0x708 };
-    const root_fixture = signing.SignerIdentity{ .label = "peer-root-proof", .seed = @splat(0xc3) };
-    const remote_fixture = signing.SignerIdentity{ .label = "peer-remote-proof", .seed = @splat(0xc4) };
     const subjects = policy.SubjectSet{ .user_id = owner.serial };
-    // Fixture enrollment keys have their own vault so they cannot alter the
-    // persisted catalog whose exact contents the reboot proof checks.
-    var fixture_vault = vault.Service.init();
-    fixture_vault.attachHardwareProvider(service.store.hardware_provider);
-    const root_secret = try fixture_vault.importSecret(policies, subjects, .{ .owner = owner, .task_id = 8, .label = root_fixture.label, .raw = &root_fixture.seed, .now_ticks = 3 }, null);
-    const remote_secret = try fixture_vault.importSecret(policies, subjects, .{ .owner = owner, .task_id = 8, .label = remote_fixture.label, .raw = &remote_fixture.seed, .now_ticks = 3 }, null);
-    var authority = sealed.Authority{ .service = service, .policies = policies, .subjects = subjects, .owner = owner, .holder = holder, .task_id = 8 };
-    var fixture_authority = authority;
-    fixture_authority.service = &fixture_vault;
-    var keys: [3]sealed.Key = undefined;
-    const secret_ids = [_]u64{ root_secret.id, secret_id, remote_secret.id };
-    for (&keys, secret_ids, 0..) |*key, id, index| {
-        const source = if (index == 1) &authority else &fixture_authority;
-        const handle = try source.service.lendHandle(policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 8, .secret_id = id, .expires_at_ticks = 10, .now_ticks = 3 }, null);
-        key.* = try sealed.Key.bind(source, handle.id, 3);
+    if (!restored) {
+        const root = try service.generateSigningKey(policies, subjects, .{ .owner = owner, .task_id = 8, .label = "peer root", .now_ticks = 3 }, null);
+        const other = try service.generateSigningKey(policies, subjects, .{ .owner = owner, .task_id = 8, .label = "peer remote", .now_ticks = 3 }, null);
+        if (root.id != 2 or other.id != 3) return error.InvalidPeerKeyIds;
     }
-    var graph = device_graph.Graph.init();
-    _ = try graph.ensureSealedUserRoot(owner, "peer owner", keys[0], 3);
-    const enrolled = try graph.enrollSealedDevice(owner, local, "local", keys[0], keys[1], 3);
+    var authority = sealed.Authority{ .service = service, .policies = policies, .subjects = subjects, .owner = owner, .holder = holder, .task_id = 8 };
+    var keys: [3]sealed.Key = undefined;
+    const secret_ids = [_]u64{ 2, secret_id, 3 };
+    for (&keys, secret_ids) |*key, id| {
+        const handle = try service.lendHandle(policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 8, .secret_id = id, .expires_at_ticks = 10, .now_ticks = 3 }, null);
+        key.* = try sealed.Key.bind(&authority, handle.id, 3);
+    }
+    if (!restored) {
+        root_pin.* = try keys[0].publicKey(3);
+        try durable.ensureUserRoot(owner, "peer owner", keys[0], 3, scratch);
+        try durable.enrollDevice(owner, local, "local", keys[0], keys[1], 3, scratch);
+        try durable.enrollDevice(owner, remote, "remote", keys[0], keys[2], 3, scratch);
+    }
+    const graph = try durable.deviceGraph(3);
+    const enrolled = try graph.authenticatedDevice(local, root_pin.*);
     if (!std.mem.eql(u8, enrolled.device_signature.publicKeySlice(), expected_key)) return error.WrongPeerSigningKey;
-    _ = try graph.enrollSealedDevice(owner, remote, "remote", keys[0], keys[2], 3);
-    const root_pin = try signing.publicKey(root_fixture);
-    var a = try peer.Channel.init(&graph, root_pin, local, remote, keys[1], .initiator, 3);
+    var a = try peer.Channel.init(graph, root_pin.*, local, remote, keys[1], .initiator, 3);
     defer a.close();
-    var b = try peer.Channel.init(&graph, root_pin, remote, local, keys[2], .responder, 3);
+    var b = try peer.Channel.init(graph, root_pin.*, remote, local, keys[2], .responder, 3);
     defer b.close();
     var wire: [peer.MAX_FRAME]u8 = undefined;
     try b.readHandshake(try a.writeHandshake(&wire, 3), 3);
@@ -284,6 +288,7 @@ fn provePeerAuthentication(service: *vault.Service, policies: *const policy.Dire
         if (err != error.HandleRevoked or a.established() or !std.mem.allEqual(u8, &wire, 0)) return error.PeerLeaseNotRetired;
     }
     console.print("ZIGOS:TPM2:PEER:AUTHENTICATED\n");
+    console.print(if (restored) "ZIGOS:TPM2:ENROLLMENT:RESTORED\n" else "ZIGOS:TPM2:ENROLLMENT:COMMITTED\n");
 }
 
 // The graph and unlock proof are explicit verification fixtures. Credential
