@@ -1,6 +1,8 @@
 const std = @import("std");
 const sealing = @import("../../platform/tpm2_sealing.zig");
 const hardware = @import("../../../kernel/platform/tpm2_hw.zig");
+const crb = @import("../../../kernel/platform/tpm2_crb.zig");
+const spin = @import("../../../kernel/utils/spin.zig");
 const kernel_random = @import("../../../kernel/platform/secure_random.zig");
 const console = @import("../../../kernel/utils/console.zig");
 const object_store = @import("../../storage/object_store.zig");
@@ -73,6 +75,7 @@ const Io = struct {
 
 pub fn run(manager: anytype) !void {
     if (!hardware.available()) return;
+    try runTransportProof();
     var io = Io{};
     var client = sealing.Client{};
     defer client.close(&io) catch {};
@@ -96,6 +99,61 @@ pub fn run(manager: anytype) !void {
         console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:VAULT:FAIL {s}\n", .{@errorName(err)}) catch "ZIGOS:TPM2:VAULT:FAIL\n");
         return err;
     };
+}
+
+fn cancelAndDrain(ticket: hardware.Ticket) !void {
+    try hardware.cancel(ticket);
+    while (true) {
+        const reply = hardware.poll(ticket) catch |err| {
+            if (err == error.Cancelled) return;
+            return err;
+        };
+        if (reply != null) return error.CancelledReplyExposed;
+        spin.hint();
+    }
+}
+
+fn runTransportProof() !void {
+    const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+    var response: [27]u8 = undefined;
+    defer std.crypto.secureZero(u8, &response);
+    var active: ?hardware.Ticket = null;
+    errdefer if (active) |ticket| cancelAndDrain(ticket) catch {};
+    // Exercise cancellation before and after several polling boundaries.
+    // GetCapability has no persistent side effects even if cancellation loses
+    // the race to completion. This proof drives polls; it is not a UI worker.
+    for ([_]usize{ 0, 1, 6 }) |handoff| {
+        @memset(&response, 0xaa);
+        const cancelled = try hardware.begin(&command, &response, 2000);
+        active = cancelled;
+        if (hardware.begin(&command, &response, 2000)) |_| {
+            return error.ConcurrentTpmCommand;
+        } else |err| if (err != error.Busy) return err;
+        for (0..handoff) |_| {
+            if (try hardware.poll(cancelled) != null) return error.EarlyTransportCompletion;
+        }
+        try cancelAndDrain(cancelled);
+        active = null;
+        if (!std.mem.allEqual(u8, &response, 0) or !hardware.available()) return error.BadTransportCancellation;
+
+        const next = try hardware.begin(&command, &response, 2000);
+        active = next;
+        if (hardware.cancel(cancelled)) |_| {
+            return error.StaleTransportCancellation;
+        } else |err| if (err != error.NoCommand) return err;
+        if (hardware.poll(cancelled)) |_| {
+            return error.StaleTransportPoll;
+        } else |err| if (err != error.NoCommand) return err;
+        while (true) {
+            if (try hardware.poll(next)) |reply| {
+                active = null;
+                if (try crb.parseProperty(reply, crb.FAMILY_INDICATOR) != 0x322e_3000) return error.BadTransportReply;
+                break;
+            }
+            spin.hint();
+        }
+    }
+    console.print("ZIGOS:TPM2:ASYNC_TRANSPORT:VERIFIED\n");
 }
 
 fn runWithClient(manager: anytype, client: *sealing.Client, io: *Io) !void {

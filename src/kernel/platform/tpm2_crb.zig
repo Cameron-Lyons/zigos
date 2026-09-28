@@ -47,6 +47,10 @@ pub const Error = error{
     LocalityLost,
     DeviceError,
     DeviceFailed,
+    Busy,
+    Cancelled,
+    NoCommand,
+    TicketExhausted,
 };
 
 pub const Discovery = struct {
@@ -79,15 +83,6 @@ fn readAddress(io: anytype, low: Reg, high: Reg) u64 {
     return @as(u64, io.read(low)) | (@as(u64, io.read(high)) << 32);
 }
 
-fn wait(io: anytype, reg: Reg, mask: u32, value: u32, milliseconds: u32) bool {
-    const deadline = io.deadline(milliseconds);
-    while (true) {
-        if (io.read(reg) & mask == value) return true;
-        if (io.expired(deadline)) return false;
-        io.pause();
-    }
-}
-
 fn ownsLocality(io: anytype) bool {
     return io.read(.locality_state) & 0x9e == 0x82 and io.read(.locality_status) & 3 == 1;
 }
@@ -95,18 +90,6 @@ fn ownsLocality(io: anytype) bool {
 fn healthy(io: anytype) Error!void {
     if (!ownsLocality(io)) return error.LocalityLost;
     if (io.read(.status) & 1 != 0) return error.DeviceError;
-}
-
-fn idle(io: anytype) Error!void {
-    io.write(.request, 2);
-    if (!wait(io, .request, 2, 0, INTERFACE_TIMEOUT_MS) or
-        !wait(io, .status, 2, 2, INTERFACE_TIMEOUT_MS)) return error.InterfaceTimeout;
-    try healthy(io);
-}
-
-fn release(io: anytype) Error!void {
-    io.write(.locality_control, 2);
-    if (!wait(io, .locality_status, 1, 0, LOCALITY_TIMEOUT_MS)) return error.LocalityTimeout;
 }
 
 pub const Header = struct {
@@ -124,84 +107,318 @@ pub fn parseHeader(bytes: []const u8) Error!Header {
     return .{ .tag = tag, .bytes = length, .code = std.mem.readInt(u32, bytes[6..10], .big) };
 }
 
-// The caller serializes access. An interface fault latches failure until reboot;
-// retrying a timed-out command could repeat an operation whose result was lost.
-// io supplies register/buffer access, a monotonic deadline, and a polling hint.
+// The caller serializes access to the transport and retains each operation at
+// one exclusive owner. Interface faults latch failure until reboot: a lost
+// response must never cause an implicit retry of a possibly completed command.
 pub const Transport = struct {
     discovery: Discovery,
     failed: bool = false,
+    busy: bool = false,
 
-    pub fn execute(self: *Transport, io: anytype, command: []const u8, response: []u8, timeout_ms: u32) Error![]u8 {
+    // Borrows both buffers until poll returns a response or an error. begin does
+    // no MMIO. Neither the operation nor the transport may be copied while live.
+    pub fn begin(self: *Transport, io: anytype, command: []const u8, response: []u8, timeout_ms: u32) Error!Operation(@TypeOf(io.deadline(LOCALITY_TIMEOUT_MS))) {
+        if (self.busy) return error.Busy;
         if (self.failed) return error.DeviceFailed;
         const request = parseHeader(command) catch return error.InvalidCommand;
         if (request.bytes != command.len or command.len > MAX_MESSAGE_BYTES or
             response.len < HEADER_BYTES or response.len > MAX_MESSAGE_BYTES or
             timeout_ms == 0 or timeout_ms > MAX_COMMAND_TIMEOUT_MS) return error.InvalidCommand;
+        self.busy = true;
+        return .{
+            .transport = self,
+            .command = command,
+            .response = response,
+            .request_tag = request.tag,
+            .timeout_ms = timeout_ms,
+            .deadline = io.deadline(LOCALITY_TIMEOUT_MS),
+        };
+    }
 
-        var requested = false;
-        errdefer {
-            self.failed = true;
-            @memset(response, 0);
-            // Never touch a buffer while a command might still be running or a
-            // higher locality owns the device. Cancellation itself is bounded.
-            if (requested and ownsLocality(io)) {
-                if (io.read(.start) & 1 != 0) {
-                    io.write(.cancel, 1);
-                    _ = wait(io, .start, 1, 0, CANCEL_TIMEOUT_MS);
-                }
-                if (ownsLocality(io) and io.read(.start) & 1 == 0) {
-                    io.write(.cancel, 0);
-                    idle(io) catch {};
-                    release(io) catch {};
-                }
-            } else if (requested) {
-                // Relinquish also cancels a pending locality request.
-                io.write(.locality_control, 2);
-            }
+    // Boot/proof adapter. All protocol transitions and cleanup use the same
+    // pollable engine; only this explicitly synchronous adapter spins.
+    pub fn execute(self: *Transport, io: anytype, command: []const u8, response: []u8, timeout_ms: u32) Error![]u8 {
+        var operation = try self.begin(io, command, response, timeout_ms);
+        while (true) {
+            if (try operation.poll(io)) |reply| return reply;
+            // A phase transition can be driven immediately; pause only when a
+            // hardware condition remains pending, preserving the boot fast path.
+            if (operation.waiting) io.pause();
         }
-
-        if (!wait(io, .locality_state, 0x80, 0x80, LOCALITY_TIMEOUT_MS)) return error.LocalityTimeout;
-        const interface = io.read(.interface_id);
-        const version = (interface >> 4) & 0xf;
-        if (interface & 0xf != 1 or version < 1 or version > 3 or interface & (1 << 14) == 0)
-            return error.UnsupportedInterface;
-        requested = true;
-        io.write(.locality_control, 1);
-        if (!wait(io, .locality_state, 0x9e, 0x82, LOCALITY_TIMEOUT_MS)) return error.LocalityTimeout;
-        try healthy(io);
-        if (io.read(.start) & 1 != 0) return error.DeviceError;
-
-        const command_buffer = try bufferWithinPage(self.discovery.physical_base, readAddress(io, .command_address_low, .command_address_high), io.read(.command_size));
-        const response_buffer = try bufferWithinPage(self.discovery.physical_base, readAddress(io, .response_address_low, .response_address_high), io.read(.response_size));
-        if (command.len > command_buffer.bytes) return error.InvalidCommand;
-        try idle(io);
-        io.write(.request, 1);
-        if (!wait(io, .request, 1, 0, INTERFACE_TIMEOUT_MS) or
-            !wait(io, .status, 2, 0, INTERFACE_TIMEOUT_MS)) return error.InterfaceTimeout;
-        try healthy(io);
-        io.write(.cancel, 0);
-        io.writeBytes(command_buffer.offset, command);
-        io.write(.start, 1);
-        if (!wait(io, .start, 1, 0, timeout_ms)) return error.CommandTimeout;
-        try healthy(io);
-
-        var header_bytes: [HEADER_BYTES]u8 = undefined;
-        io.readBytes(response_buffer.offset, &header_bytes);
-        const reply = try parseHeader(&header_bytes);
-        if (reply.bytes > response_buffer.bytes or reply.bytes > response.len) return error.ResponseTooLarge;
-        if (reply.code != 0) {
-            if (reply.tag != 0x8001 or reply.bytes != HEADER_BYTES) return error.InvalidResponse;
-        } else if (reply.tag != request.tag) return error.InvalidResponse;
-        io.readBytes(response_buffer.offset, response[0..reply.bytes]);
-        // A device must not change its header between the bounded header read
-        // and payload read. Do not expose a mixed response to the caller.
-        if (!std.mem.eql(u8, &header_bytes, response[0..HEADER_BYTES])) return error.InvalidResponse;
-        try healthy(io);
-        try idle(io);
-        try release(io);
-        return response[0..reply.bytes];
     }
 };
+
+pub fn Operation(comptime Deadline: type) type {
+    return struct {
+        const Self = @This();
+        const Phase = enum {
+            initial,
+            locality,
+            idle_ack,
+            idle_status,
+            ready_ack,
+            ready_status,
+            running,
+            release,
+            cleanup,
+            cancel_wait,
+            cleanup_release,
+            done,
+        };
+        const AfterIdle = enum { submit, release, cleanup };
+
+        transport: *Transport,
+        command: []const u8,
+        response: []u8,
+        request_tag: u16,
+        timeout_ms: u32,
+        deadline: Deadline,
+        phase: Phase = .initial,
+        after_idle: AfterIdle = .submit,
+        command_buffer: Buffer = .{ .offset = 0, .bytes = 0 },
+        response_buffer: Buffer = .{ .offset = 0, .bytes = 0 },
+        response_bytes: usize = 0,
+        failure: ?Error = null,
+        requested: bool = false,
+        acquired: bool = false,
+        release_issued: bool = false,
+        cancelled: bool = false,
+        waiting: bool = false,
+
+        // Cancellation suppresses the result, not the command's possible side
+        // effects. Keep polling and retain both buffers until cleanup terminates.
+        pub fn cancel(self: *Self) void {
+            if (self.phase != .done) self.cancelled = true;
+        }
+
+        // One bounded phase per call; no spin, sleep, allocation, or callback.
+        // null means pending (including cleanup). An error is terminal, so the
+        // caller can safely release its buffers even after cancellation.
+        pub fn poll(self: *Self, io: anytype) Error!?[]u8 {
+            if (self.phase == .done) return error.NoCommand;
+            self.waiting = false;
+            if (self.cancelled and self.failure == null) self.fail(error.Cancelled);
+            return self.step(io) catch |err| {
+                if (self.phase == .done) return err;
+                self.fail(err);
+                return null;
+            };
+        }
+
+        fn fail(self: *Self, err: Error) void {
+            if (err != error.Cancelled) self.transport.failed = true;
+            if (self.failure == null) self.failure = err;
+            std.crypto.secureZero(u8, self.response);
+            self.command = &.{};
+            self.phase = .cleanup;
+        }
+
+        fn wait(self: *Self, io: anytype, reg: Reg, mask: u32, value: u32, err: Error) Error!bool {
+            if (io.read(reg) & mask == value) return true;
+            if (io.expired(self.deadline)) return err;
+            self.waiting = true;
+            return false;
+        }
+
+        fn enter(self: *Self, io: anytype, phase: Phase, timeout: u32) void {
+            self.phase = phase;
+            self.deadline = io.deadline(timeout);
+        }
+
+        fn idle(self: *Self, io: anytype, after: AfterIdle) void {
+            self.after_idle = after;
+            io.write(.request, 2);
+            self.enter(io, .idle_ack, INTERFACE_TIMEOUT_MS);
+        }
+
+        fn release(self: *Self, io: anytype, cleanup: bool) void {
+            self.release_issued = true;
+            io.write(.locality_control, 2);
+            self.enter(io, if (cleanup) .cleanup_release else .release, LOCALITY_TIMEOUT_MS);
+        }
+
+        fn finish(self: *Self) Error!?[]u8 {
+            const reply = self.response[0..self.response_bytes];
+            const failure = self.failure;
+            self.command = &.{};
+            self.response = &.{};
+            self.command_buffer = .{ .offset = 0, .bytes = 0 };
+            self.response_buffer = .{ .offset = 0, .bytes = 0 };
+            self.response_bytes = 0;
+            self.transport.busy = false;
+            self.phase = .done;
+            if (failure) |err| return err;
+            return reply;
+        }
+
+        fn step(self: *Self, io: anytype) Error!?[]u8 {
+            switch (self.phase) {
+                .initial => {
+                    if (!try self.wait(io, .locality_state, 0x80, 0x80, error.LocalityTimeout)) return null;
+                    const interface = io.read(.interface_id);
+                    const version = (interface >> 4) & 0xf;
+                    if (interface & 0xf != 1 or version < 1 or version > 3 or interface & (1 << 14) == 0)
+                        return error.UnsupportedInterface;
+                    self.requested = true;
+                    io.write(.locality_control, 1);
+                    self.enter(io, .locality, LOCALITY_TIMEOUT_MS);
+                },
+                .locality => {
+                    if (!try self.wait(io, .locality_state, 0x9e, 0x82, error.LocalityTimeout)) return null;
+                    try healthy(io);
+                    self.acquired = true;
+                    if (io.read(.start) & 1 != 0) return error.DeviceError;
+                    const base = self.transport.discovery.physical_base;
+                    self.command_buffer = try bufferWithinPage(base, readAddress(io, .command_address_low, .command_address_high), io.read(.command_size));
+                    self.response_buffer = try bufferWithinPage(base, readAddress(io, .response_address_low, .response_address_high), io.read(.response_size));
+                    if (self.command.len > self.command_buffer.bytes) return error.InvalidCommand;
+                    self.idle(io, .submit);
+                },
+                .idle_ack, .idle_status => {
+                    // Cleanup errors proceed straight to release; restarting the
+                    // same idle wait would turn a deadline into an infinite loop.
+                    self.pollIdle(io) catch |err| {
+                        if (self.failure == null) return err;
+                        self.transport.failed = true;
+                        self.release(io, true);
+                    };
+                },
+                .ready_ack => {
+                    try healthy(io);
+                    if (!try self.wait(io, .request, 1, 0, error.InterfaceTimeout)) return null;
+                    self.enter(io, .ready_status, INTERFACE_TIMEOUT_MS);
+                },
+                .ready_status => {
+                    try healthy(io);
+                    if (!try self.wait(io, .status, 2, 0, error.InterfaceTimeout)) return null;
+                    io.write(.cancel, 0);
+                    io.writeBytes(self.command_buffer.offset, self.command);
+                    self.command = &.{};
+                    io.write(.start, 1);
+                    self.enter(io, .running, self.timeout_ms);
+                },
+                .running => {
+                    try healthy(io);
+                    if (!try self.wait(io, .start, 1, 0, error.CommandTimeout)) return null;
+                    var header_bytes: [HEADER_BYTES]u8 = undefined;
+                    io.readBytes(self.response_buffer.offset, &header_bytes);
+                    const reply = try parseHeader(&header_bytes);
+                    if (reply.bytes > self.response_buffer.bytes or reply.bytes > self.response.len) return error.ResponseTooLarge;
+                    if (reply.code != 0) {
+                        if (reply.tag != 0x8001 or reply.bytes != HEADER_BYTES) return error.InvalidResponse;
+                    } else if (reply.tag != self.request_tag) return error.InvalidResponse;
+                    io.readBytes(self.response_buffer.offset, self.response[0..reply.bytes]);
+                    if (!std.mem.eql(u8, &header_bytes, self.response[0..HEADER_BYTES])) return error.InvalidResponse;
+                    try healthy(io);
+                    self.response_bytes = reply.bytes;
+                    self.idle(io, .release);
+                },
+                .release => {
+                    if (!try self.wait(io, .locality_status, 1, 0, error.LocalityTimeout)) return null;
+                    return self.finish();
+                },
+                .cleanup => {
+                    if (!self.requested) return self.finish();
+                    if (ownsLocality(io)) {
+                        if (io.read(.status) & 1 != 0) self.transport.failed = true;
+                        if (io.read(.start) & 1 != 0) {
+                            io.write(.cancel, 1);
+                            self.enter(io, .cancel_wait, CANCEL_TIMEOUT_MS);
+                        } else {
+                            io.write(.cancel, 0);
+                            self.idle(io, .cleanup);
+                        }
+                    } else {
+                        if (self.acquired and !self.release_issued) self.transport.failed = true;
+                        self.release(io, true);
+                    }
+                },
+                .cancel_wait => {
+                    if (!ownsLocality(io)) {
+                        self.transport.failed = true;
+                        self.release(io, true);
+                        return null;
+                    }
+                    const stopped = self.wait(io, .start, 1, 0, error.CommandTimeout) catch {
+                        self.transport.failed = true;
+                        // Still running: do not access buffers or idle/release.
+                        return self.finish();
+                    };
+                    if (!stopped) return null;
+                    if (io.read(.status) & 1 != 0) self.transport.failed = true;
+                    io.write(.cancel, 0);
+                    self.idle(io, .cleanup);
+                },
+                .cleanup_release => {
+                    const released = self.wait(io, .locality_status, 1, 0, error.LocalityTimeout) catch {
+                        self.transport.failed = true;
+                        return self.finish();
+                    };
+                    if (released) return self.finish();
+                },
+                .done => unreachable,
+            }
+            return null;
+        }
+
+        fn pollIdle(self: *Self, io: anytype) Error!void {
+            try healthy(io);
+            if (self.phase == .idle_ack) {
+                if (!try self.wait(io, .request, 2, 0, error.InterfaceTimeout)) return;
+                self.enter(io, .idle_status, INTERFACE_TIMEOUT_MS);
+                return;
+            }
+            if (!try self.wait(io, .status, 2, 2, error.InterfaceTimeout)) return;
+            switch (self.after_idle) {
+                .submit => {
+                    io.write(.request, 1);
+                    self.enter(io, .ready_ack, INTERFACE_TIMEOUT_MS);
+                },
+                .release => self.release(io, false),
+                .cleanup => self.release(io, true),
+            }
+        }
+    };
+}
+
+// A kernel-private token fences stale poll/cancel calls from the next command.
+// The slot, transport and borrowed buffers must remain at stable addresses;
+// callers serialize every slot access, but need not hold a lock between polls.
+pub const Ticket = enum(u64) { _ };
+
+pub fn CommandSlot(comptime Deadline: type) type {
+    return struct {
+        operation: ?Operation(Deadline) = null,
+        current: Ticket = @enumFromInt(0),
+        next_ticket: u64 = 1,
+
+        pub fn begin(self: *@This(), transport: *Transport, io: anytype, command: []const u8, response: []u8, timeout_ms: u32) Error!Ticket {
+            if (self.operation != null) return error.Busy;
+            if (self.next_ticket == 0) return error.TicketExhausted;
+            self.operation = try transport.begin(io, command, response, timeout_ms);
+            self.current = @enumFromInt(self.next_ticket);
+            self.next_ticket +%= 1;
+            return self.current;
+        }
+
+        pub fn poll(self: *@This(), io: anytype, ticket: Ticket) Error!?[]u8 {
+            if (ticket != self.current) return error.NoCommand;
+            const operation = if (self.operation) |*value| value else return error.NoCommand;
+            const reply = operation.poll(io) catch |err| {
+                self.operation = null;
+                return err;
+            };
+            if (reply != null) self.operation = null;
+            return reply;
+        }
+
+        pub fn cancel(self: *@This(), ticket: Ticket) Error!void {
+            if (ticket != self.current) return error.NoCommand;
+            const operation = if (self.operation) |*value| value else return error.NoCommand;
+            operation.cancel();
+        }
+    };
+}
 
 pub const FAMILY_INDICATOR: u32 = 0x100;
 pub const MANUFACTURER: u32 = 0x105;

@@ -59,6 +59,16 @@ start_tpm() {
   return 1
 }
 
+check_transport_proof() {
+  local log="$1"
+  if [ "$(grep -c '^ZIGOS:TPM2:ASYNC_TRANSPORT:' "$log" || true)" -ne 1 ] ||
+    ! grep -Fxq 'ZIGOS:TPM2:ASYNC_TRANSPORT:VERIFIED' "$log"; then
+    cat "$log" >&2
+    echo 'TPM2 asynchronous transport proof mismatch' >&2
+    return 1
+  fi
+}
+
 run_boot() {
   local name="$1"
   local device="$2"
@@ -79,6 +89,7 @@ run_boot() {
     return 1
   fi
   if [ -n "$sealing_marker" ]; then
+    check_transport_proof "$log"
     local pin_marker='ZIGOS:TPM2:PIN:VERIFIED'
     local session_proofs=1
     if [ "$name" = different-tpm ]; then session_proofs=0; fi
@@ -186,6 +197,7 @@ run_interrupted_checkpoint() {
   qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" \
     'ZIGOS:TPM2:ANCHOR_RECOVERY:INTERRUPTED' "${TPM2_QEMU_SECONDS:-90}"
   stop_tpm
+  check_transport_proof "$log"
   if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
     ! grep -Fxq 'ZIGOS:TPM2:SEAL:RECOVERED' "$log" ||
     [ "$(grep -c '^ZIGOS:TPM2:ANCHOR_RECOVERY:' "$log" || true)" -ne 1 ] ||
@@ -204,6 +216,7 @@ run_interrupted_enrollment() {
   qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" \
     'ZIGOS:TPM2:ENROLLMENT_RECOVERY:INTERRUPTED' "${TPM2_QEMU_SECONDS:-90}"
   stop_tpm
+  check_transport_proof "$log"
   if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
     ! grep -Fxq 'ZIGOS:TPM2:PIN:RECOVERED' "$log" ||
     ! grep -Fxq 'ZIGOS:TPM2:SESSION:VERIFIED' "$log" ||
@@ -225,6 +238,7 @@ run_pin_lockout() {
   qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" \
     'ZIGOS:TPM2:PIN:LOCKED' "${TPM2_QEMU_SECONDS:-90}"
   stop_tpm
+  check_transport_proof "$log"
   if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
     [ "$(grep -c '^ZIGOS:TPM2:PIN:' "$log" || true)" -ne 1 ] ||
     grep -Eq '^ZIGOS:TPM2:(SEAL|IDENTITY|VAULT|ENROLLMENT_RECOVERY):|FAIL' "$log"; then

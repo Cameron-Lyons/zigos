@@ -230,7 +230,13 @@ requests.
   the normal router and framebuffer to the real TPM verifier, including rejected
   PINs, lock/reopen, and expiry. Trusted enrollment still must attach the session
   owner at production boot. Verification currently runs synchronously after
-  presenting the busy state; a dedicated asynchronous authentication worker remains
+  presenting the busy state. The TPM transport now offers bounded begin/poll/cancel
+  operations without holding a lock across device waits. Monotonic command tokens
+  reject stale polls and cancellation; cancelled operations retain their buffers
+  until bounded cleanup completes, erase replies, and disable the transport if
+  cleanup cannot safely stop the device. The synchronous boot and identity paths
+  drive this same engine. TPM boot proofs check cancellation, transport reuse,
+  and stale command tokens. A dedicated asynchronous authentication worker remains
   open alongside first-user provisioning and physical input validation.
   Origin validation
   accepts canonical HTTPS DNS origins
