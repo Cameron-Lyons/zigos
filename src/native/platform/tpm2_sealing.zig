@@ -8,6 +8,7 @@ pub const Name = [34]u8;
 pub const MAX_BLOB_BYTES = 512;
 const MAX_PACKET_BYTES = 1024;
 const OWNER: u32 = 0x4000_0001;
+const LOCKOUT: u32 = 0x4000_000a;
 const NULL: u32 = 0x4000_0007;
 const PASSWORD: u32 = 0x4000_0009;
 const CREATE_PRIMARY: u32 = 0x131;
@@ -20,9 +21,25 @@ const NV_DEFINE: u32 = 0x12a;
 const NV_READ_PUBLIC: u32 = 0x169;
 const NV_READ: u32 = 0x14e;
 const NV_WRITE: u32 = 0x137;
+const HIERARCHY_CHANGE_AUTH: u32 = 0x129;
+const DA_PARAMETERS: u32 = 0x13a;
+const DA_RESET: u32 = 0x139;
 const NV_ATTRIBUTES: u32 = 0x0004_1004; // AUTHREAD, AUTHWRITE, WRITEALL; dictionary attack protected
 const NV_WRITTEN: u32 = 0x2000_0000;
 pub const MAX_NV_BYTES = 256;
+
+pub const DictionaryAttackPolicy = struct {
+    max_tries: u32,
+    recovery_seconds: u32,
+    lockout_recovery_seconds: u32,
+
+    fn validate(self: DictionaryAttackPolicy) !void {
+        // Zero recovery disables guessing protection or permits reboot-based
+        // lockout-auth retries. Keep both recovery intervals persistent.
+        if (self.max_tries == 0 or self.max_tries > 32 or self.recovery_seconds < 60 or self.lockout_recovery_seconds < 60)
+            return error.InvalidDictionaryAttackPolicy;
+    }
+};
 
 pub const NvBinding = union(enum) {
     none,
@@ -88,7 +105,8 @@ const Reply = struct {
 
 // A caller owns each Client exclusively and supplies execute(command, response,
 // timeout_ms) and random(out). The kernel adapter uses CRB and its seeded CSPRNG.
-// No ownership changes, persistent TPM objects, index deletion, or hierarchy clears.
+// No persistent TPM objects, index deletion, or hierarchy clears. Lockout
+// administration is explicit and requires separately retained authorization.
 // The owner hierarchy must have empty authorization. Objects require a separate
 // 256-bit caller authorization, are fixed to this TPM/parent, and use dictionary
 // attack protection. PCR policy and user-auth provisioning belong to the caller.
@@ -291,6 +309,54 @@ pub const Client = struct {
         return self.writeNv(io, space, auth, data, false);
     }
 
+    // Explicit enrollment/rotation only. Null means the caller knows the
+    // current lockout authorization is empty; never retry automatically with
+    // empty auth after a failure. Retain the new authorization durably before
+    // calling: a lost response can mean the TPM has already committed it.
+    pub fn changeLockoutAuthorization(self: *Client, io: anytype, current: ?*const Key, next: *const Key) !void {
+        try self.ready(next);
+        if (current) |auth| if (std.mem.allEqual(u8, auth, 0)) return error.InvalidAuthorization;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [34]u8 = undefined;
+        defer std.crypto.secureZero(u8, &parameters);
+        var w = wire.Writer{ .bytes = &parameters };
+        try w.sized(next);
+        const reply = try self.authorizedHandlesWithResponseAuth(io, &session, HIERARCHY_CHANGE_AUTH, &.{LOCKOUT}, &.{&.{ 0x40, 0, 0, 0x0a }}, if (current) |auth| auth else "", next, &parameters, 0x21, false);
+        if (reply.parameters.len != 0) return error.InvalidResponse;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
+    pub fn configureDictionaryAttack(self: *Client, io: anytype, auth: *const Key, policy: DictionaryAttackPolicy) !void {
+        try policy.validate();
+        var parameters: [12]u8 = undefined;
+        var w = wire.Writer{ .bytes = &parameters };
+        try w.int(u32, policy.max_tries);
+        try w.int(u32, policy.recovery_seconds);
+        try w.int(u32, policy.lockout_recovery_seconds);
+        try self.lockoutCommand(io, auth, DA_PARAMETERS, &parameters);
+    }
+
+    // Recovery administrator operation; never part of an ordinary PIN retry.
+    pub fn resetDictionaryAttack(self: *Client, io: anytype, auth: *const Key) !void {
+        try self.lockoutCommand(io, auth, DA_RESET, &.{});
+    }
+
+    fn lockoutCommand(self: *Client, io: anytype, auth: *const Key, code: u32, parameters: []u8) !void {
+        try self.ready(auth);
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        const reply = try self.authorizedHandles(io, &session, code, &.{LOCKOUT}, &.{&.{ 0x40, 0, 0, 0x0a }}, auth, parameters, 1, false);
+        if (reply.parameters.len != 0) return error.InvalidResponse;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
     // The unwritten check and command HMAC use the SAME public-area snapshot.
     // A forged WRITTEN bit changes the Name and cannot authorize a rollback.
     pub fn nvInitialize(self: *Client, io: anytype, space: NvSpace, auth: *const Key, data: []const u8) !void {
@@ -417,7 +483,12 @@ pub const Client = struct {
     }
 
     fn authorizedHandles(self: *Client, io: anytype, session: *Session, code: u32, handles: []const u32, names: []const []const u8, auth: []const u8, parameters: []u8, attributes: u8, has_handle: bool) !Reply {
+        return self.authorizedHandlesWithResponseAuth(io, session, code, handles, names, auth, auth, parameters, attributes, has_handle);
+    }
+
+    fn authorizedHandlesWithResponseAuth(self: *Client, io: anytype, session: *Session, code: u32, handles: []const u32, names: []const []const u8, auth: []const u8, response_auth: []const u8, parameters: []u8, attributes: u8, has_handle: bool) !Reply {
         std.debug.assert(handles.len == names.len and handles.len > 0 and handles.len <= 2 and auth.len <= 32);
+        std.debug.assert(response_auth.len <= 32);
         var value: [64]u8 = @splat(0);
         defer std.crypto.secureZero(u8, &value);
         @memcpy(value[0..32], &session.key);
@@ -463,7 +534,12 @@ pub const Client = struct {
         hash.update(&cc);
         hash.update(reply.parameters);
         const rp_hash = hash.finalResult();
-        var expected = crypto.authHmac(session_value, &rp_hash, &next_nonce, &nonce, response_attributes);
+        // HierarchyChangeAuth responses use the newly committed authValue.
+        // Request encryption and its HMAC above always use the old value.
+        std.crypto.secureZero(u8, value[32..]);
+        @memcpy(value[32..][0..response_auth.len], response_auth);
+        const response_value = value[0 .. 32 + response_auth.len];
+        var expected = crypto.authHmac(response_value, &rp_hash, &next_nonce, &nonce, response_attributes);
         defer std.crypto.secureZero(u8, &expected);
         if (!std.crypto.timing_safe.eql(Key, expected, response_mac)) {
             self.failed = true;
@@ -472,7 +548,7 @@ pub const Client = struct {
         if (attributes & 0x40 != 0) {
             r = .{ .bytes = reply.parameters };
             const encrypted = try r.sized();
-            var key_iv = crypto.kdfa(session_value, "CFB", &next_nonce, &nonce);
+            var key_iv = crypto.kdfa(response_value, "CFB", &next_nonce, &nonce);
             defer std.crypto.secureZero(u8, &key_iv);
             crypto.cfb(reply.parameters[2..][0..encrypted.len], &key_iv, .decrypt);
         }
@@ -589,6 +665,25 @@ test "TPM NV validates callers and full record bounds before touching hardware" 
     try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .discover }, &auth));
     try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .{ .pinned = @splat(0) } }, &auth));
     try std.testing.expectError(error.InvalidNvSpace, client.nvInitialize(&io, space, &auth, &out));
+    try std.testing.expectEqual(@as(usize, 0), io.calls);
+}
+
+test "TPM lockout administration refuses empty secrets and disabled guessing limits" {
+    var client = Client{ .parent = 0x8000_0000 };
+    var io = RejectIo{};
+    const key: Key = @splat(1);
+    const empty: Key = @splat(0);
+    try std.testing.expectError(error.InvalidAuthorization, client.changeLockoutAuthorization(&io, null, &empty));
+    try std.testing.expectError(error.InvalidAuthorization, client.changeLockoutAuthorization(&io, &empty, &key));
+    try std.testing.expectError(error.InvalidAuthorization, client.resetDictionaryAttack(&io, &empty));
+    const valid = DictionaryAttackPolicy{ .max_tries = 8, .recovery_seconds = 3600, .lockout_recovery_seconds = 86400 };
+    try std.testing.expectError(error.InvalidAuthorization, client.configureDictionaryAttack(&io, &empty, valid));
+    for ([_]DictionaryAttackPolicy{
+        .{ .max_tries = 0, .recovery_seconds = 60, .lockout_recovery_seconds = 60 },
+        .{ .max_tries = 33, .recovery_seconds = 60, .lockout_recovery_seconds = 60 },
+        .{ .max_tries = 8, .recovery_seconds = 0, .lockout_recovery_seconds = 60 },
+        .{ .max_tries = 8, .recovery_seconds = 60, .lockout_recovery_seconds = 0 },
+    }) |policy| try std.testing.expectError(error.InvalidDictionaryAttackPolicy, client.configureDictionaryAttack(&io, &key, policy));
     try std.testing.expectEqual(@as(usize, 0), io.calls);
 }
 

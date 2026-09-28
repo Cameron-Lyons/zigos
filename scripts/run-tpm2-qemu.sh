@@ -79,6 +79,13 @@ run_boot() {
     return 1
   fi
   if [ -n "$sealing_marker" ]; then
+    local pin_marker='ZIGOS:TPM2:PIN:VERIFIED'
+    if [ "$name" = different-tpm ]; then pin_marker='ZIGOS:TPM2:PIN:WRONG_DEVICE'; fi
+    if [ "$(grep -c '^ZIGOS:TPM2:PIN:' "$log" || true)" -ne 1 ] || ! grep -Fxq "$pin_marker" "$log"; then
+      cat "$log" >&2
+      echo "TPM2 PIN verification mismatch for $name" >&2
+      return 1
+    fi
     local enrollment_marker='ZIGOS:TPM2:ENROLLMENT_RECOVERY:VERIFIED'
     if [ "$name" = cold ]; then enrollment_marker='ZIGOS:TPM2:ENROLLMENT_RECOVERY:COMMITTED'; fi
     if [ "$name" = different-tpm ]; then enrollment_marker='ZIGOS:TPM2:ENROLLMENT_RECOVERY:MISSING'; fi
@@ -188,6 +195,8 @@ run_interrupted_enrollment() {
     'ZIGOS:TPM2:ENROLLMENT_RECOVERY:INTERRUPTED' "${TPM2_QEMU_SECONDS:-90}"
   stop_tpm
   if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
+    ! grep -Fxq 'ZIGOS:TPM2:PIN:RECOVERED' "$log" ||
+    [ "$(grep -c '^ZIGOS:TPM2:PIN:' "$log" || true)" -ne 1 ] ||
     [ "$(grep -c '^ZIGOS:TPM2:ENROLLMENT_RECOVERY:' "$log" || true)" -ne 1 ] ||
     grep -Eq '^ZIGOS:TPM2:(SEAL|IDENTITY|VAULT):|FAIL' "$log"; then
     cat "$log" >&2
@@ -197,8 +206,26 @@ run_interrupted_enrollment() {
   echo 'TPM2 QEMU interrupted enrollment: PASS'
 }
 
+run_pin_lockout() {
+  local log="$LOG_DIR/pin-lockout.log"
+  start_tpm pin-lockout
+  export QEMU_EXTRA_ARGS="$BASE_EXTRA_ARGS -chardev socket,id=zigos_tpm_socket,path=$TPM_WORK/control.sock -tpmdev emulator,id=zigos_tpm,chardev=zigos_tpm_socket -device tpm-crb,tpmdev=zigos_tpm"
+  qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" \
+    'ZIGOS:TPM2:PIN:LOCKED' "${TPM2_QEMU_SECONDS:-90}"
+  stop_tpm
+  if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
+    [ "$(grep -c '^ZIGOS:TPM2:PIN:' "$log" || true)" -ne 1 ] ||
+    grep -Eq '^ZIGOS:TPM2:(SEAL|IDENTITY|VAULT|ENROLLMENT_RECOVERY):|FAIL' "$log"; then
+    cat "$log" >&2
+    echo 'TPM2 PIN proof did not stop at persistent lockout' >&2
+    return 1
+  fi
+  echo 'TPM2 QEMU PIN lockout: PASS'
+}
+
 bash "$SCRIPT_DIR/build-native-store.sh" "$STORE_IMAGE" 8 reset
 if [ "$MODE" = sealing ]; then
+  run_pin_lockout
   run_interrupted_enrollment
   run_boot cold tpm-crb 'ZIGOS:TPM2:CRB_READY' 'ZIGOS:TPM2:SEAL:CREATED'
   # Give each restart case the same persisted sealed object. Verification

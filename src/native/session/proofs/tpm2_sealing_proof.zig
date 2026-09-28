@@ -19,6 +19,9 @@ const content_type = "application/x-zigos-tpm-sealing-proof";
 
 const Io = struct {
     known_key: ?*const sealing.Key = null,
+    known_pin: ?[]const u8 = null,
+    protected_authorizations: []const sealing.Key = &.{},
+    corrupt_lockout_change: bool = false,
     corrupt_unseal: bool = false,
     corrupt_nv_read: bool = false,
     corrupt_nv_write: bool = false,
@@ -32,6 +35,8 @@ const Io = struct {
     }
     pub fn execute(self: *@This(), command: []const u8, response: []u8, timeout_ms: u32) ![]u8 {
         if (std.mem.indexOf(u8, command, &auth) != null) return error.PlaintextAuthorization;
+        if (self.known_pin) |pin| if (std.mem.indexOf(u8, command, pin) != null) return error.PlaintextPin;
+        for (self.protected_authorizations) |key| if (std.mem.indexOf(u8, command, &key) != null) return error.PlaintextAuthorization;
         if (self.known_key) |key| {
             if (std.mem.indexOf(u8, command, key) != null) return error.PlaintextKey;
         }
@@ -53,7 +58,8 @@ const Io = struct {
             if (std.mem.indexOf(u8, reply, key) != null) return error.PlaintextKey;
         }
         if (std.mem.indexOf(u8, reply, "ZGVAnch1") != null) return error.PlaintextAnchor;
-        if (((self.corrupt_unseal and std.mem.readInt(u32, command[6..10], .big) == 0x15e) or
+        if (((self.corrupt_lockout_change and std.mem.readInt(u32, command[6..10], .big) == 0x129) or
+            (self.corrupt_unseal and std.mem.readInt(u32, command[6..10], .big) == 0x15e) or
             (self.corrupt_nv_read and std.mem.readInt(u32, command[6..10], .big) == 0x14e) or
             (self.corrupt_nv_write and std.mem.readInt(u32, command[6..10], .big) == 0x137)) and
             std.mem.readInt(u32, reply[6..10], .big) == 0)
@@ -70,6 +76,11 @@ pub fn run(manager: anytype) !void {
     var io = Io{};
     var client = sealing.Client{};
     defer client.close(&io) catch {};
+    @import("tpm2_pin_proof.zig").run(manager, &io) catch |err| {
+        var line: [128]u8 = undefined;
+        console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:PIN:FAIL {s}\n", .{@errorName(err)}) catch "ZIGOS:TPM2:PIN:FAIL\n");
+        return err;
+    };
     @import("tpm2_enrollment_proof.zig").run(manager, &io, &auth) catch |err| {
         var line: [128]u8 = undefined;
         console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:ENROLLMENT_RECOVERY:FAIL {s}\n", .{@errorName(err)}) catch "ZIGOS:TPM2:ENROLLMENT_RECOVERY:FAIL\n");

@@ -2,6 +2,7 @@ const std = @import("std");
 const tpm2_secret_provider = @import("../../native/platform/tpm2_secret_provider.zig");
 const tpm2_sealing = @import("../../native/platform/tpm2_sealing.zig");
 const tpm2_vault_anchor = @import("../../native/platform/tpm2_vault_anchor.zig");
+const tpm2_pin = @import("../../native/platform/tpm2_pin.zig");
 
 const attestation_service = @import("../../native/platform/attestation_service.zig");
 const base_boot_selector = @import("../../native/platform/base_boot_selector.zig");
@@ -26,6 +27,7 @@ const update_health = @import("../../native/platform/update_health.zig");
 test "platform host tests import native platform modules" {
     std.testing.refAllDecls(tpm2_sealing);
     std.testing.refAllDecls(tpm2_vault_anchor);
+    std.testing.refAllDecls(tpm2_pin);
     std.testing.refAllDecls(tpm2_secret_provider);
     std.testing.refAllDecls(attestation_service);
     std.testing.refAllDecls(base_boot_selector);

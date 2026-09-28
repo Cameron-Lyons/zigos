@@ -190,7 +190,21 @@ requests.
   Proofs carry only the fixed Ed25519 signature and use the enrolled device key
   for verification, keeping existing request-size limits intact. A trusted
   authenticator can issue proofs through a private sealed device-key lease;
-  software-seed issuance is restricted to verification builds. Origin validation
+  software-seed issuance is restricted to verification builds. A TPM PIN capsule
+  now seals a random 256-bit vault authorization under a 6–32 digit PIN. Its
+  domain-separated authorization binds the owner, device, and random salt; the
+  capsule stores no software PIN verifier. Unlock requires an independently
+  trusted capsule digest and checks its enrolled TPM parent Name before sending
+  PIN authorization. Failed unlocks erase the output. Explicit lockout-administrator
+  enrollment and rotation encrypt the new authorization and verify responses with
+  the new value. Persistent guessing limits require nonzero recovery intervals;
+  the default is eight attempts and one recovered attempt per powered hour.
+  The recovery administrator has a separate 24-hour retry interval. Ordinary PIN
+  attempts never reset these limits. QEMU verifies lockout across a VM/TPM restart,
+  explicit administrator recovery, and a lost authorization-change response.
+  The primitive requires trusted enrollment and separately retained administrator
+  authorization; it does not supply the first-user UI or an input trust path.
+  Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog
   now checkpoints up to 16 sealed records and 16 credentials together, preserves
@@ -225,8 +239,8 @@ requests.
   and never rewritten; a missing index requires explicit recovery. This closes
   the definition/first-write crash gap without another object or normal-checkpoint
   NV write. Production authorization provisioning and first-user enrollment UI,
-  physical TPM persistence validation, trusted
-  PIN/biometric verification and session-lifecycle integration, and userspace
+  physical TPM persistence validation, trusted PIN input, biometric verification,
+  session-lifecycle integration, and userspace
   request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   interrupted initial enrollment, recovery from the native disk after restarting
