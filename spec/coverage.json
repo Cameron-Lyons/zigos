@@ -1209,6 +1209,30 @@
         {
           "file": "src/kernel/memory/firmware_memory_map.zig",
           "name": "kernel reservation rejects overlapping or overflowing EFI heap ranges atomically"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 log rejects truncated framing, substituted digests and incorrect last-entry pointers"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 replay includes earlier PCR extensions and refuses duplicate or later boot events"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 log handles multiple digest banks and rejects duplicate or unknown algorithms"
+        },
+        {
+          "file": "src/boot/tpm_pcr.zig",
+          "name": "PCR read rejects substituted banks, extra selections and malformed replies"
+        },
+        {
+          "file": "src/kernel/boot/multiboot2.zig",
+          "name": "EFI TPM log handoff rejects duplicate and malformed measurement tags"
+        },
+        {
+          "file": "src/kernel/memory/firmware_memory_map.zig",
+          "name": "copied TPM event log remains reserved and malformed extents fail before mutation"
         }
       ]
     },

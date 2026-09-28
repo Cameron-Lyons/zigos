@@ -50,7 +50,7 @@ pub fn reserveLiveHandoffRanges(
     info_address: u32,
     info: handoff.Info,
 ) Error!void {
-    var runs: [4]frame_allocator.FrameRun = undefined;
+    var runs: [5]frame_allocator.FrameRun = undefined;
     var run_count: usize = 0;
 
     runs[run_count] = try liveRangeRun(
@@ -89,6 +89,11 @@ pub fn reserveLiveHandoffRanges(
             runs[run_count] = run;
             run_count += 1;
         }
+    }
+
+    if (info.boot_tpm) |tpm| {
+        runs[run_count] = try liveRangeRun(memory_bytes, page_size, std.math.cast(u32, tpm.log_address) orelse return error.InvalidHandoffRange, tpm.log_bytes);
+        run_count += 1;
     }
 
     for (runs[0..run_count]) |run| {
@@ -366,6 +371,23 @@ test "live Multiboot information map and command-line pages stay reserved" {
     try std.testing.expect(allocator.isReserved(6 * TEST_PAGE_SIZE));
     try std.testing.expect(allocator.isReserved(7 * TEST_PAGE_SIZE));
     try std.testing.expectEqual(@as(u32, 5), allocator.stats().reserved);
+}
+
+test "copied TPM event log remains reserved and malformed extents fail before mutation" {
+    const memory_bytes = 2 * 1024 * 1024;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    var info = testInfo(1 << 6, 3 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, 0);
+    info.boot_tpm = .{ .log_address = 0x100000, .log_bytes = 2 * TEST_PAGE_SIZE + 1, .pcr11 = @splat(7) };
+    try reserveLiveHandoffRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, TEST_PAGE_SIZE, info);
+    for (0..3) |index| try std.testing.expect(allocator.isReserved(0x100000 + index * TEST_PAGE_SIZE));
+    try std.testing.expect(!allocator.isReserved(0x100000 - TEST_PAGE_SIZE));
+    try std.testing.expect(!allocator.isReserved(0x100000 + 3 * TEST_PAGE_SIZE));
+    allocator.reset();
+    info.boot_tpm.?.log_address = std.math.maxInt(u64);
+    try std.testing.expectError(error.InvalidHandoffRange, reserveLiveHandoffRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, TEST_PAGE_SIZE, info));
+    try std.testing.expectEqual(@as(u32, 0), allocator.stats().reserved);
 }
 
 test "firmware framebuffer storage is reserved across touched pages" {

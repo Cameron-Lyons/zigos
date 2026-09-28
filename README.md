@@ -817,18 +817,34 @@ use it for remote attestation. Runtime measurement snapshots and the embedded
 fixture-signed manifests check consistency; they do not establish release
 authority, prove TPM PCR values, or enforce rollback protection.
 
+When firmware provides TCG2 with an active SHA-256 bank, the loader extends
+PCR 11 with a versioned description of the exact kernel and command-line hashes
+and the firmware authentication state. It copies the event-log prefix through
+that event into reserved memory, capped at 256 KiB. The kernel replays PCR 11
+and compares it with both the handoff and a live TPM read after CRB initialization.
+Malformed logs, missing SHA-256 support, partial extensions, and mismatches stop
+that measured boot. Absence of the firmware protocol permits an unmeasured boot;
+it cannot produce the `BOOT_MEASUREMENT:VERIFIED` checkpoint.
+This local consistency check uses the [TCG2 firmware protocol](https://trustedcomputinggroup.org/resource/tcg-efi-protocol-specification/).
+The snapshot precedes ExitBootServices and is not a complete final firmware log
+or a nonce-bound TPM quote. Attestation-key enrollment, quote verification, and
+PCR-bound secret policies remain open.
+
 `./scripts/zig.sh build unified-efi-qemu-test` checks firmware authorization of
 the complete EFI image, rejection of changes to either embedded payload, and
-immunity to external kernel and command-line files. This proof uses the production
-kernel with embedded QEMU test options; release media retain the hardware CPU
-baseline. It needs Python packages
-`virt-firmware` (tested with 26.9) and `pefile`, and Secure Boot capable OVMF.
+immunity to external kernel and command-line files. Successful boots must pass the
+live TPM measurement check; a TPM without an active SHA-256 bank must be rejected
+before kernel entry. This proof uses the production kernel with embedded QEMU
+test options; release media retain the hardware CPU baseline. It needs `swtpm`
+and `swtpm_setup`, Secure Boot capable OVMF, and the Python packages
+`virt-firmware` (tested with 26.9) and `pefile`.
 Set `OVMF_SECURE_BOOT_CODE` and matching `OVMF_SECURE_BOOT_VARS` (or `OVMF_VARS`);
 `EFI_TEST_PYTHON` and `EFI_VARS_TOOL`
 can select tools installed in an isolated virtual environment. The test enrolls
 only disposable VM variables and never accesses host firmware. CI supplies the
 isolated tools, and release-security-preflight includes this gate. The production
-hardware proof requires Secure Boot enabled and a firmware-authenticated image.
+hardware proof requires Secure Boot enabled, a firmware-authenticated image,
+and a verified live TPM boot measurement.
 Release signing, signer enrollment, TPM measured-boot quotes, and anti-rollback
 policy remain separate production work. The firmware state and whole-image
 authentication rules follow the [UEFI boot manager](https://uefi.org/specs/UEFI/2.11/03_Boot_Manager.html)

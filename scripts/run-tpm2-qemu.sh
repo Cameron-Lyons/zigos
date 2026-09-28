@@ -62,10 +62,21 @@ start_tpm() {
 
 check_transport_proof() {
   local log="$1"
+  check_boot_measurement "$log"
   if [ "$(grep -c '^ZIGOS:TPM2:ASYNC_TRANSPORT:' "$log" || true)" -ne 1 ] ||
     ! grep -Fxq 'ZIGOS:TPM2:ASYNC_TRANSPORT:VERIFIED' "$log"; then
     cat "$log" >&2
     echo 'TPM2 asynchronous transport proof mismatch' >&2
+    return 1
+  fi
+}
+
+check_boot_measurement() {
+  local log="$1"
+  if [ "$(grep -c '^ZIGOS:TPM2:BOOT_MEASUREMENT:' "$log" || true)" -ne 1 ] ||
+    ! grep -Fxq 'ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED' "$log"; then
+    cat "$log" >&2
+    echo 'TPM2 live boot measurement mismatch' >&2
     return 1
   fi
 }
@@ -87,6 +98,12 @@ run_boot() {
   if [ "$(grep -Ec '^ZIGOS:TPM2:(CRB_READY|UNAVAILABLE)' "$log")" -ne 1 ] || ! grep -Fxq "$expected" "$log"; then
     cat "$log" >&2
     echo "TPM2 device result mismatch for $name" >&2
+    return 1
+  fi
+  if [ "$device" = tpm-crb ]; then
+    check_boot_measurement "$log"
+  elif grep -Fq 'ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED' "$log"; then
+    echo "Unsupported TPM transport claimed verified measurement: $name" >&2
     return 1
   fi
   if [ -n "$sealing_marker" ]; then

@@ -3,6 +3,7 @@ const uefi = std.os.uefi;
 const efi_elf = @import("efi_elf.zig");
 const efi_handoff = @import("efi_handoff.zig");
 const payload = @import("boot_payload");
+const tcg2 = @import("efi_tcg2.zig");
 
 pub const NATIVE_EFI_LONG_MODE_ENTRY = true;
 pub const DROPS_MULTIBOOT2_PROTECTED_MODE_ENTRY = true;
@@ -52,6 +53,8 @@ pub fn main() uefi.Status {
     ) catch return bootFailure("heap-reservation", .out_of_resources);
     defer boot.freePages(heap_pages) catch {};
     const boot_image = efi_handoff.image_info.Info.measure(kernel_bytes, cmdline, authenticated, @intFromPtr(heap_pages.ptr));
+    const measurement = tcg2.capture(boot, boot_image) catch return bootFailure("tpm-measurement", .security_violation);
+    defer if (measurement) |captured| boot.freePages(captured.pages) catch {};
 
     const handoff_pages = boot.allocatePages(
         .{ .max_address = @ptrFromInt(HANDOFF_MAX_ADDRESS) },
@@ -91,6 +94,7 @@ pub fn main() uefi.Status {
             .efi_system_table = @intFromPtr(system_table),
             .acpi_rsdp = rsdp,
             .boot_image = boot_image,
+            .boot_tpm = if (measurement) |captured| captured.info else null,
         }) catch return .load_error;
         boot.exitBootServices(uefi.handle, map_slice.info.key) catch continue;
         // No firmware calls, allocations, or fallible work after this point.

@@ -102,7 +102,7 @@ install_apt() {
     ${s} sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "${source}"
   done
   ${s} apt-get "${apt_options[@]}" update
-  ${s} apt-get "${apt_options[@]}" install -y python3 python3-venv nasm qemu-system-x86 ovmf grub-common grub-efi-amd64-bin dosfstools xorriso mtools
+  ${s} apt-get "${apt_options[@]}" install -y python3 python3-venv nasm qemu-system-x86 ovmf grub-common grub-efi-amd64-bin dosfstools xorriso mtools swtpm swtpm-tools
 
   if ! have_cmd zig; then
     if ! ${s} apt-get "${apt_options[@]}" install -y zig; then

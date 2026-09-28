@@ -1,6 +1,7 @@
 const std = @import("std");
 const endian = @import("bytes.zig");
 pub const image_info = @import("image_info.zig");
+pub const tpm_info = @import("tpm_info.zig");
 
 const writeU32 = endian.writeU32Le;
 const writeU64 = endian.writeU64Le;
@@ -65,6 +66,7 @@ pub const Request = struct {
     efi_system_table: u64 = 0,
     acpi_rsdp: []const u8 = &.{},
     boot_image: ?image_info.Info = null,
+    boot_tpm: ?tpm_info.Info = null,
 };
 
 pub const USES_NATIVE_EFI_STUB = true;
@@ -101,6 +103,7 @@ pub fn embeddedCommandLine(bytes: []const u8) error{InvalidCommandLine}![]const 
 pub fn encodedSize(request: Request) usize {
     var size: usize = INFO_HEADER_BYTES;
     if (request.boot_image != null) size += TAG_HEADER_BYTES + image_info.PAYLOAD_BYTES;
+    if (request.boot_tpm != null) size += TAG_HEADER_BYTES + tpm_info.PAYLOAD_BYTES;
     if (request.cmdline.len != 0) {
         size = alignTag(size + TAG_HEADER_BYTES + request.cmdline.len + 1);
     }
@@ -131,6 +134,11 @@ pub fn encode(buffer: []u8, request: Request) error{BufferTooSmall}![]u8 {
         writeTagHeader(buffer, &offset, image_info.TAG, TAG_HEADER_BYTES + image_info.PAYLOAD_BYTES);
         info.encode(buffer[offset..][0..image_info.PAYLOAD_BYTES]);
         offset += image_info.PAYLOAD_BYTES;
+    }
+    if (request.boot_tpm) |info| {
+        writeTagHeader(buffer, &offset, tpm_info.TAG, TAG_HEADER_BYTES + tpm_info.PAYLOAD_BYTES);
+        info.encode(buffer[offset..][0..tpm_info.PAYLOAD_BYTES]);
+        offset += tpm_info.PAYLOAD_BYTES;
     }
     if (request.cmdline.len != 0) {
         const payload = request.cmdline.len + 1;

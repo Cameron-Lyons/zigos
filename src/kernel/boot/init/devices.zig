@@ -67,6 +67,9 @@ pub fn init() void {
     if (hardware_proof.tpmDiscovery()) |discovery| {
         if (@import("../../platform/tpm2_hw.zig").initialize(discovery)) |_| {
             console.print("ZIGOS:TPM2:CRB_READY\n");
+            const measured = @import("../../platform/tpm_boot.zig").verify() catch
+                @panic("TPM boot measurement does not match the firmware event log");
+            console.print(if (measured) "ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED\n" else "ZIGOS:TPM2:BOOT_MEASUREMENT:UNAVAILABLE\n");
         } else |err| {
             console.print("ZIGOS:TPM2:UNAVAILABLE ");
             console.print(@errorName(err));
