@@ -6,6 +6,7 @@ const noise = @import("../core/noise_xx.zig");
 const graph_mod = @import("device_graph.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const sealed = @import("../services/sealed_signing_key.zig");
 const Hash = std.crypto.hash.sha2.Sha256;
 const Ed = std.crypto.sign.Ed25519;
 pub const MAGIC = "ZGNP";
@@ -14,7 +15,7 @@ pub const MAX_FRAME = 256;
 pub const HEADER = 22;
 pub const DATA_HEADER = HEADER + 16 + 8;
 pub const MAX_PAYLOAD = MAX_FRAME - DATA_HEADER - 16;
-pub const Error = noise.Error || graph_mod.Error || error{ PeerMismatch, IdentityMismatch, MalformedFrame, ReplayRejected, TrustChanged };
+pub const Error = noise.Error || graph_mod.Error || sealed.Error || error{ PeerMismatch, IdentityMismatch, MalformedFrame, ReplayRejected, TrustChanged };
 
 const Crypto = union(enum) { closed, handshake: noise.Handshake, transport: noise.Split };
 
@@ -24,7 +25,7 @@ pub const Channel = struct {
     graph: *const graph_mod.Graph,
     root_pin: signing.PublicKey,
     context: [32]u8,
-    peer_key: signing.PublicKey,
+    signer: sealed.Key = .{},
     certificate: [64]u8,
     local: u64,
     remote: u64,
@@ -33,24 +34,41 @@ pub const Channel = struct {
     receive_highest: u64 = 0,
     receive_bitmap: u64 = 0,
 
-    pub fn init(graph: *const graph_mod.Graph, root_pin: signing.PublicKey, local: principal.PrincipalId, remote: principal.PrincipalId, signer: signing.SignerIdentity, role: noise.Role) Error!Channel {
+    pub fn init(graph: *const graph_mod.Graph, root_pin: signing.PublicKey, local: principal.PrincipalId, remote: principal.PrincipalId, signer: sealed.Key, role: noise.Role, now_ticks: u64) Error!Channel {
+        try signer.validate(now_ticks);
+        const record = try graph.authenticatedDevice(local, root_pin);
+        if (!record.owner.eql(signer.authority.?.owner)) return error.DeviceOwnerMismatch;
+        return initImpl(graph, root_pin, local, remote, signer, role, now_ticks);
+    }
+
+    pub fn initForVerification(graph: *const graph_mod.Graph, root_pin: signing.PublicKey, local: principal.PrincipalId, remote: principal.PrincipalId, signer: signing.SignerIdentity, role: noise.Role) Error!Channel {
+        if (comptime @import("builtin").os.tag == .freestanding) {
+            if (comptime !@import("../../kernel/config.zig").includesVerificationEvidence()) return error.SealedSigningKeyRequired;
+        }
+        return initImpl(graph, root_pin, local, remote, signer, role, 0);
+    }
+
+    fn initImpl(graph: *const graph_mod.Graph, root_pin: signing.PublicKey, local: principal.PrincipalId, remote: principal.PrincipalId, signer: anytype, role: noise.Role, now_ticks: u64) Error!Channel {
         if (local.kind != .device or remote.kind != .device or local.serial == remote.serial) return error.PeerMismatch;
         const local_record = try graph.authenticatedDevice(local, root_pin);
         const remote_record = try graph.authenticatedDevice(remote, root_pin);
         if (!local_record.owner.eql(remote_record.owner)) return error.DeviceOwnerMismatch;
-        if (!std.mem.eql(u8, &(signing.publicKey(signer) catch return error.IdentityMismatch), &local_record.device_signature.public_key)) return error.IdentityMismatch;
         const context = try contextFor(graph, root_pin, local.serial, remote.serial, role);
         var handshake = try noise.Handshake.init(role, &context);
         defer handshake.deinit();
         const digest = certificateDigest(context, handshake.local_static.public_key);
-        const certificate = signing.sign(signer, &digest) catch return error.IdentityMismatch;
+        const certificate = if (@TypeOf(signer) == sealed.Key)
+            try signer.signMessage(&digest, now_ticks)
+        else
+            signing.sign(signer, &digest) catch return error.IdentityMismatch;
+        if (!std.mem.eql(u8, certificate.publicKeySlice(), &local_record.device_signature.public_key)) return error.IdentityMismatch;
         return .{
             .graph = graph,
             .root_pin = root_pin,
             .local = local.serial,
             .remote = remote.serial,
             .context = context,
-            .peer_key = remote_record.device_signature.public_key,
+            .signer = if (@TypeOf(signer) == sealed.Key) signer else .{},
             .certificate = certificate.value,
             .role = role,
             .crypto = .{ .handshake = handshake },
@@ -61,10 +79,10 @@ pub const Channel = struct {
         return self.crypto == .transport;
     }
 
-    pub fn writeHandshake(self: *Channel, output: []u8) Error![]const u8 {
+    pub fn writeHandshake(self: *Channel, output: []u8, now_ticks: u64) Error![]const u8 {
         errdefer self.close();
         errdefer std.crypto.secureZero(u8, output[0..@min(output.len, MAX_FRAME)]);
-        try self.requireTrust();
+        try self.requireTrust(now_ticks);
         if (self.crypto != .handshake) return error.InvalidState;
         const state = &self.crypto.handshake;
         if (output.len < MAX_FRAME) return error.InvalidLength;
@@ -75,9 +93,9 @@ pub const Channel = struct {
         return output[0 .. HEADER + message.len];
     }
 
-    pub fn readHandshake(self: *Channel, frame: []const u8) Error!void {
+    pub fn readHandshake(self: *Channel, frame: []const u8, now_ticks: u64) Error!void {
         errdefer self.close();
-        try self.requireTrust();
+        try self.requireTrust(now_ticks);
         if (self.crypto != .handshake) return error.InvalidState;
         const state = &self.crypto.handshake;
         try self.validateHeader(frame, state.step + 1);
@@ -90,15 +108,16 @@ pub const Channel = struct {
         } else {
             if (certificate.len != 64) return error.IdentityMismatch;
             const digest = certificateDigest(self.context, state.remote_static);
-            const public = Ed.PublicKey.fromBytes(self.peer_key) catch return error.IdentityMismatch;
+            const peer = self.graph.findDeviceConst(.{ .kind = .device, .serial = self.remote }) orelse return error.DeviceNotFound;
+            const public = Ed.PublicKey.fromBytes(peer.device_signature.public_key) catch return error.IdentityMismatch;
             Ed.Signature.fromBytes(certificate[0..64].*).verify(&digest, public) catch return error.IdentityMismatch;
         }
         if (state.step == 3) try self.finish();
     }
 
-    pub fn seal(self: *Channel, output: []u8, payload: []const u8) Error![]const u8 {
+    pub fn seal(self: *Channel, output: []u8, payload: []const u8, now_ticks: u64) Error![]const u8 {
         errdefer std.crypto.secureZero(u8, output[0..@min(output.len, MAX_FRAME)]);
-        try self.requireTrust();
+        try self.requireTrust(now_ticks);
         if (self.crypto != .transport) return error.InvalidState;
         if (payload.len == 0 or payload.len > MAX_PAYLOAD or output.len < DATA_HEADER + payload.len + 16) return error.InvalidLength;
         const state = &self.crypto.transport;
@@ -113,9 +132,9 @@ pub const Channel = struct {
         return output[0 .. DATA_HEADER + ciphertext.len];
     }
 
-    pub fn open(self: *Channel, output: []u8, frame: []const u8) Error![]const u8 {
+    pub fn open(self: *Channel, output: []u8, frame: []const u8, now_ticks: u64) Error![]const u8 {
         errdefer std.crypto.secureZero(u8, output[0..@min(output.len, MAX_PAYLOAD)]);
-        try self.requireTrust();
+        try self.requireTrust(now_ticks);
         if (self.crypto != .transport) return error.InvalidState;
         try self.validateHeader(frame, 4);
         if (frame.len <= DATA_HEADER + 16) return error.MalformedFrame;
@@ -131,6 +150,7 @@ pub const Channel = struct {
     pub fn close(self: *Channel) void {
         std.crypto.secureZero(u8, std.mem.asBytes(&self.crypto));
         self.crypto = .closed;
+        self.signer = .{};
         self.receive_highest = 0;
         self.receive_bitmap = 0;
     }
@@ -141,8 +161,12 @@ pub const Channel = struct {
         self.crypto = .{ .transport = split };
     }
 
-    fn requireTrust(self: *Channel) Error!void {
+    fn requireTrust(self: *Channel, now_ticks: u64) Error!void {
         if (self.crypto == .closed) return error.InvalidState;
+        if (self.signer.authority != null) self.signer.validate(now_ticks) catch |err| {
+            self.close();
+            return err;
+        };
         const current = contextFor(self.graph, self.root_pin, self.local, self.remote, self.role) catch {
             self.close();
             return error.TrustChanged;
@@ -246,18 +270,18 @@ const Fixture = struct {
     }
 
     fn initiator(devices: *const graph_mod.Graph) !Channel {
-        return Channel.init(devices, try signing.publicKey(root), a, b, alice, .initiator);
+        return Channel.initForVerification(devices, try signing.publicKey(root), a, b, alice, .initiator);
     }
 
     fn responder(devices: *const graph_mod.Graph) !Channel {
-        return Channel.init(devices, try signing.publicKey(root), b, a, bob, .responder);
+        return Channel.initForVerification(devices, try signing.publicKey(root), b, a, bob, .responder);
     }
 
     fn connect(a_channel: *Channel, b_channel: *Channel) !void {
         var wire: [MAX_FRAME]u8 = undefined;
-        try b_channel.readHandshake(try a_channel.writeHandshake(&wire));
-        try a_channel.readHandshake(try b_channel.writeHandshake(&wire));
-        try b_channel.readHandshake(try a_channel.writeHandshake(&wire));
+        try b_channel.readHandshake(try a_channel.writeHandshake(&wire, 1), 1);
+        try a_channel.readHandshake(try b_channel.writeHandshake(&wire, 1), 1);
+        try b_channel.readHandshake(try a_channel.writeHandshake(&wire, 1), 1);
         try std.testing.expect(a_channel.established() and b_channel.established());
     }
 };
@@ -270,31 +294,31 @@ test "peer channel authenticates independent device state and rejects every alte
     var bob = try Fixture.responder(&graph_b);
     defer bob.close();
     var wire: [MAX_FRAME]u8 = undefined;
-    try std.testing.expectError(error.InvalidState, alice.seal(&wire, "too early"));
+    try std.testing.expectError(error.InvalidState, alice.seal(&wire, "too early", 1));
     try Fixture.connect(&alice, &bob);
-    const frame = try alice.seal(&wire, "authenticated object request");
+    const frame = try alice.seal(&wire, "authenticated object request", 1);
     try std.testing.expect(std.mem.indexOf(u8, frame, "authenticated object request") == null);
     var output: [MAX_PAYLOAD]u8 = undefined;
     for (0..frame.len) |index| {
         var changed = wire;
         changed[index] ^= 1;
         @memset(&output, 0xa5);
-        if (bob.open(&output, changed[0..frame.len])) |_| return error.TamperAccepted else |_| {}
+        if (bob.open(&output, changed[0..frame.len], 1)) |_| return error.TamperAccepted else |_| {}
         try std.testing.expect(std.mem.allEqual(u8, &output, 0));
         try std.testing.expectEqual(@as(u64, 0), bob.receive_bitmap);
     }
-    try std.testing.expectEqualStrings("authenticated object request", try bob.open(&output, frame));
-    try std.testing.expectError(error.ReplayRejected, bob.open(&output, frame));
-    try std.testing.expectError(error.PeerMismatch, alice.open(&output, frame));
-    const reply = try bob.seal(&wire, "confirmed");
-    try std.testing.expectEqualStrings("confirmed", try alice.open(&output, reply));
+    try std.testing.expectEqualStrings("authenticated object request", try bob.open(&output, frame, 1));
+    try std.testing.expectError(error.ReplayRejected, bob.open(&output, frame, 1));
+    try std.testing.expectError(error.PeerMismatch, alice.open(&output, frame, 1));
+    const reply = try bob.seal(&wire, "confirmed", 1);
+    try std.testing.expectEqualStrings("confirmed", try alice.open(&output, reply, 1));
 }
 
 test "peer channel requires pinned graph signatures and rejects Noise certificates from other identities" {
     var graph = try Fixture.graph();
     const pin = try signing.publicKey(Fixture.root);
-    try std.testing.expectError(error.InvalidRootSignature, Channel.init(&graph, @splat(0), Fixture.a, Fixture.b, Fixture.alice, .initiator));
-    try std.testing.expectError(error.IdentityMismatch, Channel.init(&graph, pin, Fixture.a, Fixture.b, Fixture.bob, .initiator));
+    try std.testing.expectError(error.InvalidRootSignature, Channel.initForVerification(&graph, @splat(0), Fixture.a, Fixture.b, Fixture.alice, .initiator));
+    try std.testing.expectError(error.IdentityMismatch, Channel.initForVerification(&graph, pin, Fixture.a, Fixture.b, Fixture.bob, .initiator));
     graph.findDevice(Fixture.b).?.enrollment_signature.value[0] ^= 1;
     try std.testing.expectError(error.InvalidEnrollmentSignature, Fixture.initiator(&graph));
     graph.findDevice(Fixture.b).?.enrollment_signature.value[0] ^= 1;
@@ -303,9 +327,9 @@ test "peer channel requires pinned graph signatures and rejects Noise certificat
     var bob = try Fixture.responder(&graph);
     defer bob.close();
     var wire: [MAX_FRAME]u8 = undefined;
-    try bob.readHandshake(try alice.writeHandshake(&wire));
+    try bob.readHandshake(try alice.writeHandshake(&wire, 1), 1);
     bob.certificate[0] ^= 1;
-    try std.testing.expectError(error.IdentityMismatch, alice.readHandshake(try bob.writeHandshake(&wire)));
+    try std.testing.expectError(error.IdentityMismatch, alice.readHandshake(try bob.writeHandshake(&wire, 1), 1));
     try std.testing.expect(alice.crypto == .closed);
     _ = try graph.rotateDeviceKey(Fixture.owner, Fixture.b, Fixture.root, Fixture.bob, 2);
     _ = try graph.authenticatedDevice(Fixture.b, pin);
@@ -322,21 +346,21 @@ test "peer channel commits replay window only after authentication and expires r
     try Fixture.connect(&alice, &bob);
     var packets: [3][MAX_FRAME]u8 = undefined;
     var lengths: [3]usize = undefined;
-    for (&packets, &lengths) |*packet, *length| length.* = (try alice.seal(packet, "delta")).len;
+    for (&packets, &lengths) |*packet, *length| length.* = (try alice.seal(packet, "delta", 1)).len;
     var output: [MAX_PAYLOAD]u8 = undefined;
-    for ([_]usize{ 2, 0, 1 }) |index| try std.testing.expectEqualStrings("delta", try bob.open(&output, packets[index][0..lengths[index]]));
+    for ([_]usize{ 2, 0, 1 }) |index| try std.testing.expectEqualStrings("delta", try bob.open(&output, packets[index][0..lengths[index]], 1));
     var forged = packets[0];
     std.mem.writeInt(u64, forged[HEADER + 16 ..][0..8], 10_000, .little);
-    try std.testing.expectError(error.AuthenticationFailed, bob.open(&output, forged[0..lengths[0]]));
+    try std.testing.expectError(error.AuthenticationFailed, bob.open(&output, forged[0..lengths[0]], 1));
     try std.testing.expectEqual(@as(u64, 2), bob.receive_highest);
     alice.crypto.transport.send.nonce = 64;
     var wire: [MAX_FRAME]u8 = undefined;
-    _ = try bob.open(&output, try alice.seal(&wire, "new window"));
-    try std.testing.expectError(error.ReplayRejected, bob.open(&output, packets[0][0..lengths[0]]));
-    const pending = try alice.seal(&wire, "pending revocation");
+    _ = try bob.open(&output, try alice.seal(&wire, "new window", 1), 1);
+    try std.testing.expectError(error.ReplayRejected, bob.open(&output, packets[0][0..lengths[0]], 1));
+    const pending = try alice.seal(&wire, "pending revocation", 1);
     try graph.revokeDevice(Fixture.owner, Fixture.a, Fixture.root, 3);
-    try std.testing.expectError(error.TrustChanged, bob.open(&output, pending));
-    try std.testing.expectError(error.TrustChanged, alice.seal(&wire, "revoked"));
+    try std.testing.expectError(error.TrustChanged, bob.open(&output, pending, 1));
+    try std.testing.expectError(error.TrustChanged, alice.seal(&wire, "revoked", 1));
     try std.testing.expect(alice.crypto == .closed and bob.crypto == .closed);
 }
 
@@ -348,17 +372,17 @@ test "peer channel fresh sessions isolate old ciphertext and nonce exhaustion cl
     defer bob.close();
     try Fixture.connect(&alice, &bob);
     var wire: [MAX_FRAME]u8 = undefined;
-    const old = try alice.seal(&wire, "old session");
+    const old = try alice.seal(&wire, "old session", 1);
     var next_a = try Fixture.initiator(&graph);
     defer next_a.close();
     var next_b = try Fixture.responder(&graph);
     defer next_b.close();
     try Fixture.connect(&next_a, &next_b);
     var output: [MAX_PAYLOAD]u8 = undefined;
-    try std.testing.expectError(error.PeerMismatch, next_b.open(&output, old));
+    try std.testing.expectError(error.PeerMismatch, next_b.open(&output, old, 1));
     alice.crypto.transport.send.nonce = std.math.maxInt(u64) - 1;
-    try std.testing.expectEqualStrings("last nonce", try bob.open(&output, try alice.seal(&wire, "last nonce")));
-    try std.testing.expectError(error.NonceExhausted, alice.seal(&wire, "exhausted"));
+    try std.testing.expectEqualStrings("last nonce", try bob.open(&output, try alice.seal(&wire, "last nonce", 1), 1));
+    try std.testing.expectError(error.NonceExhausted, alice.seal(&wire, "exhausted", 1));
     try std.testing.expect(alice.crypto == .closed);
 }
 
@@ -369,24 +393,24 @@ test "peer channel rejects altered and truncated handshakes without retaining se
     var bob = try Fixture.responder(&graph);
     defer bob.close();
     var wire: [MAX_FRAME]u8 = undefined;
-    try bob.readHandshake(try alice.writeHandshake(&wire));
-    const response = try bob.writeHandshake(&wire);
+    try bob.readHandshake(try alice.writeHandshake(&wire, 1), 1);
+    const response = try bob.writeHandshake(&wire, 1);
     for (0..response.len) |index| {
         var candidate = alice;
         defer candidate.close();
         var changed = wire;
         changed[index] ^= 1;
-        if (candidate.readHandshake(changed[0..response.len])) |_| return error.TamperAccepted else |_| {}
+        if (candidate.readHandshake(changed[0..response.len], 1)) |_| return error.TamperAccepted else |_| {}
         try std.testing.expect(candidate.crypto == .closed);
     }
     for (0..response.len) |length| {
         var candidate = alice;
         defer candidate.close();
-        if (candidate.readHandshake(response[0..length])) |_| return error.TruncationAccepted else |_| {}
+        if (candidate.readHandshake(response[0..length], 1)) |_| return error.TruncationAccepted else |_| {}
         try std.testing.expect(candidate.crypto == .closed);
     }
-    try alice.readHandshake(response);
-    try bob.readHandshake(try alice.writeHandshake(&wire));
+    try alice.readHandshake(response, 1);
+    try bob.readHandshake(try alice.writeHandshake(&wire, 1), 1);
     try std.testing.expect(alice.established() and bob.established());
 }
 
@@ -398,13 +422,13 @@ test "peer channel rejects key rotation and root replacement during a live hands
         var bob = try Fixture.responder(&graph);
         defer bob.close();
         var wire: [MAX_FRAME]u8 = undefined;
-        const hello = try alice.writeHandshake(&wire);
+        const hello = try alice.writeHandshake(&wire, 1);
         if (variant == 0) {
             _ = try graph.rotateDeviceKey(Fixture.owner, Fixture.a, Fixture.root, Fixture.alice, 2);
         } else {
             graph.findUserRoot(Fixture.owner).?.root_signature.public_key[0] ^= 1;
         }
-        try std.testing.expectError(error.TrustChanged, bob.readHandshake(hello));
+        try std.testing.expectError(error.TrustChanged, bob.readHandshake(hello, 1));
         try std.testing.expect(bob.crypto == .closed);
     }
 }

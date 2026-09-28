@@ -28,6 +28,8 @@ const Fixture = struct {
     sender: channel.Channel = undefined,
     recipient: channel.Channel = undefined,
     signing_fixture: signer_fixture.Fixture = .{},
+    sender_keys: signer_fixture.Fixture = .{},
+    receiver_keys: signer_fixture.Fixture = .{},
     signer: sealed.Signer = undefined,
     authority: sync.AuthorityContext = undefined,
     receiver: transfer.Receiver = undefined,
@@ -85,12 +87,14 @@ const Fixture = struct {
 
     fn connect(self: *Fixture) !void {
         self.sender_graph = self.service.deviceGraph().*;
-        self.sender = try channel.Channel.init(&self.sender_graph, try signing.publicKey(root_key), alice, bob, alice_key, .initiator);
-        self.recipient = try channel.Channel.init(self.service.deviceGraph(), try signing.publicKey(root_key), bob, alice, bob_key, .responder);
+        const sender_key = try self.sender_keys.init(owner, self.service.owner, self.service.task_id, alice_key);
+        const receiver_key = try self.receiver_keys.init(owner, self.service.owner, self.service.task_id, bob_key);
+        self.sender = try channel.Channel.init(&self.sender_graph, try signing.publicKey(root_key), alice, bob, sender_key.key, .initiator, 20);
+        self.recipient = try channel.Channel.init(self.service.deviceGraph(), try signing.publicKey(root_key), bob, alice, receiver_key.key, .responder, 20);
         var wire: [channel.MAX_FRAME]u8 = undefined;
-        try self.recipient.readHandshake(try self.sender.writeHandshake(&wire));
-        try self.sender.readHandshake(try self.recipient.writeHandshake(&wire));
-        try self.recipient.readHandshake(try self.sender.writeHandshake(&wire));
+        try self.recipient.readHandshake(try self.sender.writeHandshake(&wire, 20), 20);
+        try self.sender.readHandshake(try self.recipient.writeHandshake(&wire, 20), 20);
+        try self.recipient.readHandshake(try self.sender.writeHandshake(&wire, 20), 20);
     }
 
     fn deinit(self: *Fixture) void {
@@ -107,7 +111,7 @@ const Fixture = struct {
 
     fn send(self: *Fixture, bytes: []const u8) !transfer.Progress {
         var wire: [channel.MAX_FRAME]u8 = undefined;
-        return self.receiver.receive(&self.recipient, self.authority, self.signer, try self.sender.seal(&wire, bytes));
+        return self.receiver.receive(&self.recipient, self.authority, self.signer, try self.sender.seal(&wire, bytes, 20));
     }
 
     fn begin(self: *Fixture, value: transfer.Begin) !transfer.Progress {
@@ -153,7 +157,7 @@ test "object transfer admits encrypted chunks and acknowledges durable signed by
     var response: [channel.MAX_PAYLOAD]u8 = undefined;
     var wire: [channel.MAX_FRAME]u8 = undefined;
     var plaintext: [channel.MAX_PAYLOAD]u8 = undefined;
-    const decoded = try transfer.decodeProgress(try f.sender.open(&plaintext, try f.recipient.seal(&wire, try transfer.encodeProgress(&response, receipt))));
+    const decoded = try transfer.decodeProgress(try f.sender.open(&plaintext, try f.recipient.seal(&wire, try transfer.encodeProgress(&response, receipt), 20), 20));
     try std.testing.expectEqualDeep(receipt, decoded);
     try std.testing.expectEqualDeep(receipt, try f.commit());
     f.disk.crash();
@@ -211,7 +215,7 @@ test "object transfer rejects tampering and replay before any object allocation"
     defer f.deinit();
     var bytes: [channel.MAX_PAYLOAD]u8 = undefined;
     var wire: [channel.MAX_FRAME]u8 = undefined;
-    const frame = try f.sender.seal(&wire, try transfer.encodeBegin(&bytes, f.request("new")));
+    const frame = try f.sender.seal(&wire, try transfer.encodeBegin(&bytes, f.request("new")), 20);
     wire[frame.len - 1] ^= 1;
     try std.testing.expectError(error.AuthenticationFailed, f.receiver.receive(&f.recipient, f.authority, f.signer, frame));
     try std.testing.expect(f.receiver.transfer == null);
@@ -222,7 +226,7 @@ test "object transfer rejects tampering and replay before any object allocation"
 }
 
 test "object transfer rechecks capability share and device revocation and erases staged bytes" {
-    for (0..3) |revocation| {
+    for (0..4) |revocation| {
         const f = try Fixture.init();
         defer f.deinit();
         try f.stage("private pending bytes");
@@ -230,8 +234,10 @@ test "object transfer rechecks capability share and device revocation and erases
             try f.capabilities.revokeGrant(f.receiver.binding.peer_capability_id);
         } else if (revocation == 1) {
             try f.disk.service.shareWorkspace(f.disk.workspace_id, .{ .principal_id = alice, .can_read = true, .can_write = false, .network_scope = .trusted_overlay });
-        } else {
+        } else if (revocation == 2) {
             _ = try f.service.revokeTrustedDevice(owner, alice, root_key, 21);
+        } else {
+            f.receiver_keys.service.findHandle(f.recipient.signer.handle_id).?.revoked = true;
         }
         if (f.commit()) |_| return error.RevokedWriteAccepted else |_| {}
         try std.testing.expect(f.receiver.transfer == null);

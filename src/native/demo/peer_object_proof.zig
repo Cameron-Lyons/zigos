@@ -66,6 +66,8 @@ fn execute(context: *support.Context, service: *sync.Service, channel: *channel_
     });
     var receiver = transfer.Receiver{ .store = store, .sync = service, .capabilities = context.capability_table, .binding = .{ .workspace_id = workspace_id, .object_id = created.object_id.raw(), .local_device = channel.local, .peer_device = channel.remote, .peer_capability_id = grant.capability.id }, .scratch = &payload };
     defer receiver.reset();
+    var key_fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+    const storage_key = try key_fixture.init(context.session_user, store.owner, store.task_id, support.storage_signer);
     const authority = support.mintSyncAuthority(context, 311);
     var offer: [29]u8 = undefined;
     var writer = Writer{ .buffer = &offer };
@@ -88,7 +90,7 @@ fn execute(context: *support.Context, service: *sync.Service, channel: *channel_
             resend = clock.afterMilliseconds(20);
         }
         const frame = try receive(&incoming) orelse continue;
-        const progress = receiver.receiveForVerification(channel, authority, support.storage_signer, frame) catch |err| {
+        const progress = receiver.receive(channel, authority, storage_key, frame) catch |err| {
             if (err == error.ReplayRejected) continue;
             return err;
         };
@@ -131,7 +133,7 @@ fn sendObject(channel: *channel_mod.Channel, peer_mac: [6]u8, payload: []const u
             resend = clock.afterMilliseconds(20);
         }
         const frame = try receive(&incoming) orelse continue;
-        const message = channel.open(&plaintext, frame) catch |err| {
+        const message = channel.open(&plaintext, frame, 311) catch |err| {
             if (err == error.ReplayRejected) continue;
             return err;
         };
@@ -172,7 +174,7 @@ fn send(channel: *channel_mod.Channel, peer_mac: [6]u8, message: []const u8) !vo
     // transfer IDs and offsets after authenticating each packet.
     // A full transmit ring drops this attempt; the timed application retry
     // (or its peer's repeated request) will try again before the deadline.
-    _ = network.sendActiveFrame(peer_mac, try channel.seal(&wire, message));
+    _ = network.sendActiveFrame(peer_mac, try channel.seal(&wire, message, 311));
 }
 
 fn receive(buffer: []u8) !?[]const u8 {

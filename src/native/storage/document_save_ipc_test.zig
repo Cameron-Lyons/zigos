@@ -342,7 +342,7 @@ test "document IPC rejects expired revoked denied and unavailable signing leases
             _ = try fixture.server.runOnce(10);
         }
         const signing_fixture = &fixture.signing_fixture;
-        const handle = signing_fixture.service.findHandle(fixture.open_request.signer.handle_id).?;
+        const handle = signing_fixture.service.findHandle(fixture.open_request.signer.key.handle_id).?;
         switch (variant) {
             0 => handle.expires_at_ticks = 10,
             1 => handle.revoked = true,
@@ -566,10 +566,10 @@ test "document channel owns borrowed opening metadata and reuses retired resourc
     request.path = &path;
     const binding = try fixture.channel.open(&fixture.port, &fixture.device.service, request, 2);
     @memset(&path, 'x');
-    request.signer.handle_id += 1;
-    request.signer.sealed_digest[0] ^= 1;
+    request.signer.key.handle_id += 1;
+    request.signer.key.sealed_digest[0] ^= 1;
     try std.testing.expectEqualStrings(durable.path, fixture.channel.server.?.binding.path);
-    try std.testing.expectEqual(fixture.open_request.signer.handle_id, fixture.channel.server.?.binding.signer.handle_id);
+    try std.testing.expectEqual(fixture.open_request.signer.key.handle_id, fixture.channel.server.?.binding.signer.key.handle_id);
     try std.testing.expectEqual(fixture.device.original_version_id, binding.version_id);
     try std.testing.expectError(error.DocumentAlreadyOpen, fixture.channel.open(&fixture.port, &fixture.device.service, request, 2));
     fixture.channel.close(3);

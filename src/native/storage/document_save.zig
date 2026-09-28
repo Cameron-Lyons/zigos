@@ -152,7 +152,7 @@ fn requestDigest(request: anytype) !crypto_hash.Digest {
     var hash = crypto_hash.init();
     crypto_hash.updateBytes(&hash, "payload", request.payload);
     if (@TypeOf(request.signer) == object_signer.Signer) {
-        crypto_hash.updateBytes(&hash, "signer-sealed-key", &request.signer.sealed_digest);
+        crypto_hash.updateBytes(&hash, "signer-sealed-key", &request.signer.key.sealed_digest);
     } else {
         crypto_hash.updateBytes(&hash, "signer-label", request.signer.label);
         const public_key = try signing.publicKey(request.signer);

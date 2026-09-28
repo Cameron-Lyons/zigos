@@ -9,6 +9,7 @@ const sync_transport = @import("../../native/sync/sync_transport.zig");
 
 test "sync host tests import native sync modules" {
     _ = @import("../../native/sync/peer_channel.zig");
+    _ = @import("../../native/sync/sealed_peer_test.zig");
     _ = @import("../../native/sync/object_transfer_test.zig");
     std.testing.refAllDecls(device_graph);
     std.testing.refAllDecls(network_policy);

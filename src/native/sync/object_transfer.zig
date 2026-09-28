@@ -73,7 +73,7 @@ pub const Receiver = struct {
             return err;
         };
         const owner = (self.store.findWorkspaceRecordConst(self.binding.workspace_id) orelse return error.WorkspaceNotFound).owner;
-        if (!signer.authority.?.owner.eql(owner)) {
+        if (!signer.key.authority.?.owner.eql(owner)) {
             self.reset();
             return error.PermissionDenied;
         }
@@ -99,7 +99,7 @@ pub const Receiver = struct {
         self.expire(authority.now_ticks);
         var plaintext: [channel_mod.MAX_PAYLOAD]u8 = undefined;
         defer std.crypto.secureZero(u8, &plaintext);
-        const message = channel.open(&plaintext, frame) catch |err| {
+        const message = channel.open(&plaintext, frame, authority.now_ticks) catch |err| {
             if (!channel.established()) self.reset();
             return err;
         };

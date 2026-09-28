@@ -7,6 +7,7 @@ const measured_boot = @import("../platform/measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+const sealed = @import("../services/sealed_signing_key.zig");
 
 const addDeviceGraphMeasuredArtifact = measured_boot.addMeasuredArtifact;
 
@@ -163,7 +164,7 @@ pub const DeviceRecord = struct {
     }
 };
 
-pub const Error = error{
+pub const Error = sealed.Error || error{
     AlreadyRevoked,
     DeviceNotFound,
     DeviceTableFull,
@@ -246,8 +247,17 @@ pub const Graph = struct {
         label: []const u8,
         identity: signing.SignerIdentity,
     ) Error!*UserRootRecord {
+        return self.ensureUserRootInternal(user_principal, label, identity, 0);
+    }
+
+    pub fn ensureSealedUserRoot(self: *Graph, user: principal.PrincipalId, label: []const u8, key: sealed.Key, now_ticks: u64) Error!*UserRootRecord {
+        try requireSealedOwner(key, user, now_ticks);
+        return self.ensureUserRootInternal(user, label, key, now_ticks);
+    }
+
+    fn ensureUserRootInternal(self: *Graph, user_principal: principal.PrincipalId, label: []const u8, identity: anytype, tick: u64) Error!*UserRootRecord {
         if (user_principal.kind != .user) return error.InvalidPrincipalKind;
-        if (self.findUserRoot(user_principal) != null) return self.requireRootAuthority(user_principal, identity);
+        if (self.findUserRoot(user_principal) != null) return self.requireRootAuthority(user_principal, identity, tick);
         if (self.user_roots.countInUse() >= MAX_USER_ROOTS) return error.UserRootTableFull;
 
         var root = zeroUserRoot();
@@ -256,7 +266,7 @@ pub const Graph = struct {
 
         var message_buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = rootMessage(&message_buffer, user_principal, label) catch return error.InvalidRootSignature;
-        root.root_signature = signing.sign(identity, message) catch return error.InvalidRootSignature;
+        root.root_signature = try signIdentity(identity, message, tick);
         if (!signing.verify(root.root_signature, message)) return error.InvalidRootSignature;
 
         const slot_index = self.installUserRootRecord(root) orelse return error.UserRootTableFull;
@@ -288,28 +298,34 @@ pub const Graph = struct {
         return self.enrollDeviceInternal(user_principal, device_principal, label, authorizer, device_identity, platform_key, tick);
     }
 
+    pub fn enrollSealedDevice(self: *Graph, user: principal.PrincipalId, device: principal.PrincipalId, label: []const u8, root_key: sealed.Key, device_key: sealed.Key, now_ticks: u64) Error!*DeviceRecord {
+        try requireSealedOwner(root_key, user, now_ticks);
+        try requireSealedOwner(device_key, user, now_ticks);
+        return self.enrollDeviceInternal(user, device, label, root_key, device_key, null, now_ticks);
+    }
+
     fn enrollDeviceInternal(
         self: *Graph,
         user_principal: principal.PrincipalId,
         device_principal: principal.PrincipalId,
         label: []const u8,
-        authorizer: signing.SignerIdentity,
-        device_identity: signing.SignerIdentity,
+        authorizer: anytype,
+        device_identity: anytype,
         platform_key: ?PlatformKeyBindingRequest,
         tick: u64,
     ) Error!*DeviceRecord {
         if (user_principal.kind != .user or device_principal.kind != .device) return error.InvalidPrincipalKind;
-        _ = try self.requireRootAuthority(user_principal, authorizer);
+        _ = try self.requireRootAuthority(user_principal, authorizer, tick);
 
         if (self.findDevice(device_principal)) |existing| {
             if (!existing.owner.eql(user_principal)) return error.DeviceOwnerMismatch;
             if (existing.status == .revoked) return error.AlreadyRevoked;
-            try requireSameEnrollment(existing, label, device_identity, platform_key);
+            try requireSameEnrollment(existing, label, device_identity, platform_key, tick);
             return existing;
         }
         if (self.devices.countInUse() >= MAX_DEVICES) return error.DeviceTableFull;
 
-        const overlay_id = deriveOverlayId(device_principal, device_identity.label);
+        const overlay_id = deriveOverlayId(device_principal, try identityLabel(device_identity, tick));
         var device = zeroDevice();
         device.principal_id = device_principal;
         device.owner = user_principal;
@@ -324,10 +340,10 @@ pub const Graph = struct {
             overlay_id,
             1,
         ) catch return error.InvalidDeviceSignature;
-        device.device_signature = signing.sign(device_identity, device_message) catch return error.InvalidDeviceSignature;
+        device.device_signature = try signIdentity(device_identity, device_message, tick);
         if (!signing.verify(device.device_signature, device_message)) return error.InvalidDeviceSignature;
         if (platform_key) |binding_request| {
-            applyPlatformKeyBinding(&device, try buildPlatformKeyBinding(device_principal, device_identity, device.device_signature, binding_request));
+            applyPlatformKeyBinding(&device, try buildPlatformKeyBinding(device_principal, device_identity, device.device_signature, binding_request, tick));
         }
 
         var enrollment_message_buffer: [ENROLLMENT_MESSAGE_BUFFER_BYTES]u8 = undefined;
@@ -340,7 +356,7 @@ pub const Graph = struct {
             1,
             device.device_signature.publicKeySlice(),
         ) catch return error.InvalidEnrollmentSignature;
-        device.enrollment_signature = signing.sign(authorizer, enrollment_message) catch return error.InvalidEnrollmentSignature;
+        device.enrollment_signature = try signIdentity(authorizer, enrollment_message, tick);
         if (!signing.verify(device.enrollment_signature, enrollment_message)) return error.InvalidEnrollmentSignature;
 
         device.last_rotated_at_ticks = tick;
@@ -371,17 +387,23 @@ pub const Graph = struct {
         return self.rotateDeviceKeyInternal(user_principal, device_principal, authorizer, next_device_identity, platform_key, tick);
     }
 
+    pub fn rotateSealedDeviceKey(self: *Graph, user: principal.PrincipalId, device: principal.PrincipalId, root_key: sealed.Key, device_key: sealed.Key, now_ticks: u64) Error!*DeviceRecord {
+        try requireSealedOwner(root_key, user, now_ticks);
+        try requireSealedOwner(device_key, user, now_ticks);
+        return self.rotateDeviceKeyInternal(user, device, root_key, device_key, null, now_ticks);
+    }
+
     fn rotateDeviceKeyInternal(
         self: *Graph,
         user_principal: principal.PrincipalId,
         device_principal: principal.PrincipalId,
-        authorizer: signing.SignerIdentity,
-        next_device_identity: signing.SignerIdentity,
+        authorizer: anytype,
+        next_device_identity: anytype,
         platform_key: ?PlatformKeyBindingRequest,
         tick: u64,
     ) Error!*DeviceRecord {
         if (user_principal.kind != .user or device_principal.kind != .device) return error.InvalidPrincipalKind;
-        _ = try self.requireRootAuthority(user_principal, authorizer);
+        _ = try self.requireRootAuthority(user_principal, authorizer, tick);
         const record = self.findDevice(device_principal) orelse return error.DeviceNotFound;
         if (!record.owner.eql(user_principal)) return error.DeviceOwnerMismatch;
         if (record.status == .revoked) return error.AlreadyRevoked;
@@ -396,10 +418,10 @@ pub const Graph = struct {
             record.overlay_id,
             next_generation,
         ) catch return error.InvalidDeviceSignature;
-        const device_signature = signing.sign(next_device_identity, device_message) catch return error.InvalidDeviceSignature;
+        const device_signature = try signIdentity(next_device_identity, device_message, tick);
         if (!signing.verify(device_signature, device_message)) return error.InvalidDeviceSignature;
         const next_platform_key = if (platform_key) |binding_request|
-            try buildPlatformKeyBinding(device_principal, next_device_identity, device_signature, binding_request)
+            try buildPlatformKeyBinding(device_principal, next_device_identity, device_signature, binding_request, tick)
         else
             null;
 
@@ -412,7 +434,7 @@ pub const Graph = struct {
             next_generation,
             device_signature.publicKeySlice(),
         ) catch return error.InvalidRotationSignature;
-        const rotation_signature = signing.sign(authorizer, rotation_message) catch return error.InvalidRotationSignature;
+        const rotation_signature = try signIdentity(authorizer, rotation_message, tick);
         if (!signing.verify(rotation_signature, rotation_message)) return error.InvalidRotationSignature;
 
         record.device_signature = device_signature;
@@ -434,8 +456,17 @@ pub const Graph = struct {
         authorizer: signing.SignerIdentity,
         tick: u64,
     ) Error!void {
+        return self.revokeDeviceInternal(user_principal, device_principal, authorizer, tick);
+    }
+
+    pub fn revokeSealedDevice(self: *Graph, user: principal.PrincipalId, device: principal.PrincipalId, root_key: sealed.Key, now_ticks: u64) Error!void {
+        try requireSealedOwner(root_key, user, now_ticks);
+        return self.revokeDeviceInternal(user, device, root_key, now_ticks);
+    }
+
+    fn revokeDeviceInternal(self: *Graph, user_principal: principal.PrincipalId, device_principal: principal.PrincipalId, authorizer: anytype, tick: u64) Error!void {
         if (user_principal.kind != .user or device_principal.kind != .device) return error.InvalidPrincipalKind;
-        _ = try self.requireRootAuthority(user_principal, authorizer);
+        _ = try self.requireRootAuthority(user_principal, authorizer, tick);
         const record = self.findDevice(device_principal) orelse return error.DeviceNotFound;
         if (!record.owner.eql(user_principal)) return error.DeviceOwnerMismatch;
         if (record.status == .revoked) return error.AlreadyRevoked;
@@ -449,7 +480,7 @@ pub const Graph = struct {
             record.overlay_id,
             tick,
         ) catch return error.InvalidEnrollmentSignature;
-        const signature = signing.sign(authorizer, message) catch return error.InvalidEnrollmentSignature;
+        const signature = try signIdentity(authorizer, message, tick);
         if (!signing.verify(signature, message)) return error.InvalidEnrollmentSignature;
 
         record.revocation_signature = signature;
@@ -468,7 +499,7 @@ pub const Graph = struct {
 
     // Service capabilities authorize access to this graph, not control over
     // every enrolled user. Every mutation must also prove the user's root key.
-    fn requireRootAuthority(self: *Graph, user: principal.PrincipalId, authorizer: signing.SignerIdentity) Error!*UserRootRecord {
+    fn requireRootAuthority(self: *Graph, user: principal.PrincipalId, authorizer: anytype, tick: u64) Error!*UserRootRecord {
         const root = self.findUserRoot(user) orelse return error.RootNotFound;
         if (root.label_len > MAX_LABEL_BYTES or root.root_signature.format != .ed25519 or
             root.root_signature.public_key_len != signing.PUBLIC_KEY_BYTES or
@@ -476,7 +507,7 @@ pub const Graph = struct {
         var message_buffer: [ROOT_MESSAGE_BUFFER_BYTES]u8 = undefined;
         const message = rootMessage(&message_buffer, user, root.labelSlice()) catch return error.InvalidRootSignature;
         if (!signing.verify(root.root_signature, message)) return error.InvalidRootSignature;
-        const public_key = signing.publicKey(authorizer) catch return error.RootAuthorityMismatch;
+        const public_key = try identityPublicKey(authorizer, tick);
         if (!std.mem.eql(u8, &public_key, &root.root_signature.public_key)) return error.RootAuthorityMismatch;
         return root;
     }
@@ -601,6 +632,26 @@ fn zeroDevice() DeviceRecord {
     };
 }
 
+fn requireSealedOwner(key: sealed.Key, owner: principal.PrincipalId, tick: u64) Error!void {
+    try key.validate(tick);
+    if (!key.authority.?.owner.eql(owner)) return error.SecretOwnerMismatch;
+}
+
+fn signIdentity(identity: anytype, message: []const u8, tick: u64) Error!manifest.Signature {
+    if (@TypeOf(identity) == sealed.Key) return identity.signMessage(message, tick);
+    return signing.sign(identity, message) catch error.InvalidSigningKey;
+}
+
+fn identityPublicKey(identity: anytype, tick: u64) Error!signing.PublicKey {
+    if (@TypeOf(identity) == sealed.Key) return identity.publicKey(tick);
+    return signing.publicKey(identity) catch error.InvalidSigningKey;
+}
+
+fn identityLabel(identity: anytype, tick: u64) Error![]const u8 {
+    if (@TypeOf(identity) == sealed.Key) return identity.label(tick);
+    return identity.label;
+}
+
 const ResolvedPlatformKeyBinding = struct {
     origin: DeviceKeyOrigin,
     label_len: u8,
@@ -613,9 +664,9 @@ const ResolvedPlatformKeyBinding = struct {
 
 // Enrollment retries may repeat the current binding. Key changes require the
 // rotation path so generations, signatures and platform custody stay coherent.
-fn requireSameEnrollment(record: *const DeviceRecord, label: []const u8, identity: signing.SignerIdentity, platform_key: ?PlatformKeyBindingRequest) Error!void {
+fn requireSameEnrollment(record: *const DeviceRecord, label: []const u8, identity: anytype, platform_key: ?PlatformKeyBindingRequest, tick: u64) Error!void {
     if (record.label_len > MAX_LABEL_BYTES or !std.mem.eql(u8, record.labelSlice(), label)) return error.DeviceEnrollmentMismatch;
-    const key = signing.publicKey(identity) catch return error.InvalidDeviceSignature;
+    const key = try identityPublicKey(identity, tick);
     if (record.device_signature.format != .ed25519 or record.device_signature.public_key_len != signing.PUBLIC_KEY_BYTES or
         !std.mem.eql(u8, &record.device_signature.public_key, &key)) return error.DeviceEnrollmentMismatch;
     var message_buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
@@ -623,7 +674,7 @@ fn requireSameEnrollment(record: *const DeviceRecord, label: []const u8, identit
     if (record.device_signature.value_len != signing.SIGNATURE_BYTES or !signing.verify(record.device_signature, message)) return error.InvalidDeviceSignature;
     if (record.usesPlatformBackedKey() and platform_key == null) return error.PlatformKeyDowngradeDenied;
     if (platform_key) |request| {
-        const binding = try buildPlatformKeyBinding(record.principal_id, identity, record.device_signature, request);
+        const binding = try buildPlatformKeyBinding(record.principal_id, identity, record.device_signature, request, tick);
         if (!record.platform_key_bound or record.device_key_origin != binding.origin or
             record.platform_key_label_len != binding.label_len or !std.mem.eql(u8, &record.platform_key_label, &binding.label) or
             !std.mem.eql(u8, &record.platform_key_digest, &binding.digest) or
@@ -634,16 +685,17 @@ fn requireSameEnrollment(record: *const DeviceRecord, label: []const u8, identit
 
 fn buildPlatformKeyBinding(
     device_principal: principal.PrincipalId,
-    device_identity: signing.SignerIdentity,
+    device_identity: anytype,
     device_signature: manifest.Signature,
     request: PlatformKeyBindingRequest,
+    tick: u64,
 ) Error!ResolvedPlatformKeyBinding {
     if (!isPlatformBackedOrigin(request.root.origin)) return error.SoftwareDeviceKeyRejected;
     if (!request.root.device_principal.eql(device_principal)) return error.PlatformRootDeviceMismatch;
     if (request.root.root_provenance != .bootloader_provided) return error.SyntheticPlatformRoot;
     if (request.root.boot_generation == 0 or std.mem.allEqual(u8, &request.root.root_digest, 0)) return error.UnverifiedPlatformRoot;
     if (request.root.label_len > MAX_LABEL_BYTES) return error.LabelTooLong;
-    const public_key = signing.publicKey(device_identity) catch return error.InvalidPlatformKeyBinding;
+    const public_key = try identityPublicKey(device_identity, tick);
     if (!std.mem.eql(u8, device_signature.publicKeySlice(), &public_key)) return error.InvalidPlatformKeyBinding;
     const sealed_digest = platformRootSealDigest(device_principal, &request.root, &public_key, device_signature.valueSlice());
 

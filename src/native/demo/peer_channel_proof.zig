@@ -22,7 +22,9 @@ pub fn run(context: *support.Context, service: *sync_service.Service, local_mac:
         signing.SignerIdentity{ .label = "local-device", .seed = signing.seedFromByte(0x92) }
     else
         signing.SignerIdentity{ .label = "tablet-device-v2", .seed = signing.seedFromByte(0x94) };
-    var channel = channel_mod.Channel.init(service.deviceGraph(), signing.publicKey(support.user_root_signer) catch return false, if (initiator) laptop else tablet, if (initiator) tablet else laptop, signer, if (initiator) .initiator else .responder) catch |err| {
+    var key_fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+    const device_key = key_fixture.init(context.session_user, service.owner, service.task_id, signer) catch return false;
+    var channel = channel_mod.Channel.init(service.deviceGraph(), signing.publicKey(support.user_root_signer) catch return false, if (initiator) laptop else tablet, if (initiator) tablet else laptop, device_key.key, if (initiator) .initiator else .responder, 311) catch |err| {
         support.common.printBootMarker(@errorName(err));
         return false;
     };
@@ -32,7 +34,7 @@ pub fn run(context: *support.Context, service: *sync_service.Service, local_mac:
     var last_handshake: [channel_mod.MAX_FRAME]u8 = undefined;
     var last_handshake_len: usize = 0;
     if (initiator) {
-        outgoing_len = (channel.writeHandshake(&outgoing) catch return false).len;
+        outgoing_len = (channel.writeHandshake(&outgoing, 311) catch return false).len;
         _ = network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len]);
     }
     var received: [1500]u8 = undefined;
@@ -72,16 +74,16 @@ pub fn run(context: *support.Context, service: *sync_service.Service, local_mac:
                 // answering each duplicate would amplify that burst.
                 continue;
             }
-            channel.readHandshake(frame) catch |err| {
+            channel.readHandshake(frame, 311) catch |err| {
                 support.common.printBootMarker(@errorName(err));
                 return false;
             };
             @memcpy(last_handshake[0..frame.len], frame);
             last_handshake_len = frame.len;
             outgoing_len = if (channel.established())
-                (channel.seal(&outgoing, confirmation) catch return false).len
+                (channel.seal(&outgoing, confirmation, 311) catch return false).len
             else
-                (channel.writeHandshake(&outgoing) catch return false).len;
+                (channel.writeHandshake(&outgoing, 311) catch return false).len;
             _ = network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len]);
             continue;
         }
@@ -91,21 +93,21 @@ pub fn run(context: *support.Context, service: *sync_service.Service, local_mac:
             @memcpy(tampered[0..frame.len], frame);
             tampered[frame.len - 1] ^= 1;
             @memset(&plaintext, 0xa5);
-            if (channel.open(&plaintext, tampered[0..frame.len])) |_| return false else |err| {
+            if (channel.open(&plaintext, tampered[0..frame.len], 311)) |_| return false else |err| {
                 if (err != error.AuthenticationFailed or !std.mem.allEqual(u8, &plaintext, 0)) return false;
             }
         }
-        const payload = channel.open(&plaintext, frame) catch |err| {
+        const payload = channel.open(&plaintext, frame, 311) catch |err| {
             if (err != error.ReplayRejected) return false;
             continue;
         };
         if (!std.mem.eql(u8, payload, confirmation)) return false;
-        if (channel.open(&plaintext, frame)) |_| return false else |err| {
+        if (channel.open(&plaintext, frame, 311)) |_| return false else |err| {
             if (err != error.ReplayRejected) return false;
         }
         if (!confirmed) {
             confirmed = true;
-            if (initiator) outgoing_len = (channel.seal(&outgoing, confirmation) catch return false).len;
+            if (initiator) outgoing_len = (channel.seal(&outgoing, confirmation, 311) catch return false).len;
         }
         _ = network.sendActiveFrame(peer_mac, outgoing[0..outgoing_len]);
     }

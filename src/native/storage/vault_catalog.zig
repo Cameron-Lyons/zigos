@@ -62,7 +62,7 @@ pub const Session = struct {
     pub fn save(self: *Session, storage: *storage_service.Service, state: State, signer: object_signer.Signer, object_id: u64, expected_version_id: u64, now_ticks: u64, scratch: *[MAX_BYTES]u8) !Receipt {
         const service = state.vault;
         try signer.validateService(storage.owner, storage.task_id, now_ticks);
-        if (signer.authority.?.service != service) return error.InvalidSigningAuthority;
+        if (signer.key.authority.?.service != service) return error.InvalidSigningAuthority;
         try storage.requireDurableBoundary();
         const head = storage.latestVersion(object_id);
         var previous_key: ?signing.PublicKey = null;
@@ -79,13 +79,13 @@ pub const Session = struct {
             }
             break :blk @as(u64, 1);
         };
-        const payload = try encode(&service.store, state.identities, object_id, next_generation, signer.authority.?.owner, scratch);
+        const payload = try encode(&service.store, state.identities, object_id, next_generation, signer.key.authority.?.owner, scratch);
         var digest: hash.Digest = undefined;
         std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
         if (self.pending) |pending| {
             if (object_id != pending.object_id or expected_version_id != pending.base_version_id or
                 !std.mem.eql(u8, &digest, &pending.payload_digest) or
-                !std.mem.eql(u8, &signer.sealed_digest, &pending.key_digest)) return error.PendingVaultCheckpoint;
+                !std.mem.eql(u8, &signer.key.sealed_digest, &pending.key_digest)) return error.PendingVaultCheckpoint;
             if (head == null or head.?.id.raw() != pending.version_id) return error.VaultCatalogChanged;
         } else {
             const metadata = try signer.signObjectMetadata(label, CONTENT_TYPE, .secret, payload, now_ticks);
@@ -105,7 +105,7 @@ pub const Session = struct {
                 .version_id = stored.version_id.raw(),
                 .catalog_generation = next_generation,
                 .payload_digest = digest,
-                .key_digest = signer.sealed_digest,
+                .key_digest = signer.key.sealed_digest,
             };
         }
         const generation = try storage.checkpointDurable();
@@ -275,10 +275,10 @@ test "vault catalog retries a failed barrier without another version and recheck
     try std.testing.expectError(error.DurabilityBarrierFailed, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 2, &scratch));
     const count = device.service.versionCount();
     const version_id = session.pending.?.version_id;
-    fixture.service.findHandle(signer.handle_id).?.revoked = true;
+    fixture.service.findHandle(signer.key.handle_id).?.revoked = true;
     device.fail_flushes = false;
     try std.testing.expectError(error.HandleRevoked, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 3, &scratch));
-    fixture.service.findHandle(signer.handle_id).?.revoked = false;
+    fixture.service.findHandle(signer.key.handle_id).?.revoked = false;
     fixture.service.store.secrets[0].label[0] ^= 1;
     try std.testing.expectError(error.PendingVaultCheckpoint, session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 3, &scratch));
     fixture.service.store.secrets[0].label[0] ^= 1;

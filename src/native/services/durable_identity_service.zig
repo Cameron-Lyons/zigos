@@ -63,7 +63,7 @@ pub const Service = struct {
     fn requireReady(self: *const Service, owner: principal.PrincipalId, now_ticks: u64) !void {
         if (self.dirty or self.checkpoint.pending != null) return error.IdentityCheckpointPending;
         try self.signer.validateService(self.storage.owner, self.storage.task_id, now_ticks);
-        if (self.signer.authority.?.service != self.state.vault or !self.signer.authority.?.owner.eql(owner)) return error.InvalidIdentityAuthority;
+        if (self.signer.key.authority.?.service != self.state.vault or !self.signer.key.authority.?.owner.eql(owner)) return error.InvalidIdentityAuthority;
         try self.storage.requireDurableBoundary();
     }
 
