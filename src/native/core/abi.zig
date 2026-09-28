@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 12;
+pub const ABI_VERSION: u16 = 13;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -17,6 +17,15 @@ pub const InputByte = struct {
     pub const task_switch_previous: u8 = 8;
     pub const show_recovery: u8 = 9;
     pub const dismiss_recovery: u8 = 10;
+    pub const cursor_left: u8 = 11;
+    pub const cursor_right: u8 = 12;
+    pub const cursor_up: u8 = 13;
+    pub const cursor_down: u8 = 14;
+    pub const line_start: u8 = 15;
+    pub const line_end: u8 = 16;
+    pub const document_start: u8 = 17;
+    pub const document_end: u8 = 18;
+    pub const delete_forward: u8 = 19;
 };
 
 pub fn inputPacket(op: u8, data: u8) [INPUT_PACKET_BYTES]u8 {
@@ -369,7 +378,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 12), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 13), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));

@@ -5,6 +5,7 @@ const mailbox = @import("userspace_bootstrap_mailbox");
 pub const TEXT_CAPACITY: usize = 512;
 const INTERACTION_HASH_SEED: u64 = 0xcbf29ce484222325;
 const INTERACTION_HASH_PRIME: u64 = 0x100000001b3;
+const NO_VERTICAL_COLUMN = std.math.maxInt(u16);
 
 pub const ApplyResult = enum(u8) {
     rejected,
@@ -20,6 +21,7 @@ pub const State = struct {
     text: [TEXT_CAPACITY]u8 = [_]u8{0} ** TEXT_CAPACITY,
     text_length: u16 = 0,
     cursor: u16 = 0,
+    vertical_column: u16 = NO_VERTICAL_COLUMN,
     save_state: abi.DocumentSaveState = .none,
     commit_count: u32 = 0,
     activation_count: u32 = 0,
@@ -81,6 +83,15 @@ pub const State = struct {
             abi.InputByte.dismiss_recovery,
             abi.InputByte.task_switch_next,
             abi.InputByte.task_switch_previous,
+            abi.InputByte.cursor_left,
+            abi.InputByte.cursor_right,
+            abi.InputByte.cursor_up,
+            abi.InputByte.cursor_down,
+            abi.InputByte.line_start,
+            abi.InputByte.line_end,
+            abi.InputByte.document_start,
+            abi.InputByte.document_end,
+            abi.InputByte.delete_forward,
             => {},
             else => return .rejected,
         }
@@ -88,8 +99,17 @@ pub const State = struct {
         self.last_sequence = event.sequence;
         self.interaction_hash = mixEvent(self.interaction_hash, event);
         const mutated = switch (op) {
-            abi.InputByte.text => self.appendText(data),
+            abi.InputByte.text => self.insertText(data),
             abi.InputByte.backspace => self.backspace(),
+            abi.InputByte.delete_forward => if (self.model == .notes) self.deleteForward() else false,
+            abi.InputByte.cursor_left => self.moveCursor(self.cursor -| 1, false),
+            abi.InputByte.cursor_right => self.moveCursor(@min(self.text_length, self.cursor + 1), false),
+            abi.InputByte.cursor_up => self.moveVertical(false),
+            abi.InputByte.cursor_down => self.moveVertical(true),
+            abi.InputByte.line_start => self.moveCursor(self.lineStart(self.cursor), false),
+            abi.InputByte.line_end => self.moveCursor(self.lineEnd(self.cursor), false),
+            abi.InputByte.document_start => self.moveCursor(0, false),
+            abi.InputByte.document_end => self.moveCursor(self.text_length, false),
             abi.InputByte.commit_text => self.commit(),
             abi.InputByte.focus_next => self.moveFocus(true),
             abi.InputByte.focus_previous => self.moveFocus(false),
@@ -104,24 +124,69 @@ pub const State = struct {
         return .mutated;
     }
 
-    fn appendText(self: *State, byte: u8) bool {
+    fn insertText(self: *State, byte: u8) bool {
         if (self.text_length == self.text.len) return self.noteOverflow();
-        self.text[self.text_length] = byte;
+        const at: usize = self.cursor;
+        std.mem.copyBackwards(u8, self.text[at + 1 .. self.text_length + 1], self.text[at..self.text_length]);
+        self.text[at] = byte;
         self.text_length += 1;
-        self.cursor = self.text_length;
-        self.flags.dirty = true;
-        if (self.save_state == .saved) self.save_state = .none;
+        self.cursor += 1;
+        self.edited();
         return true;
     }
 
     fn backspace(self: *State) bool {
-        if (self.text_length == 0) return false;
+        if (self.cursor == 0) return false;
+        self.cursor -= 1;
+        return self.deleteForward();
+    }
+
+    fn deleteForward(self: *State) bool {
+        if (self.cursor == self.text_length) return false;
+        const at: usize = self.cursor;
+        std.mem.copyForwards(u8, self.text[at .. self.text_length - 1], self.text[at + 1 .. self.text_length]);
         self.text_length -= 1;
         self.text[self.text_length] = 0;
-        self.cursor = self.text_length;
-        self.flags.dirty = true;
-        if (self.save_state == .saved) self.save_state = .none;
+        self.edited();
         return true;
+    }
+
+    fn edited(self: *State) void {
+        self.vertical_column = NO_VERTICAL_COLUMN;
+        self.flags.dirty = true;
+        self.flags.input_overflow = false;
+        if (self.save_state == .saved) self.save_state = .none;
+    }
+
+    fn lineStart(self: *const State, position: usize) usize {
+        var at = position;
+        while (at > 0 and self.text[at - 1] != '\n') : (at -= 1) {}
+        return at;
+    }
+
+    fn lineEnd(self: *const State, position: usize) usize {
+        var at = position;
+        while (at < self.text_length and self.text[at] != '\n') : (at += 1) {}
+        return at;
+    }
+
+    fn moveCursor(self: *State, position: usize, vertical: bool) bool {
+        if (self.model != .notes) return false;
+        if (!vertical) self.vertical_column = NO_VERTICAL_COLUMN;
+        if (self.cursor == position) return false;
+        self.cursor = @intCast(position);
+        return true;
+    }
+
+    fn moveVertical(self: *State, down: bool) bool {
+        if (self.model != .notes) return false;
+        const start = self.lineStart(self.cursor);
+        const end = self.lineEnd(self.cursor);
+        if ((down and end == self.text_length) or (!down and start == 0)) return false;
+        if (self.vertical_column == NO_VERTICAL_COLUMN) self.vertical_column = @intCast(self.cursor - start);
+        const target_start = if (down) end + 1 else self.lineStart(start - 1);
+        const target_end = if (down) self.lineEnd(target_start) else start - 1;
+        return self.moveCursor(@min(target_start + self.vertical_column, target_end), true);
     }
 
     fn commit(self: *State) bool {
@@ -168,8 +233,10 @@ pub const State = struct {
         @memcpy(self.text[0..text.len], text);
         self.text_length = @intCast(text.len);
         self.cursor = self.text_length;
+        self.vertical_column = NO_VERTICAL_COLUMN;
         self.flags.loading = false;
         self.flags.load_failed = false;
+        self.flags.input_overflow = false;
         self.save_state = .none;
         self.revision +|= 1;
         return true;
@@ -190,7 +257,7 @@ pub const State = struct {
     fn activate(self: *State) bool {
         self.activation_count +|= 1;
         switch (self.model) {
-            .notes => _ = self.appendText('\n'),
+            .notes => _ = self.insertText('\n'),
             .capture => self.flags.active = !self.flags.active,
             else => {},
         }
@@ -364,6 +431,79 @@ test "Notes UI state requests a save without claiming durability" {
     try std.testing.expectEqual(@as(u32, 1), state.commit_count);
     try std.testing.expectEqual(@as(u32, 1), state.activation_count);
     try std.testing.expectEqual(@as(u64, 6), state.revision);
+}
+
+test "Notes cursor edits preserve surrounding text and navigation does not dirty a saved document" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("abc\ndef"));
+    state.setSaveState(.saved);
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(1, abi.InputByte.document_start, 0)));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, abi.InputByte.cursor_right, 0)));
+    try std.testing.expect(!state.flags.dirty);
+    try std.testing.expectEqual(abi.DocumentSaveState.saved, state.save_state);
+    _ = state.apply(inputEvent(3, abi.InputByte.text, 'X'));
+    try std.testing.expectEqualStrings("aXbc\ndef", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 2), state.cursor);
+    _ = state.apply(inputEvent(4, abi.InputByte.delete_forward, 0));
+    _ = state.apply(inputEvent(5, abi.InputByte.backspace, 0));
+    try std.testing.expectEqualStrings("ac\ndef", state.textSlice());
+    _ = state.apply(inputEvent(6, abi.InputByte.line_end, 0));
+    _ = state.apply(inputEvent(7, abi.InputByte.delete_forward, 0));
+    try std.testing.expectEqualStrings("acdef", state.textSlice());
+    _ = state.apply(inputEvent(8, abi.InputByte.activate, 0));
+    try std.testing.expectEqualStrings("ac\ndef", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 3), state.cursor);
+    try std.testing.expect(state.flags.dirty);
+    try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
+    try std.testing.expect(state.presentationText().isCanonical());
+}
+
+test "Notes vertical movement retains its column across short and empty lines" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("abcdef\nx\n\nuvwxyz\n"));
+    const operations = [_]u8{
+        abi.InputByte.document_start, abi.InputByte.cursor_right, abi.InputByte.cursor_right,
+        abi.InputByte.cursor_right,   abi.InputByte.cursor_right, abi.InputByte.cursor_down,
+        abi.InputByte.cursor_down,    abi.InputByte.cursor_down,  abi.InputByte.cursor_up,
+        abi.InputByte.cursor_up,      abi.InputByte.cursor_up,    abi.InputByte.line_end,
+        abi.InputByte.cursor_down,    abi.InputByte.document_end, abi.InputByte.cursor_up,
+        abi.InputByte.line_start,     abi.InputByte.backspace,
+    };
+    const positions = [_]u16{ 0, 1, 2, 3, 4, 8, 9, 14, 9, 8, 4, 6, 8, 17, 10, 10, 9 };
+    for (operations, positions, 1..) |op, position, sequence| {
+        _ = state.apply(inputEvent(sequence, op, 0));
+        try std.testing.expectEqual(position, state.cursor);
+        try std.testing.expect(state.presentationText().isCanonical());
+    }
+    try std.testing.expectEqualStrings("abcdef\nx\nuvwxyz\n", state.textSlice());
+}
+
+test "Notes cursor boundaries and full-buffer edits preserve canonical snapshots" {
+    var state = State.init("app.notes");
+    const full = [_]u8{'a'} ** TEXT_CAPACITY;
+    try std.testing.expect(state.loadDocument(&full));
+    _ = state.apply(inputEvent(1, abi.InputByte.document_start, 0));
+    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(2, abi.InputByte.backspace, 0)));
+    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(3, abi.InputByte.cursor_left, 0)));
+    _ = state.apply(inputEvent(4, abi.InputByte.text, 'z'));
+    try std.testing.expect(state.flags.input_overflow);
+    try std.testing.expectEqualSlices(u8, &full, state.textSlice());
+    try std.testing.expect(!state.flags.dirty);
+    var reopened = state;
+    try std.testing.expect(reopened.loadDocument("fresh"));
+    try std.testing.expect(!reopened.flags.input_overflow);
+    try std.testing.expect(reopened.presentationText().isCanonical());
+    _ = state.apply(inputEvent(5, abi.InputByte.delete_forward, 0));
+    try std.testing.expect(!state.flags.input_overflow);
+    _ = state.apply(inputEvent(6, abi.InputByte.text, 'z'));
+    try std.testing.expectEqual(@as(u16, TEXT_CAPACITY), state.text_length);
+    try std.testing.expectEqual(@as(u16, 1), state.cursor);
+    try std.testing.expectEqual(@as(u8, 'z'), state.text[0]);
+    _ = state.apply(inputEvent(7, abi.InputByte.document_end, 0));
+    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(8, abi.InputByte.delete_forward, 0)));
+    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(9, abi.InputByte.cursor_down, 0)));
+    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(10, abi.InputByte.cursor_right, 0)));
+    try std.testing.expect(state.presentationText().isCanonical());
 }
 
 test "Viewer and Capture UI state keep model-specific controls" {

@@ -604,6 +604,15 @@ fn inputByte(kind: input_driver_task.EventKind) u8 {
         .task_switch_previous => abi.InputByte.task_switch_previous,
         .show_recovery => abi.InputByte.show_recovery,
         .dismiss_recovery => abi.InputByte.dismiss_recovery,
+        .cursor_left => abi.InputByte.cursor_left,
+        .cursor_right => abi.InputByte.cursor_right,
+        .cursor_up => abi.InputByte.cursor_up,
+        .cursor_down => abi.InputByte.cursor_down,
+        .line_start => abi.InputByte.line_start,
+        .line_end => abi.InputByte.line_end,
+        .document_start => abi.InputByte.document_start,
+        .document_end => abi.InputByte.document_end,
+        .delete_forward => abi.InputByte.delete_forward,
     };
 }
 
@@ -648,6 +657,41 @@ fn testTaskBudget() task_runtime.ResourceBudget {
         .shared_memory_bytes = 4 * 1024,
         .background_allowed = false,
     };
+}
+
+test "input router delivers cursor editing semantics only to the focused task" {
+    var runtime = task_runtime.Runtime.init();
+    const app = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 5 },
+        .component_class = .app_component,
+        .budget = testTaskBudget(),
+        .ui_surface_id = 45,
+        .local_only = true,
+    });
+    var compositor = compositor_session.Session.init();
+    _ = try compositor.openDocumentView(app, 7, "notes.md");
+    var router = Router{};
+    router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+    router.bindCompositor(&compositor, 99);
+    const usages = [_]u8{ 0x4A, 0x4D, 0x4F, 0x50, 0x51, 0x52, 0x4C, 0x4A, 0x4D };
+    const operations = [_]u8{
+        abi.InputByte.line_start,     abi.InputByte.line_end,       abi.InputByte.cursor_right,
+        abi.InputByte.cursor_left,    abi.InputByte.cursor_down,    abi.InputByte.cursor_up,
+        abi.InputByte.delete_forward, abi.InputByte.document_start, abi.InputByte.document_end,
+    };
+    for (usages, operations, 0..) |usage, op, index| {
+        test_feed = .{};
+        test_feed.reports[0] = makeTestReport(index * 2 + 1, 1, if (index >= 7) 1 else 0, &.{usage});
+        test_feed.reports[1] = makeTestReport(index * 2 + 2, 1, 0, &.{});
+        test_feed.count = 2;
+        try std.testing.expectEqual(@as(usize, 1), router.service(10, DEFAULT_REPORT_BUDGET));
+        try std.testing.expect(router.pollAbiForTask(99) == null);
+        const event = router.pollAbiForTask(app.id).?;
+        try std.testing.expectEqual(op, event.bytes[0]);
+        try std.testing.expectEqual(@as(u8, 0), event.bytes[1]);
+        try std.testing.expectEqual(app.id, event.task_id);
+        try std.testing.expect(router.pollAbiForTask(app.id) == null);
+    }
 }
 
 test "input router gives each keyboard independent transitions and targets modal review ownership" {

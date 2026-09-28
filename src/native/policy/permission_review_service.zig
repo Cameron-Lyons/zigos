@@ -154,6 +154,15 @@ pub const CommandInput = struct {
             .task_switch_previous,
             .show_recovery,
             .dismiss_recovery,
+            .cursor_left,
+            .cursor_right,
+            .cursor_up,
+            .cursor_down,
+            .line_start,
+            .line_end,
+            .document_start,
+            .document_end,
+            .delete_forward,
             => {},
         }
         return false;

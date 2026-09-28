@@ -32,6 +32,15 @@ pub const EventKind = enum(u8) {
     task_switch_previous,
     show_recovery,
     dismiss_recovery,
+    cursor_left,
+    cursor_right,
+    cursor_up,
+    cursor_down,
+    line_start,
+    line_end,
+    document_start,
+    document_end,
+    delete_forward,
 };
 
 pub const KeyboardEvent = struct {
@@ -108,6 +117,23 @@ fn eventForUsage(usage: u8, modifiers: u8) ?KeyboardEvent {
     const shift = (modifiers & SHIFT_MASK) != 0;
     const alt = (modifiers & ALT_MASK) != 0;
     const gui = (modifiers & GUI_MASK) != 0;
+
+    // USB HID Keyboard/Keypad page 0x07, usages 0x4A..0x52.
+    // Selection and word navigation have no semantic event yet.
+    if (usage >= 0x4A and usage <= 0x52) {
+        if (shift or alt or gui) return null;
+        const kind: EventKind = switch (usage) {
+            0x4A => if (control) .document_start else .line_start,
+            0x4D => if (control) .document_end else .line_end,
+            0x4C => if (control) return null else .delete_forward,
+            0x4F => if (control) return null else .cursor_right,
+            0x50 => if (control) return null else .cursor_left,
+            0x51 => if (control) return null else .cursor_down,
+            0x52 => if (control) return null else .cursor_up,
+            else => return null,
+        };
+        return .{ .kind = kind };
+    }
 
     return switch (usage) {
         0x29 => .{ .kind = .dismiss_recovery },
@@ -202,6 +228,23 @@ test "input decoder maps navigation recovery commit and shifted text" {
         .{ .kind = .text, .text = '?' },
     };
     try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{ 0x04, 0x1E, 0x38 }), &expected);
+}
+
+test "input decoder maps cursor editing keys and isolates unsupported modifiers" {
+    const usages = [_]u8{ 0x4A, 0x4C, 0x4D, 0x4F, 0x50, 0x51, 0x52 };
+    const kinds = [_]EventKind{ .line_start, .delete_forward, .line_end, .cursor_right, .cursor_left, .cursor_down, .cursor_up };
+    for (usages, kinds) |usage, kind| {
+        var decoder = Decoder{};
+        try expectDecoded(&decoder, testReport(0, &.{usage}), &.{.{ .kind = kind }});
+        try expectDecoded(&decoder, testReport(0, &.{usage}), &.{});
+        for ([_]u8{ SHIFT_MASK, ALT_MASK, GUI_MASK }) |modifier| {
+            try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+            try expectDecoded(&decoder, testReport(modifier, &.{usage}), &.{});
+        }
+    }
+    var decoder = Decoder{};
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4A, 0x4D }), &.{ .{ .kind = .document_start }, .{ .kind = .document_end } });
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4C, 0x4F, 0x50, 0x51, 0x52 }), &.{});
 }
 
 test "input decoder rejects malformed reports and bounds decoded batches" {

@@ -234,6 +234,18 @@ pub const BootedSystem = struct {
             .text => self.stageHardwareText(event.text, tick),
             .backspace => self.backspaceHardwareText(tick),
             .commit_text => self.commitHardwareText(tick),
+            // Cursor editing belongs to the Notes ELF, not this scripted
+            // shell journey's append-only diagnostic text input.
+            .cursor_left,
+            .cursor_right,
+            .cursor_up,
+            .cursor_down,
+            .line_start,
+            .line_end,
+            .document_start,
+            .document_end,
+            .delete_forward,
+            => self.result(.tick, false),
         };
     }
 

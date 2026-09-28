@@ -25,7 +25,9 @@ const signer = signing.SignerIdentity{ .label = "document-channel-proof", .seed 
 var report_cursor: u8 = 0;
 var report_sequence: u64 = 0;
 var report_usage: u8 = 0x04;
-var report_mode: enum { edit, open, cancel } = .edit;
+var report_modifiers: u8 = 0;
+var report_mode: enum { edit, open, cancel, key } = .edit;
+const cursor_edited_text = "aS\ncond editorb";
 
 const EditorSession = struct {
     task_id: u64,
@@ -108,6 +110,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try editAndSave(manager, second, 0x06);
     try awaitPresentation(manager, second, sibling_text ++ "bc", 2);
     try expectStored(manager, workspace_id, sibling_path, sibling_text ++ "bc", sibling.version_id.raw());
+    try editAtCursorAndSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_channel_sibling_editors);
     try expectDeniedSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_save_feedback);
@@ -303,6 +306,10 @@ fn editAndSave(manager: anytype, editor: EditorSession, usage: u8) !void {
     report_mode = .edit;
     report_usage = usage;
     if (manager.servicePendingInputWork(timer.getTicks()) != 2) return error.InputNotRouted;
+    try awaitSaving(manager, editor);
+}
+
+fn awaitSaving(manager: anytype, editor: EditorSession) !void {
     for (0..512) |_| {
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
@@ -313,6 +320,72 @@ fn editAndSave(manager: anytype, editor: EditorSession, usage: u8) !void {
         return;
     }
     return error.SavingStateMissing;
+}
+
+fn editAtCursorAndSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {
+    const storage = manager.storageServicePtr();
+    const before = try storage.resolve(workspace_id, sibling_path);
+    const checkpoint = storage.checkpoint_store.last_checkpoint_generation;
+    try pressCursorKey(manager, editor, 0x4A, 1, sibling_text ++ "bc", 0, false);
+    try pressCursorKey(manager, editor, 0x4F, 0, sibling_text ++ "bc", 1, false);
+    try pressCursorKey(manager, editor, 0x1B, 0, "Sxecond editorbc", 2, true);
+    try pressCursorKey(manager, editor, 0x4C, 0, "Sxcond editorbc", 2, true);
+    try pressCursorKey(manager, editor, 0x2A, 0, "Scond editorbc", 1, true);
+    try pressCursorKey(manager, editor, 0x28, 0, "S\ncond editorbc", 2, true);
+    try pressCursorKey(manager, editor, 0x52, 0, "S\ncond editorbc", 0, true);
+    try pressCursorKey(manager, editor, 0x04, 0, "aS\ncond editorbc", 1, true);
+    try pressCursorKey(manager, editor, 0x51, 0, "aS\ncond editorbc", 4, true);
+    try pressCursorKey(manager, editor, 0x4A, 0, "aS\ncond editorbc", 3, true);
+    try pressCursorKey(manager, editor, 0x4D, 0, "aS\ncond editorbc", 16, true);
+    try pressCursorKey(manager, editor, 0x50, 0, "aS\ncond editorbc", 15, true);
+    try pressCursorKey(manager, editor, 0x4C, 0, cursor_edited_text, 15, true);
+    try pressCursorKey(manager, editor, 0x4D, 1, cursor_edited_text, 15, true);
+    const staged = try storage.resolve(workspace_id, sibling_path);
+    if (staged.version_id.raw() != before.version_id.raw() or
+        storage.checkpoint_store.last_checkpoint_generation != checkpoint) return error.CursorEditSavedWithoutRequest;
+    // Commit only after all in-place edits have reached the owned surface.
+    report_cursor = 0;
+    report_mode = .key;
+    report_usage = 0x28;
+    report_modifiers = 1;
+    if (manager.servicePendingInputWork(timer.getTicks()) != 1) return error.CursorInputNotRouted;
+    try awaitSaving(manager, editor);
+    try awaitPresentation(manager, editor, cursor_edited_text, 3);
+    try expectStored(manager, workspace_id, sibling_path, cursor_edited_text, before.version_id.raw());
+    if (storage.checkpoint_store.last_checkpoint_generation <= checkpoint) return error.CursorSaveNotDurable;
+}
+
+fn pressCursorKey(manager: anytype, editor: EditorSession, usage: u8, modifiers: u8, expected: []const u8, cursor: u16, dirty: bool) !void {
+    const before = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse return error.EditorMailboxMissing;
+    report_cursor = 0;
+    report_mode = .key;
+    report_usage = usage;
+    report_modifiers = modifiers;
+    if (manager.servicePendingInputWork(timer.getTicks()) != 1) return error.CursorInputNotRouted;
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse continue;
+        if (state.input_event_count != before.input_event_count + 1 or state.ui_presented_revision != state.ui_state_revision) continue;
+        const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
+        const text = if (surface.text) |*value| value else continue;
+        const flags: mailbox_abi.UiStateFlags = @bitCast(text.flags);
+        if (text.cursor != cursor or state.ui_cursor != cursor or flags.dirty != dirty or
+            !std.mem.eql(u8, text.textSlice(), expected)) return error.CursorEditMismatch;
+        const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
+        var row: usize = 5;
+        var column: usize = 0;
+        for (expected[0..cursor]) |byte| {
+            if (byte == '\n' or column + 1 == frame.columns) {
+                column = 0;
+                row += 1;
+            } else column += 1;
+        }
+        if (row >= frame.rows - 3 or !frame.cells[row * frame.columns + column].cursor) return error.CursorNotPresented;
+        const cursor_glyph = [_]u8{if (cursor == expected.len or expected[cursor] == '\n') ' ' else expected[cursor]};
+        if (!framebuffer.verifyText(column, row, &cursor_glyph)) return error.CursorPixelsMissing;
+        return;
+    }
+    return error.CursorEditTimedOut;
 }
 
 fn expectDeniedSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {
@@ -326,7 +399,7 @@ fn expectDeniedSave(manager: anytype, editor: EditorSession, workspace_id: u64) 
         const text = if (surface.text) |*value| value else continue;
         if (text.save_state != @intFromEnum(abi.DocumentSaveState.permission_denied)) continue;
         const flags: mailbox_abi.UiStateFlags = @bitCast(text.flags);
-        if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), sibling_text ++ "bcd")) return error.DeniedSaveLostDraft;
+        if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), cursor_edited_text ++ "d")) return error.DeniedSaveLostDraft;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
         if (!framebuffer.verifyText(0, frame.rows - 2, "Save denied. Your draft is still here.")) return error.SaveDeniedPixelsMissing;
         const after = try storage.resolve(workspace_id, sibling_path);
@@ -407,7 +480,7 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
 }
 
 fn nextReport() ?xhci.HardwareBootKeyboardReport {
-    if (report_cursor >= @as(u8, if (report_mode == .open) 2 else 4)) return null;
+    if (report_cursor >= @as(u8, if (report_mode == .open or report_mode == .key) 2 else 4)) return null;
     defer report_cursor += 1;
     report_sequence += 1;
     var report = xhci.HardwareBootKeyboardReport{
@@ -420,10 +493,11 @@ fn nextReport() ?xhci.HardwareBootKeyboardReport {
         .product_id = 0xC31C,
     };
     if (report_cursor == 0) report.bytes[2] = switch (report_mode) {
-        .edit => report_usage,
+        .edit, .key => report_usage,
         .open => 0x28,
         .cancel => 0x2B,
     };
+    if (report_cursor == 0 and report_mode == .key) report.bytes[0] = report_modifiers;
     if (report_cursor == 2) {
         report.bytes[0] = if (report_mode == .edit) 0x01 else 0;
         report.bytes[2] = 0x28;

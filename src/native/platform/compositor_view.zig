@@ -77,12 +77,14 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
             if (flags.input_overflow) frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
             if (flags.recovery_visible) frame.put(0, frame.rows - 2, "Recovery requested", .warning);
         }
+        if (state.model == .notes and state.save_state == .saved and !flags.dirty and flags.input_overflow)
+            frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
     } else {
         frame.put(0, text_row, "Waiting for task content...", .muted);
     }
     if (surface) |state| {
         if (state.model == .notes) frame.put(0, frame.rows - 1, switch (state.save_state) {
-            .none, .saving, .saved => "Type to edit  |  Ctrl+Enter  Save",
+            .none, .saving, .saved => "Arrows  Move  |  Ctrl+Enter  Save",
             .retryable => "Type to edit  |  Ctrl+Enter  Retry save",
             .permission_denied, .document_changed, .unavailable, .failed => "Type to edit  |  Draft kept in this session",
         }, .muted);
@@ -103,24 +105,36 @@ fn saveStatus(state: abi.DocumentSaveState, dirty: bool) struct { text: []const 
 }
 
 fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: usize) void {
-    var row = start_row;
+    const visible_rows = (frame.rows -| 3) -| start_row;
+    if (visible_rows == 0) return;
+    // Derive a bounded viewport from the acknowledged cursor. The compositor
+    // owns no editor scroll state, and repeated snapshots produce the same cells.
+    var cursor_row: usize = 0;
+    var cursor_column: usize = 0;
+    for (text[0..@min(cursor, text.len)]) |byte| {
+        advanceTextPosition(byte, frame.columns, &cursor_row, &cursor_column);
+    }
+    const first_row = cursor_row -| (visible_rows - 1);
+    var row: usize = 0;
     var column: usize = 0;
     for (text, 0..) |byte, index| {
-        if (row >= frame.rows - 3) return;
-        if (index == cursor) frame.cells[row * frame.columns + column].cursor = true;
-        if (byte == '\n') {
-            column = 0;
-            row += 1;
-        } else {
-            frame.cells[row * frame.columns + column].character = byte;
-            column += 1;
-            if (column == frame.columns) {
-                column = 0;
-                row += 1;
-            }
+        if (row >= first_row + visible_rows) return;
+        if (row >= first_row) {
+            const cell = &frame.cells[(start_row + row - first_row) * frame.columns + column];
+            if (index == cursor) cell.cursor = true;
+            if (byte != '\n') cell.character = byte;
         }
+        advanceTextPosition(byte, frame.columns, &row, &column);
     }
-    if (cursor == text.len and row < frame.rows - 3) frame.cells[row * frame.columns + column].cursor = true;
+    if (cursor == text.len and row >= first_row and row < first_row + visible_rows)
+        frame.cells[(start_row + row - first_row) * frame.columns + column].cursor = true;
+}
+
+fn advanceTextPosition(byte: u8, columns: usize, row: *usize, column: *usize) void {
+    if (byte == '\n' or column.* + 1 == columns) {
+        column.* = 0;
+        row.* += 1;
+    } else column.* += 1;
 }
 
 test "desktop view renders owned surface text and removes stale task content" {
@@ -157,7 +171,7 @@ test "desktop view renders owned surface text and removes stale task content" {
     for (frame.cells[6 * frame.columns ..][0..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
 }
 
-test "desktop text wraps clips and clears the previous cursor" {
+test "desktop text wraps scrolls to its cursor and clears old cells" {
     const std = @import("std");
     var frame = try scanout.Frame.init(20, 10);
     drawText(&frame, 5, "abcdefghijklmnopqrstUV", 22);
@@ -166,8 +180,18 @@ test "desktop text wraps clips and clears the previous cursor" {
     try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
     frame.clear();
     drawText(&frame, 6, "abcdefghijklmnopqrstUV", 22);
-    try expectText(&frame, 0, 6, "abcdefghijklmnopqrst");
+    try expectText(&frame, 0, 6, "UV");
+    try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
     for (frame.cells[7 * 20 ..][0..20]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
+    frame.clear();
+    drawText(&frame, 5, "one\ntwo\nthree\n", 14);
+    try expectText(&frame, 0, 5, "three");
+    try std.testing.expect(frame.cells[6 * 20].cursor);
+    frame.clear();
+    drawText(&frame, 5, "one\ntwo\nthree\n", 1);
+    try expectText(&frame, 0, 5, "one");
+    try std.testing.expect(frame.cells[5 * 20 + 1].cursor);
+    try std.testing.expect(!frame.cells[6 * 20].cursor);
     var tiny = try scanout.Frame.init(4, 1);
     const empty = compositor.Session.init();
     render(&tiny, &empty, null);
@@ -205,6 +229,9 @@ test "desktop renders document save feedback without treating a dirty receipt as
         try std.testing.expectEqual(case.style, frame.cells[18 * frame.columns].style);
     }
     content.flags.dirty = false;
+    render(&frame, &session, content);
+    try expectText(&frame, 0, 18, "Text is full. Remove text to continue.");
+    content.flags.input_overflow = false;
     render(&frame, &session, content);
     try expectText(&frame, 0, 18, "Saved locally");
     try std.testing.expectEqual(@as(u8, ' '), frame.cells[18 * frame.columns + 13].character);
