@@ -982,6 +982,23 @@ pub fn GenerationalArena(
             return self.handleForIndex(slot_index);
         }
 
+        /// Preview the next reservation or replacement without consuming a slot
+        /// or generation. Valid only until the next mutation of this arena.
+        pub fn previewHandle(self: *const Self, replaced: ?Handle) ?Handle {
+            if (replaced) |old| {
+                if (!self.handleMatches(old.slotIndex(), old)) return null;
+                return Handle.fromParts(old.slotIndex(), nextSlotGeneration(old.generation()));
+            }
+            const claimed_count = self.claimedCount();
+            const slot_index = if (publicReusableIndex(capacity, self.free_head)) |free| blk: {
+                if (free >= claimed_count) return null;
+                break :blk free;
+            } else claimed_count;
+            if (slot_index >= capacity) return null;
+            const generation = self.slot_generations[slot_index];
+            return Handle.fromParts(slot_index, if (generation == 0) 1 else generation);
+        }
+
         /// The caller must overwrite the entire returned slot before reading it.
         pub fn reserveHandleForOverwrite(self: *Self) ?Handle {
             const slot_index = self.popFreeIndex() orelse return null;
@@ -2205,6 +2222,29 @@ test "generational arena generations wrap without zero" {
     try std.testing.expectEqual(@as(u32, 1), wrapped_handle.generation());
     try std.testing.expect(arena.getByHandle(last_generation_handle) == null);
     try std.testing.expectEqual(@as(usize, 1), arena.countInUse());
+}
+
+test "generational arena previews do not consume authority on abandoned reservations" {
+    const Arena = GenerationalArena("PreviewedHandle", TestSlot, 2);
+    var arena = Arena.init();
+    const empty = arena;
+    const first = arena.previewHandle(null).?;
+    for (0..4) |_| try std.testing.expect(first.eql(arena.previewHandle(null).?));
+    try std.testing.expectEqualDeep(empty, arena);
+    try std.testing.expect(first.eql(arena.reserveHandle().?));
+    const second = arena.reserveHandle().?;
+    try std.testing.expect(arena.previewHandle(null) == null);
+    const full = arena;
+    const next = arena.previewHandle(first).?;
+    try std.testing.expectEqualDeep(full, arena);
+    try std.testing.expect(next.eql(arena.replaceHandle(first).?));
+    try std.testing.expect(arena.previewHandle(first) == null);
+    try std.testing.expect(arena.removeHandle(second));
+    const hole = arena;
+    const reuse = arena.previewHandle(null).?;
+    try std.testing.expectEqualDeep(hole, arena);
+    try std.testing.expect(reuse.eql(arena.reserveHandle().?));
+    try std.testing.expect(reuse.slotIndex() == second.slotIndex() and !reuse.eql(second));
 }
 
 test "generational arena replaces live handles in place" {

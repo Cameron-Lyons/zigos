@@ -122,8 +122,14 @@ requests.
   authenticates its metadata and creates no handles. Identity registration,
   assertions, and recovery now use private service-owned vault leases. Requests
   carry handles instead of credential seeds. Each vault operation checks current
-  vault policy, and assertions also recheck credential policy. Assertion signatures
-  bind counters and security claims, and recovery approvals bind the registered
+  vault policy, and assertions also recheck credential policy. Import, generation,
+  rotation, lending and revocation preserve prior vault state when their supplied
+  audit backend fails. Unpublished material is erased without consuming a key ID;
+  both lease tables are checked before audit acceptance, including slot reuse.
+  Rotation prepares its replacement before revoking old leases. Export and signing
+  withhold results on audit failure. These are serialized service guarantees;
+  durable audit retention remains the audit backend and caller's responsibility.
+  Assertion signatures bind counters and security claims, and recovery approvals bind the registered
   threshold, replacement key, and credential generation. Unlock signatures also
   bind the current boot ID and a fresh service-owned session nonce; locking or
   restarting the verifier invalidates old proofs even when relative clocks reset.

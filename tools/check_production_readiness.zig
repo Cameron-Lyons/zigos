@@ -3555,7 +3555,7 @@ fn validateSecretVaultHardwareProviderBoundary(
         "pub const GenerateSigningKeyRequest",
         "self.store.generateSigningKey(request.owner, request.label)",
         ".operation = .generate_signing_key",
-        "self.store.secrets[slot_index] = unused_slot",
+        "errdefer self.discardUnpublishedSecret(slot_index, previous_id)",
         "service.attachHardwareProvider(testHardwareProvider())",
         "expiry_service.attachHardwareProvider(testHardwareProvider())",
         "export_service.attachHardwareProvider(testHardwareProvider())",
