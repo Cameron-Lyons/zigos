@@ -29,6 +29,7 @@ var report_modifiers: u8 = 0;
 var report_mode: enum { edit, open, cancel, key } = .edit;
 const cursor_edited_text = "aS\ncond editorb";
 const selection_edited_text = "Q\nb";
+const undo_edited_text = selection_edited_text ++ "u";
 
 const EditorSession = struct {
     task_id: u64,
@@ -113,6 +114,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try expectStored(manager, workspace_id, sibling_path, sibling_text ++ "bc", sibling.version_id.raw());
     try editAtCursorAndSave(manager, second, workspace_id);
     try selectAndSave(manager, second, workspace_id);
+    try undoAndSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_channel_sibling_editors);
     try expectDeniedSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_save_feedback);
@@ -439,6 +441,38 @@ fn pressSelectionKey(manager: anytype, editor: EditorSession, usage: u8, modifie
     return error.CursorEditTimedOut;
 }
 
+fn undoAndSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {
+    const storage = manager.storageServicePtr();
+    const before = try storage.resolve(workspace_id, sibling_path);
+    const checkpoint = storage.checkpoint_store.last_checkpoint_generation;
+    try pressSelectionKey(manager, editor, 0x04, 1, selection_edited_text, 3, 0, false);
+    try pressCursorKey(manager, editor, 0x1D, 2, "Z", 1, true);
+    try pressSelectionKey(manager, editor, 0x1D, 1, selection_edited_text, 3, 0, false);
+    try pressCursorKey(manager, editor, 0x1D, 3, "Z", 1, true);
+    try pressSelectionKey(manager, editor, 0x1D, 1, selection_edited_text, 3, 0, false);
+    try pressCursorKey(manager, editor, 0x15, 2, "R", 1, true);
+    try pressCursorKey(manager, editor, 0x1D, 3, "R", 1, true);
+    try pressSelectionKey(manager, editor, 0x1D, 1, selection_edited_text, 3, 0, false);
+    try pressCursorKey(manager, editor, 0x4F, 0, selection_edited_text, 3, false);
+    try pressCursorKey(manager, editor, 0x18, 0, undo_edited_text, 4, true);
+    try pressCursorKey(manager, editor, 0x1D, 1, selection_edited_text, 3, false);
+    const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
+    if (!framebuffer.verifyText(0, frame.rows - 2, "Saved locally")) return error.UndoSavedPixelsMissing;
+    try pressCursorKey(manager, editor, 0x1D, 3, undo_edited_text, 4, true);
+    const staged = try storage.resolve(workspace_id, sibling_path);
+    if (staged.version_id.raw() != before.version_id.raw() or
+        storage.checkpoint_store.last_checkpoint_generation != checkpoint) return error.UndoSavedWithoutRequest;
+    report_cursor = 0;
+    report_mode = .key;
+    report_usage = 0x28;
+    report_modifiers = 1;
+    if (manager.servicePendingInputWork(timer.getTicks()) != 1) return error.UndoInputNotRouted;
+    try awaitSaving(manager, editor);
+    try awaitPresentation(manager, editor, undo_edited_text, 5);
+    try expectStored(manager, workspace_id, sibling_path, undo_edited_text, before.version_id.raw());
+    if (storage.checkpoint_store.last_checkpoint_generation <= checkpoint) return error.UndoSaveNotDurable;
+}
+
 fn expectDeniedSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {
     const storage = manager.storageServicePtr();
     const before = try storage.resolve(workspace_id, sibling_path);
@@ -450,7 +484,7 @@ fn expectDeniedSave(manager: anytype, editor: EditorSession, workspace_id: u64) 
         const text = if (surface.text) |*value| value else continue;
         if (text.state.save_state != @intFromEnum(abi.DocumentSaveState.permission_denied)) continue;
         const flags: mailbox_abi.UiStateFlags = @bitCast(text.state.flags);
-        if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), selection_edited_text ++ "d")) return error.DeniedSaveLostDraft;
+        if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), undo_edited_text ++ "d")) return error.DeniedSaveLostDraft;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
         if (!framebuffer.verifyText(0, frame.rows - 2, "Save denied. Your draft is still here.")) return error.SaveDeniedPixelsMissing;
         const after = try storage.resolve(workspace_id, sibling_path);

@@ -164,6 +164,8 @@ pub const CommandInput = struct {
             .document_end,
             .delete_forward,
             .select_all,
+            .undo,
+            .redo,
             => {},
         }
         return false;

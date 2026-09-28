@@ -85,7 +85,7 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
     }
     if (surface) |state| {
         if (state.model == .notes) frame.put(0, frame.rows - 1, switch (state.save_state) {
-            .none, .saving, .saved => "Shift+Arrows  Select  |  Ctrl+Enter  Save",
+            .none, .saving, .saved => "Ctrl+Z  Undo  |  Ctrl+Shift+Z  Redo  |  Ctrl+Enter  Save",
             .retryable => "Type to edit  |  Ctrl+Enter  Retry save",
             .permission_denied, .document_changed, .unavailable, .failed => "Type to edit  |  Draft kept in this session",
         }, .muted);

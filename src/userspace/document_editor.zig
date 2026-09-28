@@ -22,6 +22,8 @@ pub const Editor = struct {
     client: ?Client = null,
     queued: [protocol.MAX_DOCUMENT_BYTES]u8 = undefined,
     queued_length: u16 = 0,
+    saving_revision: ?u64 = null,
+    queued_revision: ?u64 = null,
     has_queued: bool = false,
     transport_failed: bool = false,
     opened: bool = false,
@@ -30,6 +32,8 @@ pub const Editor = struct {
         if (std.meta.eql(self.binding, binding)) return;
         self.binding = binding;
         self.has_queued = false;
+        self.saving_revision = null;
+        self.queued_revision = null;
         self.transport_failed = false;
         self.opened = false;
         surface.setSaveState(.none);
@@ -76,6 +80,8 @@ pub const Editor = struct {
                 surface.setSaveState(.failed);
                 return;
             };
+            self.saving_revision = surface.contentRevision();
+            surface.history.breakGroup();
             surface.setSaveState(.saving);
             return;
         }
@@ -85,7 +91,9 @@ pub const Editor = struct {
         if (self.has_queued) {
             self.queued_length = surface.text_length;
             @memcpy(self.queued[0..self.queued_length], surface.textSlice());
+            self.queued_revision = surface.contentRevision();
         }
+        surface.history.breakGroup();
         _ = client.retry();
         surface.setSaveState(.saving);
     }
@@ -123,15 +131,15 @@ pub const Editor = struct {
             }
             if (!self.opened and client.phase == .failed) surface.failDocumentLoad();
             if (client.acknowledgedText()) |text| {
+                _ = surface.acknowledgeSavedText(text, self.saving_revision);
                 if (self.has_queued) {
                     client.start(self.queued[0..self.queued_length]) catch {
                         surface.setSaveState(.failed);
                         return false;
                     };
+                    self.saving_revision = self.queued_revision;
                     self.has_queued = false;
                     surface.setSaveState(.saving);
-                } else {
-                    if (!surface.acknowledgeSavedText(text)) surface.setSaveState(.none);
                 }
             }
         }
@@ -248,6 +256,75 @@ fn setTestText(surface: *State, text: []const u8) void {
     surface.selection_anchor = surface.cursor;
     surface.flags.dirty = true;
     surface.revision += 1;
+}
+
+fn applyTestInput(surface: *State, op: u8, data: u8) void {
+    var event = std.mem.zeroes(abi.InputEventDescriptor);
+    event.sequence = surface.last_sequence + 1;
+    event.length = 2;
+    event.bytes = abi.inputPacket(op, data);
+    _ = surface.apply(event);
+}
+
+test "document editor delayed receipts track undo redo and discarded history branches" {
+    var editor = Editor{};
+    var surface = State.init("app.notes");
+    var transport = TestTransport{};
+    try openTestEditor(&editor, &surface, &transport);
+    applyTestInput(&surface, abi.InputByte.text, 'a');
+    editor.requestSave(test_binding, &surface);
+    for (0..2) |_| _ = editor.step(test_binding, &surface, &transport);
+    applyTestInput(&surface, abi.InputByte.text, 'b');
+    applyTestInput(&surface, abi.InputByte.undo, 0);
+    try std.testing.expectEqualStrings("a", surface.textSlice());
+    try std.testing.expect(surface.flags.dirty);
+    try transport.acknowledge(&editor);
+    _ = editor.step(test_binding, &surface, &transport);
+    try std.testing.expect(!surface.flags.dirty);
+
+    applyTestInput(&surface, abi.InputByte.text, 'c');
+    editor.requestSave(test_binding, &surface);
+    for (0..2) |_| _ = editor.step(test_binding, &surface, &transport);
+    applyTestInput(&surface, abi.InputByte.undo, 0);
+    try transport.acknowledge(&editor);
+    _ = editor.step(test_binding, &surface, &transport);
+    try std.testing.expectEqualStrings("a", surface.textSlice());
+    try std.testing.expect(surface.flags.dirty);
+    applyTestInput(&surface, abi.InputByte.redo, 0);
+    try std.testing.expectEqualStrings("ac", surface.textSlice());
+    try std.testing.expect(!surface.flags.dirty);
+    applyTestInput(&surface, abi.InputByte.undo, 0);
+    applyTestInput(&surface, abi.InputByte.text, 'd');
+    try std.testing.expectEqualStrings("ad", surface.textSlice());
+    try std.testing.expect(surface.flags.dirty);
+    applyTestInput(&surface, abi.InputByte.redo, 0);
+    try std.testing.expectEqualStrings("ad", surface.textSlice());
+}
+
+test "document editor queued save receipts retain the correct undo save point" {
+    var editor = Editor{};
+    var surface = State.init("app.notes");
+    var transport = TestTransport{};
+    try openTestEditor(&editor, &surface, &transport);
+    applyTestInput(&surface, abi.InputByte.text, 'a');
+    editor.requestSave(test_binding, &surface);
+    for (0..2) |_| _ = editor.step(test_binding, &surface, &transport);
+    applyTestInput(&surface, abi.InputByte.text, 'b');
+    editor.requestSave(test_binding, &surface);
+    applyTestInput(&surface, abi.InputByte.undo, 0);
+    try transport.acknowledge(&editor);
+    _ = editor.step(test_binding, &surface, &transport);
+    try std.testing.expectEqualStrings("a", surface.textSlice());
+    try std.testing.expect(surface.flags.dirty);
+    try std.testing.expectEqual(abi.DocumentSaveState.saving, surface.save_state);
+    _ = editor.step(test_binding, &surface, &transport);
+    try transport.acknowledge(&editor);
+    _ = editor.step(test_binding, &surface, &transport);
+    try std.testing.expect(surface.flags.dirty);
+    applyTestInput(&surface, abi.InputByte.redo, 0);
+    try std.testing.expectEqualStrings("ab", surface.textSlice());
+    try std.testing.expect(!surface.flags.dirty);
+    try std.testing.expectEqual(abi.DocumentSaveState.saved, surface.save_state);
 }
 
 test "document editor bounds dispatches retains backpressured frames and parks awaiting receipts" {

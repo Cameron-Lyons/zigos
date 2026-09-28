@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 14;
+pub const ABI_VERSION: u16 = 15;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -27,6 +27,8 @@ pub const InputByte = struct {
     pub const document_end: u8 = 18;
     pub const delete_forward: u8 = 19;
     pub const select_all: u8 = 20;
+    pub const undo: u8 = 21;
+    pub const redo: u8 = 22;
 };
 
 pub const INPUT_EXTEND_SELECTION: u8 = 1;
@@ -410,7 +412,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 14), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 15), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));

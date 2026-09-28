@@ -75,7 +75,7 @@ requests.
   retires cancelled preparations. The 256-byte mailbox uses a typed UI channel
   for either a launcher or an editor. Cold-boot and reboot verification exercise
   these controls through the compositor ELF with modeled keyboard input.
-  Native ABI v14 copies canonical text snapshots from validated task memory;
+  Native ABI v15 copies canonical text snapshots from validated task memory;
   the compositor owns each accepted revision and rejects conflicting updates.
   The native boot path now maps the firmware framebuffer and draws document
   text, cursors, unsaved state, and selected Open/Cancel controls. Later frames
@@ -90,10 +90,15 @@ requests.
   the highlighted range; Backspace and Delete remove it. Navigation and selection
   preserve saved state; edits remain staged until Ctrl+Enter. The compositor
   scrolls wrapped text to keep the cursor visible without retaining another
-  editor buffer. Unicode text, navigation by visual wrapped rows, clipboard
-  operations, and undo remain open. Selection and save feedback fit within the
+  editor buffer. Ctrl+Z undoes edits and Ctrl+Shift+Z redoes them, restoring the
+  cursor and selection. Task-local history retains up to 32 edit groups and
+  1 KiB of changed text within a 1,920-byte budget. Typing groups break at spaces,
+  navigation, and saves; a new edit after undo discards the redo branch. Save
+  receipts track content revisions, so a delayed save cannot mark another draft
+  clean. Unicode text, navigation by visual wrapped rows, and clipboard
+  operations remain open. Selection and save feedback fit within the
   unchanged 528-byte text snapshot. Boot verification reads back mapped device
-  pixels for the launcher, edited Notes text, forward and reverse selections, save
+  pixels for the launcher, edited Notes text, selection and undo/redo results, save
   progress, durable success, and a denied save after revocation. A production
   document picker,
   identity and permission provisioning, accelerated graphics, Unicode rendering,

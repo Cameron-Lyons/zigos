@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
+const edit_history = @import("edit_history.zig");
 
 pub const TEXT_CAPACITY: usize = 512;
 const INTERACTION_HASH_SEED: u64 = 0xcbf29ce484222325;
@@ -29,6 +30,7 @@ pub const State = struct {
     revision: u64 = 0,
     interaction_hash: u64 = 0,
     last_sequence: u64 = 0,
+    history: edit_history.History = .{},
 
     pub fn init(comptime bundle_id: []const u8) State {
         const model = modelForBundle(bundle_id);
@@ -102,12 +104,15 @@ pub const State = struct {
             abi.InputByte.document_end,
             abi.InputByte.delete_forward,
             abi.InputByte.select_all,
+            abi.InputByte.undo,
+            abi.InputByte.redo,
             => {},
             else => return .rejected,
         }
 
         self.last_sequence = event.sequence;
         self.interaction_hash = mixEvent(self.interaction_hash, event);
+        if (op != abi.InputByte.text) self.history.breakGroup();
         const mutated = switch (op) {
             abi.InputByte.text => self.insertText(data),
             abi.InputByte.backspace => self.backspace(),
@@ -121,6 +126,8 @@ pub const State = struct {
             abi.InputByte.document_start => self.moveCursor(0, false, extend),
             abi.InputByte.document_end => self.moveCursor(self.text_length, false, extend),
             abi.InputByte.select_all => self.selectAll(),
+            abi.InputByte.undo => self.restoreEdit(false),
+            abi.InputByte.redo => self.restoreEdit(true),
             abi.InputByte.commit_text => self.commit(),
             abi.InputByte.focus_next => self.moveFocus(true),
             abi.InputByte.focus_previous => self.moveFocus(false),
@@ -140,6 +147,10 @@ pub const State = struct {
         const end = self.selectionEnd();
         const new_length = self.text_length - (end - start) + 1;
         if (new_length > self.text.len) return self.noteOverflow();
+        if (self.model == .notes) {
+            self.history.remember(@intCast(start), self.text[start..end], &.{byte}, self.cursor, self.selection_anchor, byte != '\n');
+            if (byte == ' ' or byte == '\n') self.history.breakGroup();
+        }
         if (end == start) {
             std.mem.copyBackwards(u8, self.text[start + 1 .. new_length], self.text[end..self.text_length]);
         } else {
@@ -167,6 +178,7 @@ pub const State = struct {
     }
 
     fn eraseRange(self: *State, start: usize, end: usize) bool {
+        if (self.model == .notes) self.history.remember(@intCast(start), self.text[start..end], "", self.cursor, self.selection_anchor, false);
         const new_length = self.text_length - (end - start);
         std.mem.copyForwards(u8, self.text[start..new_length], self.text[end..self.text_length]);
         @memset(self.text[new_length..self.text_length], 0);
@@ -175,6 +187,35 @@ pub const State = struct {
         self.selection_anchor = self.cursor;
         self.edited();
         return true;
+    }
+
+    fn restoreEdit(self: *State, redo: bool) bool {
+        if (self.model != .notes) return false;
+        const change = (if (redo) self.history.redo() else self.history.undo()) orelse return false;
+        const end = change.position + change.remove_length;
+        const new_end = change.position + change.insert.len;
+        const new_length = self.text_length - change.remove_length + change.insert.len;
+        if (new_end > end) {
+            std.mem.copyBackwards(u8, self.text[new_end..new_length], self.text[end..self.text_length]);
+        } else {
+            std.mem.copyForwards(u8, self.text[new_end..new_length], self.text[end..self.text_length]);
+            @memset(self.text[new_length..self.text_length], 0);
+        }
+        @memcpy(self.text[change.position..new_end], change.insert);
+        self.text_length = @intCast(new_length);
+        self.cursor = change.cursor;
+        self.selection_anchor = change.anchor;
+        self.vertical_column = NO_VERTICAL_COLUMN;
+        self.flags.input_overflow = false;
+        self.flags.dirty = !self.history.isSaved() or self.save_state == .saving or self.save_state == .retryable;
+        if (!self.flags.dirty) {
+            self.save_state = if (self.history.saved_feedback) .saved else .none;
+        } else if (self.save_state == .saved) self.save_state = .none;
+        return true;
+    }
+
+    pub fn contentRevision(self: *const State) ?u64 {
+        return self.history.revision();
     }
 
     fn edited(self: *State) void {
@@ -244,16 +285,22 @@ pub const State = struct {
         return true;
     }
 
-    pub fn acknowledgeSavedText(self: *State, saved_text: []const u8) bool {
-        if (self.model != .notes or !self.flags.dirty or !std.mem.eql(u8, self.textSlice(), saved_text)) return false;
-        self.flags.dirty = false;
-        self.save_state = .saved;
-        self.revision +|= 1;
-        return true;
+    pub fn acknowledgeSavedText(self: *State, saved_text: []const u8, saved_revision: ?u64) bool {
+        if (self.model != .notes) return false;
+        const matches = std.mem.eql(u8, self.textSlice(), saved_text);
+        self.history.markSaved(if (matches) self.contentRevision() else saved_revision);
+        const save_state: abi.DocumentSaveState = if (matches) .saved else .none;
+        if (self.flags.dirty == matches or self.save_state != save_state) self.revision +|= 1;
+        self.flags.dirty = !matches;
+        self.save_state = save_state;
+        return matches;
     }
 
     pub fn setSaveState(self: *State, state: abi.DocumentSaveState) void {
-        if (self.model != .notes or self.save_state == state) return;
+        if (self.model != .notes) return;
+        const pending_clean = state == .saving and !self.flags.dirty;
+        if (self.save_state == state and !pending_clean) return;
+        if (pending_clean) self.flags.dirty = true;
         self.save_state = state;
         self.revision +|= 1;
     }
@@ -283,6 +330,7 @@ pub const State = struct {
         self.cursor = self.text_length;
         self.vertical_column = NO_VERTICAL_COLUMN;
         self.selection_anchor = self.cursor;
+        self.history = .{};
         self.flags.loading = false;
         self.flags.load_failed = false;
         self.flags.input_overflow = false;
@@ -391,7 +439,7 @@ test "UI surface state selects application-specific fixed-capacity models" {
 test "Notes edits invalidate saved feedback while preserving in-flight and failed saves" {
     var state = State.init("app.notes");
     _ = state.apply(inputEvent(1, abi.InputByte.text, 'a'));
-    try std.testing.expect(state.acknowledgeSavedText("a"));
+    try std.testing.expect(state.acknowledgeSavedText("a", state.contentRevision()));
     try std.testing.expectEqual(abi.DocumentSaveState.saved, state.save_state);
     _ = state.apply(inputEvent(2, abi.InputByte.text, 'b'));
     try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
@@ -404,7 +452,7 @@ test "Notes edits invalidate saved feedback while preserving in-flight and faile
     const presentation = state.presentationText();
     try std.testing.expect(presentation.isCanonical());
     try std.testing.expectEqual(@intFromEnum(abi.DocumentSaveState.permission_denied), presentation.state.save_state);
-    try std.testing.expect(state.acknowledgeSavedText("ac"));
+    try std.testing.expect(state.acknowledgeSavedText("ac", state.contentRevision()));
     _ = state.apply(inputEvent(5, abi.InputByte.backspace, 0));
     try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
 }
@@ -432,7 +480,7 @@ test "Notes accepts durable receipts without clearing edits made during a save" 
     try std.testing.expect(!client.accept(99, 1, saved));
     try std.testing.expect(!client.accept(12, 2, saved));
     try std.testing.expect(client.accept(12, 1, saved));
-    try std.testing.expect(!state.acknowledgeSavedText(client.acknowledgedText().?));
+    try std.testing.expect(!state.acknowledgeSavedText(client.acknowledgedText().?, null));
     try std.testing.expect(state.flags.dirty);
     try client.start(state.textSlice());
     try std.testing.expect(!client.accept(12, 1, saved));
@@ -445,7 +493,7 @@ test "Notes accepts durable receipts without clearing edits made during a save" 
         .checkpoint_generation = 8,
     } } });
     try std.testing.expect(client.accept(12, 2, latest));
-    try std.testing.expect(state.acknowledgeSavedText(client.acknowledgedText().?));
+    try std.testing.expect(state.acknowledgeSavedText(client.acknowledgedText().?, null));
     try std.testing.expect(!state.flags.dirty);
     try std.testing.expectEqualStrings("ab", state.textSlice());
 }
@@ -505,6 +553,105 @@ test "Notes cursor edits preserve surrounding text and navigation does not dirty
     try std.testing.expect(state.flags.dirty);
     try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
     try std.testing.expect(state.presentationText().isCanonical());
+}
+
+test "Notes undo restores replaced selections and redo returns to the saved edit" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("abc\ndef"));
+    _ = state.apply(inputEvent(1, abi.InputByte.cursor_left, abi.INPUT_EXTEND_SELECTION));
+    _ = state.apply(inputEvent(2, abi.InputByte.document_start, abi.INPUT_EXTEND_SELECTION));
+    _ = state.apply(inputEvent(3, abi.InputByte.text, 'X'));
+    try std.testing.expectEqualStrings("X", state.textSlice());
+    try std.testing.expect(state.acknowledgeSavedText("X", state.contentRevision()));
+    _ = state.apply(inputEvent(4, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("abc\ndef", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 0), state.cursor);
+    try std.testing.expectEqual(@as(u16, 7), state.selection_anchor);
+    try std.testing.expect(state.flags.dirty);
+    try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
+    _ = state.apply(inputEvent(5, abi.InputByte.redo, 0));
+    try std.testing.expectEqualStrings("X", state.textSlice());
+    try std.testing.expect(!state.flags.dirty);
+    try std.testing.expectEqual(abi.DocumentSaveState.saved, state.save_state);
+    try std.testing.expect(state.presentationText().isCanonical());
+}
+
+test "Notes edit history roundtrips every short selection and both deletion directions" {
+    const original = "ab\ncd";
+    for (0..original.len + 1) |cursor| {
+        for (0..original.len + 1) |anchor| {
+            for ([_]u8{ abi.InputByte.text, abi.InputByte.activate, abi.InputByte.backspace, abi.InputByte.delete_forward }) |op| {
+                var state = State.init("app.notes");
+                try std.testing.expect(state.loadDocument(original));
+                state.cursor = @intCast(cursor);
+                state.selection_anchor = @intCast(anchor);
+                const result = state.apply(inputEvent(1, op, if (op == abi.InputByte.text) 'X' else 0));
+                if (result == .observed) continue;
+                const changed = state.presentationText();
+                _ = state.apply(inputEvent(2, abi.InputByte.undo, 0));
+                try std.testing.expectEqualStrings(original, state.textSlice());
+                try std.testing.expectEqual(cursor, state.cursor);
+                try std.testing.expectEqual(anchor, state.selection_anchor);
+                try std.testing.expect(!state.flags.dirty);
+                try std.testing.expect(state.presentationText().isCanonical());
+                _ = state.apply(inputEvent(3, abi.InputByte.redo, 0));
+                try std.testing.expectEqualDeep(changed, state.presentationText());
+            }
+        }
+    }
+}
+
+test "Notes groups typing and separates navigation saves and new branches" {
+    var state = State.init("app.notes");
+    for ("one two", 1..) |byte, sequence| _ = state.apply(inputEvent(sequence, abi.InputByte.text, byte));
+    _ = state.apply(inputEvent(8, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("one ", state.textSlice());
+    _ = state.apply(inputEvent(9, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("", state.textSlice());
+    try std.testing.expect(!state.flags.dirty);
+    _ = state.apply(inputEvent(10, abi.InputByte.redo, 0));
+    _ = state.apply(inputEvent(11, abi.InputByte.text, 'X'));
+    try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(12, abi.InputByte.redo, 0)));
+    try std.testing.expectEqualStrings("one X", state.textSlice());
+    try std.testing.expect(state.acknowledgeSavedText(state.textSlice(), state.contentRevision()));
+    _ = state.apply(inputEvent(13, abi.InputByte.text, 'Y'));
+    _ = state.apply(inputEvent(14, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("one X", state.textSlice());
+    try std.testing.expect(!state.flags.dirty);
+    _ = state.apply(inputEvent(15, abi.InputByte.cursor_left, 0));
+    _ = state.apply(inputEvent(16, abi.InputByte.text, 'Z'));
+    _ = state.apply(inputEvent(17, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("one X", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 4), state.cursor);
+    try std.testing.expect(!state.flags.dirty);
+}
+
+test "Notes undo and redo preserve full documents and delete history at a new load" {
+    const full = [_]u8{'a'} ** TEXT_CAPACITY;
+    for ([_]u8{ abi.InputByte.text, abi.InputByte.activate, abi.InputByte.backspace, abi.InputByte.delete_forward }) |op| {
+        var state = State.init("app.notes");
+        try std.testing.expect(state.loadDocument(&full));
+        _ = state.apply(inputEvent(1, abi.InputByte.select_all, 0));
+        _ = state.apply(inputEvent(2, op, if (op == abi.InputByte.text) 'x' else 0));
+        _ = state.apply(inputEvent(3, abi.InputByte.undo, 0));
+        try std.testing.expectEqualStrings(&full, state.textSlice());
+        try std.testing.expectEqual(@as(u16, 0), state.selection_anchor);
+        try std.testing.expect(!state.flags.dirty);
+        try std.testing.expect(state.presentationText().isCanonical());
+        _ = state.apply(inputEvent(4, abi.InputByte.redo, 0));
+        try std.testing.expectEqualStrings(switch (op) {
+            abi.InputByte.text => "x",
+            abi.InputByte.activate => "\n",
+            else => "",
+        }, state.textSlice());
+        try std.testing.expect(state.presentationText().isCanonical());
+        _ = state.apply(inputEvent(5, abi.InputByte.undo, 0));
+        try std.testing.expect(state.loadDocument("next"));
+        try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(6, abi.InputByte.redo, 0)));
+        try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(7, abi.InputByte.undo, 0)));
+        try std.testing.expectEqualStrings("next", state.textSlice());
+        try std.testing.expect(std.mem.allEqual(u8, &state.history.bytes, 0));
+    }
 }
 
 test "Notes replaces selected text without dirtying on selection or consuming surrounding bytes" {
@@ -570,7 +717,7 @@ test "Notes selection replacement works at capacity and receipts retain selectio
         _ = state.apply(inputEvent(4, abi.InputByte.select_all, 0));
         const anchor = state.selection_anchor;
         const cursor = state.cursor;
-        try std.testing.expect(state.acknowledgeSavedText(state.textSlice()));
+        try std.testing.expect(state.acknowledgeSavedText(state.textSlice(), state.contentRevision()));
         try std.testing.expectEqual(anchor, state.selection_anchor);
         try std.testing.expectEqual(cursor, state.cursor);
         try std.testing.expect(!state.flags.dirty);

@@ -246,6 +246,8 @@ pub const BootedSystem = struct {
             .document_end,
             .delete_forward,
             .select_all,
+            .undo,
+            .redo,
             => self.result(.tick, false),
         };
     }

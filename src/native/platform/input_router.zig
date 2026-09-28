@@ -614,6 +614,8 @@ fn inputByte(kind: input_driver_task.EventKind) u8 {
         .document_end => abi.InputByte.document_end,
         .delete_forward => abi.InputByte.delete_forward,
         .select_all => abi.InputByte.select_all,
+        .undo => abi.InputByte.undo,
+        .redo => abi.InputByte.redo,
     };
 }
 
@@ -674,14 +676,15 @@ test "input router delivers cursor editing semantics only to the focused task" {
     var router = Router{};
     router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
     router.bindCompositor(&compositor, 99);
-    const usages = [_]u8{ 0x4A, 0x4D, 0x4F, 0x50, 0x51, 0x52, 0x4C, 0x4A, 0x4D, 0x50, 0x4F, 0x4A, 0x4D, 0x04 };
-    const modifiers = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 1 };
+    const usages = [_]u8{ 0x4A, 0x4D, 0x4F, 0x50, 0x51, 0x52, 0x4C, 0x4A, 0x4D, 0x50, 0x4F, 0x4A, 0x4D, 0x04, 0x1D, 0x1D };
+    const modifiers = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 1, 1, 3 };
     const operations = [_]u8{
         abi.InputByte.line_start,     abi.InputByte.line_end,       abi.InputByte.cursor_right,
         abi.InputByte.cursor_left,    abi.InputByte.cursor_down,    abi.InputByte.cursor_up,
         abi.InputByte.delete_forward, abi.InputByte.document_start, abi.InputByte.document_end,
         abi.InputByte.cursor_left,    abi.InputByte.cursor_right,   abi.InputByte.document_start,
-        abi.InputByte.document_end,   abi.InputByte.select_all,
+        abi.InputByte.document_end,   abi.InputByte.select_all,     abi.InputByte.undo,
+        abi.InputByte.redo,
     };
     for (usages, operations, 0..) |usage, op, index| {
         test_feed = .{};

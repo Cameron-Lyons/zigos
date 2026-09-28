@@ -43,6 +43,8 @@ pub const EventKind = enum(u8) {
     document_end,
     delete_forward,
     select_all,
+    undo,
+    redo,
 };
 
 pub const KeyboardEvent = struct {
@@ -138,6 +140,10 @@ fn eventForUsage(usage: u8, modifiers: u8) ?KeyboardEvent {
     }
 
     return switch (usage) {
+        0x1D => if (control and !alt and !gui)
+            .{ .kind = if (shift) .redo else .undo }
+        else
+            textEvent(usage, shift, control or alt or gui),
         0x04 => if (control and !shift and !alt and !gui)
             .{ .kind = .select_all }
         else
@@ -273,6 +279,17 @@ test "input decoder carries Shift selection and select all without growing event
     try expectDecoded(&decoder, testReport(CONTROL_MASK | ALT_MASK, &.{0x04}), &.{});
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(KeyboardEvent));
     try std.testing.expectEqual(@as(usize, 13), @sizeOf(DecodedEvents));
+}
+
+test "input decoder maps Ctrl Z and Ctrl Shift Z to distinct history operations" {
+    var decoder = Decoder{};
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{0x1D}), &.{.{ .kind = .undo }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK | SHIFT_MASK, &.{0x1D}), &.{.{ .kind = .redo }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK | ALT_MASK, &.{0x1D}), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{0x1D}), &.{.{ .kind = .text, .data = 'z' }});
 }
 
 test "input decoder rejects malformed reports and bounds decoded batches" {
