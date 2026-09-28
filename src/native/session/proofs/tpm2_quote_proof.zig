@@ -94,6 +94,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         if (!std.mem.allEqual(u8, &client.command, 0) or !std.mem.allEqual(u8, &client.response, 0)) return error.ResidentQuoteAuthorization;
     }
     try proveRemoteAttestation(&client, io, blob.slice(), enrolled, measured.pcr11);
+    try provePeerExchange(&client, io, blob.slice(), enrolled, measured.pcr11);
     var changed = enrolled;
     changed.qualified_name[2] ^= 1;
     const commands = io.commands;
@@ -218,4 +219,67 @@ fn proveRemoteAttestation(client: *tpm.Client, io: anytype, blob: []const u8, id
     if (!std.mem.eql(u8, &session.peer_root_digest, &attestation.tpm.bootDigest(&pcr)) or
         !std.mem.eql(u8, &session.attestation_verifier_metadata_digest, &enrollment.digest())) return error.TpmSessionPinMismatch;
     console.print("ZIGOS:TPM2:REMOTE_ATTESTATION:VERIFIED\n");
+}
+
+// A real TPM quote crosses two independently established channel endpoints.
+// The disposable verifier still uses a fixture enrollment authority and PCR policy.
+fn provePeerExchange(client: *tpm.Client, io: anytype, blob: []const u8, identity: quote.Identity, pcr: tpm.Key) !void {
+    const peer = @import("../../sync/peer_channel.zig");
+    const exchange = @import("../../sync/peer_attestation.zig");
+    const graph_mod = @import("../../sync/device_graph.zig");
+    const root = signing.SignerIdentity{ .label = "quote-peer-root", .seed = @splat(0xd1) };
+    const source_key = signing.SignerIdentity{ .label = "quote-peer-source", .seed = @splat(0xd2) };
+    const target_key = signing.SignerIdentity{ .label = "quote-peer-target", .seed = @splat(0xd3) };
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 0x7090 };
+    const source = principal.PrincipalId{ .kind = .device, .serial = 0x7091 };
+    const target = principal.PrincipalId{ .kind = .device, .serial = 0x7092 };
+    var graph = graph_mod.Graph.init();
+    _ = try graph.ensureUserRoot(owner, "quote owner", root);
+    _ = try graph.enrollDevice(owner, source, "quote verifier", root, source_key, 1);
+    _ = try graph.enrollDevice(owner, target, "quote prover", root, target_key, 1);
+    const remote_graph = graph;
+    var a = try peer.Channel.initForVerification(&graph, try signing.publicKey(root), source, target, source_key, .initiator);
+    defer a.close();
+    var b = try peer.Channel.initForVerification(&remote_graph, try signing.publicKey(root), target, source, target_key, .responder);
+    defer b.close();
+    var frame: [peer.MAX_FRAME]u8 = undefined;
+    try b.readHandshake(try a.writeHandshake(&frame, 20), 20);
+    try a.readHandshake(try b.writeHandshake(&frame, 20), 20);
+    try b.readHandshake(try a.writeHandshake(&frame, 20), 20);
+    const enrollment = try attestation.tpm.Enrollment.init(target, identity, 2, "peer-quote-root");
+    var pending = try attestation.tpm.Pending.init(io, enrollment, pcr, .{ .remote_party = "peer.quote.proof", .policy_label = "peer-quote-policy" }, 200, 1000);
+    var verifier = try exchange.Exchange.init(&a, .{ .verify = &pending }, "", 20, 120);
+    defer verifier.close();
+    var prover = try exchange.Exchange.init(&b, .{ .prove = &enrollment }, "", 20, 120);
+    defer prover.close();
+    // Reverse fragments, including a repeated ciphertext, without any TPM I/O.
+    const commands = io.commands;
+    var index: usize = verifier.outgoing_count;
+    while (index != 0) {
+        index -= 1;
+        const packet = verifier.outgoing[index][0..verifier.outgoing_lens[index]];
+        for (0..2) |_| {
+            if (!prover.admit(packet, 21) or !prover.service(21, @splat(0), rejectPeerSend)) return error.PeerChallengeNotAdmitted;
+        }
+    }
+    if (io.commands != commands or prover.ready() or verifier.ready()) return error.PrematurePeerAttestation;
+    const challenge = prover.quoteChallenge(21) orelse return error.MissingPeerQuoteChallenge;
+    var service = attestation.Service.init(target);
+    var response = attestation.tpm.Response{};
+    try service.respondToTpmAttestationRequest(client, io, blob, &auth, &enrollment, &challenge, &response);
+    try prover.completeQuote(&response, 22);
+    index = prover.outgoing_count;
+    while (index != 0) {
+        index -= 1;
+        if (!verifier.admit(prover.outgoing[index][0..prover.outgoing_lens[index]], 23) or !verifier.service(23, @splat(0), rejectPeerSend)) return error.PeerQuoteNotAdmitted;
+    }
+    if (!verifier.ready() or prover.ready() or verifier.accepted == null or service.visible_request_count != 1) return error.PeerQuoteNotVerified;
+    if (!prover.admit(verifier.outgoing[0][0..verifier.outgoing_lens[0]], 24) or !prover.service(24, @splat(0), rejectPeerSend) or !prover.ready()) return error.PeerQuoteNotAcknowledged;
+    var plaintext: [peer.MAX_PAYLOAD]u8 = undefined;
+    if (!std.mem.eql(u8, "attested peer transfer", try b.open(&plaintext, try a.seal(&frame, "attested peer transfer", 25), 25))) return error.PeerQuoteChannelFailed;
+    console.print("ZIGOS:TPM2:PEER_ATTESTATION:VERIFIED\n");
+}
+
+fn rejectPeerSend(_: [6]u8, _: []const u8) bool {
+    return false;
 }

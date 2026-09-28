@@ -1257,7 +1257,10 @@
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
         "src/native/platform/attestation_service.zig",
-        "src/native/platform/tpm_attestation.zig"
+        "src/native/platform/tpm_attestation.zig",
+        "src/native/platform/tpm_attestation_wire.zig",
+        "src/native/sync/peer_attestation.zig",
+        "src/native/sync/peer_connections.zig"
       ],
       "negative_tests": [
         {
@@ -1303,6 +1306,46 @@
         {
           "file": "src/native/sync/tpm_attestation_test.zig",
           "name": "TPM remote attestation gates native driver and endpoint connections before transmission"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds once to its authenticated channel and rejects prior quotes"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation_wire.zig",
+          "name": "TPM wire challenge is canonical bounded and validated against local enrollment"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation_wire.zig",
+          "name": "TPM wire response rejects malformed lengths headers tails and truncation"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation reassembles reordered ciphertext exactly once and survives corrupted and duplicate packets"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation rejects authenticated malformed fragments before quote work"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation challenge deadlines and rollback terminate idle work"
+        },
+        {
+          "file": "src/native/sync/peer_connections_test.zig",
+          "name": "peer connections require attestation before durable transfer and retry lost fragments and acceptance"
+        },
+        {
+          "file": "src/native/sync/peer_connections_test.zig",
+          "name": "peer connections delayed attestation cannot revive released expired revoked or retired transfers"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation rejects session substitution and mixed fragment contexts"
+        },
+        {
+          "file": "src/native/sync/peer_connections_test.zig",
+          "name": "session manager peer connections reject completions before another dispatcher visit after owner loss"
         }
       ]
     },

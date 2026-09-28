@@ -309,6 +309,8 @@ run_quote_boot() {
   if [ "$(grep -c '^ZIGOS:TPM2:QUOTE:' "$log" || true)" -ne 1 ] ||
     [ "$(grep -c '^ZIGOS:TPM2:REMOTE_ATTESTATION:' "$log" || true)" -ne "$remote_attestation_count" ] ||
     { [ "$remote_attestation_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:REMOTE_ATTESTATION:VERIFIED' "$log"; } ||
+    [ "$(grep -c '^ZIGOS:TPM2:PEER_ATTESTATION:' "$log" || true)" -ne "$remote_attestation_count" ] ||
+    { [ "$remote_attestation_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:PEER_ATTESTATION:VERIFIED' "$log"; } ||
     ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log"; then
     cat "$log" >&2
     echo "TPM2 quote proof failed for $name" >&2

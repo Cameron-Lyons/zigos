@@ -59,6 +59,7 @@ pub const Policy = struct {
 pub const Challenge = struct {
     request: attestation.RemoteAttestationRequest,
     approved_pcr11: hash.Digest,
+    channel_binding: hash.Digest = hash.zero_digest,
 
     pub fn validate(self: *const Challenge, enrolled: *const Enrollment) !void {
         try enrolled.validate();
@@ -80,9 +81,10 @@ pub const Challenge = struct {
     // preventing raw quotes or another application protocol from being repackaged.
     pub fn qualifyingData(self: *const Challenge) hash.Digest {
         var h = hash.init();
-        hash.updateBytes(&h, "schema", "zigos.remote-tpm-attestation.v1");
+        hash.updateBytes(&h, "schema", "zigos.remote-tpm-attestation.v2");
         hash.updateBytes(&h, "request", &self.request.digest());
         hash.updateBytes(&h, "approved-pcr11", &self.approved_pcr11);
+        hash.updateBytes(&h, "channel-binding", &self.channel_binding);
         return hash.finalize(&h);
     }
 };
@@ -91,7 +93,7 @@ pub const Challenge = struct {
 pub const Response = quote.Evidence;
 
 comptime {
-    if (@sizeOf(Response) > 224 or @sizeOf(Pending) > 800) @compileError("TPM attestation exceeds bounded state ceilings");
+    if (@sizeOf(Response) > 224 or @sizeOf(Pending) > 832) @compileError("TPM attestation exceeds bounded state ceilings");
 }
 
 pub const Accepted = struct {
@@ -146,6 +148,17 @@ pub const Pending = struct {
             .enrollment_digest = self.enrollment.digest(),
             .clock = clock,
         };
+    }
+
+    // Bind once, after Noise establishment and before publishing the challenge.
+    // An earlier unbound response cannot verify against this new context.
+    pub fn bindChannel(self: *Pending, binding: hash.Digest, now_ms: u64) !void {
+        try self.verifier.observe(now_ms);
+        try self.challenge.validate(&self.enrollment);
+        if (std.mem.allEqual(u8, &binding, 0) or !std.mem.allEqual(u8, &self.challenge.channel_binding, 0) or
+            !std.mem.eql(u8, &self.challenge.qualifyingData(), &self.verifier.nonce)) return error.InvalidTpmChallenge;
+        self.challenge.channel_binding = binding;
+        self.verifier.nonce = self.challenge.qualifyingData();
     }
 
     pub fn cancel(self: *Pending) void {
@@ -290,4 +303,23 @@ test "TPM remote attestation service rejects invalid requests without TPM comman
     try std.testing.expectEqual(@as(u16, 0), out.len);
     try std.testing.expectEqualDeep(before, service);
     try std.testing.expectEqual(@as(usize, 0), io.commands);
+}
+
+test "TPM remote attestation binds once to its authenticated channel and rejects prior quotes" {
+    var entropy = TestEntropy{};
+    var pending = try Pending.init(&entropy, try testEnrollment(), @splat(2), .{ .remote_party = "peer", .policy_label = "approved" }, 100, 1000);
+    const before = try quote.testing.QuoteFixture.initFor(pending.challenge.qualifyingData(), pending.challenge.approved_pcr11);
+    try std.testing.expectError(error.InvalidTpmChallenge, pending.bindChannel(@splat(0), 101));
+    try pending.bindChannel(@splat(3), 102);
+    try std.testing.expectError(error.InvalidTpmChallenge, pending.bindChannel(@splat(4), 103));
+    try std.testing.expectError(error.QuoteMismatch, pending.accept(&before.evidence, 104));
+    var other = pending.challenge;
+    other.channel_binding[0] ^= 1;
+    const wrong = try quote.testing.QuoteFixture.initFor(other.qualifyingData(), other.approved_pcr11);
+    try std.testing.expectError(error.QuoteMismatch, pending.accept(&wrong.evidence, 105));
+    const correct = try quote.testing.QuoteFixture.initFor(pending.challenge.qualifyingData(), pending.challenge.approved_pcr11);
+    _ = try pending.accept(&correct.evidence, 106);
+    try std.testing.expectError(error.QuoteChallengeConsumed, pending.bindChannel(@splat(5), 107));
+    pending = try Pending.init(&entropy, try testEnrollment(), @splat(2), .{ .remote_party = "peer", .policy_label = "approved" }, 100, 1000);
+    try std.testing.expectError(error.QuoteChallengeExpired, pending.bindChannel(@splat(3), 1100));
 }

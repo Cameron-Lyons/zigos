@@ -10,6 +10,7 @@ const sync_transport = @import("../../native/sync/sync_transport.zig");
 test "sync host tests import native sync modules" {
     _ = @import("../../native/sync/tpm_attestation_test.zig");
     _ = @import("../../native/sync/peer_connections_test.zig");
+    _ = @import("../../native/sync/peer_attestation_test.zig");
     _ = @import("../../native/sync/object_sender_test.zig");
     _ = @import("../../native/sync/peer_handshake_test.zig");
     _ = @import("../../native/sync/peer_admission_test.zig");

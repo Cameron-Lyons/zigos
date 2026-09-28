@@ -16,6 +16,8 @@ const authority_mod = @import("../services/service_authority.zig");
 const sealed = @import("../services/sealed_signing_key.zig");
 const signer_mod = @import("../storage/sealed_object_signer.zig");
 const signing = @import("../core/signing.zig");
+const attestation = @import("peer_attestation.zig");
+const tpm = @import("../platform/tpm_attestation.zig");
 
 pub const MAX_CONNECTIONS = 4;
 pub const Handle = enum(u64) { _ };
@@ -29,30 +31,44 @@ pub const Request = struct {
     device_key: sealed.Key,
     peer_mac: [6]u8,
     expires_at: u64,
+    // Local policy and enrollment only. The caller retains these until release.
+    attestation: ?attestation.Requirement = null,
     direction: union(enum) {
         send,
         receive: struct { signer: signer_mod.Signer, limit: u32 },
     },
 };
 pub const Status = struct {
-    phase: enum { handshaking, transferring, complete },
+    phase: enum { handshaking, attesting, transferring, complete },
     progress: ?transfer.Progress = null,
     digest: [32]u8 = @splat(0),
 };
 
 const Connection = struct {
+    const Preflight = struct { started: bool = false, quote_notified: bool = false, exchange: attestation.Exchange = undefined };
     request: Request,
     channel: peer.Channel,
     buffer: []u8 = &.{},
     source_version: u64,
     endpoint: union(enum) { pending, sender: sender_mod.Sender, receiver: transfer.Receiver } = .pending,
-    state: union(enum) { closed, handshake: handshake.Handshake, session: admission.Session } = .closed,
+    state: union(enum) { closed, handshake: handshake.Handshake, attesting, session: admission.Session } = .closed,
+    preflight: ?*Preflight = null,
 
     fn promote(self: *Connection, handshakes: *handshake.Handshakes, sessions: *admission.Sessions, now: u64) !void {
         var confirmation: [peer.MAX_FRAME]u8 = undefined;
         defer std.crypto.secureZero(u8, &confirmation);
         const last = try handshakes.take(&self.state.handshake, &confirmation, now);
         self.state = .closed;
+        if (self.preflight) |preflight| {
+            preflight.exchange = try attestation.Exchange.init(&self.channel, self.request.attestation.?, last, now, self.request.expires_at);
+            preflight.started = true;
+            self.state = .attesting;
+            return;
+        }
+        try self.beginTransfer(sessions, last, now);
+    }
+
+    fn beginTransfer(self: *Connection, sessions: *admission.Sessions, confirmation: []const u8, now: u64) !void {
         var authority = self.request.authority;
         authority.now_ticks = now;
         const r = self.request;
@@ -61,7 +77,7 @@ const Connection = struct {
                 const entry = try r.store.findEntryForObject(r.binding.workspace_id, r.binding.object_id);
                 if (entry.version_id.raw() != self.source_version) return error.ObjectChanged;
                 self.endpoint = .{ .sender = try sender_mod.Sender.init(r.store, r.service, r.capabilities, r.binding, &self.channel, authority) };
-                self.state = .{ .session = try admission.Session.initSender(&self.channel, &self.endpoint.sender, authority, r.peer_mac, r.expires_at, last) };
+                self.state = .{ .session = try admission.Session.initSender(&self.channel, &self.endpoint.sender, authority, r.peer_mac, r.expires_at, confirmation) };
             },
             .receive => |receive| {
                 self.endpoint = .{ .receiver = .{ .store = r.store, .sync = r.service, .capabilities = r.capabilities, .binding = r.binding, .scratch = self.buffer } };
@@ -81,7 +97,13 @@ const Connection = struct {
                 sessions.detach(s);
                 s.close();
             },
-            .closed => {},
+            .closed, .attesting => {},
+        }
+        if (self.preflight) |preflight| {
+            if (preflight.started) preflight.exchange.close();
+            if (!preflight.started and self.request.attestation.? == .verify) self.request.attestation.?.verify.cancel();
+            std.crypto.secureZero(u8, std.mem.asBytes(preflight));
+            backing.free(Preflight, preflight);
         }
         // A failed promotion can own an endpoint before it owns a session.
         switch (self.endpoint) {
@@ -96,15 +118,18 @@ const Connection = struct {
     }
 
     fn live(self: *const Connection) bool {
+        if (self.preflight) |preflight| if (preflight.started and !preflight.exchange.active()) return false;
         return switch (self.state) {
             .handshake => |*h| h.active(),
             .session => |*s| s.active,
+            .attesting => true,
             .closed => false,
         };
     }
 
     fn status(self: *const Connection) Status {
         if (self.state == .handshake) return .{ .phase = .handshaking };
+        if (self.state == .attesting) return .{ .phase = .attesting };
         const progress = self.state.session.lastProgress();
         const complete = if (progress) |p| p.durable() else false;
         return .{ .phase = if (complete) .complete else .transferring, .progress = progress, .digest = if (complete) switch (self.endpoint) {
@@ -131,6 +156,14 @@ pub const Connections = struct {
         for (sessions.slots) |maybe| if (maybe) |s| {
             if (s.channel.local == request.binding.local_device and s.channel.remote == request.binding.peer_device) return error.PeerAlreadyAdmitted;
         };
+        // Attestation owns the pair between the handshake and transfer pools.
+        // One verifier challenge cannot be borrowed by two live connections.
+        for (self.slots) |slot| if (slot.connection) |existing| {
+            if (existing.channel.local == request.binding.local_device and existing.channel.remote == request.binding.peer_device) return error.PeerAlreadyAdmitted;
+            if (request.attestation) |required| if (required == .verify) {
+                if (existing.request.attestation) |active| if (active == .verify and active.verify == required.verify) return error.PeerAlreadyAdmitted;
+            };
+        };
         var available: ?usize = null;
         for (self.slots, 0..) |slot, i| if (slot.connection == null and slot.generation < std.math.maxInt(u64) >> 2) {
             available = i;
@@ -154,6 +187,10 @@ pub const Connections = struct {
         const connection = backing.alloc(Connection) orelse return error.NoSpaceLeft;
         connection.* = .{ .request = request, .channel = channel, .source_version = entry.version_id.raw() };
         errdefer connection.destroy(handshakes, sessions);
+        if (request.attestation != null) {
+            connection.preflight = backing.alloc(Connection.Preflight) orelse return error.NoSpaceLeft;
+            connection.preflight.?.* = .{};
+        }
         connection.buffer = backing.allocBytes(limit) orelse return error.NoSpaceLeft;
         connection.state = .{ .handshake = try handshake.Handshake.init(&connection.channel, request.service, request.capabilities, request.authority, request.peer_mac, now + @min(request.expires_at - now, handshake.MAX_LIFETIME_TICKS)) };
         try handshakes.attach(&connection.state.handshake, now);
@@ -191,8 +228,17 @@ pub const Connections = struct {
             const slot = &self.slots[self.cursor];
             self.cursor = @intCast((self.cursor + 1) % MAX_CONNECTIONS);
             const connection = slot.connection orelse continue;
-            if (connection.state != .handshake or !connection.state.handshake.complete()) continue;
-            connection.promote(handshakes, sessions, now) catch {
+            const establishing = connection.state == .handshake and connection.state.handshake.complete();
+            const attested = connection.state == .attesting and connection.preflight.?.exchange.ready();
+            if (!establishing and !attested) continue;
+            if (attested and !validatePreflight(connection, now)) {
+                slot.connection = null;
+                connection.destroy(handshakes, sessions);
+                work += 1;
+                if (work == @min(budget, admission.DISPATCH_BUDGET)) break;
+                continue;
+            }
+            (if (establishing) connection.promote(handshakes, sessions, now) else connection.beginTransfer(sessions, "", now)) catch {
                 slot.connection = null;
                 connection.destroy(handshakes, sessions);
             };
@@ -203,8 +249,88 @@ pub const Connections = struct {
     }
 
     pub fn hasReadyWork(self: *const Connections) bool {
-        for (self.slots) |slot| if (slot.connection) |c| if (c.state == .handshake and c.state.handshake.complete()) return true;
+        for (self.slots) |slot| if (slot.connection) |c| {
+            if (c.state == .handshake and c.state.handshake.complete()) return true;
+            if (c.state == .attesting and c.preflight.?.exchange.ready()) return true;
+        };
         return false;
+    }
+
+    fn validatePreflight(c: *Connection, now: u64) bool {
+        return validatePreflightAuthority(c, now) and c.preflight.?.exchange.validate(now);
+    }
+
+    fn validatePreflightAuthority(c: *Connection, now: u64) bool {
+        const p = c.preflight orelse return false;
+        if (!p.started) return false;
+        var authority = c.request.authority;
+        authority.now_ticks = now;
+        _ = authority_mod.requireServiceAuthority(c.request.capabilities, c.request.service.service_id, authority, .endpoint_connect) catch {
+            p.exchange.close();
+            return false;
+        };
+        return true;
+    }
+
+    // Notify once when packet processing has assembled the owner's quote work.
+    // The owner retrieves it by its existing handle and completes it separately.
+    pub fn wakeAttestationOwners(self: *Connections, context: anytype, wake: anytype, now: u64) void {
+        for (self.slots) |slot| if (slot.connection) |c| if (c.preflight) |p| {
+            if (p.started and !p.quote_notified and p.exchange.needsQuote()) {
+                p.quote_notified = true;
+                _ = wake(context, c.request.service.task_id, now);
+            }
+        };
+    }
+
+    pub fn attestationChallenge(self: *Connections, handle: Handle, now: u64) ?tpm.Challenge {
+        const c = self.resolve(handle) orelse return null;
+        if (!validatePreflight(c, now)) return null;
+        return c.preflight.?.exchange.quoteChallenge(now);
+    }
+
+    pub fn completeAttestation(self: *Connections, handle: Handle, response: *const tpm.Response, now: u64) !void {
+        const c = self.resolve(handle) orelse return error.StalePeerConnection;
+        if (!validatePreflight(c, now)) return error.PeerAdmissionDenied;
+        try c.preflight.?.exchange.completeQuote(response, now);
+    }
+
+    pub fn hasAttestations(self: *const Connections) bool {
+        for (self.slots) |slot| if (slot.connection) |c| if (c.preflight) |p| if (p.started and p.exchange.active()) return true;
+        return false;
+    }
+
+    pub fn hasAttestationWork(self: *const Connections, now: u64) bool {
+        for (self.slots) |slot| if (slot.connection) |c| if (c.preflight) |p| if (p.started and p.exchange.hasWork(now)) return true;
+        return false;
+    }
+
+    pub fn nextWake(self: *const Connections) ?u64 {
+        var result: ?u64 = null;
+        for (self.slots) |slot| if (slot.connection) |c| if (c.preflight) |p| if (p.started) {
+            if (p.exchange.nextWake()) |deadline| result = if (result) |existing| @min(existing, deadline) else deadline;
+        };
+        return result;
+    }
+
+    pub fn admitAttestation(self: *Connections, bytes: []const u8, now: u64) bool {
+        for (self.slots) |slot| if (slot.connection) |c| if (c.preflight) |p| if (p.started and p.exchange.admit(bytes, now)) return true;
+        return false;
+    }
+
+    pub fn serviceAttestations(self: *Connections, now: u64, send: anytype, budget: usize) usize {
+        if (budget == 0) return 0;
+        var work: usize = 0;
+        for (0..MAX_CONNECTIONS) |_| {
+            const slot = self.slots[self.cursor];
+            self.cursor = @intCast((self.cursor + 1) % MAX_CONNECTIONS);
+            const c = slot.connection orelse continue;
+            if (c.preflight == null or !c.preflight.?.started) continue;
+            if (!validatePreflightAuthority(c, now)) continue;
+            if (c.preflight.?.exchange.service(now, c.request.peer_mac, send)) work += 1;
+            if (work == @min(budget, admission.DISPATCH_BUDGET)) break;
+        }
+        return work;
     }
 
     pub fn reap(self: *Connections, handshakes: *handshake.Handshakes, sessions: *admission.Sessions) void {

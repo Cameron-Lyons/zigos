@@ -15,6 +15,7 @@ pub const MAX_FRAME = 256;
 pub const HEADER = 22;
 pub const DATA_HEADER = HEADER + 16 + 8;
 pub const MAX_PAYLOAD = MAX_FRAME - DATA_HEADER - 16;
+pub const ATTESTATION_KIND: u8 = 5;
 pub const Error = noise.Error || graph_mod.Error || sealed.Error || error{ PeerMismatch, IdentityMismatch, MalformedFrame, ReplayRejected, TrustChanged };
 
 const Crypto = union(enum) { closed, handshake: noise.Handshake, transport: noise.Split };
@@ -120,6 +121,20 @@ pub const Channel = struct {
     }
 
     pub fn seal(self: *Channel, output: []u8, payload: []const u8, now_ticks: u64) Error![]const u8 {
+        return self.sealKind(4, output, payload, now_ticks);
+    }
+
+    pub fn sealAttestation(self: *Channel, output: []u8, payload: []const u8, now_ticks: u64) Error![]const u8 {
+        return self.sealKind(ATTESTATION_KIND, output, payload, now_ticks);
+    }
+
+    pub fn binding(self: *Channel, now_ticks: u64) Error![32]u8 {
+        try self.requireTrust(now_ticks);
+        if (self.crypto != .transport) return error.InvalidState;
+        return self.crypto.transport.hash;
+    }
+
+    fn sealKind(self: *Channel, kind: u8, output: []u8, payload: []const u8, now_ticks: u64) Error![]const u8 {
         errdefer std.crypto.secureZero(u8, output[0..@min(output.len, MAX_FRAME)]);
         try self.requireTrust(now_ticks);
         if (self.crypto != .transport) return error.InvalidState;
@@ -129,7 +144,7 @@ pub const Channel = struct {
             self.close();
             return error.NonceExhausted;
         }
-        writeHeader(output[0..HEADER], 4, self.local, self.remote);
+        writeHeader(output[0..HEADER], kind, self.local, self.remote);
         @memcpy(output[HEADER..][0..16], state.hash[0..16]);
         std.mem.writeInt(u64, output[HEADER + 16 ..][0..8], state.send.nonce, .little);
         const ciphertext = try state.send.seal(output[DATA_HEADER..], payload, output[0..DATA_HEADER]);
@@ -137,10 +152,18 @@ pub const Channel = struct {
     }
 
     pub fn open(self: *Channel, output: []u8, frame: []const u8, now_ticks: u64) Error![]const u8 {
+        return self.openKind(4, output, frame, now_ticks);
+    }
+
+    pub fn openAttestation(self: *Channel, output: []u8, frame: []const u8, now_ticks: u64) Error![]const u8 {
+        return self.openKind(ATTESTATION_KIND, output, frame, now_ticks);
+    }
+
+    fn openKind(self: *Channel, kind: u8, output: []u8, frame: []const u8, now_ticks: u64) Error![]const u8 {
         errdefer std.crypto.secureZero(u8, output[0..@min(output.len, MAX_PAYLOAD)]);
         try self.requireTrust(now_ticks);
         if (self.crypto != .transport) return error.InvalidState;
-        try self.validateHeader(frame, 4);
+        try self.validateHeader(frame, kind);
         if (frame.len <= DATA_HEADER + 16) return error.MalformedFrame;
         const state = &self.crypto.transport;
         if (!std.crypto.timing_safe.eql([16]u8, state.hash[0..16].*, frame[HEADER..][0..16].*)) return error.PeerMismatch;
@@ -435,4 +458,30 @@ test "peer channel rejects key rotation and root replacement during a live hands
         try std.testing.expectError(error.TrustChanged, bob.readHandshake(hello, 1));
         try std.testing.expect(bob.crypto == .closed);
     }
+}
+
+test "peer channel separates attestation from object traffic with authenticated kinds and shared replay protection" {
+    const graph = try Fixture.graph();
+    var a = try Fixture.initiator(&graph);
+    defer a.close();
+    var b = try Fixture.responder(&graph);
+    defer b.close();
+    try Fixture.connect(&a, &b);
+    try std.testing.expectEqualSlices(u8, &try a.binding(1), &try b.binding(1));
+    var bytes: [MAX_FRAME]u8 = undefined;
+    var plain: [MAX_PAYLOAD]u8 = undefined;
+    const frame = try a.sealAttestation(&bytes, "attestation", 1);
+    try std.testing.expectError(error.MalformedFrame, b.open(&plain, frame, 1));
+    bytes[5] = 4;
+    try std.testing.expectError(error.AuthenticationFailed, b.open(&plain, frame, 1));
+    bytes[5] = ATTESTATION_KIND;
+    try std.testing.expectEqualStrings("attestation", try b.openAttestation(&plain, frame, 1));
+    try std.testing.expectError(error.ReplayRejected, b.openAttestation(&plain, frame, 1));
+    try std.testing.expectEqualStrings("object", try b.open(&plain, try a.seal(&bytes, "object", 1), 1));
+    var fresh_a = try Fixture.initiator(&graph);
+    defer fresh_a.close();
+    var fresh_b = try Fixture.responder(&graph);
+    defer fresh_b.close();
+    try Fixture.connect(&fresh_a, &fresh_b);
+    try std.testing.expect(!std.mem.eql(u8, &try a.binding(1), &try fresh_a.binding(1)));
 }

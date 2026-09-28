@@ -857,9 +857,22 @@ capabilities, with separate pins for the enrollment and PCR 11 profile. A quote
 does not claim that arbitrary runtime measurement records are hardware measured.
 The cold/reboot QEMU proof authorizes an encrypted session through this path and
 rejects wrong policy context, PCR, peer, expiry and replay. Its approved PCR is a
-test fixture; deployed verifier policy, enrollment distribution, remote challenge
-transport and physical-machine validation remain open. Callers must cancel
+test fixture; deployed verifier policy, enrollment distribution and
+physical-machine validation remain open. Callers must cancel
 outstanding verifier challenges when their enrollment or approval policy changes.
+
+Managed peer connections can require TPM attestation before object transfer.
+The challenge binds the full Noise session hash; canonical records are at most
+402 bytes and use up to three encrypted datagrams. Cached ciphertext retries
+handle loss and reordering without reusing a nonce for new plaintext. The local
+owner supplies the trusted enrollment and PCR policy, retrieves quote work by
+connection handle, and completes the TPM operation outside packet dispatch.
+A completed challenge wakes that owner once. Stale, expired and revoked handles
+cannot complete a quote. Handshake, attestation and object traffic share the
+existing two-operation dispatch budget; packets allocate no connection state.
+Host tests cover fragment failures and durable transfer. The swtpm cold/reboot
+proof carries an actual quote between two Noise endpoints in one guest;
+attestation across independently enrolled machines still needs validation.
 
 Remote attestation service signatures bind the complete verifier request and
 the provider's actual metadata digest through a domain-separated context.
