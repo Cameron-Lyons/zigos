@@ -364,8 +364,13 @@ requests.
   plaintext on authentication failure. Independent verification nodes
   now establish Noise XX channels with fresh X25519 keys certified by pinned
   device identities. Both nodes decrypt confirmation traffic and reject packet
-  tampering and replay. Production identity provisioning, peer discovery and
-  authorization of inbound object operations still need integration.
+  tampering and replay on the managed channel used for durable object transfer.
+  The two-node gate uses a bounded localhost relay to discard the first two final
+  confirmations, then requires an identical retransmission and a durable receipt.
+  The session manager exposes owned connection handles; unmanaged handshake
+  attachment and handoff entry points have been removed. Production identity
+  provisioning, peer discovery and authorization of inbound object operations
+  still need integration.
 - The driver model treats storage, network, USB controllers, GPU/display,
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA
@@ -564,6 +569,7 @@ Use the pinned toolchain and repo entrypoints:
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
+- Python 3 for the two-node network fault relay and its tests
 - An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, PGE, PCID/INVPCID,
   x2APIC, XSAVE/XSAVES, CET IBT and shadow-stack support, FRED, LASS, LKGS,
   1 GiB pages, and a calibrated invariant TSC with deadline timers. Production
@@ -1045,6 +1051,8 @@ QEMU proof runs are script-backed:
 
 - `scripts/run-zigos-native-smoke.sh`
 - `scripts/run-storage-durability-qemu.sh`
+- `scripts/run-sync-two-node-qemu.sh` (drops two final confirmations by default;
+  `SYNC_TWO_NODE_DROP_CONFIRMATIONS=0` runs without injected loss)
 - `scripts/run-kernel-recovery.sh`
 - `scripts/capture-kernel-benchmark.sh` (capture helper; `zig build benchmark` runs the strict gate)
 - `scripts/run-uefi-boot-test.sh`

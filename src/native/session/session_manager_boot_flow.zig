@@ -408,30 +408,6 @@ pub const SessionManager = struct {
         self.refreshPeerReservation();
     }
 
-    pub fn attachPeerHandshake(self: *SessionManager, handshake: *peer_handshake.Handshake, now_ticks: u64) !void {
-        if (!self.runtime_context.constructed or handshake.capabilities != self.capabilityTablePtr() or !self.handshakeTaskActive(handshake)) return error.PeerAdmissionDenied;
-        for (self.peers.slots) |maybe| if (maybe) |session| {
-            if (session.channel.local == handshake.channel.local and session.channel.remote == handshake.channel.remote) return error.PeerAlreadyAdmitted;
-        };
-        try self.peer_handshakes.attach(handshake, now_ticks);
-        network_driver.reserveReceivePrefix(peer_channel.MAGIC.*);
-        self.peer_dispatch_tick = now_ticks;
-    }
-
-    pub fn detachPeerHandshake(self: *SessionManager, handshake: *peer_handshake.Handshake) void {
-        self.peer_handshakes.detach(handshake);
-        self.refreshPeerReservation();
-    }
-
-    pub fn takePeerHandshake(self: *SessionManager, handshake: *peer_handshake.Handshake, confirmation: []u8, now_ticks: u64) ![]const u8 {
-        if (!self.handshakeTaskActive(handshake) or !network_driver.hasActiveDevice()) {
-            self.detachPeerHandshake(handshake);
-            return error.PeerAdmissionDenied;
-        }
-        defer self.refreshPeerReservation();
-        return self.peer_handshakes.take(handshake, confirmation, now_ticks);
-    }
-
     fn refreshPeerReservation(self: *const SessionManager) void {
         if (!self.peers.hasSessions() and !self.peer_handshakes.hasSessions()) network_driver.reserveReceivePrefix(null);
     }

@@ -80,7 +80,7 @@ install_macos() {
   fi
 
   log "Installing dependencies with Homebrew..."
-  brew install zig nasm qemu dosfstools xorriso mtools x86_64-elf-grub
+  brew install python zig nasm qemu dosfstools xorriso mtools x86_64-elf-grub
 }
 
 install_apt() {
@@ -102,7 +102,7 @@ install_apt() {
     ${s} sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "${source}"
   done
   ${s} apt-get "${apt_options[@]}" update
-  ${s} apt-get "${apt_options[@]}" install -y nasm qemu-system-x86 ovmf grub-common grub-efi-amd64-bin dosfstools xorriso mtools
+  ${s} apt-get "${apt_options[@]}" install -y python3 nasm qemu-system-x86 ovmf grub-common grub-efi-amd64-bin dosfstools xorriso mtools
 
   if ! have_cmd zig; then
     if ! ${s} apt-get "${apt_options[@]}" install -y zig; then
@@ -116,7 +116,7 @@ install_dnf() {
   s="$(sudo_cmd)"
 
   log "Installing dependencies with dnf..."
-  ${s} dnf install -y zig nasm qemu-system-x86 edk2-ovmf grub2-tools grub2-tools-extra grub2-efi-x64-modules dosfstools xorriso mtools
+  ${s} dnf install -y python3 zig nasm qemu-system-x86 edk2-ovmf grub2-tools grub2-tools-extra grub2-efi-x64-modules dosfstools xorriso mtools
 }
 
 install_pacman() {
@@ -124,7 +124,7 @@ install_pacman() {
   s="$(sudo_cmd)"
 
   log "Installing dependencies with pacman..."
-  ${s} pacman -Sy --noconfirm zig nasm grub edk2-ovmf dosfstools xorriso mtools
+  ${s} pacman -Sy --noconfirm python zig nasm grub edk2-ovmf dosfstools xorriso mtools
 
   if ! ${s} pacman -S --noconfirm qemu-full; then
     if ! ${s} pacman -S --noconfirm qemu-desktop; then
@@ -137,7 +137,7 @@ verify_tools() {
   log "Verifying toolchain..."
 
   local missing=0
-  for cmd in nasm qemu-system-x86_64 xorriso mformat mcopy mmd mkfs.fat; do
+  for cmd in python3 nasm qemu-system-x86_64 xorriso mformat mcopy mmd mkfs.fat; do
     if ! have_cmd "${cmd}"; then
       log "Missing command: ${cmd}"
       missing=1
