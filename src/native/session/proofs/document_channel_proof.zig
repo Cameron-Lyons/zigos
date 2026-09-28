@@ -106,6 +106,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
 
     try clipboardBetweenEditors(manager, first, second, expected[0 .. original_length + 1]);
     try visualNavigation(manager, graph, workspace_id, document_key);
+    try unicodeDocument(manager, graph, workspace_id, document_key, second);
     _ = try manager.compositorSessionPtr().switchView(second.window_id);
     try expectChannelRetired(manager, first);
     const frames_before_retirement = paging.frameStats();
@@ -440,18 +441,23 @@ fn pressKeysAt(manager: anytype, editor: EditorSession, usages: []const u8, modi
         const cursor_column = @min(position.column, frame.columns - 1);
         const cursor_cell = frame.cells[cursor_row * frame.columns + cursor_column];
         if (!cursor_cell.cursor or cursor_cell.cursor_trailing != (position.column == frame.columns)) return error.CursorNotPresented;
-        if (!framebuffer.verifyText(cursor_column, cursor_row, &.{cursor_cell.character})) return error.CursorPixelsMissing;
+        if (!framebuffer.verifyCell(cursor_column, cursor_row)) return error.CursorPixelsMissing;
         var rows = layout.rows();
         var index: usize = 0;
         while (rows.next()) |row| : (index += 1) {
             if (index < first_row) continue;
             if (index >= first_row + visible) break;
-            for (expected[row.start..row.end], row.start..) |byte, offset| {
-                const column = offset - row.start;
+            var clusters = abi.text_layout.unicode.Iterator{ .text = expected[0..row.end], .offset = row.start };
+            var column: usize = 0;
+            while (clusters.next()) |cluster| {
+                const width = @min(cluster.columns(column), frame.columns - column);
                 const screen_row = 5 + index - first_row;
-                const selected = offset >= @min(cursor, anchor) and offset < @max(cursor, anchor);
-                if ((frame.cells[screen_row * frame.columns + column].style == .selected) != selected) return error.SelectionNotPresented;
-                if (!framebuffer.verifyText(column, screen_row, &.{byte})) return error.SelectionPixelsMissing;
+                const selected = cluster.start >= @min(cursor, anchor) and cluster.start < @max(cursor, anchor);
+                for (0..width) |part| {
+                    if ((frame.cells[screen_row * frame.columns + column + part].style == .selected) != selected) return error.SelectionNotPresented;
+                    if (!framebuffer.verifyCell(column + part, screen_row)) return error.SelectionPixelsMissing;
+                }
+                column += width;
             }
         }
         return;
@@ -510,6 +516,58 @@ fn visualNavigation(manager: anytype, graph: anytype, workspace_id: u64, documen
     if (current.version_id.raw() != stored.version_id.raw() or storage.checkpoint_store.last_checkpoint_generation != checkpoint)
         return error.NavigationChangedStorage;
     common.printBootMarker(boot_markers.document_visual_navigation);
+}
+
+fn unicodeDocument(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer, sibling: EditorSession) !void {
+    // The first clipboard chunk ends in the middle of U+754C.
+    const text = "a" ** 67 ++ "界e\u{301} café Ελληνικά\n👩‍💻\r\n終";
+    const unicode_path = "documents/unicode.md";
+    const storage = manager.storageServicePtr();
+    const stored = try storage.putVersion(.{
+        .object_type = .document,
+        .payload = text,
+        .metadata = try object_store.signMetadata(signer, "Unicode document", "text/plain", .document, text, 0),
+    });
+    try storage.beginTransaction(workspace_id);
+    errdefer storage.abortTransaction(workspace_id) catch {};
+    try storage.stagePut(workspace_id, unicode_path, stored.object_id, stored.version_id, .document);
+    _ = try storage.commit(workspace_id, 0);
+    const editor = try openEditor(manager, graph, workspace_id, unicode_path, 0xD0C4, document_key);
+    var retired = false;
+    defer if (!retired) retireEditor(manager, editor);
+    try awaitPresentation(manager, editor, text, 0);
+    const checkpoint = storage.checkpoint_store.last_checkpoint_generation;
+    try pressCursorKey(manager, editor, 0x2A, 0, text[0 .. text.len - 3], text.len - 3, true);
+    try pressCursorKey(manager, editor, 0x1D, 1, text, text.len, false);
+    try pressSelectionKey(manager, editor, 0x50, 2, text, text.len - 3, text.len, false);
+    try pressCursorKey(manager, editor, 0x4C, 0, text[0 .. text.len - 3], text.len - 3, true);
+    try pressSelectionKey(manager, editor, 0x1D, 1, text, text.len - 3, text.len, false);
+    try pressSelectionKey(manager, editor, 0x04, 1, text, text.len, 0, false);
+    try pressSelectionKey(manager, editor, 0x06, 1, text, text.len, 0, false);
+    _ = try manager.compositorSessionPtr().switchView(sibling.window_id);
+    const original = sibling_text ++ "b";
+    try pressSelectionKey(manager, sibling, 0x04, 1, original, original.len, 0, false);
+    try pressCursorKey(manager, sibling, 0x19, 1, text, text.len, true);
+    try pressSelectionKey(manager, sibling, 0x1D, 1, original, original.len, 0, false);
+    try pressCursorKey(manager, sibling, 0x4F, 0, original, original.len, false);
+    _ = try manager.compositorSessionPtr().switchView(editor.window_id);
+    try pressCursorKey(manager, editor, 0x4F, 0, text, text.len, false);
+    try pressCursorKey(manager, editor, 0x04, 0, text ++ "a", text.len + 1, true);
+    if (storage.checkpoint_store.last_checkpoint_generation != checkpoint) return error.UnicodeSavedWithoutRequest;
+    report_cursor = 0;
+    report_mode = .key;
+    report_usage = 0x28;
+    report_modifiers = 1;
+    if (manager.servicePendingInputWork(timer.getTicks()) != 1) return error.UnicodeInputNotRouted;
+    try awaitSaving(manager, editor);
+    try awaitPresentation(manager, editor, text ++ "a", 1);
+    try expectStored(manager, workspace_id, unicode_path, text ++ "a", stored.version_id.raw());
+    retireEditor(manager, editor);
+    retired = true;
+    const reopened = try openEditor(manager, graph, workspace_id, unicode_path, 0xD0C5, document_key);
+    defer retireEditor(manager, reopened);
+    try awaitPresentation(manager, reopened, text ++ "a", 0);
+    common.printBootMarker(boot_markers.document_unicode);
 }
 
 fn clipboardBetweenEditors(manager: anytype, first: EditorSession, second: EditorSession, first_text: []const u8) !void {

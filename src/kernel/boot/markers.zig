@@ -225,6 +225,7 @@ pub const document_channel_userspace_save = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_SA
 pub const document_surface_pixels = "ZIGOS:DOCUMENT:SURFACE_PIXELS:PASS";
 pub const document_save_feedback = "ZIGOS:DOCUMENT:SAVE_FEEDBACK:PASS";
 pub const document_input_ordering = "ZIGOS:DOCUMENT:INPUT_ORDERING:PASS";
+pub const document_unicode = "ZIGOS:DOCUMENT:UNICODE:PASS";
 pub const document_visual_navigation = "ZIGOS:DOCUMENT:VISUAL_NAVIGATION:PASS";
 pub const document_clipboard = "ZIGOS:DOCUMENT:CLIPBOARD:PASS";
 pub const document_channel_sibling_editors = "ZIGOS:DOCUMENT_CHANNEL:SIBLING_EDITORS:PASS";

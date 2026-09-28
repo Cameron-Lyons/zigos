@@ -2,6 +2,7 @@ const std = @import("std");
 const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
 const layout = abi.text_layout;
+const unicode = layout.unicode;
 const edit_history = @import("edit_history.zig");
 
 pub const TEXT_CAPACITY: usize = 512;
@@ -81,7 +82,11 @@ pub const State = struct {
         if (event.length < 1 or event.length > event.bytes.len) return .rejected;
         const op = event.bytes[0];
         const data = if (event.length > 1) event.bytes[1] else 0;
-        if (op == abi.InputByte.text and (data < 0x20 or data > 0x7e)) return .rejected;
+        if (op == abi.InputByte.text) {
+            const bytes = event.bytes[1..event.length];
+            const scalar = unicode.decode(bytes, 0) orelse return .rejected;
+            if (scalar.end != bytes.len or scalar.point < 0x20 or !unicode.validText(bytes)) return .rejected;
+        } else if (event.length > 2) return .rejected;
         if (!event.viewport.valid()) return .rejected;
         const navigation = (op >= abi.InputByte.cursor_left and op <= abi.InputByte.document_end) or op == abi.InputByte.page_up or op == abi.InputByte.page_down;
         if (navigation) {
@@ -131,17 +136,17 @@ pub const State = struct {
         self.interaction_hash = mixEvent(self.interaction_hash, event);
         if (op != abi.InputByte.text) self.history.breakGroup();
         const mutated = switch (op) {
-            abi.InputByte.text => self.insertText(data),
+            abi.InputByte.text => self.insertText(event.bytes[1..event.length]),
             abi.InputByte.backspace => self.backspace(),
             abi.InputByte.delete_forward => if (self.model == .notes) self.deleteForward() else false,
-            abi.InputByte.cursor_left => self.moveCursor(if (!extend and self.hasSelection()) self.selectionStart() else self.cursor -| 1, false, extend),
-            abi.InputByte.cursor_right => self.moveCursor(if (!extend and self.hasSelection()) self.selectionEnd() else @min(self.text_length, self.cursor + 1), false, extend),
+            abi.InputByte.cursor_left => self.moveCursor(if (!extend and self.hasSelection()) self.selectionStart() else unicode.previousBoundary(self.textSlice(), self.cursor), false, extend),
+            abi.InputByte.cursor_right => self.moveCursor(if (!extend and self.hasSelection()) self.selectionEnd() else unicode.nextBoundary(self.textSlice(), self.cursor), false, extend),
             abi.InputByte.cursor_up => self.moveVertical(false, 1, extend),
             abi.InputByte.cursor_down => self.moveVertical(true, 1, extend),
             abi.InputByte.page_up => self.moveVertical(false, self.viewport.pageRows(), extend),
             abi.InputByte.page_down => self.moveVertical(true, self.viewport.pageRows(), extend),
             abi.InputByte.line_start => self.moveCaret(.{ .offset = self.textLayout().locate(self.caret()).row.start }, false, extend),
-            abi.InputByte.line_end => self.moveCaret(self.textLayout().locate(self.caret()).row.atColumn(std.math.maxInt(usize)), false, extend),
+            abi.InputByte.line_end => self.moveCaret(self.textLayout().locate(self.caret()).row.atColumn(self.textSlice(), std.math.maxInt(usize)), false, extend),
             abi.InputByte.document_start => self.moveCursor(0, false, extend),
             abi.InputByte.document_end => self.moveCursor(self.text_length, false, extend),
             abi.InputByte.select_all => self.selectAll(),
@@ -162,24 +167,25 @@ pub const State = struct {
         return .mutated;
     }
 
-    fn insertText(self: *State, byte: u8) bool {
+    fn insertText(self: *State, bytes: []const u8) bool {
         const start = self.selectionStart();
         const end = self.selectionEnd();
-        const new_length = self.text_length - (end - start) + 1;
+        const new_length = self.text_length - (end - start) + bytes.len;
         if (new_length > self.text.len) return self.noteOverflow();
         if (self.model == .notes) {
-            self.history.remember(@intCast(start), self.text[start..end], &.{byte}, self.cursor, self.selection_anchor, self.cursor_upstream, byte != '\n');
-            if (byte == ' ' or byte == '\n') self.history.breakGroup();
+            self.history.remember(@intCast(start), self.text[start..end], bytes, self.cursor, self.selection_anchor, self.cursor_upstream, bytes[0] != '\n');
+            if (bytes[0] == ' ' or bytes[0] == '\n') self.history.breakGroup();
         }
-        if (end == start) {
-            std.mem.copyBackwards(u8, self.text[start + 1 .. new_length], self.text[end..self.text_length]);
+        const new_end = start + bytes.len;
+        if (new_end > end) {
+            std.mem.copyBackwards(u8, self.text[new_end..new_length], self.text[end..self.text_length]);
         } else {
-            std.mem.copyForwards(u8, self.text[start + 1 .. new_length], self.text[end..self.text_length]);
+            std.mem.copyForwards(u8, self.text[new_end..new_length], self.text[end..self.text_length]);
             @memset(self.text[new_length..self.text_length], 0);
         }
-        self.text[start] = byte;
+        @memcpy(self.text[start..new_end], bytes);
         self.text_length = @intCast(new_length);
-        self.cursor = @intCast(start + 1);
+        self.cursor = @intCast(new_end);
         self.selection_anchor = self.cursor;
         self.edited();
         return true;
@@ -188,13 +194,13 @@ pub const State = struct {
     fn backspace(self: *State) bool {
         if (self.hasSelection()) return self.eraseRange(self.selectionStart(), self.selectionEnd());
         if (self.cursor == 0) return false;
-        return self.eraseRange(self.cursor - 1, self.cursor);
+        return self.eraseRange(unicode.previousBoundary(self.textSlice(), self.cursor), self.cursor);
     }
 
     fn deleteForward(self: *State) bool {
         if (self.hasSelection()) return self.eraseRange(self.selectionStart(), self.selectionEnd());
         if (self.cursor == self.text_length) return false;
-        return self.eraseRange(self.cursor, self.cursor + 1);
+        return self.eraseRange(self.cursor, unicode.nextBoundary(self.textSlice(), self.cursor));
     }
 
     fn eraseRange(self: *State, start: usize, end: usize) bool {
@@ -223,9 +229,9 @@ pub const State = struct {
         }
         @memcpy(self.text[change.position..new_end], change.insert);
         self.text_length = @intCast(new_length);
-        self.cursor = change.cursor;
+        self.cursor = @intCast(unicode.ceilBoundary(self.textSlice(), change.cursor));
         self.cursor_upstream = change.cursor_upstream;
-        self.selection_anchor = change.anchor;
+        self.selection_anchor = @intCast(unicode.ceilBoundary(self.textSlice(), change.anchor));
         self.vertical_column = NO_VERTICAL_COLUMN;
         self.flags.input_overflow = false;
         self.flags.dirty = !self.history.isSaved() or self.save_state == .saving or self.save_state == .retryable;
@@ -246,7 +252,7 @@ pub const State = struct {
     // Clipboard bytes are staged outside the document. Publish one edit only
     // after the complete transfer succeeds, retaining the draft on overflow.
     pub fn replaceSelection(self: *State, bytes: []const u8) bool {
-        if (self.model != .notes or !@import("clipboard_protocol.zig").validText(bytes)) return false;
+        if (self.model != .notes or !unicode.validText(bytes)) return false;
         const start = self.selectionStart();
         const end = self.selectionEnd();
         const remaining = self.text_length - (end - start);
@@ -274,6 +280,8 @@ pub const State = struct {
     }
 
     fn edited(self: *State) void {
+        self.cursor = @intCast(unicode.ceilBoundary(self.textSlice(), self.cursor));
+        self.selection_anchor = self.cursor;
         self.cursor_upstream = false;
         self.flags.clipboard_failed = false;
         self.vertical_column = NO_VERTICAL_COLUMN;
@@ -376,9 +384,7 @@ pub const State = struct {
 
     pub fn loadDocument(self: *State, text: []const u8) bool {
         if (self.model != .notes or self.flags.dirty or text.len > self.text.len) return false;
-        // The current text presentation accepts printable ASCII and newlines.
-        // Refuse unsupported content without truncating or changing its bytes.
-        for (text) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
+        if (!unicode.validText(text)) return false;
         @memset(&self.text, 0);
         @memcpy(self.text[0..text.len], text);
         self.text_length = @intCast(text.len);
@@ -410,7 +416,7 @@ pub const State = struct {
     fn activate(self: *State) bool {
         self.activation_count +|= 1;
         switch (self.model) {
-            .notes => _ = self.insertText('\n'),
+            .notes => _ = self.insertText("\n"),
             .capture => self.flags.active = !self.flags.active,
             else => {},
         }
@@ -937,4 +943,72 @@ test "UI surface state rejects stale events and records bounded overflow once" {
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(3, abi.InputByte.text, 'z')));
     try std.testing.expect(state.flags.input_overflow);
     try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(4, abi.InputByte.text, 'z')));
+}
+
+test "Notes edits UTF-8 by grapheme and restores exact bytes through undo and redo" {
+    var state = State.init("app.notes");
+    const original = "Ae\u{301}界👩‍💻Z";
+    try std.testing.expect(state.loadDocument(original));
+    _ = state.apply(inputEvent(1, abi.InputByte.cursor_left, 0));
+    try std.testing.expectEqual(@as(u16, 18), state.cursor);
+    _ = state.apply(inputEvent(2, abi.InputByte.backspace, 0));
+    try std.testing.expectEqualStrings("Ae\u{301}界Z", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 7), state.cursor);
+    _ = state.apply(inputEvent(3, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings(original, state.textSlice());
+    try std.testing.expectEqual(@as(u16, 18), state.cursor);
+    _ = state.apply(inputEvent(4, abi.InputByte.cursor_left, abi.INPUT_EXTEND_SELECTION));
+    try std.testing.expectEqualStrings("👩‍💻", state.selectionSlice());
+    _ = state.apply(inputEvent(5, abi.InputByte.delete_forward, 0));
+    try std.testing.expectEqualStrings("Ae\u{301}界Z", state.textSlice());
+    _ = state.apply(inputEvent(6, abi.InputByte.backspace, 0));
+    _ = state.apply(inputEvent(7, abi.InputByte.backspace, 0));
+    try std.testing.expectEqualStrings("AZ", state.textSlice());
+    var event = inputEvent(8, abi.InputByte.text, 0);
+    @memcpy(event.bytes[1..3], "é");
+    event.length = 3;
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(event));
+    try std.testing.expectEqualStrings("AéZ", state.textSlice());
+    var snapshot = state.presentationText();
+    try std.testing.expect(snapshot.isCanonical());
+    _ = state.apply(inputEvent(9, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("AZ", state.textSlice());
+    _ = state.apply(inputEvent(10, abi.InputByte.redo, 0));
+    try std.testing.expectEqualStrings("AéZ", state.textSlice());
+    event.sequence = 11;
+    event.length = 2; // Never insert a partial scalar.
+    try std.testing.expectEqual(ApplyResult.rejected, state.apply(event));
+}
+
+test "Notes repairs caret boundaries when insertion or deletion joins adjacent graphemes" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("\u{301}x"));
+    _ = state.apply(inputEvent(1, abi.InputByte.document_start, 0));
+    try std.testing.expect(state.replaceSelection("e"));
+    try std.testing.expectEqualStrings("e\u{301}x", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 3), state.cursor);
+    _ = state.apply(inputEvent(2, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("\u{301}x", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 0), state.cursor);
+    _ = state.apply(inputEvent(3, abi.InputByte.redo, 0));
+    try std.testing.expectEqual(@as(u16, 3), state.cursor);
+
+    state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("e\r\n\u{301}x"));
+    _ = state.apply(inputEvent(1, abi.InputByte.document_start, 0));
+    _ = state.apply(inputEvent(2, abi.InputByte.cursor_right, 0));
+    _ = state.apply(inputEvent(3, abi.InputByte.delete_forward, 0));
+    try std.testing.expectEqualStrings("e\u{301}x", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 3), state.cursor);
+    _ = state.apply(inputEvent(4, abi.InputByte.undo, 0));
+    try std.testing.expectEqualStrings("e\r\n\u{301}x", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 1), state.cursor);
+    _ = state.apply(inputEvent(5, abi.InputByte.cursor_right, 0));
+    try std.testing.expectEqual(@as(u16, 3), state.cursor);
+
+    state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument(&@as([511]u8, @splat('a'))));
+    try std.testing.expect(!state.replaceSelection("é"));
+    try std.testing.expectEqual(@as(u16, 511), state.text_length);
+    try std.testing.expect(!state.flags.dirty);
 }

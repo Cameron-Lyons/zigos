@@ -134,13 +134,15 @@ fn drawTextAt(frame: *scanout.Frame, start_row: usize, text: []const u8, caret: 
         if (index < first_row) continue;
         if (index >= first_row + viewport.rows) break;
         const cells = frame.cells[(start_row + index - first_row) * frame.columns ..][0..frame.columns];
-        for (text[row.start..row.end], row.start..) |byte, offset| {
-            const cell = &cells[offset - row.start];
-            cell.character = byte;
-            if (offset >= selection_start and offset < selection_end) cell.style = .selected;
+        var clusters = abi.text_layout.unicode.Iterator{ .text = text[0..row.end], .offset = row.start };
+        var column: usize = 0;
+        while (clusters.next()) |cluster| {
+            const width = @min(cluster.columns(column), frame.columns - column);
+            frame.putCluster(column, start_row + index - first_row, text[cluster.start..cluster.end], width, if (cluster.start >= selection_start and cluster.start < selection_end) .selected else .body);
+            column += width;
         }
-        if (row.next > row.end and row.end - row.start < frame.columns and row.end >= selection_start and row.end < selection_end)
-            cells[row.end - row.start].style = .selected;
+        if (row.next > row.end and column < frame.columns and row.end >= selection_start and row.end < selection_end)
+            cells[column].style = .selected;
         if (index == position.index) {
             const cell = &cells[@min(position.column, frame.columns - 1)];
             cell.cursor = true;

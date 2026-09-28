@@ -283,3 +283,36 @@ test "clipboard client stages a full paste and leaves the selection intact on fa
         try std.testing.expectEqualSlices(u8, &@as([protocol.MAX_TEXT_BYTES]u8, @splat(0)), &client.bytes);
     }
 }
+
+test "clipboard client assembles split UTF-8 and rejects malformed final text atomically" {
+    for ([_]bool{ false, true }) |malformed| {
+        var state = State.init("app.notes");
+        try std.testing.expect(state.loadDocument("draft"));
+        state.selection_anchor = 0;
+        var client = Client{};
+        var transport = TestTransport{};
+        const event = testEvent(&state, abi.InputByte.paste);
+        client.start(test_binding, &state, event);
+        _ = client.step(&state, &transport);
+        var bytes = ("a" ** 67 ++ "界e\u{301}👩‍💻").*;
+        if (malformed) bytes[bytes.len - 1] = 0xff;
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const end = @min(bytes.len, offset + protocol.CHUNK_BYTES);
+            try transport.respond(event.sequence, .{ .status = .ok, .total = bytes.len, .offset = @intCast(offset), .bytes = bytes[offset..end] });
+            _ = client.step(&state, &transport);
+            if (client.pending()) {
+                try std.testing.expectEqualStrings("draft", state.textSlice());
+                _ = client.step(&state, &transport);
+            }
+            offset = end;
+        }
+        try std.testing.expect(!client.pending());
+        try std.testing.expectEqual(malformed, state.flags.clipboard_failed);
+        try std.testing.expectEqualStrings(if (malformed) "draft" else &bytes, state.textSlice());
+        if (!malformed) {
+            _ = testEvent(&state, abi.InputByte.undo);
+            try std.testing.expectEqualStrings("draft", state.textSlice());
+        }
+    }
+}

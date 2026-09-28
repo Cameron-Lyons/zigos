@@ -112,13 +112,25 @@ requests.
   The editor and compositor share allocation-free wrapping, including an explicit
   caret position at soft-wrap boundaries. Display geometry arrives with trusted
   input without enlarging its 56-byte descriptor, and caret metadata keeps the
-  text snapshot at 528 bytes. Unicode text remains open. Selection,
+  text snapshot at 528 bytes. Notes loads, edits, copies, saves, and reopens UTF-8
+  within the existing 512-byte document bound. Unicode 18 extended grapheme
+  clusters keep combining accents, emoji sequences, and CRLF together during
+  movement, selection, deletion, and wrapping. Tabs use four-column stops;
+  East Asian wide characters and emoji occupy two cells. Narrow and wide bitmap
+  glyphs and combining accents render through a pinned, licensed font
+  ([font notices](src/kernel/platform/fonts/README.md),
+  [Unicode notices](src/native/core/unicode_data/README.md)); damage
+  tracking compares complete cluster bytes. Complex-script shaping, bidi layout,
+  color emoji, and international input methods remain open. Unsupported shaped
+  clusters display a replacement glyph without changing their stored bytes.
+  The native text event accepts one UTF-8 scalar; the hardware keyboard currently
+  supplies the US ASCII layout. Selection,
   clipboard failure feedback, and save feedback fit within the
   unchanged 528-byte text snapshot. Boot verification reads back mapped device
   pixels for the launcher, edited Notes text, selection and undo/redo results, save
   progress, durable success, and a denied save after revocation. A production
   document picker,
-  identity and permission provisioning, accelerated graphics, Unicode rendering,
+  identity and permission provisioning, accelerated graphics, complete international text support,
   physical display verification, and moving storage into userspace remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
   checks instruction availability and success, bounds retries, rejects a stuck

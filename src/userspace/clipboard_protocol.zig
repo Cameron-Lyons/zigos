@@ -4,7 +4,7 @@ pub const MAX_TEXT_BYTES: usize = 512;
 pub const MAX_FRAME_BYTES: usize = 88;
 pub const CHUNK_BYTES: usize = MAX_FRAME_BYTES - 20;
 const MAGIC: u32 = 0x504c435a;
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 pub const Status = enum(u16) { ok, denied, empty, invalid, unavailable, expired };
 pub const Reply = struct { status: Status, total: u16 = 0, offset: u16 = 0, bytes: []const u8 = "" };
@@ -19,8 +19,10 @@ pub const Body = union(enum(u8)) {
 pub const Frame = struct { gesture: u64, body: Body };
 pub const Error = error{MalformedFrame};
 
-pub fn validText(bytes: []const u8) bool {
-    for (bytes) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
+// A transport fragment may begin/end inside a scalar. Validate the assembled
+// document at commit and paste completion, before publishing any bytes.
+fn validFragment(bytes: []const u8) bool {
+    for (bytes) |byte| if ((byte < 0x20 and byte != '\n' and byte != '\r' and byte != '\t') or byte == 0x7f) return false;
     return true;
 }
 
@@ -39,7 +41,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
         },
         .copy_chunk => |chunk| blk: {
             if (chunk.bytes.len == 0 or chunk.bytes.len > CHUNK_BYTES or chunk.offset >= MAX_TEXT_BYTES or
-                chunk.bytes.len > MAX_TEXT_BYTES - chunk.offset or !validText(chunk.bytes)) return error.MalformedFrame;
+                chunk.bytes.len > MAX_TEXT_BYTES - chunk.offset or !validFragment(chunk.bytes)) return error.MalformedFrame;
             put(u16, out[16..], chunk.offset);
             put(u16, out[18..], @intCast(chunk.bytes.len));
             @memcpy(out[20..][0..chunk.bytes.len], chunk.bytes);
@@ -53,7 +55,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
         },
         .reply => |reply| blk: {
             if (reply.total > MAX_TEXT_BYTES or reply.offset > reply.total or reply.bytes.len > CHUNK_BYTES or
-                reply.bytes.len > reply.total - reply.offset or !validText(reply.bytes) or
+                reply.bytes.len > reply.total - reply.offset or !validFragment(reply.bytes) or
                 (reply.status != .ok and (reply.total != 0 or reply.offset != 0 or reply.bytes.len != 0))) return error.MalformedFrame;
             put(u16, out[6..], @intFromEnum(reply.status));
             put(u16, out[16..], reply.total);

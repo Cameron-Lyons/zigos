@@ -75,11 +75,30 @@ pub fn totalPixelWrites() u64 {
     return pixels_written;
 }
 
+pub fn verifyCell(column: usize, row: usize) bool {
+    if (!initialized or column >= composed_frame.columns or row >= composed_frame.rows) return false;
+    return renderer.matchesCell(column, row, composed_frame.cells[row * composed_frame.columns + column]);
+}
+
 pub fn verifyText(column: usize, row: usize, text: []const u8) bool {
-    if (!initialized or row >= composed_frame.rows or column >= composed_frame.columns or text.len > composed_frame.columns - column) return false;
-    for (text, column..) |byte, x| {
+    if (!initialized or row >= composed_frame.rows or column >= composed_frame.columns) return false;
+    const unicode = @import("../../native/core/unicode.zig");
+    if (!unicode.validText(text)) return false;
+    var iterator = unicode.Iterator{ .text = text };
+    var x = column;
+    while (iterator.next()) |cluster| {
+        const width = cluster.columns(x);
+        if (cluster.newline or width > composed_frame.columns - x) return false;
+        const scalar = unicode.decode(text, cluster.start).?;
         const cell = composed_frame.cells[row * composed_frame.columns + x];
-        if (cell.character != byte or !renderer.matchesCell(x, row, cell)) return false;
+        if (cell.character != (if (cluster.tab) @as(u21, ' ') else scalar.point)) return false;
+        if (scalar.end != cluster.end) {
+            const offset: usize = cell.cluster_offset;
+            if (cell.cluster_length != cluster.end - cluster.start or offset + cell.cluster_length > composed_frame.cluster_length or
+                !std.mem.eql(u8, text[cluster.start..cluster.end], composed_frame.clusters[offset..][0..cell.cluster_length])) return false;
+        }
+        for (0..width) |part| if (!verifyCell(x + part, row)) return false;
+        x += width;
     }
     return true;
 }

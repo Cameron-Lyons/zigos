@@ -349,6 +349,11 @@ done
   printf '}\n'
 } > "$measurements_path"
 
+if ! command -v jq >/dev/null 2>&1; then
+  printf 'jq is required to encode bundled third-party notices in the release SBOM.\n' >&2
+  exit 1
+fi
+
 if ! command -v jj >/dev/null 2>&1; then
   printf 'Jujutsu (jj) is required to generate release source provenance.\n' >&2
   exit 1
@@ -374,6 +379,13 @@ sbom_path="$WORK_PATH/sbom.spdx.json"
   printf '    "created": "%s",\n' "$created_utc"
   printf '    "creators": ["Tool: scripts/generate-release-sbom-provenance.sh", "Organization: Zigos release security gate"]\n'
   printf '  },\n'
+  # The signed SBOM accompanies binary releases and carries the complete
+  # notices for the embedded Unicode data and derived bitmap font.
+  printf '  "documentComment": '
+  cat "$ROOT_DIR/src/native/core/unicode_data/UNICODE-LICENSE.txt" \
+    "$ROOT_DIR/src/kernel/platform/fonts/README.md" \
+    "$ROOT_DIR/src/kernel/platform/fonts/UNIFONT-LICENSE.txt" | jq -Rs .
+  printf ',\n'
   printf '  "packages": [\n'
   printf '    {\n'
   printf '      "name": "zigos",\n'

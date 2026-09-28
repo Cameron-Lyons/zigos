@@ -1,13 +1,14 @@
 const std = @import("std");
 pub const text_layout = @import("text_layout.zig");
 
-pub const ABI_VERSION: u16 = 17;
+pub const ABI_VERSION: u16 = 18;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
 pub const WAIT_PLUS_SEALED_RINGS = true;
 
 pub const InputByte = struct {
+    // bytes[1..length] carries one supported UTF-8 scalar (1..4 bytes).
     pub const text: u8 = 1;
     pub const backspace: u8 = 2;
     pub const commit_text: u8 = 3;
@@ -296,10 +297,12 @@ pub const SurfaceText = extern struct {
     pub fn isCanonical(self: *const SurfaceText) bool {
         if (self.text_length > SURFACE_TEXT_BYTES or self.cursor > self.text_length or self.state.selection_anchor > self.text_length or
             self.state.reserved != 0 or self.state.model == 0 or self.state.model > 6 or self.state.flags & 0x80 != 0) return false;
-        if (self.state.cursor_upstream and (self.state.model != 1 or self.cursor == 0 or self.text[self.cursor - 1] == '\n')) return false;
+        if (self.state.cursor_upstream and (self.state.model != 1 or self.cursor == 0 or text_layout.unicode.followsNewline(self.textSlice(), self.cursor))) return false;
         const save_state = std.enums.fromInt(DocumentSaveState, self.state.save_state) orelse return false;
         if (self.state.model != 1 and (save_state != .none or self.state.selection_anchor != self.cursor)) return false;
-        for (self.textSlice()) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
+        if (!text_layout.unicode.validText(self.textSlice()) or
+            !text_layout.unicode.isBoundary(self.textSlice(), self.cursor) or
+            !text_layout.unicode.isBoundary(self.textSlice(), self.state.selection_anchor)) return false;
         return std.mem.allEqual(u8, self.text[self.text_length..], 0);
     }
 };
@@ -440,7 +443,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 17), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 18), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));
@@ -472,4 +475,24 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
     presentation.buffer_object_id = 0;
     try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
+}
+
+test "text surface rejects cursors inside scalars and grapheme clusters" {
+    const bytes = "e\u{301}界\r\n";
+    var text = SurfaceText{ .text_length = bytes.len, .cursor = bytes.len, .state = .{ .model = 1, .selection_anchor = bytes.len } };
+    @memcpy(text.text[0..bytes.len], bytes);
+    try std.testing.expect(text.isCanonical());
+    for ([_]u16{ 1, 2, 4, 5, 7 }) |offset| {
+        text.cursor = offset;
+        try std.testing.expect(!text.isCanonical());
+        text.cursor = bytes.len;
+        text.state.selection_anchor = @intCast(offset);
+        try std.testing.expect(!text.isCanonical());
+        text.state.selection_anchor = bytes.len;
+    }
+    text.state.cursor_upstream = true;
+    try std.testing.expect(!text.isCanonical());
+    text.state.cursor_upstream = false;
+    text.text[0] = 0xff;
+    try std.testing.expect(!text.isCanonical());
 }

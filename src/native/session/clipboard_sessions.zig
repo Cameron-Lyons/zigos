@@ -416,7 +416,7 @@ fn handle(manager: anytype, s: *State, channel: *Channel, frame: protocol.Frame,
             queue(channel, frame.gesture, .{ .status = .ok, .total = channel.length, .offset = channel.offset }, false);
         },
         .copy_commit => {
-            if (channel.operation != .copy or channel.offset != channel.length) {
+            if (channel.operation != .copy or channel.offset != channel.length or !abi.text_layout.unicode.validText(channel.bytes[0..channel.length])) {
                 queue(channel, frame.gesture, .{ .status = .invalid }, true);
                 return;
             }
@@ -763,4 +763,19 @@ test "clipboard session preserves old content on incomplete uploads and erases i
     f.clipboard.closeTask(f.tasks[0], 10);
     try std.testing.expectEqual(@as(u64, 0), f.clipboard.state().?.item.source_task);
     try std.testing.expectError(error.EndpointNotFound, f.endpoints.descriptor(ids.endpoint(client_id)));
+}
+
+test "clipboard session validates complete UTF-8 across chunk boundaries before publishing" {
+    const f = try TestFixture.init();
+    defer f.deinit();
+    const text = "a" ** 67 ++ "界e\u{301}👩‍💻";
+    _ = try f.copy(0, text);
+    try std.testing.expectEqualStrings(text, f.clipboard.state().?.item.bytes[0..text.len]);
+    for ([_][]const u8{ "\xc0\xaf", "\xed\xa0\x80", "\xe2\x82", "\xc2\x85" }) |bad| {
+        const g = try f.gesture(0, 0x06);
+        _ = try f.exchange(0, g, .{ .copy_begin = @intCast(bad.len) }, 10);
+        _ = try f.exchange(0, g, .{ .copy_chunk = .{ .offset = 0, .bytes = bad } }, 10);
+        try std.testing.expectEqual(protocol.Status.invalid, (try f.exchange(0, g, .{ .copy_commit = {} }, 10)).status);
+        try std.testing.expectEqualStrings(text, f.clipboard.state().?.item.bytes[0..text.len]);
+    }
 }

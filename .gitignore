@@ -10,5 +10,7 @@ qemu*.log
 *.o
 *.elf
 *.bin
+!src/native/core/unicode_data/properties.bin
+!src/kernel/platform/fonts/zigos-bitmap.bin
 *.iso
 .DS_Store
