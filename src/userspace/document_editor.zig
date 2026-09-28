@@ -245,6 +245,7 @@ fn setTestText(surface: *State, text: []const u8) void {
     @memcpy(surface.text[0..text.len], text);
     surface.text_length = @intCast(text.len);
     surface.cursor = surface.text_length;
+    surface.selection_anchor = surface.cursor;
     surface.flags.dirty = true;
     surface.revision += 1;
 }

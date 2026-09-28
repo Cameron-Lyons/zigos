@@ -2683,10 +2683,13 @@ test "compositor text snapshots isolate mutations and reject revision and window
     var session = Session.init();
     const window = try session.openTaskView(task, "Notes");
     var presentation = testSurfacePresentation(72, 512);
-    var text = abi.SurfaceText{ .window_id = window.id, .model = 1, .text_length = 5, .cursor = 5 };
+    var text = abi.SurfaceText{ .window_id = window.id, .state = .{ .model = 1, .selection_anchor = 5 }, .text_length = 5, .cursor = 5 };
     @memcpy(text.text[0..5], "Draft");
     try std.testing.expectEqual(PresentResult.accepted, try session.presentSurfaceText(task, &presentation, &text));
     try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurfaceText(task, &presentation, &text));
+    text.state.selection_anchor = 0;
+    try std.testing.expectError(error.PresentationConflict, session.presentSurfaceText(task, &presentation, &text));
+    text.state.selection_anchor = 5;
     text.text[0] = 'X';
     try std.testing.expectEqualStrings("Draft", session.surfacePresentation(72).?.text.?.textSlice());
     try std.testing.expectError(error.PresentationConflict, session.presentSurfaceText(task, &presentation, &text));

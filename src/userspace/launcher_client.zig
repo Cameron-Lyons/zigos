@@ -111,6 +111,7 @@ fn show(surface: *State, label: []const u8, suffix: []const u8) void {
     @memcpy(surface.text[label.len..][0..suffix.len], suffix);
     surface.text_length = @intCast(label.len + suffix.len);
     surface.cursor = 0;
+    surface.selection_anchor = 0;
     surface.flags.dirty = false;
     surface.revision +|= 1;
 }

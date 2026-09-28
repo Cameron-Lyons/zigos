@@ -5,6 +5,7 @@ pub const Content = struct {
     surface_id: u64,
     text: []const u8,
     cursor: usize,
+    selection_anchor: ?usize = null,
     flags: mailbox.UiStateFlags,
     window_id: u64 = 0,
     model: mailbox.UiModelKind = .generic,
@@ -67,7 +68,7 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
         } else if (state.text.len == 0 and state.model != .notes) {
             frame.put(0, text_row, "Ready for input.", .muted);
         } else {
-            drawText(frame, text_row, state.text, state.cursor);
+            drawText(frame, text_row, state.text, state.cursor, state.selection_anchor);
         }
         if (state.model == .notes) {
             const status = saveStatus(state.save_state, flags.dirty);
@@ -84,7 +85,7 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
     }
     if (surface) |state| {
         if (state.model == .notes) frame.put(0, frame.rows - 1, switch (state.save_state) {
-            .none, .saving, .saved => "Arrows  Move  |  Ctrl+Enter  Save",
+            .none, .saving, .saved => "Shift+Arrows  Select  |  Ctrl+Enter  Save",
             .retryable => "Type to edit  |  Ctrl+Enter  Retry save",
             .permission_denied, .document_changed, .unavailable, .failed => "Type to edit  |  Draft kept in this session",
         }, .muted);
@@ -104,7 +105,7 @@ fn saveStatus(state: abi.DocumentSaveState, dirty: bool) struct { text: []const 
     };
 }
 
-fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: usize) void {
+fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: usize, selection_anchor: ?usize) void {
     const visible_rows = (frame.rows -| 3) -| start_row;
     if (visible_rows == 0) return;
     // Derive a bounded viewport from the acknowledged cursor. The compositor
@@ -115,6 +116,9 @@ fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: u
         advanceTextPosition(byte, frame.columns, &cursor_row, &cursor_column);
     }
     const first_row = cursor_row -| (visible_rows - 1);
+    const anchor = selection_anchor orelse cursor;
+    const selection_start = @min(anchor, cursor);
+    const selection_end = @max(anchor, cursor);
     var row: usize = 0;
     var column: usize = 0;
     for (text, 0..) |byte, index| {
@@ -122,6 +126,7 @@ fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: u
         if (row >= first_row) {
             const cell = &frame.cells[(start_row + row - first_row) * frame.columns + column];
             if (index == cursor) cell.cursor = true;
+            if (index >= selection_start and index < selection_end) cell.style = .selected;
             if (byte != '\n') cell.character = byte;
         }
         advanceTextPosition(byte, frame.columns, &row, &column);
@@ -174,21 +179,21 @@ test "desktop view renders owned surface text and removes stale task content" {
 test "desktop text wraps scrolls to its cursor and clears old cells" {
     const std = @import("std");
     var frame = try scanout.Frame.init(20, 10);
-    drawText(&frame, 5, "abcdefghijklmnopqrstUV", 22);
+    drawText(&frame, 5, "abcdefghijklmnopqrstUV", 22, null);
     try expectText(&frame, 0, 5, "abcdefghijklmnopqrst");
     try expectText(&frame, 0, 6, "UV");
     try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
     frame.clear();
-    drawText(&frame, 6, "abcdefghijklmnopqrstUV", 22);
+    drawText(&frame, 6, "abcdefghijklmnopqrstUV", 22, null);
     try expectText(&frame, 0, 6, "UV");
     try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
     for (frame.cells[7 * 20 ..][0..20]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
     frame.clear();
-    drawText(&frame, 5, "one\ntwo\nthree\n", 14);
+    drawText(&frame, 5, "one\ntwo\nthree\n", 14, null);
     try expectText(&frame, 0, 5, "three");
     try std.testing.expect(frame.cells[6 * 20].cursor);
     frame.clear();
-    drawText(&frame, 5, "one\ntwo\nthree\n", 1);
+    drawText(&frame, 5, "one\ntwo\nthree\n", 1, null);
     try expectText(&frame, 0, 5, "one");
     try std.testing.expect(frame.cells[5 * 20 + 1].cursor);
     try std.testing.expect(!frame.cells[6 * 20].cursor);
@@ -196,6 +201,30 @@ test "desktop text wraps scrolls to its cursor and clears old cells" {
     const empty = compositor.Session.init();
     render(&tiny, &empty, null);
     try expectText(&tiny, 0, 0, "Zigo");
+}
+
+test "desktop selection highlights both directions across newlines and clears on collapse" {
+    const std = @import("std");
+    var frame = try scanout.Frame.init(20, 10);
+    for ([_]struct { cursor: usize, anchor: usize }{ .{ .cursor = 2, .anchor = 5 }, .{ .cursor = 5, .anchor = 2 } }) |selection| {
+        frame.clear();
+        drawText(&frame, 5, "abc\ndef", selection.cursor, selection.anchor);
+        try std.testing.expectEqual(scanout.Style.body, frame.cells[5 * 20 + 1].style);
+        try std.testing.expectEqual(scanout.Style.selected, frame.cells[5 * 20 + 2].style);
+        try std.testing.expectEqual(scanout.Style.selected, frame.cells[5 * 20 + 3].style);
+        try std.testing.expectEqual(scanout.Style.selected, frame.cells[6 * 20].style);
+        try std.testing.expectEqual(scanout.Style.body, frame.cells[6 * 20 + 1].style);
+    }
+    frame.clear();
+    drawText(&frame, 5, "abc\ndef", 5, 5);
+    for (frame.cells[5 * 20 .. 7 * 20]) |cell| try std.testing.expectEqual(scanout.Style.body, cell.style);
+    frame.clear();
+    drawText(&frame, 6, "abcdefghijklmnopqrstUV", 22, 18);
+    try expectText(&frame, 0, 6, "UV");
+    try std.testing.expectEqual(scanout.Style.selected, frame.cells[6 * 20].style);
+    try std.testing.expectEqual(scanout.Style.selected, frame.cells[6 * 20 + 1].style);
+    try std.testing.expectEqual(scanout.Style.body, frame.cells[6 * 20 + 2].style);
+    try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
 }
 
 test "desktop renders document save feedback without treating a dirty receipt as saved" {

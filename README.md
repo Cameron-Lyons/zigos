@@ -75,7 +75,7 @@ requests.
   retires cancelled preparations. The 256-byte mailbox uses a typed UI channel
   for either a launcher or an editor. Cold-boot and reboot verification exercise
   these controls through the compositor ELF with modeled keyboard input.
-  Native ABI v13 copies canonical text snapshots from validated task memory;
+  Native ABI v14 copies canonical text snapshots from validated task memory;
   the compositor owns each accepted revision and rejects conflicting updates.
   The native boot path now maps the firmware framebuffer and draws document
   text, cursors, unsaved state, and selected Open/Cancel controls. Later frames
@@ -85,12 +85,15 @@ requests.
   retain the draft, and only an explicit retry resubmits a failed barrier.
   Notes supports insertion, Backspace and Delete at the cursor, arrow movement
   between characters and logical lines, Home/End, and Ctrl+Home/End. Vertical
-  movement remembers its column across shorter lines. Navigation preserves saved
-  state; edits remain staged until Ctrl+Enter. The compositor scrolls wrapped
-  text to keep the cursor visible without retaining another editor buffer.
-  Selection, Unicode text, and navigation by visual wrapped rows remain open.
-  The status fits within the unchanged 528-byte text snapshot. Boot verification
-  reads back mapped device pixels for the launcher, edited Notes text, save
+  movement remembers its column across shorter lines. Shift extends selection
+  with these navigation keys, and Ctrl+A selects the document. Typing replaces
+  the highlighted range; Backspace and Delete remove it. Navigation and selection
+  preserve saved state; edits remain staged until Ctrl+Enter. The compositor
+  scrolls wrapped text to keep the cursor visible without retaining another
+  editor buffer. Unicode text, navigation by visual wrapped rows, clipboard
+  operations, and undo remain open. Selection and save feedback fit within the
+  unchanged 528-byte text snapshot. Boot verification reads back mapped device
+  pixels for the launcher, edited Notes text, forward and reverse selections, save
   progress, durable success, and a denied save after revocation. A production
   document picker,
   identity and permission provisioning, accelerated graphics, Unicode rendering,

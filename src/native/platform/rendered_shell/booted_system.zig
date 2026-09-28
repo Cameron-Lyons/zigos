@@ -231,7 +231,7 @@ pub const BootedSystem = struct {
             .task_switch_previous => self.dispatchInput(.{ .kind = .task_switch_previous, .tick = tick }),
             .show_recovery => self.dispatchInput(.{ .kind = .show_recovery, .tick = tick }),
             .dismiss_recovery => self.dispatchInput(.{ .kind = .dismiss_recovery, .tick = tick }),
-            .text => self.stageHardwareText(event.text, tick),
+            .text => self.stageHardwareText(event.data, tick),
             .backspace => self.backspaceHardwareText(tick),
             .commit_text => self.commitHardwareText(tick),
             // Cursor editing belongs to the Notes ELF, not this scripted
@@ -245,6 +245,7 @@ pub const BootedSystem = struct {
             .document_start,
             .document_end,
             .delete_forward,
+            .select_all,
             => self.result(.tick, false),
         };
     }

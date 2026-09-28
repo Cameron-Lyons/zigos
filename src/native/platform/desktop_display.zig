@@ -25,11 +25,12 @@ pub fn present(session: *const compositor.Session) bool {
                         .surface_id = surface.presentation.surface_id,
                         .text = text.textSlice(),
                         .cursor = text.cursor,
-                        .flags = @bitCast(text.flags),
+                        .selection_anchor = text.state.selection_anchor,
+                        .flags = @bitCast(text.state.flags),
                         .window_id = text.window_id,
-                        .model = std.enums.fromInt(mailbox.UiModelKind, text.model) orelse return false,
-                        .focus_index = text.focus_index,
-                        .save_state = std.enums.fromInt(abi.DocumentSaveState, text.save_state) orelse return false,
+                        .model = std.enums.fromInt(mailbox.UiModelKind, text.state.model) orelse return false,
+                        .focus_index = text.state.focus_index,
+                        .save_state = std.enums.fromInt(abi.DocumentSaveState, text.state.save_state) orelse return false,
                     };
                 }
             }

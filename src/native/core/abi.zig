@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ABI_VERSION: u16 = 13;
+pub const ABI_VERSION: u16 = 14;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -26,7 +26,10 @@ pub const InputByte = struct {
     pub const document_start: u8 = 17;
     pub const document_end: u8 = 18;
     pub const delete_forward: u8 = 19;
+    pub const select_all: u8 = 20;
 };
+
+pub const INPUT_EXTEND_SELECTION: u8 = 1;
 
 pub fn inputPacket(op: u8, data: u8) [INPUT_PACKET_BYTES]u8 {
     var bytes = [_]u8{0} ** INPUT_PACKET_BYTES;
@@ -241,14 +244,20 @@ pub const DocumentSaveState = enum(u8) {
     failed,
 };
 
+pub const SurfaceTextState = packed struct(u32) {
+    selection_anchor: u10 = 0,
+    focus_index: u2 = 0,
+    model: u3 = 0,
+    flags: u8 = 0,
+    save_state: u4 = 0,
+    reserved: u5 = 0,
+};
+
 pub const SurfaceText = extern struct {
     window_id: u64 = 0,
     text_length: u16 = 0,
     cursor: u16 = 0,
-    focus_index: u8 = 0,
-    model: u8 = 0,
-    flags: u8 = 0,
-    save_state: u8 = 0,
+    state: SurfaceTextState = .{},
     text: [SURFACE_TEXT_BYTES]u8 = [_]u8{0} ** SURFACE_TEXT_BYTES,
 
     pub fn textSlice(self: *const SurfaceText) []const u8 {
@@ -256,10 +265,10 @@ pub const SurfaceText = extern struct {
     }
 
     pub fn isCanonical(self: *const SurfaceText) bool {
-        if (self.text_length > SURFACE_TEXT_BYTES or self.cursor > self.text_length or
-            self.focus_index > 3 or self.model == 0 or self.model > 6 or self.flags & 0xc0 != 0) return false;
-        const save_state = std.enums.fromInt(DocumentSaveState, self.save_state) orelse return false;
-        if (self.model != 1 and save_state != .none) return false;
+        if (self.text_length > SURFACE_TEXT_BYTES or self.cursor > self.text_length or self.state.selection_anchor > self.text_length or
+            self.state.reserved != 0 or self.state.model == 0 or self.state.model > 6 or self.state.flags & 0xc0 != 0) return false;
+        const save_state = std.enums.fromInt(DocumentSaveState, self.state.save_state) orelse return false;
+        if (self.state.model != 1 and (save_state != .none or self.state.selection_anchor != self.cursor)) return false;
         for (self.textSlice()) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
         return std.mem.allEqual(u8, self.text[self.text_length..], 0);
     }
@@ -267,14 +276,37 @@ pub const SurfaceText = extern struct {
 
 test "text surface save feedback stays bounded and rejects noncanonical states" {
     try std.testing.expectEqual(@as(usize, 528), @sizeOf(SurfaceText));
-    var text = SurfaceText{ .model = 1, .save_state = @intFromEnum(DocumentSaveState.retryable) };
+    var text = SurfaceText{ .state = .{ .model = 1, .save_state = @intFromEnum(DocumentSaveState.retryable) } };
     try std.testing.expect(text.isCanonical());
-    text.save_state = 255;
+    text.state.save_state = 15;
     try std.testing.expect(!text.isCanonical());
-    text.save_state = @intFromEnum(DocumentSaveState.saved);
-    text.model = 5;
+    text.state.save_state = @intFromEnum(DocumentSaveState.saved);
+    text.state.model = 5;
     try std.testing.expect(!text.isCanonical());
-    text.save_state = 0;
+    text.state.save_state = 0;
+    try std.testing.expect(text.isCanonical());
+}
+
+test "text surface selections use bounded packed metadata and reject ambiguous state" {
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(SurfaceTextState));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(SurfaceText, "text"));
+    var text = SurfaceText{ .text_length = 3, .cursor = 1, .state = .{ .model = 1, .selection_anchor = 3 } };
+    @memcpy(text.text[0..3], "abc");
+    try std.testing.expect(text.isCanonical());
+    text.state.selection_anchor = 4;
+    try std.testing.expect(!text.isCanonical());
+    text.state.selection_anchor = 3;
+    text.state.reserved = 1;
+    try std.testing.expect(!text.isCanonical());
+    text.state.reserved = 0;
+    text.state.flags = 0x80;
+    try std.testing.expect(!text.isCanonical());
+    text.state.flags = 0;
+    text.state.model = 7;
+    try std.testing.expect(!text.isCanonical());
+    text.state.model = 2;
+    try std.testing.expect(!text.isCanonical());
+    text.state.selection_anchor = @intCast(text.cursor);
     try std.testing.expect(text.isCanonical());
 }
 
@@ -378,7 +410,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 13), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 14), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));

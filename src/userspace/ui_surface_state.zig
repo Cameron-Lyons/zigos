@@ -21,6 +21,7 @@ pub const State = struct {
     text: [TEXT_CAPACITY]u8 = [_]u8{0} ** TEXT_CAPACITY,
     text_length: u16 = 0,
     cursor: u16 = 0,
+    selection_anchor: u16 = 0,
     vertical_column: u16 = NO_VERTICAL_COLUMN,
     save_state: abi.DocumentSaveState = .none,
     commit_count: u32 = 0,
@@ -57,10 +58,13 @@ pub const State = struct {
             .window_id = self.window_id,
             .text_length = self.text_length,
             .cursor = self.cursor,
-            .focus_index = @intCast(self.focus_index),
-            .model = @intFromEnum(self.model),
-            .flags = @bitCast(self.flags),
-            .save_state = @intFromEnum(self.save_state),
+            .state = .{
+                .selection_anchor = @intCast(self.selection_anchor),
+                .focus_index = @intCast(self.focus_index),
+                .model = @intCast(@intFromEnum(self.model)),
+                .flags = @bitCast(self.flags),
+                .save_state = @intCast(@intFromEnum(self.save_state)),
+            },
         };
         @memcpy(out.text[0..self.text_length], self.textSlice());
         return out;
@@ -72,6 +76,11 @@ pub const State = struct {
         const op = event.bytes[0];
         const data = if (event.length > 1) event.bytes[1] else 0;
         if (op == abi.InputByte.text and (data < 0x20 or data > 0x7e)) return .rejected;
+        const navigation = op >= abi.InputByte.cursor_left and op <= abi.InputByte.document_end;
+        if (navigation) {
+            if (data & ~abi.INPUT_EXTEND_SELECTION != 0) return .rejected;
+        } else if (op != abi.InputByte.text and data != 0) return .rejected;
+        const extend = navigation and data & abi.INPUT_EXTEND_SELECTION != 0;
         switch (op) {
             abi.InputByte.text,
             abi.InputByte.backspace,
@@ -92,6 +101,7 @@ pub const State = struct {
             abi.InputByte.document_start,
             abi.InputByte.document_end,
             abi.InputByte.delete_forward,
+            abi.InputByte.select_all,
             => {},
             else => return .rejected,
         }
@@ -102,14 +112,15 @@ pub const State = struct {
             abi.InputByte.text => self.insertText(data),
             abi.InputByte.backspace => self.backspace(),
             abi.InputByte.delete_forward => if (self.model == .notes) self.deleteForward() else false,
-            abi.InputByte.cursor_left => self.moveCursor(self.cursor -| 1, false),
-            abi.InputByte.cursor_right => self.moveCursor(@min(self.text_length, self.cursor + 1), false),
-            abi.InputByte.cursor_up => self.moveVertical(false),
-            abi.InputByte.cursor_down => self.moveVertical(true),
-            abi.InputByte.line_start => self.moveCursor(self.lineStart(self.cursor), false),
-            abi.InputByte.line_end => self.moveCursor(self.lineEnd(self.cursor), false),
-            abi.InputByte.document_start => self.moveCursor(0, false),
-            abi.InputByte.document_end => self.moveCursor(self.text_length, false),
+            abi.InputByte.cursor_left => self.moveCursor(if (!extend and self.hasSelection()) self.selectionStart() else self.cursor -| 1, false, extend),
+            abi.InputByte.cursor_right => self.moveCursor(if (!extend and self.hasSelection()) self.selectionEnd() else @min(self.text_length, self.cursor + 1), false, extend),
+            abi.InputByte.cursor_up => self.moveVertical(false, extend),
+            abi.InputByte.cursor_down => self.moveVertical(true, extend),
+            abi.InputByte.line_start => self.moveCursor(self.lineStart(self.cursor), false, extend),
+            abi.InputByte.line_end => self.moveCursor(self.lineEnd(self.cursor), false, extend),
+            abi.InputByte.document_start => self.moveCursor(0, false, extend),
+            abi.InputByte.document_end => self.moveCursor(self.text_length, false, extend),
+            abi.InputByte.select_all => self.selectAll(),
             abi.InputByte.commit_text => self.commit(),
             abi.InputByte.focus_next => self.moveFocus(true),
             abi.InputByte.focus_previous => self.moveFocus(false),
@@ -125,28 +136,43 @@ pub const State = struct {
     }
 
     fn insertText(self: *State, byte: u8) bool {
-        if (self.text_length == self.text.len) return self.noteOverflow();
-        const at: usize = self.cursor;
-        std.mem.copyBackwards(u8, self.text[at + 1 .. self.text_length + 1], self.text[at..self.text_length]);
-        self.text[at] = byte;
-        self.text_length += 1;
-        self.cursor += 1;
+        const start = self.selectionStart();
+        const end = self.selectionEnd();
+        const new_length = self.text_length - (end - start) + 1;
+        if (new_length > self.text.len) return self.noteOverflow();
+        if (end == start) {
+            std.mem.copyBackwards(u8, self.text[start + 1 .. new_length], self.text[end..self.text_length]);
+        } else {
+            std.mem.copyForwards(u8, self.text[start + 1 .. new_length], self.text[end..self.text_length]);
+            @memset(self.text[new_length..self.text_length], 0);
+        }
+        self.text[start] = byte;
+        self.text_length = @intCast(new_length);
+        self.cursor = @intCast(start + 1);
+        self.selection_anchor = self.cursor;
         self.edited();
         return true;
     }
 
     fn backspace(self: *State) bool {
+        if (self.hasSelection()) return self.eraseRange(self.selectionStart(), self.selectionEnd());
         if (self.cursor == 0) return false;
-        self.cursor -= 1;
-        return self.deleteForward();
+        return self.eraseRange(self.cursor - 1, self.cursor);
     }
 
     fn deleteForward(self: *State) bool {
+        if (self.hasSelection()) return self.eraseRange(self.selectionStart(), self.selectionEnd());
         if (self.cursor == self.text_length) return false;
-        const at: usize = self.cursor;
-        std.mem.copyForwards(u8, self.text[at .. self.text_length - 1], self.text[at + 1 .. self.text_length]);
-        self.text_length -= 1;
-        self.text[self.text_length] = 0;
+        return self.eraseRange(self.cursor, self.cursor + 1);
+    }
+
+    fn eraseRange(self: *State, start: usize, end: usize) bool {
+        const new_length = self.text_length - (end - start);
+        std.mem.copyForwards(u8, self.text[start..new_length], self.text[end..self.text_length]);
+        @memset(self.text[new_length..self.text_length], 0);
+        self.text_length = @intCast(new_length);
+        self.cursor = @intCast(start);
+        self.selection_anchor = self.cursor;
         self.edited();
         return true;
     }
@@ -170,23 +196,45 @@ pub const State = struct {
         return at;
     }
 
-    fn moveCursor(self: *State, position: usize, vertical: bool) bool {
-        if (self.model != .notes) return false;
-        if (!vertical) self.vertical_column = NO_VERTICAL_COLUMN;
-        if (self.cursor == position) return false;
-        self.cursor = @intCast(position);
-        return true;
+    fn hasSelection(self: *const State) bool {
+        return self.cursor != self.selection_anchor;
     }
 
-    fn moveVertical(self: *State, down: bool) bool {
+    fn selectionStart(self: *const State) usize {
+        return @min(self.cursor, self.selection_anchor);
+    }
+
+    fn selectionEnd(self: *const State) usize {
+        return @max(self.cursor, self.selection_anchor);
+    }
+
+    fn selectAll(self: *State) bool {
+        if (self.model != .notes) return false;
+        const changed = self.selection_anchor != 0 or self.cursor != self.text_length;
+        self.selection_anchor = 0;
+        self.cursor = self.text_length;
+        self.vertical_column = NO_VERTICAL_COLUMN;
+        return changed;
+    }
+
+    fn moveCursor(self: *State, position: usize, vertical: bool, extend: bool) bool {
+        if (self.model != .notes) return false;
+        if (!vertical) self.vertical_column = NO_VERTICAL_COLUMN;
+        const changed = self.cursor != position or (!extend and self.hasSelection());
+        self.cursor = @intCast(position);
+        if (!extend) self.selection_anchor = self.cursor;
+        return changed;
+    }
+
+    fn moveVertical(self: *State, down: bool, extend: bool) bool {
         if (self.model != .notes) return false;
         const start = self.lineStart(self.cursor);
         const end = self.lineEnd(self.cursor);
-        if ((down and end == self.text_length) or (!down and start == 0)) return false;
+        if ((down and end == self.text_length) or (!down and start == 0)) return self.moveCursor(self.cursor, true, extend);
         if (self.vertical_column == NO_VERTICAL_COLUMN) self.vertical_column = @intCast(self.cursor - start);
         const target_start = if (down) end + 1 else self.lineStart(start - 1);
         const target_end = if (down) self.lineEnd(target_start) else start - 1;
-        return self.moveCursor(@min(target_start + self.vertical_column, target_end), true);
+        return self.moveCursor(@min(target_start + self.vertical_column, target_end), true, extend);
     }
 
     fn commit(self: *State) bool {
@@ -234,6 +282,7 @@ pub const State = struct {
         self.text_length = @intCast(text.len);
         self.cursor = self.text_length;
         self.vertical_column = NO_VERTICAL_COLUMN;
+        self.selection_anchor = self.cursor;
         self.flags.loading = false;
         self.flags.load_failed = false;
         self.flags.input_overflow = false;
@@ -354,7 +403,7 @@ test "Notes edits invalidate saved feedback while preserving in-flight and faile
     try std.testing.expectEqual(abi.DocumentSaveState.permission_denied, state.save_state);
     const presentation = state.presentationText();
     try std.testing.expect(presentation.isCanonical());
-    try std.testing.expectEqual(@intFromEnum(abi.DocumentSaveState.permission_denied), presentation.save_state);
+    try std.testing.expectEqual(@intFromEnum(abi.DocumentSaveState.permission_denied), presentation.state.save_state);
     try std.testing.expect(state.acknowledgeSavedText("ac"));
     _ = state.apply(inputEvent(5, abi.InputByte.backspace, 0));
     try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
@@ -458,6 +507,89 @@ test "Notes cursor edits preserve surrounding text and navigation does not dirty
     try std.testing.expect(state.presentationText().isCanonical());
 }
 
+test "Notes replaces selected text without dirtying on selection or consuming surrounding bytes" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("first\nsecond"));
+    state.setSaveState(.saved);
+    _ = state.apply(inputEvent(1, abi.InputByte.document_start, 0));
+    try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(2, abi.InputByte.line_end, abi.INPUT_EXTEND_SELECTION)));
+    try std.testing.expectEqual(@as(u16, 0), state.selection_anchor);
+    try std.testing.expectEqual(@as(u16, 5), state.cursor);
+    try std.testing.expect(!state.flags.dirty);
+    try std.testing.expectEqual(abi.DocumentSaveState.saved, state.save_state);
+    _ = state.apply(inputEvent(3, abi.InputByte.text, 'X'));
+    try std.testing.expectEqualStrings("X\nsecond", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 1), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    try std.testing.expect(state.presentationText().isCanonical());
+}
+
+test "Notes reverse selections shrink cross lines and collapse without editing" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("abc\nx\nxyz"));
+    const extend = abi.INPUT_EXTEND_SELECTION;
+    for ([_]u8{ abi.InputByte.cursor_up, abi.InputByte.cursor_up, abi.InputByte.cursor_down }, [_]u16{ 5, 3, 5 }, 1..) |op, position, sequence| {
+        _ = state.apply(inputEvent(sequence, op, extend));
+        try std.testing.expectEqual(position, state.cursor);
+        try std.testing.expectEqual(@as(u16, 9), state.selection_anchor);
+        try std.testing.expect(!state.flags.dirty);
+    }
+    _ = state.apply(inputEvent(4, abi.InputByte.cursor_right, 0));
+    try std.testing.expectEqual(@as(u16, 9), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    _ = state.apply(inputEvent(5, abi.InputByte.cursor_left, extend));
+    _ = state.apply(inputEvent(6, abi.InputByte.cursor_left, 0));
+    try std.testing.expectEqual(@as(u16, 8), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    _ = state.apply(inputEvent(7, abi.InputByte.document_start, extend));
+    _ = state.apply(inputEvent(8, abi.InputByte.delete_forward, 0));
+    try std.testing.expectEqualStrings("z", state.textSlice());
+    try std.testing.expectEqual(@as(u16, 0), state.cursor);
+    try std.testing.expectEqual(state.cursor, state.selection_anchor);
+    try std.testing.expect(state.presentationText().isCanonical());
+}
+
+test "Notes selection replacement works at capacity and receipts retain selection" {
+    const full = [_]u8{'a'} ** TEXT_CAPACITY;
+    for ([_]u8{ abi.InputByte.text, abi.InputByte.activate, abi.InputByte.backspace, abi.InputByte.delete_forward }) |op| {
+        var state = State.init("app.notes");
+        try std.testing.expect(state.loadDocument(&full));
+        _ = state.apply(inputEvent(1, abi.InputByte.text, 'x'));
+        try std.testing.expect(state.flags.input_overflow);
+        _ = state.apply(inputEvent(2, abi.InputByte.select_all, 0));
+        try std.testing.expectEqual(@as(u16, TEXT_CAPACITY), state.cursor);
+        try std.testing.expectEqual(@as(u16, 0), state.selection_anchor);
+        _ = state.apply(inputEvent(3, op, if (op == abi.InputByte.text) 'x' else 0));
+        try std.testing.expectEqualStrings(switch (op) {
+            abi.InputByte.text => "x",
+            abi.InputByte.activate => "\n",
+            else => "",
+        }, state.textSlice());
+        try std.testing.expect(!state.flags.input_overflow);
+        try std.testing.expect(state.presentationText().isCanonical());
+        _ = state.apply(inputEvent(4, abi.InputByte.select_all, 0));
+        const anchor = state.selection_anchor;
+        const cursor = state.cursor;
+        try std.testing.expect(state.acknowledgeSavedText(state.textSlice()));
+        try std.testing.expectEqual(anchor, state.selection_anchor);
+        try std.testing.expectEqual(cursor, state.cursor);
+        try std.testing.expect(!state.flags.dirty);
+    }
+}
+
+test "Notes rejects malformed selection modifiers and stale input without changing state" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("abc"));
+    _ = state.apply(inputEvent(2, abi.InputByte.cursor_left, abi.INPUT_EXTEND_SELECTION));
+    const before = state;
+    try std.testing.expectEqual(ApplyResult.rejected, state.apply(inputEvent(3, abi.InputByte.cursor_left, 2)));
+    try std.testing.expectEqualDeep(before, state);
+    try std.testing.expectEqual(ApplyResult.rejected, state.apply(inputEvent(3, abi.InputByte.select_all, 1)));
+    try std.testing.expectEqualDeep(before, state);
+    try std.testing.expectEqual(ApplyResult.rejected, state.apply(inputEvent(2, abi.InputByte.backspace, 0)));
+    try std.testing.expectEqualDeep(before, state);
+}
+
 test "Notes vertical movement retains its column across short and empty lines" {
     var state = State.init("app.notes");
     try std.testing.expect(state.loadDocument("abcdef\nx\n\nuvwxyz\n"));
@@ -512,6 +644,10 @@ test "Viewer and Capture UI state keep model-specific controls" {
     try std.testing.expectEqual(@as(u16, 1), viewer.focus_index);
     try std.testing.expectEqual(ApplyResult.mutated, viewer.apply(inputEvent(2, abi.InputByte.text, 'q')));
     try std.testing.expectEqualStrings("q", viewer.textSlice());
+    try std.testing.expectEqual(ApplyResult.observed, viewer.apply(inputEvent(3, abi.InputByte.select_all, 0)));
+    try std.testing.expectEqual(ApplyResult.observed, viewer.apply(inputEvent(4, abi.InputByte.cursor_left, abi.INPUT_EXTEND_SELECTION)));
+    try std.testing.expectEqual(viewer.cursor, viewer.selection_anchor);
+    try std.testing.expect(viewer.presentationText().isCanonical());
 
     var capture = State.init("app.capture");
     try std.testing.expectEqual(ApplyResult.mutated, capture.apply(inputEvent(1, abi.InputByte.activate, 0)));
@@ -529,6 +665,7 @@ test "UI surface state rejects stale events and records bounded overflow once" {
 
     state.text_length = TEXT_CAPACITY;
     state.cursor = TEXT_CAPACITY;
+    state.selection_anchor = state.cursor;
     try std.testing.expectEqual(ApplyResult.mutated, state.apply(inputEvent(3, abi.InputByte.text, 'z')));
     try std.testing.expect(state.flags.input_overflow);
     try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(4, abi.InputByte.text, 'z')));

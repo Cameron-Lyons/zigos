@@ -28,6 +28,7 @@ var report_usage: u8 = 0x04;
 var report_modifiers: u8 = 0;
 var report_mode: enum { edit, open, cancel, key } = .edit;
 const cursor_edited_text = "aS\ncond editorb";
+const selection_edited_text = "Q\nb";
 
 const EditorSession = struct {
     task_id: u64,
@@ -111,6 +112,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try awaitPresentation(manager, second, sibling_text ++ "bc", 2);
     try expectStored(manager, workspace_id, sibling_path, sibling_text ++ "bc", sibling.version_id.raw());
     try editAtCursorAndSave(manager, second, workspace_id);
+    try selectAndSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_channel_sibling_editors);
     try expectDeniedSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_save_feedback);
@@ -314,7 +316,7 @@ fn awaitSaving(manager: anytype, editor: EditorSession) !void {
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
-        if (text.save_state != @intFromEnum(abi.DocumentSaveState.saving)) continue;
+        if (text.state.save_state != @intFromEnum(abi.DocumentSaveState.saving)) continue;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
         if (!framebuffer.verifyText(0, frame.rows - 2, "Saving...")) return error.SavingPixelsMissing;
         return;
@@ -356,6 +358,43 @@ fn editAtCursorAndSave(manager: anytype, editor: EditorSession, workspace_id: u6
 }
 
 fn pressCursorKey(manager: anytype, editor: EditorSession, usage: u8, modifiers: u8, expected: []const u8, cursor: u16, dirty: bool) !void {
+    try pressSelectionKey(manager, editor, usage, modifiers, expected, cursor, cursor, dirty);
+}
+
+fn selectAndSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {
+    const storage = manager.storageServicePtr();
+    const before = try storage.resolve(workspace_id, sibling_path);
+    const checkpoint = storage.checkpoint_store.last_checkpoint_generation;
+    try pressCursorKey(manager, editor, 0x4A, 1, cursor_edited_text, 0, false);
+    try pressSelectionKey(manager, editor, 0x4D, 2, cursor_edited_text, 2, 0, false);
+    try pressCursorKey(manager, editor, 0x11, 2, "N\ncond editorb", 1, true);
+    try pressSelectionKey(manager, editor, 0x4D, 3, "N\ncond editorb", 14, 1, true);
+    try pressCursorKey(manager, editor, 0x2A, 0, "N", 1, true);
+    try pressSelectionKey(manager, editor, 0x04, 1, "N", 1, 0, true);
+    try pressCursorKey(manager, editor, 0x14, 2, "Q", 1, true);
+    try pressCursorKey(manager, editor, 0x28, 0, "Q\n", 2, true);
+    try pressCursorKey(manager, editor, 0x04, 0, "Q\na", 3, true);
+    try pressSelectionKey(manager, editor, 0x50, 2, "Q\na", 2, 3, true);
+    try pressCursorKey(manager, editor, 0x05, 0, selection_edited_text, 3, true);
+    try pressCursorKey(manager, editor, 0x4A, 1, selection_edited_text, 0, true);
+    try pressSelectionKey(manager, editor, 0x51, 2, selection_edited_text, 2, 0, true);
+    try pressCursorKey(manager, editor, 0x4F, 0, selection_edited_text, 2, true);
+    try pressCursorKey(manager, editor, 0x4D, 1, selection_edited_text, 3, true);
+    const staged = try storage.resolve(workspace_id, sibling_path);
+    if (staged.version_id.raw() != before.version_id.raw() or
+        storage.checkpoint_store.last_checkpoint_generation != checkpoint) return error.SelectionEditSavedWithoutRequest;
+    report_cursor = 0;
+    report_mode = .key;
+    report_usage = 0x28;
+    report_modifiers = 1;
+    if (manager.servicePendingInputWork(timer.getTicks()) != 1) return error.SelectionInputNotRouted;
+    try awaitSaving(manager, editor);
+    try awaitPresentation(manager, editor, selection_edited_text, 4);
+    try expectStored(manager, workspace_id, sibling_path, selection_edited_text, before.version_id.raw());
+    if (storage.checkpoint_store.last_checkpoint_generation <= checkpoint) return error.SelectionSaveNotDurable;
+}
+
+fn pressSelectionKey(manager: anytype, editor: EditorSession, usage: u8, modifiers: u8, expected: []const u8, cursor: u16, anchor: u16, dirty: bool) !void {
     const before = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse return error.EditorMailboxMissing;
     report_cursor = 0;
     report_mode = .key;
@@ -368,8 +407,8 @@ fn pressCursorKey(manager: anytype, editor: EditorSession, usage: u8, modifiers:
         if (state.input_event_count != before.input_event_count + 1 or state.ui_presented_revision != state.ui_state_revision) continue;
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
-        const flags: mailbox_abi.UiStateFlags = @bitCast(text.flags);
-        if (text.cursor != cursor or state.ui_cursor != cursor or flags.dirty != dirty or
+        const flags: mailbox_abi.UiStateFlags = @bitCast(text.state.flags);
+        if (text.cursor != cursor or text.state.selection_anchor != anchor or state.ui_cursor != cursor or flags.dirty != dirty or
             !std.mem.eql(u8, text.textSlice(), expected)) return error.CursorEditMismatch;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
         var row: usize = 5;
@@ -383,6 +422,18 @@ fn pressCursorKey(manager: anytype, editor: EditorSession, usage: u8, modifiers:
         if (row >= frame.rows - 3 or !frame.cells[row * frame.columns + column].cursor) return error.CursorNotPresented;
         const cursor_glyph = [_]u8{if (cursor == expected.len or expected[cursor] == '\n') ' ' else expected[cursor]};
         if (!framebuffer.verifyText(column, row, &cursor_glyph)) return error.CursorPixelsMissing;
+        row = 5;
+        column = 0;
+        for (expected, 0..) |byte, index| {
+            const selected = index >= @min(cursor, anchor) and index < @max(cursor, anchor);
+            if (row >= frame.rows - 3 or (frame.cells[row * frame.columns + column].style == .selected) != selected) return error.SelectionNotPresented;
+            const glyph = [_]u8{if (byte == '\n') ' ' else byte};
+            if (!framebuffer.verifyText(column, row, &glyph)) return error.SelectionPixelsMissing;
+            if (byte == '\n' or column + 1 == frame.columns) {
+                column = 0;
+                row += 1;
+            } else column += 1;
+        }
         return;
     }
     return error.CursorEditTimedOut;
@@ -397,9 +448,9 @@ fn expectDeniedSave(manager: anytype, editor: EditorSession, workspace_id: u64) 
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
-        if (text.save_state != @intFromEnum(abi.DocumentSaveState.permission_denied)) continue;
-        const flags: mailbox_abi.UiStateFlags = @bitCast(text.flags);
-        if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), cursor_edited_text ++ "d")) return error.DeniedSaveLostDraft;
+        if (text.state.save_state != @intFromEnum(abi.DocumentSaveState.permission_denied)) continue;
+        const flags: mailbox_abi.UiStateFlags = @bitCast(text.state.flags);
+        if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), selection_edited_text ++ "d")) return error.DeniedSaveLostDraft;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
         if (!framebuffer.verifyText(0, frame.rows - 2, "Save denied. Your draft is still here.")) return error.SaveDeniedPixelsMissing;
         const after = try storage.resolve(workspace_id, sibling_path);
@@ -453,7 +504,7 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
         {
             const text = if (surface.text) |*content| content else return error.SurfaceTextMissing;
             if (!std.mem.eql(u8, text.textSlice(), expected)) return error.SurfaceTextMismatch;
-            if (commits != 0 and text.save_state != @intFromEnum(abi.DocumentSaveState.saved)) return error.SavedStateMissing;
+            if (commits != 0 and text.state.save_state != @intFromEnum(abi.DocumentSaveState.saved)) return error.SavedStateMissing;
             if (manager.compositorSessionPtr().active_window_id == editor.window_id) {
                 const first_line = std.mem.indexOfScalar(u8, expected, '\n') orelse expected.len;
                 if (!framebuffer.verifyText(0, 5, expected[0..first_line])) return error.DocumentPixelsMissing;

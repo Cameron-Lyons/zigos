@@ -121,7 +121,7 @@ pub const CommandInput = struct {
         switch (event.kind) {
             .text => {
                 if (self.pending_line_len >= self.pending_line.len) return error.ReportTooLarge;
-                self.pending_line[self.pending_line_len] = event.text;
+                self.pending_line[self.pending_line_len] = event.data;
                 self.pending_line_len += 1;
             },
             .backspace => {
@@ -163,6 +163,7 @@ pub const CommandInput = struct {
             .document_start,
             .document_end,
             .delete_forward,
+            .select_all,
             => {},
         }
         return false;
@@ -1102,12 +1103,12 @@ fn createReviewTestTask(
 test "permission command queue retains its full compact capacity" {
     var input = CommandInput{};
     for (0..MAX_PHYSICAL_INPUT_COMMANDS) |_| {
-        try std.testing.expect(!try input.submit(.{ .kind = .text, .text = 'a' }));
+        try std.testing.expect(!try input.submit(.{ .kind = .text, .data = 'a' }));
         try std.testing.expect(try input.submit(.{ .kind = .activate }));
     }
 
     try std.testing.expectEqual(@as(u8, MAX_PHYSICAL_INPUT_COMMANDS), input.pending_command_count);
-    try std.testing.expect(!try input.submit(.{ .kind = .text, .text = 'b' }));
+    try std.testing.expect(!try input.submit(.{ .kind = .text, .data = 'b' }));
     try std.testing.expectError(error.InputCommandQueueFull, input.submit(.{ .kind = .activate }));
 
     var buffer: [MAX_INPUT_LINE]u8 = undefined;

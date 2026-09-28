@@ -261,7 +261,7 @@ pub const Router = struct {
             .port_id = routed.port_id,
             .slot_id = routed.slot_id,
             .length = 2,
-            .bytes = abi.inputPacket(inputByte(routed.event.kind), routed.event.text),
+            .bytes = abi.inputPacket(inputByte(routed.event.kind), routed.event.data),
         };
     }
 
@@ -613,6 +613,7 @@ fn inputByte(kind: input_driver_task.EventKind) u8 {
         .document_start => abi.InputByte.document_start,
         .document_end => abi.InputByte.document_end,
         .delete_forward => abi.InputByte.delete_forward,
+        .select_all => abi.InputByte.select_all,
     };
 }
 
@@ -673,22 +674,25 @@ test "input router delivers cursor editing semantics only to the focused task" {
     var router = Router{};
     router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
     router.bindCompositor(&compositor, 99);
-    const usages = [_]u8{ 0x4A, 0x4D, 0x4F, 0x50, 0x51, 0x52, 0x4C, 0x4A, 0x4D };
+    const usages = [_]u8{ 0x4A, 0x4D, 0x4F, 0x50, 0x51, 0x52, 0x4C, 0x4A, 0x4D, 0x50, 0x4F, 0x4A, 0x4D, 0x04 };
+    const modifiers = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 1 };
     const operations = [_]u8{
         abi.InputByte.line_start,     abi.InputByte.line_end,       abi.InputByte.cursor_right,
         abi.InputByte.cursor_left,    abi.InputByte.cursor_down,    abi.InputByte.cursor_up,
         abi.InputByte.delete_forward, abi.InputByte.document_start, abi.InputByte.document_end,
+        abi.InputByte.cursor_left,    abi.InputByte.cursor_right,   abi.InputByte.document_start,
+        abi.InputByte.document_end,   abi.InputByte.select_all,
     };
     for (usages, operations, 0..) |usage, op, index| {
         test_feed = .{};
-        test_feed.reports[0] = makeTestReport(index * 2 + 1, 1, if (index >= 7) 1 else 0, &.{usage});
+        test_feed.reports[0] = makeTestReport(index * 2 + 1, 1, modifiers[index], &.{usage});
         test_feed.reports[1] = makeTestReport(index * 2 + 2, 1, 0, &.{});
         test_feed.count = 2;
         try std.testing.expectEqual(@as(usize, 1), router.service(10, DEFAULT_REPORT_BUDGET));
         try std.testing.expect(router.pollAbiForTask(99) == null);
         const event = router.pollAbiForTask(app.id).?;
         try std.testing.expectEqual(op, event.bytes[0]);
-        try std.testing.expectEqual(@as(u8, 0), event.bytes[1]);
+        try std.testing.expectEqual(@as(u8, if (index >= 9 and index <= 12) abi.INPUT_EXTEND_SELECTION else 0), event.bytes[1]);
         try std.testing.expectEqual(app.id, event.task_id);
         try std.testing.expect(router.pollAbiForTask(app.id) == null);
     }
@@ -724,7 +728,7 @@ test "input router gives each keyboard independent transitions and targets modal
     try std.testing.expectEqual(@as(u64, 77), wire_event.task_id);
     try std.testing.expectEqual(abi.InputByte.text, wire_event.bytes[0]);
     try std.testing.expectEqual(@as(u8, 'a'), wire_event.bytes[1]);
-    try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(77).?.event.text);
+    try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(77).?.event.data);
     try std.testing.expect(router.pollForTask(app.id) == null);
 }
 
@@ -828,8 +832,8 @@ test "input router applies task switching before routing later reports" {
     const events_routed = router.service(20, DEFAULT_REPORT_BUDGET);
     try std.testing.expectEqual(@as(usize, 3), events_routed);
     try std.testing.expectEqual(first_window.id, compositor.active_window_id);
-    try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(second.id).?.event.text);
-    try std.testing.expectEqual(@as(u8, 'b'), router.pollForTask(first.id).?.event.text);
+    try std.testing.expectEqual(@as(u8, 'a'), router.pollForTask(second.id).?.event.data);
+    try std.testing.expectEqual(@as(u8, 'b'), router.pollForTask(first.id).?.event.data);
 
     var woke_first = false;
     var woke_second = false;
@@ -925,22 +929,22 @@ test "input router keeps compositor switching responsive when a focused inbox is
     router.bindCompositor(&compositor, 99);
     const report = makeTestReport(1, 1, 0, &.{0x04});
     for (0..MAX_EVENTS_PER_INBOX) |_| {
-        try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'a' }, 40));
+        try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .data = 'a' }, 40));
     }
-    try std.testing.expect(!router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'b' }, 41));
+    try std.testing.expect(!router.routeEvent(&compositor, report, .{ .kind = .text, .data = 'b' }, 41));
     try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .task_switch_next }, 42));
     try std.testing.expectEqual(first_window.id, compositor.active_window_id);
 
     for (0..MAX_EVENTS_PER_INBOX) |_| {
-        try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'c' }, 43));
+        try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .data = 'c' }, 43));
     }
     try std.testing.expectEqual(@as(u8, MAX_QUEUED_EVENTS), router.queued_event_count);
     try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .task_switch_next }, 44));
     try std.testing.expectEqual(second_window.id, compositor.active_window_id);
-    try std.testing.expect(!router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'd' }, 45));
+    try std.testing.expect(!router.routeEvent(&compositor, report, .{ .kind = .text, .data = 'd' }, 45));
 
     try std.testing.expect(router.pollForTask(third.id) != null);
-    try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .text = 'd' }, 46));
+    try std.testing.expect(router.routeEvent(&compositor, report, .{ .kind = .text, .data = 'd' }, 46));
     try std.testing.expectEqual(@as(u8, MAX_QUEUED_EVENTS), router.queued_event_count);
 
     try std.testing.expectEqual(@as(usize, MAX_EVENTS_PER_INBOX - 1), router.dropForTask(third.id));
