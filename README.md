@@ -34,7 +34,12 @@ requests.
   last valid handle intact when it cannot advance, and callers skip exhausted
   slots or return capacity errors. Task restore checks destinations before any
   retirement or grant changes. The 64-bit handle layout and resident memory
-  ceilings are unchanged. These guarantees apply within each arena's lifetime.
+  ceilings are unchanged. The pasteboard, capture, network session, personal context,
+  backup, and media/print tables now use the same checked generation limit. They
+  preserve exhausted records and skip them during reuse, returning capacity
+  errors when no reusable slot remains. The media/print completion queue preserves order
+  while skipping exhausted jobs. Pasteboard revocation checks both the source
+  task and principal. These guarantees apply within each table or arena's lifetime.
 - The first daily-driver slice is Notes/docs: signed native package install,
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised

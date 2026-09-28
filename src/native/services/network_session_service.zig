@@ -385,10 +385,7 @@ pub const Service = struct {
     }
 
     fn nextSessionId(self: *const Service, session_index: usize) u64 {
-        const current_generation = (SessionHandle{ .value = self.sessions[session_index].id }).generation();
-        const incremented = current_generation +% 1;
-        const generation = if (incremented == 0) 1 else incremented;
-        return SessionHandle.fromParts(session_index, generation).value;
+        return (SessionHandle{ .value = self.sessions[session_index].id }).nextInSlot(session_index).?.value;
     }
 
     fn availableSessionIndex(self: *const Service, now_ticks: u64) ?usize {
@@ -398,6 +395,7 @@ pub const Service = struct {
         }
         for (0..MAX_SESSIONS) |offset| {
             const index = (@as(usize, self.next_reusable_session) + offset) % MAX_SESSIONS;
+            if ((SessionHandle{ .value = self.sessions[index].id }).nextInSlot(index) == null) continue;
             if (sessionReusableAt(&self.sessions[index], now_ticks)) return index;
         }
         return null;
@@ -589,6 +587,31 @@ test "network session open validates destinations and uses direct generational h
     try std.testing.expectEqualStrings("updates.example", session.destinationSlice());
     try std.testing.expectEqual(@as(usize, 1), service.sessionCount());
     try std.testing.expectEqual(session.id, service.find(session.id).?.id);
+    for (1..MAX_SESSIONS) |_| _ = try service.open(&network_policies, &capabilities, &policies, subjects, valid_request, null);
+    for (&service.sessions, 0..) |*entry, index| {
+        entry.id = SessionHandle.fromParts(index, indexed_arena.MAX_HANDLE_GENERATION).value;
+        entry.state = .completed;
+    }
+    const before = service;
+    try std.testing.expectError(error.SessionTableFull, service.open(&network_policies, &capabilities, &policies, subjects, valid_request, null));
+    try std.testing.expectEqualDeep(before, service);
+    service.sessions[7].id = SessionHandle.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION - 1).value;
+    const last = try service.open(&network_policies, &capabilities, &policies, subjects, valid_request, null);
+    try std.testing.expectEqual(SessionHandle.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION).value, last.id);
+    try std.testing.expect(service.find(SessionHandle.fromParts(7, 1).value) == null);
+    _ = try service.recordTransfer(.{
+        .subject = app,
+        .task_id = valid_request.task_id,
+        .session_id = last.id,
+        .expected_policy_id = valid_request.policy_id,
+        .expected_capability_id = valid_request.capability_id,
+        .bytes = 1,
+        .now_ticks = 12,
+        .detail = "last generation transfer",
+    }, null);
+    const exhausted = service;
+    try std.testing.expectError(error.SessionTableFull, service.open(&network_policies, &capabilities, &policies, subjects, valid_request, null));
+    try std.testing.expectEqualDeep(exhausted, service);
 }
 
 test "network session service opens leased attested sessions and audits revocation" {

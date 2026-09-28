@@ -920,6 +920,16 @@ pub fn GenerationalHandle(comptime display_name: []const u8) type {
             return @intCast(self.value >> 32);
         }
 
+        // For bounded service tables that retain their last issued handle in
+        // each slot. Exhausted or malformed identities cannot become empty slots.
+        pub fn nextInSlot(self: Self, slot_index: usize) ?Self {
+            if (slot_index > std.math.maxInt(u32)) return null;
+            if (self.isZero()) return fromParts(slot_index, 1);
+            const current = self.generation();
+            if (self.slotIndex() != slot_index or current == 0 or current >= MAX_HANDLE_GENERATION) return null;
+            return fromParts(slot_index, current + 1);
+        }
+
         pub fn isZero(self: Self) bool {
             return self.value == 0;
         }
@@ -932,6 +942,16 @@ pub fn GenerationalHandle(comptime display_name: []const u8) type {
             try writer.print("{s}({d}:{d})", .{ display_name, self.slotIndex(), self.generation() });
         }
     };
+}
+
+test "stored service handles advance only in their own slot and never through exhaustion" {
+    const Handle = GenerationalHandle("StoredServiceHandle");
+    try std.testing.expectEqual(Handle.fromParts(3, 1), Handle.zero.nextInSlot(3).?);
+    try std.testing.expectEqual(Handle.fromParts(3, MAX_HANDLE_GENERATION), Handle.fromParts(3, MAX_HANDLE_GENERATION - 1).nextInSlot(3).?);
+    try std.testing.expect(Handle.fromParts(3, MAX_HANDLE_GENERATION).nextInSlot(3) == null);
+    try std.testing.expect(Handle.fromParts(3, 1).nextInSlot(4) == null);
+    try std.testing.expect((Handle{ .value = 3 }).nextInSlot(3) == null);
+    try std.testing.expect((Handle{ .value = (@as(u64, EXHAUSTED_HANDLE_GENERATION) << 32) | 3 }).nextInSlot(3) == null);
 }
 
 pub fn GenerationalArena(

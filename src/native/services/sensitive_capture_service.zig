@@ -304,22 +304,19 @@ pub const Service = struct {
     fn availableSessionSlot(self: *const Service, now_ticks: u64) ?usize {
         for (0..MAX_SESSIONS) |offset| {
             const slot_index = (@as(usize, self.next_reusable_slot) + offset) % MAX_SESSIONS;
-            if (!self.slots[slot_index].in_use) return slot_index;
+            if (!self.slots[slot_index].in_use and (SessionHandle{ .value = self.slots[slot_index].session.id }).nextInSlot(slot_index) != null) return slot_index;
         }
         for (0..MAX_SESSIONS) |offset| {
             const slot_index = (@as(usize, self.next_reusable_slot) + offset) % MAX_SESSIONS;
             const slot = &self.slots[slot_index];
-            if (sessionLiveAt(&slot.session, now_ticks)) continue;
+            if ((SessionHandle{ .value = slot.session.id }).nextInSlot(slot_index) == null or sessionLiveAt(&slot.session, now_ticks)) continue;
             return slot_index;
         }
         return null;
     }
 
     fn nextSessionId(self: *const Service, slot_index: usize) u64 {
-        const current_generation = (SessionHandle{ .value = self.slots[slot_index].session.id }).generation();
-        const incremented = current_generation +% 1;
-        const generation = if (incremented == 0) 1 else incremented;
-        return SessionHandle.fromParts(slot_index, generation).value;
+        return (SessionHandle{ .value = self.slots[slot_index].session.id }).nextInSlot(slot_index).?.value;
     }
 
     fn accountActiveSession(self: *Service, session: *const Session) void {
@@ -813,4 +810,43 @@ test "sensitive capture sessions use direct generational handles" {
     try std.testing.expectEqual(@as(usize, 2), service.sessionCount());
     try std.testing.expectEqual(first.id, service.find(first.id).?.id);
     try std.testing.expectEqual(second.id, service.find(second.id).?.id);
+    const request = StartRequest{
+        .subject = app,
+        .task_id = 45,
+        .device_id = 9,
+        .kind = .camera,
+        .foreground_session_id = 6,
+        .expires_at_ticks = 45,
+        .now_ticks = 12,
+        .sample_budget = 1,
+        .indicator_visible = true,
+    };
+    for (2..MAX_SESSIONS) |_| _ = try service.start(&policies, subjects, request, null);
+    for (&service.slots, 0..) |*slot, index| {
+        slot.session.id = SessionHandle.fromParts(index, indexed_arena.MAX_HANDLE_GENERATION).value;
+        slot.session.expires_at_ticks = request.now_ticks;
+    }
+    const before = service;
+    try std.testing.expectError(error.CaptureTableFull, service.start(&policies, subjects, request, null));
+    try std.testing.expectEqualDeep(before, service);
+    service.slots[7].session.id = SessionHandle.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION - 1).value;
+    const last = try service.start(&policies, subjects, request, null);
+    const last_id = last.id;
+    try std.testing.expectEqual(SessionHandle.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION).value, last_id);
+    try std.testing.expect(service.find(SessionHandle.fromParts(7, 1).value) == null);
+    _ = try service.sample(.{
+        .subject = app,
+        .task_id = request.task_id,
+        .session_id = last_id,
+        .expected_device_id = request.device_id,
+        .expected_foreground_session_id = request.foreground_session_id,
+        .expected_kind = .camera,
+        .now_ticks = 13,
+    }, null);
+    try std.testing.expectEqual(@as(u32, 1), last.sample_count);
+    try std.testing.expectEqual(MAX_SESSIONS, service.activeSessionCount());
+    try std.testing.expectEqual(MAX_SESSIONS, service.privacyIndicatorCount(.camera));
+    const exhausted = service;
+    try std.testing.expectError(error.CaptureTableFull, service.start(&policies, subjects, request, null));
+    try std.testing.expectEqualDeep(exhausted, service);
 }

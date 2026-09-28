@@ -436,16 +436,14 @@ pub const Service = struct {
         }
         for (0..MAX_CONTEXT_LEASES) |offset| {
             const lease_index = (@as(usize, self.next_reusable_lease) + offset) % MAX_CONTEXT_LEASES;
+            if ((LeaseHandle{ .value = self.leases[lease_index].id }).nextInSlot(lease_index) == null) continue;
             if (leaseReusableAt(&self.leases[lease_index], now_ticks)) return lease_index;
         }
         return null;
     }
 
     fn nextLeaseId(self: *const Service, lease_index: usize) u64 {
-        const current_generation = (LeaseHandle{ .value = self.leases[lease_index].id }).generation();
-        const incremented = current_generation +% 1;
-        const generation = if (incremented == 0) 1 else incremented;
-        return LeaseHandle.fromParts(lease_index, generation).value;
+        return (LeaseHandle{ .value = self.leases[lease_index].id }).nextInSlot(lease_index).?.value;
     }
 };
 
@@ -1439,4 +1437,29 @@ test "personal context leases use direct generational handles" {
     try std.testing.expectEqual(@as(usize, 2), service.leaseCount());
     try std.testing.expectEqual(first.id, service.find(first.id).?.id);
     try std.testing.expectEqual(second.id, service.find(second.id).?.id);
+    const request = LeaseRequest{
+        .subject = app,
+        .task_id = 722,
+        .workspace_id = 44,
+        .max_query_bytes = 64,
+        .expires_at_ticks = 100,
+        .now_ticks = 12,
+    };
+    for (2..MAX_CONTEXT_LEASES) |_| _ = try service.issueLease(&policies, subjects, request, null);
+    for (&service.leases, 0..) |*lease, index| {
+        lease.id = LeaseHandle.fromParts(index, indexed_arena.MAX_HANDLE_GENERATION).value;
+        lease.revoked = true;
+    }
+    const before = service;
+    try std.testing.expectError(error.LeaseTableFull, service.issueLease(&policies, subjects, request, null));
+    try std.testing.expectEqualDeep(before, service);
+    service.leases[7].id = LeaseHandle.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION - 1).value;
+    const last = try service.issueLease(&policies, subjects, request, null);
+    try std.testing.expectEqual(LeaseHandle.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION).value, last.id);
+    try std.testing.expect(!last.revoked);
+    try std.testing.expect(service.find(LeaseHandle.fromParts(7, 1).value) == null);
+    last.expires_at_ticks = request.now_ticks;
+    const exhausted = service;
+    try std.testing.expectError(error.LeaseTableFull, service.issueLease(&policies, subjects, request, null));
+    try std.testing.expectEqualDeep(exhausted, service);
 }
