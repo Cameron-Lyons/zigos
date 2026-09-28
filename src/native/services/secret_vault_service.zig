@@ -76,6 +76,13 @@ pub const SignRequest = struct {
     now_ticks: u64,
 };
 
+pub const SigningAuthority = struct {
+    holder: principal.PrincipalId,
+    task_id: u64,
+    handle_id: u64,
+    now_ticks: u64,
+};
+
 pub const RotateRequest = struct {
     owner: principal.PrincipalId,
     task_id: u64,
@@ -334,11 +341,16 @@ pub const Service = struct {
         request: SignRequest,
         ledger: ?*event_ledger.Ledger,
     ) Error!manifest.Signature {
-        const handle = self.findHandle(request.handle_id) orelse {
-            if (ledger) |log| try log.recordSecretVault(request.holder, request.task_id, 0, request.handle_id, false, false, false, false, false, request.now_ticks, "sign digest");
-            return error.VaultHandleNotFound;
-        };
-        errdefer if (ledger) |log| log.recordSecretVault(request.holder, request.task_id, handle.secret_id, handle.id, false, handle.hardware_backed, false, false, false, request.now_ticks, "sign digest") catch {};
+        return self.signMessage(policies, subjects, .{
+            .holder = request.holder,
+            .task_id = request.task_id,
+            .handle_id = request.handle_id,
+            .now_ticks = request.now_ticks,
+        }, &request.digest, ledger);
+    }
+
+    pub fn requireSigningHandle(self: *const Service, policies: *const policy_object.Directory, subjects: policy_object.SubjectSet, request: SigningAuthority) Error!*const VaultHandle {
+        const handle = self.findHandleConst(request.handle_id) orelse return error.VaultHandleNotFound;
         if (!handle.holder.eql(request.holder) or handle.task_id != request.task_id) return error.HandleHolderMismatch;
         if (handle.revoked) return error.HandleRevoked;
         if (handle.expired(request.now_ticks)) return error.HandleExpired;
@@ -348,10 +360,20 @@ pub const Service = struct {
             .lease_ticks = handle.expires_at_ticks - request.now_ticks,
         });
         if (!decision.allowed) return error.PolicyDenied;
-        const signature = try self.store.signDigest(handle.store_handle_id, .{
+        return handle;
+    }
+
+    pub fn signMessage(self: *Service, policies: *const policy_object.Directory, subjects: policy_object.SubjectSet, request: SigningAuthority, message: []const u8, ledger: ?*event_ledger.Ledger) Error!manifest.Signature {
+        const handle = self.findHandle(request.handle_id) orelse {
+            if (ledger) |log| try log.recordSecretVault(request.holder, request.task_id, 0, request.handle_id, false, false, false, false, false, request.now_ticks, "sign digest");
+            return error.VaultHandleNotFound;
+        };
+        errdefer if (ledger) |log| log.recordSecretVault(request.holder, request.task_id, handle.secret_id, handle.id, false, handle.hardware_backed, false, false, false, request.now_ticks, "sign digest") catch {};
+        _ = try self.requireSigningHandle(policies, subjects, request);
+        const signature = try self.store.signMessage(handle.store_handle_id, .{
             .holder = request.holder,
             .task_id = request.task_id,
-        }, &request.digest);
+        }, message);
         if (ledger) |log| try log.recordSecretVault(request.holder, request.task_id, handle.secret_id, handle.id, true, handle.hardware_backed, false, false, false, request.now_ticks, "sign digest");
         return signature;
     }
@@ -441,6 +463,11 @@ pub const Service = struct {
 
     pub fn findHandle(self: *Service, handle_id: u64) ?*VaultHandle {
         const slot = self.handles.getByHandle(.{ .value = handle_id }) orelse return null;
+        return &slot.handle;
+    }
+
+    pub fn findHandleConst(self: *const Service, handle_id: u64) ?*const VaultHandle {
+        const slot = self.handles.getConstByHandle(.{ .value = handle_id }) orelse return null;
         return &slot.handle;
     }
 

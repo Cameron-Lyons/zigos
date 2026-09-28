@@ -92,7 +92,7 @@ run_boot() {
     fi
     local expected_proofs=1 proof
     if [[ "$sealing_marker" == *:WRONG_DEVICE ]]; then expected_proofs=0; fi
-    for proof in IDENTITY:SIGNED KEYGEN:DISTINCT; do
+    for proof in IDENTITY:SIGNED KEYGEN:DISTINCT DOCUMENT:SIGNING; do
       if [ "$(grep -c "^ZIGOS:TPM2:${proof%%:*}:" "$log" || true)" -ne "$expected_proofs" ] ||
         { [ "$expected_proofs" -eq 1 ] && ! grep -Fxq "ZIGOS:TPM2:$proof" "$log"; }; then
         cat "$log" >&2

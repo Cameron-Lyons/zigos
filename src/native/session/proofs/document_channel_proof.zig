@@ -8,6 +8,7 @@ const signing = @import("../../core/signing.zig");
 const userspace_launch = @import("../../task/userspace_launch.zig");
 const userspace_executor = @import("../../task/userspace_executor.zig");
 const document_sessions = @import("../document_sessions.zig");
+const document_signer = @import("../../storage/document_signer.zig");
 const object_store = @import("../../storage/object_store.zig");
 const workspace = @import("../../storage/workspace.zig");
 const paging = @import("../../../kernel/memory/paging64.zig");
@@ -38,6 +39,8 @@ const EditorSession = struct {
 // the generated Notes ELF through the ordinary input and endpoint syscalls.
 pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     const storage = manager.storageServicePtr();
+    var signing_fixture = @import("../../../tests/fixtures/document_signer.zig").Fixture{};
+    const document_key = try signing_fixture.init(graph.state.ids.session_user, storage.owner, storage.task_id, signer);
     const original = try storage.resolve(workspace_id, path);
     const version = storage.version(original.version_id.raw()) orelse return error.MissingVersion;
     const payload = try storage.versionPayload(version);
@@ -59,7 +62,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
 
     // Exceed the shared stack-slot limit: failed activation must make the
     // slot reusable while sibling tasks keep the Notes address space alive.
-    for (0..40) |_| try expectLaunchRollback(manager, graph, workspace_id);
+    for (0..40) |_| try expectLaunchRollback(manager, graph, workspace_id, document_key);
     common.printBootMarker(boot_markers.document_channel_launch_rollback);
 
     const input = manager.inputRouterPtr();
@@ -68,12 +71,12 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     defer {
         if (previous_source) |source| input.bindHardwareSource(source) else input.clearHardwareSource();
     }
-    try cancelFromCompositor(manager, graph, workspace_id);
+    try cancelFromCompositor(manager, graph, workspace_id, document_key);
     // Open executes in the already-running compositor ELF. The Notes tasks
     // share image and page tables, but retain independent editor state.
-    const first = try openFromCompositor(manager, graph, workspace_id);
+    const first = try openFromCompositor(manager, graph, workspace_id, document_key);
     defer retireEditor(manager, first);
-    const second = try openEditor(manager, graph, workspace_id, sibling_path, 0xD0C2);
+    const second = try openEditor(manager, graph, workspace_id, sibling_path, 0xD0C2, document_key);
     defer retireEditor(manager, second);
     try awaitPresentation(manager, first, expected[0..original_length], 0);
     try awaitPresentation(manager, second, sibling_text, 0);
@@ -145,8 +148,8 @@ fn chooseOffer(manager: anytype, prepared: PreparedEditor, cancel: bool) !void {
     if (manager.servicePendingInputWork(timer.getTicks()) != @as(usize, if (cancel) 2 else 1)) return error.LaunchInputNotRouted;
 }
 
-fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !EditorSession {
-    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C1);
+fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: document_signer.Signer) !EditorSession {
+    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C1, document_key);
     errdefer manager.cancelPreparedDocumentTask(prepared.task_id, timer.getTicks()) catch {};
     try chooseOffer(manager, prepared, false);
     for (0..512) |_| {
@@ -162,11 +165,11 @@ fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !Edit
     return error.LaunchDecisionTimedOut;
 }
 
-fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !void {
+fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: document_signer.Signer) !void {
     const compositor = manager.compositorSessionPtr();
     const windows_before = compositor.window_count;
     const focus_before = compositor.active_window_id;
-    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C5);
+    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C5, document_key);
     const address_space_id = manager.runtimePtr().find(prepared.task_id).?.address_space_id;
     try chooseOffer(manager, prepared, true);
     var selected_cancel_seen = false;
@@ -188,8 +191,8 @@ fn cancelFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !vo
     return error.CancelDecisionTimedOut;
 }
 
-fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64) !EditorSession {
-    const prepared = try prepareEditor(manager, graph, workspace_id, document_path, surface_id);
+fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64, document_key: document_signer.Signer) !EditorSession {
+    const prepared = try prepareEditor(manager, graph, workspace_id, document_path, surface_id, document_key);
     const launched = try manager.activateDocumentTask(prepared.request, 0);
     if (manager.focusedInputCapabilityForTask(launched.task_id, 0) == null or
         manager.surfacePresentationCapabilityForTask(launched.task_id, 0) == null) return error.InitialUiAuthorityMissing;
@@ -199,7 +202,7 @@ fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path
     return .{ .task_id = launched.task_id, .surface_id = surface_id, .window_id = launched.window_id, .binding = launched.binding, .document_capability_id = prepared.request.authority.capability_id };
 }
 
-fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64) !PreparedEditor {
+fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64, document_key: document_signer.Signer) !PreparedEditor {
     const storage = manager.storageServicePtr();
     const runtime = manager.runtimePtr();
     const capabilities = manager.capabilityTablePtr();
@@ -252,11 +255,11 @@ fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_p
         .server_bootstrap_capability_id = service_authority,
         .workspace_id = workspace_id,
         .path = document_path,
-        .signer = signer,
+        .signer = document_key,
     } };
 }
 
-fn expectLaunchRollback(manager: anytype, graph: anytype, workspace_id: u64) !void {
+fn expectLaunchRollback(manager: anytype, graph: anytype, workspace_id: u64, document_key: document_signer.Signer) !void {
     const runtime = manager.runtimePtr();
     const capabilities = manager.capabilityTablePtr();
     const endpoints = manager.kernelPort().?.kernel.endpoint_table;
@@ -266,7 +269,7 @@ fn expectLaunchRollback(manager: anytype, graph: anytype, workspace_id: u64) !vo
     const windows_before = compositor.window_count;
     const focus_before = compositor.active_window_id;
     const active_before = runtime.countTasksInState(.active);
-    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C3);
+    const prepared = try prepareEditor(manager, graph, workspace_id, path, 0xD0C3, document_key);
     const address_space_id = runtime.find(prepared.task_id).?.address_space_id;
     const scheduler = manager.userspaceSchedulerPtr();
     // Force rejection at the final publish step, after real channel endpoints,

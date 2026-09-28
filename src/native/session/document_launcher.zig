@@ -16,7 +16,6 @@ const heap_backed = builtin.target.os.tag == .freestanding;
 const Pending = struct {
     request: documents.OpenRequest,
     path: [workspace.MAX_ENTRY_PATH_BYTES]u8,
-    signer_label: [workspace.MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8,
     object_id: u64,
     version_id: u64,
     window_id: u64,
@@ -56,8 +55,9 @@ pub const Launcher = struct {
     pub fn offer(self: *Launcher, manager: anytype, request: documents.OpenRequest, label: []const u8, now_ticks: u64) !u64 {
         if (self.state()) |s| if (s.pending != null or s.outgoing != null) return error.LauncherBusy;
         if (self.token == std.math.maxInt(u64)) return error.LaunchTokenExhausted;
-        if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES or request.signer.label.len == 0 or
-            request.signer.label.len > workspace.MAX_EXPORT_SIGNATURE_SIGNER_BYTES) return error.InvalidDocumentRequest;
+        if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.InvalidDocumentRequest;
+        const storage = manager.storageServicePtr();
+        try request.signer.validateService(storage.owner, storage.task_id, now_ticks);
         var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
         _ = try protocol.encode(&bytes, .{ .token = self.token + 1, .body = .{ .offer = .{ .window_id = 1, .label = label } } });
         var port = storage_service.StoragePort.init(manager.storageServicePtr(), manager.capabilityTablePtr());
@@ -76,7 +76,6 @@ pub const Launcher = struct {
         s.pending = .{
             .request = request,
             .path = undefined,
-            .signer_label = undefined,
             .object_id = view.object_id.raw(),
             .version_id = view.version_id.raw(),
             .window_id = window.id,
@@ -84,9 +83,7 @@ pub const Launcher = struct {
         };
         const pending = &s.pending.?;
         @memcpy(pending.path[0..request.path.len], request.path);
-        @memcpy(pending.signer_label[0..request.signer.label.len], request.signer.label);
         pending.request.path = pending.path[0..request.path.len];
-        pending.request.signer.label = pending.signer_label[0..request.signer.label.len];
         s.result = null;
         queue(s, .{ .token = self.token, .body = .{ .offer = .{ .window_id = window.id, .label = label } } });
         return self.token;
@@ -301,7 +298,7 @@ comptime {
     if (@sizeOf(State) > 1024) @compileError("launcher exceeds bounded storage");
 }
 
-fn prepareTestDocument(manager: anytype) !documents.OpenRequest {
+fn prepareTestDocument(manager: anytype, signing_fixture: *@import("../../tests/fixtures/document_signer.zig").Fixture) !documents.OpenRequest {
     const signing = @import("../core/signing.zig");
     const object_store = @import("../storage/object_store.zig");
     const task = try @import("../task/userspace_launch.zig").prepareRegisteredDirect(manager.userspaceCatalogPtr(), manager.runtimePtr(), "app.notes", .{
@@ -337,7 +334,7 @@ fn prepareTestDocument(manager: anytype) !documents.OpenRequest {
         .server_bootstrap_capability_id = 0,
         .workspace_id = ws.id.raw(),
         .path = path,
-        .signer = signer,
+        .signer = try signing_fixture.init(task.owner, storage.owner, storage.task_id, signer),
     };
 }
 
@@ -374,7 +371,8 @@ test "document launcher consumes cancellation once and refuses revoked or replac
         defer session_manager.testing.resetState();
         session_manager.boot();
         const manager = session_manager.system();
-        const request = try prepareTestDocument(manager);
+        var signing_fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+        const request = try prepareTestDocument(manager, &signing_fixture);
         const task = manager.runtimePtr().find(request.authority.task_id).?;
         const address_space_id = task.address_space_id;
         const windows_before = manager.compositorSessionPtr().window_count;
@@ -397,11 +395,10 @@ test "document launcher consumes cancellation once and refuses revoked or replac
         if (case == .revoke) try manager.capabilityTablePtr().revokeGrant(request.authority.capability_id);
         if (case == .replace) {
             const storage = manager.storageServicePtr();
-            const object_store = @import("../storage/object_store.zig");
             const replacement = try storage.putVersion(.{
                 .object_type = .document,
                 .payload = "Replacement",
-                .metadata = try object_store.signMetadata(request.signer, "Notes", "text/plain", .document, "Replacement", 1),
+                .metadata = try request.signer.signMetadata("Notes", "Replacement", 1),
             });
             try storage.beginTransaction(request.workspace_id);
             try storage.stagePut(request.workspace_id, request.path, replacement.object_id, replacement.version_id, .document);
@@ -436,7 +433,8 @@ test "document launcher bounds queue pressure and retires pending offers on chan
     defer session_manager.testing.resetState();
     session_manager.boot();
     const manager = session_manager.system();
-    const request = try prepareTestDocument(manager);
+    var signing_fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+    const request = try prepareTestDocument(manager, &signing_fixture);
     const endpoints_before = manager.kernelPort().?.kernel.endpoint_table.activeCount();
     const windows_before = manager.compositorSessionPtr().window_count;
     _ = try manager.offerDocumentLaunch(request, "Notes", 1);
@@ -470,7 +468,8 @@ test "document launcher rejects foreign endpoints and releases unexpected author
     defer session_manager.testing.resetState();
     session_manager.boot();
     const manager = session_manager.system();
-    const request = try prepareTestDocument(manager);
+    var signing_fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+    const request = try prepareTestDocument(manager, &signing_fixture);
     const token = try manager.offerDocumentLaunch(request, "Notes", 1);
     const launcher = &manager.launcher;
     const s = launcher.state().?;

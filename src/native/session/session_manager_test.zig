@@ -558,7 +558,7 @@ fn rejectedDocumentRequest(task: *const task_runtime.TaskRecord) @import("docume
         .server_bootstrap_capability_id = 0,
         .workspace_id = 0,
         .path = "documents/notes.md",
-        .signer = .{ .label = "launch-test", .seed = signing.seedFromByte(0xD4) },
+        .signer = .{},
     };
 }
 

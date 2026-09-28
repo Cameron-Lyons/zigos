@@ -18,6 +18,7 @@ const Client = @import("../../userspace/document_client.zig").Client;
 
 const Fixture = struct {
     device: *durable.Fixture,
+    signing_fixture: @import("../../tests/fixtures/document_signer.zig").Fixture = .{},
     runtime: task_runtime.Runtime = .init(),
     capabilities: capability.CapabilityTable = .init(),
     endpoints: endpoint.Table = .init(),
@@ -80,7 +81,7 @@ const Fixture = struct {
             .server_bootstrap_capability_id = try self.bootstrapCapability(service),
             .workspace_id = device.workspace_id,
             .path = durable.path,
-            .signer = durable.signer,
+            .signer = try self.signing_fixture.init(.{ .kind = .user, .serial = 1 }, service.owner, service.id, durable.signer),
         };
         const binding = try self.channel.open(&self.port, &device.service, self.open_request, 0);
         self.server = &self.channel.server.?;
@@ -210,7 +211,7 @@ test "document IPC rejects a version change or revoked read midway through loadi
             try fixture.capabilities.revokeGrant(fixture.write_capability);
         } else {
             var other_editor = @import("document_save.zig").Session{};
-            _ = try other_editor.save(&fixture.device.service, .{
+            _ = try other_editor.saveForVerification(&fixture.device.service, .{
                 .workspace_id = fixture.device.workspace_id,
                 .path = durable.path,
                 .expected_version_id = fixture.client.version_id,
@@ -270,7 +271,7 @@ test "document IPC loads read-only shares but refuses hidden reads and oversized
     }).withObjectScope(ids.object(900), durable.path));
     var other_editor = @import("document_save.zig").Session{};
     const oversized = [_]u8{'x'} ** (protocol.MAX_DOCUMENT_BYTES + 1);
-    const saved = try other_editor.save(&fixture.device.service, .{
+    const saved = try other_editor.saveForVerification(&fixture.device.service, .{
         .workspace_id = fixture.device.workspace_id,
         .path = durable.path,
         .expected_version_id = fixture.device.original_version_id,
@@ -326,6 +327,44 @@ test "document IPC rechecks revocation before committing assembled data" {
     try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
     try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
     try std.testing.expectEqualStrings("original", try fixture.device.text());
+}
+
+test "document IPC rejects expired revoked denied and unavailable signing leases before publication" {
+    for (0..4) |variant| {
+        const fixture = try Fixture.init();
+        defer fixture.deinit();
+        try fixture.client.start("unsaved signing failure");
+        var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+        while (fixture.client.phase != .commit) {
+            const frame = (try fixture.client.nextFrame(&bytes)).?;
+            try fixture.send(frame, fixture.client.request_id);
+            fixture.client.sent();
+            _ = try fixture.server.runOnce(10);
+        }
+        const signing_fixture = &fixture.signing_fixture;
+        const handle = signing_fixture.service.findHandle(fixture.open_request.signer.handle_id).?;
+        switch (variant) {
+            0 => handle.expires_at_ticks = 10,
+            1 => handle.revoked = true,
+            2 => {
+                _ = try signing_fixture.policies.create(.{
+                    .scope = .user,
+                    .subject_id = 1,
+                    .issuer = .{ .kind = .policy_authority, .serial = 1 },
+                    .label = "deny signing",
+                    .secret_vault_allowed = false,
+                }, durable.signer);
+            },
+            3 => signing_fixture.service.attachHardwareProvider(.{}),
+            else => unreachable,
+        }
+        try fixture.submit();
+        _ = try fixture.receive(true);
+        try std.testing.expectEqual(if (variant == 3) protocol.Status.storage_failed else protocol.Status.permission_denied, fixture.client.last_status.?);
+        try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+        try std.testing.expectEqualStrings("original", try fixture.device.text());
+        try std.testing.expect(fixture.client.acknowledgedText() == null);
+    }
 }
 
 test "document IPC retains a committed receipt while the client queue is full" {
@@ -523,15 +562,14 @@ test "document channel owns borrowed opening metadata and reuses retired resourc
     fixture.channel.close(1);
     const baseline = fixture.capabilities.activeCount();
     var path = durable.path.*;
-    var label = [_]u8{'s'} ** 12;
     var request = fixture.open_request;
     request.path = &path;
-    request.signer.label = &label;
     const binding = try fixture.channel.open(&fixture.port, &fixture.device.service, request, 2);
     @memset(&path, 'x');
-    @memset(&label, 'x');
+    request.signer.handle_id += 1;
+    request.signer.sealed_digest[0] ^= 1;
     try std.testing.expectEqualStrings(durable.path, fixture.channel.server.?.binding.path);
-    try std.testing.expectEqualStrings("ssssssssssss", fixture.channel.server.?.binding.signer.label);
+    try std.testing.expectEqual(fixture.open_request.signer.handle_id, fixture.channel.server.?.binding.signer.handle_id);
     try std.testing.expectEqual(fixture.device.original_version_id, binding.version_id);
     try std.testing.expectError(error.DocumentAlreadyOpen, fixture.channel.open(&fixture.port, &fixture.device.service, request, 2));
     fixture.channel.close(3);

@@ -67,7 +67,7 @@ fn checkpointBaseline(storage: *storage_service.Service) bool {
     if (!putPath(storage, workspace_id, baseline_path, baseline_object_id, 10)) return false;
     const entry = storage.resolve(workspace_id, baseline_path) catch return false;
     var editor = document_save.Session{};
-    const receipt = editor.save(storage, .{
+    const receipt = editor.saveForVerification(storage, .{
         .workspace_id = workspace_id,
         .path = baseline_path,
         .expected_version_id = entry.version_id.raw(),

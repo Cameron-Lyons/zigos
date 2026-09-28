@@ -44,7 +44,12 @@ requests.
   oversized documents, and text the current renderer cannot represent, while
   preserving an existing draft. Session opening now validates existing scoped
   authority, owns the channel's metadata, and publishes the opening binding
-  before the app's first instruction. A lazy four-channel pool services at most
+  before the app's first instruction. Launch offers and document channels hold
+  a storage-service vault lease and sealed-key fingerprint instead of a raw
+  signing seed. Each new save checks current signing policy, lease expiry,
+  revocation, service ownership, and key binding before publishing a version.
+  The vault signs bounded canonical metadata without exporting its key.
+  A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels
   queued saves when either endpoint or task is retired. Editors keep their text
   and save state on each task's stack, and prepared bindings survive sibling
@@ -133,7 +138,8 @@ requests.
   label, and export policy, and verifies signing leases and 96-byte secret export.
   Cold and reboot cases also register an identity against that recovered key,
   verify a vault-backed assertion, and reject counter tampering, expired leases,
-  wrong service tasks, and revoked handles.
+  wrong service tasks, and revoked handles. It also signs document metadata
+  with the recovered sealed key and rejects signing after lease revocation.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).

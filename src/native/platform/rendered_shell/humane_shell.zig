@@ -620,7 +620,7 @@ pub const HumaneShell = struct {
         if (!self.state.document_opened) return error.DocumentRequired;
         if (text.len > MAX_SHELL_TEXT_INPUT_BYTES) return error.TextInputTooLarge;
 
-        const edited = try self.document_saver.save(self.storage, .{
+        const edited = try self.document_saver.saveForVerification(self.storage, .{
             .workspace_id = self.config.workspace_id,
             .path = self.config.document_path,
             .expected_version_id = self.state.document_version_id,

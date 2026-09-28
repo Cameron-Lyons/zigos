@@ -30,7 +30,7 @@ pub const MAX_INLINE_PAYLOAD_BYTES: usize = MAX_CHUNK_BYTES * MAX_INLINE_PAYLOAD
 pub const MAX_VERSION_PARENTS: usize = 2;
 pub const MAX_OBJECT_QUERY_RESULTS: usize = 16;
 pub const MAX_OBJECT_HISTORY_RESULTS: usize = 16;
-const MAX_METADATA_MESSAGE_BYTES: usize = 256;
+pub const MAX_METADATA_MESSAGE_BYTES: usize = 256;
 pub const MAX_METADATA_LABEL_BYTES: usize = 48;
 pub const MAX_CONTENT_TYPE_BYTES: usize = 64;
 const BlobPayloadLength = u17;
@@ -195,6 +195,10 @@ pub const SignedMetadata = struct {
         var message_buffer: [MAX_METADATA_MESSAGE_BYTES]u8 = undefined;
         const message = metadataMessage(&message_buffer, object_type, payload, self.*) catch return false;
         return signing.verify(self.signature, message);
+    }
+
+    pub fn signingMessage(self: *const SignedMetadata, buffer: *[MAX_METADATA_MESSAGE_BYTES]u8, object_type: ObjectType, payload: []const u8) error{NoSpaceLeft}![]const u8 {
+        return metadataMessage(buffer, object_type, payload, self.*);
     }
 };
 

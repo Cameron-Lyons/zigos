@@ -78,6 +78,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         if (!std.mem.eql(u8, signature.publicKeySlice(), payload[0..32])) return error.RecoveredWrongVaultKey;
     } else @memcpy(payload[0..32], signature.publicKeySlice());
     try proveIdentityAssertions(&service, &policies, secret.id, payload[0..32]);
+    try proveDocumentSigning(&service, &policies, secret.id, payload[0..32]);
     var out: secrets.Value = @splat(0xaa);
     defer std.crypto.secureZero(u8, &out);
     if (service.exportRaw(&policies, subjects, .{ .holder = app, .task_id = 5, .handle_id = handle.id, .now_ticks = 3 }, null, &out)) |_| {
@@ -189,6 +190,29 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         _ = try storage.checkpointDurable();
     }
     console.print(if (restored) "ZIGOS:TPM2:VAULT:RECOVERED\n" else "ZIGOS:TPM2:VAULT:CREATED\n");
+}
+
+fn proveDocumentSigning(service: *vault.Service, policies: *const policy.Directory, secret_id: u64, expected_key: *const signing.PublicKey) !void {
+    const document_signer = @import("../../storage/document_signer.zig");
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 0x705 };
+    const handle = try service.lendHandle(policies, .{ .user_id = owner.serial }, .{
+        .owner = owner,
+        .holder = holder,
+        .task_id = 7,
+        .secret_id = secret_id,
+        .expires_at_ticks = 10,
+        .now_ticks = 2,
+    }, null);
+    var authority = document_signer.Authority{ .service = service, .policies = policies, .subjects = .{ .user_id = owner.serial }, .owner = owner, .holder = holder, .task_id = 7 };
+    const document_key = try document_signer.Signer.bind(&authority, handle.id, 3);
+    const metadata = try document_key.signMetadata("documents/sealed.md", "TPM-backed document", 3);
+    if (!metadata.verifyFor(.document, "TPM-backed document") or
+        !std.mem.eql(u8, metadata.signature.publicKeySlice(), expected_key)) return error.InvalidDocumentSignature;
+    try service.revoke(.{ .subject = owner, .task_id = 4, .handle_id = handle.id, .secret_id = secret_id, .expected_holder = holder, .expected_holder_task_id = 7, .now_ticks = 4 }, null);
+    if (document_key.signMetadata("documents/sealed.md", "revoked", 4)) |_| return error.DocumentSignedAfterRevocation else |err| {
+        if (err != error.HandleRevoked) return err;
+    }
+    console.print("ZIGOS:TPM2:DOCUMENT:SIGNING\n");
 }
 
 // The graph and unlock proof are explicit verification fixtures. Credential

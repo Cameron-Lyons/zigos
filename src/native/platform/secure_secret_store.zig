@@ -13,6 +13,7 @@ pub const MAX_VALUE_BYTES: usize = sealing.MAX_VALUE_BYTES;
 pub const Value = sealing.Value;
 pub const SealedBlob = sealing.Blob;
 pub const RawValue = struct { len: u8 = 0, bytes: Value = @splat(0) };
+pub const MAX_SIGNING_MESSAGE_BYTES: usize = 256;
 pub const DIRECT_SECRET_LOOKUP = true;
 pub const DENSE_SECRET_TABLE = true;
 pub const COMPACT_SECRET_METADATA = true;
@@ -74,6 +75,7 @@ pub const Error = sealing.Error || error{
     SecretNotFound,
     SecretTableFull,
     InvalidSigningKey,
+    InvalidSigningMessage,
 };
 
 const HandleSlot = struct {
@@ -284,9 +286,14 @@ pub const Store = struct {
         return out[0..len];
     }
 
-    // Signing does not grant raw export. Only the fixed-size caller digest enters
-    // Ed25519; the recovered seed and expanded key pair expire with this call.
+    // Signing does not grant raw export. The bounded message enters Ed25519;
+    // the recovered seed and expanded key pair expire with this call.
     pub fn signDigest(self: *const Store, handle_id: u64, context: ExportContext, digest: *const sealing.Binding) Error!manifest.Signature {
+        return self.signMessage(handle_id, context, digest);
+    }
+
+    pub fn signMessage(self: *const Store, handle_id: u64, context: ExportContext, message: []const u8) Error!manifest.Signature {
+        if (message.len == 0 or message.len > MAX_SIGNING_MESSAGE_BYTES) return error.InvalidSigningMessage;
         const handle = self.describeHandle(handle_id) orelse return error.HandleNotFound;
         if (!handle.holder.eql(context.holder) or handle.task_id != context.task_id) return error.HandleHolderMismatch;
         const secret = self.findSecretConst(handle.secret_id) orelse return error.SecretNotFound;
@@ -297,7 +304,7 @@ pub const Store = struct {
         const Ed25519 = std.crypto.sign.Ed25519;
         var pair = Ed25519.KeyPair.generateDeterministic(raw[0..32].*) catch return error.InvalidSigningKey;
         defer std.crypto.secureZero(u8, std.mem.asBytes(&pair));
-        const signature = pair.sign(digest, null) catch return error.InvalidSigningKey;
+        const signature = pair.sign(message, null) catch return error.InvalidSigningKey;
         var result = manifest.Signature{ .signer = secret.labelSlice(), .public_key_len = 32, .value_len = 64 };
         result.public_key[0..32].* = pair.public_key.toBytes();
         result.value[0..64].* = signature.toBytes();
