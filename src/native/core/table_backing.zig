@@ -30,6 +30,24 @@ pub fn free(comptime T: type, ptr: *T) void {
     std.heap.page_allocator.destroy(ptr);
 }
 
+pub fn allocBytes(length: usize) ?[]u8 {
+    if (length == 0) return &.{};
+    const bytes = if (comptime builtin.target.os.tag == .freestanding)
+        @as([*]u8, @ptrCast(kernel_memory.kmalloc(length) orelse return null))[0..length]
+    else
+        std.heap.page_allocator.alloc(u8, length) catch return null;
+    @memset(bytes, 0);
+    return bytes;
+}
+
+pub fn freeBytes(bytes: []u8) void {
+    if (bytes.len == 0) return;
+    std.crypto.secureZero(u8, bytes);
+    if (comptime builtin.target.os.tag == .freestanding) {
+        kernel_memory.kfree(bytes.ptr);
+    } else std.heap.page_allocator.free(bytes);
+}
+
 test "table backing allocates and frees on the host" {
     const Slot = struct { value: u64 = 0 };
     const slot = alloc(Slot) orelse return error.OutOfMemory;

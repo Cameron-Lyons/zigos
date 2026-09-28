@@ -31,6 +31,7 @@ const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
 const peer_admission = @import("../sync/peer_admission.zig");
 const peer_handshake = @import("../sync/peer_handshake.zig");
+const peer_connections = @import("../sync/peer_connections.zig");
 const peer_channel = @import("../sync/peer_channel.zig");
 const network_driver = @import("../drivers/network_driver_task.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
@@ -121,6 +122,7 @@ pub const SessionManager = struct {
     launcher: document_launcher.Launcher = .{},
     peers: peer_admission.Sessions = .{},
     peer_handshakes: peer_handshake.Handshakes = .{},
+    peer_connections: peer_connections.Connections = .{},
     peer_dispatch_tick: u64 = 0,
     handshake_dispatch_first: bool = true,
 
@@ -138,6 +140,8 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
+        const retired_peer_handles = self.peer_connections;
         self.peer_handshakes.deinit();
         self.peers.deinit();
         self.launcher.deinit(self, 0);
@@ -160,6 +164,7 @@ pub const SessionManager = struct {
         self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();
         self.initializeAllocated();
+        self.peer_connections = retired_peer_handles;
         bootstrap_driver_port.reset();
         session_service_bootstrap.resetBootedDataPlanes();
         if (self.ensureConstructed()) self.runtime_context.resetScheduler();
@@ -301,7 +306,7 @@ pub const SessionManager = struct {
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
-        return self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        return self.peer_connections.hasReadyWork() or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
     pub const DocumentTask = struct {
@@ -377,17 +382,21 @@ pub const SessionManager = struct {
         return service.frames_queued;
     }
 
-    pub fn attachPeerSession(self: *SessionManager, session: *peer_admission.Session, now_ticks: u64) !void {
-        if (!self.runtime_context.constructed or session.capabilityTable() != self.capabilityTablePtr() or
-            session.storageService() != self.storageServicePtr() or !self.peerTasksActive(session)) return error.PeerAdmissionDenied;
-        if (self.peer_handshakes.contains(session.channel.local, session.channel.remote)) return error.PeerAlreadyAdmitted;
-        try self.peers.attach(session, now_ticks);
+    pub fn openPeerConnection(self: *SessionManager, request: peer_connections.Request) !peer_connections.Handle {
+        if (!self.runtime_context.constructed or request.capabilities != self.capabilityTablePtr() or request.store != self.storageServicePtr() or
+            !self.peerOwnersActive(request.service, request.store)) return error.PeerAdmissionDenied;
+        const handle = try self.peer_connections.open(&self.peer_handshakes, &self.peers, request);
         network_driver.reserveReceivePrefix(peer_channel.MAGIC.*);
-        self.peer_dispatch_tick = now_ticks;
+        self.peer_dispatch_tick = request.authority.now_ticks;
+        return handle;
     }
 
-    pub fn detachPeerSession(self: *SessionManager, session: *peer_admission.Session) void {
-        self.peers.detach(session);
+    pub fn peerConnectionStatus(self: *const SessionManager, handle: peer_connections.Handle) ?peer_connections.Status {
+        return self.peer_connections.status(handle);
+    }
+
+    pub fn releasePeerConnection(self: *SessionManager, handle: peer_connections.Handle) !void {
+        try self.peer_connections.release(&self.peer_handshakes, &self.peers, handle);
         self.refreshPeerReservation();
     }
 
@@ -436,16 +445,25 @@ pub const SessionManager = struct {
     }
 
     fn peerTasksActive(self: *const SessionManager, session: *const peer_admission.Session) bool {
+        return self.peerOwnersActive(session.syncService(), session.storageService());
+    }
+
+    fn peerOwnersActive(self: *const SessionManager, service: *sync_service_mod.Service, store: *storage_service_mod.Service) bool {
         const runtime = self.runtime_context.taskRuntimeConst() orelse return false;
-        const sync_task = runtime.findConst(session.syncService().task_id) orelse return false;
-        const storage_task = runtime.findConst(session.storageService().task_id) orelse return false;
+        const sync_task = runtime.findConst(service.task_id) orelse return false;
+        const storage_task = runtime.findConst(store.task_id) orelse return false;
         return sync_task.state == .active and storage_task.state == .active and
-            sync_task.owner.eql(session.syncService().owner) and storage_task.owner.eql(session.storageService().owner);
+            sync_task.owner.eql(service.owner) and storage_task.owner.eql(store.owner);
     }
 
     pub fn servicePeerWork(self: *SessionManager, now_ticks: u64) usize {
         self.peer_dispatch_tick = now_ticks;
-        if (!self.peers.hasSessions() and !self.peer_handshakes.hasSessions()) return 0;
+        self.peer_connections.retireInactive(&self.peer_handshakes, &self.peers, self, peerOwnersActive);
+        self.peer_connections.reap(&self.peer_handshakes, &self.peers);
+        if (!self.peers.hasSessions() and !self.peer_handshakes.hasSessions()) {
+            self.refreshPeerReservation();
+            return 0;
+        }
         for (&self.peer_handshakes.slots) |*slot| if (slot.*) |handshake| {
             if (!self.handshakeTaskActive(handshake) or !network_driver.hasActiveDevice()) {
                 handshake.close();
@@ -466,15 +484,16 @@ pub const SessionManager = struct {
         }
         // Alternate which pool spends the shared budget first, so pending
         // establishments and active object traffic cannot starve one another.
-        var work: usize = 0;
+        var work = self.peer_connections.advance(&self.peer_handshakes, &self.peers, now_ticks, peer_admission.DISPATCH_BUDGET);
         if (self.handshake_dispatch_first) {
-            work += self.peer_handshakes.service(now_ticks, network_driver.sendActiveFrame, peer_admission.DISPATCH_BUDGET);
+            work += self.peer_handshakes.service(now_ticks, network_driver.sendActiveFrame, peer_admission.DISPATCH_BUDGET - work);
             work += self.peers.serviceBudget(now_ticks, network_driver.sendActiveFrame, peer_admission.DISPATCH_BUDGET - work);
         } else {
-            work += self.peers.service(now_ticks, network_driver.sendActiveFrame);
+            work += self.peers.serviceBudget(now_ticks, network_driver.sendActiveFrame, peer_admission.DISPATCH_BUDGET - work);
             work += self.peer_handshakes.service(now_ticks, network_driver.sendActiveFrame, peer_admission.DISPATCH_BUDGET - work);
         }
         self.handshake_dispatch_first = !self.handshake_dispatch_first;
+        self.peer_connections.reap(&self.peer_handshakes, &self.peers);
         self.refreshPeerReservation();
         return work;
     }
@@ -1013,6 +1032,7 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
         self.peer_handshakes.deinit();
         self.peers.deinit();
         network_driver.reserveReceivePrefix(null);

@@ -64,10 +64,10 @@ pub fn run(context: *support.Context, service: *sync_service.Service, local_mac:
         }
         if (!rejectInvalidConfirmation(&channel, handshake.last_received[0..handshake.last_received_len], now)) return false;
         var outgoing: [channel_mod.MAX_FRAME]u8 = undefined;
-        const confirmation = manager.takePeerHandshake(&handshake, &outgoing, now) catch return false;
+        _ = manager.takePeerHandshake(&handshake, &outgoing, now) catch return false;
         if (manager.peer_handshakes.hasSessions() or !channel.established()) return false;
         support.common.printBootMarker(markers.sync_peer_handshake_completed);
-        if (!@import("peer_object_proof.zig").run(context, service, &channel, peer_mac, initiator, confirmation)) return false;
+        if (!@import("peer_object_proof.zig").run(context, service, &channel, peer_mac, initiator)) return false;
         if (@import("../../kernel/drivers/virtio_net_hw.zig").interruptCount() == 0) return false;
         support.common.printBootMarker(markers.sync_peer_authenticated);
         support.common.printBootMarker(markers.sync_peer_ciphertext_rejected);

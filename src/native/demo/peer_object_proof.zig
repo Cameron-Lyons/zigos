@@ -8,15 +8,15 @@ const transfer = @import("../sync/object_transfer.zig");
 const sync = @import("../sync/sync_service.zig");
 const storage = @import("../storage/storage_service.zig");
 const objects = @import("../storage/object_store.zig");
-const sender_mod = @import("../sync/object_sender.zig");
+const connections = @import("../sync/peer_connections.zig");
 const support = @import("scenario_support.zig");
 const markers = @import("../../kernel/boot/markers.zig");
 const clock = @import("../../kernel/timer/tsc_clock.zig");
 const path = "received.bin";
 const payload_length = 1024;
 
-pub fn run(context: *support.Context, service: *sync.Service, channel: *channel_mod.Channel, peer_mac: [6]u8, initiator: bool, confirmation: []const u8) bool {
-    execute(context, service, channel, peer_mac, initiator, confirmation) catch |err| {
+pub fn run(context: *support.Context, service: *sync.Service, channel: *channel_mod.Channel, peer_mac: [6]u8, initiator: bool) bool {
+    execute(context, service, channel, peer_mac, initiator) catch |err| {
         support.common.printBootMarker("ZIGOS:SYNC:PEER_OBJECT:FAILED");
         support.common.printBootMarker(@errorName(err));
         return false;
@@ -25,7 +25,7 @@ pub fn run(context: *support.Context, service: *sync.Service, channel: *channel_
     return true;
 }
 
-fn execute(context: *support.Context, service: *sync.Service, channel: *channel_mod.Channel, peer_mac: [6]u8, initiator: bool, confirmation: []const u8) !void {
+fn execute(context: *support.Context, service: *sync.Service, channel: *channel_mod.Channel, peer_mac: [6]u8, initiator: bool) !void {
     const store = context.storage_service_instance;
     var payload: [payload_length]u8 = @splat(0);
     defer std.crypto.secureZero(u8, &payload);
@@ -58,46 +58,66 @@ fn execute(context: *support.Context, service: *sync.Service, channel: *channel_
         .network_scope = .trusted_overlay,
         .expires_at_ticks = 1_000,
     });
-    var receiver = transfer.Receiver{ .store = store, .sync = service, .capabilities = context.capability_table, .binding = .{ .workspace_id = workspace_id, .object_id = created.object_id.raw(), .local_device = channel.local, .peer_device = channel.remote, .peer_capability_id = grant.capability.id }, .scratch = &payload };
-    defer receiver.reset();
+    const binding = transfer.Binding{ .workspace_id = workspace_id, .object_id = created.object_id.raw(), .local_device = channel.local, .peer_device = channel.remote, .peer_capability_id = grant.capability.id };
     var key_fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
-    const authority = support.mintSyncAuthority(context, 311);
-    var sender: sender_mod.Sender = undefined;
-    var admitted = if (initiator) blk: {
-        sender = try sender_mod.Sender.init(store, service, context.capability_table, receiver.binding, channel, authority);
-        break :blk try admission.Session.initSender(channel, &sender, authority, peer_mac, 311 + admission.MAX_LIFETIME_TICKS, confirmation);
-    } else blk: {
-        const storage_key = try key_fixture.init(context.session_user, store.owner, store.task_id, support.storage_signer);
-        break :blk try admission.Session.initOffering(channel, &receiver, storage_key, authority, peer_mac, 311 + admission.MAX_LIFETIME_TICKS);
+    const request = connections.Request{
+        .store = store,
+        .service = service,
+        .capabilities = context.capability_table,
+        .authority = support.mintSyncAuthority(context, 311),
+        .binding = binding,
+        .root_pin = channel.root_pin,
+        .device_key = channel.signer,
+        .peer_mac = peer_mac,
+        .expires_at = 311 + admission.MAX_LIFETIME_TICKS,
+        .direction = if (initiator) .send else .{ .receive = .{ .signer = try key_fixture.init(context.session_user, store.owner, store.task_id, support.storage_signer), .limit = payload_length } },
     };
+    // The preceding channel is the isolated tamper/replay proof. This transfer
+    // opens its own service-owned channel and promotes it without a stack-owned
+    // channel, handshake, sender, receiver or receive staging allocation.
+    channel.close();
     const manager = @import("../session/session_manager.zig").system();
-    try manager.attachPeerSession(&admitted, 311);
-    defer manager.detachPeerSession(&admitted);
+    const retired_handle = try manager.openPeerConnection(request);
+    defer manager.releasePeerConnection(retired_handle) catch {};
+    if (!try context.runtime.suspendTask(store.task_id, 311)) return error.PeerTaskNotSuspended;
+    _ = manager.servicePeerWork(311);
+    const retired = manager.peerConnectionStatus(retired_handle) == null and !manager.peer_handshakes.hasSessions() and !manager.peers.hasSessions();
+    if (!try context.runtime.resumeTask(store.task_id, 311) or !retired) return error.PeerTaskNotRetired;
+    const handle = try manager.openPeerConnection(request);
+    defer manager.releasePeerConnection(handle) catch {};
+    if (handle == retired_handle or manager.peerConnectionStatus(retired_handle) != null) return error.StalePeerConnection;
+    support.common.printBootMarker(markers.sync_peer_connection_owner_retired);
     timer.synchronize();
     const start_tick = timer.getTicks();
     support.common.printBootMarker(if (initiator) markers.sync_peer_object_sender_admitted else markers.sync_peer_object_admitted);
     var reopened = false;
+    var promoted = false;
     var grace = clock.afterMilliseconds(30_000);
     const deadline = clock.afterMilliseconds(30_000);
     while (!deadline.expired()) {
         timer.synchronize();
         const now = 311 + (timer.getTicks() - start_tick);
-        if ((initiator and sender.complete()) or (!initiator and reopened and grace.expired())) {
+        const state = manager.peerConnectionStatus(handle) orelse return error.PeerAdmissionRetired;
+        if ((initiator and state.phase == .complete) or (!initiator and reopened and grace.expired())) {
             if (initiator) support.common.printBootMarker(markers.sync_peer_object_acknowledged);
             if (!try context.runtime.suspendTask(service.task_id, now)) return error.PeerTaskNotSuspended;
             defer _ = context.runtime.resumeTask(service.task_id, now) catch false;
             _ = manager.servicePeerWork(now);
-            if (admitted.active or channel.established() or manager.peers.hasSessions()) return error.PeerTaskNotRetired;
+            if (manager.peerConnectionStatus(handle) != null or manager.peers.hasSessions() or manager.peer_handshakes.hasSessions()) return error.PeerTaskNotRetired;
             support.common.printBootMarker(if (initiator) markers.sync_peer_object_sender_retired else markers.sync_peer_object_retired);
             return;
         }
         _ = manager.servicePendingNetworkWork(now);
         _ = manager.servicePeerWork(now);
-        if (!admitted.active) return error.PeerAdmissionRetired;
+        const current = manager.peerConnectionStatus(handle) orelse return error.PeerAdmissionRetired;
+        if (!promoted and current.phase != .handshaking) {
+            promoted = true;
+            support.common.printBootMarker(markers.sync_peer_connection_promoted);
+        }
         if (initiator) continue;
-        const progress = admitted.lastProgress() orelse continue;
+        const progress = current.progress orelse continue;
         if (progress.durable() and !reopened) {
-            const expected = receiver.transfer.?.request.digest;
+            const expected = current.digest;
             store.* = storage.Service.reloadFromAttachedVolume(context.storage_service_id, context.storage_task_id, context.storage_service_principal, context.storage_checkpoint_store);
             store.bindCapabilityTable(context.capability_table);
             store.checkpoint_enabled = false;

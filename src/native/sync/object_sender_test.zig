@@ -13,7 +13,7 @@ const mac_b = [6]u8{ 2, 0, 0, 0, 0, 2 };
 const source_path = "outbox/source";
 const Leg = enum { offer, begin, chunk, commit, progress, receipt };
 
-const Fixture = struct {
+pub const Fixture = struct {
     var active: *Fixture = undefined;
     base: *Base,
     sender: sender_mod.Sender = undefined,
@@ -32,7 +32,7 @@ const Fixture = struct {
     source_cap: u64 = 0,
     source_object: u64 = 0,
 
-    fn init(payload: []const u8) !*Fixture {
+    pub fn init(payload: []const u8) !*Fixture {
         const f = try std.testing.allocator.create(Fixture);
         errdefer std.testing.allocator.destroy(f);
         const base = try Base.init();
@@ -65,7 +65,7 @@ const Fixture = struct {
         return f;
     }
 
-    fn deinit(f: *Fixture) void {
+    pub fn deinit(f: *Fixture) void {
         f.pool.deinit();
         f.base.deinit();
         std.testing.allocator.destroy(f);

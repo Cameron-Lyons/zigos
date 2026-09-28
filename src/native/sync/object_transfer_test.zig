@@ -16,8 +16,8 @@ const objects = @import("../storage/object_store.zig");
 const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
 const alice = principal.PrincipalId{ .kind = .device, .serial = 11 };
 const bob = principal.PrincipalId{ .kind = .device, .serial = 22 };
-const root_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0xa1) };
-const alice_key = signing.SignerIdentity{ .label = "alice", .seed = @splat(0xa2) };
+pub const root_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0xa1) };
+pub const alice_key = signing.SignerIdentity{ .label = "alice", .seed = @splat(0xa2) };
 const bob_key = signing.SignerIdentity{ .label = "bob", .seed = @splat(0xa3) };
 
 pub const Fixture = struct {
