@@ -101,7 +101,7 @@ run_boot() {
       fi
     done
     local durable_kind durable_marker
-    for durable_kind in CATALOG CREDENTIALS ENROLLMENT; do
+    for durable_kind in CATALOG CREDENTIALS ENROLLMENT PUBLIC_ENROLLMENT; do
       durable_marker="ZIGOS:TPM2:$durable_kind:COMMITTED"
       if [ "$name" = reboot ]; then durable_marker="ZIGOS:TPM2:$durable_kind:RESTORED"; fi
       if [ "$(grep -c "^ZIGOS:TPM2:$durable_kind:" "$log" || true)" -ne "$expected_proofs" ] ||

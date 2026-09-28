@@ -93,6 +93,52 @@ pub const PlatformKeyBindingRequest = struct {
     root: PlatformDeviceRoot,
 };
 
+// Public proof of possession and consent to this owner's independently pinned
+// root. Approval still requires that root's local sealed signing authority.
+pub const EnrollmentProposal = struct {
+    owner: principal.PrincipalId,
+    device: principal.PrincipalId,
+    label_len: u8,
+    label: [MAX_LABEL_BYTES]u8,
+    overlay_id: u64,
+    root_pin: signing.PublicKey,
+    device_signature: manifest.Signature,
+    consent_signature: manifest.Signature,
+
+    pub fn create(owner: principal.PrincipalId, device: principal.PrincipalId, label: []const u8, root_pin: signing.PublicKey, key: sealed.Key, now: u64) Error!EnrollmentProposal {
+        try requireSealedOwner(key, owner, now);
+        if (owner.kind != .user or owner.serial == 0 or device.kind != .device or device.serial == 0) return error.InvalidPrincipalKind;
+        var result = EnrollmentProposal{ .owner = owner, .device = device, .label_len = 0, .label = @splat(0), .overlay_id = deriveOverlayId(device, try key.label(now)), .root_pin = root_pin, .device_signature = .{}, .consent_signature = .{} };
+        result.label_len = @intCast(native_util.copyTextExact(&result.label, label) catch return error.LabelTooLong);
+        var buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        result.device_signature = try signIdentity(key, deviceMessage(&buffer, device, label, result.overlay_id, 1) catch return error.InvalidDeviceSignature, now);
+        result.consent_signature = try signIdentity(key, &result.consentDigest(), now);
+        return result;
+    }
+
+    pub fn validate(self: *const EnrollmentProposal) Error!void {
+        if (self.owner.kind != .user or self.owner.serial == 0 or self.device.kind != .device or self.device.serial == 0) return error.InvalidPrincipalKind;
+        if (self.label_len > MAX_LABEL_BYTES or self.overlay_id == 0) return error.InvalidDeviceSignature;
+        var buffer: [DEVICE_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        const message = deviceMessage(&buffer, self.device, self.label[0..self.label_len], self.overlay_id, 1) catch return error.InvalidDeviceSignature;
+        if (!verifyPinnedSignature(self.device_signature, message, self.device_signature.public_key) or
+            !verifyPinnedSignature(self.consent_signature, &self.consentDigest(), self.device_signature.public_key)) return error.InvalidDeviceSignature;
+    }
+
+    fn consentDigest(self: *const EnrollmentProposal) crypto_hash.Digest {
+        var hasher = crypto_hash.init();
+        crypto_hash.updateBytes(&hasher, "protocol", "zigos.device-enrollment.v1");
+        crypto_hash.updateInt(&hasher, "owner", self.owner.serial);
+        crypto_hash.updateInt(&hasher, "device", self.device.serial);
+        crypto_hash.updateBytes(&hasher, "root-pin", &self.root_pin);
+        crypto_hash.updateBytes(&hasher, "label", self.label[0..self.label_len]);
+        crypto_hash.updateInt(&hasher, "overlay", self.overlay_id);
+        crypto_hash.updateBytes(&hasher, "device-key", &self.device_signature.public_key);
+        crypto_hash.updateBytes(&hasher, "device-signature", &self.device_signature.value);
+        return crypto_hash.finalize(&hasher);
+    }
+};
+
 pub const UserRootRecord = struct {
     principal_id: principal.PrincipalId,
     label_len: u8,
@@ -302,6 +348,38 @@ pub const Graph = struct {
         try requireSealedOwner(root_key, user, now_ticks);
         try requireSealedOwner(device_key, user, now_ticks);
         return self.enrollDeviceInternal(user, device, label, root_key, device_key, null, now_ticks);
+    }
+
+    pub fn approveEnrollment(self: *Graph, proposal: *const EnrollmentProposal, root_key: sealed.Key, now: u64) Error!*DeviceRecord {
+        try proposal.validate();
+        try requireSealedOwner(root_key, proposal.owner, now);
+        const root = try self.requireRootAuthority(proposal.owner, root_key, now);
+        if (!std.mem.eql(u8, &root.root_signature.public_key, &proposal.root_pin)) return error.RootAuthorityMismatch;
+        if (self.findDevice(proposal.device)) |existing| {
+            _ = try self.authenticatedDevice(proposal.device, proposal.root_pin);
+            if (!existing.owner.eql(proposal.owner)) return error.DeviceOwnerMismatch;
+            if (existing.usesPlatformBackedKey()) return error.PlatformKeyDowngradeDenied;
+            if (existing.key_rotation_generation != 1 or existing.overlay_id != proposal.overlay_id or
+                !std.mem.eql(u8, existing.labelSlice(), proposal.label[0..proposal.label_len]) or
+                !std.mem.eql(u8, &existing.device_signature.public_key, &proposal.device_signature.public_key) or
+                !std.mem.eql(u8, &existing.device_signature.value, &proposal.device_signature.value)) return error.DeviceEnrollmentMismatch;
+            return existing;
+        }
+        if (self.devices.countInUse() >= MAX_DEVICES) return error.DeviceTableFull;
+        var record = zeroDevice();
+        record.principal_id = proposal.device;
+        record.owner = proposal.owner;
+        record.label_len = proposal.label_len;
+        @memcpy(record.label[0..record.label_len], proposal.label[0..proposal.label_len]);
+        record.overlay_id = proposal.overlay_id;
+        record.device_signature = proposal.device_signature;
+        record.device_signature.signer = "device-graph";
+        var buffer: [ENROLLMENT_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        const message = enrollmentMessage(&buffer, proposal.owner, proposal.device, record.labelSlice(), record.overlay_id, 1, &record.device_signature.public_key) catch return error.InvalidEnrollmentSignature;
+        record.enrollment_signature = try signIdentity(root_key, message, now);
+        record.last_rotated_at_ticks = now;
+        const index = self.installDeviceRecord(record) orelse return error.DeviceTableFull;
+        return &self.devices.slots[index].device;
     }
 
     fn enrollDeviceInternal(

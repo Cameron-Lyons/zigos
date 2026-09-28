@@ -155,12 +155,13 @@ requests.
   verify a vault-backed assertion, and reject counter tampering, expired leases,
   wrong service tasks, and revoked handles. It also signs document metadata
   with the recovered sealed key and rejects signing after lease revocation.
-  The reboot restores two generated keys and a 96-byte exportable secret through
-  the durable catalog, checks that no leases survived, then lends fresh authority.
+  The reboot restores three generated keys and a 96-byte exportable secret through
+  the primary catalog and a device key through a separate vault catalog, checks
+  that no leases survived, then lends fresh authority.
   It also resumes an assertion counter after reboot and refuses a credential
   revoked before shutdown. The cold boot saves an unlock proof; the reboot rejects
   replay at matching relative ticks and rejects replacing its signed context with
-  the new session. Catalog format v2 rejects older snapshots.
+  the new session. Catalog format v3 includes the authenticated device graph and rejects older snapshots.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
@@ -189,8 +190,14 @@ requests.
   cannot enroll, rotate, or revoke another user's devices. Enrollment retries
   must match the current device key, label, and platform binding; key changes
   use explicit rotation. Exhausted generations and rejected mutations leave the
-  graph unchanged. Production root enrollment and sealed graph-signing keys
-  remain open.
+  graph unchanged. Sealed-key graph mutations checkpoint before publication.
+  Public enrollment lets a device prove possession and consent to an independently
+  pinned owner root while retaining its private key in its own vault. The authority
+  approves the public record and publishes a signed graph; import checks the local
+  key, preserves observed rotations and revocations, and checkpoints before use.
+  Host tests join separate vaults and disks; the TPM cold/reboot proof restores two
+  device vaults and catalogs on the same guest TPM. Production approval, enrollment
+  transport, trusted root-pin provisioning and rollback-resistant floors remain open.
   The two-node gate uses modern VirtIO PCI networking with bounded 32-entry
   queues, separate DMA permissions, VT-d isolation and remapped MSI-X.
   Both guests must transmit and receive encrypted native frames and observe

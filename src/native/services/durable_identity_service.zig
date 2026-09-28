@@ -5,6 +5,7 @@ const catalog = @import("../storage/vault_catalog.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const object_signer = @import("../storage/sealed_object_signer.zig");
 const sealed = @import("sealed_signing_key.zig");
+const enrollment = @import("../sync/device_enrollment.zig");
 
 // Trusted native service boundary. All borrowed state stays at stable addresses
 // and operations are serialized. A failed checkpoint withholds the result and
@@ -88,6 +89,33 @@ pub const Service = struct {
         const devices = self.state.devices orelse return error.GraphDestinationRequired;
         _ = try devices.rotateSealedDeviceKey(owner, device, root_key, device_key, now_ticks);
         _ = try self.flush(now_ticks, scratch);
+    }
+
+    pub fn approveEnrollment(self: *Service, proposal: *const graph.EnrollmentProposal, root_key: sealed.Key, now: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        try self.requireEnrollmentKey(proposal.owner, root_key, now);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        const existed = devices.findDeviceConst(proposal.device) != null;
+        _ = try devices.approveEnrollment(proposal, root_key, now);
+        if (!existed or self.version_id == 0) _ = try self.flush(now, scratch);
+    }
+
+    pub fn publishEnrollment(self: *const Service, owner: principal.PrincipalId, root_key: sealed.Key, now: u64, buffer: []u8) ![]const u8 {
+        try self.requireEnrollmentKey(owner, root_key, now);
+        if (self.version_id == 0) return error.IdentityCheckpointRequired;
+        return enrollment.publish(self.state.devices orelse return error.GraphDestinationRequired, owner, root_key, now, buffer);
+    }
+
+    pub fn acceptEnrollment(self: *Service, owner: principal.PrincipalId, local_device: principal.PrincipalId, local_key: sealed.Key, pin: signing.PublicKey, bytes: []const u8, now: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+        try self.requireEnrollmentKey(owner, local_key, now);
+        const devices = self.state.devices orelse return error.GraphDestinationRequired;
+        var candidate = graph.Graph.init();
+        try enrollment.readPublication(&candidate, owner, pin, bytes);
+        const local = try candidate.authenticatedRecord(local_device, pin);
+        if (!std.mem.eql(u8, local.device_signature.publicKeySlice(), &(try local_key.publicKey(now)))) return error.InvalidIdentityAuthority;
+        const changed = try enrollment.requireExtension(devices, &candidate, owner, pin);
+        if (!changed and self.version_id != 0) return;
+        devices.* = candidate;
+        _ = try self.flush(now, scratch);
     }
 
     pub fn revokeDevice(self: *Service, owner: principal.PrincipalId, device: principal.PrincipalId, root_key: sealed.Key, now_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !void {

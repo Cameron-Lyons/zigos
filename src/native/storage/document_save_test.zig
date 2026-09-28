@@ -73,6 +73,13 @@ pub const Fixture = struct {
         allocator.destroy(self);
     }
 
+    // Tests with multiple independent images select the device before each
+    // serialized storage operation; the modeled driver has one active disk.
+    pub fn activate(self: *Fixture) void {
+        active = self;
+        storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush });
+    }
+
     fn request(self: *Fixture, payload: []const u8) document_save.VerificationRequest {
         return .{ .workspace_id = self.workspace_id, .path = path, .expected_version_id = self.original_version_id, .payload = payload, .signer = signer, .tick = 10 };
     }
