@@ -29,6 +29,9 @@ pub fn run() noreturn {
         timer.synchronize();
         const now_ticks = timer.getTicks();
         const pending = event_wake.takeAll();
+        // Expiry revokes input/identity authority before a userspace task can
+        // consume another event, including wakes without keyboard activity.
+        session_manager.system().serviceAuthenticationClock(now_ticks);
 
         if (pending.xhci or pending.timer) {
             const bound_task_id = xhci_driver_task.boundTaskId();

@@ -217,6 +217,21 @@ requests.
   stale proofs and handles, and durable counter recovery after locking with a
   lost NV-write response. Coordination adds at most 4 KiB, borrows existing stores,
   and reuses private credential leases for repeated assertions.
+  Native trusted PIN entry now intercepts hardware reports before task switching
+  or app inbox delivery. Entry and exit drain queued reports and wait for a fresh
+  key release; each keyboard retains its own held-key suppression. Ctrl+Alt+Delete
+  locks the attached identity session through this native path. The framebuffer
+  renders a separate masked prompt above all app content, and compositor reset
+  preserves its live attachment without checkpointing it. PIN buffers are bounded
+  to 32 bytes and erased after submission, interruption, cancellation, or timeout.
+  Paste and application shortcuts cannot reach the prompt. Authentication and
+  PIN-entry deadlines participate in the desktop wake schedule, with expiry
+  checked before userspace dispatch. QEMU connects modeled HID reports through
+  the normal router and framebuffer to the real TPM verifier, including rejected
+  PINs, lock/reopen, and expiry. Trusted enrollment still must attach the session
+  owner at production boot. Verification currently runs synchronously after
+  presenting the busy state; a dedicated asynchronous authentication worker remains
+  open alongside first-user provisioning and physical input validation.
   Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog
@@ -252,8 +267,8 @@ requests.
   and never rewritten; a missing index requires explicit recovery. This closes
   the definition/first-write crash gap without another object or normal-checkpoint
   NV write. Production authorization provisioning and first-user enrollment UI,
-  physical TPM persistence validation, trusted PIN input, biometric verification,
-  desktop lock/unlock event integration, and userspace
+  physical TPM persistence and trusted input validation, biometric verification,
+  production enrollment binding for desktop sign-in, and userspace
   request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
   interrupted initial enrollment, recovery from the native disk after restarting

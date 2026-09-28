@@ -96,9 +96,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     const boot = @import("../../../kernel/platform/secure_random.zig").bootInstanceId();
     var scratch: [catalog.MAX_BYTES]u8 = undefined;
     if (expected_rejection) |expected| {
-        if (session.unlock(capsule, pin, boot, 1, 100, &scratch)) |_| return error.ActivatedRejectedPinSession else |err| {
-            if (err != expected) return err;
-        }
+        try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, expected);
         try requireLocked(&session);
         return;
     }
@@ -179,5 +177,91 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     }
     try requireLocked(&session);
     try session.close();
+    try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null);
     console.print("ZIGOS:TPM2:SESSION:VERIFIED\n");
+}
+
+// Verification-only modeled HID reports enter through the same native router,
+// renderer, deadline dispatch and TPM authenticator used by the desktop owner.
+const xhci = @import("../../../kernel/drivers/xhci.zig");
+var input_report: ?xhci.HardwareBootKeyboardReport = null;
+var input_sequence: u64 = 0;
+
+fn pollInputReport() ?xhci.HardwareBootKeyboardReport {
+    const report = input_report orelse return null;
+    std.crypto.secureZero(u8, &input_report.?.bytes);
+    input_report = null;
+    return report;
+}
+
+fn noInputProof() ?xhci.InputProof {
+    return null;
+}
+
+fn sendInput(manager: anytype, usage: u8, modifiers: u8, now_ticks: u64) void {
+    input_sequence += 1;
+    input_report = .{ .sequence = input_sequence, .port_id = 1, .slot_id = 1, .endpoint_id = 3 };
+    input_report.?.bytes[0] = modifiers;
+    input_report.?.bytes[2] = usage;
+    _ = manager.servicePendingInputWork(now_ticks);
+    _ = @import("../../platform/desktop_display.zig").present(manager.compositorSessionPtr());
+}
+
+fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod.Capsule, pin: []const u8, boot: [16]u8, scratch: *[catalog.MAX_BYTES]u8, rejection: ?anyerror) !void {
+    const entry_mod = @import("../../platform/trusted_pin_entry.zig");
+    const Adapter = @import("../../services/identity_pin_authenticator.zig").Adapter(@TypeOf(session.io.*));
+    var adapter = Adapter{ .session = session, .capsule = capsule, .boot_instance = boot, .lifetime_ticks = 100, .scratch = scratch };
+    var entry = entry_mod.Entry{ .authenticator = adapter.authenticator(), .input_timeout_ticks = 50 };
+    const router = manager.inputRouterPtr();
+    const previous_source = router.source;
+    const previous_compositor = router.compositor;
+    const previous_task_id = router.compositor_task_id;
+    router.bindHardwareSource(.{ .poll_report = pollInputReport, .input_proof = noInputProof });
+    router.bindCompositor(manager.compositorSessionPtr(), manager.storageServicePtr().task_id);
+    manager.bindTrustedAuthentication(&entry, 200);
+    defer {
+        router.clearTrustedEntry();
+        sendInput(manager, 0, 0, 309); // Complete this fixture's exit barrier.
+        if (previous_compositor) |compositor| router.bindCompositor(compositor, previous_task_id) else router.clearCompositor();
+        if (previous_source) |source| router.bindHardwareSource(source) else router.clearHardwareSource();
+        input_report = null;
+    }
+    sendInput(manager, 0, 0, 201); // Release/drain before entering digits.
+    for (pin) |digit| {
+        sendInput(manager, if (digit == '0') 0x27 else digit - '1' + 0x1e, 0, 202);
+        sendInput(manager, 0, 0, 202);
+        if (router.queued_event_count != 0 or router.pollWakeTarget() != null) return error.LeakedPinInput;
+    }
+    const frame = @import("../../../kernel/platform/framebuffer_hw.zig").frame() orelse return error.MissingPinFrame;
+    for (0..pin.len) |i| if (frame.cells[6 * frame.columns + i].character != '*') return error.UnmaskedPinInput;
+    sendInput(manager, 0x28, 0, 203);
+    if (!std.mem.allEqual(u8, &entry.pin, 0) or entry.view.digits != 0 or router.queued_event_count != 0) return error.RetainedSubmittedPin;
+    if (rejection) |expected| {
+        if (entry.view.status != (if (expected == error.PinLockedOut) entry_mod.Status.locked_out else .rejected)) return error.BadTrustedPinRejection;
+        try requireLocked(session);
+        return;
+    }
+    if (entry.capturing() or !session.replay.active) return error.TrustedPinDidNotUnlock;
+    const old_key = session.device_key;
+    const proof = try session.issueUnlockProof("session.example", "trusted entry", 204, 250);
+    if (proof.issued_at_ticks != 203) return error.WrongTrustedPinTime;
+    sendInput(manager, 0, 0, 204);
+    sendInput(manager, 0x4c, 5, 205); // Ctrl+Alt+Delete revokes locally.
+    try requireLocked(session);
+    if (!entry.capturing()) return error.TrustedAttentionDidNotLock;
+    if (old_key.validate(205)) |_| return error.RetainedTrustedInputKey else |err| {
+        if (err != error.VaultHandleNotFound) return err;
+    }
+    sendInput(manager, 0, 0, 206);
+    for (pin) |digit| {
+        sendInput(manager, if (digit == '0') 0x27 else digit - '1' + 0x1e, 0, 207);
+        sendInput(manager, 0, 0, 207);
+    }
+    sendInput(manager, 0x28, 0, 208);
+    if (entry.capturing() or !session.replay.active) return error.TrustedPinDidNotUnlock;
+    if (manager.nextServiceWake() == null or manager.nextServiceWake().? > 308) return error.MissingAuthenticationDeadline;
+    manager.serviceAuthenticationClock(308);
+    try requireLocked(session);
+    if (!entry.capturing() or router.queued_event_count != 0) return error.MissedAuthenticationDeadline;
+    console.print("ZIGOS:TPM2:PIN_INPUT:VERIFIED\n");
 }

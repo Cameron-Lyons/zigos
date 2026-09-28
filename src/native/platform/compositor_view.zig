@@ -28,7 +28,14 @@ pub fn textViewport(columns: usize, rows: usize, start_row: usize) abi.text_layo
 pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content: ?Content) void {
     frame.clear();
     frame.put(0, 0, "Zigos", .accent);
+    if (session.authentication_view) |authentication| {
+        if (authentication.status != .hidden) {
+            renderAuthentication(frame, authentication.*);
+            return;
+        }
+    }
     if (frame.rows < 10) return;
+    if (session.authentication_view != null and frame.columns >= 72) frame.put(14, 0, "Ctrl+Alt+Delete  Lock", .muted);
     if (frame.columns >= 40) frame.put(frame.columns - 21, 0, "Alt+Tab  Switch task", .muted);
     frame.fillRow(2, .selected);
 
@@ -100,6 +107,49 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
             .permission_denied, .document_changed, .unavailable, .failed => "Type to edit  |  Draft kept in this session",
         }, .muted);
     }
+}
+
+fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_pin_entry.zig").View) void {
+    if (frame.rows < 10) return;
+    frame.fillRow(2, .selected);
+    frame.put(1, 2, "Unlock Zigos", .selected);
+    frame.put(0, 4, "Enter your device PIN", .body);
+    const mask = "********************************";
+    frame.put(0, 6, mask[0..@min(authentication.digits, mask.len)], .accent);
+    const message = switch (authentication.status) {
+        .hidden, .entering => "",
+        .too_short => "Enter at least 6 digits.",
+        .too_long => "PIN is too long. Press Esc to start again.",
+        .pending, .verifying => "Unlocking...",
+        .rejected => "PIN not recognized. Try again.",
+        .locked_out => "Too many attempts. Wait or use device recovery.",
+        .unavailable => "Sign-in unavailable. Press Ctrl+Alt+Delete to retry.",
+    };
+    frame.put(0, 8, message, if (authentication.status == .pending or authentication.status == .verifying) .body else .warning);
+    frame.put(0, frame.rows - 1, "Enter  Unlock  |  Esc  Clear PIN", .muted);
+}
+
+test "desktop view gives trusted authentication exclusive masked chrome" {
+    const std = @import("std");
+    var session = compositor.Session.init();
+    defer session.deinit();
+    var authentication = @import("trusted_pin_entry.zig").View{ .status = .entering, .digits = 8 };
+    session.authentication_view = &authentication;
+    var frame = try scanout.Frame.init(60, 20);
+    frame.put(0, 12, "Previous private document", .body);
+    const app = Content{ .surface_id = 99, .text = "73019428", .cursor = 8, .flags = .{ .active = true } };
+    render(&frame, &session, app);
+    try expectText(&frame, 1, 2, "Unlock Zigos");
+    try expectText(&frame, 0, 6, "********");
+    for (frame.cells[12 * frame.columns ..][0..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
+    for (frame.cells[6 * frame.columns ..][8..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
+    authentication.status = .verifying;
+    render(&frame, &session, app);
+    try expectText(&frame, 0, 8, "Unlocking...");
+    authentication.status = .hidden;
+    render(&frame, &session, app);
+    try expectText(&frame, 0, 5, "No open tasks.");
+    for (frame.cells[6 * frame.columns ..][0..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
 }
 
 fn saveStatus(state: abi.DocumentSaveState, dirty: bool) struct { text: []const u8, style: scanout.Style } {

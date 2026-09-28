@@ -12,6 +12,7 @@ const manifest = @import("../policy/manifest.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const input_router_mod = @import("../platform/input_router.zig");
+const trusted_pin = @import("../platform/trusted_pin_entry.zig");
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_util = @import("../core/util.zig");
@@ -437,7 +438,7 @@ pub const SessionManager = struct {
 
     pub fn nextServiceWake(self: *const SessionManager) ?u64 {
         var wake: ?u64 = null;
-        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.clipboard.nextWake() }) |candidate| {
+        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.clipboard.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null }) |candidate| {
             if (candidate) |deadline| wake = if (wake) |value| @min(value, deadline) else deadline;
         }
         return wake;
@@ -521,8 +522,29 @@ pub const SessionManager = struct {
         self.input_router.bindHardwareSource(source);
     }
 
+    pub fn bindTrustedAuthentication(self: *SessionManager, entry: *trusted_pin.Entry, now_ticks: u64) void {
+        self.input_router.bindTrustedEntry(entry, now_ticks);
+        _ = desktop_display.present(self.compositorSessionPtr());
+    }
+
+    pub fn serviceAuthenticationClock(self: *SessionManager, now_ticks: u64) void {
+        const entry = self.input_router.trusted_entry orelse return;
+        const revision = entry.revision;
+        entry.tick(now_ticks);
+        self.input_router.synchronizeTrustedInput();
+        if (entry.revision != revision) _ = desktop_display.present(self.compositorSessionPtr());
+    }
+
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
+        if (self.input_router.trusted_entry) |entry| {
+            if (entry.prepareVerification(now_ticks)) {
+                _ = desktop_display.present(self.compositorSessionPtr());
+                entry.verify(now_ticks);
+                self.input_router.synchronizeTrustedInput();
+                _ = desktop_display.present(self.compositorSessionPtr());
+            }
+        }
         if (!self.runtime_context.constructed) return events_routed;
         const runtime = self.runtime_context.taskRuntime().?;
         const scheduler = self.runtime_context.userspaceScheduler().?;
