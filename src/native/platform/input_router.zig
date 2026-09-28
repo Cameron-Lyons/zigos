@@ -632,6 +632,8 @@ fn inputByte(kind: input_driver_task.EventKind) u8 {
         .copy => abi.InputByte.copy,
         .cut => abi.InputByte.cut,
         .paste => abi.InputByte.paste,
+        .page_up => abi.InputByte.page_up,
+        .page_down => abi.InputByte.page_down,
     };
 }
 

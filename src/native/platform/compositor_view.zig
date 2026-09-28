@@ -5,6 +5,7 @@ pub const Content = struct {
     surface_id: u64,
     text: []const u8,
     cursor: usize,
+    cursor_upstream: bool = false,
     selection_anchor: ?usize = null,
     flags: mailbox.UiStateFlags,
     window_id: u64 = 0,
@@ -14,6 +15,13 @@ pub const Content = struct {
 };
 const compositor = @import("compositor_session.zig");
 const scanout = @import("../../kernel/platform/text_scanout.zig");
+pub const DOCUMENT_START_ROW: usize = 5;
+
+pub fn textViewport(columns: usize, rows: usize, start_row: usize) abi.text_layout.Viewport {
+    const visible = (rows -| 3) -| start_row;
+    if (columns == 0 or columns > 255 or visible == 0 or visible > 255) return .{};
+    return .{ .columns = @intCast(columns), .rows = @intCast(visible) };
+}
 
 // Compose the user-facing view from compositor-owned snapshots. The diagnostic
 // text framebuffer remains separate so its proof labels never become UI copy.
@@ -34,7 +42,7 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
 
     const surface = if (content) |value| if (window.ui_surface_id == value.surface_id and
         (value.window_id == 0 or value.window_id == window.id)) value else null else null;
-    var text_row: usize = 5;
+    var text_row: usize = DOCUMENT_START_ROW;
     if (window.item_count != 0) {
         var index: usize = 0;
         while (index < session.item_count and text_row + 4 < frame.rows - 3) : (index += 1) {
@@ -68,7 +76,7 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
         } else if (state.text.len == 0 and state.model != .notes) {
             frame.put(0, text_row, "Ready for input.", .muted);
         } else {
-            drawText(frame, text_row, state.text, state.cursor, state.selection_anchor);
+            drawTextAt(frame, text_row, state.text, .{ .offset = state.cursor, .upstream = state.cursor_upstream }, state.selection_anchor);
         }
         if (state.model == .notes) {
             const status = saveStatus(state.save_state, flags.dirty);
@@ -108,40 +116,37 @@ fn saveStatus(state: abi.DocumentSaveState, dirty: bool) struct { text: []const 
 }
 
 fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: usize, selection_anchor: ?usize) void {
-    const visible_rows = (frame.rows -| 3) -| start_row;
-    if (visible_rows == 0) return;
-    // Derive a bounded viewport from the acknowledged cursor. The compositor
-    // owns no editor scroll state, and repeated snapshots produce the same cells.
-    var cursor_row: usize = 0;
-    var cursor_column: usize = 0;
-    for (text[0..@min(cursor, text.len)]) |byte| {
-        advanceTextPosition(byte, frame.columns, &cursor_row, &cursor_column);
-    }
-    const first_row = cursor_row -| (visible_rows - 1);
-    const anchor = selection_anchor orelse cursor;
-    const selection_start = @min(anchor, cursor);
-    const selection_end = @max(anchor, cursor);
-    var row: usize = 0;
-    var column: usize = 0;
-    for (text, 0..) |byte, index| {
-        if (row >= first_row + visible_rows) return;
-        if (row >= first_row) {
-            const cell = &frame.cells[(start_row + row - first_row) * frame.columns + column];
-            if (index == cursor) cell.cursor = true;
-            if (index >= selection_start and index < selection_end) cell.style = .selected;
-            if (byte != '\n') cell.character = byte;
-        }
-        advanceTextPosition(byte, frame.columns, &row, &column);
-    }
-    if (cursor == text.len and row >= first_row and row < first_row + visible_rows)
-        frame.cells[(start_row + row - first_row) * frame.columns + column].cursor = true;
+    drawTextAt(frame, start_row, text, .{ .offset = cursor }, selection_anchor);
 }
 
-fn advanceTextPosition(byte: u8, columns: usize, row: *usize, column: *usize) void {
-    if (byte == '\n' or column.* + 1 == columns) {
-        column.* = 0;
-        row.* += 1;
-    } else column.* += 1;
+fn drawTextAt(frame: *scanout.Frame, start_row: usize, text: []const u8, caret: abi.text_layout.Caret, selection_anchor: ?usize) void {
+    const viewport = textViewport(frame.columns, frame.rows, start_row);
+    if (viewport.rows == 0) return;
+    const layout = abi.text_layout.Layout{ .text = text, .columns = viewport.columns };
+    const position = layout.locate(caret);
+    const first_row = position.index -| (@as(usize, viewport.rows) - 1);
+    const anchor = selection_anchor orelse caret.offset;
+    const selection_start = @min(anchor, caret.offset);
+    const selection_end = @max(anchor, caret.offset);
+    var iterator = layout.rows();
+    var index: usize = 0;
+    while (iterator.next()) |row| : (index += 1) {
+        if (index < first_row) continue;
+        if (index >= first_row + viewport.rows) break;
+        const cells = frame.cells[(start_row + index - first_row) * frame.columns ..][0..frame.columns];
+        for (text[row.start..row.end], row.start..) |byte, offset| {
+            const cell = &cells[offset - row.start];
+            cell.character = byte;
+            if (offset >= selection_start and offset < selection_end) cell.style = .selected;
+        }
+        if (row.next > row.end and row.end - row.start < frame.columns and row.end >= selection_start and row.end < selection_end)
+            cells[row.end - row.start].style = .selected;
+        if (index == position.index) {
+            const cell = &cells[@min(position.column, frame.columns - 1)];
+            cell.cursor = true;
+            cell.cursor_trailing = position.column == frame.columns;
+        }
+    }
 }
 
 test "desktop view renders owned surface text and removes stale task content" {
@@ -203,6 +208,27 @@ test "desktop text wraps scrolls to its cursor and clears old cells" {
     const empty = compositor.Session.init();
     render(&tiny, &empty, null);
     try expectText(&tiny, 0, 0, "Zigo");
+}
+
+test "desktop places an upstream wrap caret after the row and pages without phantom lines" {
+    const std = @import("std");
+    var frame = try scanout.Frame.init(5, 11);
+    const text = "abcdefghij\nxy\n";
+    drawTextAt(&frame, 5, text, .{ .offset = 5, .upstream = true }, null);
+    try expectText(&frame, 0, 5, "abcde");
+    try std.testing.expect(frame.cells[5 * 5 + 4].cursor);
+    try std.testing.expect(frame.cells[5 * 5 + 4].cursor_trailing);
+    try std.testing.expect(!frame.cells[6 * 5].cursor);
+    frame.clear();
+    drawTextAt(&frame, 5, text, .{ .offset = 5 }, null);
+    try std.testing.expect(frame.cells[6 * 5].cursor);
+    try std.testing.expect(!frame.cells[6 * 5].cursor_trailing);
+    frame.clear();
+    drawTextAt(&frame, 5, text, .{ .offset = 14 }, 0);
+    try expectText(&frame, 0, 5, "fghij");
+    try expectText(&frame, 0, 6, "xy");
+    try std.testing.expect(frame.cells[7 * 5].cursor);
+    try std.testing.expectEqual(scanout.Style.selected, frame.cells[6 * 5 + 2].style);
 }
 
 test "desktop selection highlights both directions across newlines and clears on collapse" {

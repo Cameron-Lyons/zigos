@@ -105,6 +105,8 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try expectStored(manager, workspace_id, path, expected[0 .. original_length + 1], original.version_id.raw());
 
     try clipboardBetweenEditors(manager, first, second, expected[0 .. original_length + 1]);
+    try visualNavigation(manager, graph, workspace_id, document_key);
+    _ = try manager.compositorSessionPtr().switchView(second.window_id);
     try expectChannelRetired(manager, first);
     const frames_before_retirement = paging.frameStats();
     retireEditor(manager, first);
@@ -405,6 +407,10 @@ fn pressSelectionKey(manager: anytype, editor: EditorSession, usage: u8, modifie
 }
 
 fn pressKeys(manager: anytype, editor: EditorSession, usages: []const u8, modifiers: u8, expected: []const u8, cursor: u16, anchor: u16, dirty: bool) !void {
+    return pressKeysAt(manager, editor, usages, modifiers, expected, cursor, anchor, dirty, false);
+}
+
+fn pressKeysAt(manager: anytype, editor: EditorSession, usages: []const u8, modifiers: u8, expected: []const u8, cursor: u16, anchor: u16, dirty: bool, upstream: bool) !void {
     const before = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse return error.EditorMailboxMissing;
     report_cursor = 0;
     report_mode = .key;
@@ -423,31 +429,30 @@ fn pressKeys(manager: anytype, editor: EditorSession, usages: []const u8, modifi
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
         const flags: mailbox_abi.UiStateFlags = @bitCast(text.state.flags);
-        if (text.cursor != cursor or text.state.selection_anchor != anchor or state.ui_cursor != cursor or flags.dirty != dirty or
+        if (text.cursor != cursor or text.state.cursor_upstream != upstream or text.state.selection_anchor != anchor or state.ui_cursor != cursor or flags.dirty != dirty or
             !std.mem.eql(u8, text.textSlice(), expected)) return error.CursorEditMismatch;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
-        var row: usize = 5;
-        var column: usize = 0;
-        for (expected[0..cursor]) |byte| {
-            if (byte == '\n' or column + 1 == frame.columns) {
-                column = 0;
-                row += 1;
-            } else column += 1;
-        }
-        if (row >= frame.rows - 3 or !frame.cells[row * frame.columns + column].cursor) return error.CursorNotPresented;
-        const cursor_glyph = [_]u8{if (cursor == expected.len or expected[cursor] == '\n') ' ' else expected[cursor]};
-        if (!framebuffer.verifyText(column, row, &cursor_glyph)) return error.CursorPixelsMissing;
-        row = 5;
-        column = 0;
-        for (expected, 0..) |byte, index| {
-            const selected = index >= @min(cursor, anchor) and index < @max(cursor, anchor);
-            if (row >= frame.rows - 3 or (frame.cells[row * frame.columns + column].style == .selected) != selected) return error.SelectionNotPresented;
-            const glyph = [_]u8{if (byte == '\n') ' ' else byte};
-            if (!framebuffer.verifyText(column, row, &glyph)) return error.SelectionPixelsMissing;
-            if (byte == '\n' or column + 1 == frame.columns) {
-                column = 0;
-                row += 1;
-            } else column += 1;
+        const layout = abi.text_layout.Layout{ .text = expected, .columns = frame.columns };
+        const position = layout.locate(.{ .offset = cursor, .upstream = upstream });
+        const visible = frame.rows - 8;
+        const first_row = position.index -| (visible - 1);
+        const cursor_row = 5 + position.index - first_row;
+        const cursor_column = @min(position.column, frame.columns - 1);
+        const cursor_cell = frame.cells[cursor_row * frame.columns + cursor_column];
+        if (!cursor_cell.cursor or cursor_cell.cursor_trailing != (position.column == frame.columns)) return error.CursorNotPresented;
+        if (!framebuffer.verifyText(cursor_column, cursor_row, &.{cursor_cell.character})) return error.CursorPixelsMissing;
+        var rows = layout.rows();
+        var index: usize = 0;
+        while (rows.next()) |row| : (index += 1) {
+            if (index < first_row) continue;
+            if (index >= first_row + visible) break;
+            for (expected[row.start..row.end], row.start..) |byte, offset| {
+                const column = offset - row.start;
+                const screen_row = 5 + index - first_row;
+                const selected = offset >= @min(cursor, anchor) and offset < @max(cursor, anchor);
+                if ((frame.cells[screen_row * frame.columns + column].style == .selected) != selected) return error.SelectionNotPresented;
+                if (!framebuffer.verifyText(column, screen_row, &.{byte})) return error.SelectionPixelsMissing;
+            }
         }
         return;
     }
@@ -465,6 +470,46 @@ fn expectBatchedInputAndSourceRestart(manager: anytype, editor: EditorSession) !
     try pressCursorKey(manager, editor, 0x0A, 0, undo_edited_text ++ "abcdefg", 11, true);
     try pressCursorKey(manager, editor, 0x1D, 1, undo_edited_text, 4, false);
     common.printBootMarker(boot_markers.document_input_ordering);
+}
+
+fn visualNavigation(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer) !void {
+    const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
+    const width = frame.columns;
+    const page = frame.rows - 9;
+    if (width < 20 or width > 120 or page < 3) return error.InvalidTextViewport;
+    var text: [protocol.MAX_DOCUMENT_BYTES]u8 = undefined;
+    const first_line = 2 * width + 3;
+    for (text[0..first_line], 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+    text[first_line] = '\n';
+    for (text[first_line + 1 ..], 0..) |*byte, index| byte.* = if (index % 2 == 0) 'x' else '\n';
+    const storage = manager.storageServicePtr();
+    const stored = try storage.putVersion(.{
+        .object_type = .document,
+        .payload = &text,
+        .metadata = try object_store.signMetadata(signer, "Wrapped document", "text/plain", .document, &text, 0),
+    });
+    const wrapped_path = "documents/wrapped.md";
+    try storage.beginTransaction(workspace_id);
+    errdefer storage.abortTransaction(workspace_id) catch {};
+    try storage.stagePut(workspace_id, wrapped_path, stored.object_id, stored.version_id, .document);
+    _ = try storage.commit(workspace_id, 0);
+    const editor = try openEditor(manager, graph, workspace_id, wrapped_path, 0xD0C3, document_key);
+    defer retireEditor(manager, editor);
+    try awaitPresentation(manager, editor, &text, 0);
+    const checkpoint = storage.checkpoint_store.last_checkpoint_generation;
+    try pressKeysAt(manager, editor, &.{0x4A}, 1, &text, 0, 0, false, false);
+    try pressKeysAt(manager, editor, &.{0x4D}, 0, &text, @intCast(width), @intCast(width), false, true);
+    try pressKeysAt(manager, editor, &.{0x51}, 0, &text, @intCast(2 * width), @intCast(2 * width), false, true);
+    try pressKeysAt(manager, editor, &.{0x4A}, 0, &text, @intCast(width), @intCast(width), false, false);
+    try pressKeysAt(manager, editor, &.{0x51}, 2, &text, @intCast(2 * width), @intCast(width), false, false);
+    try pressKeysAt(manager, editor, &.{0x4A}, 1, &text, 0, 0, false, false);
+    const page_offset: u16 = @intCast(first_line + 1 + 2 * (page - 3));
+    try pressKeysAt(manager, editor, &.{0x4E}, 2, &text, page_offset, 0, false, false);
+    try pressKeysAt(manager, editor, &.{0x4B}, 0, &text, 0, 0, false, false);
+    const current = try storage.resolve(workspace_id, wrapped_path);
+    if (current.version_id.raw() != stored.version_id.raw() or storage.checkpoint_store.last_checkpoint_generation != checkpoint)
+        return error.NavigationChangedStorage;
+    common.printBootMarker(boot_markers.document_visual_navigation);
 }
 
 fn clipboardBetweenEditors(manager: anytype, first: EditorSession, second: EditorSession, first_text: []const u8) !void {
@@ -583,10 +628,13 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
             if (!std.mem.eql(u8, text.textSlice(), expected)) return error.SurfaceTextMismatch;
             if (commits != 0 and text.state.save_state != @intFromEnum(abi.DocumentSaveState.saved)) return error.SavedStateMissing;
             if (manager.compositorSessionPtr().active_window_id == editor.window_id) {
-                const first_line = std.mem.indexOfScalar(u8, expected, '\n') orelse expected.len;
-                if (!framebuffer.verifyText(0, 5, expected[0..first_line])) return error.DocumentPixelsMissing;
+                const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
+                const layout = abi.text_layout.Layout{ .text = expected, .columns = frame.columns };
+                const caret = layout.locate(.{ .offset = text.cursor, .upstream = text.state.cursor_upstream });
+                const first_visible = caret.index -| (frame.rows - 9);
+                const row = layout.rowAt(first_visible);
+                if (!framebuffer.verifyText(0, 5, expected[row.start..row.end])) return error.DocumentPixelsMissing;
                 if (commits != 0) {
-                    const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
                     if (!framebuffer.verifyText(0, frame.rows - 2, "Saved locally")) return error.SavedPixelsMissing;
                 }
             }

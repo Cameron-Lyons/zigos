@@ -11,6 +11,14 @@ pub fn hasPresented() bool {
     return hardware.totalPixelWrites() != 0;
 }
 
+pub fn inputViewport(session: *const compositor.Session, event: abi.InputEventDescriptor) abi.text_layout.Viewport {
+    if (comptime builtin.os.tag != .freestanding) return .{};
+    const frame = hardware.frame() orelse return .{};
+    const window = session.findWindowConst(event.window_id) orelse return .{};
+    if (window.subject_task_id != event.task_id or window.ui_surface_id != event.surface_id or window.item_count != 0) return .{};
+    return view.textViewport(frame.columns, frame.rows, view.DOCUMENT_START_ROW);
+}
+
 // The native text compositor owns the firmware framebuffer. Snapshot lookup
 // never borrows task memory, and the renderer writes only damaged text cells.
 pub fn present(session: *const compositor.Session) bool {
@@ -26,6 +34,7 @@ pub fn present(session: *const compositor.Session) bool {
                         .text = text.textSlice(),
                         .cursor = text.cursor,
                         .selection_anchor = text.state.selection_anchor,
+                        .cursor_upstream = text.state.cursor_upstream,
                         .flags = @bitCast(text.state.flags),
                         .window_id = text.window_id,
                         .model = std.enums.fromInt(mailbox.UiModelKind, text.state.model) orelse return false,

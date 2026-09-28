@@ -48,6 +48,8 @@ pub const EventKind = enum(u8) {
     copy,
     cut,
     paste,
+    page_up,
+    page_down,
 };
 
 pub const KeyboardEvent = struct {
@@ -132,6 +134,8 @@ fn eventForUsage(usage: u8, modifiers: u8) ?KeyboardEvent {
         const kind: EventKind = switch (usage) {
             0x4A => if (control) .document_start else .line_start,
             0x4D => if (control) .document_end else .line_end,
+            0x4B => if (control) return null else .page_up,
+            0x4E => if (control) return null else .page_down,
             0x4C => if (control or shift) return null else .delete_forward,
             0x4F => if (control) return null else .cursor_right,
             0x50 => if (control) return null else .cursor_left,
@@ -254,8 +258,8 @@ test "input decoder maps navigation recovery commit and shifted text" {
 }
 
 test "input decoder maps cursor editing keys and isolates unsupported modifiers" {
-    const usages = [_]u8{ 0x4A, 0x4C, 0x4D, 0x4F, 0x50, 0x51, 0x52 };
-    const kinds = [_]EventKind{ .line_start, .delete_forward, .line_end, .cursor_right, .cursor_left, .cursor_down, .cursor_up };
+    const usages = [_]u8{ 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52 };
+    const kinds = [_]EventKind{ .line_start, .page_up, .delete_forward, .line_end, .page_down, .cursor_right, .cursor_left, .cursor_down, .cursor_up };
     for (usages, kinds) |usage, kind| {
         var decoder = Decoder{};
         try expectDecoded(&decoder, testReport(0, &.{usage}), &.{.{ .kind = kind }});
@@ -268,6 +272,12 @@ test "input decoder maps cursor editing keys and isolates unsupported modifiers"
     var decoder = Decoder{};
     try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4A, 0x4D }), &.{ .{ .kind = .document_start }, .{ .kind = .document_end } });
     try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4C, 0x4F, 0x50, 0x51, 0x52 }), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4B, 0x4E }), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{ 0x4B, 0x4E }), &.{
+        .{ .kind = .page_up, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .page_down, .data = abi.INPUT_EXTEND_SELECTION },
+    });
 }
 
 test "input decoder carries Shift selection and select all without growing event batches" {

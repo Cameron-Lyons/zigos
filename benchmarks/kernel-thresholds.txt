@@ -32,3 +32,4 @@ slo.irq_to_task 250000
 slo.nvme_queued_io 400000
 slo.endpoint_rtt 40000
 slo.focused_input 150000
+text_layout.navigate_full_document 5000

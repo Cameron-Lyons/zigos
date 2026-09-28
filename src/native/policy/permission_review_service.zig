@@ -157,6 +157,8 @@ pub const CommandInput = struct {
             .cursor_left,
             .cursor_right,
             .cursor_up,
+            .page_up,
+            .page_down,
             .cursor_down,
             .line_start,
             .line_end,

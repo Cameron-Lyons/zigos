@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("native_abi");
 const mailbox = @import("userspace_bootstrap_mailbox");
+const layout = abi.text_layout;
 const edit_history = @import("edit_history.zig");
 
 pub const TEXT_CAPACITY: usize = 512;
@@ -24,6 +25,8 @@ pub const State = struct {
     cursor: u16 = 0,
     selection_anchor: u16 = 0,
     vertical_column: u16 = NO_VERTICAL_COLUMN,
+    cursor_upstream: bool = false,
+    viewport: layout.Viewport = .{},
     save_state: abi.DocumentSaveState = .none,
     commit_count: u32 = 0,
     activation_count: u32 = 0,
@@ -62,6 +65,7 @@ pub const State = struct {
             .cursor = self.cursor,
             .state = .{
                 .selection_anchor = @intCast(self.selection_anchor),
+                .cursor_upstream = self.cursor_upstream,
                 .focus_index = @intCast(self.focus_index),
                 .model = @intCast(@intFromEnum(self.model)),
                 .flags = @bitCast(self.flags),
@@ -78,7 +82,8 @@ pub const State = struct {
         const op = event.bytes[0];
         const data = if (event.length > 1) event.bytes[1] else 0;
         if (op == abi.InputByte.text and (data < 0x20 or data > 0x7e)) return .rejected;
-        const navigation = op >= abi.InputByte.cursor_left and op <= abi.InputByte.document_end;
+        if (!event.viewport.valid()) return .rejected;
+        const navigation = (op >= abi.InputByte.cursor_left and op <= abi.InputByte.document_end) or op == abi.InputByte.page_up or op == abi.InputByte.page_down;
         if (navigation) {
             if (data & ~abi.INPUT_EXTEND_SELECTION != 0) return .rejected;
         } else if (op != abi.InputByte.text and data != 0) return .rejected;
@@ -97,6 +102,8 @@ pub const State = struct {
             abi.InputByte.cursor_left,
             abi.InputByte.cursor_right,
             abi.InputByte.cursor_up,
+            abi.InputByte.page_up,
+            abi.InputByte.page_down,
             abi.InputByte.cursor_down,
             abi.InputByte.line_start,
             abi.InputByte.line_end,
@@ -113,6 +120,13 @@ pub const State = struct {
             else => return .rejected,
         }
 
+        const previous_affinity = self.cursor_upstream;
+        if (!std.meta.eql(self.viewport, event.viewport)) {
+            self.viewport = event.viewport;
+            self.vertical_column = NO_VERTICAL_COLUMN;
+            const row = self.textLayout().locate(self.caret()).row;
+            self.cursor_upstream = self.cursor_upstream and row.soft and self.cursor == row.end;
+        }
         self.last_sequence = event.sequence;
         self.interaction_hash = mixEvent(self.interaction_hash, event);
         if (op != abi.InputByte.text) self.history.breakGroup();
@@ -122,10 +136,12 @@ pub const State = struct {
             abi.InputByte.delete_forward => if (self.model == .notes) self.deleteForward() else false,
             abi.InputByte.cursor_left => self.moveCursor(if (!extend and self.hasSelection()) self.selectionStart() else self.cursor -| 1, false, extend),
             abi.InputByte.cursor_right => self.moveCursor(if (!extend and self.hasSelection()) self.selectionEnd() else @min(self.text_length, self.cursor + 1), false, extend),
-            abi.InputByte.cursor_up => self.moveVertical(false, extend),
-            abi.InputByte.cursor_down => self.moveVertical(true, extend),
-            abi.InputByte.line_start => self.moveCursor(self.lineStart(self.cursor), false, extend),
-            abi.InputByte.line_end => self.moveCursor(self.lineEnd(self.cursor), false, extend),
+            abi.InputByte.cursor_up => self.moveVertical(false, 1, extend),
+            abi.InputByte.cursor_down => self.moveVertical(true, 1, extend),
+            abi.InputByte.page_up => self.moveVertical(false, self.viewport.pageRows(), extend),
+            abi.InputByte.page_down => self.moveVertical(true, self.viewport.pageRows(), extend),
+            abi.InputByte.line_start => self.moveCaret(.{ .offset = self.textLayout().locate(self.caret()).row.start }, false, extend),
+            abi.InputByte.line_end => self.moveCaret(self.textLayout().locate(self.caret()).row.atColumn(std.math.maxInt(usize)), false, extend),
             abi.InputByte.document_start => self.moveCursor(0, false, extend),
             abi.InputByte.document_end => self.moveCursor(self.text_length, false, extend),
             abi.InputByte.select_all => self.selectAll(),
@@ -141,7 +157,7 @@ pub const State = struct {
             abi.InputByte.task_switch_next, abi.InputByte.task_switch_previous => false,
             else => unreachable,
         };
-        if (!mutated) return .observed;
+        if (!mutated and previous_affinity == self.cursor_upstream) return .observed;
         self.revision +|= 1;
         return .mutated;
     }
@@ -152,7 +168,7 @@ pub const State = struct {
         const new_length = self.text_length - (end - start) + 1;
         if (new_length > self.text.len) return self.noteOverflow();
         if (self.model == .notes) {
-            self.history.remember(@intCast(start), self.text[start..end], &.{byte}, self.cursor, self.selection_anchor, byte != '\n');
+            self.history.remember(@intCast(start), self.text[start..end], &.{byte}, self.cursor, self.selection_anchor, self.cursor_upstream, byte != '\n');
             if (byte == ' ' or byte == '\n') self.history.breakGroup();
         }
         if (end == start) {
@@ -182,7 +198,7 @@ pub const State = struct {
     }
 
     fn eraseRange(self: *State, start: usize, end: usize) bool {
-        if (self.model == .notes) self.history.remember(@intCast(start), self.text[start..end], "", self.cursor, self.selection_anchor, false);
+        if (self.model == .notes) self.history.remember(@intCast(start), self.text[start..end], "", self.cursor, self.selection_anchor, self.cursor_upstream, false);
         const new_length = self.text_length - (end - start);
         std.mem.copyForwards(u8, self.text[start..new_length], self.text[end..self.text_length]);
         @memset(self.text[new_length..self.text_length], 0);
@@ -208,6 +224,7 @@ pub const State = struct {
         @memcpy(self.text[change.position..new_end], change.insert);
         self.text_length = @intCast(new_length);
         self.cursor = change.cursor;
+        self.cursor_upstream = change.cursor_upstream;
         self.selection_anchor = change.anchor;
         self.vertical_column = NO_VERTICAL_COLUMN;
         self.flags.input_overflow = false;
@@ -240,7 +257,7 @@ pub const State = struct {
         if (start == end and bytes.len == 0) return true;
         const new_end = start + bytes.len;
         const new_length = remaining + bytes.len;
-        self.history.remember(@intCast(start), self.text[start..end], bytes, self.cursor, self.selection_anchor, false);
+        self.history.remember(@intCast(start), self.text[start..end], bytes, self.cursor, self.selection_anchor, self.cursor_upstream, false);
         if (new_end > end) {
             std.mem.copyBackwards(u8, self.text[new_end..new_length], self.text[end..self.text_length]);
         } else {
@@ -257,6 +274,7 @@ pub const State = struct {
     }
 
     fn edited(self: *State) void {
+        self.cursor_upstream = false;
         self.flags.clipboard_failed = false;
         self.vertical_column = NO_VERTICAL_COLUMN;
         self.flags.dirty = true;
@@ -264,16 +282,12 @@ pub const State = struct {
         if (self.save_state == .saved) self.save_state = .none;
     }
 
-    fn lineStart(self: *const State, position: usize) usize {
-        var at = position;
-        while (at > 0 and self.text[at - 1] != '\n') : (at -= 1) {}
-        return at;
+    fn textLayout(self: *const State) layout.Layout {
+        return .{ .text = self.textSlice(), .columns = self.viewport.columns };
     }
 
-    fn lineEnd(self: *const State, position: usize) usize {
-        var at = position;
-        while (at < self.text_length and self.text[at] != '\n') : (at += 1) {}
-        return at;
+    fn caret(self: *const State) layout.Caret {
+        return .{ .offset = self.cursor, .upstream = self.cursor_upstream };
     }
 
     fn hasSelection(self: *const State) bool {
@@ -290,31 +304,33 @@ pub const State = struct {
 
     fn selectAll(self: *State) bool {
         if (self.model != .notes) return false;
-        const changed = self.selection_anchor != 0 or self.cursor != self.text_length;
+        const changed = self.selection_anchor != 0 or self.cursor != self.text_length or self.cursor_upstream;
         self.selection_anchor = 0;
         self.cursor = self.text_length;
+        self.cursor_upstream = false;
         self.vertical_column = NO_VERTICAL_COLUMN;
         return changed;
     }
 
     fn moveCursor(self: *State, position: usize, vertical: bool, extend: bool) bool {
+        return self.moveCaret(.{ .offset = position }, vertical, extend);
+    }
+
+    fn moveCaret(self: *State, position: layout.Caret, vertical: bool, extend: bool) bool {
         if (self.model != .notes) return false;
         if (!vertical) self.vertical_column = NO_VERTICAL_COLUMN;
-        const changed = self.cursor != position or (!extend and self.hasSelection());
-        self.cursor = @intCast(position);
+        const changed = self.cursor != position.offset or self.cursor_upstream != position.upstream or (!extend and self.hasSelection());
+        self.cursor = @intCast(position.offset);
+        self.cursor_upstream = position.upstream;
         if (!extend) self.selection_anchor = self.cursor;
         return changed;
     }
 
-    fn moveVertical(self: *State, down: bool, extend: bool) bool {
+    fn moveVertical(self: *State, down: bool, count: usize, extend: bool) bool {
         if (self.model != .notes) return false;
-        const start = self.lineStart(self.cursor);
-        const end = self.lineEnd(self.cursor);
-        if ((down and end == self.text_length) or (!down and start == 0)) return self.moveCursor(self.cursor, true, extend);
-        if (self.vertical_column == NO_VERTICAL_COLUMN) self.vertical_column = @intCast(self.cursor - start);
-        const target_start = if (down) end + 1 else self.lineStart(start - 1);
-        const target_end = if (down) self.lineEnd(target_start) else start - 1;
-        return self.moveCursor(@min(target_start + self.vertical_column, target_end), true, extend);
+        const text_layout = self.textLayout();
+        if (self.vertical_column == NO_VERTICAL_COLUMN) self.vertical_column = @intCast(text_layout.locate(self.caret()).column);
+        return self.moveCaret(text_layout.vertical(self.caret(), self.vertical_column, down, count), true, extend);
     }
 
     fn commit(self: *State) bool {
@@ -367,6 +383,7 @@ pub const State = struct {
         @memcpy(self.text[0..text.len], text);
         self.text_length = @intCast(text.len);
         self.cursor = self.text_length;
+        self.cursor_upstream = false;
         self.vertical_column = NO_VERTICAL_COLUMN;
         self.selection_anchor = self.cursor;
         self.history = .{};
@@ -412,6 +429,71 @@ pub const State = struct {
         return true;
     }
 };
+
+fn navigationEvent(state: *State, op: u8, extend: bool, viewport: layout.Viewport) ApplyResult {
+    var event = inputEvent(state.last_sequence + 1, op, if (extend) abi.INPUT_EXTEND_SELECTION else 0);
+    event.viewport = viewport;
+    return state.apply(event);
+}
+
+test "Notes navigates visual rows with wrap affinity preferred columns and atomic undo" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("abcdefghij\nxy\n1234567"));
+    const viewport = layout.Viewport{ .columns = 5, .rows = 3 };
+    _ = navigationEvent(&state, abi.InputByte.document_start, false, viewport);
+    _ = navigationEvent(&state, abi.InputByte.line_end, false, viewport);
+    try std.testing.expectEqual(@as(u16, 5), state.cursor);
+    try std.testing.expect(state.cursor_upstream);
+    _ = navigationEvent(&state, abi.InputByte.cursor_down, false, viewport);
+    try std.testing.expectEqual(@as(u16, 10), state.cursor);
+    try std.testing.expect(!state.cursor_upstream);
+    _ = navigationEvent(&state, abi.InputByte.cursor_down, true, viewport);
+    try std.testing.expectEqual(@as(u16, 13), state.cursor);
+    try std.testing.expectEqual(@as(u16, 10), state.selection_anchor);
+    _ = navigationEvent(&state, abi.InputByte.cursor_down, true, viewport);
+    try std.testing.expectEqual(@as(u16, 19), state.cursor);
+    try std.testing.expect(state.cursor_upstream);
+    _ = navigationEvent(&state, abi.InputByte.cursor_up, false, viewport);
+    _ = navigationEvent(&state, abi.InputByte.cursor_up, false, viewport);
+    try std.testing.expectEqual(@as(u16, 10), state.cursor);
+    _ = navigationEvent(&state, abi.InputByte.cursor_up, false, viewport);
+    try std.testing.expectEqual(@as(u16, 5), state.cursor);
+    try std.testing.expect(state.cursor_upstream);
+    try std.testing.expect(!state.flags.dirty);
+    const saved_revision = state.contentRevision();
+    try std.testing.expect(state.replaceSelection("!"));
+    try std.testing.expectEqualStrings("abcde!fghij\nxy\n1234567", state.textSlice());
+    _ = navigationEvent(&state, abi.InputByte.undo, false, viewport);
+    try std.testing.expectEqual(saved_revision, state.contentRevision());
+    try std.testing.expect(state.cursor_upstream);
+    try std.testing.expectEqual(@as(u16, 5), state.cursor);
+    try std.testing.expect(!state.flags.dirty);
+}
+
+test "Notes pages by the visible viewport and resets the preferred column on resize" {
+    var state = State.init("app.notes");
+    try std.testing.expect(state.loadDocument("abcdefghij\nxy\n1234567"));
+    const viewport = layout.Viewport{ .columns = 5, .rows = 3 };
+    _ = navigationEvent(&state, abi.InputByte.document_start, false, viewport);
+    _ = navigationEvent(&state, abi.InputByte.page_down, true, viewport);
+    try std.testing.expectEqual(@as(u16, 11), state.cursor);
+    try std.testing.expectEqual(@as(u16, 0), state.selection_anchor);
+    _ = navigationEvent(&state, abi.InputByte.page_down, true, viewport);
+    try std.testing.expectEqual(@as(u16, 19), state.cursor);
+    _ = navigationEvent(&state, abi.InputByte.page_up, false, viewport);
+    try std.testing.expectEqual(@as(u16, 11), state.cursor);
+    _ = navigationEvent(&state, abi.InputByte.page_up, false, viewport);
+    try std.testing.expectEqual(@as(u16, 0), state.cursor);
+    _ = navigationEvent(&state, abi.InputByte.line_end, false, viewport);
+    try std.testing.expect(state.cursor_upstream);
+    _ = navigationEvent(&state, abi.InputByte.cursor_down, false, .{ .columns = 3, .rows = 2 });
+    try std.testing.expectEqual(@as(u16, 8), state.cursor);
+    try std.testing.expect(!state.cursor_upstream);
+    const previous = state;
+    try std.testing.expectEqual(ApplyResult.rejected, navigationEvent(&state, abi.InputByte.page_up, false, .{ .columns = 3 }));
+    try std.testing.expectEqualDeep(previous, state);
+    try std.testing.expect(!state.flags.dirty);
+}
 
 pub fn modelForBundle(comptime bundle_id: []const u8) mailbox.UiModelKind {
     if (std.mem.startsWith(u8, bundle_id, "app.notes")) return .notes;

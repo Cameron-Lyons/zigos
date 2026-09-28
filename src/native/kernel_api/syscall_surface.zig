@@ -705,6 +705,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
         .port_id = 1,
         .slot_id = 2,
         .length = 2,
+        .viewport = .{ .columns = 80, .rows = 24 },
         .bytes = abi.inputPacket(abi.InputByte.text, 'x'),
     } };
     test_kernel.kernel.bindFocusedInputReceiver(.{
@@ -731,6 +732,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
     try std.testing.expectEqual(@as(u64, 9), response.event.sequence);
     try std.testing.expectEqual(app_task.id, response.event.task_id);
     try std.testing.expectEqual(@as(u8, 'x'), response.event.bytes[1]);
+    try std.testing.expectEqual(abi.text_layout.Viewport{ .columns = 80, .rows = 24 }, response.event.viewport);
 
     response = std.mem.zeroes(abi.InputRecvResponse);
     const empty = dispatchRequest(

@@ -1,6 +1,7 @@
 const std = @import("std");
+pub const text_layout = @import("text_layout.zig");
 
-pub const ABI_VERSION: u16 = 16;
+pub const ABI_VERSION: u16 = 17;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -32,6 +33,8 @@ pub const InputByte = struct {
     pub const copy: u8 = 23;
     pub const cut: u8 = 24;
     pub const paste: u8 = 25;
+    pub const page_up: u8 = 26;
+    pub const page_down: u8 = 27;
 };
 
 pub const INPUT_EXTEND_SELECTION: u8 = 1;
@@ -216,7 +219,8 @@ pub const InputEventDescriptor = extern struct {
     port_id: u8,
     slot_id: u8,
     length: u8,
-    _reserved: [5]u8 = [_]u8{0} ** 5,
+    viewport: text_layout.Viewport = .{},
+    _reserved: [3]u8 = [_]u8{0} ** 3,
     bytes: [INPUT_PACKET_BYTES]u8 = [_]u8{0} ** INPUT_PACKET_BYTES,
 };
 
@@ -225,6 +229,22 @@ pub const InputRecvResponse = extern struct {
     _reserved: [7]u8 = [_]u8{0} ** 7,
     event: InputEventDescriptor,
 };
+
+test "input viewport and caret affinity preserve fixed native wire sizes" {
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputEventDescriptor));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(InputRecvResponse));
+    try std.testing.expectEqual(@as(usize, 43), @offsetOf(InputEventDescriptor, "viewport"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(InputEventDescriptor, "bytes"));
+    try std.testing.expectEqual(@as(usize, 528), @sizeOf(SurfaceText));
+    var text = SurfaceText{ .text_length = 1, .cursor = 1, .state = .{ .model = 1, .cursor_upstream = true } };
+    text.text[0] = 'a';
+    try std.testing.expect(text.isCanonical());
+    text.text[0] = '\n';
+    try std.testing.expect(!text.isCanonical());
+    text.text[0] = 'a';
+    text.cursor = 0;
+    try std.testing.expect(!text.isCanonical());
+}
 
 pub const SurfacePresentation = extern struct {
     surface_id: u64,
@@ -258,7 +278,8 @@ pub const SurfaceTextState = packed struct(u32) {
     model: u3 = 0,
     flags: u8 = 0,
     save_state: u4 = 0,
-    reserved: u5 = 0,
+    cursor_upstream: bool = false,
+    reserved: u4 = 0,
 };
 
 pub const SurfaceText = extern struct {
@@ -275,6 +296,7 @@ pub const SurfaceText = extern struct {
     pub fn isCanonical(self: *const SurfaceText) bool {
         if (self.text_length > SURFACE_TEXT_BYTES or self.cursor > self.text_length or self.state.selection_anchor > self.text_length or
             self.state.reserved != 0 or self.state.model == 0 or self.state.model > 6 or self.state.flags & 0x80 != 0) return false;
+        if (self.state.cursor_upstream and (self.state.model != 1 or self.cursor == 0 or self.text[self.cursor - 1] == '\n')) return false;
         const save_state = std.enums.fromInt(DocumentSaveState, self.state.save_state) orelse return false;
         if (self.state.model != 1 and (save_state != .none or self.state.selection_anchor != self.cursor)) return false;
         for (self.textSlice()) |byte| if (byte != '\n' and (byte < 0x20 or byte > 0x7e)) return false;
@@ -418,7 +440,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 16), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 17), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));

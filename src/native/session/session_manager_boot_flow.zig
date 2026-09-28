@@ -1078,7 +1078,8 @@ const initial_session_manager = SessionManager{};
 
 fn pollFocusedInputForKernel(context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor {
     const manager: *SessionManager = @ptrCast(@alignCast(context));
-    const event = manager.input_router.pollAbiForTask(task_id) orelse return null;
+    var event = manager.input_router.pollAbiForTask(task_id) orelse return null;
+    event.viewport = desktop_display.inputViewport(manager.compositorSessionPtr(), event);
     manager.clipboard.observe(manager, event);
     return event;
 }

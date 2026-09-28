@@ -14,7 +14,8 @@ pub const Cell = packed struct(u16) {
     character: u8 = ' ',
     style: Style = .body,
     cursor: bool = false,
-    reserved: u4 = 0,
+    cursor_trailing: bool = false,
+    reserved: u3 = 0,
 };
 const palette = [_]struct { foreground: u24, background: u24 }{
     .{ .foreground = 0xe5ebf2, .background = BACKGROUND },
@@ -119,6 +120,10 @@ pub const Renderer = struct {
         return stats;
     }
 
+    fn cursorPixel(cell: Cell, x: usize, y: usize) bool {
+        return cell.cursor and (if (cell.cursor_trailing) x >= 10 and y >= 2 and y < 18 else y >= 18);
+    }
+
     fn drawCell(self: *Renderer, column: usize, row: usize, cell: Cell) void {
         const glyph = font.glyph(cell.character);
         const foreground = self.foregrounds[@intFromEnum(cell.style)];
@@ -129,7 +134,7 @@ pub const Renderer = struct {
             for (0..CELL_WIDTH) |x| {
                 const ink = y >= 2 and y < 16 and x < 10 and
                     (glyph[(y - 2) / 2] & (@as(u5, 16) >> @intCast(x / 2))) != 0;
-                const cursor = cell.cursor and y >= 18;
+                const cursor = cursorPixel(cell, x, y);
                 self.pixels[(top + y) * self.info.pixels_per_scan_line + left + x] = if (ink or cursor) foreground else background;
             }
         }
@@ -147,7 +152,7 @@ pub const Renderer = struct {
             for (0..CELL_WIDTH) |x| {
                 const ink = y >= 2 and y < 16 and x < 10 and
                     (glyph[(y - 2) / 2] & (@as(u5, 16) >> @intCast(x / 2))) != 0;
-                const expected = if (ink or (cell.cursor and y >= 18)) foreground else background;
+                const expected = if (ink or cursorPixel(cell, x, y)) foreground else background;
                 if (self.pixels[(top + y) * self.info.pixels_per_scan_line + left + x] != expected) return false;
             }
         }

@@ -288,7 +288,29 @@ const cases = benchmark_cases.benchmarkCases(.{
     .slo_nvme_queued_io = benchmarkSloNvmeQueuedIo,
     .slo_endpoint_rtt = benchmarkSloEndpointRtt,
     .slo_focused_input = benchmarkSloFocusedInput,
+    .text_navigation = benchmarkTextNavigation,
 });
+
+var navigation_text: [abi.SURFACE_TEXT_BYTES]u8 = initial: {
+    var text: [abi.SURFACE_TEXT_BYTES]u8 = undefined;
+    for (&text, 0..) |*byte, index| byte.* = if (index % 31 == 30) '\n' else 'a';
+    break :initial text;
+};
+
+fn benchmarkTextNavigation(iteration: u32) u64 {
+    // Vary the document, viewport, caret and direction. One measured operation
+    // includes locating the old caret, moving it, and locating its new cell.
+    navigation_text[255] = if (iteration & 1 == 0) '\n' else 'b';
+    const layout = abi.text_layout.Layout{ .text = &navigation_text, .columns = if (iteration & 2 == 0) 20 else 120 };
+    const caret = abi.text_layout.Caret{ .offset = iteration % (navigation_text.len + 1), .upstream = iteration & 4 != 0 };
+    const before = layout.locate(caret);
+    const next = layout.vertical(caret, before.column, iteration & 8 != 0, if (iteration & 16 == 0) 1 else 23);
+    const after = layout.locate(next);
+    if (after.row.start + after.column != next.offset or next.offset > navigation_text.len) {
+        benchmark_reporting.benchStepFailure("text layout navigation", error.InvalidCaret);
+    }
+    return 1 + next.offset + 513 * after.index + @intFromBool(next.upstream);
+}
 
 const quality_gates = benchmark_cases.qualityGateCases(.{
     .battery_saver_batch_delay = qualityBatterySaverBatchDelay,

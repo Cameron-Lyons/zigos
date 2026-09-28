@@ -10,6 +10,7 @@ const Edit = struct {
     inserted_length: u16,
     cursor: u16,
     anchor: u16,
+    cursor_upstream: bool = false,
 
     fn byteLength(self: Edit) usize {
         return @as(usize, self.removed_length) + self.inserted_length;
@@ -22,6 +23,7 @@ pub const Change = struct {
     insert: []const u8,
     cursor: u16,
     anchor: u16,
+    cursor_upstream: bool = false,
 };
 
 // A task-private log of changed bytes, not full document snapshots. Oldest
@@ -58,7 +60,7 @@ pub const History = struct {
         self.join_typing = false;
     }
 
-    pub fn remember(self: *History, position: u16, removed: []const u8, inserted: []const u8, cursor: u16, anchor: u16, typing: bool) void {
+    pub fn remember(self: *History, position: u16, removed: []const u8, inserted: []const u8, cursor: u16, anchor: u16, cursor_upstream: bool, typing: bool) void {
         std.debug.assert(removed.len + inserted.len <= BYTE_CAPACITY);
         if (self.next_revision == std.math.maxInt(u64)) {
             @memset(&self.bytes, 0);
@@ -97,6 +99,7 @@ pub const History = struct {
             .inserted_length = @intCast(inserted.len),
             .cursor = cursor,
             .anchor = anchor,
+            .cursor_upstream = cursor_upstream,
         };
         self.next_revision += 1;
         self.length += 1;
@@ -115,6 +118,7 @@ pub const History = struct {
             .insert = self.bytes[self.offset(self.index)..][0..edit.removed_length],
             .cursor = edit.cursor,
             .anchor = edit.anchor,
+            .cursor_upstream = edit.cursor_upstream,
         };
     }
 
@@ -159,7 +163,7 @@ comptime {
 
 test "edit history evicts complete records under both budgets and never reuses branch revisions" {
     var history = History{};
-    for (0..MAX_EDITS + 8) |index| history.remember(@intCast(index), "", "x", @intCast(index), @intCast(index), false);
+    for (0..MAX_EDITS + 8) |index| history.remember(@intCast(index), "", "x", @intCast(index), @intCast(index), false, false);
     try std.testing.expectEqual(MAX_EDITS, history.length);
     for (0..MAX_EDITS) |_| try std.testing.expect(history.undo() != null);
     try std.testing.expect(history.undo() == null);
@@ -167,7 +171,7 @@ test "edit history evicts complete records under both budgets and never reuses b
     try std.testing.expect(!history.isSaved());
     _ = history.redo();
     const discarded_revision = history.edits[history.index].revision;
-    history.remember(9, "", "z", 9, 9, false);
+    history.remember(9, "", "z", 9, 9, false, false);
     history.markSaved(discarded_revision);
     try std.testing.expect(!history.isSaved());
     try std.testing.expect(history.redo() == null);
@@ -176,8 +180,8 @@ test "edit history evicts complete records under both budgets and never reuses b
     history = .{};
     const full_a = [_]u8{'a'} ** 512;
     const full_b = [_]u8{'b'} ** 512;
-    history.remember(0, &full_a, &full_b, 512, 0, false);
-    history.remember(0, &full_b, "c", 512, 0, false);
+    history.remember(0, &full_a, &full_b, 512, 0, false, false);
+    history.remember(0, &full_b, "c", 512, 0, false, false);
     try std.testing.expectEqual(@as(u8, 1), history.length);
     const change = history.undo().?;
     try std.testing.expectEqualStrings(&full_b, change.insert);
@@ -189,9 +193,9 @@ test "edit history evicts complete records under both budgets and never reuses b
 
 test "edit history stops issuing save identities at revision exhaustion" {
     var history = History{ .next_revision = std.math.maxInt(u64) - 1 };
-    history.remember(0, "", "a", 0, 0, false);
+    history.remember(0, "", "a", 0, 0, false, false);
     try std.testing.expect(history.revision() == null);
-    history.remember(1, "", "b", 1, 1, false);
+    history.remember(1, "", "b", 1, 1, false, false);
     history.markSaved(null);
     try std.testing.expect(!history.isSaved());
     try std.testing.expect(history.undo() == null);

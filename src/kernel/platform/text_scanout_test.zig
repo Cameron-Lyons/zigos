@@ -49,6 +49,11 @@ test "scanout preserves padding and guards and writes only damaged cells" {
     try std.testing.expectEqual(@as(usize, 1), cursor.changed_cells);
     try std.testing.expectEqual(@as(usize, scanout.CELL_WIDTH * scanout.CELL_HEIGHT), cursor.pixels_written);
     try std.testing.expectEqual(info.encodeColor(0x72d5bb), pixels[top_left + 19 * info.pixels_per_scan_line]);
+    frame.cells[0].cursor_trailing = true;
+    try std.testing.expectEqual(@as(usize, 1), (try renderer.present(&frame)).changed_cells);
+    try std.testing.expectEqual(info.encodeColor(0x72d5bb), pixels[top_left + 2 * info.pixels_per_scan_line + 11]);
+    try std.testing.expectEqual(info.encodeColor(scanout.BACKGROUND), pixels[top_left + 19 * info.pixels_per_scan_line]);
+    try std.testing.expect(renderer.matchesCell(0, 0, frame.cells[0]));
     frame.clear();
     try std.testing.expectEqual(@as(usize, 1), (try renderer.present(&frame)).changed_cells);
     for (0..scanout.CELL_HEIGHT) |y| {
@@ -78,6 +83,7 @@ test "incremental scanout matches fresh rendering across text and style changes"
                 .character = random.intRangeAtMost(u8, ' ', '~'),
                 .style = @enumFromInt(random.uintLessThan(u3, 5)),
                 .cursor = random.boolean(),
+                .cursor_trailing = random.boolean(),
             };
         }
         _ = try renderer.present(&frame);

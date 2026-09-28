@@ -39,3 +39,8 @@ historical kernel baseline. `full_queue` measures rejection while all eight
 slots remain occupied. Each result is the median of five 200,000-iteration
 samples after warmup. These host timings are informational; the QEMU kernel
 benchmark remains the integration gate.
+
+The text-layout case locates, moves, and relocates the caret in a full 512-byte
+document. It varies hard breaks, widths of 20 and 120 columns, wrap affinity,
+movement direction, and one-row versus 23-row page steps. Its checksum includes
+the resulting byte offset, row, and affinity; invalid caret results fail the run.

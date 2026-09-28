@@ -17,6 +17,7 @@ pub const Client = struct {
     phase: Phase = .idle,
     awaiting: bool = false,
     cut: bool = false,
+    cursor_upstream: bool = false,
 
     pub fn pending(self: *const Client) bool {
         return self.phase != .idle;
@@ -38,6 +39,7 @@ pub const Client = struct {
             .revision = state.contentRevision(),
             .cursor = state.cursor,
             .anchor = state.selection_anchor,
+            .cursor_upstream = state.cursor_upstream,
             .phase = if (op == abi.InputByte.paste) .paste else .begin,
             .cut = op == abi.InputByte.cut,
         };
@@ -141,7 +143,7 @@ pub const Client = struct {
         return self.offset + @as(u16, @intCast(@min(protocol.CHUNK_BYTES, self.length - self.offset)));
     }
     fn matches(self: *const Client, state: *const State) bool {
-        return self.revision == state.contentRevision() and self.cursor == state.cursor and self.anchor == state.selection_anchor;
+        return self.revision == state.contentRevision() and self.cursor == state.cursor and self.anchor == state.selection_anchor and self.cursor_upstream == state.cursor_upstream;
     }
     fn finish(self: *Client, state: *State, failed: bool) void {
         self.* = .{};

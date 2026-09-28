@@ -80,7 +80,7 @@ requests.
   retires cancelled preparations. The 256-byte mailbox uses a typed UI channel
   for either a launcher or an editor. Cold-boot and reboot verification exercise
   these controls through the compositor ELF with modeled keyboard input.
-  Native ABI v15 copies canonical text snapshots from validated task memory;
+  Native ABI v17 copies canonical text snapshots from validated task memory;
   the compositor owns each accepted revision and rejects conflicting updates.
   The native boot path now maps the firmware framebuffer and draws document
   text, cursors, unsaved state, and selected Open/Cancel controls. Later frames
@@ -89,8 +89,10 @@ requests.
   unavailable storage. Later edits invalidate the saved label; failed saves
   retain the draft, and only an explicit retry resubmits a failed barrier.
   Notes supports insertion, Backspace and Delete at the cursor, arrow movement
-  between characters and logical lines, Home/End, and Ctrl+Home/End. Vertical
-  movement remembers its column across shorter lines. Shift extends selection
+  between characters and visible wrapped rows. Home/End reach the current visual
+  row, Ctrl+Home/End reach document boundaries, and Page Up/Down move by the
+  visible viewport with one row of overlap. Vertical movement remembers its
+  column across shorter rows. Shift extends selection
   with these navigation keys, and Ctrl+A selects the document. Typing replaces
   the highlighted range; Backspace and Delete remove it. Navigation and selection
   preserve saved state; edits remain staged until Ctrl+Enter. The compositor
@@ -107,7 +109,10 @@ requests.
   Cut removes text only after acknowledgement, and paste applies the complete
   payload as one undoable edit. Transfers accept up to 512 bytes; copied content
   expires after five minutes or when its source document authority is lost.
-  Unicode text and navigation by visual wrapped rows remain open. Selection,
+  The editor and compositor share allocation-free wrapping, including an explicit
+  caret position at soft-wrap boundaries. Display geometry arrives with trusted
+  input without enlarging its 56-byte descriptor, and caret metadata keeps the
+  text snapshot at 528 bytes. Unicode text remains open. Selection,
   clipboard failure feedback, and save feedback fit within the
   unchanged 528-byte text snapshot. Boot verification reads back mapped device
   pixels for the launcher, edited Notes text, selection and undo/redo results, save
