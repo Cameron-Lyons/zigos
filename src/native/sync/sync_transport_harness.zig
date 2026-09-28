@@ -533,6 +533,33 @@ pub const Harness = struct {
         }, source_device, target_device);
     }
 
+    pub fn openTpmServiceIdentity(
+        self: *Harness,
+        broker: *network_policy.EgressBroker,
+        request: network_policy.TpmServiceIdentityOpenRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!TransportSession {
+        const evidence = network_policy.ConnectionEvidence.fromTpmAttestation(
+            .{ .service_identity = request.service_identity },
+            target_device,
+            request.pending,
+            request.response,
+            request.now_ms,
+        ) orelse {
+            self.denied_sessions +|= 1;
+            return error.ProductionAttestationRequired;
+        };
+        return self.openServiceIdentity(broker, .{
+            .task_id = request.task_id,
+            .principal_id = request.principal_id,
+            .capability_id = request.capability_id,
+            .policy_id = request.policy_id,
+            .evidence = evidence,
+            .now_ticks = request.now_ticks,
+        }, source_device, target_device);
+    }
+
     pub fn openRelay(
         self: *Harness,
         broker: *network_policy.EgressBroker,

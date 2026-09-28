@@ -473,6 +473,33 @@ pub const NativeNetworkStack = struct {
         }, source_device, target_device);
     }
 
+    pub fn openTpmServiceIdentity(
+        self: *NativeNetworkStack,
+        broker: *network_policy.EgressBroker,
+        request: network_policy.TpmServiceIdentityOpenRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!NativeServiceIdentityConnection {
+        const evidence = network_policy.ConnectionEvidence.fromTpmAttestation(
+            .{ .service_identity = request.service_identity },
+            target_device,
+            request.pending,
+            request.response,
+            request.now_ms,
+        ) orelse {
+            self.attempted_connections +|= 1;
+            return self.denyOpen(.attestation_required);
+        };
+        return self.openServiceIdentity(broker, .{
+            .task_id = request.task_id,
+            .principal_id = request.principal_id,
+            .capability_id = request.capability_id,
+            .policy_id = request.policy_id,
+            .evidence = evidence,
+            .now_ticks = request.now_ticks,
+        }, source_device, target_device);
+    }
+
     pub fn openLocalDiscovery(
         self: *NativeNetworkStack,
         broker: *network_policy.EgressBroker,

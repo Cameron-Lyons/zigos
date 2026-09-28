@@ -1256,7 +1256,8 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
-        "src/native/platform/attestation_service.zig"
+        "src/native/platform/attestation_service.zig",
+        "src/native/platform/tpm_attestation.zig"
       ],
       "negative_tests": [
         {
@@ -1286,6 +1287,22 @@
         {
           "file": "src/native/platform/attestation_service.zig",
           "name": "attestation signing and provisioning failures leave committed state unchanged"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation rejects stale revoked malformed and expired verifier state"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation service rejects invalid requests without TPM commands or state changes"
+        },
+        {
+          "file": "src/native/sync/tpm_attestation_test.zig",
+          "name": "TPM remote attestation gates native driver and endpoint connections before transmission"
         }
       ]
     },

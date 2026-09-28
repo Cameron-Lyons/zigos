@@ -6,6 +6,7 @@ const measured_boot = @import("measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+pub const tpm = @import("tpm_attestation.zig");
 
 const addMeasuredArtifact = measured_boot.addMeasuredArtifact;
 
@@ -891,6 +892,30 @@ pub const Service = struct {
         return response;
     }
 
+    // The enrolled key/blob and authorization come from local provisioning.
+    // The verifier's PCR expectation is checked against the TPM's live quote;
+    // this path makes no claim about software runtime measurement records.
+    pub fn respondToTpmAttestationRequest(
+        self: *Service,
+        client: *@import("tpm2_sealing.zig").Client,
+        io: anytype,
+        blob: []const u8,
+        auth: *const crypto_hash.Digest,
+        enrolled: *const tpm.Enrollment,
+        challenge: *const tpm.Challenge,
+        out: *tpm.Response,
+    ) !void {
+        out.* = .{};
+        errdefer out.* = .{};
+        try challenge.validate(enrolled);
+        if (!self.device.eql(enrolled.device)) return error.RootIdentityMismatch;
+        if (self.isRootGenerationRevoked(enrolled.generation)) return error.RootGenerationRevoked;
+        try self.validateRemoteChallenge(challenge.request.remotePartySlice(), challenge.request.nonceSlice(), challenge.request.user_visible);
+        const qualifying_data = challenge.qualifyingData();
+        try client.quoteAttestation(io, blob, auth, &enrolled.identity, &qualifying_data, &challenge.approved_pcr11, out);
+        self.recordVisibleRequest(challenge.request.remotePartySlice(), challenge.request.nonceSlice());
+    }
+
     pub fn verifyRemoteAttestationResponse(
         response: RemoteAttestationResponse,
         request: RemoteAttestationRequest,
@@ -1027,13 +1052,19 @@ pub const Service = struct {
 
     fn recordSuccessfulRequest(self: *Service, statement: *const Statement) void {
         if (!statement.user_visible) return;
+        self.recordVisibleRequest(statement.remotePartySlice(), statement.nonceSlice());
+    }
+
+    fn recordVisibleRequest(self: *Service, remote_party: []const u8, nonce: []const u8) void {
         self.visible_request_count +|= 1;
-        self.last_remote_party_len = statement.remote_party_len;
-        self.last_remote_party = statement.remote_party;
-        if (statement.remote_party_len != 0) {
-            self.last_remote_nonce_len = statement.nonce_len;
-            self.last_remote_nonce = statement.nonce;
-            self.rememberRemoteChallenge(statement.remotePartySlice(), statement.nonceSlice());
+        self.last_remote_party_len = @intCast(remote_party.len);
+        @memset(&self.last_remote_party, 0);
+        @memcpy(self.last_remote_party[0..remote_party.len], remote_party);
+        if (remote_party.len != 0) {
+            self.last_remote_nonce_len = @intCast(nonce.len);
+            @memset(&self.last_remote_nonce, 0);
+            @memcpy(self.last_remote_nonce[0..nonce.len], nonce);
+            self.rememberRemoteChallenge(remote_party, nonce);
         }
     }
 

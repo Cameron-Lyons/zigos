@@ -34,6 +34,7 @@ test "platform host tests import native platform modules" {
     std.testing.refAllDecls(tpm2_pin);
     std.testing.refAllDecls(tpm2_secret_provider);
     std.testing.refAllDecls(attestation_service);
+    std.testing.refAllDecls(attestation_service.tpm);
     std.testing.refAllDecls(base_boot_selector);
     std.testing.refAllDecls(compositor_display);
     std.testing.refAllDecls(compositor_view);

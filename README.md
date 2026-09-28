@@ -813,7 +813,7 @@ Firmware authentication is recorded separately: SecureBoot must be one and
 SetupMode must be zero; AuditMode, if present, must be zero. Missing required
 state, malformed values, and read errors leave the boot unverified.
 Unsigned QEMU boots cannot claim an authenticated root or
-use it for remote attestation. Runtime measurement snapshots and the embedded
+use it for runtime measured-state attestation. Runtime measurement snapshots and the embedded
 fixture-signed manifests check consistency; they do not establish release
 authority, prove TPM PCR values, or enforce rollback protection.
 
@@ -843,8 +843,23 @@ TPM commands, cold boot, recovered keys, replay, wrong authorization, substitute
 keys, damaged blobs/responses, and TPM replacement using disposable swtpm state.
 Its enrollment authority is a verification-only fixture. Operational attestation
 key enrollment, manufacturer/EK certification, release-policy approval of PCR
-values, connection to remote attestation services, and PCR-bound secret policies
+values, and PCR-bound secret policies
 remain open; a valid signature alone does not establish those trust decisions.
+
+The attestation service now has a separate TPM response path. The verifier owns
+the enrolled device/key/generation and approved PCR value, generates a fresh
+32-byte nonce, and binds the complete request and PCR expectation into the
+quote's signed extraData. Responses contain only bounded TPM evidence. Acceptance
+is single-use, expires within one minute, and rejects clock rollback. Service
+failures erase the response and leave the challenge available for retry.
+Native driver and endpoint connection paths consume this evidence through egress
+capabilities, with separate pins for the enrollment and PCR 11 profile. A quote
+does not claim that arbitrary runtime measurement records are hardware measured.
+The cold/reboot QEMU proof authorizes an encrypted session through this path and
+rejects wrong policy context, PCR, peer, expiry and replay. Its approved PCR is a
+test fixture; deployed verifier policy, enrollment distribution, remote challenge
+transport and physical-machine validation remain open. Callers must cancel
+outstanding verifier challenges when their enrollment or approval policy changes.
 
 Remote attestation service signatures bind the complete verifier request and
 the provider's actual metadata digest through a domain-separated context.

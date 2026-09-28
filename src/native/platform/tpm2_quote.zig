@@ -82,15 +82,19 @@ pub const Pending = struct {
     }
 
     pub fn accept(self: *Pending, bytes: []const u8, now_ms: u64) !ClockInfo {
+        try self.observe(now_ms);
+        const result = try verify(bytes, &self.identity, &self.nonce, &self.pcr);
+        self.consumed = true;
+        return result;
+    }
+
+    pub fn observe(self: *Pending, now_ms: u64) !void {
         if (self.consumed) return error.QuoteChallengeConsumed;
         if (now_ms < self.last_observed_ms or now_ms >= self.expires_at_ms) {
             self.consumed = true;
             return error.QuoteChallengeExpired;
         }
         self.last_observed_ms = now_ms;
-        const result = try verify(bytes, &self.identity, &self.nonce, &self.pcr);
-        self.consumed = true;
-        return result;
     }
 
     pub fn cancel(self: *Pending) void {
@@ -173,6 +177,10 @@ fn scalar(bytes: []const u8) Error!Digest {
     return result;
 }
 
+pub const testing = if (@import("builtin").is_test) struct {
+    pub const QuoteFixture = Fixture;
+} else struct {};
+
 const Fixture = struct {
     key: Ecdsa.KeyPair,
     identity: Identity,
@@ -181,6 +189,10 @@ const Fixture = struct {
     evidence: Evidence = .{},
 
     fn init() !Fixture {
+        return initFor(@splat(0x37), @splat(0x4a));
+    }
+
+    pub fn initFor(nonce: Digest, pcr: Digest) !Fixture {
         const key = try Ecdsa.KeyPair.generateDeterministic(@splat(0x79));
         const sec1 = key.public_key.toUncompressedSec1();
         var public: [PUBLIC_BYTES]u8 = undefined;
@@ -188,7 +200,7 @@ const Fixture = struct {
         try w.put(&PUBLIC_PREFIX);
         try w.sized(sec1[1..33]);
         try w.sized(sec1[33..65]);
-        var self = Fixture{ .key = key, .identity = try Identity.fromPublic(&public, &objectName("test parent")) };
+        var self = Fixture{ .key = key, .identity = try Identity.fromPublic(&public, &objectName("test parent")), .nonce = nonce, .pcr = pcr };
         w = .{ .bytes = &self.evidence.bytes, .pos = 2 };
         try w.int(u32, 0xff54_4347);
         try w.int(u16, 0x8018);

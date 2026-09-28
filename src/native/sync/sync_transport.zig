@@ -581,6 +581,21 @@ pub const NativeTransportService = struct {
         return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
     }
 
+    pub fn openTpmServiceIdentity(
+        self: *NativeTransportService,
+        broker: *network_policy.EgressBroker,
+        request: network_policy.TpmServiceIdentityOpenRequest,
+        source_task_id: u64,
+        target_task_id: u64,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!NativeConnection {
+        try self.ensureTrustedTransportDevices(source_device, target_device);
+        var session = try self.harness.openTpmServiceIdentity(broker, request, source_device, target_device);
+        defer session.deinit();
+        return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
+    }
+
     pub fn openRelay(
         self: *NativeTransportService,
         broker: *network_policy.EgressBroker,

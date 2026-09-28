@@ -4,6 +4,11 @@ const tpm = @import("../../platform/tpm2_sealing.zig");
 const quote = tpm.quote;
 const wire = @import("../../platform/tpm2_wire.zig");
 const signing = @import("../../core/signing.zig");
+const attestation = @import("../../platform/attestation_service.zig");
+const network_policy = @import("../../sync/network_policy.zig");
+const transport = @import("../../sync/sync_transport_harness.zig");
+const capability = @import("../../kernel_api/capability.zig");
+const principal = @import("../../core/principal.zig");
 const objects = @import("../../storage/object_store.zig");
 const ids = @import("../../core/ids.zig");
 const handoff = @import("../../../kernel/boot/handoff.zig");
@@ -88,6 +93,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         }
         if (!std.mem.allEqual(u8, &client.command, 0) or !std.mem.allEqual(u8, &client.response, 0)) return error.ResidentQuoteAuthorization;
     }
+    try proveRemoteAttestation(&client, io, blob.slice(), enrolled, measured.pcr11);
     var changed = enrolled;
     changed.qualified_name[2] ^= 1;
     const commands = io.commands;
@@ -118,4 +124,98 @@ pub fn run(manager: anytype, io: anytype) !void {
     }
     try client.close(io);
     console.print(if (restored) "ZIGOS:TPM2:QUOTE:RECOVERED\n" else "ZIGOS:TPM2:QUOTE:CREATED\n");
+}
+
+fn proveRemoteAttestation(client: *tpm.Client, io: anytype, blob: []const u8, identity: quote.Identity, pcr: tpm.Key) !void {
+    // This verifier policy is a local verification fixture. Operational approved
+    // PCR values must come from release policy, not from the prover's handoff.
+    const target = principal.PrincipalId{ .kind = .device, .serial = 0x7081 };
+    const source = principal.PrincipalId{ .kind = .device, .serial = 0x7082 };
+    const owner = principal.PrincipalId{ .kind = .service, .serial = 0x7083 };
+    const enrollment = try attestation.tpm.Enrollment.init(target, identity, 2, "remote-tpm-root");
+    var service = attestation.Service.init(target);
+    var pending = try attestation.tpm.Pending.init(io, enrollment, pcr, .{
+        .remote_party = "remote.tpm.proof",
+        .policy_label = "remote-tpm-policy",
+        .minimum_generation = 2,
+        .revoked_generations = &.{1},
+    }, 100, 1000);
+    var response = attestation.tpm.Response{};
+    var altered = pending.challenge;
+    altered.request.policy_label[0] ^= 1;
+    const wrong_context = altered.qualifyingData();
+    try client.quoteAttestation(io, blob, &auth, &identity, &wrong_context, &pcr, &response);
+    if (pending.accept(&response, 101)) |_| return error.RelabeledTpmQuoteAccepted else |err| {
+        if (err != error.QuoteMismatch) return err;
+    }
+    altered = pending.challenge;
+    altered.approved_pcr11[0] ^= 1;
+    if (service.respondToTpmAttestationRequest(client, io, blob, &auth, &enrollment, &altered, &response)) |_| return error.WrongTpmBootAccepted else |err| {
+        if (err != error.QuoteMismatch or service.visible_request_count != 0 or service.remote_nonce_history_count != 0 or
+            response.len != 0 or !std.mem.allEqual(u8, &response.bytes, 0)) return error.BadTpmServiceFailure;
+    }
+    try service.respondToTpmAttestationRequest(client, io, blob, &auth, &enrollment, &pending.challenge, &response);
+    if (service.visible_request_count != 1) return error.MissingVisibleTpmAttestation;
+    const commands = io.commands;
+    var unpublished = attestation.tpm.Response{};
+    if (service.respondToTpmAttestationRequest(client, io, blob, &auth, &enrollment, &pending.challenge, &unpublished)) |_| return error.ReusedTpmServiceNonce else |err| {
+        if (err != error.RemoteNonceReplay or io.commands != commands or service.visible_request_count != 1) return error.BadTpmServiceReplayRejection;
+    }
+    var expired = pending;
+    if (expired.accept(&response, 1100)) |_| return error.ExpiredTpmResponseAccepted else |err| {
+        if (err != error.QuoteChallengeExpired) return err;
+    }
+    var policies = network_policy.Directory.init();
+    const policy = try policies.create(.{
+        .owner = owner,
+        .label = "remote-tpm-policy",
+        .mode = .named_service_identity,
+        .target = "remote.tpm.proof",
+        .require_remote_attestation = true,
+        .pinned_root_digest = attestation.tpm.bootDigest(&pcr),
+        .pinned_attestation_verifier_metadata_digest = enrollment.digest(),
+    });
+    var capabilities = capability.CapabilityTable.init();
+    const cap = try capabilities.mintBootRoot(.{
+        .holder = owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .network_policy, .id = policy.id },
+        .rights = .{ .network_policy = .{ .network_remote = true } },
+        .scope = .{ .task_id = 0x7084, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 1, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    var broker = network_policy.EgressBroker.init(&policies, &capabilities);
+    var harness = transport.Harness.init();
+    const request = network_policy.TpmServiceIdentityOpenRequest{
+        .task_id = 0x7084,
+        .principal_id = owner,
+        .capability_id = cap.id,
+        .policy_id = policy.id,
+        .service_identity = "remote.tpm.proof",
+        .pending = &pending,
+        .response = &response,
+        .now_ms = 102,
+        .now_ticks = 10,
+    };
+    if (harness.openTpmServiceIdentity(&broker, request, source, source)) |_| return error.MisroutedTpmResponseAccepted else |err| {
+        if (err != error.ProductionAttestationRequired or pending.verifier.consumed) return error.BadTpmPeerRejection;
+    }
+    var wrong_service = request;
+    wrong_service.service_identity = "wrong.tpm.proof";
+    if (harness.openTpmServiceIdentity(&broker, wrong_service, source, target)) |_| return error.WrongTpmServiceAccepted else |err| {
+        if (err != error.ProductionAttestationRequired or pending.verifier.consumed) return error.BadTpmServiceRejection;
+    }
+    var session = try harness.openTpmServiceIdentity(&broker, request, source, target);
+    defer session.deinit();
+    try session.requireProductionAttestation();
+    if (harness.openTpmServiceIdentity(&broker, request, source, target)) |_| return error.ReplayedTpmSessionAccepted else |err| {
+        if (err != error.ProductionAttestationRequired or harness.created_sessions != 1) return error.BadTpmReplayRejection;
+    }
+    const packet = try harness.encryptPacket(&session, "TPM attested payload");
+    var plaintext: [transport.MAX_PACKET_BYTES]u8 = undefined;
+    if (!std.mem.eql(u8, try transport.decryptForSession(&session, packet, &plaintext), "TPM attested payload")) return error.TpmSessionPayloadMismatch;
+    if (!std.mem.eql(u8, &session.peer_root_digest, &attestation.tpm.bootDigest(&pcr)) or
+        !std.mem.eql(u8, &session.attestation_verifier_metadata_digest, &enrollment.digest())) return error.TpmSessionPinMismatch;
+    console.print("ZIGOS:TPM2:REMOTE_ATTESTATION:VERIFIED\n");
 }

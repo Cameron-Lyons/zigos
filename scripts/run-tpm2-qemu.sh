@@ -304,7 +304,11 @@ run_quote_boot() {
   qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" 'ZIGOS:NATIVE:READY' "${TPM2_QEMU_SECONDS:-90}"
   stop_tpm
   check_transport_proof "$log"
+  local remote_attestation_count=1
+  if [ "$name" = replacement ]; then remote_attestation_count=0; fi
   if [ "$(grep -c '^ZIGOS:TPM2:QUOTE:' "$log" || true)" -ne 1 ] ||
+    [ "$(grep -c '^ZIGOS:TPM2:REMOTE_ATTESTATION:' "$log" || true)" -ne "$remote_attestation_count" ] ||
+    { [ "$remote_attestation_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:REMOTE_ATTESTATION:VERIFIED' "$log"; } ||
     ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log"; then
     cat "$log" >&2
     echo "TPM2 quote proof failed for $name" >&2
