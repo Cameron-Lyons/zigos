@@ -121,6 +121,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try selectAndSave(manager, second, workspace_id);
     try undoAndSave(manager, second, workspace_id);
     try expectBatchedInputAndSourceRestart(manager, second);
+    try expectHeldInput(manager, second);
     common.printBootMarker(boot_markers.document_channel_sibling_editors);
     try expectDeniedSave(manager, second, workspace_id);
     common.printBootMarker(boot_markers.document_save_feedback);
@@ -421,12 +422,16 @@ fn pressKeysAt(manager: anytype, editor: EditorSession, usages: []const u8, modi
     defer report_keys = [_]u8{0} ** 6;
     report_modifiers = modifiers;
     if (manager.servicePendingInputWork(timer.getTicks()) != usages.len) return error.CursorInputNotRouted;
+    try awaitInputPresentation(manager, editor, expected, cursor, anchor, dirty, upstream, before.input_event_count, before.last_input_sequence, usages.len);
+}
+
+fn awaitInputPresentation(manager: anytype, editor: EditorSession, expected: []const u8, cursor: u16, anchor: u16, dirty: bool, upstream: bool, before_count: u64, before_sequence: u64, additional: usize) !void {
     for (0..512) |_| {
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse continue;
-        if (state.input_event_count != before.input_event_count + usages.len or state.ui_presented_revision != state.ui_state_revision) continue;
+        if (state.input_event_count != before_count + additional or state.ui_presented_revision != state.ui_state_revision) continue;
         if (manager.clipboard.transferPendingForTask(editor.task_id)) continue;
-        if (state.last_input_sequence <= before.last_input_sequence) return error.InputSequenceReused;
+        if (state.last_input_sequence <= before_sequence) return error.InputSequenceReused;
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
         const flags: mailbox_abi.UiStateFlags = @bitCast(text.state.flags);
@@ -476,6 +481,38 @@ fn expectBatchedInputAndSourceRestart(manager: anytype, editor: EditorSession) !
     try pressCursorKey(manager, editor, 0x0A, 0, undo_edited_text ++ "abcdefg", 11, true);
     try pressCursorKey(manager, editor, 0x1D, 1, undo_edited_text, 4, false);
     common.printBootMarker(boot_markers.document_input_ordering);
+}
+
+var held_report: ?xhci.HardwareBootKeyboardReport = null;
+fn nextHeldReport() ?xhci.HardwareBootKeyboardReport {
+    defer held_report = null;
+    return held_report;
+}
+fn heldSourceEpoch() ?u64 {
+    return 1;
+}
+
+fn expectHeldInput(manager: anytype, editor: EditorSession) !void {
+    const input = manager.inputRouterPtr();
+    const source = input.source.?;
+    input.bindHardwareSource(.{ .poll_report = nextHeldReport, .input_proof = noHardwareProof, .continuity_epoch = heldSourceEpoch });
+    const before = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), editor.task_id) orelse return error.EditorMailboxMissing;
+    const start = timer.getTicks();
+    held_report = .{ .sequence = 1, .port_id = 1, .slot_id = 1, .endpoint_id = 3, .bytes = .{ 0, 0, 0x04, 0, 0, 0, 0, 0 } };
+    if (manager.servicePendingInputWork(start) != 1) return error.HeldPressMissing;
+    try awaitInputPresentation(manager, editor, undo_edited_text ++ "a", 5, 5, true, false, before.input_event_count, before.last_input_sequence, 1);
+    const deadline = input.nextWake() orelse return error.RepeatDeadlineMissing;
+    if (manager.nextServiceWake() == null or manager.nextServiceWake().? > deadline) return error.RepeatIdleWakeMissing;
+    // Deterministic clock injection exercises the production router and idle
+    // deadline. The generated Notes ELF still consumes/presents every event.
+    if (manager.servicePendingInputWork(deadline - 1) != 0 or manager.servicePendingInputWork(deadline) != 1) return error.RepeatDeadlineIncorrect;
+    try awaitInputPresentation(manager, editor, undo_edited_text ++ "aa", 6, 6, true, false, before.input_event_count, before.last_input_sequence, 2);
+    const release = input.nextWake().?;
+    held_report = .{ .sequence = 2, .port_id = 1, .slot_id = 1, .endpoint_id = 3 };
+    if (manager.servicePendingInputWork(release) != 0 or input.nextWake() != null or manager.servicePendingInputWork(release + 100) != 0) return error.RepeatSurvivedRelease;
+    input.bindHardwareSource(source);
+    try pressCursorKey(manager, editor, 0x1D, 1, undo_edited_text, 4, false);
+    common.printBootMarker(boot_markers.document_input_repeat);
 }
 
 fn visualNavigation(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer) !void {

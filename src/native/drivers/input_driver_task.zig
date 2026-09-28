@@ -77,6 +77,18 @@ pub const DecodedEvents = struct {
 pub const Decoder = struct {
     previous_keys: [BOOT_KEY_SLOTS]u8 = [_]u8{0} ** BOOT_KEY_SLOTS,
 
+    // Call before decode, and use only after decode validates the report. A
+    // chord containing any new command key must never acquire repeat authority.
+    pub fn newRepeatUsage(self: *const Decoder, report: [BOOT_KEYBOARD_REPORT_BYTES]u8) ?u8 {
+        var candidate: ?u8 = null;
+        for (report[2..]) |usage| {
+            if (usage == 0 or containsUsage(&self.previous_keys, usage)) continue;
+            _ = repeatEvent(usage, report[0]) orelse return null;
+            candidate = usage;
+        }
+        return candidate;
+    }
+
     pub fn decode(
         self: *Decoder,
         report: [BOOT_KEYBOARD_REPORT_BYTES]u8,
@@ -103,6 +115,17 @@ pub const Decoder = struct {
         }
     }
 };
+
+// Repeat is restricted to ordinary document editing. In particular, neither
+// clipboard authorization nor activation/save/recovery can be synthesized.
+pub fn repeatEvent(usage: u8, modifiers: u8) ?KeyboardEvent {
+    if (modifiers & ~SHIFT_MASK != 0) return null;
+    const event = eventForUsage(usage, modifiers) orelse return null;
+    return switch (event.kind) {
+        .text, .backspace, .delete_forward, .cursor_left, .cursor_right, .cursor_up, .cursor_down, .line_start, .line_end, .page_up, .page_down => event,
+        else => null,
+    };
+}
 
 fn validateKeys(keys: []const u8) Error!void {
     for (keys, 0..) |usage, index| {

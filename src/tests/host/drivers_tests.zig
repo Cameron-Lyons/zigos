@@ -19,6 +19,9 @@ const xhci_driver_task = @import("../../native/drivers/xhci_driver_task.zig");
 const display_driver_task = @import("../../native/drivers/display_driver_task.zig");
 
 test "driver host tests import native driver modules" {
+    // Reach the hardware module's pure tests without instantiating MMIO/VT-d
+    // entry points in a hosted Debug executable.
+    _ = @import("../../kernel/drivers/xhci_hw.zig").keyboardContinuityEpoch;
     std.testing.refAllDecls(tpm2_crb_test);
     std.testing.refAllDecls(accelerator_driver_task);
     std.testing.refAllDecls(bootstrap_driver_port);

@@ -35,6 +35,9 @@ else
         pub fn keyboardReportCount() u64 {
             return 0;
         }
+        pub fn keyboardContinuityEpoch() ?u64 {
+            return null;
+        }
         pub fn pollKeyboardReport() ?xhci.HardwareBootKeyboardReport {
             return null;
         }
@@ -130,6 +133,10 @@ pub fn lifecyclePending() bool {
 
 pub fn keyboardReportCount() u64 {
     return xhci_hw.keyboardReportCount();
+}
+
+pub fn keyboardContinuityEpoch() ?u64 {
+    return xhci_hw.keyboardContinuityEpoch();
 }
 
 pub fn pollKeyboardReport() ?HardwareBootKeyboardReport {

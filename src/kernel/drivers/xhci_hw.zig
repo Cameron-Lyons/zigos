@@ -115,12 +115,16 @@ var set_boot_protocol_count: u64 = 0;
 var configure_endpoint_count: u64 = 0;
 var interrupt_report_submission_count: u64 = 0;
 var keyboard_report_count: u64 = 0;
+// Never reset with controller counters: a reclaimed USB slot is a new input
+// lifetime even when the replacement reports the same device identity.
+var keyboard_continuity_epoch: u64 = 1;
 
 fn controllerActive() bool {
     return @atomicLoad(bool, &active, .acquire);
 }
 
 fn publishControllerActive(value: bool) void {
+    if (!value) keyboard_continuity_epoch +|= 1;
     @atomicStore(bool, &active, value, .release);
 }
 
@@ -713,6 +717,11 @@ pub fn keyboardReportCount() u64 {
     return keyboard_report_count;
 }
 
+pub fn keyboardContinuityEpoch() ?u64 {
+    if (!controllerActive() or keyboard_continuity_epoch == std.math.maxInt(u64)) return null;
+    return keyboard_continuity_epoch;
+}
+
 pub fn keyboardReportAfter(observed_sequence: u64) ?xhci.HardwareBootKeyboardReport {
     if (!controllerActive()) return null;
     return keyboardReports().latestAfter(observed_sequence);
@@ -835,6 +844,7 @@ pub fn handledInterruptCount() u64 {
 }
 
 fn clearPortDescriptorState(state: *PortRuntimeState) void {
+    if (state.endpoint_configured) keyboard_continuity_epoch +|= 1;
     state.descriptor_prefix_valid = false;
     state.device_descriptor = null;
     state.configuration_descriptor_header = null;
@@ -884,6 +894,7 @@ fn handlePortStatusChange(event: xhci.Event, reader: *ExtendedCapabilityReader) 
     if (status.change_bits == 0 or status.over_current) return error.InvalidPortStatus;
 
     const state = &ports[event.port_id];
+    if (state.enabled and !status.enabled) keyboard_continuity_epoch +|= 1;
     state.connected = status.connected;
     state.enabled = status.enabled;
     if (!status.connected) {
@@ -2112,7 +2123,7 @@ test "xHCI hardware DMA windows retain page-granular access directions" {
     const plan = try xhci.planControllerDma(capabilities, 1, 0x1000);
     var windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
     const count = try buildDmaWindows(plan, &windows);
-    try std.testing.expectEqual(@as(usize, 7), count);
+    try std.testing.expectEqual(@as(usize, 8), count);
     try std.testing.expectEqual(@as(u32, 0x1000), windows[0].base);
     try std.testing.expect(windows[0].device_readable and !windows[0].device_writable);
     try std.testing.expect(windows[1].device_readable and windows[1].device_writable);
@@ -2130,4 +2141,29 @@ test "xHCI hardware DMA windows retain page-granular access directions" {
         error.DmaIsolationPlanInvalid,
         buildDmaWindows(outside_managed_width, &windows),
     );
+}
+
+test "keyboard repeat continuity changes across device teardown and controller reset" {
+    const saved_epoch = keyboard_continuity_epoch;
+    const saved_active = controllerActive();
+    defer {
+        keyboard_continuity_epoch = saved_epoch;
+        @atomicStore(bool, &active, saved_active, .release);
+    }
+    keyboard_continuity_epoch = 10;
+    publishControllerActive(true);
+    try std.testing.expectEqual(@as(?u64, 10), keyboardContinuityEpoch());
+    var port = PortRuntimeState{ .endpoint_configured = true };
+    clearPortDescriptorState(&port);
+    try std.testing.expectEqual(@as(?u64, 11), keyboardContinuityEpoch());
+    clearPortDescriptorState(&port);
+    try std.testing.expectEqual(@as(?u64, 11), keyboardContinuityEpoch());
+    publishControllerActive(false);
+    try std.testing.expect(keyboardContinuityEpoch() == null);
+    publishControllerActive(true);
+    try std.testing.expectEqual(@as(?u64, 12), keyboardContinuityEpoch());
+    keyboard_continuity_epoch = std.math.maxInt(u64);
+    publishControllerActive(false);
+    publishControllerActive(true);
+    try std.testing.expect(keyboardContinuityEpoch() == null);
 }

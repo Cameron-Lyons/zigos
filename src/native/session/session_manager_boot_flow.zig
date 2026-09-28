@@ -121,6 +121,8 @@ pub const SessionManager = struct {
     native_store: native_store_mount.NativeStoreMount = native_store_mount.NativeStoreMount.init(),
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
     input_router: input_router_mod.Router = .{},
+    input_repeat_lifecycle: u64 = 0,
+    input_repeat_capability: u64 = 0,
     surface_authority_scanned_lifecycle_generation: u64 = 0,
     documents: document_sessions.Sessions = .{},
     clipboard: clipboard_sessions.Sessions = .{},
@@ -479,7 +481,7 @@ pub const SessionManager = struct {
 
     pub fn nextServiceWake(self: *const SessionManager) ?u64 {
         var wake: ?u64 = null;
-        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.peer_connections.nextWake(), if (self.peer_quote_worker) |worker| worker.operations.next_wake(worker.context) else null, self.clipboard.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null }) |candidate| {
+        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.peer_connections.nextWake(), if (self.peer_quote_worker) |worker| worker.operations.next_wake(worker.context) else null, self.clipboard.nextWake(), self.input_router.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null }) |candidate| {
             if (candidate) |deadline| wake = if (wake) |value| @min(value, deadline) else deadline;
         }
         return wake;
@@ -584,6 +586,17 @@ pub const SessionManager = struct {
     }
 
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
+        // A held key cannot renew revoked input authority or outlive its task.
+        // Fresh physical presses keep the ordinary capability bootstrap path.
+        if (self.runtime_context.constructed) if (self.input_router.repeatingTask()) |task_id| {
+            const task = self.runtime_context.taskRuntime().?.find(task_id);
+            if (task == null or task.?.state != .active or
+                self.input_repeat_lifecycle != self.runtime_context.taskRuntime().?.taskLifecycleGeneration() or
+                focusedInputCapabilityForResolvedTask(self.kernel_context.capabilityTable().?, task.?, now_ticks) != self.input_repeat_capability)
+            {
+                _ = self.input_router.dropForTask(task_id);
+            }
+        };
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
         if (self.input_router.trusted_entry) |entry| {
             if (entry.prepareVerification(now_ticks)) {
@@ -602,6 +615,10 @@ pub const SessionManager = struct {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
             };
+            if (task.state != .active) {
+                _ = self.input_router.dropForTask(task_id);
+                continue;
+            }
             if (self.ensureFocusedInputCapabilityForResolvedTask(task, capability_table, now_ticks) == null) {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
@@ -612,6 +629,10 @@ pub const SessionManager = struct {
                 now_ticks,
                 now_ticks +% 1,
             );
+        }
+        if (self.input_router.repeatingTask()) |task_id| {
+            self.input_repeat_lifecycle = runtime.taskLifecycleGeneration();
+            self.input_repeat_capability = self.focusedInputCapabilityForTask(task_id, now_ticks) orelse 0;
         }
         return events_routed;
     }

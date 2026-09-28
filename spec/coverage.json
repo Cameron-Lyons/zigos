@@ -1875,6 +1875,8 @@
     "REQ-WINDOWS-AND-VIEWS": {
       "status": "enforced",
       "enforcement_modules": [
+        "src/native/platform/input_router.zig",
+        "src/native/drivers/input_driver_task.zig",
         "src/native/platform/compositor_display.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/session/service_bootstrap.zig",
@@ -1882,6 +1884,18 @@
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
+        {
+          "file": "src/native/platform/input_router.zig",
+          "name": "keyboard repeat cancels across focus round trips modal ownership and task retirement"
+        },
+        {
+          "file": "src/native/platform/input_router.zig",
+          "name": "keyboard repeat processes releases before deadlines and never overtakes the report budget"
+        },
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "keyboard repeat wakes an idle session and cannot renew revoked or suspended task authority"
+        },
         {
           "file": "src/native/platform/compositor_session.zig",
           "name": "compositor service closes task windows during app removal"

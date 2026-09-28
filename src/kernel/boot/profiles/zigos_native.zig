@@ -23,6 +23,7 @@ pub fn run() noreturn {
     session_manager.bindHardwareInput(.{
         .poll_report = pollHardwareKeyboardReport,
         .input_proof = hardwareInputProof,
+        .continuity_epoch = xhci_driver_task.keyboardContinuityEpoch,
     });
     session_manager.boot();
     while (true) {

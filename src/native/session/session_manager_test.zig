@@ -639,3 +639,43 @@ test "document activation denial retires preparation but never cancels a schedul
     try std.testing.expectEqual(task_runtime.TaskState.active, active.state);
     try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(active.id) != null);
 }
+
+fn repeatContinuityEpoch() ?u64 {
+    return 1;
+}
+
+test "keyboard repeat wakes an idle session and cannot renew revoked or suspended task authority" {
+    for (0..3) |boundary| {
+        const manager = try std.testing.allocator.create(session_manager.SessionManager);
+        defer std.testing.allocator.destroy(manager);
+        manager.* = .init();
+        defer manager.reset();
+        manager.boot();
+        const task = try manager.runtimePtr().createTask(.{
+            .owner = .{ .kind = .app, .serial = 9 },
+            .component_class = .app_component,
+            .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 64 * 1024, .endpoint_slots = 4, .shared_memory_bytes = 4096, .background_allowed = false },
+            .ui_surface_id = 987,
+            .local_only = true,
+        });
+        _ = try manager.compositorSessionPtr().openDocumentView(task, 7, "repeat.md");
+        manager.bindHardwareInput(.{ .poll_report = pollFocusedInputTestReport, .input_proof = noFocusedInputTestProof, .continuity_epoch = repeatContinuityEpoch });
+        focused_input_test_report = .{ .sequence = 1, .port_id = 1, .slot_id = 1, .endpoint_id = 3, .bytes = .{ 0, 0, 0x04, 0, 0, 0, 0, 0 } };
+        try std.testing.expectEqual(@as(usize, 1), manager.servicePendingInputWork(100));
+        const first = manager.inputRouterPtr().pollAbiForTask(task.id).?;
+        try std.testing.expectEqual(@as(?u64, 140), manager.nextServiceWake());
+        try std.testing.expectEqual(@as(usize, 1), manager.servicePendingInputWork(140));
+        const repeated = manager.inputRouterPtr().pollAbiForTask(task.id).?;
+        try std.testing.expect(repeated.sequence > first.sequence);
+        const grant = manager.focusedInputCapabilityForTask(task.id, 140).?;
+        const grants_before = task.capability_count;
+        if (boundary != 0) {
+            try std.testing.expect(try manager.runtimePtr().suspendTask(task.id, 141));
+            if (boundary == 2) try std.testing.expect(try manager.runtimePtr().resumeTask(task.id, 142));
+        } else try manager.capabilityTablePtr().revokeGrant(grant);
+        try std.testing.expectEqual(@as(usize, 0), manager.servicePendingInputWork(144));
+        try std.testing.expectEqual(grants_before, task.capability_count);
+        try std.testing.expect(manager.inputRouterPtr().pollAbiForTask(task.id) == null);
+        try std.testing.expect(manager.nextServiceWake() == null);
+    }
+}

@@ -9,12 +9,15 @@ const compositor_session = @import("compositor_session.zig");
 const trusted_auth = @import("trusted_auth_entry.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const root = @import("root");
+const timer = @import("../../kernel/timer/timer.zig");
 
 pub const MAX_KEYBOARDS: usize = 4;
 pub const MAX_INBOXES: usize = compositor_session.MAX_WINDOWS + 1;
 pub const MAX_QUEUED_EVENTS: usize = 32;
 pub const MAX_EVENTS_PER_INBOX: usize = 16;
 pub const DEFAULT_REPORT_BUDGET: usize = 16;
+pub const REPEAT_DELAY_TICKS: u64 = 400 / timer.MILLISECONDS_PER_TICK;
+pub const REPEAT_INTERVAL_TICKS: u64 = 40 / timer.MILLISECONDS_PER_TICK;
 pub const HEAP_BACKED_EVENT_SLOTS_ON_FREESTANDING = true;
 pub const EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
@@ -23,6 +26,7 @@ const NO_INBOX_INDEX: u8 = std.math.maxInt(u8);
 const INBOX_INDEX_CAPACITY: usize = MAX_INBOXES * 2;
 
 comptime {
+    std.debug.assert(REPEAT_DELAY_TICKS > 0 and REPEAT_INTERVAL_TICKS > 0);
     std.debug.assert(MAX_QUEUED_EVENTS <= NO_EVENT_INDEX);
     std.debug.assert(MAX_INBOXES <= NO_INBOX_INDEX);
 }
@@ -30,6 +34,9 @@ comptime {
 pub const HardwareReportSource = struct {
     poll_report: *const fn () ?xhci.HardwareBootKeyboardReport,
     input_proof: *const fn () ?xhci.InputProof,
+    // Optional for press-only sources. Repeat requires a live, non-exhausted
+    // epoch which changes on device removal, reset, or transport interruption.
+    continuity_epoch: ?*const fn () ?u64 = null,
 };
 
 pub const RoutedKeyboardEvent = struct {
@@ -110,6 +117,18 @@ const Inbox = struct {
 
 const InboxArena = indexed_arena.IndexedArenaWithKey(u64, Inbox, MAX_INBOXES, INBOX_INDEX_CAPACITY, inboxTaskId);
 
+const Repeat = struct {
+    deadline: u64,
+    routing_epoch: u64,
+    window_id: u64,
+    task_id: u64,
+    surface_id: u64,
+    focus_epoch: u32,
+    keyboard_index: u8,
+    usage: u8,
+    event: input_driver_task.KeyboardEvent,
+};
+
 pub const Router = struct {
     source: ?HardwareReportSource = null,
     compositor: ?*compositor_session.Session = null,
@@ -135,8 +154,13 @@ pub const Router = struct {
     trusted_revision: u64 = 0,
     drain_until_neutral: bool = false,
     released_since_boundary: bool = false,
+    require_keyboard_neutral: bool = false,
+    source_epoch: ?u64 = null,
+    last_service_tick: u64 = 0,
+    repeat: ?Repeat = null,
 
     comptime {
+        if (@sizeOf(?Repeat) > 64) @compileError("keyboard repeat exceeds its bounded single-key state");
         if (heap_backed_event_slots and @sizeOf(EventSlotBacking) > EVENT_SLOT_HANDLE_SIZE_CEILING_BYTES) {
             @compileError("heap-backed input event slots exceed their handle size ceiling");
         }
@@ -185,6 +209,8 @@ pub const Router = struct {
         self.routing_epoch +|= 1;
         self.dropAllInboxes();
         self.source = source;
+        self.require_keyboard_neutral = false;
+        self.source_epoch = if (source.continuity_epoch) |epoch| epoch() else null;
         self.last_report_sequence = 0;
         self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
     }
@@ -194,6 +220,7 @@ pub const Router = struct {
         self.routing_epoch +|= 1;
         self.dropAllInboxes();
         self.source = null;
+        self.source_epoch = null;
         self.last_report_sequence = 0;
         self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
     }
@@ -262,14 +289,41 @@ pub const Router = struct {
 
     pub fn service(self: *Router, now_ticks: u64, report_budget: usize) usize {
         var events_routed: usize = 0;
+        const clock_valid = now_ticks >= self.last_service_tick;
+        if (!clock_valid) self.repeat = null;
+        self.last_service_tick = now_ticks;
         if (self.trusted_entry) |entry| entry.tick(now_ticks);
         self.synchronizeTrustedInput();
         const source = self.source orelse return 0;
         const compositor = self.compositor orelse return 0;
+        const epoch = if (source.continuity_epoch) |read_epoch| read_epoch() else null;
+        if (epoch != self.source_epoch) {
+            // The source is bound before the native driver starts. Its first
+            // activation has no old held state to drain. A real interruption
+            // retains the release barrier while the controller is unavailable.
+            const interrupted = self.source_epoch != null or self.last_report_sequence != 0;
+            self.source_epoch = epoch;
+            if (interrupted) {
+                self.last_report_sequence = 0;
+                self.routing_epoch +|= 1;
+                self.dropAllInboxes();
+                self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
+                self.require_keyboard_neutral = true;
+                self.drain_until_neutral = true;
+                self.released_since_boundary = false;
+                if (self.trusted_entry) |entry| entry.inputInterrupted(now_ticks);
+                self.synchronizeTrustedInput();
+            }
+        }
+        if (self.repeat) |pending| if (!self.repeatTargetValid(pending)) {
+            self.repeat = null;
+        };
         self.pruneStaleInboxes(compositor);
 
+        var drained = false;
         for (0..report_budget) |_| {
             var report = source.poll_report() orelse {
+                drained = true;
                 // Drain the complete old queue and observe a fresh release.
                 // Other keyboards' held keys remain suppressed by their own
                 // decoders, including a keyboard unplugged while holding keys.
@@ -279,6 +333,7 @@ pub const Router = struct {
             defer std.crypto.secureZero(u8, &report.bytes);
 
             if (!validTopology(report)) {
+                self.repeat = null;
                 if (self.trusted_entry) |entry| if (entry.capturing()) {
                     entry.inputInterrupted(now_ticks);
                     self.synchronizeTrustedInput();
@@ -290,8 +345,21 @@ pub const Router = struct {
             }
             self.last_report_sequence = report.sequence;
 
-            const keyboard = self.keyboardFor(report) orelse continue;
+            const keyboard = self.keyboardFor(report) orelse {
+                self.repeat = null;
+                continue;
+            };
+            const repeat_usage = if (epoch != null and clock_valid and !self.drain_until_neutral and
+                !(if (self.trusted_entry) |entry| entry.capturing() else false))
+                keyboard.decoder.newRepeatUsage(report.bytes)
+            else
+                null;
+            var new_press = false;
+            if (self.repeat != null) for (report.bytes[2..]) |usage| {
+                if (usage != 0 and std.mem.indexOfScalar(u8, &keyboard.decoder.previous_keys, usage) == null) new_press = true;
+            };
             var decoded = keyboard.decoder.decode(report.bytes) catch {
+                self.repeat = null;
                 if (self.trusted_entry) |entry| {
                     if (entry.capturing()) entry.lock(now_ticks);
                     self.synchronizeTrustedInput();
@@ -299,6 +367,18 @@ pub const Router = struct {
                 continue;
             };
             defer std.crypto.secureZero(u8, std.mem.asBytes(&decoded));
+            // A newly pressed key replaces the single desktop repeat owner.
+            // Releasing it never resumes an older held key on either keyboard.
+            if (new_press) self.repeat = null;
+            if (self.repeat) |*pending| {
+                if (&self.keyboards[pending.keyboard_index] == keyboard) {
+                    if (std.mem.indexOfScalar(u8, report.bytes[2..], pending.usage) == null) {
+                        self.repeat = null;
+                    } else if (input_driver_task.repeatEvent(pending.usage, report.bytes[0])) |event| {
+                        pending.event = event;
+                    } else self.repeat = null;
+                }
+            }
             if (std.mem.allEqual(u8, &report.bytes, 0)) {
                 keyboard.saw_neutral = true;
                 self.released_since_boundary = true;
@@ -306,6 +386,9 @@ pub const Router = struct {
             self.reports_accepted +|= 1;
 
             if (self.drain_until_neutral) continue;
+            // Continuity loss reclaims USB identities. Each keyboard must
+            // release before its held state can become a new foreground press.
+            if (self.require_keyboard_neutral and !keyboard.saw_neutral) continue;
             if (self.trusted_entry) |entry| {
                 if (secureAttention(report.bytes)) {
                     entry.lock(now_ticks);
@@ -330,11 +413,74 @@ pub const Router = struct {
             for (decoded.slice()) |event| {
                 if (self.routeEvent(compositor, report, event, now_ticks)) {
                     events_routed += 1;
+                    if (clock_valid) if (repeat_usage) |usage| {
+                        if (std.meta.eql(event, input_driver_task.repeatEvent(usage, report.bytes[0]).?)) {
+                            self.armRepeat(compositor, keyboard, usage, event, now_ticks);
+                        }
+                    };
                 }
             }
         }
 
+        // Never overtake a queued release or shortcut, and never catch up missed
+        // intervals. Even after a long stall a visit can produce only one repeat.
+        if (drained) if (self.repeat) |pending| {
+            if (self.repeatTargetValid(pending) and now_ticks >= pending.deadline) {
+                const keyboard = &self.keyboards[pending.keyboard_index];
+                const report = xhci.HardwareBootKeyboardReport{ .port_id = keyboard.identity.port_id, .slot_id = keyboard.identity.slot_id };
+                if (self.routeEvent(compositor, report, pending.event, now_ticks)) events_routed += 1;
+                if (std.math.add(u64, now_ticks, REPEAT_INTERVAL_TICKS)) |deadline| {
+                    self.repeat.?.deadline = deadline;
+                } else |_| self.repeat = null;
+            }
+        };
         return events_routed;
+    }
+
+    pub fn nextWake(self: *const Router) ?u64 {
+        const pending = self.repeat orelse return null;
+        return if (self.repeatTargetValid(pending)) pending.deadline else null;
+    }
+
+    pub fn repeatingTask(self: *const Router) ?u64 {
+        return if (self.repeat) |pending| pending.task_id else null;
+    }
+
+    fn repeatTargetValid(self: *const Router, pending: Repeat) bool {
+        const source = self.source orelse return false;
+        const read_epoch = source.continuity_epoch orelse return false;
+        const epoch = read_epoch() orelse return false;
+        const compositor = self.compositor orelse return false;
+        const active = compositor.activeWindow() orelse return false;
+        if (self.drain_until_neutral or self.last_report_sequence == std.math.maxInt(u64) or
+            self.last_event_sequence == std.math.maxInt(u64) or self.routing_epoch == std.math.maxInt(u64) or
+            compositor.focus_epoch == std.math.maxInt(u32) or epoch == std.math.maxInt(u64) or
+            epoch != self.source_epoch or pending.routing_epoch != self.routing_epoch or
+            pending.focus_epoch != compositor.focus_epoch or pending.window_id != active.id or
+            active.modal or active.view_type != .document_view or active.subject_task_id != pending.task_id or
+            active.ui_surface_id != pending.surface_id) return false;
+        if (self.trusted_entry) |entry| {
+            if (entry.capturing() or entry.revision != self.trusted_revision or entry.revision == std.math.maxInt(u64)) return false;
+        }
+        return true;
+    }
+
+    fn armRepeat(self: *Router, compositor: *const compositor_session.Session, keyboard: *const KeyboardSlot, usage: u8, event: input_driver_task.KeyboardEvent, now_ticks: u64) void {
+        const active = compositor.activeWindow() orelse return;
+        const pending = Repeat{
+            .deadline = std.math.add(u64, now_ticks, REPEAT_DELAY_TICKS) catch return,
+            .routing_epoch = self.routing_epoch,
+            .window_id = active.id,
+            .task_id = active.subject_task_id,
+            .surface_id = active.ui_surface_id orelse return,
+            .focus_epoch = compositor.focus_epoch,
+            .keyboard_index = for (&self.keyboards, 0..) |*slot, index| {
+                if (slot == keyboard) break @as(u8, @intCast(index));
+            } else unreachable,
+            .usage = usage,
+            .event = event,
+        };
+        if (self.repeatTargetValid(pending)) self.repeat = pending;
     }
 
     pub fn pollForTask(self: *Router, task_id: u64) ?RoutedKeyboardEvent {
@@ -380,6 +526,9 @@ pub const Router = struct {
     }
 
     pub fn dropForTask(self: *Router, task_id: u64) usize {
+        if (self.repeat) |pending| if (pending.task_id == task_id) {
+            self.repeat = null;
+        };
         const inbox_index = self.findInboxIndex(task_id) orelse return 0;
         const inbox = &self.inboxes.slots[inbox_index];
         const dropped: usize = @intCast(inbox.count);
@@ -415,6 +564,7 @@ pub const Router = struct {
     ) bool {
         switch (event.kind) {
             .task_switch_next, .task_switch_previous => {
+                self.repeat = null;
                 self.routing_epoch +|= 1;
                 _ = compositor.switchVisible(if (event.kind == .task_switch_next) .next else .previous) catch {
                     return false;
@@ -573,6 +723,7 @@ pub const Router = struct {
     }
 
     fn dropAllInboxes(self: *Router) void {
+        self.repeat = null;
         var inbox_index: usize = self.active_inbox_head;
         while (inbox_index != NO_INBOX_INDEX) {
             if (inbox_index >= MAX_INBOXES) native_util.impossibleByInvariant("active input inbox reset points outside slots");
@@ -1323,4 +1474,297 @@ test "input router keeps compositor switching responsive when a focused inbox is
     }
     try std.testing.expect(router.pollForTask(second.id).?.sequence > previous_sequence);
     try std.testing.expectEqual(@as(u8, 0), router.queued_event_count);
+}
+
+var repeat_test_epoch: ?u64 = 1;
+fn repeatTestEpoch() ?u64 {
+    return repeat_test_epoch;
+}
+
+const RepeatFixture = struct {
+    compositor: compositor_session.Session = .init(),
+    router: Router = .{},
+    task_id: u64 = 0,
+    window_id: u64 = 0,
+
+    fn init(self: *RepeatFixture) !void {
+        var runtime = task_runtime.Runtime.init();
+        const app = try runtime.createTask(.{
+            .owner = .{ .kind = .app, .serial = 5 },
+            .component_class = .app_component,
+            .budget = testTaskBudget(),
+            .ui_surface_id = 45,
+            .local_only = true,
+        });
+        _ = try self.compositor.openTaskView(app, "Other view");
+        self.task_id = app.id;
+        self.window_id = (try self.compositor.openDocumentView(app, 7, "notes.md")).id;
+        repeat_test_epoch = 1;
+        test_feed = .{};
+        self.router.bindCompositor(&self.compositor, 99);
+        self.router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof, .continuity_epoch = repeatTestEpoch });
+    }
+
+    fn deinit(self: *RepeatFixture) void {
+        self.router.deinit();
+        self.compositor.deinit();
+    }
+
+    fn feed(self: *RepeatFixture, tick: u64, slot: u8, modifiers: u8, keys: []const u8) usize {
+        test_feed = .{};
+        test_feed.reports[0] = makeTestReport(self.router.last_report_sequence + 1, slot, modifiers, keys);
+        test_feed.count = 1;
+        return self.router.service(tick, DEFAULT_REPORT_BUDGET);
+    }
+};
+
+test "keyboard repeat delivers timed editing with fresh sequences and bounded late service" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    try std.testing.expectEqual(@as(usize, 1), f.feed(10, 1, 0, &.{0x04}));
+    const first = f.router.pollAbiForTask(f.task_id).?;
+    try std.testing.expectEqual(@as(?u64, 50), f.router.nextWake());
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(49, 16));
+    try std.testing.expectEqual(@as(usize, 1), f.router.service(50, 16));
+    try std.testing.expectEqual(f.task_id, f.router.pollWakeTarget().?);
+    const repeated = f.router.pollAbiForTask(f.task_id).?;
+    try std.testing.expectEqual(first.sequence + 1, repeated.sequence);
+    try std.testing.expectEqual(@as(u64, 50), repeated.tick);
+    try std.testing.expectEqual(@as(u8, 'a'), repeated.bytes[1]);
+    try std.testing.expectEqual(@as(?u64, 54), f.router.nextWake());
+    try std.testing.expectEqual(@as(usize, 1), f.router.service(2000, 16));
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(2000, 16));
+    try std.testing.expectEqual(@as(?u64, 2004), f.router.nextWake());
+    try std.testing.expectEqual(@as(usize, 1), f.router.queuedForTask(f.task_id));
+    _ = f.feed(2004, 1, 0, &.{});
+    try std.testing.expect(f.router.nextWake() == null);
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(3000, 16));
+}
+
+test "keyboard repeat processes releases before deadlines and never overtakes the report budget" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    _ = f.feed(1, 1, 0, &.{0x50});
+    _ = f.router.pollForTask(f.task_id);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(2, 1, 0, &.{0x50});
+    test_feed.reports[1] = makeTestReport(3, 1, 0, &.{});
+    test_feed.count = 2;
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(41, 0));
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(41, 1));
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(42, 1));
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(43, 1));
+    try std.testing.expect(f.router.nextWake() == null);
+    try std.testing.expect(f.router.pollForTask(f.task_id) == null);
+}
+
+test "keyboard repeat follows Shift but cannot manufacture commands from held keys" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    _ = f.feed(1, 1, 0, &.{0x50});
+    _ = f.router.pollForTask(f.task_id);
+    try std.testing.expectEqual(@as(usize, 0), f.feed(40, 1, 2, &.{0x50}));
+    _ = f.router.service(41, 16);
+    const selected = f.router.pollForTask(f.task_id).?;
+    try std.testing.expectEqual(input_driver_task.EventKind.cursor_left, selected.event.kind);
+    try std.testing.expectEqual(abi.INPUT_EXTEND_SELECTION, selected.event.data);
+    _ = f.feed(45, 1, 0, &.{0x50});
+    try std.testing.expectEqual(@as(u8, 0), f.router.pollForTask(f.task_id).?.event.data);
+    _ = f.feed(49, 1, 1, &.{0x50});
+    try std.testing.expect(f.router.nextWake() == null);
+    _ = f.feed(50, 1, 0, &.{0x50});
+    try std.testing.expect(f.router.nextWake() == null);
+    _ = f.feed(51, 1, 0, &.{});
+    _ = f.feed(52, 1, 0, &.{0x06});
+    _ = f.router.pollForTask(f.task_id);
+    _ = f.feed(92, 1, 1, &.{0x06});
+    try std.testing.expect(f.router.nextWake() == null);
+    try std.testing.expect(f.router.pollForTask(f.task_id) == null);
+    for ([_]u8{ 0x28, 0x2b, 0x29, 0x15, 0x06, 0x1b, 0x19, 0x1d, 0x04 }) |usage| {
+        _ = f.feed(100, 1, 0, &.{});
+        _ = f.feed(101, 1, 1, &.{usage});
+        try std.testing.expect(f.router.nextWake() == null);
+    }
+}
+
+test "keyboard repeat keeps one owner across keyboards and never resumes an older held key" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    _ = f.feed(1, 1, 0, &.{0x04});
+    _ = f.feed(2, 2, 0, &.{0x05});
+    _ = f.router.pollForTask(f.task_id);
+    _ = f.router.pollForTask(f.task_id);
+    _ = f.router.service(42, 16);
+    const b = f.router.pollForTask(f.task_id).?;
+    try std.testing.expectEqual(@as(u8, 2), b.slot_id);
+    try std.testing.expectEqual(@as(u8, 'b'), b.event.data);
+    _ = f.feed(43, 2, 0, &.{});
+    _ = f.feed(44, 1, 0, &.{0x04});
+    try std.testing.expect(f.router.nextWake() == null);
+    _ = f.feed(45, 1, 0, &.{ 0x04, 0x06, 0x07 });
+    _ = f.router.pollForTask(f.task_id);
+    _ = f.router.pollForTask(f.task_id);
+    _ = f.router.service(85, 16);
+    try std.testing.expectEqual(@as(u8, 'd'), f.router.pollForTask(f.task_id).?.event.data);
+}
+
+test "keyboard repeat cancels across focus round trips modal ownership and task retirement" {
+    const Change = enum { round_trip, modal, drop_task, clear_source, clear_compositor, source_rebind, exhausted_focus, exhausted_routing, exhausted_report, exhausted_event };
+    for (std.enums.values(Change)) |change| {
+        var f = RepeatFixture{};
+        try f.init();
+        defer f.deinit();
+        _ = f.feed(1, 1, 0, &.{0x04});
+        _ = f.router.pollForTask(f.task_id);
+        switch (change) {
+            .round_trip => {
+                _ = try f.compositor.switchVisible(.next);
+                _ = try f.compositor.switchView(f.window_id);
+            },
+            .modal => {
+                _ = try f.compositor.setModalReviewer(f.window_id, 44);
+            },
+            .drop_task => {
+                _ = f.router.dropForTask(f.task_id);
+            },
+            .clear_source => f.router.clearHardwareSource(),
+            .clear_compositor => f.router.clearCompositor(),
+            .source_rebind => f.router.bindHardwareSource(f.router.source.?),
+            .exhausted_focus => f.compositor.focus_epoch = std.math.maxInt(u32),
+            .exhausted_routing => f.router.routing_epoch = std.math.maxInt(u64),
+            .exhausted_report => f.router.last_report_sequence = std.math.maxInt(u64),
+            .exhausted_event => f.router.last_event_sequence = std.math.maxInt(u64),
+        }
+        try std.testing.expect(f.router.nextWake() == null);
+        try std.testing.expectEqual(@as(usize, 0), f.router.service(41, 16));
+        try std.testing.expect(f.router.pollForTask(f.task_id) == null);
+    }
+}
+
+test "keyboard repeat fails closed on interrupted and malformed input and clock exhaustion" {
+    const Change = enum { disconnect, unavailable, exhausted_epoch, malformed, rollover, topology, backwards, end_of_time };
+    for (std.enums.values(Change)) |change| {
+        var f = RepeatFixture{};
+        try f.init();
+        defer f.deinit();
+        _ = f.feed(10, 1, 0, &.{0x04});
+        _ = f.router.pollForTask(f.task_id);
+        var tick: u64 = 50;
+        switch (change) {
+            .disconnect => repeat_test_epoch = 2,
+            .unavailable => repeat_test_epoch = null,
+            .exhausted_epoch => repeat_test_epoch = std.math.maxInt(u64),
+            .malformed, .rollover, .topology => {
+                test_feed = .{};
+                test_feed.reports[0] = makeTestReport(2, 1, 0, &.{0x04});
+                test_feed.count = 1;
+                switch (change) {
+                    .malformed => test_feed.reports[0].bytes[1] = 1,
+                    .rollover => test_feed.reports[0].bytes[2] = 1,
+                    .topology => test_feed.reports[0].port_id = 0,
+                    else => unreachable,
+                }
+            },
+            .backwards => tick = 9,
+            .end_of_time => tick = std.math.maxInt(u64),
+        }
+        _ = f.router.service(tick, 16);
+        try std.testing.expect(f.router.nextWake() == null);
+        const last = f.router.pollForTask(f.task_id);
+        try std.testing.expect((last != null) == (change == .end_of_time));
+        if (change == .end_of_time) continue;
+        _ = f.feed(100, 1, 0, &.{0x04});
+        try std.testing.expect(f.router.nextWake() == null);
+    }
+}
+
+test "keyboard repeat requires fresh release after USB slot reuse and never repeats trusted PIN input" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    _ = f.feed(1, 1, 0, &.{0x04});
+    repeat_test_epoch = 2;
+    // A controller reset may restart the source's report numbering too.
+    f.router.last_report_sequence = 500;
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(1, 1, 0, &.{0x04});
+    test_feed.count = 1;
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(40, 16));
+    try std.testing.expectEqual(@as(u64, 1), f.router.last_report_sequence);
+    try std.testing.expectEqual(@as(usize, 0), f.feed(41, 1, 0, &.{0x04}));
+    try std.testing.expect(f.router.pollForTask(f.task_id) == null);
+    _ = f.feed(42, 1, 0, &.{});
+    try std.testing.expectEqual(@as(usize, 1), f.feed(43, 1, 0, &.{0x04}));
+    try std.testing.expect(f.router.nextWake() != null);
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
+    var entry = trusted_auth.Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 500 };
+    f.router.bindTrustedEntry(&entry, 44);
+    defer f.router.clearTrustedEntry();
+    try std.testing.expect(f.router.nextWake() == null);
+    _ = f.feed(45, 1, 0, &.{});
+    _ = f.feed(46, 1, 0, &.{0x1e});
+    const length = entry.view.characters;
+    try std.testing.expectEqual(@as(u8, 1), length);
+    _ = f.router.service(100, 16);
+    try std.testing.expectEqual(length, entry.view.characters);
+    try std.testing.expect(f.router.nextWake() == null);
+    try std.testing.expect(f.router.pollForTask(f.task_id) == null);
+}
+
+test "keyboard repeat bounds queue pressure and requires accepted initial delivery" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    _ = f.feed(1, 1, 0, &.{0x04});
+    for (0..100) |i| _ = f.router.service(41 + i * 4, 16);
+    try std.testing.expectEqual(MAX_EVENTS_PER_INBOX, f.router.queuedForTask(f.task_id));
+    try std.testing.expectEqual(@as(usize, MAX_EVENTS_PER_INBOX), f.router.queued_event_count);
+    try std.testing.expectEqual(@as(u64, MAX_EVENTS_PER_INBOX), f.router.last_event_sequence);
+    _ = f.feed(450, 1, 0, &.{0x05}); // New press cannot be queued.
+    try std.testing.expect(f.router.nextWake() == null);
+    while (f.router.pollForTask(f.task_id) != null) {}
+    try std.testing.expectEqual(@as(usize, 0), f.router.service(1000, 16));
+}
+
+test "keyboard repeat cannot inherit another keyboard held before a USB continuity boundary" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    _ = f.feed(1, 1, 0, &.{0x04});
+    _ = f.feed(2, 2, 0, &.{0x05});
+    repeat_test_epoch = 2;
+    _ = f.feed(3, 1, 0, &.{});
+    try std.testing.expect(!f.router.drain_until_neutral);
+    try std.testing.expectEqual(@as(usize, 0), f.feed(4, 2, 0, &.{0x05}));
+    try std.testing.expect(f.router.pollForTask(f.task_id) == null);
+    try std.testing.expect(f.router.nextWake() == null);
+    _ = f.feed(5, 2, 0, &.{});
+    try std.testing.expectEqual(@as(usize, 1), f.feed(6, 2, 0, &.{0x05}));
+    try std.testing.expect(f.router.nextWake() != null);
+}
+
+test "keyboard repeat accepts initial controller activation but retains the restart release barrier" {
+    var f = RepeatFixture{};
+    try f.init();
+    defer f.deinit();
+    repeat_test_epoch = null;
+    f.router.bindHardwareSource(f.router.source.?);
+    _ = f.router.service(0, 16);
+    repeat_test_epoch = 1;
+    try std.testing.expectEqual(@as(usize, 1), f.feed(1, 1, 0, &.{0x04}));
+    try std.testing.expect(f.router.nextWake() != null);
+    repeat_test_epoch = null;
+    _ = f.router.service(2, 16);
+    try std.testing.expect(f.router.nextWake() == null);
+    try std.testing.expect(f.router.pollForTask(f.task_id) == null);
+    repeat_test_epoch = 2;
+    try std.testing.expectEqual(@as(usize, 0), f.feed(3, 1, 0, &.{0x04}));
+    try std.testing.expect(f.router.nextWake() == null);
+    _ = f.feed(4, 1, 0, &.{});
+    try std.testing.expectEqual(@as(usize, 1), f.feed(5, 1, 0, &.{0x04}));
+    try std.testing.expect(f.router.nextWake() != null);
 }

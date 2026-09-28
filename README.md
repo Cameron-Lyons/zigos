@@ -95,7 +95,11 @@ requests.
   column across shorter rows. Shift extends selection
   with these navigation keys, and Ctrl+A selects the document. Typing replaces
   the highlighted range; Backspace and Delete remove it. Navigation and selection
-  preserve saved state; edits remain staged until Ctrl+Enter. The compositor
+  preserve saved state; edits remain staged until Ctrl+Enter. Held document keys
+  repeat after 400 ms, then every 40 ms, with one repeat per service visit and
+  no burst after a stall. Release, focus changes, USB interruption, and lost task
+  authority cancel repeat. Shortcuts, permission controls, and trusted PIN entry
+  remain press-only. Repeat deadlines wake an otherwise idle desktop. The compositor
   scrolls wrapped text to keep the cursor visible without retaining another
   editor buffer. Ctrl+Z undoes edits and Ctrl+Shift+Z redoes them, restoring the
   cursor and selection. Task-local history retains up to 32 edit groups and
