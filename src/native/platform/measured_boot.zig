@@ -281,6 +281,7 @@ pub const BootRecord = struct {
         if (self.record_count > MAX_RECORDS) return null;
         var root = crypto_hash.zero_digest;
         for (self.records[0..self.record_count], 0..) |record, index| {
+            if (record.label_len > record.label.len) return null;
             root = hashDigest(root, record, index);
         }
         return root;

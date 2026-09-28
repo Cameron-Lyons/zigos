@@ -846,6 +846,16 @@ key enrollment, manufacturer/EK certification, release-policy approval of PCR
 values, connection to remote attestation services, and PCR-bound secret policies
 remain open; a valid signature alone does not establish those trust decisions.
 
+Remote attestation service signatures bind the complete verifier request and
+the provider's actual metadata digest through a domain-separated context.
+Changing policy, key restrictions, revocations, or metadata invalidates the
+signature, and standalone statements cannot be repackaged as remote responses.
+The response remains 616 bytes. Verification checks bounded lengths and canonical
+unused fields before hashing, then checks the signature once against the trusted
+root. Failed signing and provisioning leave committed service state unchanged.
+Verified service-identity connections also require the signed device identity to
+match the selected peer before opening a connection.
+
 `./scripts/zig.sh build unified-efi-qemu-test` checks firmware authorization of
 the complete EFI image, rejection of changes to either embedded payload, and
 immunity to external kernel and command-line files. Successful boots must pass the

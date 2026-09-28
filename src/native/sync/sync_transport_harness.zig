@@ -509,6 +509,10 @@ pub const Harness = struct {
         source_device: principal.PrincipalId,
         target_device: principal.PrincipalId,
     ) Error!TransportSession {
+        if (!request.attestation_response.statement.device.eql(target_device)) {
+            self.denied_sessions +|= 1;
+            return error.ProductionAttestationRequired;
+        }
         const evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
             .{ .service_identity = request.service_identity },
             request.attestation_response,

@@ -449,6 +449,10 @@ pub const NativeNetworkStack = struct {
         source_device: principal.PrincipalId,
         target_device: principal.PrincipalId,
     ) Error!NativeServiceIdentityConnection {
+        if (!request.attestation_response.statement.device.eql(target_device)) {
+            self.attempted_connections +|= 1;
+            return self.denyOpen(.attestation_required);
+        }
         const evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
             .{ .service_identity = request.service_identity },
             request.attestation_response,
@@ -1652,7 +1656,7 @@ test "native network stack gates service identity packets on attested policy cap
     });
     const peer_attestation_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, peer_attestation_request);
     const pinned_digest = peer_attestation_response.statement.root_digest;
-    const request_digest = peer_attestation_response.request_digest;
+    const request_digest = peer_attestation_request.digest();
     var wrong_digest = pinned_digest;
     wrong_digest[0] ^= 0xFF;
 
@@ -1761,6 +1765,23 @@ test "native network stack gates service identity packets on attested policy cap
 
     const target_mac = [_]u8{ 0x02, 0, 0, 0, 0, 9 };
     try stack.bindPeerLink(target, target_mac);
+    const other_target = principal.PrincipalId{ .kind = .device, .serial = target.serial + 1 };
+    try stack.bindPeerLink(other_target, .{ 0x02, 0, 0, 0, 0, 10 });
+    try std.testing.expectError(error.EgressDenied, stack.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 70,
+        .principal_id = service_owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy.id,
+        .service_identity = "overlay.native.identity",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 10,
+    }, source, other_target));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.attestation_required, stack.last_denial_reason);
+    try std.testing.expectEqual(@as(usize, 0), stack.opened_connections);
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
     const connection = try stack.openVerifiedServiceIdentity(&broker, .{
         .task_id = 70,
         .principal_id = service_owner,
@@ -1805,8 +1826,8 @@ test "native network stack gates service identity packets on attested policy cap
     try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &frame.attestation_verifier_metadata_digest));
     try std.testing.expect(frame.flags.identity_pinned);
     try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native payload"));
-    try std.testing.expectEqual(@as(usize, 6), stack.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 4), stack.denied_before_transmit);
+    try std.testing.expectEqual(@as(usize, 7), stack.attempted_connections);
+    try std.testing.expectEqual(@as(usize, 5), stack.denied_before_transmit);
     try std.testing.expectEqual(@as(usize, 1), stack.opened_connections);
     try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);

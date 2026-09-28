@@ -1761,6 +1761,20 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         .now_ticks = 31,
     }, 176, 177, source, target));
 
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 176,
+        .principal_id = app,
+        .capability_id = service_identity_capability.id,
+        .policy_id = service_identity_policy.id,
+        .service_identity = "overlay.production.sync",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 31,
+    }, 176, 177, source, .{ .kind = .device, .serial = target.serial + 1 }));
+    try std.testing.expectEqual(@as(usize, 0), ProductionDriver.send_count);
+
     var production_service_connection = try production_transport.openVerifiedServiceIdentity(&broker, .{
         .task_id = 176,
         .principal_id = app,

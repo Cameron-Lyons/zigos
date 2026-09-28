@@ -1270,6 +1270,22 @@
         {
           "file": "src/native/platform/attestation_service.zig",
           "name": "attestation verification rejects measured state and statement tampering"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation response cannot be relabeled for another verifier policy"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation signatures bind every request restriction and actual verifier metadata"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation rejects malformed bounded records before hashing or signing"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation signing and provisioning failures leave committed state unchanged"
         }
       ]
     },
