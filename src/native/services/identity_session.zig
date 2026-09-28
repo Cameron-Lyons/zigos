@@ -127,6 +127,9 @@ pub fn Session(comptime Io: type) type {
             if (!std.mem.eql(u8, &(try catalog_key.publicKey(now_ticks)), &record.checkpoint.public_key)) return error.SigningKeyChanged;
             self.device_key = try self.lendKey(enrolled.device_secret_id, now_ticks);
             if (!std.mem.eql(u8, &(try self.device_key.publicKey(now_ticks)), device.device_signature.publicKeySlice())) return error.SigningKeyChanged;
+            // TPM waits may yield to the desktop. Recheck the exact pinned
+            // catalog before publishing its current storage version.
+            _ = try catalog.inspect(self.storage, self.anchor_backend.current.trust(), scratch);
             self.anchor_interface = self.anchor_backend.interface();
             self.coordinator = .{
                 .state = self.state,

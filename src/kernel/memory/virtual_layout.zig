@@ -30,6 +30,13 @@ pub const device_memory = Region{
     .bytes = 1024 * 1024 * 1024,
 };
 
+// Shares the device window's PML4 entry, already inherited by task roots, but
+// has its own PDPT range and ordinary cached, supervisor-only stack pages.
+pub const native_stacks = Region{
+    .base = 0xFFFF_C000_4000_0000,
+    .bytes = 1024 * 1024,
+};
+
 pub fn regionsDisjoint(first: Region, second: Region) bool {
     const first_end = first.endExclusive() orelse return false;
     const second_end = second.endExclusive() orelse return false;
@@ -57,17 +64,27 @@ comptime {
     if (!table64.isCanonicalVirtualAddress(physical_memory.base) or
         !table64.isCanonicalVirtualAddress(physical_end - 1) or
         !table64.isCanonicalVirtualAddress(device_memory.base) or
-        !table64.isCanonicalVirtualAddress(device_end - 1))
+        !table64.isCanonicalVirtualAddress(device_end - 1) or
+        !table64.isCanonicalVirtualAddress(native_stacks.base) or
+        !table64.isCanonicalVirtualAddress(native_stacks.endExclusive().? - 1))
     {
         @compileError("kernel virtual-memory windows must be canonical");
     }
-    if (!regionsDisjoint(physical_memory, device_memory)) {
+    if ((native_stacks.base >> 39) != (device_memory.base >> 39))
+        @compileError("worker stacks must share the inherited device PML4 entry");
+    if (!regionsDisjoint(physical_memory, device_memory) or
+        !regionsDisjoint(physical_memory, native_stacks) or !regionsDisjoint(device_memory, native_stacks))
+    {
         @compileError("kernel virtual-memory windows must be disjoint");
     }
 }
 
 test "kernel virtual-memory windows are canonical and disjoint" {
     try std.testing.expect(regionsDisjoint(physical_memory, device_memory));
+    try std.testing.expect(regionsDisjoint(physical_memory, native_stacks));
+    try std.testing.expect(regionsDisjoint(device_memory, native_stacks));
+    try std.testing.expect(table64.isCanonicalVirtualAddress(native_stacks.base));
+    try std.testing.expect(table64.isCanonicalVirtualAddress(native_stacks.endExclusive().? - 1));
     try std.testing.expect(table64.isCanonicalVirtualAddress(physical_memory.base));
     try std.testing.expect(table64.isCanonicalVirtualAddress(physical_memory.endExclusive().? - 1));
     try std.testing.expect(table64.isCanonicalVirtualAddress(device_memory.base));

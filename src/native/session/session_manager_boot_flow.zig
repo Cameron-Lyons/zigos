@@ -143,6 +143,8 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        // Revoke and drain authentication before any borrowed service is freed.
+        self.input_router.clearTrustedEntry();
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
         const retired_peer_handles = self.peer_connections;
         self.peer_handshakes.deinit();

@@ -5,15 +5,17 @@ const input = @import("../drivers/input_driver_task.zig");
 
 pub const MAX_PIN_BYTES = 32;
 pub const MIN_PIN_BYTES = 6;
-pub const Status = enum { hidden, entering, too_short, too_long, pending, verifying, rejected, locked_out, unavailable };
+pub const Status = enum { hidden, entering, too_short, too_long, pending, verifying, cancelling, rejected, locked_out, unavailable };
 pub const View = struct { status: Status = .hidden, digits: u8 = 0 };
 
-// Stable, exclusive service owner. Unlock consumes the borrowed PIN within the
-// call and activates only after all authentication/recovery checks succeed.
+// Stable, exclusive service owner. Start copies the borrowed PIN; poll performs
+// one bounded worker step. Cancellation retains all backing until busy is false.
 pub const Authenticator = struct {
     context: *anyopaque,
     lock_fn: *const fn (*anyopaque) void,
-    unlock_fn: *const fn (*anyopaque, []const u8, u64) anyerror!void,
+    start_fn: *const fn (*anyopaque, []const u8, u64) anyerror!void,
+    poll_fn: *const fn (*anyopaque, u64) anyerror!bool,
+    busy_fn: *const fn (*anyopaque) bool,
     deadline_fn: *const fn (*anyopaque) u64,
 };
 
@@ -86,6 +88,7 @@ pub const Entry = struct {
     pin: [MAX_PIN_BYTES]u8 = @splat(0),
     input_deadline: ?u64 = null,
     session_deadline: ?u64 = null,
+    poll_deadline: ?u64 = null,
     last_ticks: u64 = 0,
 
     pub fn capturing(self: *const Entry) bool {
@@ -97,7 +100,8 @@ pub const Entry = struct {
         self.erase();
         self.session_deadline = null;
         self.last_ticks = now_ticks;
-        self.view.status = .entering;
+        self.view.status = if (self.busy()) .cancelling else .entering;
+        self.poll_deadline = if (self.busy()) now_ticks +| 1 else null;
         self.revision +|= 1;
     }
 
@@ -112,6 +116,7 @@ pub const Entry = struct {
             return;
         }
         self.last_ticks = now_ticks;
+        if (self.poll_deadline) |deadline| if (now_ticks >= deadline) self.poll(now_ticks);
         if (self.input_deadline) |deadline| if (now_ticks >= deadline) {
             self.erase();
             self.view.status = .entering;
@@ -120,13 +125,17 @@ pub const Entry = struct {
     }
 
     pub fn nextWake(self: *const Entry) ?u64 {
-        return self.input_deadline orelse self.session_deadline;
+        return self.poll_deadline orelse self.input_deadline orelse self.session_deadline;
     }
 
     pub fn handle(self: *Entry, event: input.KeyboardEvent, now_ticks: u64) void {
         self.tick(now_ticks);
         if (!self.capturing()) return;
         if (event.kind == .dismiss_recovery) {
+            if (self.view.status == .verifying or self.view.status == .pending or self.view.status == .cancelling) {
+                self.lock(now_ticks);
+                return;
+            }
             self.erase();
             if (self.view.status != .locked_out and self.view.status != .unavailable) self.view.status = .entering;
             return;
@@ -173,29 +182,69 @@ pub const Entry = struct {
         }
     }
 
-    // The native owner presents this busy state before calling verify, which
-    // may perform slow hardware I/O. Input routing never calls the verifier.
+    // Present the busy state before submitting to the worker. The input PIN is
+    // erased before the first worker step, and no hardware wait blocks routing.
     pub fn prepareVerification(self: *Entry, now_ticks: u64) bool {
         self.tick(now_ticks);
         if (self.view.status != .pending) return false;
         self.view.status = .verifying;
+        self.input_deadline = null;
         return true;
     }
 
     pub fn verify(self: *Entry, now_ticks: u64) void {
-        self.tick(now_ticks);
-        if (self.view.status != .verifying) return;
-        defer self.erase();
-        defer self.revision +|= 1;
-        self.authenticator.unlock_fn(self.authenticator.context, self.pin[0..self.view.digits], now_ticks) catch |err| {
-            self.authenticator.lock_fn(self.authenticator.context);
-            self.view.status = switch (err) {
-                error.PinRejected => .rejected,
-                error.PinLockedOut => .locked_out,
-                else => .unavailable,
-            };
+        if (self.view.status != .verifying or self.poll_deadline != null) return;
+        self.authenticator.start_fn(self.authenticator.context, self.pin[0..self.view.digits], now_ticks) catch |err| {
+            self.erase();
+            self.failed(err, now_ticks);
             return;
         };
+        self.erase();
+        self.poll_deadline = now_ticks;
+        self.poll(now_ticks);
+    }
+
+    pub fn busy(self: *const Entry) bool {
+        return self.authenticator.busy_fn(self.authenticator.context);
+    }
+
+    // Exclusive teardown only. Normal lock/Escape is nonblocking. Owners can
+    // cancel and service ticks before detaching to avoid waiting here. Never
+    // release a backing store while a suspended protocol still borrows it.
+    pub fn quiesce(self: *Entry) void {
+        self.lock(self.last_ticks);
+        while (self.busy()) self.poll(self.last_ticks);
+    }
+
+    fn failed(self: *Entry, err: anyerror, now_ticks: u64) void {
+        const was_verifying = self.view.status == .verifying;
+        self.authenticator.lock_fn(self.authenticator.context);
+        self.poll_deadline = if (self.busy()) now_ticks +| 1 else null;
+        if (was_verifying) self.view.status = switch (err) {
+            error.PinRejected => .rejected,
+            error.PinLockedOut => .locked_out,
+            error.Cancelled => .entering,
+            else => .unavailable,
+        } else if (self.view.status == .cancelling and !self.busy()) self.view.status = .entering;
+        self.revision +|= 1;
+    }
+
+    fn poll(self: *Entry, now_ticks: u64) void {
+        const complete = self.authenticator.poll_fn(self.authenticator.context, now_ticks) catch |err| {
+            self.failed(err, now_ticks);
+            return;
+        };
+        if (!complete) {
+            self.poll_deadline = now_ticks +| 1;
+            return;
+        }
+        self.poll_deadline = null;
+        if (self.view.status != .verifying) {
+            self.authenticator.lock_fn(self.authenticator.context);
+            if (self.view.status == .cancelling) self.view.status = .entering;
+            self.revision +|= 1;
+            return;
+        }
         const deadline = self.authenticator.deadline_fn(self.authenticator.context);
         if (deadline <= now_ticks) {
             self.inputInterrupted(now_ticks);
@@ -204,6 +253,7 @@ pub const Entry = struct {
         self.session_deadline = deadline;
         self.last_ticks = now_ticks;
         self.view.status = .hidden;
+        self.revision +|= 1;
     }
 
     fn erase(self: *Entry) void {
@@ -213,6 +263,48 @@ pub const Entry = struct {
     }
 
     comptime {
-        if (@sizeOf(@This()) > 128) @compileError("trusted PIN entry exceeds bounded state");
+        if (@sizeOf(@This()) > 160) @compileError("trusted PIN entry exceeds bounded state");
     }
 };
+
+test "trusted PIN worker keeps input private across cancellation late replies and teardown" {
+    var backend = @import("../../tests/fixtures/pin_authenticator.zig").Fixture{ .polls_remaining = 3 };
+    var entry = Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 2 };
+    entry.lock(1);
+    for (backend.expected) |byte| entry.handle(.{ .kind = .text, .data = byte }, 2);
+    entry.handle(.{ .kind = .activate }, 2);
+    try std.testing.expect(entry.prepareVerification(2));
+    entry.verify(2);
+    try std.testing.expect(entry.busy() and entry.view.status == .verifying);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.pin, 0));
+    try std.testing.expectEqual(@as(?u64, 3), entry.nextWake());
+    entry.tick(4); // The edit timeout must not cancel submitted work.
+    try std.testing.expect(entry.view.status == .verifying and !backend.cancelled);
+    entry.handle(.{ .kind = .dismiss_recovery }, 4);
+    try std.testing.expect(entry.view.status == .cancelling and backend.cancelled);
+    backend.late_success = true; // Even an invalid late success cannot unlock.
+    entry.handle(.{ .kind = .text, .data = '7' }, 4);
+    try std.testing.expectEqual(@as(u8, 0), entry.view.digits);
+    entry.tick(5);
+    entry.tick(6);
+    try std.testing.expect(!entry.busy() and !backend.active and entry.capturing());
+    try std.testing.expectEqual(Status.entering, entry.view.status);
+    backend.late_success = false;
+    backend.polls_remaining = 2;
+    for (backend.expected) |byte| entry.handle(.{ .kind = .text, .data = byte }, 7);
+    entry.handle(.{ .kind = .activate }, 7);
+    try std.testing.expect(entry.prepareVerification(7));
+    entry.verify(7);
+    entry.tick(6); // A reversed clock cancels without abandoning the worker.
+    try std.testing.expect(entry.busy() and backend.cancelled);
+    entry.quiesce();
+    try std.testing.expect(!entry.busy() and !backend.active);
+    try std.testing.expect(entry.nextWake() == null);
+    backend.polls_remaining = 1;
+    for (backend.expected) |byte| entry.handle(.{ .kind = .text, .data = byte }, 8);
+    entry.handle(.{ .kind = .activate }, 8);
+    try std.testing.expect(entry.prepareVerification(8));
+    entry.verify(8);
+    entry.tick(108); // Completion after its lease expired stays locked.
+    try std.testing.expect(!entry.busy() and !backend.active and entry.capturing());
+}

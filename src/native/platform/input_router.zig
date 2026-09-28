@@ -239,7 +239,7 @@ pub const Router = struct {
     // this binding. Keep Entry alive until both router and compositor detach.
     pub fn clearTrustedEntry(self: *Router) void {
         if (self.trusted_entry) |entry| {
-            entry.lock(entry.last_ticks);
+            entry.quiesce();
             if (self.compositor) |compositor| compositor.authentication_view = null;
             self.trusted_entry = null;
             self.trusted_revision = 0;

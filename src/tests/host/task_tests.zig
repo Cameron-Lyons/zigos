@@ -17,6 +17,8 @@ const userspace_scheduler = @import("../../native/task/userspace_scheduler.zig")
 const userspace_service_protocol = @import("../../native/task/userspace_service_protocol.zig");
 
 test "task host tests import native task modules" {
+    std.testing.refAllDecls(@import("../../native/task/cooperative_worker.zig"));
+    std.testing.refAllDecls(@import("../../native/task/guarded_worker_stack.zig"));
     std.testing.refAllDecls(accelerator_scheduler);
     std.testing.refAllDecls(background_dispatch);
     std.testing.refAllDecls(process_isolation);

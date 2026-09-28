@@ -121,6 +121,7 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_
         .too_short => "Enter at least 6 digits.",
         .too_long => "PIN is too long. Press Esc to start again.",
         .pending, .verifying => "Unlocking...",
+        .cancelling => "Finishing cancelled attempt...",
         .rejected => "PIN not recognized. Try again.",
         .locked_out => "Too many attempts. Wait or use device recovery.",
         .unavailable => "Sign-in unavailable. Press Ctrl+Alt+Delete to retry.",

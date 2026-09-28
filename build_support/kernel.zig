@@ -633,4 +633,5 @@ fn addKernelAssemblyFiles(
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/smp/ap_trampoline.S"));
     kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
+    kernel_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
 }

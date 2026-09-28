@@ -229,15 +229,23 @@ requests.
   checked before userspace dispatch. QEMU connects modeled HID reports through
   the normal router and framebuffer to the real TPM verifier, including rejected
   PINs, lock/reopen, and expiry. Trusted enrollment still must attach the session
-  owner at production boot. Verification currently runs synchronously after
-  presenting the busy state. The TPM transport now offers bounded begin/poll/cancel
-  operations without holding a lock across device waits. Monotonic command tokens
-  reject stale polls and cancellation; cancelled operations retain their buffers
-  until bounded cleanup completes, erase replies, and disable the transport if
-  cleanup cannot safely stop the device. The synchronous boot and identity paths
-  drive this same engine. TPM boot proofs check cancellation, transport reuse,
-  and stale command tokens. A dedicated asynchronous authentication worker remains
-  open alongside first-user provisioning and physical input validation.
+  owner at production boot. PIN verification now runs on a lazy 128 KiB guarded,
+  supervisor-only NX stack. The worker yields at TPM command boundaries and device
+  waits so the native loop can service input, display and userspace tasks. The
+  transport's bounded begin/poll/cancel engine releases its lock on every entry;
+  nonwrapping command tokens reject stale polls and cancellation. Worker
+  cancellation finishes an active command so cleanup can identify created TPM
+  handles, permits only handle flushes afterward, and prevents late activation.
+  The prompt stays locked during cleanup. Actual time, current policy and the
+  pinned catalog are rechecked before success; the PIN copy and complete worker
+  stack are erased on completion. Ordinary lock and Escape do not wait for TPM
+  cleanup. Exclusive teardown drains pending work before releasing borrowed
+  stores; owners can cancel and service it before detaching. Host tests cover
+  suspended buffers, cancellation, late results and stack-switch state. Virtual
+  TPM proofs check userspace dispatch while suspended, input and scanout between
+  polls, protected stack pages,
+  cancellation before and after catalog restore, resource cleanup, reopen and
+  expiry. First-user provisioning and physical input validation remain open.
   Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog

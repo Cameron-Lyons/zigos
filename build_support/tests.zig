@@ -20,6 +20,7 @@ pub fn addTestArtifacts(
         .target = b.graph.host,
         .optimize = optimize,
     });
+    host_tests_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
     addNativeTestImports(host_tests_module, test_modules.wire, userspace_images);
     const host_tests = b.addTest(.{
         .name = "native-host-tests",
@@ -31,6 +32,7 @@ pub fn addTestArtifacts(
         .target = b.graph.host,
         .optimize = optimize,
     });
+    spec_tests_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
     addNativeTestImports(spec_tests_module, test_modules.wire, userspace_images);
     const spec_tests = b.addTest(.{
         .name = "zigos-spec-tests",

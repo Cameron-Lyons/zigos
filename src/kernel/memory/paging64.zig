@@ -596,18 +596,17 @@ fn mapFailure(error_value: UserMapError) noreturn {
 }
 
 pub fn mapKernelBorrowedPage(virt_addr: usize, phys_addr: usize, flags: u32) void {
-    if (!table64.isCanonicalVirtualAddress(virt_addr))
-        haltWithMessage("Kernel mapping uses a non-canonical virtual address!\n");
-    if (!table64.physicalAddressFits(phys_addr))
-        haltWithMessage("Kernel physical mapping exceeds the x86-64 address width!\n");
-    mapBorrowedPageIn(
-        kernelPageDirectory(),
-        virt_addr,
-        phys_addr,
-        flags & ~PAGE_USER,
-        TABLE_OWNER_KERNEL_DYNAMIC,
-        true,
-    ) catch |err| mapFailure(err);
+    tryMapKernelBorrowedPage(virt_addr, phys_addr, flags) catch |err| mapFailure(err);
+}
+
+pub fn tryMapKernelBorrowedPage(virt_addr: usize, phys_addr: usize, flags: u32) UserMapError!void {
+    if (!table64.isCanonicalVirtualAddress(virt_addr) or !table64.physicalAddressFits(phys_addr))
+        return error.InvalidRange;
+    try mapBorrowedPageIn(kernelPageDirectory(), virt_addr, phys_addr, flags & ~PAGE_USER, TABLE_OWNER_KERNEL_DYNAMIC, true);
+}
+
+pub fn kernelAddressSpaceActive() bool {
+    return getCurrentPageDirectory() == kernelPageDirectory();
 }
 
 fn lookupLeaf(pml4: *PageDirectory, virt_addr: usize) ?*PageTableEntry {

@@ -5,6 +5,7 @@ const windows = @import("../memory/mmio_windows.zig");
 const clock = @import("../timer/tsc_clock.zig");
 const spin = @import("../utils/spin.zig");
 const interrupt_context = @import("../interrupts/context.zig");
+const worker_context = @import("../../native/task/cooperative_worker.zig");
 
 pub const Error = crb.Error || error{ AlreadyInitialized, Unavailable, Busy, InterruptContext };
 var attempted = false;
@@ -57,10 +58,15 @@ pub fn begin(command: []const u8, response: []u8, timeout_ms: u32) Error!Ticket 
 // terminal response/error. Busy and InterruptContext reject entry without
 // retiring the command. A stale ticket never operates on a newer command.
 pub fn poll(ticket: Ticket) Error!?[]u8 {
+    return (try pollStatus(ticket)).reply;
+}
+
+fn pollStatus(ticket: Ticket) Error!struct { reply: ?[]u8, waiting: bool } {
     try acquire();
     defer lock.release();
     var io = HardwareIo{};
-    return commands.poll(&io, ticket);
+    const reply = try commands.poll(&io, ticket);
+    return .{ .reply = reply, .waiting = if (commands.operation) |operation| operation.waiting else false };
 }
 
 pub fn cancel(ticket: Ticket) Error!void {
@@ -69,23 +75,41 @@ pub fn cancel(ticket: Ticket) Error!void {
     return commands.cancel(ticket);
 }
 
-// Explicit synchronous adapter for existing boot and identity protocol callers.
-// The authentication worker can drive begin/poll/cancel without blocking here.
+// Boot callers run synchronously. A native worker yields without a held lock
+// before each command and whenever hardware waits. Finish active commands even
+// after cancellation so the protocol can record and flush any created handles.
+// Only FlushContext may start after cancellation; normal work unwinds through
+// its existing defers. Cancelling CRB itself could suppress a created handle.
 pub fn execute(command: []const u8, response: []u8, timeout_ms: u32) Error![]u8 {
+    // Reject interrupt entry before consulting the interrupted worker. The
+    // acquire check alone would occur after its first cooperative yield.
+    if (interrupt_context.active()) return error.InterruptContext;
+    const worker = worker_context.current();
+    if (worker) |active| {
+        active.yield();
+        if (active.cancel_requested and (command.len < 10 or std.mem.readInt(u32, command[6..10], .big) != 0x165)) return error.Cancelled;
+    }
     const ticket = try begin(command, response, timeout_ms);
+    var phases: usize = 0;
     while (true) {
         // Contention before poll acquires the lock does not retire the command.
         // Keep ownership until its terminal result rather than abandoning a
         // borrowed stack buffer while the TPM can still write its reply.
-        const reply = poll(ticket) catch |err| switch (err) {
+        const status = pollStatus(ticket) catch |err| switch (err) {
             error.Busy => {
-                spin.hint();
+                if (worker) |active| active.yield() else spin.hint();
                 continue;
             },
             else => return err,
         };
-        if (reply) |bytes| return bytes;
-        spin.hint();
+        if (status.reply) |bytes| return bytes;
+        phases += 1;
+        if (worker) |active| {
+            if (status.waiting or phases == 16) {
+                phases = 0;
+                active.yield();
+            }
+        } else spin.hint();
     }
 }
 
