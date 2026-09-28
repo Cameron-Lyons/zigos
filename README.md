@@ -28,6 +28,13 @@ requests.
 - The native service layer under `src/native/` contains the current principal,
   capability, syscall, task runtime, session, driver, storage, sync, policy,
   platform, and demo proof code.
+- Shared handle arenas retire slots at generation exhaustion instead of wrapping
+  into stale authority. Arena resets and index rebuilds preserve retired slots;
+  endpoint table reset also preserves generation history. Replacement keeps the
+  last valid handle intact when it cannot advance, and callers skip exhausted
+  slots or return capacity errors. Task restore checks destinations before any
+  retirement or grant changes. The 64-bit handle layout and resident memory
+  ceilings are unchanged. These guarantees apply within each arena's lifetime.
 - The first daily-driver slice is Notes/docs: signed native package install,
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised

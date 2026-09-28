@@ -72,6 +72,7 @@ pub const Error = sealing.Error || error{
     HandleHolderMismatch,
     HandleNotFound,
     HandleTableFull,
+    HandleGenerationExhausted,
     LabelTooLong,
     RawExportDenied,
     SecretNotFound,
@@ -223,8 +224,7 @@ pub const Store = struct {
         allow_raw_export: bool,
     ) Error!SecretHandle {
         const handle_id = if (retired_handle) |retired|
-            self.handles.replaceHandle(retired) orelse
-                native_util.impossibleByInvariant("secure store replacement keeps its retired handle live")
+            self.handles.replaceHandle(retired) orelse return error.HandleGenerationExhausted
         else
             self.handles.reserveHandleForOverwrite() orelse return error.HandleTableFull;
         const handle = SecretHandle{
@@ -579,11 +579,11 @@ test "secure secret store replaces one handle with a direct generation" {
     const owner = principal.PrincipalId{ .kind = .user, .serial = 6 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 48 };
     const secret = try store.importSecret(owner, "replaceable", "replaceable material", false, true);
-    store.handles.slot_generations[0] = std.math.maxInt(u32);
+    store.handles.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION - 1;
     const retired = try store.lendHandle(secret.id, holder, 95, true);
     const retired_id = HandleId{ .value = retired.id };
     try std.testing.expectEqual(@as(usize, 0), retired_id.slotIndex());
-    try std.testing.expectEqual(std.math.maxInt(u32), retired_id.generation());
+    try std.testing.expectEqual(indexed_arena.MAX_HANDLE_GENERATION - 1, retired_id.generation());
 
     try std.testing.expectError(error.HandleNotFound, store.replaceHandle(999, secret.id, holder, 96, true));
     try std.testing.expect(store.describeHandle(retired.id) != null);
@@ -591,11 +591,19 @@ test "secure secret store replaces one handle with a direct generation" {
     const replacement = try store.replaceHandle(retired.id, secret.id, holder, 96, true);
     const replacement_id = HandleId{ .value = replacement.id };
     try std.testing.expectEqual(retired_id.slotIndex(), replacement_id.slotIndex());
-    try std.testing.expectEqual(@as(u32, 1), replacement_id.generation());
+    try std.testing.expectEqual(indexed_arena.MAX_HANDLE_GENERATION, replacement_id.generation());
     try std.testing.expect(!retired_id.eql(replacement_id));
     try std.testing.expect(store.describeHandle(retired.id) == null);
     try std.testing.expectEqual(@as(u64, 96), store.describeHandle(replacement.id).?.task_id);
     try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
+    const before = store;
+    try std.testing.expectError(error.HandleGenerationExhausted, store.replaceHandle(replacement.id, secret.id, holder, 97, true));
+    try std.testing.expectEqualDeep(before, store);
+    try std.testing.expect(store.handles.removeHandle(replacement_id));
+    const next = try store.lendHandle(secret.id, holder, 97, true);
+    try std.testing.expectEqual(@as(usize, 1), (HandleId{ .value = next.id }).slotIndex());
+    try std.testing.expect(store.describeHandle(retired.id) == null);
+    try std.testing.expect(store.describeHandle(replacement.id) == null);
 }
 
 test "secure secret store keeps secrets dense and handles direct through full tables" {

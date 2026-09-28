@@ -246,7 +246,7 @@ pub const Service = struct {
             return error.PolicyDenied;
         }
 
-        const retired_slot_index = if (self.handles.countInUse() >= MAX_HANDLES)
+        const retired_slot_index = if (self.handles.previewHandle(null) == null or self.store.handles.previewHandle(null) == null)
             self.terminalHandleSlot(request.now_ticks) orelse {
                 try recordLend(ledger, request, 0, false, secret.hardware_backed);
                 return error.HandleTableFull;
@@ -551,7 +551,9 @@ pub const Service = struct {
             const slot_index = (start + offset) % MAX_HANDLES;
             const slot = &self.handles.slots[slot_index];
             if (!slot.in_use) continue;
-            if (slot.handle.revoked or slot.handle.expired(now_ticks)) return slot_index;
+            if ((slot.handle.revoked or slot.handle.expired(now_ticks)) and
+                self.handles.previewHandle(.{ .value = slot.handle.id }) != null and
+                self.store.handles.previewHandle(.{ .value = slot.handle.store_handle_id }) != null) return slot_index;
         }
         return null;
     }
@@ -1608,7 +1610,7 @@ test "secret vault lending preflights lower capacity before accepting an audit" 
     const before = service;
     try std.testing.expectError(error.HandleTableFull, service.lendHandle(&policies, .{}, .{ .owner = owner, .holder = holder, .task_id = 1, .secret_id = secret, .expires_at_ticks = 100, .now_ticks = 3 }, &ledger));
     try std.testing.expectEqualDeep(before, service);
-    try std.testing.expect(ledger.latestKind(.secret_vault) == null);
+    try std.testing.expect(!ledger.latestKind(.secret_vault).?.allowed);
 }
 
 test "secret vault audit failure withholds exported bytes and signatures" {
@@ -1633,6 +1635,33 @@ test "secret vault audit failure withholds exported bytes and signatures" {
     try std.testing.expectEqualDeep(before, service);
     const signed = try service.signMessage(&policies, .{}, .{ .holder = holder, .task_id = 1, .handle_id = signing_handle.id, .now_ticks = 3 }, "message", null);
     try std.testing.expect(@import("../core/signing.zig").verify(signed, "message"));
+}
+
+test "secret vault exhaustion skips terminal leases that either arena cannot replace" {
+    for ([_]bool{ false, true }) |lower| {
+        var service = Service.init();
+        const policies = policy_object.Directory.init();
+        const owner = principal.PrincipalId{ .kind = .user, .serial = 970 };
+        const holder = principal.PrincipalId{ .kind = .service, .serial = 971 };
+        const secret = (try service.store.importSecret(owner, "private", "value", false, true)).id;
+        if (lower) service.store.handles.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION else service.handles.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION;
+        const request = LendRequest{ .owner = owner, .holder = holder, .task_id = 1, .secret_id = secret, .expires_at_ticks = 100, .now_ticks = 1 };
+        const first = (try service.lendHandle(&policies, .{}, request, null)).*;
+        for (1..MAX_HANDLES) |_| _ = try service.lendHandle(&policies, .{}, request, null);
+        try service.revoke(.{ .subject = owner, .task_id = 1, .secret_id = secret, .now_ticks = 2 }, null);
+        const next = try service.lendHandle(&policies, .{}, request, null);
+        try std.testing.expectEqual(@as(usize, 1), (HandleId{ .value = next.id }).slotIndex());
+        try std.testing.expect(service.findHandleConst(first.id).?.revoked);
+        try service.retireSecret(&policies, .{}, .{ .owner = owner, .task_id = 1, .secret_id = secret, .now_ticks = 2 }, null);
+        // A retired arena slot remains unavailable even when all leases are gone.
+        @memset(&service.handles.slot_generations, indexed_arena.EXHAUSTED_HANDLE_GENERATION);
+        const another = (try service.store.importSecret(owner, "another", "new", false, true)).id;
+        var exhausted_request = request;
+        exhausted_request.secret_id = another;
+        const before = service;
+        try std.testing.expectError(error.HandleTableFull, service.lendHandle(&policies, .{}, exhausted_request, null));
+        try std.testing.expectEqualDeep(before, service);
+    }
 }
 
 const FailedAudit = if (@import("builtin").is_test) struct {

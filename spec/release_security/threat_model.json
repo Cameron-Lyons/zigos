@@ -17,8 +17,8 @@
       "id": "TM-001",
       "domain": "explicit-authority",
       "abuse_case": "A task reuses a revoked or expired capability to reach a service after its authority changed.",
-      "mitigation": "Capability tables carry revocation generations, leases, scope checks, and explicit rights projections.",
-      "negative_tests": ["src/tests/spec/adversarial_security.zig", "src/tests/spec/architecture_security.zig"],
+      "mitigation": "Capability tables carry revocation generations, leases, scope checks, and explicit rights projections. Shared fixed and paged handle arenas permanently retire slots at generation exhaustion within an arena lifetime, preserve exhaustion across reset and index rebuild, and refuse replacement without invalidating the last live handle. Endpoint reset preserves its generation history; task restore checks destination generations before retirement or grant changes. Capability batch admission, vault lending, delegation reuse and closed overlay-session reuse reject or skip exhausted slots before publishing new authority.",
+      "negative_tests": ["src/tests/spec/adversarial_security.zig", "src/tests/spec/architecture_security.zig", "src/native/core/indexed_arena.zig", "src/native/kernel_api/capability.zig", "src/native/kernel_api/endpoint.zig", "src/native/kernel_api/shared_memory.zig", "src/native/task/task_runtime.zig", "src/native/services/secret_vault_service.zig", "src/native/services/agent_delegation_service.zig", "src/native/sync/sync_service/service.zig"],
       "residual_risk_owner": "kernel-api-owner",
       "residual_risk_decision": "accepted-for-release-with-generation-and-lease-tests"
     },

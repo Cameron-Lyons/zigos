@@ -7,6 +7,10 @@ const native_util = @import("util.zig");
 pub const no_index = std.math.maxInt(usize);
 pub const COMPACT_ARENA_METADATA = true;
 pub const RIGHT_SIZES_DIRTY_ID_INDEXES = true;
+// The final metadata value permanently retires a physical slot. It is never
+// issued as a handle generation, including after reset or index rebuilding.
+pub const EXHAUSTED_HANDLE_GENERATION: u32 = std.math.maxInt(u32);
+pub const MAX_HANDLE_GENERATION: u32 = EXHAUSTED_HANDLE_GENERATION - 1;
 
 fn sparseIndexCapacity(comptime entry_capacity: usize) usize {
     const minimum_capacity = entry_capacity + (entry_capacity + 3) / 4;
@@ -904,7 +908,7 @@ pub fn GenerationalHandle(comptime display_name: []const u8) type {
         value: u64 = 0,
 
         pub fn fromParts(slot_index: usize, generation_value: u32) Self {
-            if (generation_value == 0) return .{};
+            if (generation_value == 0 or generation_value > MAX_HANDLE_GENERATION) return .{};
             return .{ .value = (@as(u64, generation_value) << 32) | @as(u64, @intCast(slot_index)) };
         }
 
@@ -986,15 +990,10 @@ pub fn GenerationalArena(
         /// or generation. Valid only until the next mutation of this arena.
         pub fn previewHandle(self: *const Self, replaced: ?Handle) ?Handle {
             if (replaced) |old| {
-                if (!self.handleMatches(old.slotIndex(), old)) return null;
+                if (!self.handleMatches(old.slotIndex(), old) or !self.canReplaceIndex(old.slotIndex())) return null;
                 return Handle.fromParts(old.slotIndex(), nextSlotGeneration(old.generation()));
             }
-            const claimed_count = self.claimedCount();
-            const slot_index = if (publicReusableIndex(capacity, self.free_head)) |free| blk: {
-                if (free >= claimed_count) return null;
-                break :blk free;
-            } else claimed_count;
-            if (slot_index >= capacity) return null;
+            const slot_index = self.availableIndexExcluding({}, neverExcludeIndex) orelse return null;
             const generation = self.slot_generations[slot_index];
             return Handle.fromParts(slot_index, if (generation == 0) 1 else generation);
         }
@@ -1012,6 +1011,14 @@ pub fn GenerationalArena(
             return slot_index;
         }
 
+        pub fn canReserveIndex(self: *const Self, slot_index: usize) bool {
+            return slot_index < capacity and !self.slots[slot_index].in_use and self.slot_generations[slot_index] != EXHAUSTED_HANDLE_GENERATION;
+        }
+
+        pub fn canReplaceIndex(self: *const Self, slot_index: usize) bool {
+            return slot_index < capacity and self.slots[slot_index].in_use and self.slot_generations[slot_index] < MAX_HANDLE_GENERATION;
+        }
+
         pub fn reserveHandleAt(self: *Self, slot_index: usize) ?Handle {
             const reserved_index = self.reserveIndexAt(slot_index) orelse return null;
             return self.handleForIndex(reserved_index);
@@ -1019,14 +1026,14 @@ pub fn GenerationalArena(
 
         /// The caller must overwrite the entire returned slot before reading it.
         pub fn reserveHandleAtForOverwrite(self: *Self, slot_index: usize) ?Handle {
-            if (slot_index >= capacity or self.slots[slot_index].in_use) return null;
+            if (!self.canReserveIndex(slot_index)) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
             self.claimSlotForOverwrite(slot_index);
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
 
         pub fn reserveIndexAt(self: *Self, slot_index: usize) ?usize {
-            if (slot_index >= capacity or self.slots[slot_index].in_use) return null;
+            if (!self.canReserveIndex(slot_index)) return null;
             if (!self.claimFreeIndex(slot_index)) return null;
             self.claimSlot(slot_index);
             return slot_index;
@@ -1043,13 +1050,13 @@ pub fn GenerationalArena(
             while (next_index) |slot_index| : (attempts += 1) {
                 if (slot_index >= claimed_count or attempts >= claimed_count) return null;
                 next_index = publicReusableIndex(capacity, self.free_next[slot_index]);
-                if (excludes(context, slot_index)) continue;
+                if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION or excludes(context, slot_index)) continue;
                 return slot_index;
             }
 
             var slot_index = claimed_count;
             while (slot_index < capacity) : (slot_index += 1) {
-                if (excludes(context, slot_index)) continue;
+                if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION or excludes(context, slot_index)) continue;
                 return slot_index;
             }
             return null;
@@ -1069,6 +1076,7 @@ pub fn GenerationalArena(
 
         pub fn handleForIndex(self: *const Self, slot_index: usize) ?Handle {
             if (slot_index >= capacity or !self.slots[slot_index].in_use) return null;
+            if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) return null;
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
 
@@ -1094,7 +1102,7 @@ pub fn GenerationalArena(
         /// Invalidates the prior handle without clearing the live slot. The
         /// caller must overwrite the entire slot before reading it.
         pub fn replaceIndexForOverwrite(self: *Self, slot_index: usize) ?Handle {
-            if (slot_index >= capacity or !self.slots[slot_index].in_use) return null;
+            if (!self.canReplaceIndex(slot_index)) return null;
             self.slot_generations[slot_index] = nextSlotGeneration(self.slot_generations[slot_index]);
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
@@ -1131,28 +1139,35 @@ pub fn GenerationalArena(
         }
 
         fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
-            if (handle.isZero() or slot_index >= capacity) return false;
+            if (handle.isZero() or slot_index >= capacity or handle.generation() > MAX_HANDLE_GENERATION) return false;
             return self.slots[slot_index].in_use and self.slot_generations[slot_index] == handle.generation();
         }
 
         inline fn popFreeIndex(self: *Self) ?usize {
-            return popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index);
+            while (popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index)) |slot_index| {
+                if (self.slot_generations[slot_index] != EXHAUSTED_HANDLE_GENERATION) return slot_index;
+            }
+            return null;
         }
 
         inline fn pushFreeIndex(self: *Self, slot_index: usize) void {
-            pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
+            if (self.slot_generations[slot_index] != EXHAUSTED_HANDLE_GENERATION)
+                pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
         }
 
         inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
-            if (slot_index >= capacity or self.slots[slot_index].in_use) return false;
+            if (!self.canReserveIndex(slot_index)) return false;
             return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
         }
     };
 }
 
+fn neverExcludeIndex(_: void, _: usize) bool {
+    return false;
+}
+
 inline fn nextSlotGeneration(current: u32) u32 {
-    const next = current +% 1;
-    return if (next == 0) 1 else next;
+    return current +| 1;
 }
 
 pub fn PagedIndexedArena(
@@ -1317,6 +1332,23 @@ pub fn PagedIndexedArenaWithKeyOptions(
             return self.slotAt(claimed_index);
         }
 
+        pub fn canReserveIndex(self: *const Self, slot_index: usize) bool {
+            if (slot_index >= capacity or slotInUse(self.slotAtConst(slot_index))) return false;
+            if (comptime options.track_generations) return self.slot_generations[slot_index] != EXHAUSTED_HANDLE_GENERATION;
+            return true;
+        }
+
+        // Snapshot callers can reject an exhausted destination before resetting
+        // membership or retiring any currently live authority.
+        pub fn canReserveIndexAfterReset(self: *const Self, slot_index: usize) bool {
+            if (slot_index >= capacity) return false;
+            if (comptime options.track_generations) {
+                const generation = self.slot_generations[slot_index];
+                return (if (slot_index < self.claimedCount()) nextSlotGeneration(generation) else generation) != EXHAUSTED_HANDLE_GENERATION;
+            }
+            return true;
+        }
+
         pub fn reserveIndexAt(self: *Self, key: Key, slot_index: usize) ?usize {
             return self.reserveIndexInternal(key, slot_index);
         }
@@ -1360,6 +1392,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
             if (slot_index >= capacity) return null;
             const slot = self.slotAtConst(slot_index);
             if (!slotInUse(slot)) return null;
+            if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) return null;
             return Handle.fromParts(slot_index, self.slot_generations[slot_index]);
         }
 
@@ -1419,7 +1452,13 @@ pub fn PagedIndexedArenaWithKeyOptions(
             return true;
         }
 
-        pub fn rebuildPrimaryIndex(self: *Self) void {
+        pub fn rebuildPrimaryIndex(self: *Self) (if (options.track_generations) error{HandleGenerationExhausted}!void else void) {
+            if (comptime options.track_generations) {
+                for (0..capacity) |index| {
+                    if (slotInUse(self.slotAtConst(index)) and self.slot_generations[index] == EXHAUSTED_HANDLE_GENERATION)
+                        return error.HandleGenerationExhausted;
+                }
+            }
             self.primary_index.reset();
             if (comptime options.store_keys) self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
             self.free_next = [_]FreeIndex{free_no_index} ** capacity;
@@ -1464,7 +1503,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
             if (self.primary_index.lookup(raw_key) != null) return null;
 
             const slot_index = if (requested_slot_index) |explicit_index| blk: {
-                if (explicit_index >= capacity or slotInUse(self.slotAtConst(explicit_index))) return null;
+                if (!self.canReserveIndex(explicit_index)) return null;
                 if (!self.claimFreeIndex(explicit_index)) return null;
                 break :blk explicit_index;
             } else self.popFreeIndex() orelse return null;
@@ -1522,21 +1561,30 @@ pub fn PagedIndexedArenaWithKeyOptions(
 
         fn handleMatches(self: *const Self, slot_index: usize, handle: Handle) bool {
             if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            if (handle.isZero() or slot_index >= capacity) return false;
+            if (handle.isZero() or slot_index >= capacity or handle.generation() > MAX_HANDLE_GENERATION) return false;
             const slot = self.slotAtConst(slot_index);
             return slotInUse(slot) and self.slot_generations[slot_index] == handle.generation();
         }
 
         inline fn popFreeIndex(self: *Self) ?usize {
-            return popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index);
+            while (popReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index)) |slot_index| {
+                if (comptime options.track_generations) {
+                    if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) continue;
+                }
+                return slot_index;
+            }
+            return null;
         }
 
         inline fn pushFreeIndex(self: *Self, slot_index: usize) void {
+            if (comptime options.track_generations) {
+                if (self.slot_generations[slot_index] == EXHAUSTED_HANDLE_GENERATION) return;
+            }
             pushReusableIndex(capacity, &self.free_head, &self.free_next, slot_index);
         }
 
         inline fn claimFreeIndex(self: *Self, slot_index: usize) bool {
-            if (slot_index >= capacity or slotInUse(self.slotAtConst(slot_index))) return false;
+            if (!self.canReserveIndex(slot_index)) return false;
             return claimReusableIndex(capacity, self.claimedCount(), &self.free_head, &self.free_next, &self.next_unclaimed_index, slot_index);
         }
     };
@@ -1666,7 +1714,7 @@ test "paged arenas can derive keys from live slots" {
     arena.slotAt(slot_index).record.id = 7;
     try std.testing.expect(arena.getConst(7) != null);
     const handle = arena.handleForIndex(slot_index).?;
-    arena.rebuildPrimaryIndex();
+    try arena.rebuildPrimaryIndex();
     try std.testing.expectEqual(slot_index, arena.slotIndexOf(7).?);
     try std.testing.expect(arena.removeHandle(handle));
     try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
@@ -2211,17 +2259,48 @@ test "generational arena supports explicit whole-slot overwrite reservations" {
     try std.testing.expectEqualStrings("in-place", arena.getByHandle(in_place_handle).?.record.label);
 }
 
-test "generational arena generations wrap without zero" {
-    const Arena = GenerationalArena("TestGenerationalHandle", TestSlot, 1);
+test "generational arena exhaustion preserves the last live handle and retires its slot" {
+    const Arena = GenerationalArena("ExhaustedHandle", TestSlot, 3);
     var arena = Arena.init();
-    arena.slot_generations[0] = std.math.maxInt(u32);
+    arena.slot_generations[0] = MAX_HANDLE_GENERATION;
+    const last = arena.reserveHandle().?;
+    const before = arena;
+    try std.testing.expect(arena.previewHandle(last) == null);
+    try std.testing.expect(arena.replaceHandle(last) == null);
+    try std.testing.expect(arena.replaceIndexForOverwrite(0) == null);
+    try std.testing.expectEqualDeep(before, arena);
+    try std.testing.expect(arena.getByHandle(last) != null);
+    try std.testing.expect(arena.removeHandle(last));
+    try std.testing.expect(arena.reserveHandleAt(0) == null);
+    try std.testing.expect(arena.reserveHandleAtForOverwrite(0) == null);
+    const next = arena.reserveHandle().?;
+    try std.testing.expectEqual(@as(usize, 1), next.slotIndex());
+    try std.testing.expect(arena.getByHandle(last) == null);
+    for (0..3) |_| {
+        arena.reset();
+        try std.testing.expect(arena.reserveHandleAt(0) == null);
+        try std.testing.expectEqual(@as(usize, 1), arena.reserveHandle().?.slotIndex());
+        try std.testing.expect(arena.getByHandle(last) == null);
+    }
+    arena.reset();
+    @memset(&arena.slot_generations, EXHAUSTED_HANDLE_GENERATION);
+    try std.testing.expect(arena.previewHandle(null) == null);
+    try std.testing.expect(arena.reserveHandle() == null);
+    try std.testing.expect(arena.reserveHandleForOverwrite() == null);
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+}
 
-    const last_generation_handle = arena.reserveHandle().?;
-    try std.testing.expectEqual(std.math.maxInt(u32), last_generation_handle.generation());
-    const wrapped_handle = arena.replaceHandle(last_generation_handle).?;
-    try std.testing.expectEqual(@as(u32, 1), wrapped_handle.generation());
-    try std.testing.expect(arena.getByHandle(last_generation_handle) == null);
-    try std.testing.expectEqual(@as(usize, 1), arena.countInUse());
+test "generational arena exhaustion skips retired gaps in grant reservations" {
+    const Arena = GenerationalArena("SparseExhaustion", TestSlot, 4);
+    var arena = Arena.init();
+    arena.slot_generations[1] = EXHAUSTED_HANDLE_GENERATION;
+    _ = arena.reserveHandleAt(3).?; // Publishes a gap containing the retired slot.
+    try std.testing.expectEqual(@as(usize, 0), arena.availableIndexExcluding(@as(usize, 2), testIndexExcluded).?);
+    try std.testing.expectEqual(@as(usize, 2), arena.reserveHandle().?.slotIndex());
+    try std.testing.expectEqual(@as(usize, 0), arena.previewHandle(null).?.slotIndex());
+    try std.testing.expectEqual(@as(usize, 0), arena.reserveHandle().?.slotIndex());
+    try std.testing.expect(arena.reserveHandle() == null);
+    try std.testing.expectEqual(@as(usize, 3), arena.countInUse());
 }
 
 test "generational arena previews do not consume authority on abandoned reservations" {
@@ -2300,7 +2379,54 @@ test "paged indexed arena uses slab pages and invalidates stale handles" {
 test "paged indexed arena generations advance without using zero" {
     try std.testing.expectEqual(@as(u32, 1), nextSlotGeneration(0));
     try std.testing.expectEqual(@as(u32, 2), nextSlotGeneration(1));
-    try std.testing.expectEqual(@as(u32, 1), nextSlotGeneration(std.math.maxInt(u32)));
+    try std.testing.expectEqual(EXHAUSTED_HANDLE_GENERATION, nextSlotGeneration(MAX_HANDLE_GENERATION));
+    try std.testing.expectEqual(EXHAUSTED_HANDLE_GENERATION, nextSlotGeneration(EXHAUSTED_HANDLE_GENERATION));
+}
+
+test "paged indexed arena exhaustion survives reset and explicit slot selection" {
+    const Arena = PagedIndexedArena(TestSlot, 2, 2, 8, testSlotId);
+    var arena = Arena.init();
+    arena.slot_generations[0] = MAX_HANDLE_GENERATION;
+    const last = arena.reserveHandle(1).?;
+    arena.getByHandle(last).?.record.id = 1;
+    try std.testing.expect(arena.removeHandle(last));
+    try std.testing.expect(arena.reserveIndexAt(2, 0) == null);
+    const next = arena.reserveHandle(2).?;
+    arena.getByHandle(next).?.record.id = 2;
+    try std.testing.expectEqual(@as(usize, 1), next.slotIndex());
+    arena.resetRetainingPayloads();
+    try std.testing.expect(arena.reserveIndexAt(3, 0) == null);
+    const restored = arena.reserveHandle(3).?;
+    arena.getByHandle(restored).?.record.id = 3;
+    try std.testing.expectEqual(@as(usize, 1), restored.slotIndex());
+    arena.reset();
+    arena.reset();
+    try std.testing.expect(arena.reserveIndexAt(4, 0) == null);
+    try std.testing.expect(arena.getByHandle(last) == null);
+    @memset(&arena.slot_generations, EXHAUSTED_HANDLE_GENERATION);
+    try std.testing.expect(arena.reserveHandle(5) == null);
+    try std.testing.expectEqual(@as(usize, 0), arena.countInUse());
+}
+
+test "paged indexed arena exhaustion cannot be undone by rebuilding an index" {
+    const Arena = PagedIndexedArena(TestSlot, 2, 2, 8, testSlotId);
+    var arena = Arena.init();
+    arena.slot_generations[0] = MAX_HANDLE_GENERATION;
+    const last = arena.reserveHandle(1).?;
+    arena.getByHandle(last).?.record.id = 1;
+    try std.testing.expect(arena.removeHandle(last));
+    const healthy = arena.reserveHandle(2).?;
+    arena.getByHandle(healthy).?.record.id = 2;
+    try arena.rebuildPrimaryIndex();
+    try std.testing.expect(arena.reserveIndexAt(3, 0) == null);
+    try std.testing.expect(arena.getByHandle(last) == null);
+    // Raw restore must not publish a payload over an exhausted generation.
+    arena.slotAt(0).* = .{ .in_use = true, .record = .{ .id = 3 } };
+    const before = arena;
+    try std.testing.expectError(error.HandleGenerationExhausted, arena.rebuildPrimaryIndex());
+    try std.testing.expectEqualDeep(before, arena);
+    try std.testing.expect(arena.getByHandle(last) == null);
+    try std.testing.expect(arena.getByHandle(healthy) != null);
 }
 
 test "paged indexed arena full reset clears payloads and invalidates handles" {

@@ -488,9 +488,13 @@ pub const Runtime = struct {
         var destinations: [MAX_TASKS]u8 = undefined;
         var retained = std.StaticBitSet(MAX_TASKS).initEmpty();
         var occupied = std.StaticBitSet(MAX_TASKS).initEmpty();
+        var exhausted_destinations = std.StaticBitSet(MAX_TASKS).initEmpty();
         for (state.tasks[0..state.task_count], 0..) |*slot, index| {
             const current = self.findConst(slot.task.id) orelse continue;
             if (!sameTaskIncarnation(current, &slot.task)) continue;
+            // Surviving authority retains its stable cold slot. Reject an
+            // exhausted incarnation before retiring tasks or changing state.
+            if (!self.tasks.canReserveIndexAfterReset(current.arena_slot_index)) return error.NoSpaceLeft;
             destinations[index] = current.arena_slot_index;
             retained.set(current.arena_slot_index);
             occupied.set(current.arena_slot_index);
@@ -499,8 +503,11 @@ pub const Runtime = struct {
             if (self.findConst(slot.task.id)) |current| {
                 if (retained.isSet(current.arena_slot_index)) continue;
             }
-            const destination = occupied.complement().findFirstSet() orelse
-                native_util.impossibleByInvariant("snapshot tasks fit in their arena");
+            const destination = choose: while (true) {
+                const candidate = occupied.unionWith(exhausted_destinations).complement().findFirstSet() orelse return error.NoSpaceLeft;
+                if (self.tasks.canReserveIndexAfterReset(candidate)) break :choose candidate;
+                exhausted_destinations.set(candidate);
+            };
             destinations[index] = @intCast(destination);
             occupied.set(destination);
         }
@@ -590,8 +597,8 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn rebuildIndexes(self: *Runtime) void {
-        self.tasks.rebuildPrimaryIndex();
+    pub fn rebuildIndexes(self: *Runtime) error{HandleGenerationExhausted}!void {
+        try self.tasks.rebuildPrimaryIndex();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
         self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
@@ -1575,6 +1582,39 @@ test "task handles reject stale task records across restore and reuse" {
     try std.testing.expect(runtime.taskHandleForResolved(replacement).eql(replacement_handle));
 }
 
+test "task handle exhaustion rejects restore before retirement and survives runtime reset" {
+    var runtime = Runtime.init();
+    const first = try createTaskIdTestTask(&runtime, 801);
+    const first_id = first.id;
+    _ = try createTaskIdTestTask(&runtime, 802);
+    try runtime.grantCapability(first_id, 91);
+    runtime.tasks.slot_generations[first.arena_slot_index] = indexed_arena.MAX_HANDLE_GENERATION;
+    const last = runtime.taskHandleForResolved(first);
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    var recorder = RetirementRecorder{};
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(RetirementRecorder, &recorder)));
+    const next_id = runtime.next_task_id;
+    try std.testing.expectError(error.NoSpaceLeft, runtime.restoreFromSnapshot(&snapshot));
+    try std.testing.expectEqual(@as(usize, 0), recorder.count);
+    try std.testing.expectEqual(@as(usize, 2), runtime.taskCount());
+    try std.testing.expectEqual(next_id, runtime.next_task_id);
+    try std.testing.expect(runtime.findByHandle(last, first_id) != null);
+    try std.testing.expectEqualSlices(u64, &.{91}, runtime.find(first_id).?.capabilityIds());
+    runtime.reset();
+    try runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expect(runtime.find(first_id).?.arena_slot_index != last.slotIndex());
+    try std.testing.expect(runtime.findByHandle(last, first_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.find(first_id).?.capabilityIds().len);
+    runtime.reset();
+    @memset(&runtime.tasks.slot_generations, indexed_arena.EXHAUSTED_HANDLE_GENERATION);
+    const retirements = recorder.count;
+    try std.testing.expectError(error.NoSpaceLeft, runtime.restoreFromSnapshot(&snapshot));
+    try std.testing.expectEqual(retirements, recorder.count);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    try std.testing.expectError(error.TaskTableFull, createTaskIdTestTask(&runtime, 803));
+}
+
 test "task runtime ids are monotonic and exhaust without wrapping" {
     var runtime = Runtime.init();
 
@@ -1624,7 +1664,7 @@ test "task runtime host ids do not advance when address space installation fails
         slot.address_space = model.zeroAddressSpace();
         slot.address_space.id = address_space_id;
     }
-    runtime.rebuildIndexes();
+    try runtime.rebuildIndexes();
 
     runtime.next_process_id = 80;
     runtime.next_address_space_id = 81;
@@ -1667,7 +1707,7 @@ test "task runtime component ids do not advance when host allocation fails" {
         slot.address_space = model.zeroAddressSpace();
         slot.address_space.id = address_space_id;
     }
-    runtime.rebuildIndexes();
+    try runtime.rebuildIndexes();
 
     runtime.next_component_id = 90;
     const next_component_before = runtime.next_component_id;

@@ -190,7 +190,8 @@ pub const Table = struct {
 
     pub fn reset(self: *Table) void {
         self.deinit();
-        self.* = Table.init();
+        self.arena.reset();
+        self.owner_index.reset();
     }
 
     pub fn deinit(self: *Table) void {
@@ -726,6 +727,25 @@ test "endpoint ids reject stale handles after slot reuse" {
     try std.testing.expect(!endpoint.id.eql(replacement.id));
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(endpoint.id));
     try std.testing.expectEqual(replacement.id.raw(), (try table.descriptor(replacement.id)).endpoint_id);
+}
+
+test "endpoint exhaustion survives table reset without reviving stale authority" {
+    var table = Table.init();
+    defer table.deinit();
+    table.arena.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION;
+    const last = try table.create(ids.task(10), "last", .{});
+    const ordinary = try table.create(ids.task(11), "ordinary", .{});
+    table.reset();
+    const next = try table.create(ids.task(12), "next", .{});
+    try std.testing.expectEqual(@as(usize, 1), (EndpointHandle{ .value = next.id.raw() }).slotIndex());
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(last.id));
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ordinary.id));
+    try std.testing.expectEqual(@as(u16, 0), table.activeForTask(ids.task(10)));
+    try std.testing.expectEqual(@as(u16, 1), table.activeForTask(ids.task(12)));
+    table.reset();
+    @memset(&table.arena.slot_generations, indexed_arena.EXHAUSTED_HANDLE_GENERATION);
+    try std.testing.expectError(error.TableFull, table.create(ids.task(13), "exhausted", .{}));
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
 }
 
 test "endpoint table rejection preserves active endpoints" {
