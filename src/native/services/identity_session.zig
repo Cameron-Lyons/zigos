@@ -15,19 +15,12 @@ const storage_service = @import("../storage/storage_service.zig");
 const graph_snapshot = @import("../sync/device_graph_snapshot.zig");
 const sealed = @import("sealed_signing_key.zig");
 const durable = @import("durable_identity_service.zig");
+const enrollment_mod = @import("identity_enrollment.zig");
+const recovery = @import("identity_recovery.zig");
 
 // Provisioning supplies this independently of the capsule/catalog being opened.
 // Secret IDs select keys; their public keys are checked against the NV pins.
-pub const Enrollment = struct {
-    owner: principal.PrincipalId,
-    device: principal.PrincipalId,
-    capsule_digest: tpm.Key,
-    parent: tpm.PersistentParent,
-    catalog_object_id: u64,
-    anchor_index: u32,
-    catalog_secret_id: u64,
-    device_secret_id: u64,
-};
+pub const Enrollment = enrollment_mod.Enrollment;
 
 pub const AssertionRequest = struct {
     credential_id: u64,
@@ -55,6 +48,7 @@ pub fn Session(comptime Io: type) type {
         signing_authority: sealed.Authority = undefined,
         coordinator: ?durable.Service = null,
         device_key: sealed.Key = .{},
+        unlock_method: ?identity.UnlockMethod = null,
         verified_at_ticks: u64 = 0,
         last_ticks: u64 = 0,
         expires_at_ticks: u64 = 0,
@@ -75,6 +69,7 @@ pub fn Session(comptime Io: type) type {
             self.state.identities.* = .init();
             if (self.state.devices) |devices| devices.* = .init();
             self.device_key = .{};
+            self.unlock_method = null;
             self.coordinator = null;
             self.verified_at_ticks = 0;
             self.last_ticks = 0;
@@ -92,19 +87,47 @@ pub fn Session(comptime Io: type) type {
         pub fn unlock(self: *Self, capsule: *const pin_mod.Capsule, pin: []const u8, boot_instance: [16]u8, now_ticks: u64, lifetime_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
             if (self.replay.active) return error.IdentitySessionAlreadyActive;
             errdefer self.lock();
+            const deadline = try self.prepareUnlock(capsule, boot_instance, now_ticks, lifetime_ticks);
+            try self.client.openPersistent(self.io, self.enrollment.parent);
+            try capsule.unlock(&self.client, self.io, &self.enrollment.capsule_digest, pin, &self.authorization);
+            try self.restore(boot_instance, now_ticks, deadline, .device_pin, scratch);
+        }
+
+        // Explicit recovery authority: authenticate the entire package against
+        // this independently enrolled identity BEFORE sending administrator
+        // authorization. Only this path resets DA lockout. It retains neither
+        // the recovery key nor owner/lockout secrets in the active session.
+        pub fn unlockRecovery(self: *Self, capsule: *const pin_mod.Capsule, package: []const u8, recovery_key: *const tpm.Key, boot_instance: [16]u8, now_ticks: u64, lifetime_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !void {
+            if (self.replay.active) return error.IdentitySessionAlreadyActive;
+            errdefer self.lock();
+            const deadline = try self.prepareUnlock(capsule, boot_instance, now_ticks, lifetime_ticks);
+            const record = enrollment_mod.Record{ .enrollment = self.enrollment, .capsule = capsule.* };
+            var secrets = recovery.Secrets{};
+            defer secrets.wipe();
+            try recovery.Package.open(package, &(try record.digest()), recovery_key, &secrets);
+            try self.client.openPersistent(self.io, self.enrollment.parent);
+            try self.client.resetDictionaryAttack(self.io, &secrets.lockout);
+            self.authorization = secrets.vault;
+            try self.restore(boot_instance, now_ticks, deadline, .recovery_key, scratch);
+        }
+
+        fn prepareUnlock(self: *Self, capsule: *const pin_mod.Capsule, boot_instance: [16]u8, now_ticks: u64, lifetime_ticks: u64) !u64 {
             const enrolled = self.enrollment;
             const devices = self.state.devices orelse return error.GraphDestinationRequired;
-            if (enrolled.owner.kind != .user or enrolled.owner.serial == 0 or enrolled.device.kind != .device or enrolled.device.serial == 0 or
-                enrolled.catalog_object_id == 0 or enrolled.catalog_secret_id == 0 or enrolled.device_secret_id == 0 or enrolled.catalog_secret_id == enrolled.device_secret_id or
-                self.storage.owner.kind != .service or self.storage.owner.serial == 0 or self.storage.task_id == 0 or
+            try enrolled.validate();
+            if (self.storage.owner.kind != .service or self.storage.owner.serial == 0 or self.storage.task_id == 0 or
                 !capsule.owner.eql(enrolled.owner) or !capsule.device.eql(enrolled.device) or std.mem.allEqual(u8, &boot_instance, 0)) return error.InvalidIdentitySession;
             if (lifetime_ticks == 0) return error.InvalidLease;
             const deadline = std.math.add(u64, now_ticks, lifetime_ticks) catch return error.InvalidLease;
             if (!self.state.vault.store.empty() or self.state.vault.handles.countInUse() != 0 or self.state.vault.store.handles.countInUse() != 0 or
                 self.state.identities.credential_count != 0 or !graph_snapshot.empty(devices)) return error.VaultNotEmpty;
             try self.close();
-            try self.client.openPersistent(self.io, enrolled.parent);
-            try capsule.unlock(&self.client, self.io, &enrolled.capsule_digest, pin, &self.authorization);
+            return deadline;
+        }
+
+        fn restore(self: *Self, boot_instance: [16]u8, now_ticks: u64, deadline: u64, method: identity.UnlockMethod, scratch: *[catalog.MAX_BYTES]u8) !void {
+            const enrolled = self.enrollment;
+            const devices = self.state.devices.?;
             const Anchor = nv.Backend(Io);
             const record = Anchor.read(&self.client, self.io, &self.authorization, enrolled.anchor_index) catch |err| blk: {
                 if (err != error.NvUninitialized) return err;
@@ -142,6 +165,7 @@ pub fn Session(comptime Io: type) type {
             };
             self.verified_at_ticks = now_ticks;
             self.last_ticks = now_ticks;
+            self.unlock_method = method;
             // This is the only activation point, after every authenticated
             // restore and key check. Entropy failure erases all loaded state.
             try self.replay.begin(boot_instance, self.io);
@@ -155,7 +179,7 @@ pub fn Session(comptime Io: type) type {
                 .device = self.enrollment.device,
                 .relying_party_id = relying_party_id,
                 .challenge = challenge,
-                .method = .device_pin,
+                .method = self.unlock_method orelse return error.InvalidIdentitySession,
                 .verified_at_ticks = self.verified_at_ticks,
                 .expires_at_ticks = expires_at_ticks,
                 .key_handle_id = self.device_key.handle_id,
@@ -231,6 +255,7 @@ test "identity session lock erases authority before fallible TPM cleanup" {
     session.replay = @import("../../tests/fixtures/identity_vault.zig").unlock_session;
     const captured = try session.replay.binding();
     session.authorization = @splat(0x55);
+    session.unlock_method = .recovery_key;
     session.client.command = @splat(0x55);
     session.client.response = @splat(0x55);
     session.client.parent = 0x8000_0001;
@@ -245,6 +270,7 @@ test "identity session lock erases authority before fallible TPM cleanup" {
     try std.testing.expect(keys.service.store.describeHandle(old_handle.store_handle_id) == null);
     try std.testing.expectError(error.VaultHandleNotFound, signer.key.validate(3));
     try std.testing.expect(session.coordinator == null);
+    try std.testing.expect(session.unlock_method == null);
     session.lock();
     try std.testing.expectEqual(@as(usize, 1), io.calls);
     // Repeated local lock preserves the last nonce and cannot do I/O.
@@ -270,4 +296,55 @@ test "identity session lock erases authority before fallible TPM cleanup" {
     try std.testing.expect(!session.replay.active and session.coordinator == null);
     try std.testing.expect(keys.service.store.empty());
     try std.testing.expect(std.mem.allEqual(u8, &session.authorization, 0));
+}
+
+test "identity session recovery authenticates enrollment before hardware and never provisions a replacement" {
+    const Io = struct {
+        reads: usize = 0,
+        pub fn random(_: *@This(), _: []u8) !void {
+            return error.UnexpectedEntropy;
+        }
+        pub fn execute(self: *@This(), command: []const u8, response: []u8, _: u32) ![]u8 {
+            if (command.len != 14 or std.mem.readInt(u32, command[6..10], .big) != 0x173) return error.UnexpectedAdministratorCommand;
+            self.reads += 1;
+            var writer = @import("../platform/tpm2_wire.zig").Writer{ .bytes = response };
+            try writer.begin(0x8001, 0x18b);
+            return writer.finish();
+        }
+    };
+    const Entropy = struct {
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 7);
+        }
+    };
+    const record = try @import("../../tests/fixtures/identity_enrollment.zig").record();
+    var secrets = recovery.Secrets{ .owner = @splat(1), .lockout = @splat(2), .vault = @splat(3) };
+    defer secrets.wipe();
+    const key: tpm.Key = @splat(8);
+    var entropy = Entropy{};
+    var package = recovery.Package{};
+    try recovery.Package.seal(&record, &secrets, &key, &entropy, &package);
+    const device = try @import("../storage/document_save_test.zig").Fixture.init(true);
+    defer device.deinit();
+    var vault = @import("secret_vault_service.zig").Service.init();
+    var identities = identity.Store.init();
+    var graph = @import("../sync/device_graph.zig").Graph.init();
+    var policies = policy.Directory.init();
+    var io = Io{};
+    var session = Session(Io){ .io = &io, .enrollment = record.enrollment, .state = .{ .vault = &vault, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &policies, .subjects = .{ .user_id = record.enrollment.owner.serial } };
+    defer session.close() catch {};
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    const wrong_key: tpm.Key = @splat(9);
+    try std.testing.expectError(error.RecoveryAuthenticationFailed, session.unlockRecovery(&record.capsule, &package.bytes, &wrong_key, @splat(1), 1, 100, &scratch));
+    session.enrollment.parent.name[2] ^= 1;
+    try std.testing.expectError(error.RecoveryEnrollmentChanged, session.unlockRecovery(&record.capsule, &package.bytes, &key, @splat(1), 1, 100, &scratch));
+    session.enrollment = record.enrollment;
+    var changed_capsule = record.capsule;
+    changed_capsule.salt[0] ^= 1;
+    try std.testing.expectError(error.UntrustedPinCapsule, session.unlockRecovery(&changed_capsule, &package.bytes, &key, @splat(1), 1, 100, &scratch));
+    try std.testing.expectEqual(@as(usize, 0), io.reads);
+    try std.testing.expectError(error.PersistentParentMissing, session.unlockRecovery(&record.capsule, &package.bytes, &key, @splat(1), 1, 100, &scratch));
+    try std.testing.expectEqual(@as(usize, 1), io.reads);
+    try std.testing.expect(std.mem.allEqual(u8, &session.authorization, 0));
+    try std.testing.expect(session.unlock_method == null and !session.replay.active and session.coordinator == null and vault.store.empty());
 }

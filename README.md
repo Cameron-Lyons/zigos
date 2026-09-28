@@ -211,6 +211,20 @@ requests.
   explicit administrator recovery, and a lost authorization-change response.
   The primitive requires trusted enrollment and separately retained administrator
   authorization; it does not supply the first-user UI or an input trust path.
+  A canonical public enrollment record now binds the owner, device, PIN capsule,
+  persistent parent, catalog, NV index and key IDs under an independent digest.
+  Its 176-byte recovery package encrypts separate random owner, lockout and vault
+  authorizations with XChaCha20-Poly1305 and authenticates the entire enrollment
+  binding. It requires a separately retained random 256-bit recovery key, never
+  a PIN or password. Provisioning must commit the package and retain that key
+  before changing TPM authorization. Recovery authenticates the package before
+  hardware access, confirms the enrolled TPM, explicitly resets PIN lockout, and
+  follows the same authenticated catalog/device-key restoration as PIN unlock.
+  Signed proofs identify recovery-key verification; lock erases that state and
+  invalidates its leases and replay domain. The session retains no recovery key
+  or owner/lockout authorization. This restores access on the original TPM; it
+  cannot recover keys after that TPM is cleared or lost. Enrollment-root binding,
+  first-user and recovery UI, and independent recovery-key export remain open.
   A bounded identity-session owner now connects PIN verification to authenticated
   NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
   nonce before activation. Lock synchronously invalidates both lease tables,
@@ -327,7 +341,13 @@ requests.
   damaged parent-response HMAC, reconciles a damaged owner-change reply using the
   retained new authorization, and verifies that empty owner authorization cannot
   create parents or define NV indexes. Normal identity unlock issues no owner
-  commands. The transport, sealing and ownership suites run in release preflight.
+  commands. Final administrator secrets are generated randomly, encrypted before
+  persistence, and restored from the disk package after reboot. The reboot also
+  exhausts all eight PIN attempts, requires recovery-key authentication before any
+  administrator command, rejects damaged packages and changed enrollment, and
+  verifies recovery through anchor tampering, replay-entropy failure, durable
+  assertion counters, replay rejection and expiry. The transport, sealing and
+  ownership suites run in release preflight.
   Production first-user enrollment, independent enrollment-root binding and
   recovery-secret custody/export remain open.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);

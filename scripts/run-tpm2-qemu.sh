@@ -262,8 +262,12 @@ run_ownership_boot() {
   qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" "$marker" "${TPM2_QEMU_SECONDS:-90}"
   stop_tpm
   check_transport_proof "$log"
+  local recovery_count=0
+  if [ "$name" = reboot ]; then recovery_count=1; fi
   if [ "$(grep -c '^ZIGOS:TPM2:OWNER:' "$log" || true)" -ne 1 ] ||
-    ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log"; then
+    ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log" ||
+    [ "$(grep -c '^ZIGOS:TPM2:RECOVERY:' "$log" || true)" -ne "$recovery_count" ] ||
+    { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY:VERIFIED' "$log"; }; then
     cat "$log" >&2
     echo "TPM2 owner proof failed for $name" >&2
     return 1

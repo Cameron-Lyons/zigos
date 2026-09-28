@@ -8,48 +8,50 @@ const ids = @import("../../core/ids.zig");
 const signing = @import("../../core/signing.zig");
 const objects = @import("../../storage/object_store.zig");
 const identity_proof = @import("identity_session_proof.zig");
+const enrollment = @import("../../services/identity_enrollment.zig");
+const recovery = @import("../../services/identity_recovery.zig");
 const console = @import("../../../kernel/utils/console.zig");
 const x86 = @import("../../../arch/x86.zig");
-const admin = [_]tpm.Key{ @splat(0xb5), @splat(0xb6), @splat(0xb7) };
+// These two public fixtures model separately retained transition/recovery keys.
+// Final owner, lockout and vault authorizations are random and disk-encrypted.
+const transition_owner: tpm.Key = @splat(0xb5);
+const recovery_key: tpm.Key = @splat(0xb8);
 const pin = "93058271";
 const object_id = 0x706_0001;
 const parent_handle = 0x8100_7060;
 const content_type = "application/x-zigos-tpm-owner-proof";
 const label = "TPM owner enrollment proof";
 const signer = signing.SignerIdentity{ .label = "owner-proof-enrollment", .seed = @splat(0xa6) };
-const MAX_BYTES = 8 + 1 + 4 + 34 + 32 + 2 + pin_mod.MAX_BYTES;
+const MAX_BYTES = 8 + 1 + 32 + 2 + enrollment.MAX_BYTES + recovery.PACKAGE_BYTES;
 const Record = struct {
     enrolled: bool = false,
-    parent: tpm.PersistentParent,
-    digest: tpm.Key,
-    capsule: pin_mod.Capsule,
+    identity: enrollment.Record,
+    package: recovery.Package,
 
     fn encode(self: *const Record, out: *[MAX_BYTES]u8) ![]const u8 {
         var w = wire.Writer{ .bytes = out };
-        try w.put("ZGOwner1");
+        try w.put("ZGOwner2");
         try w.int(u8, @intFromBool(self.enrolled));
-        try w.int(u32, self.parent.handle);
-        try w.put(&self.parent.name);
-        try w.put(&self.digest);
-        var capsule: [pin_mod.MAX_BYTES]u8 = undefined;
-        try w.sized(try self.capsule.encode(&capsule));
+        try w.put(&(try self.identity.digest()));
+        var bytes: [enrollment.MAX_BYTES]u8 = undefined;
+        try w.sized(try self.identity.encode(&bytes));
+        try w.put(&self.package.bytes);
         return out[0..w.pos];
     }
 
     fn decode(bytes: []const u8) !Record {
         var r = wire.Reader{ .bytes = bytes };
-        if (!std.mem.eql(u8, try r.take(8), "ZGOwner1")) return error.InvalidOwnerProof;
+        if (!std.mem.eql(u8, try r.take(8), "ZGOwner2")) return error.InvalidOwnerProof;
         const enrolled = try r.int(u8);
         if (enrolled > 1) return error.InvalidOwnerProof;
-        const handle = try r.int(u32);
-        const name = (try r.take(34))[0..34].*;
         const digest = (try r.take(32))[0..32].*;
-        const capsule = try pin_mod.Capsule.decode(try r.sized(), &digest);
+        // The caller has authenticated this whole record with its independent
+        // fixture signer before accepting the embedded enrollment digest.
+        const identity = try enrollment.Record.decode(try r.sized(), &digest);
+        const package = (try r.take(recovery.PACKAGE_BYTES))[0..recovery.PACKAGE_BYTES].*;
         try r.end();
-        const record = Record{ .enrolled = enrolled != 0, .parent = .{ .handle = handle, .name = name }, .digest = digest, .capsule = capsule };
-        try record.parent.validate();
-        if (handle != parent_handle or capsule.owner.serial != 0x706 or capsule.device.serial != 0x707) return error.InvalidOwnerProof;
-        return record;
+        if (identity.enrollment.parent.handle != parent_handle or identity.capsule.owner.serial != 0x706 or identity.capsule.device.serial != 0x707) return error.InvalidOwnerProof;
+        return .{ .enrolled = enrolled != 0, .identity = identity, .package = .{ .bytes = package } };
     }
 };
 
@@ -72,7 +74,6 @@ fn requireAuthorizationRejection(client: *const tpm.Client, err: anyerror) !void
 }
 
 pub fn run(manager: anytype, io: anytype) !void {
-    io.protected_authorizations = &admin;
     io.known_pin = pin;
     defer io.protected_authorizations = &.{};
     defer io.known_pin = null;
@@ -82,6 +83,10 @@ pub fn run(manager: anytype, io: anytype) !void {
     const storage = manager.storageServicePtr();
     var key: tpm.Key = @splat(0);
     defer std.crypto.secureZero(u8, &key);
+    var secrets = recovery.Secrets{};
+    defer secrets.wipe();
+    var admin: [4]tpm.Key = undefined;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&admin));
     var record: Record = undefined;
     if (storage.latestVersion(object_id)) |version| {
         var bytes: [MAX_BYTES]u8 = undefined;
@@ -89,21 +94,24 @@ pub fn run(manager: anytype, io: anytype) !void {
         if (version.object_type != .secret or !std.mem.eql(u8, version.metadata.contentTypeSlice(), content_type) or
             !version.metadata.verifyFor(.secret, payload) or !std.mem.eql(u8, version.metadata.signature.publicKeySlice(), &(try signing.publicKey(signer)))) return error.UntrustedOwnerProof;
         record = try Record.decode(payload);
+        try recovery.Package.open(&record.package.bytes, &(try record.identity.digest()), &recovery_key, &secrets);
+        admin = .{ transition_owner, secrets.owner, secrets.lockout, recovery_key };
+        io.protected_authorizations = &admin;
     } else {
         try client.createEnrollmentParent(io);
-        try io.random(&key);
+        try recovery.Secrets.generate(io, &secrets);
+        admin = .{ transition_owner, secrets.owner, secrets.lockout, recovery_key };
+        io.protected_authorizations = &admin;
+        key = secrets.vault;
         io.known_key = &key;
-        record = .{
-            .parent = .{ .handle = parent_handle, .name = client.parent_name },
-            .digest = undefined,
-            .capsule = try pin_mod.Capsule.enroll(&client, io, .{ .kind = .user, .serial = 0x706 }, .{ .kind = .device, .serial = 0x707 }, pin, &key),
-        };
-        record.digest = try record.capsule.digest();
+        const capsule = try pin_mod.Capsule.enroll(&client, io, .{ .kind = .user, .serial = 0x706 }, .{ .kind = .device, .serial = 0x707 }, pin, &key);
+        record = .{ .identity = .{ .capsule = capsule, .enrollment = identity_proof.enrollmentFor(&capsule, try capsule.digest(), .{ .handle = parent_handle, .name = client.parent_name }) }, .package = .{} };
+        try recovery.Package.seal(&record.identity, &secrets, &recovery_key, io, &record.package);
         // The independent fixture enrollment record reaches disk before the
         // permanent object does. Simulate losing an accepted persistence reply.
         try save(storage, &record);
         io.corrupt_persistence = true;
-        if (client.persistParent(io, record.parent, null)) |_| return error.AcceptedCorruptPersistenceReply else |err| {
+        if (client.persistParent(io, record.identity.enrollment.parent, null)) |_| return error.AcceptedCorruptPersistenceReply else |err| {
             if (err != error.IntegrityFailure or !client.failed or io.persist_commands != 1) return error.BadPersistenceFailure;
         }
         io.corrupt_persistence = false;
@@ -111,7 +119,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         halt("ZIGOS:TPM2:OWNER:INTERRUPTED\n");
     }
 
-    client.openPersistent(io, record.parent) catch |err| {
+    client.openPersistent(io, record.identity.enrollment.parent) catch |err| {
         if (err != error.PersistentParentMissing) return err;
         if (io.owner_commands != 0 or !std.mem.allEqual(u8, &key, 0)) return error.ReprovisionedMissingParent;
         console.print("ZIGOS:TPM2:OWNER:REPLACEMENT_REJECTED\n");
@@ -121,11 +129,12 @@ pub fn run(manager: anytype, io: anytype) !void {
     var tampered = tpm.Client{};
     defer tampered.close(io) catch {};
     io.corrupt_parent_public = true;
-    if (tampered.openPersistent(io, record.parent)) |_| return error.AcceptedUnauthenticatedParent else |err| {
+    if (tampered.openPersistent(io, record.identity.enrollment.parent)) |_| return error.AcceptedUnauthenticatedParent else |err| {
         if (err != error.IntegrityFailure or tampered.parent != 0) return error.BadParentAuthenticationFailure;
     }
     io.corrupt_parent_public = false;
-    try record.capsule.unlock(&client, io, &record.digest, pin, &key);
+    try record.identity.capsule.unlock(&client, io, &record.identity.enrollment.capsule_digest, pin, &key);
+    if (!std.crypto.timing_safe.eql(tpm.Key, key, secrets.vault)) return error.RecoveredWrongVaultAuthorization;
     io.known_key = &key;
 
     if (!record.enrolled) {
@@ -133,7 +142,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         var bootstrap = tpm.Client{};
         defer bootstrap.close(io) catch {};
         try bootstrap.createEnrollmentParent(io);
-        try bootstrap.persistParent(io, record.parent, null);
+        try bootstrap.persistParent(io, record.identity.enrollment.parent, null);
         if (io.persist_commands != 0) return error.RepeatedParentPersistence;
         try bootstrap.close(io);
 
@@ -146,7 +155,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         io.corrupt_lockout_change = false;
         try client.close(io);
         client = .{};
-        try client.openPersistent(io, record.parent);
+        try client.openPersistent(io, record.identity.enrollment.parent);
         try client.changeOwnerAuthorization(io, &admin[0], &admin[1]);
         try client.changeLockoutAuthorization(io, null, &admin[2]);
         try client.configureDictionaryAttack(io, &admin[2], pin_mod.DEFAULT_POLICY);
@@ -161,8 +170,8 @@ pub fn run(manager: anytype, io: anytype) !void {
         var empty_owner = tpm.Client{};
         defer empty_owner.close(io) catch {};
         if (empty_owner.createEnrollmentParent(io)) |_| return error.EmptyOwnerCreatedParent else |err| try requireAuthorizationRejection(&empty_owner, err);
-        try identity_proof.provision(manager, io, &client, &record.capsule, &key, &admin[1]);
-        try identity_proof.run(manager, io, &record.capsule, &record.digest, pin, null, record.parent);
+        try identity_proof.provision(manager, io, &client, &record.identity.capsule, &key, &admin[1]);
+        try identity_proof.run(manager, io, &record.identity.capsule, &record.identity.enrollment.capsule_digest, pin, null, record.identity.enrollment.parent);
         record.enrolled = true;
         try save(storage, &record);
         try client.close(io);
@@ -170,10 +179,25 @@ pub fn run(manager: anytype, io: anytype) !void {
     }
 
     const before = io.owner_commands;
-    try identity_proof.run(manager, io, &record.capsule, &record.digest, pin, null, record.parent);
+    try identity_proof.run(manager, io, &record.identity.capsule, &record.identity.enrollment.capsule_digest, pin, null, record.identity.enrollment.parent);
     if (before != 0 or io.owner_commands != 0) return error.IdentityRequestedOwnerAuthorization;
+    // Exhaust the real TPM policy, then recover with the encrypted package
+    // loaded from the previous boot, without knowing the PIN in that path.
+    var denied: tpm.Key = @splat(0);
+    defer std.crypto.secureZero(u8, &denied);
+    for (0..pin_mod.DEFAULT_POLICY.max_tries) |_| {
+        if (record.identity.capsule.unlock(&client, io, &record.identity.enrollment.capsule_digest, "93058279", &denied)) |_| return error.AcceptedWrongPin else |err| {
+            if (err != error.PinRejected or !std.mem.allEqual(u8, &denied, 0)) return error.InvalidRecoveryLockout;
+        }
+    }
+    if (record.identity.capsule.unlock(&client, io, &record.identity.enrollment.capsule_digest, pin, &denied)) |_| return error.MissingRecoveryLockout else |err| {
+        if (err != error.PinLockedOut or !std.mem.allEqual(u8, &denied, 0)) return error.InvalidRecoveryLockout;
+    }
+    try identity_proof.runRecovery(manager, io, &record.identity, &record.package, &recovery_key);
+    try record.identity.capsule.unlock(&client, io, &record.identity.enrollment.capsule_digest, pin, &denied);
+    if (!std.crypto.timing_safe.eql(tpm.Key, denied, secrets.vault)) return error.RecoveryDidNotRestorePin;
     try client.close(io);
     client = .{};
-    try client.openPersistent(io, record.parent);
+    try client.openPersistent(io, record.identity.enrollment.parent);
     console.print("ZIGOS:TPM2:OWNER:VERIFIED\n");
 }

@@ -20,6 +20,8 @@ const typed_component_abi = @import("../../native/services/typed_component_abi.z
 const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
 
 test "service host tests import native service modules" {
+    std.testing.refAllDecls(@import("../../native/services/identity_enrollment.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_recovery.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_session.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_pin_authenticator.zig"));
     _ = @import("../../native/services/public_enrollment_test.zig");

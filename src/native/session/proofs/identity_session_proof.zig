@@ -17,6 +17,10 @@ const console = @import("../../../kernel/utils/console.zig");
 const object_id = 0x704_0001;
 const anchor_index = 0x0180_7041;
 
+pub fn enrollmentFor(capsule: *const pin_mod.Capsule, digest: tpm.Key, parent: tpm.PersistentParent) session_mod.Enrollment {
+    return .{ .owner = capsule.owner, .device = capsule.device, .capsule_digest = digest, .parent = parent, .catalog_object_id = object_id, .anchor_index = anchor_index, .catalog_secret_id = 1, .device_secret_id = 3 };
+}
+
 fn makePolicy(policies: *policy.Directory, owner: @import("../../core/principal.zig").PrincipalId) !void {
     _ = try policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "session proof", .secret_vault_allowed = true, .require_hardware_backed_secrets = true, .deny_secret_raw_export = true, .max_secret_handle_lease_ticks = 1000, .credential_assertions_allowed = true }, .{ .label = "session policy fixture", .seed = @splat(0x72) });
 }
@@ -88,7 +92,7 @@ fn SessionIo(comptime Inner: type) type {
 }
 
 fn requireLocked(session: anytype) !void {
-    if (session.replay.active or session.coordinator != null or !std.mem.allEqual(u8, &session.authorization, 0) or
+    if (session.replay.active or session.coordinator != null or session.unlock_method != null or !std.mem.allEqual(u8, &session.authorization, 0) or
         !session.state.vault.store.empty() or session.state.vault.activeHandleCount() != 0 or session.state.vault.store.handles.countInUse() != 0 or
         session.state.vault.store.hardware_provider.operations != null or session.state.identities.credential_count != 0 or !graph_snapshot.empty(session.state.devices.?)) return error.RetainedLockedAuthority;
 }
@@ -102,7 +106,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     var session_io = SessionIo(@TypeOf(io.*)){ .inner = io };
     var session = session_mod.Session(@TypeOf(session_io)){
         .io = &session_io,
-        .enrollment = .{ .owner = capsule.owner, .device = capsule.device, .capsule_digest = digest.*, .parent = parent, .catalog_object_id = object_id, .anchor_index = anchor_index, .catalog_secret_id = 1, .device_secret_id = 3 },
+        .enrollment = enrollmentFor(capsule, digest.*, parent),
         .state = .{ .vault = &service, .identities = &identities, .devices = &graph },
         .storage = manager.storageServicePtr(),
         .policies = &policies,
@@ -141,7 +145,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     const old_key = session.device_key;
     const old_handle = service.findHandleConst(old_key.handle_id).?.*;
     const old_proof = try session.issueUnlockProof("session.example", "challenge", 12, 90);
-    if (old_proof.issued_at_ticks != 10) return error.RefreshedPinVerification;
+    if (old_proof.issued_at_ticks != 10 or old_proof.method != .device_pin) return error.RefreshedPinVerification;
     if (session.unlock(capsule, pin, boot, 13, 100, &scratch)) |_| return error.ReplacedLiveSession else |err| {
         if (err != error.IdentitySessionAlreadyActive) return err;
     }
@@ -195,6 +199,80 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     try session.close();
     try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null);
     console.print("ZIGOS:TPM2:SESSION:VERIFIED\n");
+}
+
+pub fn runRecovery(manager: anytype, io: anytype, record: *const @import("../../services/identity_enrollment.zig").Record, package: *const @import("../../services/identity_recovery.zig").Package, recovery_key: *const tpm.Key) !void {
+    var service = vault.Service.init();
+    var identities = identity.Store.init();
+    var graph = graph_mod.Graph.init();
+    var policies = policy.Directory.init();
+    try makePolicy(&policies, record.enrollment.owner);
+    var session_io = SessionIo(@TypeOf(io.*)){ .inner = io };
+    var session = session_mod.Session(@TypeOf(session_io)){
+        .io = &session_io,
+        .enrollment = record.enrollment,
+        .state = .{ .vault = &service, .identities = &identities, .devices = &graph },
+        .storage = manager.storageServicePtr(),
+        .policies = &policies,
+        .subjects = .{ .user_id = record.enrollment.owner.serial },
+    };
+    defer session.close() catch {};
+    const boot = @import("../../../kernel/platform/secure_random.zig").bootInstanceId();
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    const commands = io.commands;
+    const resets = io.da_resets;
+    var wrong_key = recovery_key.*;
+    defer std.crypto.secureZero(u8, &wrong_key);
+    wrong_key[0] ^= 1;
+    if (session.unlockRecovery(&record.capsule, &package.bytes, &wrong_key, boot, 1, 100, &scratch)) |_| return error.AcceptedWrongRecoveryKey else |err| {
+        if (err != error.RecoveryAuthenticationFailed) return err;
+    }
+    try requireLocked(&session);
+    var damaged = package.*;
+    damaged.bytes[damaged.bytes.len - 1] ^= 1;
+    if (session.unlockRecovery(&record.capsule, &damaged.bytes, recovery_key, boot, 1, 100, &scratch)) |_| return error.AcceptedDamagedRecoveryPackage else |err| {
+        if (err != error.RecoveryAuthenticationFailed) return err;
+    }
+    try requireLocked(&session);
+    session.enrollment.catalog_object_id += 1;
+    if (session.unlockRecovery(&record.capsule, &package.bytes, recovery_key, boot, 1, 100, &scratch)) |_| return error.AcceptedForeignRecoveryEnrollment else |err| {
+        if (err != error.RecoveryEnrollmentChanged) return err;
+    }
+    try requireLocked(&session);
+    session.enrollment = record.enrollment;
+    if (io.commands != commands or io.da_resets != resets) return error.UntrustedRecoveryReachedTpm;
+    io.corrupt_nv_read = true;
+    if (session.unlockRecovery(&record.capsule, &package.bytes, recovery_key, boot, 1, 100, &scratch)) |_| return error.AcceptedCorruptRecoveryAnchor else |err| {
+        if (err != error.IntegrityFailure) return err;
+    }
+    io.corrupt_nv_read = false;
+    try requireLocked(&session);
+    session_io.fail_replay_entropy = true;
+    if (session.unlockRecovery(&record.capsule, &package.bytes, recovery_key, boot, 1, 100, &scratch)) |_| return error.ActivatedRecoveryWithoutEntropy else |err| {
+        if (err != error.SessionEntropyUnavailable) return err;
+    }
+    session_io.fail_replay_entropy = false;
+    try requireLocked(&session);
+    try session.unlockRecovery(&record.capsule, &package.bytes, recovery_key, boot, 10, 100, &scratch);
+    const proof = try session.issueUnlockProof("session.example", "recover", 11, 90);
+    if (proof.method != .recovery_key or proof.issued_at_ticks != 10 or io.da_resets != resets + 3) return error.InvalidRecoveryAuthority;
+    const credential = identities.findCredentialConst(1) orelse return error.MissingSessionCredential;
+    const public_key = credential.credential_public_key;
+    const previous_count = credential.assertion_count;
+    const assertion = try session.assertCredential(.{ .credential_id = 1, .relying_party_id = "session.example", .origin = "https://session.example", .challenge = "recover", .local_unlock = proof }, 12, &scratch);
+    if (assertion.assertion_counter != previous_count + 1 or !identity.verifyAssertion(&assertion, &public_key)) return error.InvalidRecoveryAssertion;
+    session.lock();
+    try requireLocked(&session);
+    try session.unlockRecovery(&record.capsule, &package.bytes, recovery_key, boot, 20, 100, &scratch);
+    if (identities.findCredentialConst(1).?.assertion_count != previous_count + 1) return error.LostRecoveryCounter;
+    if (session.assertCredential(.{ .credential_id = 1, .relying_party_id = "session.example", .origin = "https://session.example", .challenge = "recover", .local_unlock = proof }, 21, &scratch)) |_| return error.ReplayedRecoveryProof else |err| {
+        if (err != error.UnlockContextMismatch) return err;
+    }
+    if (session.requireActive(session.expires_at_ticks)) |_| return error.AcceptedExpiredRecovery else |err| {
+        if (err != error.IdentitySessionExpired) return err;
+    }
+    try requireLocked(&session);
+    console.print("ZIGOS:TPM2:RECOVERY:VERIFIED\n");
 }
 
 // Verification-only modeled HID reports enter through the same native router,
