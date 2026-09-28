@@ -20,6 +20,24 @@ pub fn empty(graph: *const graph_mod.Graph) bool {
     return graph.user_roots.countInUse() == 0 and graph.devices.countInUse() == 0;
 }
 
+// Untrusted enrollment metadata only. Self-consistency is not authority: the
+// caller must independently authenticate the candidate before using this pin.
+pub fn enrollmentCandidatePin(owner: principal.PrincipalId, bytes: []const u8) Error!?signing.PublicKey {
+    var reader = Reader{ .buffer = bytes };
+    const present = try reader.readByte();
+    var pin: ?signing.PublicKey = null;
+    if (present == 1) {
+        var label: [graph_mod.MAX_LABEL_BYTES]u8 = undefined;
+        _ = try readText(&reader, &label);
+        const signature = try readSignature(&reader);
+        if (!signature.isPresent()) return error.InvalidGraphSnapshot;
+        pin = signature.public_key;
+    }
+    var candidate = graph_mod.Graph.init();
+    try decode(&candidate, owner, pin, bytes);
+    return pin;
+}
+
 pub fn encode(graph: ?*const graph_mod.Graph, owner: principal.PrincipalId, buffer: []u8) Error![]const u8 {
     var writer = Writer{ .buffer = buffer };
     if (graph == null or empty(graph.?)) {

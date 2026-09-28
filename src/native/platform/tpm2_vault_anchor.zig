@@ -53,6 +53,17 @@ pub const Record = struct {
         return record;
     }
 
+    pub fn enrollmentSpace(self: Record, index: u32) !tpm.NvSpace {
+        const bytes = try self.encode();
+        var index_bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &index_bytes, index, .big);
+        var digest = std.crypto.hash.sha2.Sha256.init(.{});
+        digest.update("zigos:tpm-vault-enrollment:v1\x00");
+        digest.update(&index_bytes);
+        digest.update(&bytes);
+        return .{ .index = index, .size = RECORD_BYTES, .binding = .{ .pinned = digest.finalResult() } };
+    }
+
     fn successor(self: Record, checkpoint: catalog.Checkpoint, previous_digest: hash.Digest) !Record {
         if (checkpoint.object_id != self.checkpoint.object_id or !checkpoint.owner.eql(self.checkpoint.owner) or
             !std.mem.eql(u8, &checkpoint.public_key, &self.checkpoint.public_key)) return error.VaultAnchorBindingChanged;
@@ -78,23 +89,50 @@ pub fn Backend(comptime Io: type) type {
         current: Record,
 
         fn space(self: *const Self) tpm.NvSpace {
-            return .{ .index = self.index, .size = RECORD_BYTES };
+            return .{ .index = self.index, .size = RECORD_BYTES, .binding = .discover };
         }
 
         pub fn read(client: *tpm.Client, io: *Io, authorization: *const tpm.Key, index: u32) !Record {
             var bytes: [RECORD_BYTES]u8 = undefined;
             defer std.crypto.secureZero(u8, &bytes);
-            try client.nvRead(io, .{ .index = index, .size = RECORD_BYTES }, authorization, &bytes);
+            try client.nvRead(io, .{ .index = index, .size = RECORD_BYTES, .binding = .discover }, authorization, &bytes);
             return Record.decode(&bytes);
         }
 
-        // Explicit first enrollment, only after a durable catalog checkpoint.
-        // Failure may leave a defined/unwritten index; never overwrite it here.
-        pub fn provision(self: *Self) !void {
+        // Explicit first enrollment. Commit the exact catalog before defining
+        // the immutable NV enrollment commitment. Existing indexes are refused.
+        pub fn provision(self: *Self, storage: *const storage_service.Service, scratch: *[catalog.MAX_BYTES]u8) !void {
             var bytes = try self.current.encode();
             defer std.crypto.secureZero(u8, &bytes);
-            try self.client.nvDefine(self.io, self.space(), self.authorization);
-            try self.client.nvWrite(self.io, self.space(), self.authorization, &bytes);
+            const candidate = try enrollmentCandidate(storage, self.current.checkpoint.object_id, self.current.checkpoint.owner, scratch);
+            if (!std.mem.eql(u8, &bytes, &(try candidate.encode()))) return error.VaultAnchorBindingChanged;
+            _ = try storage.checkpointDurable();
+            const enrollment_space = try self.current.enrollmentSpace(self.index);
+            try self.client.nvDefine(self.io, enrollment_space, self.authorization);
+            try self.client.nvInitialize(self.io, enrollment_space, self.authorization, &bytes);
+        }
+
+        // Resume only a definition already committed by explicit enrollment.
+        // NV_ReadPublic is unauthenticated: its claims become authority only
+        // when the HMAC read/write succeeds with that exact committed Name.
+        // A missing index is never redefined, and a later anchor is never reset.
+        pub fn resumeProvision(client: *tpm.Client, io: *Io, authorization: *const tpm.Key, index: u32, storage: *const storage_service.Service, object_id: u64, owner: principal.PrincipalId, scratch: *[catalog.MAX_BYTES]u8) !Record {
+            const candidate = try enrollmentCandidate(storage, object_id, owner, scratch);
+            const enrollment_space = try candidate.enrollmentSpace(index);
+            var expected = try candidate.encode();
+            defer std.crypto.secureZero(u8, &expected);
+            _ = try storage.checkpointDurable();
+            var actual: [RECORD_BYTES]u8 = undefined;
+            defer std.crypto.secureZero(u8, &actual);
+            client.nvRead(io, enrollment_space, authorization, &actual) catch |err| {
+                if (err != error.NvUninitialized) return err;
+                // Recheck WRITTEN inside the same Name-bound HMAC operation;
+                // never trust an earlier public-area reply to permit a write.
+                try client.nvInitialize(io, enrollment_space, authorization, &expected);
+                return candidate;
+            };
+            if (!std.mem.eql(u8, &actual, &expected)) return error.VaultAnchorChanged;
+            return candidate;
         }
 
         // Keep this backend and the returned interface at stable addresses
@@ -135,9 +173,22 @@ pub fn Backend(comptime Io: type) type {
     };
 }
 
+fn enrollmentCandidate(storage: *const storage_service.Service, object_id: u64, owner: principal.PrincipalId, scratch: *[catalog.MAX_BYTES]u8) !Record {
+    const candidate = try catalog.inspectEnrollment(storage, object_id, owner, scratch);
+    return .{ .checkpoint = candidate.checkpoint, .device_root_pin = candidate.device_root_pin };
+}
+
 test "TPM vault anchor codec rejects malformed records and binds freshness to exact payload" {
     const initial = Record{ .checkpoint = .{ .object_id = 12, .owner = .{ .kind = .user, .serial = 3 }, .public_key = @splat(4), .generation = 7, .payload_digest = @splat(5) }, .device_root_pin = @splat(6) };
     const bytes = try initial.encode();
+    const commitment = (try initial.enrollmentSpace(0x0180_1234)).binding.pinned;
+    try std.testing.expect(!std.mem.eql(u8, &commitment, &(try initial.enrollmentSpace(0x0180_1235)).binding.pinned));
+    for ([_]usize{ 8, 16, 24, 40, 72, 104, 135 }) |offset| {
+        var altered = bytes;
+        altered[offset] ^= 1;
+        const other = try Record.decode(&altered);
+        try std.testing.expect(!std.mem.eql(u8, &commitment, &(try other.enrollmentSpace(0x0180_1234)).binding.pinned));
+    }
     try std.testing.expectEqualDeep(initial, try Record.decode(&bytes));
     for (0..bytes.len) |len| try std.testing.expectError(error.InvalidVaultAnchor, Record.decode(bytes[0..len]));
     for ([_]usize{ 0, 32, 33, 34, 39 }) |offset| {
@@ -159,6 +210,55 @@ test "TPM vault anchor codec rejects malformed records and binds freshness to ex
     try std.testing.expectEqualDeep(initial.device_root_pin, next.device_root_pin);
     changed.public_key[0] ^= 1;
     try std.testing.expectError(error.VaultAnchorBindingChanged, initial.successor(changed, initial.checkpoint.payload_digest));
+}
+
+test "TPM first enrollment validates its entire candidate and disk barrier before hardware" {
+    const durable = @import("../storage/document_save_test.zig");
+    const SigningFixture = @import("../../tests/fixtures/document_signer.zig").Fixture;
+    const identity = @import("os_identity.zig");
+    const Io = struct {
+        pub fn random(_: *@This(), _: []u8) !void {
+            return error.UnexpectedHardwareAccess;
+        }
+        pub fn execute(_: *@This(), _: []const u8, _: []u8, _: u32) ![]u8 {
+            return error.UnexpectedHardwareAccess;
+        }
+    };
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    var fixture = SigningFixture{};
+    const signer = try fixture.init(owner, device.service.owner, device.service.task_id, durable.signer);
+    var identities = identity.Store.init();
+    const state = catalog.State{ .vault = &fixture.service, .identities = &identities };
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    var session = catalog.Session{};
+    device.fail_flushes = true;
+    try std.testing.expectError(error.DurabilityBarrierFailed, session.save(&device.service, state, signer, 1000, 0, 2, &scratch));
+    const candidate = try enrollmentCandidate(&device.service, 1000, owner, &scratch);
+    var client = tpm.Client{};
+    var io = Io{};
+    const auth: tpm.Key = @splat(1);
+    const Anchor = Backend(Io);
+    var backend = Anchor{ .client = &client, .io = &io, .authorization = &auth, .index = 0x0180_1234, .current = candidate };
+    backend.current.device_root_pin = @splat(7);
+    try std.testing.expectError(error.VaultAnchorBindingChanged, backend.provision(&device.service, &scratch));
+    backend.current = candidate;
+    backend.current.checkpoint.owner.serial += 1;
+    try std.testing.expectError(error.InvalidVaultCatalog, backend.provision(&device.service, &scratch));
+    backend.current = candidate;
+    backend.current.checkpoint.payload_digest[0] ^= 1;
+    try std.testing.expectError(error.VaultAnchorBindingChanged, backend.provision(&device.service, &scratch));
+    backend.current = candidate;
+    device.fail_flushes = true;
+    try std.testing.expectError(error.DurabilityBarrierFailed, backend.provision(&device.service, &scratch));
+    try std.testing.expectError(error.DurabilityBarrierFailed, Anchor.resumeProvision(&client, &io, &auth, backend.index, &device.service, 1000, owner, &scratch));
+    device.fail_flushes = false;
+    try std.testing.expectError(error.NotInitialized, backend.provision(&device.service, &scratch));
+    try std.testing.expectError(error.NotInitialized, Anchor.resumeProvision(&client, &io, &auth, backend.index, &device.service, 1000, owner, &scratch));
+    try std.testing.expectEqualDeep(candidate, backend.current);
+    device.crash();
+    try std.testing.expectEqualDeep(candidate, try enrollmentCandidate(&device.service, 1000, owner, &scratch));
 }
 
 test "TPM vault recovery requires durable disk state and retains its pin when hardware fails" {

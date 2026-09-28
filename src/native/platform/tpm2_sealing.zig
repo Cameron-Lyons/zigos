@@ -24,15 +24,25 @@ const NV_ATTRIBUTES: u32 = 0x0004_1004; // AUTHREAD, AUTHWRITE, WRITEALL; dictio
 const NV_WRITTEN: u32 = 0x2000_0000;
 pub const MAX_NV_BYTES = 256;
 
+pub const NvBinding = union(enum) {
+    none,
+    // Read the immutable commitment from the public area. It is authenticated
+    // only when the following HMAC command succeeds with this index Name.
+    discover,
+    pinned: Key,
+};
+
 // Caller allocates an application index. No undefine, clear, owner read/write,
 // partial write, or implicit provisioning operation is exposed.
 pub const NvSpace = struct {
     index: u32,
     size: u16,
+    binding: NvBinding = .none,
 
     fn validate(self: NvSpace) !void {
         if (self.index < 0x0180_0000 or self.index > 0x0180_ffff or self.size == 0 or self.size > MAX_NV_BYTES)
             return error.InvalidNvSpace;
+        if (self.binding == .pinned and std.mem.allEqual(u8, &self.binding.pinned, 0)) return error.InvalidNvSpace;
     }
 };
 const PRIMARY_PREFIX = [_]u8{
@@ -226,19 +236,24 @@ pub const Client = struct {
     pub fn nvDefine(self: *Client, io: anytype, space: NvSpace, auth: *const Key) !void {
         try self.ready(auth);
         try space.validate();
+        if (space.binding == .discover) return error.InvalidNvSpace;
         errdefer |err| self.rejectProtocolFailure(err);
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
-        var parameters: [50]u8 = undefined;
+        var parameters: [82]u8 = undefined;
         defer std.crypto.secureZero(u8, &parameters);
         var w = wire.Writer{ .bytes = &parameters };
         try w.sized(auth);
-        try w.int(u16, 14);
+        const commitment: []const u8 = if (space.binding == .pinned) &space.binding.pinned else "";
+        try w.int(u16, @intCast(14 + commitment.len));
         try w.int(u32, space.index);
         try w.int(u16, 0x0b);
         try w.int(u32, NV_ATTRIBUTES);
-        try w.sized("");
+        // AUTHREAD/AUTHWRITE remain the only access paths. The otherwise
+        // unused policy digest commits enrollment metadata at NV_DefineSpace,
+        // before the first data write. It is included in the authenticated Name.
+        try w.sized(commitment);
         try w.int(u16, space.size);
         const reply = try self.authorizedHandles(io, &session, NV_DEFINE, &.{OWNER}, &.{&.{ 0x40, 0, 0, 1 }}, "", parameters[0..w.pos], 0x21, false);
         if (reply.parameters.len != 0) return error.InvalidResponse;
@@ -273,6 +288,17 @@ pub const Client = struct {
     }
 
     pub fn nvWrite(self: *Client, io: anytype, space: NvSpace, auth: *const Key, data: []const u8) !void {
+        return self.writeNv(io, space, auth, data, false);
+    }
+
+    // The unwritten check and command HMAC use the SAME public-area snapshot.
+    // A forged WRITTEN bit changes the Name and cannot authorize a rollback.
+    pub fn nvInitialize(self: *Client, io: anytype, space: NvSpace, auth: *const Key, data: []const u8) !void {
+        if (space.binding != .pinned) return error.InvalidNvSpace;
+        return self.writeNv(io, space, auth, data, true);
+    }
+
+    fn writeNv(self: *Client, io: anytype, space: NvSpace, auth: *const Key, data: []const u8, initial_only: bool) !void {
         try self.ready(auth);
         try space.validate();
         if (data.len != space.size) return error.InvalidNvSpace;
@@ -280,6 +306,7 @@ pub const Client = struct {
         defer self.wipeBuffers();
         // WRITTEN changes the index Name on its first write. Never cache it.
         const public = try self.nvPublic(io, space);
+        if (initial_only and public.written) return error.NvAlreadyInitialized;
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
         var parameters: [MAX_NV_BYTES + 4]u8 = undefined;
@@ -463,8 +490,14 @@ fn parseNvPublic(bytes: []const u8, space: NvSpace) !NvPublic {
     var p = wire.Reader{ .bytes = public };
     if (try p.int(u32) != space.index or try p.int(u16) != 0x0b) return error.InvalidResponse;
     const attributes = try p.int(u32);
-    if (attributes & ~NV_WRITTEN != NV_ATTRIBUTES or (try p.sized()).len != 0 or
-        try p.int(u16) != space.size) return error.InvalidResponse;
+    if (attributes & ~NV_WRITTEN != NV_ATTRIBUTES) return error.InvalidResponse;
+    const commitment = try p.sized();
+    switch (space.binding) {
+        .none => if (commitment.len != 0) return error.InvalidResponse,
+        .discover => if (commitment.len != 32 or std.mem.allEqual(u8, commitment, 0)) return error.InvalidResponse,
+        .pinned => |expected| if (!std.mem.eql(u8, commitment, &expected)) return error.NvBindingMismatch,
+    }
+    if (try p.int(u16) != space.size) return error.InvalidResponse;
     try p.end();
     const name = objectName(public);
     if (!std.mem.eql(u8, try r.sized(), &name)) return error.IntegrityFailure;
@@ -553,7 +586,64 @@ test "TPM NV validates callers and full record bounds before touching hardware" 
     try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = 0x0100_0000, .size = 32 }, &auth));
     try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = MAX_NV_BYTES + 1 }, &auth));
     try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 0 }, &auth));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .discover }, &auth));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .{ .pinned = @splat(0) } }, &auth));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvInitialize(&io, space, &auth, &out));
     try std.testing.expectEqual(@as(usize, 0), io.calls);
+}
+
+test "TPM NV enrollment binds the immutable policy and guards the first write with its Name" {
+    const space = NvSpace{ .index = 0x0180_1234, .size = 136, .binding = .{ .pinned = @splat(7) } };
+    var bytes: [85]u8 = @splat(0);
+    var unwritten_name: Name = undefined;
+    for ([_]u32{ NV_ATTRIBUTES, NV_ATTRIBUTES | NV_WRITTEN }) |attributes| {
+        var w = wire.Writer{ .bytes = &bytes };
+        try w.int(u16, 46);
+        try w.int(u32, space.index);
+        try w.int(u16, 0x0b);
+        try w.int(u32, attributes);
+        try w.sized(&space.binding.pinned);
+        try w.int(u16, space.size);
+        try w.sized(&objectName(bytes[2..48]));
+        const public = try parseNvPublic(bytes[0..w.pos], space);
+        if (public.written) {
+            try std.testing.expect(!std.mem.eql(u8, &unwritten_name, &public.name));
+        } else unwritten_name = public.name;
+        var discovery = space;
+        discovery.binding = .discover;
+        try std.testing.expectEqualDeep(public, try parseNvPublic(bytes[0..w.pos], discovery));
+        discovery.binding = .none;
+        try std.testing.expectError(error.InvalidResponse, parseNvPublic(bytes[0..w.pos], discovery));
+        for (0..w.pos) |len| try std.testing.expectError(error.InvalidResponse, parseNvPublic(bytes[0..len], space));
+        try std.testing.expectError(error.InvalidResponse, parseNvPublic(&bytes, space));
+        var wrong = space;
+        wrong.binding.pinned[0] ^= 1;
+        try std.testing.expectError(error.NvBindingMismatch, parseNvPublic(bytes[0..w.pos], wrong));
+        var forged = bytes;
+        forged[8] ^= 0x20; // Changing WRITTEN without changing Name is invalid.
+        try std.testing.expectError(error.IntegrityFailure, parseNvPublic(forged[0..w.pos], space));
+    }
+    const PublicIo = struct {
+        payload: []const u8,
+        reads: usize = 0,
+        pub fn random(_: *@This(), _: []u8) !void {
+            return error.UnexpectedAuthorization;
+        }
+        pub fn execute(self: *@This(), command: []const u8, response: []u8, _: u32) ![]u8 {
+            if (std.mem.readInt(u32, command[6..10], .big) != NV_READ_PUBLIC) return error.UnexpectedWrite;
+            self.reads += 1;
+            var w = wire.Writer{ .bytes = response };
+            try w.begin(0x8001, 0);
+            try w.put(self.payload);
+            return response[0..w.finish().len];
+        }
+    };
+    var io = PublicIo{ .payload = bytes[0..84] };
+    var client = Client{ .parent = 0x8000_0000 };
+    const data: [136]u8 = @splat(1);
+    try std.testing.expectError(error.NvAlreadyInitialized, client.nvInitialize(&io, space, &(@as(Key, @splat(1))), &data));
+    try std.testing.expectEqual(@as(usize, 1), io.reads);
+    try std.testing.expect(!client.failed);
 }
 
 test "TPM NV public parsing rejects weaker access policy altered names and noncanonical framing" {

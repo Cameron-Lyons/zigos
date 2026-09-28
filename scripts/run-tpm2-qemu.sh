@@ -79,6 +79,14 @@ run_boot() {
     return 1
   fi
   if [ -n "$sealing_marker" ]; then
+    local enrollment_marker='ZIGOS:TPM2:ENROLLMENT_RECOVERY:VERIFIED'
+    if [ "$name" = cold ]; then enrollment_marker='ZIGOS:TPM2:ENROLLMENT_RECOVERY:COMMITTED'; fi
+    if [ "$name" = different-tpm ]; then enrollment_marker='ZIGOS:TPM2:ENROLLMENT_RECOVERY:MISSING'; fi
+    if [ "$(grep -c '^ZIGOS:TPM2:ENROLLMENT_RECOVERY:' "$log" || true)" -ne 1 ] || ! grep -Fxq "$enrollment_marker" "$log"; then
+      cat "$log" >&2
+      echo "TPM2 initial enrollment recovery mismatch for $name" >&2
+      return 1
+    fi
     if [ "$(grep -c '^ZIGOS:TPM2:SEAL:' "$log")" -ne 1 ] || ! grep -Fxq "$sealing_marker" "$log"; then
       cat "$log" >&2
       echo "TPM2 sealing result mismatch for $name" >&2
@@ -172,8 +180,26 @@ run_interrupted_checkpoint() {
   echo 'TPM2 QEMU interrupted checkpoint: PASS'
 }
 
+run_interrupted_enrollment() {
+  local log="$LOG_DIR/interrupted-enrollment.log"
+  start_tpm interrupted-enrollment
+  export QEMU_EXTRA_ARGS="$BASE_EXTRA_ARGS -chardev socket,id=zigos_tpm_socket,path=$TPM_WORK/control.sock -tpmdev emulator,id=zigos_tpm,chardev=zigos_tpm_socket -device tpm-crb,tpmdev=zigos_tpm"
+  qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" \
+    'ZIGOS:TPM2:ENROLLMENT_RECOVERY:INTERRUPTED' "${TPM2_QEMU_SECONDS:-90}"
+  stop_tpm
+  if ! grep -Fxq 'ZIGOS:TPM2:CRB_READY' "$log" ||
+    [ "$(grep -c '^ZIGOS:TPM2:ENROLLMENT_RECOVERY:' "$log" || true)" -ne 1 ] ||
+    grep -Eq '^ZIGOS:TPM2:(SEAL|IDENTITY|VAULT):|FAIL' "$log"; then
+    cat "$log" >&2
+    echo 'TPM2 interrupted enrollment did not stop before its first NV write' >&2
+    return 1
+  fi
+  echo 'TPM2 QEMU interrupted enrollment: PASS'
+}
+
 bash "$SCRIPT_DIR/build-native-store.sh" "$STORE_IMAGE" 8 reset
 if [ "$MODE" = sealing ]; then
+  run_interrupted_enrollment
   run_boot cold tpm-crb 'ZIGOS:TPM2:CRB_READY' 'ZIGOS:TPM2:SEAL:CREATED'
   # Give each restart case the same persisted sealed object. Verification
   # fixtures mutate other records on each boot and are not a soak workload.

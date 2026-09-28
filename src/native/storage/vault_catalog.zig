@@ -168,6 +168,31 @@ pub fn inspect(storage: *const storage_service.Service, trust: Trust, scratch: *
     return (try readTrusted(storage, trust, scratch)).checkpoint;
 }
 
+pub const EnrollmentCandidate = struct {
+    checkpoint: Checkpoint,
+    device_root_pin: ?signing.PublicKey,
+};
+
+// This candidate comes entirely from untrusted disk bytes. A valid signature
+// proves self-consistency, not enrollment authority. No keys are unsealed and
+// no state is published. Authenticate the exact candidate against an independent
+// enrollment commitment before using it as a restore pin.
+pub fn inspectEnrollment(storage: *const storage_service.Service, object_id: u64, owner: principal.PrincipalId, scratch: *[MAX_BYTES]u8) !EnrollmentCandidate {
+    const version = storage.latestVersion(object_id) orelse return error.VaultCatalogMissing;
+    const key = version.metadata.signature.publicKeySlice();
+    if (key.len != signing.PUBLIC_KEY_BYTES) return error.UntrustedVaultCatalog;
+    const verified = try readTrusted(storage, .{ .object_id = object_id, .owner = owner, .public_key = key[0..signing.PUBLIC_KEY_BYTES].* }, scratch);
+    var reader = Reader{ .buffer = verified.payload };
+    const saved = try header(&reader, object_id);
+    for (saved.slot_ids) |id| if (secrets.isLiveId(id)) {
+        _ = try readRecord(&reader, owner);
+    };
+    const credentials = try reader.readSlice(try reader.readU16());
+    identity.validateSnapshot(owner, credentials) catch return error.InvalidVaultCatalog;
+    const pin = try graph_snapshot.enrollmentCandidatePin(owner, verified.payload[reader.offset..]);
+    return .{ .checkpoint = verified.checkpoint, .device_root_pin = pin };
+}
+
 // Recover only one signed, direct successor of an independently pinned digest.
 // Unsigned object-store parent/version identifiers are never recovery authority.
 pub fn inspectSuccessor(storage: *const storage_service.Service, trust: Trust, scratch: *[MAX_BYTES]u8) !Checkpoint {
@@ -441,6 +466,42 @@ test "vault catalog authenticates its trust pin owner and signed generation" {
     trust.minimum_generation = 2;
     try std.testing.expectError(error.VaultCatalogRollback, restore(&device.service, .{ .vault = &recovered, .identities = &identities }, trust, &scratch));
     try std.testing.expectEqual(@as(u8, 0), recovered.store.secret_count);
+}
+
+test "vault catalog enrollment inspection checks signed framing without restoring secrets" {
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var identities = identity.Store.init();
+    var fixture = SigningFixture{};
+    const signer = try prepare(&fixture, &device.service);
+    var scratch: [MAX_BYTES]u8 = undefined;
+    var session = Session{};
+    const first = try session.save(&device.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 2, &scratch);
+    const candidate = try inspectEnrollment(&device.service, test_object_id, test_owner, &scratch);
+    try std.testing.expectEqualDeep(try inspect(&device.service, try testTrust(), &scratch), candidate.checkpoint);
+    try std.testing.expect(candidate.device_root_pin == null);
+    try std.testing.expectError(error.InvalidVaultCatalog, inspectEnrollment(&device.service, test_object_id, .{ .kind = .user, .serial = test_owner.serial + 1 }, &scratch));
+    const version = device.service.version(first.version_id).?.*;
+    var saved: [MAX_BYTES]u8 = undefined;
+    const payload = try device.service.versionPayloadInto(&version, &saved);
+    var altered = saved;
+    altered[header_bytes + 1] ^= 1; // canonical, but wrong sealed-record owner
+    var metadata = try signer.signObjectMetadata(label, CONTENT_TYPE, .secret, altered[0..payload.len], 3);
+    var changed = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = altered[0..payload.len], .metadata = metadata, .parent_version_id = ids.version(first.version_id) });
+    try std.testing.expectError(error.InvalidVaultCatalog, inspectEnrollment(&device.service, test_object_id, test_owner, &scratch));
+    // Even a valid signature cannot make a truncated graph valid enrollment.
+    metadata = try signer.signObjectMetadata(label, CONTENT_TYPE, .secret, payload[0 .. payload.len - 1], 3);
+    changed = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = payload[0 .. payload.len - 1], .metadata = metadata, .parent_version_id = changed.version_id });
+    try std.testing.expectError(error.InvalidGraphSnapshot, inspectEnrollment(&device.service, test_object_id, test_owner, &scratch));
+    // A different self-signed catalog is only a candidate, never independent
+    // trust. The TPM enrollment commitment must reject its different digest.
+    var foreign_fixture = SigningFixture{};
+    const foreign_signer = try foreign_fixture.init(test_owner, device.service.owner, device.service.task_id, .{ .label = "foreign", .seed = @splat(0xee) });
+    metadata = try foreign_signer.signObjectMetadata(label, CONTENT_TYPE, .secret, payload, 3);
+    _ = try device.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id), .object_type = .secret, .payload = payload, .metadata = metadata, .parent_version_id = changed.version_id });
+    const foreign = try inspectEnrollment(&device.service, test_object_id, test_owner, &scratch);
+    try std.testing.expect(!std.mem.eql(u8, &candidate.checkpoint.public_key, &foreign.checkpoint.public_key));
+    try std.testing.expectEqual(@as(u8, 0), identities.credential_count);
 }
 
 test "vault catalog rejects incomplete framing and rolls back a later failed unseal" {

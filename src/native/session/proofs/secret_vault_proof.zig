@@ -236,8 +236,8 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             .checkpoint = try catalog.inspect(storage, .{ .object_id = remote_catalog_id, .owner = owner, .public_key = remote_catalog_pin }, &catalog_scratch),
             .device_root_pin = root_pin,
         } };
-        try anchor_backend.provision();
-        try remote_anchor.provision();
+        try anchor_backend.provision(storage, &catalog_scratch);
+        try remote_anchor.provision(storage, &catalog_scratch);
         try proveNvRejections(io, authorization);
         console.print("ZIGOS:TPM2:CATALOG:COMMITTED\n");
     }
@@ -570,12 +570,12 @@ fn proveNvRejections(io: anytype, authorization: *const tpm.Key) !void {
     var bytes: [nv_anchor.RECORD_BYTES]u8 = @splat(0xaa);
     var wrong = authorization.*;
     wrong[0] ^= 1;
-    const space = tpm.NvSpace{ .index = local_index, .size = bytes.len };
+    const space = tpm.NvSpace{ .index = local_index, .size = bytes.len, .binding = .discover };
     if (client.nvRead(io, space, &wrong, &bytes)) |_| return error.AcceptedWrongNvAuthorization else |err| {
         if (err != error.TpmError or client.last_tpm_error != 0x98e or !std.mem.allEqual(u8, &bytes, 0)) return error.BadNvAuthorizationFailure;
     }
     try client.nvRead(io, space, authorization, &bytes);
-    if (client.nvDefine(io, space, authorization)) |_| return error.RedefinedVaultAnchor else |err| {
+    if (client.nvDefine(io, .{ .index = local_index, .size = bytes.len }, authorization)) |_| return error.RedefinedVaultAnchor else |err| {
         if (err != error.TpmError or client.last_tpm_error != 0x14c) return error.BadNvRedefinitionFailure;
     }
     io.corrupt_nv_read = true;

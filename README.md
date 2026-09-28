@@ -214,13 +214,24 @@ requests.
   disk durability, and advances NV before restoring secrets. Unrelated histories,
   skipped generations, unsigned version links, and older snapshots cannot authorize
   recovery. Normal saves still use one NV write, with unchanged 136-byte anchors
-  and 112-byte checkpoint coordination state. Interrupted first enrollment still
-  needs explicit recovery. Production authorization provisioning,
-  catalog trust-pin enrollment, physical TPM persistence validation, trusted
+  and 112-byte checkpoint coordination state. First enrollment durably commits
+  the catalog, then binds its exact initial anchor and NV index into the immutable
+  SHA-256 `authPolicy` field at index definition. AUTHREAD/AUTHWRITE remain the
+  only data-access paths. After interruption, bounded inspection reconstructs an
+  untrusted candidate without unsealing keys. A successful HMAC operation using
+  that committed NV Name authenticates the candidate before restore. Recovery
+  writes only an unwritten index, checking WRITTEN in the same public-area snapshot
+  used for the command HMAC. An already committed enrollment is compared exactly
+  and never rewritten; a missing index requires explicit recovery. This closes
+  the definition/first-write crash gap without another object or normal-checkpoint
+  NV write. Production authorization provisioning and first-user enrollment UI,
+  physical TPM persistence validation, trusted
   PIN/biometric verification and session-lifecycle integration, and userspace
   request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
-  creation, recovery from the native disk after restarting the VM and swtpm,
+  interrupted initial enrollment, recovery from the native disk after restarting
+  the VM and swtpm, lost first-write replies, altered enrollment commitments,
+  a forged public WRITTEN status, missing-index refusal,
   repeated handle cleanup, bad authorization, private-blob tampering, response
   HMAC tampering, and refusal by a replacement TPM. The same guest test persists
   a vault-generated signing key, checks its public key after reboot, proves another

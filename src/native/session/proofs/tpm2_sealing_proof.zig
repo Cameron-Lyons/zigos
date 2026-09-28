@@ -23,6 +23,7 @@ const Io = struct {
     corrupt_nv_read: bool = false,
     corrupt_nv_write: bool = false,
     interrupt_nv_write: bool = false,
+    spoof_unwritten_once: bool = false,
     nv_writes: usize = 0,
     corrupted: bool = false,
 
@@ -40,6 +41,14 @@ const Io = struct {
             self.nv_writes += 1;
         }
         const reply = try hardware.execute(command, response, timeout_ms);
+        if (self.spoof_unwritten_once and std.mem.readInt(u32, command[6..10], .big) == 0x169 and std.mem.readInt(u32, reply[6..10], .big) == 0) {
+            self.spoof_unwritten_once = false;
+            const public_len = std.mem.readInt(u16, reply[10..12], .big);
+            const attrs = std.mem.readInt(u32, reply[18..22], .big);
+            if (attrs & 0x2000_0000 == 0 or reply.len != 12 + public_len + 36) return error.InvalidWrittenPublicArea;
+            std.mem.writeInt(u32, reply[18..22], attrs & ~@as(u32, 0x2000_0000), .big);
+            Sha256.hash(reply[12..][0..public_len], reply[16 + public_len ..][0..32], .{});
+        }
         if (self.known_key) |key| {
             if (std.mem.indexOf(u8, reply, key) != null) return error.PlaintextKey;
         }
@@ -61,6 +70,11 @@ pub fn run(manager: anytype) !void {
     var io = Io{};
     var client = sealing.Client{};
     defer client.close(&io) catch {};
+    @import("tpm2_enrollment_proof.zig").run(manager, &io, &auth) catch |err| {
+        var line: [128]u8 = undefined;
+        console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:ENROLLMENT_RECOVERY:FAIL {s}\n", .{@errorName(err)}) catch "ZIGOS:TPM2:ENROLLMENT_RECOVERY:FAIL\n");
+        return err;
+    };
     runWithClient(manager, &client, &io) catch |err| {
         var line: [128]u8 = undefined;
         console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:SEAL:FAIL {s} code={x}\n", .{ @errorName(err), client.last_tpm_error }) catch "ZIGOS:TPM2:SEAL:FAIL\n");
