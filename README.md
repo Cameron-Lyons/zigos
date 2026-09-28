@@ -799,6 +799,41 @@ All generated optical media are UEFI-only and are rejected unless they contain a
 bootable x86-64 EFI El Torito image. The QEMU harness uses OVMF pflash firmware
 and exposes boot media through virtio-SCSI instead of a legacy disk controller;
 legacy BIOS boot is not a supported execution path.
+Each native EFI executable embeds its kernel ELF and command line. The loader
+never reads a replacement kernel or options from the boot volume or firmware
+load options. It validates the ELF layout, reserves every destination page,
+and passes SHA-256 measurements of the exact embedded payload to the kernel.
+The kernel loads at 32 MiB, above the low firmware allocations observed in OVMF.
+EFI allocates the 32 MiB early heap separately below the identity-map limit;
+the frame allocator preserves both exact ranges and keeps free gaps available.
+It no longer assumes that memory following the kernel is safe to overwrite.
+Recovery and benchmark VMs share the default 256 MiB QEMU memory setting so
+firmware has room for the explicitly reserved heap.
+Firmware authentication is recorded separately: SecureBoot must be one and
+SetupMode must be zero; AuditMode, if present, must be zero. Missing required
+state, malformed values, and read errors leave the boot unverified.
+Unsigned QEMU boots cannot claim an authenticated root or
+use it for remote attestation. Runtime measurement snapshots and the embedded
+fixture-signed manifests check consistency; they do not establish release
+authority, prove TPM PCR values, or enforce rollback protection.
+
+`./scripts/zig.sh build unified-efi-qemu-test` checks firmware authorization of
+the complete EFI image, rejection of changes to either embedded payload, and
+immunity to external kernel and command-line files. This proof uses the production
+kernel with embedded QEMU test options; release media retain the hardware CPU
+baseline. It needs Python packages
+`virt-firmware` (tested with 26.9) and `pefile`, and Secure Boot capable OVMF.
+Set `OVMF_SECURE_BOOT_CODE` and matching `OVMF_SECURE_BOOT_VARS` (or `OVMF_VARS`);
+`EFI_TEST_PYTHON` and `EFI_VARS_TOOL`
+can select tools installed in an isolated virtual environment. The test enrolls
+only disposable VM variables and never accesses host firmware. CI supplies the
+isolated tools, and release-security-preflight includes this gate. The production
+hardware proof requires Secure Boot enabled and a firmware-authenticated image.
+Release signing, signer enrollment, TPM measured-boot quotes, and anti-rollback
+policy remain separate production work. The firmware state and whole-image
+authentication rules follow the [UEFI boot manager](https://uefi.org/specs/UEFI/2.11/03_Boot_Manager.html)
+and [image validation specification](https://uefi.org/specs/UEFI/2.11/32_Secure_Boot_and_Driver_Signing.html).
+
 The installed benchmark ELF retains symbols for diagnostics, while its boot
 media contains a separately linked debug-stripped derivative so firmware never
 parses the suite's large non-loadable debug sections.

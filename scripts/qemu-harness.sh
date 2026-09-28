@@ -65,7 +65,7 @@ qemu_harness_cpu_model() {
 }
 
 qemu_harness_profile_memory() {
-  printf '%s\n' "${QEMU_PROFILE_MEMORY:-${QEMU_MEMORY:-128M}}"
+  printf '%s\n' "${QEMU_PROFILE_MEMORY:-$(qemu_harness_default_memory)}"
 }
 
 qemu_harness_native_smoke_memory() {

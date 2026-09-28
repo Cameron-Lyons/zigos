@@ -53,6 +53,7 @@ pub const Info = struct {
     acpi2_rsdp_addr: u32 = 0,
     acpi2_rsdp_length: u32 = 0,
     efi64_system_table_addr: u64 = 0,
+    boot_image: ?multiboot2.image_info.Info = null,
 
     pub fn hasMemoryInfo(self: Info) bool {
         return (self.flags & FLAG_MEMORY_INFO) != 0;
@@ -197,6 +198,7 @@ pub fn parseMultiboot2Info(bytes: []const u8, physical_base: u32) Error!Info {
         .acpi2_rsdp_addr = parsed.acpi2_rsdp_addr,
         .acpi2_rsdp_length = parsed.acpi2_rsdp_length,
         .efi64_system_table_addr = parsed.efi64_system_table_addr,
+        .boot_image = parsed.boot_image,
     };
 }
 

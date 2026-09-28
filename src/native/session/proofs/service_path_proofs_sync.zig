@@ -846,7 +846,7 @@ fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
     try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .policy, "identity-first", "strict");
     try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .driver_set, "signed-network-driver", "net");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
     return boot;
 }
 

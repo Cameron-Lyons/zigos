@@ -1186,7 +1186,7 @@ fn verifiedDriverPeerBoot(generation: u64) !measured_boot.BootRecord {
     try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "native-network-policy", "strict");
     try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "native-network-driver-set", "i225");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
     return boot;
 }
 

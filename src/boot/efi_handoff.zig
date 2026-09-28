@@ -1,5 +1,6 @@
 const std = @import("std");
 const endian = @import("bytes.zig");
+pub const image_info = @import("image_info.zig");
 
 const writeU32 = endian.writeU32Le;
 const writeU64 = endian.writeU64Le;
@@ -63,6 +64,7 @@ pub const Request = struct {
     framebuffer: ?Framebuffer = null,
     efi_system_table: u64 = 0,
     acpi_rsdp: []const u8 = &.{},
+    boot_image: ?image_info.Info = null,
 };
 
 pub const USES_NATIVE_EFI_STUB = true;
@@ -89,13 +91,16 @@ pub fn rgbFromMasks(red_pos: u8, green_pos: u8, blue_pos: u8) [FRAMEBUFFER_RGB_B
     return .{ red_pos, 8, green_pos, 8, blue_pos, 8 };
 }
 
-pub fn preferredCommandLine(file_cmdline: []const u8, load_options: []const u8) []const u8 {
-    if (file_cmdline.len != 0) return file_cmdline;
-    return load_options;
+pub fn embeddedCommandLine(bytes: []const u8) error{InvalidCommandLine}![]const u8 {
+    if (bytes.len > 256) return error.InvalidCommandLine;
+    const result = std.mem.trim(u8, bytes, " \t\r\n");
+    for (result) |byte| if (byte != '\t' and (byte < 0x20 or byte > 0x7e)) return error.InvalidCommandLine;
+    return result;
 }
 
 pub fn encodedSize(request: Request) usize {
     var size: usize = INFO_HEADER_BYTES;
+    if (request.boot_image != null) size += TAG_HEADER_BYTES + image_info.PAYLOAD_BYTES;
     if (request.cmdline.len != 0) {
         size = alignTag(size + TAG_HEADER_BYTES + request.cmdline.len + 1);
     }
@@ -122,6 +127,11 @@ pub fn encode(buffer: []u8, request: Request) error{BufferTooSmall}![]u8 {
     writeU32(buffer[0..4], @intCast(needed));
 
     var offset: usize = INFO_HEADER_BYTES;
+    if (request.boot_image) |info| {
+        writeTagHeader(buffer, &offset, image_info.TAG, TAG_HEADER_BYTES + image_info.PAYLOAD_BYTES);
+        info.encode(buffer[offset..][0..image_info.PAYLOAD_BYTES]);
+        offset += image_info.PAYLOAD_BYTES;
+    }
     if (request.cmdline.len != 0) {
         const payload = request.cmdline.len + 1;
         writeTagHeader(buffer, &offset, TAG_COMMAND_LINE, TAG_HEADER_BYTES + payload);
@@ -178,19 +188,11 @@ fn alignTag(value: usize) usize {
     return std.mem.alignForward(usize, value, TAG_ALIGNMENT);
 }
 
-test "EFI command line prefers the ESP file over LoadedImage options" {
-    try std.testing.expectEqualStrings(
-        "model_inventory qemu_software_cpu_fallback qemu_tsc_frequency_hz=2400000000",
-        preferredCommandLine(
-            "model_inventory qemu_software_cpu_fallback qemu_tsc_frequency_hz=2400000000",
-            "UEFI QEMU QEMU CD-ROM",
-        ),
-    );
-    try std.testing.expectEqualStrings(
-        "UEFI QEMU QEMU CD-ROM",
-        preferredCommandLine(&.{}, "UEFI QEMU QEMU CD-ROM"),
-    );
-    try std.testing.expectEqualStrings(&.{}, preferredCommandLine(&.{}, &.{}));
+test "EFI embedded command line rejects truncation and control bytes" {
+    try std.testing.expectEqualStrings("model_inventory", try embeddedCommandLine("model_inventory\n"));
+    try std.testing.expectEqualStrings("", try embeddedCommandLine("\r\n"));
+    for ([_][]const u8{ "x\x00y", "x\ny", "x\x7f", "x" ** 257 }) |invalid|
+        try std.testing.expectError(error.InvalidCommandLine, embeddedCommandLine(invalid));
 }
 
 test "EFI memory types become Multiboot2 map kinds" {

@@ -63,7 +63,7 @@ pub const PlatformDeviceRoot = struct {
         if (device_principal.kind != .device) return error.InvalidPrincipalKind;
         if (!isPlatformBackedOrigin(origin)) return error.SoftwareDeviceKeyRejected;
         if (!boot.hasVerifiedRoot() or !boot.isInternallyConsistent()) return error.UnverifiedPlatformRoot;
-        if (boot.root_provenance != .bootloader_provided) return error.SyntheticPlatformRoot;
+        if (boot.root_provenance != .firmware_authenticated) return error.SyntheticPlatformRoot;
 
         var root = PlatformDeviceRoot{
             .origin = origin,
@@ -255,9 +255,9 @@ pub const DeviceRecord = struct {
         return self.platform_key_bound and isPlatformBackedOrigin(self.device_key_origin);
     }
 
-    pub fn hasBootloaderBackedPlatformRoot(self: *const DeviceRecord) bool {
+    pub fn hasFirmwareAuthenticatedPlatformRoot(self: *const DeviceRecord) bool {
         return self.usesPlatformBackedKey() and
-            self.platform_root_provenance == .bootloader_provided and
+            self.platform_root_provenance == .firmware_authenticated and
             self.platform_root_generation != 0 and
             !std.mem.allEqual(u8, &self.platform_root_digest, 0);
     }
@@ -890,7 +890,7 @@ fn buildPlatformKeyBinding(
 ) Error!ResolvedPlatformKeyBinding {
     if (!isPlatformBackedOrigin(request.root.origin)) return error.SoftwareDeviceKeyRejected;
     if (!request.root.device_principal.eql(device_principal)) return error.PlatformRootDeviceMismatch;
-    if (request.root.root_provenance != .bootloader_provided) return error.SyntheticPlatformRoot;
+    if (request.root.root_provenance != .firmware_authenticated) return error.SyntheticPlatformRoot;
     if (request.root.boot_generation == 0 or std.mem.allEqual(u8, &request.root.root_digest, 0)) return error.UnverifiedPlatformRoot;
     if (request.root.label_len > MAX_LABEL_BYTES) return error.LabelTooLong;
     const public_key = try identityPublicKey(device_identity, tick);
@@ -1302,8 +1302,8 @@ test "device graph binds platform-backed device keys and rejects synthetic downg
         .label = "laptop-platform-key-v2",
         .seed = signing.seedFromByte(0x63),
     };
-    const boot = try verifiedDeviceGraphBoot(61, .bootloader_provided);
-    const rotated_boot = try verifiedDeviceGraphBoot(62, .bootloader_provided);
+    const boot = try verifiedDeviceGraphBoot(61, .firmware_authenticated);
+    const rotated_boot = try verifiedDeviceGraphBoot(62, .firmware_authenticated);
     const emulator_boot = try verifiedDeviceGraphBoot(63, .emulator_provided);
     const unverified_boot = unverifiedDeviceGraphBoot(64);
 
@@ -1322,10 +1322,10 @@ test "device graph binds platform-backed device keys and rejects synthetic downg
         .root = laptop_root,
     }, 20);
     try std.testing.expect(laptop_record.usesPlatformBackedKey());
-    try std.testing.expect(laptop_record.hasBootloaderBackedPlatformRoot());
+    try std.testing.expect(laptop_record.hasFirmwareAuthenticatedPlatformRoot());
     try std.testing.expectEqual(DeviceKeyOrigin.secure_enclave, laptop_record.device_key_origin);
     try std.testing.expectEqualStrings("laptop-bootloader-key", laptop_record.platformKeyLabelSlice());
-    try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, laptop_record.platform_root_provenance);
+    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, laptop_record.platform_root_provenance);
     try std.testing.expectEqual(@as(u64, 61), laptop_record.platform_root_generation);
     try std.testing.expectEqualSlices(u8, boot.root_digest[0..], laptop_record.platform_root_digest[0..]);
     const first_digest = laptop_record.platform_key_digest;
@@ -1349,7 +1349,7 @@ test "device graph binds platform-backed device keys and rejects synthetic downg
         .root = rotated_root,
     }, 40);
     try std.testing.expect(rotated.usesPlatformBackedKey());
-    try std.testing.expect(rotated.hasBootloaderBackedPlatformRoot());
+    try std.testing.expect(rotated.hasFirmwareAuthenticatedPlatformRoot());
     try std.testing.expectEqual(DeviceKeyOrigin.tpm, rotated.device_key_origin);
     try std.testing.expectEqualStrings("laptop-tpm-key", rotated.platformKeyLabelSlice());
     try std.testing.expectEqual(@as(u64, 62), rotated.platform_root_generation);

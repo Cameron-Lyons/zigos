@@ -161,12 +161,13 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
     "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY",
     "ZIGOS:USERSPACE:INPUT_ABI:READY",
-    "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED",
+    "ZIGOS:PLATFORM:BOOT_DESCRIPTOR:VERIFIED",
     "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED",
-    "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED",
+    "ZIGOS:PLATFORM:MEASUREMENT_SNAPSHOT:VERIFIED",
     "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED",
     "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED",
     "ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT",
+    "ZIGOS:PLATFORM:BOOT_IMAGE:FIRMWARE_AUTHENTICATED",
     "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false",
     "ZIGOS:TASK:SESSION_READY",
     "ZIGOS:NATIVE:READY",
@@ -1633,7 +1634,7 @@ fn validateNuc11tnki5KernelProofSources(
         "const boot_link = b.addSystemCommand",
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
-        "qemu_iso.addFileArg(boot_kernel)",
+        "addEfiImage(b, .ReleaseSmall, boot_kernel",
         "scripts/build-efi-iso.sh",
         "scripts/check-efi-image.sh",
         "src/boot/cmdline-qemu.txt",
@@ -1652,7 +1653,7 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
         try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
     }
-    if (std.mem.indexOf(u8, kernel_build_source, "addEfiStub") == null or
+    if (std.mem.indexOf(u8, kernel_build_source, "addEfiImage") == null or
         std.mem.indexOf(u8, kernel_build_source, ".os_tag = .uefi") == null)
     {
         try common.addError(errors, allocator, "kernel build must emit a native x86-64 UEFI stub", .{});
@@ -1671,10 +1672,12 @@ fn validateNuc11tnki5KernelProofSources(
         "efi_elf.load",
         "efi_handoff.encode",
         "enterKernel",
-        "KERNEL_PATH",
-        "CMDLINE_PATH",
-        "preferredCommandLine",
-        "loadCommandLineFile",
+        "payload.kernel",
+        "payload.cmdline",
+        "embeddedCommandLine",
+        "authenticatedFirmwareState",
+        "readFirmwareByte",
+        "segment.pageCount()",
         "HANDOFF_MAX_ADDRESS",
         "128 * 1024 * 1024",
     };
@@ -1689,7 +1692,8 @@ fn validateNuc11tnki5KernelProofSources(
         "EXITS_BOOT_SERVICES",
         "TAG_ACPI_NEW",
         "TAG_EFI64_SYSTEM_TABLE",
-        "preferredCommandLine",
+        "embeddedCommandLine",
+        "boot_image",
     };
     for (required_efi_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, efi_handoff_source, snippet) == null) {
@@ -1833,7 +1837,7 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "kernel build must include the FRED event-delivery assembly", .{});
     }
     if (std.mem.indexOf(u8, kernel_build_source, "src/boot/efi_stub.zig") == null or
-        std.mem.indexOf(u8, kernel_build_source, "addNativeEfiStub") == null)
+        std.mem.indexOf(u8, kernel_build_source, "addEfiImage") == null)
     {
         try common.addError(errors, allocator, "kernel build must compile the native EFI long-mode stub", .{});
     }

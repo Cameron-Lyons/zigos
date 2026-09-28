@@ -235,8 +235,8 @@ test "sync service persists platform-backed device key bindings across restart" 
         .label = "persistent-platform-laptop-v2",
         .seed = signing.seedFromByte(0x93),
     };
-    const boot = try verifiedSyncDeviceGraphBoot(9_340, .bootloader_provided);
-    const rotated_boot = try verifiedSyncDeviceGraphBoot(9_341, .bootloader_provided);
+    const boot = try verifiedSyncDeviceGraphBoot(9_340, .firmware_authenticated);
+    const rotated_boot = try verifiedSyncDeviceGraphBoot(9_341, .firmware_authenticated);
     const provider = device_graph.PlatformKeyBindingRequest{
         .root = try device_graph.PlatformDeviceRoot.fromBootRecord(laptop, .secure_enclave, "laptop-secure-enclave-key", &boot),
     };
@@ -259,7 +259,7 @@ test "sync service persists platform-backed device key bindings across restart" 
     _ = try port.ensureUserRoot(syncAuthority(&service, sync_owner, authority_capability, 1), user, "owner", user_signer);
     const enrolled = try port.enrollPlatformBackedDevice(syncAuthority(&service, sync_owner, authority_capability, 2), user, laptop, "laptop", user_signer, laptop_signer, provider, 2);
     try std.testing.expect(enrolled.usesPlatformBackedKey());
-    try std.testing.expect(enrolled.hasBootloaderBackedPlatformRoot());
+    try std.testing.expect(enrolled.hasFirmwareAuthenticatedPlatformRoot());
     try std.testing.expectEqual(device_graph.DeviceKeyOrigin.secure_enclave, enrolled.device_key_origin);
     try std.testing.expectEqualSlices(u8, boot.root_digest[0..], enrolled.platform_root_digest[0..]);
 
@@ -271,12 +271,12 @@ test "sync service persists platform-backed device key bindings across restart" 
     var restarted = try Service.initWithStorage(9_330, 9_331, sync_owner, &storage, &restarted_resident);
     const restored = restarted.findDeviceRecord(laptop).?;
     try std.testing.expect(restored.usesPlatformBackedKey());
-    try std.testing.expect(restored.hasBootloaderBackedPlatformRoot());
+    try std.testing.expect(restored.hasFirmwareAuthenticatedPlatformRoot());
     try std.testing.expectEqual(device_graph.DeviceKeyOrigin.tpm, restored.device_key_origin);
     try std.testing.expectEqualStrings("laptop-tpm-key", restored.platformKeyLabelSlice());
     try std.testing.expectEqualSlices(u8, rotated_digest[0..], restored.platform_key_digest[0..]);
     try std.testing.expectEqual(@as(u64, 9_341), restored.platform_root_generation);
-    try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, restored.platform_root_provenance);
+    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, restored.platform_root_provenance);
     try std.testing.expectEqualSlices(u8, rotated_boot.root_digest[0..], restored.platform_root_digest[0..]);
     try std.testing.expectEqual(@as(u32, 2), restored.key_rotation_generation);
     try std.testing.expect(!restored.isTrusted());

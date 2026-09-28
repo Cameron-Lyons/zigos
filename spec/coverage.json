@@ -1163,12 +1163,16 @@
         "src/main.zig",
         "src/native_smoke_markers.zig",
         "tools/generate_userspace_archive.zig",
-        "scripts/run-zigos-native-smoke.sh"
+        "scripts/run-zigos-native-smoke.sh",
+        "src/boot/efi_stub.zig",
+        "src/boot/efi_elf.zig",
+        "src/boot/image_info.zig",
+        "scripts/run-unified-efi-qemu.sh"
       ],
       "negative_tests": [
         {
           "file": "src/native/platform/measured_boot.zig",
-          "name": "bootloader measurement handoff rejects unsigned manifests and tampered startup artifacts"
+          "name": "measurement snapshot rejects unsigned manifests and tampered startup artifacts"
         },
         {
           "file": "src/native/platform/measured_boot.zig",
@@ -1177,6 +1181,34 @@
         {
           "file": "src/native_smoke_markers.zig",
           "name": "native smoke gate requires measured boot reboot comparison markers"
+        },
+        {
+          "file": "src/boot/efi_elf.zig",
+          "name": "ELF64 parser rejects unsafe layouts before physical allocation"
+        },
+        {
+          "file": "src/boot/efi_elf.zig",
+          "name": "ELF64 parser rejects page overlap and accepts adjacent reservations"
+        },
+        {
+          "file": "src/boot/image_info.zig",
+          "name": "EFI authentication requires complete enforcing firmware state"
+        },
+        {
+          "file": "src/kernel/boot/multiboot2.zig",
+          "name": "EFI image provenance rejects duplicates and invalid encoded claims"
+        },
+        {
+          "file": "src/native/sync/sync_state_store.zig",
+          "name": "sync state rejects the retired unauthenticated bootloader provenance"
+        },
+        {
+          "file": "src/kernel/memory/firmware_memory_map.zig",
+          "name": "kernel and EFI heap reservations preserve free gaps and firmware NVS"
+        },
+        {
+          "file": "src/kernel/memory/firmware_memory_map.zig",
+          "name": "kernel reservation rejects overlapping or overflowing EFI heap ranges atomically"
         }
       ]
     },
@@ -1193,7 +1225,7 @@
         },
         {
           "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service rejects emulator measured roots for remote attestations"
+          "name": "attestation service rejects emulator and unauthenticated measured roots for remote attestations"
         },
         {
           "file": "src/native/platform/attestation_service.zig",

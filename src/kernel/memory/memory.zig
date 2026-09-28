@@ -4,9 +4,10 @@ const console = @import("../utils/console.zig");
 const heap_geometry = @import("heap_geometry.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const spin = @import("../utils/spin.zig");
+const boot_handoff = @import("../boot/handoff.zig");
+const boot_image = @import("../../boot/image_info.zig");
 
-const BYTES_PER_MIB: usize = 1024 * 1024;
-pub const HEAP_SIZE: usize = 32 * BYTES_PER_MIB;
+pub const HEAP_SIZE: usize = boot_image.KERNEL_HEAP_BYTES;
 const GRANULE = heap_geometry.granule;
 const PAGE_SIZE: usize = 4096;
 const MAX_SPANS: usize = 4096;
@@ -16,6 +17,7 @@ pub const MAGAZINE_CPUS: usize = 8;
 const CLASS_COUNT = heap_geometry.free_list_class_count;
 
 extern var __kernel_end: u8;
+extern var __kernel_start: u8;
 
 const SPAN_FREE: u8 = 0;
 const SPAN_LIVE: u8 = 1;
@@ -73,12 +75,18 @@ fn alignUp(addr: usize, alignment: usize) usize {
     return (addr + alignment - 1) & ~(alignment - 1);
 }
 
-fn heapStartAddress() usize {
-    return alignUp(@intFromPtr(&__kernel_end), PAGE_SIZE);
+pub fn heapStartAddress() usize {
+    const info = boot_handoff.capturedInfo() orelse @panic("missing EFI heap handoff");
+    const image = info.boot_image orelse @panic("missing EFI heap reservation");
+    return @intCast(image.heap_base);
 }
 
-pub fn getReservedMemoryEnd() usize {
-    return heapStartAddress() + HEAP_SIZE;
+pub fn kernelStartAddress() usize {
+    return @intFromPtr(&__kernel_start);
+}
+
+pub fn kernelEndAddress() usize {
+    return alignUp(@intFromPtr(&__kernel_end), PAGE_SIZE);
 }
 
 fn currentCpu() usize {

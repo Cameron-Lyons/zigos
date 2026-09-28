@@ -611,7 +611,7 @@ fn decodeDevice(resident: *state_support.ResidentState, reader: *CursorReader) E
         slot.device.platform_root_generation = try reader.readU64();
         slot.device.platform_root_provenance = try parseRootProvenance(try reader.readByte());
         try reader.readBytes(&slot.device.platform_root_digest);
-        if (!slot.device.hasBootloaderBackedPlatformRoot()) return error.CorruptState;
+        if (!slot.device.hasFirmwareAuthenticatedPlatformRoot()) return error.CorruptState;
     } else if (slot.device.device_key_origin != .software or slot.device.platform_key_label_len != 0) {
         return error.CorruptState;
     }
@@ -1046,10 +1046,17 @@ fn parseDeviceKeyOrigin(raw: u8) Error!device_graph.DeviceKeyOrigin {
 fn parseRootProvenance(raw: u8) Error!measured_boot.RootProvenance {
     return switch (raw) {
         0 => .synthetic_host,
-        1 => .bootloader_provided,
         2 => .emulator_provided,
+        3 => .firmware_authenticated,
+        4 => .unverified_boot,
         else => error.CorruptState,
     };
+}
+
+test "sync state rejects the retired unauthenticated bootloader provenance" {
+    try std.testing.expectError(error.CorruptState, parseRootProvenance(1));
+    try std.testing.expectEqual(measured_boot.RootProvenance.unverified_boot, try parseRootProvenance(4));
+    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, try parseRootProvenance(3));
 }
 
 fn parsePolicyMode(raw: u8) Error!network_policy.PolicyMode {

@@ -1165,7 +1165,7 @@ test "attestation service does not count hidden requests and detects tampering" 
 }
 
 test "attestation service can use a provisioned hardware-backed root for visible remote requests" {
-    const boot = try verifiedTestBoot(14, .bootloader_provided);
+    const boot = try verifiedTestBoot(14, .firmware_authenticated);
     const root_signer = signing.SignerIdentity{
         .label = "device-se",
         .seed = signing.seedFromByte(0x55),
@@ -1233,7 +1233,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
     try std.testing.expectEqualStrings("device-se", statement.rootLabelSlice());
     try std.testing.expectEqualStrings("device-se", statement.rootKeyIdSlice());
     try std.testing.expectEqual(@as(u64, 1), statement.root_key_generation);
-    try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, statement.root_provenance);
+    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, statement.root_provenance);
     try std.testing.expect(statement.manifest_verified);
 
     try std.testing.expect(!Service.verifyForBoot(statement, .{
@@ -1259,7 +1259,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
 }
 
 test "attestation verifier rejects revoked root generations after rotation" {
-    const boot = try verifiedTestBoot(18, .bootloader_provided);
+    const boot = try verifiedTestBoot(18, .firmware_authenticated);
     var v1_provider = FakeTpmRootProvider.initGeneration(.{
         .label = "device-tpm-v1",
         .seed = signing.seedFromByte(0x5C),
@@ -1334,7 +1334,7 @@ test "attestation verifier rejects revoked root generations after rotation" {
 }
 
 test "attestation request response records bind verifier policy rotation and revocation" {
-    const boot = try verifiedTestBoot(19, .bootloader_provided);
+    const boot = try verifiedTestBoot(19, .firmware_authenticated);
     var v1_provider = FakeTpmRootProvider.initGeneration(.{
         .label = "device-tpm-v1",
         .seed = signing.seedFromByte(0x60),
@@ -1441,7 +1441,7 @@ test "attestation request response records bind verifier policy rotation and rev
 }
 
 test "external attestation root provider signs through operational key handles" {
-    const boot = try verifiedTestBoot(20, .bootloader_provided);
+    const boot = try verifiedTestBoot(20, .firmware_authenticated);
     const external_signer = signing.SignerIdentity{
         .label = "device-hsm-root",
         .seed = signing.seedFromByte(0x62),
@@ -1700,24 +1700,26 @@ test "production attestation descriptors reject test-only operational names" {
     ));
 }
 
-test "attestation service rejects emulator measured roots for remote attestations" {
-    const boot = try verifiedTestBoot(17, .emulator_provided);
-    try std.testing.expect(boot.hasVerifiedRoot());
-    try std.testing.expect(!boot.isRemoteAttestable());
+test "attestation service rejects emulator and unauthenticated measured roots for remote attestations" {
+    for ([_]measured_boot.RootProvenance{ .emulator_provided, .unverified_boot }) |provenance| {
+        const boot = try verifiedTestBoot(17, provenance);
+        try std.testing.expect(boot.hasVerifiedRoot());
+        try std.testing.expect(!boot.isRemoteAttestable());
 
-    var service = Service.init(.{ .kind = .device, .serial = 40 });
-    var root_provider = FakeTpmRootProvider.init(.{
-        .label = "device-tpm",
-        .seed = signing.seedFromByte(0x5A),
-    });
-    try service.provisionRootProvider(root_provider.provider());
+        var service = Service.init(.{ .kind = .device, .serial = 40 });
+        var root_provider = FakeTpmRootProvider.init(.{
+            .label = "device-tpm",
+            .seed = signing.seedFromByte(0x5A),
+        });
+        try service.provisionRootProvider(root_provider.provider());
 
-    try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
-        boot,
-        "attest.example",
-        "remote-nonce-0006",
-        true,
-    ));
+        try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
+            boot,
+            "attest.example",
+            "remote-nonce-0006",
+            true,
+        ));
+    }
 }
 
 test "attestation service rejects provisioned remote attestations without a verified measured root" {
@@ -1787,7 +1789,7 @@ test "attestation service rejects anonymous root providers" {
 }
 
 test "attestation verification rejects measured state and statement tampering" {
-    const boot = try verifiedTestBoot(16, .bootloader_provided);
+    const boot = try verifiedTestBoot(16, .firmware_authenticated);
     const root_signer = signing.SignerIdentity{
         .label = "device-tpm",
         .seed = signing.seedFromByte(0x58),

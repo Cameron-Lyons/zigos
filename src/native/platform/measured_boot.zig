@@ -41,7 +41,7 @@ pub const BUILD_ARTIFACT_ENTRY_SIZE_CEILING_BYTES: usize = 82;
 pub const ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 1_328;
 pub const BUILD_ARTIFACT_MANIFEST_SIZE_CEILING_BYTES: usize = 2_760;
 pub const BOOT_RECORD_SIZE_CEILING_BYTES: usize = 1_360;
-pub const BOOTLOADER_HANDOFF_SIZE_CEILING_BYTES: usize = 1_360;
+pub const MEASUREMENT_SNAPSHOT_SIZE_CEILING_BYTES: usize = 1_360;
 pub const RECORDER_SIZE_CEILING_BYTES: usize = 1_328;
 
 comptime {
@@ -72,9 +72,12 @@ pub const MeasurementKind = enum(u8) {
 };
 
 pub const RootProvenance = enum(u8) {
-    synthetic_host,
-    bootloader_provided,
-    emulator_provided,
+    synthetic_host = 0,
+    // Value 1 used to claim bootloader provenance without firmware evidence.
+    // Reject that serialized value instead of upgrading old stored claims.
+    emulator_provided = 2,
+    firmware_authenticated = 3,
+    unverified_boot = 4,
 };
 
 pub const MeasurementRecord = struct {
@@ -98,7 +101,7 @@ pub const ArtifactManifestEntry = MeasurementRecord;
 
 pub const BuildArtifactKind = enum(u8) {
     bootloader_source,
-    bootloader_measurement,
+    boot_descriptor,
     userspace_image,
 };
 
@@ -271,7 +274,7 @@ pub const BootRecord = struct {
     }
 
     pub fn isRemoteAttestable(self: *const BootRecord) bool {
-        return self.hasVerifiedRoot() and self.root_provenance == .bootloader_provided;
+        return self.hasVerifiedRoot() and self.root_provenance == .firmware_authenticated;
     }
 
     pub fn computedRootDigest(self: *const BootRecord) ?crypto_hash.Digest {
@@ -295,15 +298,17 @@ pub const BootRecord = struct {
     }
 };
 
-pub const BootloaderMeasurementHandoff = struct {
+// Snapshot consistency and fixture-manifest signatures establish integrity
+// only. Origin authentication must be supplied separately by the boot path.
+pub const MeasurementSnapshot = struct {
     generation: u64,
     record_count: u8,
     records: [MAX_RECORDS]MeasurementRecord,
     root_digest: crypto_hash.Digest,
 
-    pub fn fromBootRecord(boot: *const BootRecord) Error!BootloaderMeasurementHandoff {
+    pub fn fromBootRecord(boot: *const BootRecord) Error!MeasurementSnapshot {
         if (boot.record_count > MAX_RECORDS) return error.ManifestMismatch;
-        var handoff = BootloaderMeasurementHandoff{
+        var handoff = MeasurementSnapshot{
             .generation = boot.generation,
             .record_count = boot.record_count,
             .records = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS,
@@ -314,8 +319,8 @@ pub const BootloaderMeasurementHandoff = struct {
     }
 
     comptime {
-        if (@sizeOf(@This()) > BOOTLOADER_HANDOFF_SIZE_CEILING_BYTES) {
-            @compileError("bootloader measurement handoff exceeds its compact size ceiling");
+        if (@sizeOf(@This()) > MEASUREMENT_SNAPSHOT_SIZE_CEILING_BYTES) {
+            @compileError("measurement snapshot exceeds its compact size ceiling");
         }
     }
 };
@@ -655,10 +660,11 @@ pub fn verifyBootRecordAgainstManifest(
     boot.artifact_manifest_verified = true;
 }
 
-pub fn verifyBootloaderMeasurementHandoff(
-    handoff: *const BootloaderMeasurementHandoff,
+pub fn verifyMeasurementSnapshot(
+    handoff: *const MeasurementSnapshot,
     signed_manifest: *const SignedArtifactManifest,
     expected_signer: signing.SignerIdentity,
+    provenance: RootProvenance,
 ) Error!BootRecord {
     if (!verifySignedArtifactManifest(signed_manifest, expected_signer)) {
         return error.UntrustedArtifactManifest;
@@ -670,7 +676,7 @@ pub fn verifyBootloaderMeasurementHandoff(
         .records = handoff.records,
         .root_digest = handoff.root_digest,
     };
-    try verifyBootRecordAgainstManifest(&boot, &signed_manifest.manifest, .bootloader_provided);
+    try verifyBootRecordAgainstManifest(&boot, &signed_manifest.manifest, provenance);
     return boot;
 }
 
@@ -892,7 +898,7 @@ fn requiredArtifactShape(artifact_manifest: *const ArtifactManifest) bool {
 
 fn requiredBuildArtifactShape(manifest: *const BuildArtifactManifest) bool {
     return manifest.countKind(.bootloader_source) == 1 and
-        manifest.countKind(.bootloader_measurement) == 1 and
+        manifest.countKind(.boot_descriptor) == 1 and
         manifest.countKind(.userspace_image) >= userspace_registry.production_build_image_specs.len;
 }
 
@@ -1278,7 +1284,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     const unexpected_bootloader_digest = crypto_hash.digestFromByte(0x12);
 
     try manifest.addDigest(.bootloader_source, "src/boot/efi_stub.zig", bootloader_source_digest);
-    try manifest.addDigest(.bootloader_measurement, "efi:zigos_native", bootloader_measurement_digest);
+    try manifest.addDigest(.boot_descriptor, "efi:zigos_native", bootloader_measurement_digest);
     inline for (0..10) |index| {
         const digest = crypto_hash.digestFromByte(@intCast(0x20 + index));
         var label_buffer: [BUILD_ARTIFACT_LABEL_BUFFER_BYTES]u8 = undefined;
@@ -1291,7 +1297,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     manifest.signature = try signing.signWithDefaultRegistry(.ed25519, build_artifact_manifest_signer, payload);
 
     try std.testing.expect(verifyBuildArtifactManifest(&manifest));
-    try std.testing.expect(manifest.find(.bootloader_measurement, "efi:zigos_native") != null);
+    try std.testing.expect(manifest.find(.boot_descriptor, "efi:zigos_native") != null);
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
         .bootloader_source,
@@ -1300,7 +1306,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     ));
     try std.testing.expect(buildArtifactDigestMatches(
         &manifest,
-        .bootloader_measurement,
+        .boot_descriptor,
         "efi:zigos_native",
         &bootloader_measurement_digest,
     ));
@@ -1312,7 +1318,7 @@ test "build-generated artifact manifests reject tampered bootloader source measu
     ));
     try std.testing.expect(!buildArtifactDigestMatches(
         &manifest,
-        .bootloader_measurement,
+        .boot_descriptor,
         "efi:zigos_native",
         &unexpected_bootloader_digest,
     ));
@@ -1336,7 +1342,7 @@ test "build-generated production artifact manifest matches embedded userspace ar
     try generatedProductionArtifactManifestMatchesUserspaceArchive();
 }
 
-test "bootloader measurement handoff rejects unsigned manifests and tampered startup artifacts" {
+test "measurement snapshot rejects unsigned manifests and tampered startup artifacts" {
     var artifact_manifest = ArtifactManifest.init(33);
     var recorder = Recorder.init();
     recorder.begin(33);
@@ -1352,28 +1358,33 @@ test "bootloader measurement handoff rejects unsigned manifests and tampered sta
 
     const signed_manifest = try signArtifactManifest(artifact_manifest, production_artifact_manifest_signer);
     const boot = recorder.finalize();
-    const handoff = try BootloaderMeasurementHandoff.fromBootRecord(&boot);
-    const verified = try verifyBootloaderMeasurementHandoff(
+    const handoff = try MeasurementSnapshot.fromBootRecord(&boot);
+    const verified = try verifyMeasurementSnapshot(
         &handoff,
         &signed_manifest,
         production_artifact_manifest_signer,
+        .firmware_authenticated,
     );
+    const unverified = try verifyMeasurementSnapshot(&handoff, &signed_manifest, production_artifact_manifest_signer, .unverified_boot);
+    try std.testing.expect(unverified.hasVerifiedRoot());
+    try std.testing.expect(!unverified.isRemoteAttestable());
+    try std.testing.expectEqual(RootProvenance.unverified_boot, unverified.root_provenance);
     try std.testing.expect(verified.hasVerifiedRoot());
     try std.testing.expect(verified.isRemoteAttestable());
-    try std.testing.expectEqual(RootProvenance.bootloader_provided, verified.root_provenance);
+    try std.testing.expectEqual(RootProvenance.firmware_authenticated, verified.root_provenance);
 
     var unsigned_manifest = signed_manifest;
     unsigned_manifest.manifest.entries[0].digest[0] ^= 0x40;
     try std.testing.expectError(
         error.UntrustedArtifactManifest,
-        verifyBootloaderMeasurementHandoff(&handoff, &unsigned_manifest, production_artifact_manifest_signer),
+        verifyMeasurementSnapshot(&handoff, &unsigned_manifest, production_artifact_manifest_signer, .firmware_authenticated),
     );
 
     var wrong_root = handoff;
     wrong_root.root_digest[31] ^= 0x20;
     try std.testing.expectError(
         error.ManifestMismatch,
-        verifyBootloaderMeasurementHandoff(&wrong_root, &signed_manifest, production_artifact_manifest_signer),
+        verifyMeasurementSnapshot(&wrong_root, &signed_manifest, production_artifact_manifest_signer, .firmware_authenticated),
     );
 
     for (0..artifact_manifest.entry_count) |entry_index| {
@@ -1381,7 +1392,7 @@ test "bootloader measurement handoff rejects unsigned manifests and tampered sta
         tampered_handoff.records[entry_index].digest[0] ^= 0x11;
         try std.testing.expectError(
             error.ManifestMismatch,
-            verifyBootloaderMeasurementHandoff(&tampered_handoff, &signed_manifest, production_artifact_manifest_signer),
+            verifyMeasurementSnapshot(&tampered_handoff, &signed_manifest, production_artifact_manifest_signer, .firmware_authenticated),
         );
 
         var tampered_manifest = artifact_manifest;
@@ -1389,7 +1400,7 @@ test "bootloader measurement handoff rejects unsigned manifests and tampered sta
         const trusted_tampered_manifest = try signArtifactManifest(tampered_manifest, production_artifact_manifest_signer);
         try std.testing.expectError(
             error.ManifestMismatch,
-            verifyBootloaderMeasurementHandoff(&handoff, &trusted_tampered_manifest, production_artifact_manifest_signer),
+            verifyMeasurementSnapshot(&handoff, &trusted_tampered_manifest, production_artifact_manifest_signer, .firmware_authenticated),
         );
     }
 }
@@ -1409,10 +1420,10 @@ test "verified boot chain rejects synthetic provenance and every mismatched arti
     try addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-driver-set", "drivers=v6");
 
     var boot = recorder.finalize();
-    try verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    try verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
     try std.testing.expect(boot.hasVerifiedRoot());
     try std.testing.expect(boot.isRemoteAttestable());
-    try std.testing.expectEqual(RootProvenance.bootloader_provided, boot.root_provenance);
+    try std.testing.expectEqual(RootProvenance.firmware_authenticated, boot.root_provenance);
 
     var emulator_boot = recorder.finalize();
     try verifyBootRecordAgainstManifest(&emulator_boot, &artifact_manifest, .emulator_provided);
@@ -1431,7 +1442,7 @@ test "verified boot chain rejects synthetic provenance and every mismatched arti
     wrong_root_boot.root_digest[0] ^= 0xFF;
     try std.testing.expectError(
         error.ManifestMismatch,
-        verifyBootRecordAgainstManifest(&wrong_root_boot, &artifact_manifest, .bootloader_provided),
+        verifyBootRecordAgainstManifest(&wrong_root_boot, &artifact_manifest, .firmware_authenticated),
     );
     try std.testing.expect(!wrong_root_boot.hasVerifiedRoot());
 
@@ -1441,7 +1452,7 @@ test "verified boot chain rejects synthetic provenance and every mismatched arti
         var rejected_boot = recorder.finalize();
         try std.testing.expectError(
             error.ManifestMismatch,
-            verifyBootRecordAgainstManifest(&rejected_boot, &tampered_manifest, .bootloader_provided),
+            verifyBootRecordAgainstManifest(&rejected_boot, &tampered_manifest, .firmware_authenticated),
         );
         try std.testing.expect(!rejected_boot.hasVerifiedRoot());
 
@@ -1449,7 +1460,7 @@ test "verified boot chain rejects synthetic provenance and every mismatched arti
         tampered_boot.records[entry_index].digest[0] ^= 0xAA;
         try std.testing.expectError(
             error.ManifestMismatch,
-            verifyBootRecordAgainstManifest(&tampered_boot, &artifact_manifest, .bootloader_provided),
+            verifyBootRecordAgainstManifest(&tampered_boot, &artifact_manifest, .firmware_authenticated),
         );
         try std.testing.expect(!tampered_boot.hasVerifiedRoot());
     }

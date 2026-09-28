@@ -32,6 +32,7 @@ test "core host tests import native core modules" {
     std.testing.refAllDecls(heap_allocator_tests);
     std.testing.refAllDecls(text_scanout_tests);
     std.testing.refAllDecls(page_table64);
+    _ = @import("../../kernel/memory/paging64.zig");
     std.testing.refAllDecls(virtual_layout);
     std.testing.refAllDecls(tsc_deadline);
     _ = @import("../../kernel/timer/timer.zig");

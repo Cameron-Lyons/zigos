@@ -6,13 +6,19 @@ supplies a fresh external challenge, a separately installed hardware verifier,
 and a separately distributed release verifier. Each exact executable must
 match its independently supplied SHA-256 pin.
 
+The production firmware settings must record `secure_boot=enabled`, and the
+production capture must contain `ZIGOS:PLATFORM:BOOT_IMAGE:FIRMWARE_AUTHENTICATED`.
+Unsigned local media cannot satisfy the production proof. Firmware must authorize
+the complete unified EFI executable, including its embedded kernel and command
+line. Enrollment and signing of release images remain a separate release task.
+
 The proof uses two single-boot captures from the same stable device identity:
 
-1. Boot shipped `build/os.iso`, containing
-   `zig-out/bin/kernel-zigos-native.elf`, and capture only that boot in
+1. Boot shipped `build/os.iso`, whose EFI executable embeds the stripped
+   `zig-out/bin/kernel-zigos-native.elf` derivative, and capture only that boot in
    `production-serial.log`.
-2. Boot `build/os-verification.iso`, containing
-   `zig-out/bin/kernel-zigos-native-verification.elf`, and capture only that
+2. Boot `build/os-verification.iso`, whose EFI executable embeds the stripped
+   `zig-out/bin/kernel-zigos-native-verification.elf` derivative, and capture only that
    boot in `verification-serial.log`.
 
 Never concatenate reboots or cycle output into either single-boot log. Each

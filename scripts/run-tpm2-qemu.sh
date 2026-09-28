@@ -281,15 +281,7 @@ run_ownership_boot() {
 
 bash "$SCRIPT_DIR/build-native-store.sh" "$STORE_IMAGE" 8 reset
 if [ "$MODE" = ownership ]; then
-  # Reuse the exact verified kernel and EFI loader, changing only this
-  # verification-only boot selector on disposable media.
-  xorriso -osirrox on -indev "$QEMU_BOOT_ISO" \
-    -extract /boot/kernel.elf "$TPM_WORK/kernel.elf" \
-    -extract /EFI/BOOT/BOOTX64.EFI "$TPM_WORK/bootx64.efi" >"$LOG_DIR/iso-extract.log" 2>&1
-  { tr '\n' ' ' <"$ROOT_DIR/src/boot/cmdline-qemu.txt"; printf ' tpm_ownership_proof\n'; } >"$TPM_WORK/cmdline.txt"
-  bash "$SCRIPT_DIR/build-efi-iso.sh" "$TPM_WORK/kernel.elf" "$TPM_WORK/bootx64.efi" \
-    "$TPM_WORK/ownership.iso" "$TPM_WORK/iso-staging" "$TPM_WORK/cmdline.txt" >"$LOG_DIR/iso-build.log" 2>&1
-  export QEMU_BOOT_ISO="$TPM_WORK/ownership.iso"
+  # The build graph supplies a unified EFI image with the ownership selector.
   run_ownership_boot interrupted 'ZIGOS:TPM2:OWNER:INTERRUPTED'
   run_ownership_boot enrolled 'ZIGOS:TPM2:OWNER:ENROLLED'
   run_ownership_boot reboot 'ZIGOS:TPM2:OWNER:VERIFIED'

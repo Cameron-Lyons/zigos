@@ -1,5 +1,6 @@
 const std = @import("std");
 const endian = @import("../utils/endian.zig");
+pub const image_info = @import("../../boot/image_info.zig");
 
 const readU32Le = endian.readU32Le;
 const readU64Le = endian.readU64Le;
@@ -35,6 +36,7 @@ pub const Error = error{
 
 pub const ParsedInfo = struct {
     total_size: u32,
+    boot_image: ?image_info.Info = null,
     has_basic_memory: bool = false,
     has_command_line: bool = false,
     has_memory_map: bool = false,
@@ -103,6 +105,10 @@ pub fn parse(bytes: []const u8, physical_base: u32) Error!ParsedInfo {
         }
 
         switch (tag_type) {
+            image_info.TAG => {
+                if (parsed.boot_image != null) return error.DuplicateTag;
+                parsed.boot_image = image_info.Info.decode(bytes[header_end..tag_end]) catch return error.InvalidTag;
+            },
             TAG_COMMAND_LINE => {
                 if (seen_command_line) return error.DuplicateTag;
                 seen_command_line = true;
@@ -358,11 +364,13 @@ test "EFI stub handoff round-trips through the Multiboot2 parser" {
         },
         .efi_system_table = 0x1234_0000,
         .acpi_rsdp = &rsdp,
+        .boot_image = image_info.Info.measure("kernel", "model_inventory", false, 0x4000000),
     };
 
     var storage: [512]u8 = undefined;
     const encoded = try efi_handoff.encode(&storage, request);
     const parsed = try parse(encoded, 0x2000);
+    try std.testing.expectEqualDeep(request.boot_image.?, parsed.boot_image.?);
     try std.testing.expect(parsed.has_command_line);
     try std.testing.expect(parsed.has_memory_map);
     try std.testing.expect(parsed.has_framebuffer);
@@ -373,4 +381,21 @@ test "EFI stub handoff round-trips through the Multiboot2 parser" {
     try std.testing.expectEqual(@as(u64, 0x8000_0000), parsed.framebuffer_addr);
     try std.testing.expectEqual(@as(u64, 0x1234_0000), parsed.efi64_system_table_addr);
     try std.testing.expectEqual(@as(u32, efi_handoff.ACPI_RSDP_V2_MIN_BYTES), parsed.acpi2_rsdp_length);
+}
+
+test "EFI image provenance rejects duplicates and invalid encoded claims" {
+    const efi_handoff = @import("../../boot/efi_handoff.zig");
+    var bytes: [192]u8 = undefined;
+    const info = image_info.Info.measure("kernel", "", false, 0x4000000);
+    const encoded = try efi_handoff.encode(&bytes, .{ .boot_image = info });
+    try std.testing.expect(!(try parse(encoded, 0x1000)).boot_image.?.firmware_authenticated);
+    // Two independently well-formed tags must never disagree by parser order.
+    @memcpy(bytes[96..184], bytes[8..96]);
+    @memset(bytes[184..192], 0);
+    writeU32(bytes[188..192], 8);
+    writeU32(bytes[0..4], bytes.len);
+    try std.testing.expectError(error.DuplicateTag, parse(&bytes, 0x1000));
+    _ = try efi_handoff.encode(&bytes, .{ .boot_image = info });
+    writeU32(bytes[20..24], 2);
+    try std.testing.expectError(error.InvalidTag, parse(bytes[0..encoded.len], 0x1000));
 }

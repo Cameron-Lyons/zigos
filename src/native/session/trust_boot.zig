@@ -417,14 +417,15 @@ pub const TrustBoot = struct {
 
         var boot = measured.finalize();
         if (builtin.target.os.tag == .freestanding) {
-            const handoff = measured_boot.BootloaderMeasurementHandoff.fromBootRecord(&boot) catch return false;
+            const handoff = measured_boot.MeasurementSnapshot.fromBootRecord(&boot) catch return false;
             if (smokeFaultModeIs("tampered_artifact_manifest")) {
                 var tampered_manifest = signed_manifest;
                 tampered_manifest.manifest.entries[0].digest[0] ^= 0x5A;
-                if (measured_boot.verifyBootloaderMeasurementHandoff(
+                if (measured_boot.verifyMeasurementSnapshot(
                     &handoff,
                     &tampered_manifest,
                     measured_boot.production_artifact_manifest_signer,
+                    productionRootProvenance(),
                 )) |_| {
                     return false;
                 } else |err| switch (err) {
@@ -439,12 +440,13 @@ pub const TrustBoot = struct {
                 if (!rejectDirectArtifactTamper(&handoff, &signed_manifest, fixture.kind, fixture.marker)) return false;
                 return false;
             }
-            boot = measured_boot.verifyBootloaderMeasurementHandoff(
+            boot = measured_boot.verifyMeasurementSnapshot(
                 &handoff,
                 &signed_manifest,
                 measured_boot.production_artifact_manifest_signer,
+                productionRootProvenance(),
             ) catch return false;
-            common.printBootMarker(boot_markers.platform_bootloader_handoff_verified);
+            common.printBootMarker(boot_markers.platform_measurement_snapshot_verified);
         } else {
             measured_boot.verifyBootRecordAgainstManifest(
                 &boot,
@@ -483,7 +485,7 @@ pub const TrustBoot = struct {
             &bootloader_source_digest,
         )) return failGeneratedArtifactManifest("bootloader_source_mismatch");
 
-        const bootloader_measurement_digest = bootloaderProvidedMeasurementDigest() catch {
+        const bootloader_measurement_digest = bootDescriptorDigest() catch {
             return failGeneratedArtifactManifest("bootloader_measurement_digest");
         };
         if (smokeFaultModeIs("tampered_bootloader_measurement")) {
@@ -491,7 +493,7 @@ pub const TrustBoot = struct {
             tampered_measurement_digest[0] ^= 0x7B;
             if (measured_boot.buildArtifactDigestMatches(
                 &generated_manifest,
-                .bootloader_measurement,
+                .boot_descriptor,
                 build_bootloader_measurement_label,
                 &tampered_measurement_digest,
             )) return failGeneratedArtifactManifest("tampered_measurement_accepted");
@@ -500,7 +502,7 @@ pub const TrustBoot = struct {
         }
         if (!measured_boot.buildArtifactDigestMatches(
             &generated_manifest,
-            .bootloader_measurement,
+            .boot_descriptor,
             build_bootloader_measurement_label,
             &bootloader_measurement_digest,
         )) return failGeneratedArtifactManifest("bootloader_measurement_mismatch");
@@ -522,7 +524,7 @@ pub const TrustBoot = struct {
         }
 
         if (print_markers) {
-            common.printBootMarker(boot_markers.platform_bootloader_measurement_provided);
+            common.printBootMarker(boot_markers.platform_boot_descriptor_verified);
             common.printBootMarker(boot_markers.platform_build_artifact_manifest_verified);
         }
         return true;
@@ -785,27 +787,37 @@ fn printBaseSelectorActiveSlot(selection: immutable_base.BootSelection) void {
 
 fn productionKernelMeasurementDigest() !crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    const bootloader_digest = try bootloaderProvidedMeasurementDigest();
+    const bootloader_digest = try bootDescriptorDigest();
     const kernel_digest = try kernelImageDigest();
     crypto_hash.updateBytes(&hasher, "bootloader-measurement-digest", &bootloader_digest);
     crypto_hash.updateBytes(&hasher, "kernel-image-digest", &kernel_digest);
+    if (builtin.target.os.tag == .freestanding) {
+        const root = @import("root");
+        if (!@hasDecl(root, "bootImageDigest")) return error.MissingBootImage;
+        const image_digest = try root.bootImageDigest();
+        crypto_hash.updateBytes(&hasher, "efi-embedded-payload", &image_digest);
+    }
     return crypto_hash.finalize(&hasher);
 }
 
 fn productionRootProvenance() measured_boot.RootProvenance {
-    if (builtin.target.os.tag == .freestanding) return .bootloader_provided;
+    if (builtin.target.os.tag == .freestanding) {
+        const root = @import("root");
+        if (@hasDecl(root, "bootImageAuthenticated") and root.bootImageAuthenticated()) return .firmware_authenticated;
+        return .unverified_boot;
+    }
     return .emulator_provided;
 }
 
-fn bootloaderProvidedMeasurementDigest() !crypto_hash.Digest {
+fn bootDescriptorDigest() !crypto_hash.Digest {
     if (builtin.target.os.tag == .freestanding) {
         const root = @import("root");
-        if (@hasDecl(root, "bootloaderMeasurementDigest")) {
-            return root.bootloaderMeasurementDigest();
+        if (@hasDecl(root, "bootDescriptorDigest")) {
+            return root.bootDescriptorDigest();
         }
         return error.MissingBootloaderMeasurement;
     }
-    return emulatorProvidedBootloaderMeasurementDigest();
+    return emulatorBootDescriptorDigest();
 }
 
 fn bootloaderSourceDigest() !crypto_hash.Digest {
@@ -837,7 +849,7 @@ fn emulatorProvidedBootloaderSourceDigest() crypto_hash.Digest {
     return crypto_hash.finalize(&hasher);
 }
 
-fn emulatorProvidedBootloaderMeasurementDigest() crypto_hash.Digest {
+fn emulatorBootDescriptorDigest() crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "measurement-source", "host-emulator-bootloader-measurement");
     crypto_hash.updateBytes(&hasher, "bootloader", "efi");
@@ -1026,7 +1038,7 @@ fn directArtifactTamperFixture() ?DirectArtifactTamperFixture {
 }
 
 fn rejectDirectArtifactTamper(
-    handoff: *const measured_boot.BootloaderMeasurementHandoff,
+    handoff: *const measured_boot.MeasurementSnapshot,
     signed_manifest: *const measured_boot.SignedArtifactManifest,
     kind: measured_boot.MeasurementKind,
     marker: []const u8,
@@ -1034,10 +1046,11 @@ fn rejectDirectArtifactTamper(
     var tampered_handoff = handoff.*;
     if (!tamperFirstHandoffRecord(&tampered_handoff, kind)) return false;
 
-    if (measured_boot.verifyBootloaderMeasurementHandoff(
+    if (measured_boot.verifyMeasurementSnapshot(
         &tampered_handoff,
         signed_manifest,
         measured_boot.production_artifact_manifest_signer,
+        productionRootProvenance(),
     )) |_| {
         return false;
     } else |err| {
@@ -1054,7 +1067,7 @@ fn rejectDirectArtifactTamper(
 }
 
 fn tamperFirstHandoffRecord(
-    handoff: *measured_boot.BootloaderMeasurementHandoff,
+    handoff: *measured_boot.MeasurementSnapshot,
     kind: measured_boot.MeasurementKind,
 ) bool {
     for (handoff.records[0..handoff.record_count]) |*record| {
@@ -1075,7 +1088,10 @@ fn supportMeasuredBootShape(boot: *const measured_boot.BootRecord) void {
     {
         common.printBootMarker(boot_markers.platform_measured_boot_recorded);
         if (boot.isRemoteAttestable()) {
+            common.printBootMarker(boot_markers.platform_boot_image_authenticated);
             common.printBootMarker(boot_markers.platform_measured_boot_verified_root);
+        } else if (boot.root_provenance == .unverified_boot) {
+            common.printBootMarker(boot_markers.platform_boot_image_unverified);
         }
     }
 }

@@ -148,11 +148,17 @@ pub fn addTpm2OwnershipQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/run-tpm2-qemu.sh",
-        kernel.output_path,
-        "ownership",
-    });
+    const image = kernel_build.addEfiImage(b, .ReleaseSmall, kernel.boot_payload, b.path("src/boot/cmdline-tpm-ownership.txt"));
+    const iso = b.addSystemCommand(&.{"bash"});
+    iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
+    iso.addFileArg(image.getEmittedBin());
+    const iso_path = iso.addOutputFileArg("tpm-ownership.iso");
+    _ = iso.addOutputDirectoryArg("tpm-ownership-staging");
+    const command = b.addSystemCommand(&.{"bash"});
+    command.addFileArg(b.path("scripts/run-with-qemu-boot-iso.sh"));
+    command.addFileArg(iso_path);
+    command.addArgs(&.{ "scripts/run-tpm2-qemu.sh", kernel.output_path, "ownership" });
+    command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -259,13 +265,11 @@ pub fn addIsoCommand(
 ) *std.Build.Step.Run {
     const command = b.addSystemCommand(&.{"bash"});
     command.addFileArg(b.path("scripts/build-efi-iso.sh"));
-    command.addFileArg(kernel.output_file);
     command.addFileArg(efi_stub.getEmittedBin());
     command.addArgs(&.{
         output_path,
         staging_path,
     });
-    command.addFileArg(b.path("src/boot/cmdline.txt"));
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(&efi_stub.step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));

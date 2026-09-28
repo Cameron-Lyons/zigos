@@ -774,7 +774,7 @@ require_key_value "$FIRMWARE_SETTINGS_PATH" "firmware settings" "target_id" "$TA
 require_key_value "$FIRMWARE_SETTINGS_PATH" "firmware settings" "board_sku" "$BOARD_SKU"
 require_key_value "$FIRMWARE_SETTINGS_PATH" "firmware settings" "boot_mode" "UEFI"
 require_key_present "$FIRMWARE_SETTINGS_PATH" "firmware settings" "bios_version"
-require_key_matches "$FIRMWARE_SETTINGS_PATH" "firmware settings" "secure_boot" '^(enabled|disabled|disabled-for-local-proof-media)$'
+require_key_value "$FIRMWARE_SETTINGS_PATH" "firmware settings" "secure_boot" "enabled"
 require_key_value "$FIRMWARE_SETTINGS_PATH" "firmware settings" "storage_mode" "nvme"
 require_key_present "$FIRMWARE_SETTINGS_PATH" "firmware settings" "wake_suspend"
 require_key_present "$FIRMWARE_SETTINGS_PATH" "firmware settings" "changed_options"

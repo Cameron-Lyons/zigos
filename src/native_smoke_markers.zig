@@ -41,12 +41,12 @@ pub const production_required = [_][]const u8{
     boot_markers.userspace_input_abi_ready,
     boot_markers.userspace_surface_presentation_ready,
     boot_markers.desktop_framebuffer_ready,
-    boot_markers.platform_bootloader_measurement_provided,
+    boot_markers.platform_boot_descriptor_verified,
     boot_markers.platform_build_artifact_manifest_verified,
-    boot_markers.platform_bootloader_handoff_verified,
+    boot_markers.platform_measurement_snapshot_verified,
     boot_markers.platform_artifact_manifest_verified,
     boot_markers.platform_measured_boot_recorded,
-    boot_markers.platform_measured_boot_verified_root,
+    boot_markers.platform_boot_image_unverified,
     boot_markers.storage_checkpoint_final_clean,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
@@ -54,6 +54,8 @@ pub const production_required = [_][]const u8{
 };
 
 pub const production_forbidden = [_][]const u8{
+    boot_markers.platform_boot_image_authenticated,
+    boot_markers.platform_measured_boot_verified_root,
     boot_markers.document_channel_launch_rollback,
     boot_markers.document_launcher_userspace_open,
     boot_markers.document_launcher_userspace_cancel,
@@ -185,9 +187,9 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.userspace_input_abi_ready,
     boot_markers.userspace_surface_presentation_ready,
     boot_markers.desktop_framebuffer_ready,
-    boot_markers.platform_bootloader_measurement_provided,
+    boot_markers.platform_boot_descriptor_verified,
     boot_markers.platform_build_artifact_manifest_verified,
-    boot_markers.platform_bootloader_handoff_verified,
+    boot_markers.platform_measurement_snapshot_verified,
     boot_markers.platform_artifact_manifest_verified,
     boot_markers.platform_health_checks_boot_rollback,
     boot_markers.platform_health_checks_core_rollback,
@@ -196,7 +198,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.platform_health_checks_ui_rollback,
     boot_markers.platform_health_checks_promote_ok,
     boot_markers.platform_measured_boot_recorded,
-    boot_markers.platform_measured_boot_verified_root,
+    boot_markers.platform_boot_image_unverified,
     boot_markers.notes_daily_driver_install_open_ok,
     boot_markers.notes_daily_driver_edit_saved_ok,
     boot_markers.notes_daily_driver_share_sync_ok,
@@ -500,7 +502,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.userspace_artifacts_ready,
         boot_markers.service_boot_service_contracts_ready,
         boot_markers.platform_artifact_manifest_verified,
-        boot_markers.platform_measured_boot_verified_root,
+        boot_markers.platform_boot_image_unverified,
         boot_markers.native_ready,
         boot_markers.userspace_scheduler_idle,
     };
@@ -572,11 +574,11 @@ test "native smoke gate requires runtime isolation proof markers" {
 }
 
 test "native smoke gate requires measured boot reboot comparison markers" {
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_measurement_provided));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_boot_descriptor_verified));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_build_artifact_manifest_verified));
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_handoff_verified));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measurement_snapshot_verified));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_recorded));
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_verified_root));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_boot_image_unverified));
     try std.testing.expect(contains(&first_boot_required, boot_markers.platform_measured_boot_first));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_root));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_shape));
