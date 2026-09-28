@@ -18,6 +18,8 @@ const LOAD: u32 = 0x157;
 const UNSEAL: u32 = 0x15e;
 const FLUSH: u32 = 0x165;
 const NV_DEFINE: u32 = 0x12a;
+const READ_PUBLIC: u32 = 0x173;
+const EVICT_CONTROL: u32 = 0x120;
 const NV_READ_PUBLIC: u32 = 0x169;
 const NV_READ: u32 = 0x14e;
 const NV_WRITE: u32 = 0x137;
@@ -62,6 +64,19 @@ pub const NvSpace = struct {
         if (self.binding == .pinned and std.mem.allEqual(u8, &self.binding.pinned, 0)) return error.InvalidNvSpace;
     }
 };
+// Independently enrolled reference, never a Name discovered from untrusted
+// storage. Owner persistent handles cannot name platform-owned objects.
+pub const PersistentParent = struct {
+    handle: u32,
+    name: Name,
+
+    pub fn validate(self: PersistentParent) !void {
+        if (self.handle < 0x8100_0000 or self.handle >= 0x8180_0000 or
+            self.name[0] != 0 or self.name[1] != 0x0b or std.mem.allEqual(u8, self.name[2..], 0))
+            return error.InvalidPersistentParent;
+    }
+};
+
 const PRIMARY_PREFIX = [_]u8{
     0, 0x23, 0, 0x0b, 0, 3, 0, 0x72, 0, 0, // ECC, SHA256, restricted storage parent, no policy
     0, 6, 0, 0x80, 0, 0x43, 0, 0x10, 0, 3, 0, 0x10, // AES128 CFB, NULL scheme, P256, NULL KDF
@@ -105,9 +120,11 @@ const Reply = struct {
 
 // A caller owns each Client exclusively and supplies execute(command, response,
 // timeout_ms) and random(out). The kernel adapter uses CRB and its seeded CSPRNG.
-// No persistent TPM objects, index deletion, or hierarchy clears. Lockout
-// administration is explicit and requires separately retained authorization.
-// The owner hierarchy must have empty authorization. Objects require a separate
+// Persistent parent creation and hierarchy administration are explicit and
+// require separately retained owner/lockout authorization. No persistent-object
+// eviction, index deletion or hierarchy clear is exposed. Normal sessions open
+// an independently pinned persistent parent without administrator secrets.
+// Objects require a separate
 // 256-bit caller authorization, are fixed to this TPM/parent, and use dictionary
 // attack protection. PCR policy and user-auth provisioning belong to the caller.
 pub const Client = struct {
@@ -120,7 +137,9 @@ pub const Client = struct {
     command: [MAX_PACKET_BYTES]u8 = @splat(0),
     response: [MAX_PACKET_BYTES]u8 = @splat(0),
 
-    pub fn initialize(self: *Client, io: anytype) !void {
+    // Explicit bootstrap on an unowned TPM only. Never fall back here when an
+    // enrolled persistent parent is missing or changed.
+    pub fn createEnrollmentParent(self: *Client, io: anytype) !void {
         if (self.parent != 0) return error.AlreadyInitialized;
         if (self.failed) return error.Failed;
         errdefer |err| self.rejectProtocolFailure(err);
@@ -147,13 +166,9 @@ pub const Client = struct {
         if (!std.mem.eql(u8, reply.authorization, &.{ 0, 0, 1, 0, 0 })) return error.InvalidResponse;
         var r = wire.Reader{ .bytes = reply.parameters };
         const public = try r.sized();
-        if (public.len != PRIMARY_PREFIX.len + 68 or !std.mem.startsWith(u8, public, &PRIMARY_PREFIX))
-            return error.InvalidResponse;
-        var point = wire.Reader{ .bytes = public[PRIMARY_PREFIX.len..] };
-        self.parent_x = try digest(try point.sized());
-        self.parent_y = try digest(try point.sized());
-        try point.end();
-        _ = std.crypto.ecc.P256.fromSerializedAffineCoordinates(self.parent_x, self.parent_y, .big) catch return error.InvalidResponse;
+        const key = try parseParentPublic(public);
+        self.parent_x = key.x;
+        self.parent_y = key.y;
         try skipCreation(&r);
         const name = try r.sized();
         self.parent_name = objectName(public);
@@ -164,12 +179,82 @@ pub const Client = struct {
     pub fn close(self: *Client, io: anytype) !void {
         defer self.wipeBuffers();
         if (self.parent != 0) {
-            self.flush(io, self.parent) catch |err| {
+            if (self.parent >> 24 == 0x80) self.flush(io, self.parent) catch |err| {
                 self.failed = true;
                 return err;
             };
             self.parent = 0;
         }
+    }
+
+    // ReadPublic alone is unauthenticated. After checking the independently
+    // pinned Name and exact storage template, prove possession of the private
+    // parent through a salted-session ReadPublic HMAC before publishing success.
+    pub fn openPersistent(self: *Client, io: anytype, enrolled: PersistentParent) !void {
+        try enrolled.validate();
+        if (self.parent != 0) return error.AlreadyInitialized;
+        if (self.failed) return error.Failed;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        const public = try self.readParentPublic(io, enrolled.handle);
+        if (!std.mem.eql(u8, &public.name, &enrolled.name)) return error.PersistentParentChanged;
+        self.parent = enrolled.handle;
+        self.parent_name = public.name;
+        self.parent_x = public.x;
+        self.parent_y = public.y;
+        errdefer self.close(io) catch {};
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        // ReadPublic has no authorization role. Request response encryption so
+        // its extra HMAC session is valid; verify the MAC before decrypting.
+        const reply = try self.authorized(io, &session, READ_PUBLIC, self.parent, &self.parent_name, "", &.{}, 0x41, false);
+        const confirmed = try parseParentReply(reply.parameters);
+        if (!std.mem.eql(u8, &confirmed.name, &enrolled.name)) return error.PersistentParentChanged;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
+    // Persist only a live transient parent. Passing a persistent handle as the
+    // object would evict it, so reject that case before any hardware operation.
+    // A matching existing parent is authenticated without issuing EvictControl;
+    // this reconciles a lost successful response without another NV mutation.
+    pub fn persistParent(self: *Client, io: anytype, enrolled: PersistentParent, owner_auth: ?*const Key) !void {
+        try enrolled.validate();
+        try optionalAuthorization(owner_auth);
+        if (self.failed) return error.Failed;
+        if (self.parent >> 24 != 0x80) return error.TransientParentRequired;
+        if (!std.mem.eql(u8, &self.parent_name, &enrolled.name)) return error.PersistentParentChanged;
+        var existing = Client{};
+        defer existing.close(io) catch {};
+        existing.openPersistent(io, enrolled) catch |err| {
+            if (err != error.PersistentParentMissing) return err;
+            try self.makePersistent(io, enrolled.handle, owner_auth);
+            try existing.openPersistent(io, enrolled);
+        };
+    }
+
+    fn makePersistent(self: *Client, io: anytype, handle: u32, owner_auth: ?*const Key) !void {
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [4]u8 = undefined;
+        std.mem.writeInt(u32, &parameters, handle, .big);
+        const reply = try self.authorizedHandles(io, &session, EVICT_CONTROL, &.{ OWNER, self.parent }, &.{ &.{ 0x40, 0, 0, 1 }, &self.parent_name }, if (owner_auth) |auth| auth else "", &parameters, 1, false);
+        if (reply.parameters.len != 0) return error.InvalidResponse;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
+    fn readParentPublic(self: *Client, io: anytype, handle: u32) !ParentPublic {
+        var w = wire.Writer{ .bytes = &self.command };
+        try w.begin(0x8001, READ_PUBLIC);
+        try w.int(u32, handle);
+        const reply = self.exchange(io, w.finish(), 0x8001, false, 2000) catch |err| {
+            if (err == error.TpmError and self.last_tpm_error == 0x18b) return error.PersistentParentMissing;
+            return err;
+        };
+        return parseParentReply(reply.parameters);
     }
 
     pub fn seal(self: *Client, io: anytype, key: *const Key, auth: *const Key, out: *Blob) !void {
@@ -251,7 +336,8 @@ pub const Client = struct {
 
     // Explicit enrollment only. Existing indexes are never replaced. A failed
     // definition/write requires caller recovery, never an automatic redefinition.
-    pub fn nvDefine(self: *Client, io: anytype, space: NvSpace, auth: *const Key) !void {
+    pub fn nvDefine(self: *Client, io: anytype, space: NvSpace, auth: *const Key, owner_auth: ?*const Key) !void {
+        try optionalAuthorization(owner_auth);
         try self.ready(auth);
         try space.validate();
         if (space.binding == .discover) return error.InvalidNvSpace;
@@ -273,7 +359,7 @@ pub const Client = struct {
         // before the first data write. It is included in the authenticated Name.
         try w.sized(commitment);
         try w.int(u16, space.size);
-        const reply = try self.authorizedHandles(io, &session, NV_DEFINE, &.{OWNER}, &.{&.{ 0x40, 0, 0, 1 }}, "", parameters[0..w.pos], 0x21, false);
+        const reply = try self.authorizedHandles(io, &session, NV_DEFINE, &.{OWNER}, &.{&.{ 0x40, 0, 0, 1 }}, if (owner_auth) |key| key else "", parameters[0..w.pos], 0x21, false);
         if (reply.parameters.len != 0) return error.InvalidResponse;
         try self.flush(io, session.handle);
         session.handle = 0;
@@ -314,8 +400,19 @@ pub const Client = struct {
     // empty auth after a failure. Retain the new authorization durably before
     // calling: a lost response can mean the TPM has already committed it.
     pub fn changeLockoutAuthorization(self: *Client, io: anytype, current: ?*const Key, next: *const Key) !void {
+        return self.changeHierarchyAuthorization(io, LOCKOUT, current, next);
+    }
+
+    // Retain next durably outside the TPM before issuing this command. Owner
+    // authorization protects parent persistence and NV definitions, but is never
+    // needed by an ordinary session opening its enrolled persistent parent.
+    pub fn changeOwnerAuthorization(self: *Client, io: anytype, current: ?*const Key, next: *const Key) !void {
+        return self.changeHierarchyAuthorization(io, OWNER, current, next);
+    }
+
+    fn changeHierarchyAuthorization(self: *Client, io: anytype, hierarchy: u32, current: ?*const Key, next: *const Key) !void {
         try self.ready(next);
-        if (current) |auth| if (std.mem.allEqual(u8, auth, 0)) return error.InvalidAuthorization;
+        try optionalAuthorization(current);
         errdefer |err| self.rejectProtocolFailure(err);
         defer self.wipeBuffers();
         var session = try self.startSession(io);
@@ -324,7 +421,9 @@ pub const Client = struct {
         defer std.crypto.secureZero(u8, &parameters);
         var w = wire.Writer{ .bytes = &parameters };
         try w.sized(next);
-        const reply = try self.authorizedHandlesWithResponseAuth(io, &session, HIERARCHY_CHANGE_AUTH, &.{LOCKOUT}, &.{&.{ 0x40, 0, 0, 0x0a }}, if (current) |auth| auth else "", next, &parameters, 0x21, false);
+        var name: [4]u8 = undefined;
+        std.mem.writeInt(u32, &name, hierarchy, .big);
+        const reply = try self.authorizedHandlesWithResponseAuth(io, &session, HIERARCHY_CHANGE_AUTH, &.{hierarchy}, &.{&name}, if (current) |auth| auth else "", next, &parameters, 0x21, false);
         if (reply.parameters.len != 0) return error.InvalidResponse;
         try self.flush(io, session.handle);
         session.handle = 0;
@@ -557,6 +656,36 @@ pub const Client = struct {
     }
 };
 
+fn optionalAuthorization(auth: ?*const Key) !void {
+    if (auth) |value| if (std.mem.allEqual(u8, value, 0)) return error.InvalidAuthorization;
+}
+
+const ParentPublic = struct { name: Name, x: Key, y: Key };
+
+fn parseParentPublic(public: []const u8) !ParentPublic {
+    if (public.len != PRIMARY_PREFIX.len + 68 or !std.mem.startsWith(u8, public, &PRIMARY_PREFIX)) return error.InvalidResponse;
+    var r = wire.Reader{ .bytes = public[PRIMARY_PREFIX.len..] };
+    const x = try digest(try r.sized());
+    const y = try digest(try r.sized());
+    try r.end();
+    _ = std.crypto.ecc.P256.fromSerializedAffineCoordinates(x, y, .big) catch return error.InvalidResponse;
+    return .{ .name = objectName(public), .x = x, .y = y };
+}
+
+fn parseParentReply(bytes: []const u8) !ParentPublic {
+    var r = wire.Reader{ .bytes = bytes };
+    const public = try parseParentPublic(try r.sized());
+    if (!std.mem.eql(u8, try r.sized(), &public.name)) return error.IntegrityFailure;
+    var qualified: Name = .{ 0, 0x0b } ++ @as([32]u8, @splat(0));
+    var hash = Sha256.init(.{});
+    hash.update(&.{ 0x40, 0, 0, 1 }); // storage hierarchy Name
+    hash.update(&public.name);
+    hash.final(qualified[2..]);
+    if (!std.mem.eql(u8, try r.sized(), &qualified)) return error.InvalidResponse;
+    try r.end();
+    return public;
+}
+
 const BlobFields = struct { private: []const u8, public: []const u8 };
 const NvPublic = struct { name: Name, written: bool };
 
@@ -659,11 +788,11 @@ test "TPM NV validates callers and full record bounds before touching hardware" 
     try std.testing.expectError(error.InvalidNvSpace, client.nvRead(&io, space, &auth, out[0..31]));
     try std.testing.expectEqual(@as(Key, @splat(0)), out);
     try std.testing.expectError(error.InvalidNvSpace, client.nvWrite(&io, space, &auth, "short"));
-    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = 0x0100_0000, .size = 32 }, &auth));
-    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = MAX_NV_BYTES + 1 }, &auth));
-    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 0 }, &auth));
-    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .discover }, &auth));
-    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .{ .pinned = @splat(0) } }, &auth));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = 0x0100_0000, .size = 32 }, &auth, null));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = MAX_NV_BYTES + 1 }, &auth, null));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 0 }, &auth, null));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .discover }, &auth, null));
+    try std.testing.expectError(error.InvalidNvSpace, client.nvDefine(&io, .{ .index = space.index, .size = 32, .binding = .{ .pinned = @splat(0) } }, &auth, null));
     try std.testing.expectError(error.InvalidNvSpace, client.nvInitialize(&io, space, &auth, &out));
     try std.testing.expectEqual(@as(usize, 0), io.calls);
 }
@@ -807,4 +936,89 @@ test "TPM sealed blob parser rejects truncation overflow trailing bytes and weak
     try std.testing.expectError(error.EntropyUnavailable, client.unseal(&io, blob.slice(), &auth, &out));
     try std.testing.expectEqual(@as(usize, 1), io.calls);
     try std.testing.expectEqual(@as(Key, @splat(0)), out);
+}
+
+test "TPM persistent parent rejects invalid enrollment and cannot evict on close or retry" {
+    const name: Name = .{ 0, 0x0b } ++ @as(Key, @splat(3));
+    const pin = PersistentParent{ .handle = 0x8100_1234, .name = name };
+    var io = RejectIo{};
+    var client = Client{};
+    for ([_]u32{ 0, 0x8000_0000, 0x8180_0000, 0x81ff_ffff, 0x8200_0000 }) |handle| {
+        try std.testing.expectError(error.InvalidPersistentParent, client.openPersistent(&io, .{ .handle = handle, .name = name }));
+    }
+    var invalid = pin;
+    invalid.name[1] = 0x04;
+    try std.testing.expectError(error.InvalidPersistentParent, client.openPersistent(&io, invalid));
+    invalid = pin;
+    @memset(invalid.name[2..], 0);
+    try std.testing.expectError(error.InvalidPersistentParent, client.openPersistent(&io, invalid));
+    client = .{ .parent = pin.handle, .parent_name = pin.name };
+    try std.testing.expectError(error.TransientParentRequired, client.persistParent(&io, pin, null));
+    const empty: Key = @splat(0);
+    const next: Key = @splat(7);
+    try std.testing.expectError(error.InvalidAuthorization, client.changeOwnerAuthorization(&io, null, &empty));
+    try std.testing.expectError(error.InvalidAuthorization, client.changeOwnerAuthorization(&io, &empty, &next));
+    try std.testing.expectError(error.InvalidAuthorization, client.nvDefine(&io, .{ .index = 0x0180_1234, .size = 32 }, &next, &empty));
+    try client.close(&io);
+    try std.testing.expectEqual(@as(u32, 0), client.parent);
+    try std.testing.expectEqual(@as(usize, 0), io.calls);
+}
+
+test "TPM persistent parent public data cannot initialize a client without possession proof" {
+    const Io = struct {
+        bytes: []const u8,
+        reads: usize = 0,
+        entropy: usize = 0,
+        pub fn execute(self: *@This(), command: []const u8, response: []u8, _: u32) ![]u8 {
+            if (self.reads != 0 or command.len != 14 or std.mem.readInt(u32, command[6..10], .big) != READ_PUBLIC) return error.UnexpectedHardwareAccess;
+            self.reads += 1;
+            var w = wire.Writer{ .bytes = response };
+            try w.begin(0x8001, 0);
+            try w.put(self.bytes);
+            return w.finish();
+        }
+        pub fn random(self: *@This(), _: []u8) !void {
+            self.entropy += 1;
+            return error.EntropyUnavailable;
+        }
+    };
+    var bytes: [192]u8 = @splat(0);
+    var w = wire.Writer{ .bytes = &bytes };
+    const point = std.crypto.ecc.P256.basePoint.affineCoordinates();
+    try w.int(u16, PRIMARY_PREFIX.len + 68);
+    const offset = w.pos;
+    try w.put(&PRIMARY_PREFIX);
+    try w.sized(&point.x.toBytes(.big));
+    try w.sized(&point.y.toBytes(.big));
+    const name = objectName(bytes[offset..w.pos]);
+    try w.sized(&name);
+    var hash = Sha256.init(.{});
+    hash.update(&.{ 0x40, 0, 0, 1 });
+    hash.update(&name);
+    const qualified: Name = .{ 0, 0x0b } ++ hash.finalResult();
+    try w.sized(&qualified);
+    const length = w.pos;
+    const pin = PersistentParent{ .handle = 0x8100_1234, .name = name };
+    var io = Io{ .bytes = bytes[0..length] };
+    var client = Client{};
+    try std.testing.expectError(error.EntropyUnavailable, client.openPersistent(&io, pin));
+    try std.testing.expectEqual(@as(u32, 0), client.parent);
+    try std.testing.expectEqual(@as(usize, 1), io.reads);
+    try std.testing.expectEqual(@as(usize, 1), io.entropy);
+    try std.testing.expect(std.mem.allEqual(u8, &client.command, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &client.response, 0));
+    for (0..length) |len| try std.testing.expectError(error.InvalidResponse, parseParentReply(bytes[0..len]));
+    try std.testing.expectError(error.InvalidResponse, parseParentReply(bytes[0 .. length + 1]));
+    for ([_]usize{ 1, 5, 10, length - 1 }) |index| {
+        var changed = bytes;
+        changed[index] ^= 1;
+        try std.testing.expectError(error.InvalidResponse, parseParentReply(changed[0..length]));
+    }
+    var changed_pin = pin;
+    changed_pin.name[10] ^= 1;
+    io = .{ .bytes = bytes[0..length] };
+    client = .{};
+    try std.testing.expectError(error.PersistentParentChanged, client.openPersistent(&io, changed_pin));
+    try std.testing.expectEqual(@as(usize, 0), io.entropy);
+    try std.testing.expectEqual(@as(u32, 0), client.parent);
 }

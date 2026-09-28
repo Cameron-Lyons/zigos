@@ -22,6 +22,7 @@ pub const Enrollment = struct {
     owner: principal.PrincipalId,
     device: principal.PrincipalId,
     capsule_digest: tpm.Key,
+    parent: tpm.PersistentParent,
     catalog_object_id: u64,
     anchor_index: u32,
     catalog_secret_id: u64,
@@ -102,7 +103,7 @@ pub fn Session(comptime Io: type) type {
             if (!self.state.vault.store.empty() or self.state.vault.handles.countInUse() != 0 or self.state.vault.store.handles.countInUse() != 0 or
                 self.state.identities.credential_count != 0 or !graph_snapshot.empty(devices)) return error.VaultNotEmpty;
             try self.close();
-            try self.client.initialize(self.io);
+            try self.client.openPersistent(self.io, enrolled.parent);
             try capsule.unlock(&self.client, self.io, &enrolled.capsule_digest, pin, &self.authorization);
             const Anchor = nv.Backend(Io);
             const record = Anchor.read(&self.client, self.io, &self.authorization, enrolled.anchor_index) catch |err| blk: {
@@ -226,7 +227,7 @@ test "identity session lock erases authority before fallible TPM cleanup" {
     var identities = identity.Store.init();
     var graph = @import("../sync/device_graph.zig").Graph.init();
     var io = Io{};
-    var session = Session(Io){ .io = &io, .enrollment = .{ .owner = owner, .device = .{ .kind = .device, .serial = 2 }, .capsule_digest = @splat(4), .catalog_object_id = 1000, .anchor_index = 0x0180_4321, .catalog_secret_id = 1, .device_secret_id = 2 }, .state = .{ .vault = &keys.service, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &keys.policies, .subjects = .{ .user_id = owner.serial } };
+    var session = Session(Io){ .io = &io, .enrollment = .{ .owner = owner, .device = .{ .kind = .device, .serial = 2 }, .capsule_digest = @splat(4), .parent = .{ .handle = 0x8100_4321, .name = .{ 0, 0x0b } ++ @as([32]u8, @splat(4)) }, .catalog_object_id = 1000, .anchor_index = 0x0180_4321, .catalog_secret_id = 1, .device_secret_id = 2 }, .state = .{ .vault = &keys.service, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &keys.policies, .subjects = .{ .user_id = owner.serial } };
     session.replay = @import("../../tests/fixtures/identity_vault.zig").unlock_session;
     const captured = try session.replay.binding();
     session.authorization = @splat(0x55);

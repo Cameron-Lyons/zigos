@@ -101,14 +101,14 @@ pub fn Backend(comptime Io: type) type {
 
         // Explicit first enrollment. Commit the exact catalog before defining
         // the immutable NV enrollment commitment. Existing indexes are refused.
-        pub fn provision(self: *Self, storage: *const storage_service.Service, scratch: *[catalog.MAX_BYTES]u8) !void {
+        pub fn provision(self: *Self, storage: *const storage_service.Service, scratch: *[catalog.MAX_BYTES]u8, owner_auth: ?*const tpm.Key) !void {
             var bytes = try self.current.encode();
             defer std.crypto.secureZero(u8, &bytes);
             const candidate = try enrollmentCandidate(storage, self.current.checkpoint.object_id, self.current.checkpoint.owner, scratch);
             if (!std.mem.eql(u8, &bytes, &(try candidate.encode()))) return error.VaultAnchorBindingChanged;
             _ = try storage.checkpointDurable();
             const enrollment_space = try self.current.enrollmentSpace(self.index);
-            try self.client.nvDefine(self.io, enrollment_space, self.authorization);
+            try self.client.nvDefine(self.io, enrollment_space, self.authorization, owner_auth);
             try self.client.nvInitialize(self.io, enrollment_space, self.authorization, &bytes);
         }
 
@@ -242,19 +242,19 @@ test "TPM first enrollment validates its entire candidate and disk barrier befor
     const Anchor = Backend(Io);
     var backend = Anchor{ .client = &client, .io = &io, .authorization = &auth, .index = 0x0180_1234, .current = candidate };
     backend.current.device_root_pin = @splat(7);
-    try std.testing.expectError(error.VaultAnchorBindingChanged, backend.provision(&device.service, &scratch));
+    try std.testing.expectError(error.VaultAnchorBindingChanged, backend.provision(&device.service, &scratch, null));
     backend.current = candidate;
     backend.current.checkpoint.owner.serial += 1;
-    try std.testing.expectError(error.InvalidVaultCatalog, backend.provision(&device.service, &scratch));
+    try std.testing.expectError(error.InvalidVaultCatalog, backend.provision(&device.service, &scratch, null));
     backend.current = candidate;
     backend.current.checkpoint.payload_digest[0] ^= 1;
-    try std.testing.expectError(error.VaultAnchorBindingChanged, backend.provision(&device.service, &scratch));
+    try std.testing.expectError(error.VaultAnchorBindingChanged, backend.provision(&device.service, &scratch, null));
     backend.current = candidate;
     device.fail_flushes = true;
-    try std.testing.expectError(error.DurabilityBarrierFailed, backend.provision(&device.service, &scratch));
+    try std.testing.expectError(error.DurabilityBarrierFailed, backend.provision(&device.service, &scratch, null));
     try std.testing.expectError(error.DurabilityBarrierFailed, Anchor.resumeProvision(&client, &io, &auth, backend.index, &device.service, 1000, owner, &scratch));
     device.fail_flushes = false;
-    try std.testing.expectError(error.NotInitialized, backend.provision(&device.service, &scratch));
+    try std.testing.expectError(error.NotInitialized, backend.provision(&device.service, &scratch, null));
     try std.testing.expectError(error.NotInitialized, Anchor.resumeProvision(&client, &io, &auth, backend.index, &device.service, 1000, owner, &scratch));
     try std.testing.expectEqualDeep(candidate, backend.current);
     device.crash();

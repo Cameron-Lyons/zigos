@@ -24,6 +24,12 @@ const Io = struct {
     known_pin: ?[]const u8 = null,
     protected_authorizations: []const sealing.Key = &.{},
     corrupt_lockout_change: bool = false,
+    corrupt_persistence: bool = false,
+    corrupt_parent_public: bool = false,
+    owner_commands: usize = 0,
+    persist_commands: usize = 0,
+    last_failed_command: u32 = 0,
+    last_tpm_error: u32 = 0,
     corrupt_unseal: bool = false,
     corrupt_nv_read: bool = false,
     corrupt_nv_write: bool = false,
@@ -47,7 +53,17 @@ const Io = struct {
             if (self.interrupt_nv_write) return error.InterruptedVaultCheckpoint;
             self.nv_writes += 1;
         }
+        const code = std.mem.readInt(u32, command[6..10], .big);
+        if (code == 0x120) self.persist_commands += 1;
+        if (code == 0x120 or code == 0x129 or code == 0x12a or code == 0x131) self.owner_commands += 1;
+        // Client.close must never FlushContext a persistent object.
+        if (code == 0x165 and std.mem.readInt(u32, command[10..14], .big) >> 24 == 0x81) return error.FlushedPersistentParent;
         const reply = try hardware.execute(command, response, timeout_ms);
+        const response_code = std.mem.readInt(u32, reply[6..10], .big);
+        if (response_code != 0) {
+            self.last_failed_command = code;
+            self.last_tpm_error = response_code;
+        }
         if (self.spoof_unwritten_once and std.mem.readInt(u32, command[6..10], .big) == 0x169 and std.mem.readInt(u32, reply[6..10], .big) == 0) {
             self.spoof_unwritten_once = false;
             const public_len = std.mem.readInt(u16, reply[10..12], .big);
@@ -60,7 +76,9 @@ const Io = struct {
             if (std.mem.indexOf(u8, reply, key) != null) return error.PlaintextKey;
         }
         if (std.mem.indexOf(u8, reply, "ZGVAnch1") != null) return error.PlaintextAnchor;
-        if (((self.corrupt_lockout_change and std.mem.readInt(u32, command[6..10], .big) == 0x129) or
+        if (((self.corrupt_persistence and code == 0x120) or
+            (self.corrupt_parent_public and code == 0x173 and std.mem.readInt(u16, reply[0..2], .big) == 0x8002) or
+            (self.corrupt_lockout_change and std.mem.readInt(u32, command[6..10], .big) == 0x129) or
             (self.corrupt_unseal and std.mem.readInt(u32, command[6..10], .big) == 0x15e) or
             (self.corrupt_nv_read and std.mem.readInt(u32, command[6..10], .big) == 0x14e) or
             (self.corrupt_nv_write and std.mem.readInt(u32, command[6..10], .big) == 0x137)) and
@@ -77,11 +95,20 @@ pub fn run(manager: anytype) !void {
     if (!hardware.available()) return;
     try runTransportProof();
     var io = Io{};
+    const handoff = @import("../../../kernel/boot/handoff.zig");
+    if (handoff.capturedInfo()) |info| if (handoff.commandLineHasFlag(info, "tpm_ownership_proof")) {
+        @import("tpm2_ownership_proof.zig").run(manager, &io) catch |err| {
+            var line: [128]u8 = undefined;
+            console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:OWNER:FAIL {s} command={x} code={x}\n", .{ @errorName(err), io.last_failed_command, io.last_tpm_error }) catch "ZIGOS:TPM2:OWNER:FAIL\n");
+            return err;
+        };
+        return;
+    };
     var client = sealing.Client{};
     defer client.close(&io) catch {};
     @import("tpm2_pin_proof.zig").run(manager, &io) catch |err| {
         var line: [128]u8 = undefined;
-        console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:PIN:FAIL {s}\n", .{@errorName(err)}) catch "ZIGOS:TPM2:PIN:FAIL\n");
+        console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:PIN:FAIL {s} command={x} code={x}\n", .{ @errorName(err), io.last_failed_command, io.last_tpm_error }) catch "ZIGOS:TPM2:PIN:FAIL\n");
         return err;
     };
     @import("tpm2_enrollment_proof.zig").run(manager, &io, &auth) catch |err| {
@@ -157,7 +184,7 @@ fn runTransportProof() !void {
 }
 
 fn runWithClient(manager: anytype, client: *sealing.Client, io: *Io) !void {
-    try client.initialize(io);
+    try client.createEnrollmentParent(io);
     const storage = manager.storageServicePtr();
     var matches: [2]object_store.ObjectQueryResult = undefined;
     const found = storage.queryObjects(.{ .object_type = .secret, .content_type = content_type }, &matches);

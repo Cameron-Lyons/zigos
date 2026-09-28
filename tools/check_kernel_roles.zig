@@ -48,6 +48,7 @@ const verification_orchestration_symbol_prefixes = [_][]const u8{
     "native.session.session_service_bootstrap.proveDriverCrashRestart",
     "native.session.trust_boot.TrustBoot.proveProductionAbImageRollback",
     "native.session.trust_boot.TrustBoot.proveProductionPostActivationHealthChecks",
+    "native.session.proofs.tpm2_ownership_proof.",
 };
 const verification_only_signatures = [_][]const u8{
     "ZIGOS:RUNTIME_PROOF:PROCESS_ISOLATION:PASS",
@@ -56,6 +57,9 @@ const verification_only_signatures = [_][]const u8{
     "ZIGOS:PLATFORM:HEALTH_CHECKS:BOOT_ROLLBACK",
     "ZIGOS:NOTES_DAILY:COMPLETE",
     "ZIGOS:SERVICE_BOOT:IPC_CONNECT:ALL_OK",
+    // Console literals may become instruction immediates in ReleaseFast. The
+    // persisted fixture type remains identifiable in the loaded data segment.
+    "application/x-zigos-tpm-owner-proof",
     "app.notes.daily",
     "zigos.system.transport-probe",
     "zigos.system.termination-probe",

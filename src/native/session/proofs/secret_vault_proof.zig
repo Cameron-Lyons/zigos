@@ -28,7 +28,7 @@ const signer = signing.SignerIdentity{ .label = label, .seed = @splat(0xb8) };
 pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     var client = tpm.Client{};
     defer client.close(io) catch {};
-    try client.initialize(io);
+    try client.createEnrollmentParent(io);
     var adapter = backend.Backend(@TypeOf(io.*)){ .client = &client, .io = io, .authorization = authorization };
     var service = vault.Service.init();
     var identities = identity.Store.init();
@@ -236,8 +236,8 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
             .checkpoint = try catalog.inspect(storage, .{ .object_id = remote_catalog_id, .owner = owner, .public_key = remote_catalog_pin }, &catalog_scratch),
             .device_root_pin = root_pin,
         } };
-        try anchor_backend.provision(storage, &catalog_scratch);
-        try remote_anchor.provision(storage, &catalog_scratch);
+        try anchor_backend.provision(storage, &catalog_scratch, null);
+        try remote_anchor.provision(storage, &catalog_scratch, null);
         try proveNvRejections(io, authorization);
         console.print("ZIGOS:TPM2:CATALOG:COMMITTED\n");
     }
@@ -475,7 +475,7 @@ fn proveIdentityAssertions(durable: *durable_identity.Service, policies: *const 
         }
         try client.close(io);
         client.* = .{};
-        try client.initialize(io);
+        try client.createEnrollmentParent(io);
         const receipt = try durable.flush(authority.now_ticks, scratch);
         if (receipt.version_id != pending_version or io.nv_writes != writes or durable.dirty or
             durable.checkpoint.pending != null or credential.assertion_count != expected_counter) return error.BadAnchorReconciliation;
@@ -566,7 +566,7 @@ fn proveUnlockReplay(durable: *durable_identity.Service, graph: *const device_gr
 fn proveNvRejections(io: anytype, authorization: *const tpm.Key) !void {
     var client = tpm.Client{};
     defer client.close(io) catch {};
-    try client.initialize(io);
+    try client.createEnrollmentParent(io);
     var bytes: [nv_anchor.RECORD_BYTES]u8 = @splat(0xaa);
     var wrong = authorization.*;
     wrong[0] ^= 1;
@@ -575,7 +575,7 @@ fn proveNvRejections(io: anytype, authorization: *const tpm.Key) !void {
         if (err != error.TpmError or client.last_tpm_error != 0x98e or !std.mem.allEqual(u8, &bytes, 0)) return error.BadNvAuthorizationFailure;
     }
     try client.nvRead(io, space, authorization, &bytes);
-    if (client.nvDefine(io, .{ .index = local_index, .size = bytes.len }, authorization)) |_| return error.RedefinedVaultAnchor else |err| {
+    if (client.nvDefine(io, .{ .index = local_index, .size = bytes.len }, authorization, null)) |_| return error.RedefinedVaultAnchor else |err| {
         if (err != error.TpmError or client.last_tpm_error != 0x14c) return error.BadNvRedefinitionFailure;
     }
     io.corrupt_nv_read = true;

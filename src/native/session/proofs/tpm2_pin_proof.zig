@@ -19,12 +19,13 @@ const content_type = "application/x-zigos-tpm-pin-proof";
 pub fn run(manager: anytype, io: anytype) !void {
     var client = tpm.Client{};
     defer client.close(io) catch {};
-    try client.initialize(io);
+    try client.createEnrollmentParent(io);
     io.known_pin = pin;
     io.protected_authorizations = &admin_keys;
     defer io.known_pin = null;
     defer io.protected_authorizations = &.{};
     defer io.known_key = null;
+    const parent = tpm.PersistentParent{ .handle = 0x8100_7040, .name = client.parent_name };
     const storage = manager.storageServicePtr();
     var matches: [2]objects.ObjectQueryResult = undefined;
     const found = storage.queryObjects(.{ .object_type = .secret, .content_type = content_type }, &matches);
@@ -58,18 +59,19 @@ pub fn run(manager: anytype, io: anytype) !void {
         io.corrupt_lockout_change = false;
         client.close(io) catch {};
         client = .{};
-        try client.initialize(io);
+        try client.createEnrollmentParent(io);
         try client.changeLockoutAuthorization(io, &admin_keys[0], &admin_keys[1]);
         try client.configureDictionaryAttack(io, &admin_keys[1], .{ .max_tries = 3, .recovery_seconds = 3600, .lockout_recovery_seconds = 86400 });
         var recovered: tpm.Key = @splat(0);
         defer std.crypto.secureZero(u8, &recovered);
         try capsule.unlock(&client, io, &trusted_digest, pin, &recovered);
         if (!std.crypto.timing_safe.eql(tpm.Key, key, recovered)) return error.RecoveredWrongPinKey;
-        try @import("identity_session_proof.zig").provision(manager, io, &client, &capsule, &key);
+        try client.persistParent(io, parent, null);
+        try @import("identity_session_proof.zig").provision(manager, io, &client, &capsule, &key, null);
         for (0..3) |_| {
-            try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, "73019429", error.PinRejected);
+            try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, "73019429", error.PinRejected, parent);
         }
-        try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, pin, error.PinLockedOut);
+        try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, pin, error.PinLockedOut, parent);
         const x86 = @import("../../../arch/x86.zig");
         x86.cli();
         console.print("ZIGOS:TPM2:PIN:LOCKED\n");
@@ -101,6 +103,6 @@ pub fn run(manager: anytype, io: anytype) !void {
     var actual: tpm.Key = undefined;
     Sha256.hash(&key, &actual, .{});
     if (!std.crypto.timing_safe.eql(tpm.Key, expected_key, actual)) return error.RecoveredWrongPinKey;
-    try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, pin, null);
+    try @import("identity_session_proof.zig").run(manager, io, &capsule, &trusted_digest, pin, null, parent);
     console.print(if (lockout_persisted) "ZIGOS:TPM2:PIN:RECOVERED\n" else "ZIGOS:TPM2:PIN:VERIFIED\n");
 }

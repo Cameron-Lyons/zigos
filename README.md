@@ -158,8 +158,15 @@ requests.
   same encrypted sessions, accept only full records up to 256 bytes, validate the
   index public area and changing Name, and erase failed read output. Index reads
   and writes require a separate caller authorization; no owner read/write, index
-  deletion, or implicit redefinition is exposed. It expects empty owner-hierarchy
-  authorization and does not enforce a PCR policy.
+  deletion, or implicit redefinition is exposed. Explicit bootstrap creates a
+  storage parent on an unowned TPM and persists it under caller-supplied owner
+  authorization. Enrollment pins its persistent handle and Name independently.
+  Normal identity unlock authenticates that parent through an encrypted salted
+  session without owner authorization; missing or changed parents fail closed.
+  Closing a client never flushes or evicts a persistent parent. Owner-authorization
+  changes encrypt the new value and authenticate the reply with it; NV definition
+  borrows explicit owner authorization only during provisioning. Administrator
+  secrets require independent recovery custody. No PCR policy is enforced.
   The secret store now retains authenticated encrypted blobs instead of digest-only
   placeholders. A TPM adapter wraps fresh data keys and protects up to 96 bytes
   per secret with XChaCha20-Poly1305, binding owner, label, and export policy.
@@ -313,6 +320,16 @@ requests.
   both VM and TPM then completes that signed checkpoint, restores its credential
   counter, and resumes assertions. Catalog format v5 includes the authenticated
   device graph and predecessor digest and rejects older snapshots.
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-ownership-qemu-test` adds four
+  disposable boots: an interrupted persistence reply, explicit owner enrollment,
+  PIN unlock after restarting the VM and TPM, and rejection of a replacement TPM.
+  It authenticates existing parents before reconciling persistence, rejects a
+  damaged parent-response HMAC, reconciles a damaged owner-change reply using the
+  retained new authorization, and verifies that empty owner authorization cannot
+  create parents or define NV indexes. Normal identity unlock issues no owner
+  commands. The transport, sealing and ownership suites run in release preflight.
+  Production first-user enrollment, independent enrollment-root binding and
+  recovery-secret custody/export remain open.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).

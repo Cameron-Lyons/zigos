@@ -21,7 +21,7 @@ fn makePolicy(policies: *policy.Directory, owner: @import("../../core/principal.
     _ = try policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "session proof", .secret_vault_allowed = true, .require_hardware_backed_secrets = true, .deny_secret_raw_export = true, .max_secret_handle_lease_ticks = 1000, .credential_assertions_allowed = true }, .{ .label = "session policy fixture", .seed = @splat(0x72) });
 }
 
-pub fn provision(manager: anytype, io: anytype, client: *tpm.Client, capsule: *const pin_mod.Capsule, authorization: *const tpm.Key) !void {
+pub fn provision(manager: anytype, io: anytype, client: *tpm.Client, capsule: *const pin_mod.Capsule, authorization: *const tpm.Key, owner_auth: ?*const tpm.Key) !void {
     var service = vault.Service.init();
     defer service.unload();
     var identities = identity.Store.init();
@@ -53,7 +53,7 @@ pub fn provision(manager: anytype, io: anytype, client: *tpm.Client, capsule: *c
         .checkpoint = try catalog.inspect(storage, .{ .object_id = object_id, .owner = capsule.owner, .public_key = try keys[0].publicKey(2) }, &scratch),
         .device_root_pin = try keys[1].publicKey(2),
     } };
-    try anchor.provision(storage, &scratch);
+    try anchor.provision(storage, &scratch, owner_auth);
 }
 
 fn SessionIo(comptime Inner: type) type {
@@ -93,7 +93,7 @@ fn requireLocked(session: anytype) !void {
         session.state.vault.store.hardware_provider.operations != null or session.state.identities.credential_count != 0 or !graph_snapshot.empty(session.state.devices.?)) return error.RetainedLockedAuthority;
 }
 
-pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, digest: *const tpm.Key, pin: []const u8, expected_rejection: ?anyerror) !void {
+pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, digest: *const tpm.Key, pin: []const u8, expected_rejection: ?anyerror, parent: tpm.PersistentParent) !void {
     var service = vault.Service.init();
     var identities = identity.Store.init();
     var graph = graph_mod.Graph.init();
@@ -102,7 +102,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     var session_io = SessionIo(@TypeOf(io.*)){ .inner = io };
     var session = session_mod.Session(@TypeOf(session_io)){
         .io = &session_io,
-        .enrollment = .{ .owner = capsule.owner, .device = capsule.device, .capsule_digest = digest.*, .catalog_object_id = object_id, .anchor_index = anchor_index, .catalog_secret_id = 1, .device_secret_id = 3 },
+        .enrollment = .{ .owner = capsule.owner, .device = capsule.device, .capsule_digest = digest.*, .parent = parent, .catalog_object_id = object_id, .anchor_index = anchor_index, .catalog_secret_id = 1, .device_secret_id = 3 },
         .state = .{ .vault = &service, .identities = &identities, .devices = &graph },
         .storage = manager.storageServicePtr(),
         .policies = &policies,
@@ -314,7 +314,7 @@ fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod
     if (old_key.validate(clock.now())) |_| return error.RetainedTrustedInputKey else |err| {
         if (err != error.VaultHandleNotFound) return err;
     }
-    // Cancel once after creating a TPM parent and again after restoring keys.
+    // Cancel once after opening the TPM parent and again after restoring keys.
     // Both paths must unwind resource cleanup before allowing another attempt.
     try session.close();
     for (0..2) |stage| {

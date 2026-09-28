@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/qemu-harness.sh"
 
 KERNEL_PATH="${1:?kernel path required}"
 MODE="${2:-transport}"
-case "$MODE" in transport|sealing) ;; *) echo "Unknown TPM test mode: $MODE" >&2; exit 2 ;; esac
+case "$MODE" in transport|sealing|ownership) ;; *) echo "Unknown TPM test mode: $MODE" >&2; exit 2 ;; esac
 SWTPM_BIN="${SWTPM_BIN:-swtpm}"
 if ! command -v "$SWTPM_BIN" >/dev/null 2>&1; then
   echo "swtpm is required for TPM2 device validation; set SWTPM_BIN or install swtpm." >&2
@@ -20,6 +20,7 @@ TPM_PID=""
 BASE_EXTRA_ARGS="${QEMU_EXTRA_ARGS:-}"
 LOG_DIR="$ROOT_DIR/build/tpm2-qemu"
 if [ "$MODE" = sealing ]; then LOG_DIR="$ROOT_DIR/build/tpm2-sealing-qemu"; fi
+if [ "$MODE" = ownership ]; then LOG_DIR="$ROOT_DIR/build/tpm2-ownership-qemu"; fi
 STORE_IMAGE="$LOG_DIR/native-store.img"
 mkdir -p "$TPM_WORK/state" "$LOG_DIR"
 
@@ -252,8 +253,42 @@ run_pin_lockout() {
   echo 'TPM2 QEMU PIN lockout: PASS'
 }
 
+run_ownership_boot() {
+  local name="$1"
+  local marker="$2"
+  local log="$LOG_DIR/$name.log"
+  start_tpm "$name"
+  export QEMU_EXTRA_ARGS="$BASE_EXTRA_ARGS -chardev socket,id=zigos_tpm_socket,path=$TPM_WORK/control.sock -tpmdev emulator,id=zigos_tpm,chardev=zigos_tpm_socket -device tpm-crb,tpmdev=zigos_tpm"
+  qemu_harness_run_native_store_until_marker "$KERNEL_PATH" "$STORE_IMAGE" "$log" "$marker" "${TPM2_QEMU_SECONDS:-90}"
+  stop_tpm
+  check_transport_proof "$log"
+  if [ "$(grep -c '^ZIGOS:TPM2:OWNER:' "$log" || true)" -ne 1 ] ||
+    ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log"; then
+    cat "$log" >&2
+    echo "TPM2 owner proof failed for $name" >&2
+    return 1
+  fi
+  echo "TPM2 QEMU ownership $name: PASS"
+}
+
 bash "$SCRIPT_DIR/build-native-store.sh" "$STORE_IMAGE" 8 reset
-if [ "$MODE" = sealing ]; then
+if [ "$MODE" = ownership ]; then
+  # Reuse the exact verified kernel and EFI loader, changing only this
+  # verification-only boot selector on disposable media.
+  xorriso -osirrox on -indev "$QEMU_BOOT_ISO" \
+    -extract /boot/kernel.elf "$TPM_WORK/kernel.elf" \
+    -extract /EFI/BOOT/BOOTX64.EFI "$TPM_WORK/bootx64.efi" >"$LOG_DIR/iso-extract.log" 2>&1
+  { tr '\n' ' ' <"$ROOT_DIR/src/boot/cmdline-qemu.txt"; printf ' tpm_ownership_proof\n'; } >"$TPM_WORK/cmdline.txt"
+  bash "$SCRIPT_DIR/build-efi-iso.sh" "$TPM_WORK/kernel.elf" "$TPM_WORK/bootx64.efi" \
+    "$TPM_WORK/ownership.iso" "$TPM_WORK/iso-staging" "$TPM_WORK/cmdline.txt" >"$LOG_DIR/iso-build.log" 2>&1
+  export QEMU_BOOT_ISO="$TPM_WORK/ownership.iso"
+  run_ownership_boot interrupted 'ZIGOS:TPM2:OWNER:INTERRUPTED'
+  run_ownership_boot enrolled 'ZIGOS:TPM2:OWNER:ENROLLED'
+  run_ownership_boot reboot 'ZIGOS:TPM2:OWNER:VERIFIED'
+  mv "$TPM_WORK/state" "$TPM_WORK/original-state"
+  mkdir "$TPM_WORK/state"
+  run_ownership_boot replacement 'ZIGOS:TPM2:OWNER:REPLACEMENT_REJECTED'
+elif [ "$MODE" = sealing ]; then
   run_pin_lockout
   run_interrupted_enrollment
   run_boot cold tpm-crb 'ZIGOS:TPM2:CRB_READY' 'ZIGOS:TPM2:SEAL:CREATED'

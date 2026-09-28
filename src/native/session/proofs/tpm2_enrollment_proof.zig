@@ -21,7 +21,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
     const Anchor = anchors.Backend(@TypeOf(io.*));
     var client = tpm.Client{};
     defer client.close(io) catch {};
-    try client.initialize(io);
+    try client.createEnrollmentParent(io);
     const storage = manager.storageServicePtr();
     var adapter = provider.Backend(@TypeOf(io.*)){ .client = &client, .io = io, .authorization = authorization };
     var service = vault.Service.init();
@@ -42,7 +42,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         var anchor = Anchor{ .client = &client, .io = io, .authorization = authorization, .index = index, .current = .{ .checkpoint = candidate.checkpoint, .device_root_pin = candidate.device_root_pin } };
         const writes = io.nv_writes;
         io.interrupt_nv_write = true;
-        if (anchor.provision(storage, &scratch)) |_| return error.EnrollmentWasNotInterrupted else |err| {
+        if (anchor.provision(storage, &scratch, null)) |_| return error.EnrollmentWasNotInterrupted else |err| {
             if (err != error.InterruptedVaultCheckpoint or !client.failed or io.nv_writes != writes) return error.BadEnrollmentInterruption;
         }
         const x86 = @import("../../../arch/x86.zig");
@@ -82,7 +82,7 @@ pub fn run(manager: anytype, io: anytype, authorization: *const tpm.Key) !void {
         io.corrupt_nv_write = false;
         client.close(io) catch {};
         client = .{};
-        try client.initialize(io);
+        try client.createEnrollmentParent(io);
         record = try Anchor.resumeProvision(&client, io, authorization, index, storage, object_id, owner, &scratch);
         if (io.nv_writes != writes + 1 or !service.store.empty() or identities.credential_count != 0) return error.EnrollmentRetryPublishedState;
         // The first public read lies about WRITTEN; the checked first-write

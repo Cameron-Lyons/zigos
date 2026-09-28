@@ -140,7 +140,7 @@ test "identity PIN adapter retains command borrows until cancelled worker unwind
     var graph = @import("../sync/device_graph.zig").Graph.init();
     var io = Io{};
     const owner = @import("../core/principal.zig").PrincipalId{ .kind = .user, .serial = 1 };
-    var session = identity_session.Session(Io){ .io = &io, .enrollment = .{ .owner = owner, .device = .{ .kind = .device, .serial = 2 }, .capsule_digest = @splat(4), .catalog_object_id = 1000, .anchor_index = 0x0180_4321, .catalog_secret_id = 1, .device_secret_id = 2 }, .state = .{ .vault = &service, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &policies, .subjects = .{ .user_id = owner.serial } };
+    var session = identity_session.Session(Io){ .io = &io, .enrollment = .{ .owner = owner, .device = .{ .kind = .device, .serial = 2 }, .capsule_digest = @splat(4), .parent = .{ .handle = 0x8100_4321, .name = .{ 0, 0x0b } ++ @as([32]u8, @splat(4)) }, .catalog_object_id = 1000, .anchor_index = 0x0180_4321, .catalog_secret_id = 1, .device_secret_id = 2 }, .state = .{ .vault = &service, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &policies, .subjects = .{ .user_id = owner.serial } };
     var capsule = pin.Capsule{ .owner = owner, .device = session.enrollment.device, .salt = @splat(4), .sealed = .{ .len = 1 } };
     var scratch: [catalog.MAX_BYTES]u8 = undefined;
     var adapter = Adapter(Io){ .session = &session, .capsule = &capsule, .boot_instance = @splat(1), .lifetime_ticks = 100, .scratch = &scratch };

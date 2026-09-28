@@ -175,6 +175,11 @@ pub fn build(b: *std.Build) void {
     tpm2_sealing_step.dependOn(&tpm2_sealing_cmd.step);
     tpm2_sealing_step.dependOn(kernel_role_check_step);
 
+    const tpm2_ownership_cmd = qemu_build.addTpm2OwnershipQemuCommand(b, kernels.zigos_native_verification, userspace_images);
+    const tpm2_ownership_step = b.step("tpm2-ownership-qemu-test", "Verify persistent TPM parent recovery and PIN sessions under protected owner authorization across reboot");
+    tpm2_ownership_step.dependOn(&tpm2_ownership_cmd.step);
+    tpm2_ownership_step.dependOn(kernel_role_check_step);
+
     const zigos_native_smoke_test_cmd = qemu_build.addNativeSmokeCommand(
         b,
         kernels.zigos_native_verification,
@@ -437,6 +442,9 @@ pub fn build(b: *std.Build) void {
     release_security_preflight_step.dependOn(driver_restart_qemu_step);
     release_security_preflight_step.dependOn(recovery_qemu_step);
     release_security_preflight_step.dependOn(sync_two_node_qemu_step);
+    release_security_preflight_step.dependOn(tpm2_qemu_step);
+    release_security_preflight_step.dependOn(tpm2_sealing_step);
+    release_security_preflight_step.dependOn(tpm2_ownership_step);
     release_security_preflight_step.dependOn(uefi_qemu_step);
     release_security_preflight_step.dependOn(verification_uefi_qemu_step);
     release_sbom_cmd.step.dependOn(release_security_preflight_step);
