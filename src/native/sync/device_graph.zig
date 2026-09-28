@@ -493,6 +493,37 @@ pub const Graph = struct {
         return &slot.device;
     }
 
+    pub fn findUserRootConst(self: *const Graph, user_principal: principal.PrincipalId) ?*const UserRootRecord {
+        const slot = self.user_roots.getConst(graphPrincipalKey(user_principal)) orelse return null;
+        if (!slot.root.principal_id.eql(user_principal)) return null;
+        return &slot.root;
+    }
+
+    // The root pin comes from the caller's trusted enrollment boundary, never
+    // from a remote certificate or the record being verified.
+    pub fn authenticatedDevice(self: *const Graph, device_principal: principal.PrincipalId, root_pin: signing.PublicKey) Error!*const DeviceRecord {
+        const record = self.findDeviceConst(device_principal) orelse return error.DeviceNotFound;
+        if (!record.isTrusted()) return error.AlreadyRevoked;
+        if (record.principal_id.kind != .device or record.principal_id.serial == 0 or record.owner.kind != .user or record.owner.serial == 0) return error.InvalidPrincipalKind;
+        if (record.label_len > MAX_LABEL_BYTES or record.key_rotation_generation == 0 or record.trust_generation == 0 or record.overlay_id == 0) return error.InvalidDeviceSignature;
+        const root_slot = self.user_roots.getConst(graphPrincipalKey(record.owner)) orelse return error.RootNotFound;
+        const root = &root_slot.root;
+        if (!root.principal_id.eql(record.owner) or root.label_len > MAX_LABEL_BYTES) return error.InvalidRootSignature;
+        var buffer: [ENROLLMENT_MESSAGE_BUFFER_BYTES]u8 = undefined;
+        const root_message = rootMessage(&buffer, record.owner, root.labelSlice()) catch return error.InvalidRootSignature;
+        if (!verifyPinnedSignature(root.root_signature, root_message, root_pin)) return error.InvalidRootSignature;
+        const device_message = deviceMessage(&buffer, record.principal_id, record.labelSlice(), record.overlay_id, record.key_rotation_generation) catch return error.InvalidDeviceSignature;
+        if (!verifyPinnedSignature(record.device_signature, device_message, record.device_signature.public_key)) return error.InvalidDeviceSignature;
+        if (record.key_rotation_generation == 1) {
+            const message = enrollmentMessage(&buffer, record.owner, record.principal_id, record.labelSlice(), record.overlay_id, 1, &record.device_signature.public_key) catch return error.InvalidEnrollmentSignature;
+            if (!verifyPinnedSignature(record.enrollment_signature, message, root_pin)) return error.InvalidEnrollmentSignature;
+        } else {
+            const message = rotationMessage(&buffer, record.owner, record.principal_id, record.overlay_id, record.key_rotation_generation, &record.device_signature.public_key) catch return error.InvalidRotationSignature;
+            if (!verifyPinnedSignature(record.rotation_signature, message, root_pin)) return error.InvalidRotationSignature;
+        }
+        return record;
+    }
+
     pub fn isTrusted(self: *const Graph, device_principal: principal.PrincipalId) bool {
         const record = self.findDeviceConst(device_principal) orelse return false;
         return record.isTrusted();
@@ -527,6 +558,12 @@ pub const Graph = struct {
         }
     }
 };
+
+fn verifyPinnedSignature(signature: manifest.Signature, message: []const u8, key: signing.PublicKey) bool {
+    return signature.format == .ed25519 and signature.public_key_len == signing.PUBLIC_KEY_BYTES and
+        signature.value_len == signing.SIGNATURE_BYTES and std.mem.eql(u8, &signature.public_key, &key) and
+        signing.verify(signature, message);
+}
 
 fn zeroUserRoot() UserRootRecord {
     return .{

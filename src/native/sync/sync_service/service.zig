@@ -503,6 +503,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.stateConst().graph.findDeviceConst(device_id);
         }
 
+        pub fn deviceGraph(self: *const Self) *const device_graph.Graph {
+            return &self.stateConst().graph;
+        }
+
         pub fn createNetworkPolicy(self: *Self, request: network_policy.CreateRequest) Error!*network_policy.PolicyRecord {
             const record = try self.state().network_policies.create(request);
             self.resident().markDirty();

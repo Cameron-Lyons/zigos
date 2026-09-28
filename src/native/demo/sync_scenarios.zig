@@ -400,7 +400,8 @@ fn proveNativeDriverPacketCapture(
         var authorized_native_frames: usize = 0;
 
         fn broker(request: network_driver_task.EgressRequest) network_driver_task.EgressDecision {
-            const native_sync_frame = std.mem.startsWith(u8, request.frame, &sync_transport.NativeTransportAbi.magic);
+            const native_sync_frame = std.mem.startsWith(u8, request.frame, &sync_transport.NativeTransportAbi.magic) or
+                std.mem.startsWith(u8, request.frame, @import("../sync/peer_channel.zig").MAGIC);
             const no_plaintext = !containsBootedNativeSyncPlaintext(request.frame);
             const allowed = request.egress_capability_id == allowed_capability_id and
                 request.network_policy_id == allowed_policy_id and
@@ -558,48 +559,8 @@ fn proveNativeDriverPacketCapture(
     if (@import("builtin").target.os.tag == .freestanding and
         @import("../drivers/device_inventory.zig").recordForClass(.network_adapter).source == .virtio_net_inventory)
     {
-        // Exercise both DMA directions between separately booted guests. Retry
-        // the captured encrypted envelope while the peer finishes booting.
-        // Boot scenarios may resume from userspace with interrupts masked.
-        // Permit device delivery during this bounded wait and restore the caller.
-        const x86 = @import("../../arch/x86.zig");
-        const interrupts_enabled = x86.interruptsEnabled();
-        x86.sti();
-        defer if (!interrupts_enabled) x86.cli();
-        const clock = @import("../../kernel/timer/tsc_clock.zig");
-        const deadline = clock.afterMilliseconds(30_000);
-        var resend = clock.afterMilliseconds(20);
-        var received: [1500]u8 = undefined;
-        var peer_frame_seen = false;
-        while (!deadline.expired()) {
-            // DMA completion can become visible before the MSI-X reaches the
-            // CPU. Observe both independently within the bounded proof window.
-            if (peer_frame_seen and @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount() != 0) {
-                support.common.printBootMarker(boot_markers.sync_native_driver_peer_frame_received);
-                complete = true;
-                return true;
-            }
-            if (resend.expired()) {
-                if (!network_driver_task.sendActiveFrame(peer_mac, captured.slice())) return false;
-                resend = clock.afterMilliseconds(20);
-            }
-            const result = network_driver_task.receiveActiveFrame(&received);
-            if (result.status == .failed) return false;
-            if (result.status == .frame) {
-                // This stage proves only physical frame delivery. The peer has
-                // its own random traffic key; remote key establishment and
-                // authenticated object admission are separate release work.
-                const peer_frame = sync_transport.inspectNativeSyncFrame(received[0..result.length]) catch continue;
-                if (!peer_frame.encrypted() or !peer_frame.egressAllowed() or containsBootedNativeSyncPlaintext(received[0..result.length])) return false;
-                // Finish with a reply after observing the peer, so both guests
-                // can complete even when the first boot's packets were dropped.
-                if (!network_driver_task.sendActiveFrame(peer_mac, captured.slice())) return false;
-                peer_frame_seen = true;
-                stage = "peer_interrupt";
-            }
-            std.atomic.spinLoopHint();
-        }
-        return false;
+        complete = @import("peer_channel_proof.zig").run(sync_service.deviceGraph(), local_mac, peer_mac, local_device_principal, tablet_device_principal);
+        return complete;
     }
     complete = true;
     return true;

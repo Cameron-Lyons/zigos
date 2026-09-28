@@ -197,10 +197,13 @@ requests.
   hardware interrupts; the harness saves wire captures beside the serial logs.
   Physical I225-LM evidence and complete cross-node object replication remain
   separate release requirements.
-  Transport encryption uses XChaCha20-Poly1305 with fresh random session keys
-  and nonces. Native sync ABI v4 authenticates task routing and sequence fields;
-  failed authentication clears plaintext output. Remote key establishment is
-  still missing: peer frame inspection alone grants no trust or storage access.
+  Native sync ABI v4 uses XChaCha20-Poly1305 with fresh random session keys
+  and nonces, authenticates task routing and sequence fields, and clears
+  plaintext on authentication failure. Independent verification nodes
+  now establish Noise XX channels with fresh X25519 keys certified by pinned
+  device identities. Both nodes decrypt confirmation traffic and reject packet
+  tampering and replay. Production identity provisioning, peer discovery and
+  authorization of inbound object operations still need integration.
 - The driver model treats storage, network, USB controllers, GPU/display,
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA
