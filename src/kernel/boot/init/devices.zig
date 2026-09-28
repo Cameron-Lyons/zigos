@@ -154,6 +154,9 @@ fn capturePciInventory() void {
             registerDeviceMmio(pciDeviceId(dev), bar.address, 0x1_0000);
         }
         network_detected = true;
+    } else if (@import("../../drivers/virtio_net_hw.zig").firstDevice()) |dev| {
+        device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .virtio_net_inventory, false);
+        network_detected = true;
     }
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {
         device_inventory.registerDetected(.graphics_adapter, pciDeviceId(dev), .pci_inventory, false);

@@ -387,6 +387,12 @@ fn proveNativeDriverPacketCapture(
     tablet_device_principal: principal.PrincipalId,
 ) bool {
     if (!network_driver_task.hasActiveDevice()) return false;
+    var complete = false;
+    var stage: []const u8 = "open";
+    defer if (!complete) {
+        support.common.printBootMarker("ZIGOS:SYNC:NATIVE_DRIVER:INCOMPLETE");
+        support.common.printBootMarker(stage);
+    };
 
     const DriverEgress = struct {
         var allowed_capability_id: u64 = 0;
@@ -438,6 +444,14 @@ fn proveNativeDriverPacketCapture(
     var broker = sync_service.egressBroker(context.capability_table);
     var native_transport = sync_transport.NativeTransportService.init();
     defer native_transport.deinit();
+    // These addresses belong to the disposable two-node verification harness.
+    // Bind a link explicitly: an unbound relay cannot send a native frame.
+    const local_mac = network_driver_task.activeMacAddress() orelse return false;
+    const peer_mac: [6]u8 = if (std.mem.eql(u8, &local_mac, &.{ 0x02, 0x5A, 0x47, 0, 0, 2 }))
+        .{ 0x02, 0x5A, 0x47, 0, 0, 1 }
+    else
+        .{ 0x02, 0x5A, 0x47, 0, 0, 2 };
+    native_transport.bindPeerLink(tablet_device_principal, peer_mac) catch return false;
     var connection = native_transport.openRelay(&broker, .{
         .task_id = context.sync_task_id,
         .principal_id = context.sync_service_principal,
@@ -448,6 +462,7 @@ fn proveNativeDriverPacketCapture(
     }, context.sync_task_id, context.network_service_id, local_device_principal, tablet_device_principal, "relay.zigos.dev") catch return false;
 
     const driver_tx_before = network_driver_task.activeDriverTransmitCount();
+    stage = "first_transmit";
     const signer = signing.SignerIdentity{
         .label = "booted-native-sync-driver",
         .seed = signing.seedFromByte(0xA7),
@@ -458,6 +473,7 @@ fn proveNativeDriverPacketCapture(
     if (network_driver_task.activeDriverTransmitCount() != driver_tx_before + 1) return false;
 
     const captured = native_transport.capture.last() orelse return false;
+    stage = "capture";
     const driver_frame = network_driver_task.lastActiveDriverFrame();
     if (driver_frame.len == 0 or !std.mem.eql(u8, captured.slice(), driver_frame)) return false;
 
@@ -483,6 +499,7 @@ fn proveNativeDriverPacketCapture(
     }
 
     var malformed_packet = captured;
+    stage = "malformed_packet";
     malformed_packet.bytes[0] ^= 0x55;
     var malformed_rejected = false;
     _ = sync_transport.decodeNativeSyncFrame(malformed_packet.slice()) catch |err| {
@@ -492,6 +509,7 @@ fn proveNativeDriverPacketCapture(
     if (!malformed_rejected) return false;
 
     native_transport.disconnect(&connection);
+    stage = "reconnect";
     var disconnected_rejected = false;
     _ = native_transport.sendSigned(&connection, booted_native_sync_driver_reconnect_payload, signer) catch |err| {
         if (err != error.NativeTransportDisconnected) return false;
@@ -504,6 +522,7 @@ fn proveNativeDriverPacketCapture(
     if (native_transport.disconnected_connections != 1 or native_transport.reconnect_count != 1) return false;
 
     const next_sequence_after_reconnect = connection.next_sequence;
+    stage = "replay";
     connection.next_sequence = connection.highest_sent_sequence;
     var replay_rejected = false;
     _ = native_transport.sendSigned(&connection, booted_native_sync_driver_replay_payload, signer) catch |err| {
@@ -514,10 +533,12 @@ fn proveNativeDriverPacketCapture(
     connection.next_sequence = next_sequence_after_reconnect;
 
     while (connection.in_flight_frames < sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES) {
+        stage = "fill";
         const fill_delivery = native_transport.sendSigned(&connection, booted_native_sync_driver_fill_payload, signer) catch return false;
         if (!fill_delivery.network_delivered) return false;
     }
     const tx_before_congestion = network_driver_task.activeDriverTransmitCount();
+    stage = "congestion";
     const drops_before_congestion = native_transport.congestion_drop_count;
     var congestion_rejected = false;
     _ = native_transport.sendSigned(&connection, booted_native_sync_driver_overflow_payload, signer) catch |err| {
@@ -528,7 +549,54 @@ fn proveNativeDriverPacketCapture(
     if (native_transport.congestion_drop_count != drops_before_congestion + 1) return false;
     if (network_driver_task.activeDriverTransmitCount() != tx_before_congestion) return false;
 
-    return DriverEgress.authorized_native_frames == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES and
+    const proof_complete = DriverEgress.authorized_native_frames == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES and
         native_transport.network_frame_count == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES and
         native_transport.capture.capturedCount() == sync_transport.MAX_NATIVE_IN_FLIGHT_FRAMES;
+    if (!proof_complete) return false;
+    stage = "peer_receive";
+    if (@import("builtin").target.os.tag == .freestanding and
+        @import("../drivers/device_inventory.zig").recordForClass(.network_adapter).source == .virtio_net_inventory)
+    {
+        // Exercise both DMA directions between separately booted guests. Retry
+        // the captured encrypted envelope while the peer finishes booting.
+        // Boot scenarios may resume from userspace with interrupts masked.
+        // Permit device delivery during this bounded wait and restore the caller.
+        const x86 = @import("../../arch/x86.zig");
+        const interrupts_enabled = x86.interruptsEnabled();
+        x86.sti();
+        defer if (!interrupts_enabled) x86.cli();
+        const clock = @import("../../kernel/timer/tsc_clock.zig");
+        const deadline = clock.afterMilliseconds(30_000);
+        var resend = clock.afterMilliseconds(20);
+        var received: [1500]u8 = undefined;
+        var peer_frame_seen = false;
+        while (!deadline.expired()) {
+            // DMA completion can become visible before the MSI-X reaches the
+            // CPU. Observe both independently within the bounded proof window.
+            if (peer_frame_seen and @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount() != 0) {
+                support.common.printBootMarker(boot_markers.sync_native_driver_peer_frame_received);
+                complete = true;
+                return true;
+            }
+            if (resend.expired()) {
+                if (!network_driver_task.sendActiveFrame(peer_mac, captured.slice())) return false;
+                resend = clock.afterMilliseconds(20);
+            }
+            const result = network_driver_task.receiveActiveFrame(&received);
+            if (result.status == .failed) return false;
+            if (result.status == .frame) {
+                const peer_frame = sync_transport.decodeNativeSyncFrame(received[0..result.length]) catch continue;
+                if (!peer_frame.encrypted() or !peer_frame.egressAllowed() or containsBootedNativeSyncPlaintext(received[0..result.length])) return false;
+                // Finish with a reply after observing the peer, so both guests
+                // can complete even when the first boot's packets were dropped.
+                if (!network_driver_task.sendActiveFrame(peer_mac, captured.slice())) return false;
+                peer_frame_seen = true;
+                stage = "peer_interrupt";
+            }
+            std.atomic.spinLoopHint();
+        }
+        return false;
+    }
+    complete = true;
+    return true;
 }

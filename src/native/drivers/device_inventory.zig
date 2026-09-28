@@ -7,6 +7,7 @@ pub const DetectionSource = enum(u8) {
     pci_inventory,
     nvme_pci_inventory,
     intel_i225_lm_inventory,
+    virtio_net_inventory,
     xhci_inventory,
     platform_policy,
 };
@@ -89,7 +90,8 @@ pub fn sourceCanBindProductionDriver(
 ) bool {
     if (source == .absent or source == .synthetic or device_id == 0) return false;
     return switch (device_class) {
-        .network_adapter => source == .intel_i225_lm_inventory and isStablePciVendorDevice(device_id, PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM),
+        .network_adapter => (source == .intel_i225_lm_inventory and isStablePciVendorDevice(device_id, PCI_VENDOR_INTEL, PCI_DEVICE_INTEL_I225_LM)) or
+            (source == .virtio_net_inventory and isStablePciVendorDevice(device_id, 0x1AF4, 0x1041)),
         .storage_controller => source == .nvme_pci_inventory and isStablePciId(device_id),
         .usb_controller => source == .xhci_inventory and isStablePciVendor(device_id, PCI_VENDOR_INTEL),
         .graphics_adapter, .audio_print_io => source == .pci_inventory and isStablePciVendor(device_id, PCI_VENDOR_INTEL),
@@ -105,6 +107,7 @@ pub fn sourceName(source: DetectionSource) []const u8 {
         .pci_inventory => "pci_inventory",
         .nvme_pci_inventory => "nvme_pci_inventory",
         .intel_i225_lm_inventory => "intel_i225_lm_inventory",
+        .virtio_net_inventory => "virtio_net_inventory",
         .xhci_inventory => "xhci_inventory",
         .platform_policy => "platform_policy",
     };
@@ -180,6 +183,21 @@ test "device inventory starts absent until hardware is discovered" {
     try std.testing.expect(!storage.kernel_bootstrap);
     try std.testing.expect(!usb.kernel_bootstrap);
     try std.testing.expect(!input.kernel_bootstrap);
+}
+
+test "device inventory binds modern VirtIO independently of physical I225 evidence" {
+    reset();
+    defer reset();
+    const modern: u64 = 0x1AF4_1041_0010;
+    registerDetected(.network_adapter, modern, .intel_i225_lm_inventory, false);
+    try std.testing.expect(!recordForClass(.network_adapter).detected);
+    registerDetected(.network_adapter, 0x1AF4_1000_0010, .virtio_net_inventory, false);
+    try std.testing.expect(!recordForClass(.network_adapter).detected);
+    registerDetected(.network_adapter, modern, .virtio_net_inventory, false);
+    try std.testing.expectEqual(modern, try requireProductionDriverDeviceId(.network_adapter));
+    try std.testing.expectEqualStrings("virtio_net_inventory", sourceName(recordForClass(.network_adapter).source));
+    registerDetected(.network_adapter, 0x8086_15F2_0020, .intel_i225_lm_inventory, false);
+    try std.testing.expectEqual(modern, deviceIdForClass(.network_adapter));
 }
 
 test "device inventory refuses synthetic records for production driver binding" {

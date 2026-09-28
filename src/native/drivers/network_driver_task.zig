@@ -14,17 +14,6 @@ const kernel_memory = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/memory/memory.zig")
 else
     struct {};
-const intel_i225_hw = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/drivers/intel_i225_hw.zig")
-else
-    struct {
-        pub fn activate() !void {}
-        pub fn prepare(_: anytype) !void {}
-        pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
-            return null;
-        }
-    };
-
 pub const ReceiveStatus = enum(u8) {
     empty = 0,
     frame = 1,
@@ -719,24 +708,6 @@ pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
 
 pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task_id: u64) bool {
     if (service_id == 0) return false;
-    if (builtin.target.os.tag == .freestanding) {
-        const pci = @import("../../kernel/drivers/pci.zig");
-        if (pci.firstIntelI225Lm()) |dev| {
-            intel_i225_hw.prepare(dev) catch |err| switch (err) {
-                error.AlreadyPrepared => {},
-                else => return false,
-            };
-        }
-    }
-    if (intel_i225_hw.publishedBar() != null) {
-        intel_i225_hw.activate() catch return false;
-        if (builtin.target.os.tag == .freestanding) {
-            const console = @import("../../kernel/utils/console.zig");
-            console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
-            console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
-            console.print("ZIGOS:I225:HW:REMAP_MSI_OK\n");
-        }
-    }
     const queue = ensureReceiveQueue() orelse return false;
     resetReceiveQueue(queue);
     active_device = device;
@@ -760,6 +731,11 @@ pub fn deactivateDevice(service_id: u64) bool {
 
 pub fn hasActiveDevice() bool {
     return active_device != null;
+}
+
+pub fn activeMacAddress() ?[6]u8 {
+    const device = active_device orelse return null;
+    return device.getMacAddress();
 }
 
 pub fn activeTaskId() u64 {

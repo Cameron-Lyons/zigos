@@ -42,6 +42,11 @@ pub const tpm_crb = Region{
     .bytes = PAGE_BYTES,
 };
 
+pub const virtio_net = Region{
+    .base = virtual_layout.device_memory.base + 0x1400_0000,
+    .bytes = PAGE_BYTES * 12,
+};
+
 pub const acpi_root = Region{
     .base = virtual_layout.device_memory.base + 0x2000_0000,
     .bytes = 0x101_000,
@@ -64,6 +69,7 @@ pub const all = [_]Region{
     intel_i225,
     xhci,
     tpm_crb,
+    virtio_net,
     acpi_root,
     acpi_entry,
     intel_vtd,

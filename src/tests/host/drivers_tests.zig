@@ -28,6 +28,8 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(driver_service);
     std.testing.refAllDecls(first_target_telemetry);
     std.testing.refAllDecls(intel_i225_tx);
+    std.testing.refAllDecls(@import("../../kernel/drivers/virtio_queue.zig"));
+    std.testing.refAllDecls(@import("../../kernel/drivers/virtio_pci.zig"));
     std.testing.refAllDecls(nvme_completion);
     std.testing.refAllDecls(nvme_prp);
     std.testing.refAllDecls(nvme_timing);

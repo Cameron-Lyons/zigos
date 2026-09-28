@@ -44,6 +44,11 @@ build_node_command() {
   local store_image="$1"
   local serial_log="$2"
   local socket_mode="$3"
+  local mac="$4"
+  local irqchip_args=()
+  if [[ "$(qemu_harness_accelerator)" == kvm* ]]; then
+    irqchip_args=(-machine kernel-irqchip=split)
+  fi
 
   qemu_harness_build_kernel_command \
     "$KERNEL_PATH" \
@@ -51,25 +56,32 @@ build_node_command() {
     "file:$serial_log" \
     yes \
     no \
+    "${irqchip_args[@]}" \
     -netdev "socket,id=syncnet,$socket_mode" \
-    -device "e1000,netdev=syncnet"
+    -device "intel-iommu,intremap=on,eim=on,aw-bits=48" \
+    -device "virtio-net-pci,netdev=syncnet,disable-legacy=on,packed=off,iommu_platform=on,mac=$mac" \
+    -object "filter-dump,id=sync_capture,netdev=syncnet,file=${serial_log%.log}.pcap"
   qemu_harness_append_native_store_drive "$store_image"
 }
 
-build_node_command "$NODE_A_STORE" "$NODE_A_LOG" "listen=127.0.0.1:${SYNC_TWO_NODE_PORT}"
+build_node_command "$NODE_A_STORE" "$NODE_A_LOG" "listen=127.0.0.1:${SYNC_TWO_NODE_PORT}" "02:5a:47:00:00:01"
 NODE_A_COMMAND=("${QEMU_HARNESS_COMMAND[@]}")
 "${NODE_A_COMMAND[@]}" >"$NODE_A_QEMU_LOG" 2>&1 &
 NODE_A_PID=$!
 
 sleep 1
 
-build_node_command "$NODE_B_STORE" "$NODE_B_LOG" "connect=127.0.0.1:${SYNC_TWO_NODE_PORT}"
+build_node_command "$NODE_B_STORE" "$NODE_B_LOG" "connect=127.0.0.1:${SYNC_TWO_NODE_PORT}" "02:5a:47:00:00:02"
 NODE_B_COMMAND=("${QEMU_HARNESS_COMMAND[@]}")
 "${NODE_B_COMMAND[@]}" >"$NODE_B_QEMU_LOG" 2>&1 &
 NODE_B_PID=$!
 
 elapsed=0
 while true; do
+  if ! kill -0 "$NODE_A_PID" 2>/dev/null || ! kill -0 "$NODE_B_PID" 2>/dev/null; then
+    echo "Two-node sync QEMU test failed: a guest exited before readiness" >&2
+    break
+  fi
   node_a_ready=0
   node_b_ready=0
   if [ -s "$NODE_A_LOG" ] && grep -Fq "$READY_MARKER" "$NODE_A_LOG"; then

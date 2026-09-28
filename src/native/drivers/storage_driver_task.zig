@@ -19,7 +19,7 @@ else
         pub fn attached() bool {
             return false;
         }
-        pub fn probeAndReport(_: anytype, _: anytype, _: anytype) !?void {
+        pub fn probeAndReport(_: anytype, _: anytype, _: anytype, _: anytype) !?void {
             return null;
         }
         pub fn activateInterrupts() !void {}
@@ -94,9 +94,24 @@ pub fn bringUp() bool {
         programmed = true;
         return true;
     };
+    const network_hw = @import("../../kernel/drivers/network_hw.zig");
+    const virtio_net_hw = @import("../../kernel/drivers/virtio_net_hw.zig");
+    // All DMA windows must exist before VT-d is enabled and any requester runs.
+    network_hw.prepare() catch |err| {
+        console.print("ZIGOS:NETWORK:PREPARE_FAIL ");
+        console.print(@errorName(err));
+        console.print("\n");
+        return false;
+    };
+    if (pci.firstXhciController()) |usb| {
+        if (xhci_hw.isolationDomain() == null) _ = xhci_hw.probe(usb) catch return false;
+    }
     var isolation_domains: [2]intel_vtd.DmaDomain = undefined;
     var isolation_domain_count: usize = 0;
     if (intel_i225_hw.isolationDomain()) |domain| {
+        isolation_domains[isolation_domain_count] = domain;
+        isolation_domain_count += 1;
+    } else if (virtio_net_hw.isolationDomain()) |domain| {
         isolation_domains[isolation_domain_count] = domain;
         isolation_domain_count += 1;
     }
@@ -108,13 +123,23 @@ pub fn bringUp() bool {
         hardware_proof.vtdSummary() orelse return false
     else
         null;
+    const scoped_dmar = if (!hardware_proof.realTargetDetected() and virtio_net_hw.isolationDomain() != null)
+        hardware_proof.dmaIsolationTable() orelse {
+            console.print("ZIGOS:NETWORK:DMA_FIRMWARE_FAIL\n");
+            return false;
+        }
+    else
+        null;
     const vtd_summary_ptr = if (vtd_summary) |*summary| summary else null;
     const fault_proof = nvme_hw.probeAndReport(
         dev,
         vtd_summary_ptr,
         isolation_domains[0..isolation_domain_count],
-    ) catch {
-        console.print("ZIGOS:NVME:HW:BRINGUP_FAIL\n");
+        scoped_dmar,
+    ) catch |err| {
+        console.print("ZIGOS:NVME:HW:BRINGUP_FAIL ");
+        console.print(@errorName(err));
+        console.print("\n");
         return false;
     };
     if (fault_proof) |proof| hardware_proof.recordVtdIsolationProof(proof);

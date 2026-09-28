@@ -4163,14 +4163,15 @@ fn validateUserspaceDriverDataPathTrack(
     }
 
     const network_activation_snippets = [_][]const u8{
-        "networkPublicationMatchesTargetI225",
+        "networkPublicationMatchesDetectedDevice",
         "device_inventory.requireProductionDriverDeviceId(.network_adapter)",
-        "if (!networkPublicationMatchesTargetI225(device_id)) return false",
+        "if (!networkPublicationMatchesDetectedDevice(device_id)) return false",
+        "@import(\"../../kernel/drivers/network_hw.zig\").activate() catch return false",
         "try std.testing.expect(!activateNetworkDevice(i225_device_id, 9))",
     };
     for (network_activation_snippets) |snippet| {
         if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) == null) {
-            try common.addError(errors, allocator, "Userspace driver data path must keep I225-only network activation snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "Userspace driver data path must validate the selected NIC before publication: {s}", .{snippet});
         }
     }
     const network_driver_spec_snippets = [_][]const u8{

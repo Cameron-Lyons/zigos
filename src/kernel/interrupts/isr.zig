@@ -281,7 +281,12 @@ fn timerInterrupt(frame: *InterruptFrame) void {
 }
 
 fn i225Interrupt(_: *InterruptFrame) void {
-    intel_i225_hw.handleInterrupt();
+    const virtio_net_hw = @import("../drivers/virtio_net_hw.zig");
+    if (virtio_net_hw.isolationDomain() != null) {
+        virtio_net_hw.handleInterrupt();
+    } else {
+        intel_i225_hw.handleInterrupt();
+    }
     event_wake.raise(.network);
 }
 

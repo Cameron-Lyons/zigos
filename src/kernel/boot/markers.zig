@@ -152,6 +152,7 @@ pub const storage_durability_deterministic_recovery = "ZIGOS:STORAGE:DURABILITY:
 pub const sync_device_graph_rooted = "ZIGOS:SYNC:DEVICE_GRAPH:ROOTED";
 pub const sync_native_driver_packet_captured = "ZIGOS:SYNC:NATIVE_DRIVER:PACKET_CAPTURED";
 pub const sync_native_driver_frame_sent = "ZIGOS:SYNC:NATIVE_DRIVER:FRAME_SENT";
+pub const sync_native_driver_peer_frame_received = "ZIGOS:SYNC:NATIVE_DRIVER:PEER_FRAME_RECEIVED";
 pub const sync_native_driver_malformed_packet_rejected = "ZIGOS:SYNC:NATIVE_DRIVER:MALFORMED_PACKET_REJECTED";
 pub const sync_native_driver_reconnect_ok = "ZIGOS:SYNC:NATIVE_DRIVER:RECONNECT_OK";
 pub const sync_native_driver_replay_rejected = "ZIGOS:SYNC:NATIVE_DRIVER:REPLAY_REJECTED";

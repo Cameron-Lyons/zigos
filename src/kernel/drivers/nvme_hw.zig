@@ -620,7 +620,10 @@ pub fn attachAsBackend(
     dev: pci.PCIDevice,
     vtd_summary: ?*const dmar.Summary,
     additional_domains: []const intel_vtd.DmaDomain,
+    scoped_dmar: ?[]const u8,
 ) !?intel_vtd.FaultRecord {
+    if (scoped_dmar != null and vtd_summary != null) return error.InvalidDmaFirmware;
+    const isolation_required = scoped_dmar != null or vtd_summary != null;
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
     if (additional_domains.len > MAX_ADDITIONAL_DMA_DOMAINS) {
         return error.TooManyDmaDomains;
@@ -628,7 +631,7 @@ pub fn attachAsBackend(
     publishInterruptsActive(false);
     resetCompletionInterruptCount();
     const dma_base = paging.allocIdentityDmaFrames(DMA_FRAME_COUNT) orelse return error.QueueAllocationFailed;
-    var retain_dma_frames = vtd_summary != null;
+    var retain_dma_frames = isolation_required;
     errdefer if (!retain_dma_frames) paging.releaseIdentityDmaFrames(dma_base, DMA_FRAME_COUNT) catch {};
     const dma_alias = paging.directMapAddress(dma_base) orelse return error.QueueAllocationFailed;
     const frames = DmaFrames{ .base = .{ .physical = dma_base, .alias = dma_alias } };
@@ -642,7 +645,7 @@ pub fn attachAsBackend(
         _ = spinUntilReady(&controller, false);
     };
     const windows = frames.windows();
-    if (vtd_summary) |summary| {
+    if (isolation_required) {
         var domains: [1 + MAX_ADDITIONAL_DMA_DOMAINS]intel_vtd.DmaDomain = undefined;
         domains[0] = .{ .device = dev, .windows = &windows };
         var domain_count: usize = 1;
@@ -650,14 +653,18 @@ pub fn attachAsBackend(
             domains[domain_count] = domain;
             domain_count += 1;
         }
-        try intel_vtd.enforceDevices(summary, domains[0..domain_count]);
+        if (vtd_summary) |summary| {
+            try intel_vtd.enforceDevices(summary, domains[0..domain_count]);
+        } else {
+            try intel_vtd.enforceScopedDevices(scoped_dmar.?, domains[0..domain_count]);
+        }
     }
     pci.enableMemoryBusMastering(dev);
     bus_master_enabled = true;
     try enable(&controller);
 
     var fault_proof: ?intel_vtd.FaultRecord = null;
-    if (vtd_summary != null) {
+    if (isolation_required) {
         const guard_phys = paging.allocIdentityDmaFrames(1) orelse return error.QueueAllocationFailed;
         var guard_releasable = false;
         defer if (guard_releasable) paging.releaseIdentityDmaFrames(guard_phys, 1) catch {};
@@ -882,8 +889,9 @@ pub fn probeAndReport(
     dev: pci.PCIDevice,
     vtd_summary: ?*const dmar.Summary,
     additional_domains: []const intel_vtd.DmaDomain,
+    scoped_dmar: ?[]const u8,
 ) !?intel_vtd.FaultRecord {
-    const fault_proof = try attachAsBackend(dev, vtd_summary, additional_domains);
+    const fault_proof = try attachAsBackend(dev, vtd_summary, additional_domains, scoped_dmar);
     console.print("ZIGOS:NVME:HW:CAP=");
     printHex64(active_controller.capabilities());
     console.print(" VS=");

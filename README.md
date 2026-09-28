@@ -191,9 +191,12 @@ requests.
   use explicit rotation. Exhausted generations and rejected mutations leave the
   graph unchanged. Production root enrollment and sealed graph-signing keys
   remain open.
-  The two-node gate currently fails its driver packet-capture requirement:
-  its emulated e1000 adapter does not activate the current I225-LM driver path.
-  It needs a supported modern virtual NIC with receive/transmit evidence.
+  The two-node gate uses modern VirtIO PCI networking with bounded 32-entry
+  queues, separate DMA permissions, VT-d isolation and remapped MSI-X.
+  Both guests must transmit and receive encrypted native frames and observe
+  hardware interrupts; the harness saves wire captures beside the serial logs.
+  Physical I225-LM evidence and complete cross-node object replication remain
+  separate release requirements.
 - The driver model treats storage, network, USB controllers, GPU/display,
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA

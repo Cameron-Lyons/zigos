@@ -685,38 +685,3 @@ fn publishDescriptor() void {
 fn acquireDescriptor() void {
     asm volatile ("lfence" ::: .{ .memory = true });
 }
-
-export fn zigosNetworkBootstrapI225Attached() callconv(.c) bool {
-    return attached();
-}
-
-export fn zigosNetworkBootstrapI225Send(
-    destination_ptr: [*]const u8,
-    payload_ptr: [*]const u8,
-    payload_len: usize,
-) callconv(.c) bool {
-    var destination: [6]u8 = undefined;
-    @memcpy(&destination, destination_ptr[0..destination.len]);
-    return sendPayload(destination, payload_ptr[0..payload_len]);
-}
-
-export fn zigosNetworkBootstrapI225Receive(
-    output_ptr: [*]u8,
-    output_capacity: usize,
-    output_len: *usize,
-) callconv(.c) u8 {
-    output_len.* = 0;
-    const result = pollReceive(output_ptr[0..output_capacity]);
-    output_len.* = result.length;
-    return @intFromEnum(result.status);
-}
-
-export fn zigosNetworkBootstrapI225WorkPending() callconv(.c) bool {
-    return networkWorkPending();
-}
-
-export fn zigosNetworkBootstrapI225Mac(output: [*]u8) callconv(.c) bool {
-    if (!controllerPrepared()) return false;
-    @memcpy(output[0..controller.mac.len], &controller.mac);
-    return true;
-}

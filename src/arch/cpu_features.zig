@@ -24,6 +24,26 @@ fn cpuid(leaf: u32, subleaf: u32) CpuidResult {
     return .{ .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx };
 }
 
+pub fn clflushLineBytes() ?usize {
+    const leaf = cpuid(1, 0);
+    return decodeClflushLineBytes(leaf.ebx, leaf.edx);
+}
+
+fn decodeClflushLineBytes(ebx: u32, edx: u32) ?usize {
+    if (edx & (1 << 19) == 0) return null;
+    const bytes: usize = ((ebx >> 8) & 0xFF) * 8;
+    if (bytes == 0 or bytes > 4096 or !@import("std").math.isPowerOfTwo(bytes)) return null;
+    return bytes;
+}
+
+test "VT-d cache maintenance requires a valid advertised CLFLUSH line" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(?usize, 64), decodeClflushLineBytes(8 << 8, 1 << 19));
+    try std.testing.expectEqual(@as(?usize, null), decodeClflushLineBytes(8 << 8, 0));
+    try std.testing.expectEqual(@as(?usize, null), decodeClflushLineBytes(0, 1 << 19));
+    try std.testing.expectEqual(@as(?usize, null), decodeClflushLineBytes(3 << 8, 1 << 19));
+}
+
 pub fn detect() baseline.Features {
     var registers = baseline.Registers{ .cpuid_available = true };
     registers.max_basic_leaf = cpuid(0, 0).eax;
