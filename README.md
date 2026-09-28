@@ -63,12 +63,18 @@ requests.
   retires cancelled preparations. The 256-byte mailbox uses a typed UI channel
   for either a launcher or an editor. Cold-boot and reboot verification exercise
   these controls through the compositor ELF with modeled keyboard input.
-  Native ABI v11 copies canonical text snapshots from validated task memory;
+  Native ABI v12 copies canonical text snapshots from validated task memory;
   the compositor owns each accepted revision and rejects conflicting updates.
   The native boot path now maps the firmware framebuffer and draws document
   text, cursors, unsaved state, and selected Open/Cancel controls. Later frames
-  write only changed cells. Boot verification reads back mapped device pixels
-  for the launcher and edited Notes text. A production document picker,
+  write only changed cells. Notes shows save progress, confirmed durable saves,
+  retryable write failures, denied access, conflicting document changes, and
+  unavailable storage. Later edits invalidate the saved label; failed saves
+  retain the draft, and only an explicit retry resubmits a failed barrier.
+  The status fits within the unchanged 528-byte text snapshot. Boot verification
+  reads back mapped device pixels for the launcher, edited Notes text, save
+  progress, durable success, and a denied save after revocation. A production
+  document picker,
   identity and permission provisioning, accelerated graphics, Unicode rendering,
   physical display verification, and moving storage into userspace remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
@@ -143,11 +149,10 @@ requests.
   with payload bytes allocated on demand. Failed writes release newly allocated
   chunks before publishing an object or version. Storage still has an explicit
   finite quota; automatic history reclamation remains open.
-- Surface presentation uses a shared-buffer handle, revision, and readiness
-  fence through the userspace display service. The current display hardware
-  adapter records the scanout request; physical scanout and modesetting remain
-  open. The bounded text rasterizer and changed-cell renderer are host-tested
-  helpers and are not connected to this production presentation path.
+- Text surfaces use compositor-owned snapshots and the firmware framebuffer in
+  production, with writes limited to changed cells. The shared-buffer handle,
+  revision, and readiness-fence path still records modeled display requests;
+  accelerated scanout and modesetting remain open.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and

@@ -9,6 +9,7 @@ pub const Content = struct {
     window_id: u64 = 0,
     model: mailbox.UiModelKind = .generic,
     focus_index: u16 = 0,
+    save_state: abi.DocumentSaveState = .none,
 };
 const compositor = @import("compositor_session.zig");
 const scanout = @import("../../kernel/platform/text_scanout.zig");
@@ -68,15 +69,37 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
         } else {
             drawText(frame, text_row, state.text, state.cursor);
         }
-        frame.put(0, frame.rows - 2, if (flags.dirty) "Unsaved changes" else if (state.model == .notes) "Local document" else "Local session", .muted);
-        if (flags.input_overflow) frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
-        if (flags.recovery_visible) frame.put(0, frame.rows - 2, "Recovery requested", .warning);
+        if (state.model == .notes) {
+            const status = saveStatus(state.save_state, flags.dirty);
+            frame.put(0, frame.rows - 2, status.text, status.style);
+        } else frame.put(0, frame.rows - 2, if (flags.dirty) "Unsaved changes" else "Local session", .muted);
+        if (state.model != .notes or state.save_state == .none) {
+            if (flags.input_overflow) frame.put(0, frame.rows - 2, "Text is full. Remove text to continue.", .warning);
+            if (flags.recovery_visible) frame.put(0, frame.rows - 2, "Recovery requested", .warning);
+        }
     } else {
         frame.put(0, text_row, "Waiting for task content...", .muted);
     }
     if (surface) |state| {
-        if (state.model == .notes) frame.put(0, frame.rows - 1, "Type to edit  |  Ctrl+Enter  Save", .muted);
+        if (state.model == .notes) frame.put(0, frame.rows - 1, switch (state.save_state) {
+            .none, .saving, .saved => "Type to edit  |  Ctrl+Enter  Save",
+            .retryable => "Type to edit  |  Ctrl+Enter  Retry save",
+            .permission_denied, .document_changed, .unavailable, .failed => "Type to edit  |  Draft kept in this session",
+        }, .muted);
     }
+}
+
+fn saveStatus(state: abi.DocumentSaveState, dirty: bool) struct { text: []const u8, style: scanout.Style } {
+    return switch (state) {
+        .none => .{ .text = if (dirty) "Unsaved changes" else "Local document", .style = .muted },
+        .saving => .{ .text = "Saving...", .style = .accent },
+        .saved => .{ .text = if (dirty) "Unsaved changes" else "Saved locally", .style = .muted },
+        .retryable => .{ .text = "Save failed. Ctrl+Enter to retry.", .style = .warning },
+        .permission_denied => .{ .text = "Save denied. Your draft is still here.", .style = .warning },
+        .document_changed => .{ .text = "Document changed elsewhere. Your draft is still here.", .style = .warning },
+        .unavailable => .{ .text = "Storage unavailable. Your draft is still here.", .style = .warning },
+        .failed => .{ .text = "Save failed. Your draft is still here.", .style = .warning },
+    };
 }
 
 fn drawText(frame: *scanout.Frame, start_row: usize, text: []const u8, cursor: usize) void {
@@ -149,6 +172,42 @@ test "desktop text wraps clips and clears the previous cursor" {
     const empty = compositor.Session.init();
     render(&tiny, &empty, null);
     try expectText(&tiny, 0, 0, "Zigo");
+}
+
+test "desktop renders document save feedback without treating a dirty receipt as saved" {
+    const std = @import("std");
+    const task_runtime = @import("../task/task_runtime.zig");
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 72 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 65536, .endpoint_slots = 4, .shared_memory_bytes = 4096 },
+        .ui_surface_id = 32,
+        .local_only = true,
+    });
+    var session = compositor.Session.init();
+    _ = try session.openTaskView(task, "Notes");
+    var content = Content{ .surface_id = 32, .text = "draft", .cursor = 5, .model = .notes, .flags = .{ .dirty = true, .input_overflow = true, .recovery_visible = true } };
+    var frame = try scanout.Frame.init(80, 20);
+    for ([_]struct { state: abi.DocumentSaveState, text: []const u8, style: scanout.Style }{
+        .{ .state = .saving, .text = "Saving...", .style = .accent },
+        .{ .state = .retryable, .text = "Save failed. Ctrl+Enter to retry.", .style = .warning },
+        .{ .state = .permission_denied, .text = "Save denied. Your draft is still here.", .style = .warning },
+        .{ .state = .document_changed, .text = "Document changed elsewhere. Your draft is still here.", .style = .warning },
+        .{ .state = .unavailable, .text = "Storage unavailable. Your draft is still here.", .style = .warning },
+        .{ .state = .failed, .text = "Save failed. Your draft is still here.", .style = .warning },
+        .{ .state = .saved, .text = "Unsaved changes", .style = .muted },
+    }) |case| {
+        content.save_state = case.state;
+        render(&frame, &session, content);
+        try expectText(&frame, 0, 5, "draft");
+        try expectText(&frame, 0, 18, case.text);
+        try std.testing.expectEqual(case.style, frame.cells[18 * frame.columns].style);
+    }
+    content.flags.dirty = false;
+    render(&frame, &session, content);
+    try expectText(&frame, 0, 18, "Saved locally");
+    try std.testing.expectEqual(@as(u8, ' '), frame.cells[18 * frame.columns + 13].character);
 }
 
 fn expectText(frame: *const scanout.Frame, column: usize, row: usize, text: []const u8) !void {

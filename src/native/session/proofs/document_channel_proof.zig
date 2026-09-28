@@ -1,4 +1,5 @@
 const std = @import("std");
+const abi = @import("../../core/abi.zig");
 const mailbox_abi = @import("../../task/userspace_bootstrap_mailbox.zig");
 const protocol = @import("../../../userspace/document_protocol.zig");
 const ids = @import("../../core/ids.zig");
@@ -30,6 +31,7 @@ const EditorSession = struct {
     surface_id: u64,
     window_id: u64,
     binding: mailbox_abi.DocumentBinding,
+    document_capability_id: u64,
 };
 
 // Verification-only modeled HID input; every app operation below executes in
@@ -104,6 +106,8 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
     try awaitPresentation(manager, second, sibling_text ++ "bc", 2);
     try expectStored(manager, workspace_id, sibling_path, sibling_text ++ "bc", sibling.version_id.raw());
     common.printBootMarker(boot_markers.document_channel_sibling_editors);
+    try expectDeniedSave(manager, second, workspace_id);
+    common.printBootMarker(boot_markers.document_save_feedback);
     try expectChannelRetired(manager, second);
     common.printBootMarker(boot_markers.document_channel_retirement);
 }
@@ -153,7 +157,7 @@ fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64) !Edit
         const window = manager.compositorSessionPtr().findWindow(manager.compositorSessionPtr().active_window_id) orelse continue;
         if (window.subject_task_id != prepared.task_id) continue;
         common.printBootMarker(boot_markers.document_launcher_userspace_open);
-        return .{ .task_id = prepared.task_id, .surface_id = prepared.surface_id, .window_id = window.id, .binding = binding };
+        return .{ .task_id = prepared.task_id, .surface_id = prepared.surface_id, .window_id = window.id, .binding = binding, .document_capability_id = prepared.request.authority.capability_id };
     }
     return error.LaunchDecisionTimedOut;
 }
@@ -192,7 +196,7 @@ fn openEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path
     const stats = manager.userspaceSchedulerPtr().taskDispatchStats(launched.task_id) orelse return error.EditorNotScheduled;
     if (!stats.queued_ready or stats.dispatch_count != 0) return error.EditorDispatchedBeforeActivation;
     if (manager.runtime_context.userspace_executor.bindInitialDocument(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.capabilityTablePtr(), launched.task_id, launched.binding, 0)) return error.PreparedMailboxRebound;
-    return .{ .task_id = launched.task_id, .surface_id = surface_id, .window_id = launched.window_id, .binding = launched.binding };
+    return .{ .task_id = launched.task_id, .surface_id = surface_id, .window_id = launched.window_id, .binding = launched.binding, .document_capability_id = prepared.request.authority.capability_id };
 }
 
 fn prepareEditor(manager: anytype, graph: anytype, workspace_id: u64, document_path: []const u8, surface_id: u64) !PreparedEditor {
@@ -296,6 +300,37 @@ fn editAndSave(manager: anytype, editor: EditorSession, usage: u8) !void {
     report_mode = .edit;
     report_usage = usage;
     if (manager.servicePendingInputWork(timer.getTicks()) != 2) return error.InputNotRouted;
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
+        const text = if (surface.text) |*value| value else continue;
+        if (text.save_state != @intFromEnum(abi.DocumentSaveState.saving)) continue;
+        const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
+        if (!framebuffer.verifyText(0, frame.rows - 2, "Saving...")) return error.SavingPixelsMissing;
+        return;
+    }
+    return error.SavingStateMissing;
+}
+
+fn expectDeniedSave(manager: anytype, editor: EditorSession, workspace_id: u64) !void {
+    const storage = manager.storageServicePtr();
+    const before = try storage.resolve(workspace_id, sibling_path);
+    try manager.capabilityTablePtr().revokeGrant(editor.document_capability_id);
+    try editAndSave(manager, editor, 0x07);
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
+        const text = if (surface.text) |*value| value else continue;
+        if (text.save_state != @intFromEnum(abi.DocumentSaveState.permission_denied)) continue;
+        const flags: mailbox_abi.UiStateFlags = @bitCast(text.flags);
+        if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), sibling_text ++ "bcd")) return error.DeniedSaveLostDraft;
+        const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
+        if (!framebuffer.verifyText(0, frame.rows - 2, "Save denied. Your draft is still here.")) return error.SaveDeniedPixelsMissing;
+        const after = try storage.resolve(workspace_id, sibling_path);
+        if (after.version_id.raw() != before.version_id.raw()) return error.DeniedSaveChangedStorage;
+        return;
+    }
+    return error.SaveDeniedStateMissing;
 }
 
 fn expectStored(manager: anytype, workspace_id: u64, document_path: []const u8, expected: []const u8, old_version_id: u64) !void {
@@ -342,9 +377,14 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
         {
             const text = if (surface.text) |*content| content else return error.SurfaceTextMissing;
             if (!std.mem.eql(u8, text.textSlice(), expected)) return error.SurfaceTextMismatch;
+            if (commits != 0 and text.save_state != @intFromEnum(abi.DocumentSaveState.saved)) return error.SavedStateMissing;
             if (manager.compositorSessionPtr().active_window_id == editor.window_id) {
                 const first_line = std.mem.indexOfScalar(u8, expected, '\n') orelse expected.len;
                 if (!framebuffer.verifyText(0, 5, expected[0..first_line])) return error.DocumentPixelsMissing;
+                if (commits != 0) {
+                    const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
+                    if (!framebuffer.verifyText(0, frame.rows - 2, "Saved locally")) return error.SavedPixelsMissing;
+                }
             }
             return;
         }

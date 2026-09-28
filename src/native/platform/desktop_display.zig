@@ -3,6 +3,7 @@ const std = @import("std");
 const compositor = @import("compositor_session.zig");
 const view = @import("compositor_view.zig");
 const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
+const abi = @import("../core/abi.zig");
 const hardware = if (builtin.os.tag == .freestanding) @import("../../kernel/platform/framebuffer_hw.zig") else struct {};
 
 pub fn hasPresented() bool {
@@ -28,6 +29,7 @@ pub fn present(session: *const compositor.Session) bool {
                         .window_id = text.window_id,
                         .model = std.enums.fromInt(mailbox.UiModelKind, text.model) orelse return false,
                         .focus_index = text.focus_index,
+                        .save_state = std.enums.fromInt(abi.DocumentSaveState, text.save_state) orelse return false,
                     };
                 }
             }

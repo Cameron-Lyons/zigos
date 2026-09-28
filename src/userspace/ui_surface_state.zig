@@ -20,6 +20,7 @@ pub const State = struct {
     text: [TEXT_CAPACITY]u8 = [_]u8{0} ** TEXT_CAPACITY,
     text_length: u16 = 0,
     cursor: u16 = 0,
+    save_state: abi.DocumentSaveState = .none,
     commit_count: u32 = 0,
     activation_count: u32 = 0,
     revision: u64 = 0,
@@ -54,9 +55,10 @@ pub const State = struct {
             .window_id = self.window_id,
             .text_length = self.text_length,
             .cursor = self.cursor,
-            .focus_index = self.focus_index,
+            .focus_index = @intCast(self.focus_index),
             .model = @intFromEnum(self.model),
             .flags = @bitCast(self.flags),
+            .save_state = @intFromEnum(self.save_state),
         };
         @memcpy(out.text[0..self.text_length], self.textSlice());
         return out;
@@ -108,6 +110,7 @@ pub const State = struct {
         self.text_length += 1;
         self.cursor = self.text_length;
         self.flags.dirty = true;
+        if (self.save_state == .saved) self.save_state = .none;
         return true;
     }
 
@@ -117,6 +120,7 @@ pub const State = struct {
         self.text[self.text_length] = 0;
         self.cursor = self.text_length;
         self.flags.dirty = true;
+        if (self.save_state == .saved) self.save_state = .none;
         return true;
     }
 
@@ -130,11 +134,19 @@ pub const State = struct {
     pub fn acknowledgeSavedText(self: *State, saved_text: []const u8) bool {
         if (self.model != .notes or !self.flags.dirty or !std.mem.eql(u8, self.textSlice(), saved_text)) return false;
         self.flags.dirty = false;
+        self.save_state = .saved;
         self.revision +|= 1;
         return true;
     }
 
+    pub fn setSaveState(self: *State, state: abi.DocumentSaveState) void {
+        if (self.model != .notes or self.save_state == state) return;
+        self.save_state = state;
+        self.revision +|= 1;
+    }
+
     pub fn beginDocumentLoad(self: *State) void {
+        self.save_state = .none;
         self.flags.loading = true;
         self.flags.load_failed = false;
         self.revision +|= 1;
@@ -158,6 +170,7 @@ pub const State = struct {
         self.cursor = self.text_length;
         self.flags.loading = false;
         self.flags.load_failed = false;
+        self.save_state = .none;
         self.revision +|= 1;
         return true;
     }
@@ -257,6 +270,27 @@ test "UI surface state selects application-specific fixed-capacity models" {
     try std.testing.expectEqual(mailbox.UiModelKind.compositor, modelForBundle("zigos.system.compositor"));
     try std.testing.expectEqual(mailbox.UiModelKind.compositor, modelForBundle("zigos.system.drivers"));
     try std.testing.expectEqual(mailbox.UiModelKind.generic, modelForBundle("app.unknown"));
+}
+
+test "Notes edits invalidate saved feedback while preserving in-flight and failed saves" {
+    var state = State.init("app.notes");
+    _ = state.apply(inputEvent(1, abi.InputByte.text, 'a'));
+    try std.testing.expect(state.acknowledgeSavedText("a"));
+    try std.testing.expectEqual(abi.DocumentSaveState.saved, state.save_state);
+    _ = state.apply(inputEvent(2, abi.InputByte.text, 'b'));
+    try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
+    state.setSaveState(.saving);
+    _ = state.apply(inputEvent(3, abi.InputByte.backspace, 0));
+    try std.testing.expectEqual(abi.DocumentSaveState.saving, state.save_state);
+    state.setSaveState(.permission_denied);
+    _ = state.apply(inputEvent(4, abi.InputByte.text, 'c'));
+    try std.testing.expectEqual(abi.DocumentSaveState.permission_denied, state.save_state);
+    const presentation = state.presentationText();
+    try std.testing.expect(presentation.isCanonical());
+    try std.testing.expectEqual(@intFromEnum(abi.DocumentSaveState.permission_denied), presentation.save_state);
+    try std.testing.expect(state.acknowledgeSavedText("ac"));
+    _ = state.apply(inputEvent(5, abi.InputByte.backspace, 0));
+    try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
 }
 
 test "Notes accepts durable receipts without clearing edits made during a save" {

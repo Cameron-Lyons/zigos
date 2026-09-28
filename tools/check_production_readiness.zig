@@ -3888,7 +3888,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 11",
+        "pub const ABI_VERSION: u16 = 12",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
