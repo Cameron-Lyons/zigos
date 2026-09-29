@@ -7,6 +7,7 @@ const entry = @import("../platform/trusted_auth_entry.zig");
 const identity_session = @import("identity_session.zig");
 const pin = @import("../platform/tpm2_pin.zig");
 const recovery = @import("identity_recovery.zig");
+const recovery_record = @import("identity_recovery_record.zig");
 const recovery_key = @import("../platform/recovery_key.zig");
 const catalog = @import("../storage/vault_catalog.zig");
 const cooperative = @import("../task/cooperative_worker.zig");
@@ -19,6 +20,7 @@ pub fn Adapter(comptime Io: type) type {
         session: *identity_session.Session(Io),
         capsule: *const pin.Capsule,
         recovery_package: ?*const recovery.Package = null,
+        recovery_pin: ?@import("identity_provisioning.zig").Pin = null,
         boot_instance: [16]u8,
         lifetime_ticks: u64,
         scratch: *[catalog.MAX_BYTES]u8,
@@ -32,7 +34,7 @@ pub fn Adapter(comptime Io: type) type {
         failure: ?anyerror = null,
 
         pub fn authenticator(self: *Self) entry.Authenticator {
-            return .{ .context = self, .recovery_available = self.recovery_package != null, .lock_fn = lock, .start_fn = start, .poll_fn = poll, .busy_fn = busy, .deadline_fn = deadline };
+            return .{ .context = self, .recovery_available = self.recovery_package != null, .recovery_characters = if (self.recovery_pin != null) recovery_record.CODE_BYTES else recovery_key.CODE_BYTES, .lock_fn = lock, .start_fn = start, .poll_fn = poll, .busy_fn = busy, .deadline_fn = deadline };
         }
 
         // Detach trusted input and finish cancellation before releasing backing
@@ -80,7 +82,13 @@ pub fn Adapter(comptime Io: type) type {
                 },
                 .recovery => {
                     if (self.recovery_package == null) return error.RecoveryUnavailable;
-                    recovery_key.decode(value, &self.value) catch return error.InvalidRecoveryCode;
+                    if (self.recovery_pin) |trusted| {
+                        var retained = recovery_record.Record{};
+                        defer retained.erase();
+                        recovery_record.Record.decode(value, &retained) catch return error.InvalidRecoveryCode;
+                        if (trusted.object_id != retained.trusted.object_id or !std.crypto.timing_safe.eql([32]u8, trusted.digest, retained.trusted.digest)) return error.RecoveryEnrollmentChanged;
+                        self.value = retained.key;
+                    } else recovery_key.decode(value, &self.value) catch return error.InvalidRecoveryCode;
                     self.value_len = self.value.len;
                 },
             }
@@ -228,4 +236,24 @@ test "identity authentication adapter validates recovery before hardware and ret
         try std.testing.expect(std.mem.allEqual(u8, adapter.stack.?.bytes, 0));
         try std.testing.expect(std.mem.allEqual(u8, &adapter.value, 0));
     }
+    adapter.recovery_pin = .{ .object_id = 1001, .digest = @splat(8) };
+    auth = adapter.authenticator();
+    try std.testing.expectEqual(recovery_record.CODE_BYTES, auth.recovery_characters);
+    var retained = recovery_record.Record{ .trusted = adapter.recovery_pin.?, .key = key };
+    defer retained.erase();
+    var record_code: [recovery_record.CODE_BYTES]u8 = undefined;
+    defer std.crypto.secureZero(u8, &record_code);
+    retained.trusted.digest[0] ^= 1;
+    try retained.encode(&record_code);
+    const before = io.calls;
+    try std.testing.expectError(error.RecoveryEnrollmentChanged, auth.start_fn(auth.context, .recovery, &record_code, 10));
+    try std.testing.expectEqual(before, io.calls);
+    try std.testing.expect(std.mem.allEqual(u8, &adapter.value, 0));
+    retained.trusted = adapter.recovery_pin.?;
+    retained.key = wrong_key;
+    try retained.encode(&record_code);
+    try auth.start_fn(auth.context, .recovery, &record_code, 10);
+    try std.testing.expectError(error.RecoveryAuthenticationFailed, auth.poll_fn(auth.context, 10));
+    try std.testing.expectEqual(before, io.calls);
+    try std.testing.expect(std.mem.allEqual(u8, &adapter.value, 0) and std.mem.allEqual(u8, adapter.stack.?.bytes, 0));
 }

@@ -573,16 +573,21 @@ pub const SessionManager = struct {
     }
 
     pub fn bindTrustedAuthentication(self: *SessionManager, entry: *trusted_auth.Entry, now_ticks: u64) void {
-        self.input_router.bindTrustedEntry(entry, now_ticks);
+        self.input_router.bindTrustedEntry(.{ .authentication = entry }, now_ticks);
+        _ = desktop_display.present(self.compositorSessionPtr());
+    }
+
+    pub fn bindTrustedSetup(self: *SessionManager, entry: *@import("../platform/trusted_setup_entry.zig").Entry, now_ticks: u64) void {
+        self.input_router.bindTrustedEntry(.{ .setup = entry }, now_ticks);
         _ = desktop_display.present(self.compositorSessionPtr());
     }
 
     pub fn serviceAuthenticationClock(self: *SessionManager, now_ticks: u64) void {
         const entry = self.input_router.trusted_entry orelse return;
-        const revision = entry.revision;
+        const revision = entry.revision();
         entry.tick(now_ticks);
         self.input_router.synchronizeTrustedInput();
-        if (entry.revision != revision) _ = desktop_display.present(self.compositorSessionPtr());
+        if (entry.revision() != revision) _ = desktop_display.present(self.compositorSessionPtr());
     }
 
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
@@ -599,9 +604,9 @@ pub const SessionManager = struct {
         };
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
         if (self.input_router.trusted_entry) |entry| {
-            if (entry.prepareVerification(now_ticks)) {
+            if (entry.prepareWork(now_ticks)) {
                 _ = desktop_display.present(self.compositorSessionPtr());
-                entry.verify(now_ticks);
+                entry.runWork(now_ticks);
                 self.input_router.synchronizeTrustedInput();
                 _ = desktop_display.present(self.compositorSessionPtr());
             }

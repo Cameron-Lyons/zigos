@@ -679,3 +679,19 @@ test "keyboard repeat wakes an idle session and cannot renew revoked or suspende
         try std.testing.expect(manager.nextServiceWake() == null);
     }
 }
+
+test "session manager setup deadlines erase private state without input activity" {
+    var backend = @import("../../tests/fixtures/setup_entry.zig").Fixture{};
+    var entry = @import("../platform/trusted_setup_entry.zig").Entry{ .backend = backend.backend(), .input_timeout_ticks = 20 };
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.* = .init();
+    defer manager.reset();
+    manager.bindTrustedSetup(&entry, 1);
+    entry.handle(.{ .kind = .text, .data = '7' }, 2);
+    try std.testing.expectEqual(@as(?u64, 22), manager.nextServiceWake());
+    manager.serviceAuthenticationClock(22);
+    try std.testing.expect(entry.view.status == .choose_pin and entry.view.notice == .timeout);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
+    try std.testing.expect(manager.nextServiceWake() == null and manager.inputRouterPtr().drain_until_neutral);
+}

@@ -66,8 +66,8 @@ pub fn Session(comptime Io: type) type {
             std.crypto.secureZero(u8, &self.authorization);
             std.crypto.secureZero(u8, &self.client.command);
             std.crypto.secureZero(u8, &self.client.response);
-            self.state.identities.* = .init();
-            if (self.state.devices) |devices| devices.* = .init();
+            self.state.identities.reset();
+            if (self.state.devices) |devices| devices.reset();
             self.device_key = .{};
             self.unlock_method = null;
             self.coordinator = null;

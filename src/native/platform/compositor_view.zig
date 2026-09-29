@@ -28,14 +28,16 @@ pub fn textViewport(columns: usize, rows: usize, start_row: usize) abi.text_layo
 pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content: ?Content) void {
     frame.clear();
     frame.put(0, 0, "Zigos", .accent);
-    if (session.authentication_view) |authentication| {
-        if (authentication.status != .hidden) {
-            renderAuthentication(frame, authentication.*);
-            return;
+    if (session.trusted_view) |trusted| if (trusted.visible()) {
+        switch (trusted.*) {
+            .authentication => |authentication| renderAuthentication(frame, authentication.*),
+            .setup => |setup| renderSetup(frame, setup),
+            .none => unreachable,
         }
-    }
+        return;
+    };
     if (frame.rows < 10) return;
-    if (session.authentication_view != null and frame.columns >= 72) frame.put(14, 0, "Ctrl+Alt+Delete  Lock", .muted);
+    if (session.trusted_view != null and frame.columns >= 72) frame.put(14, 0, "Ctrl+Alt+Delete  Lock", .muted);
     if (frame.columns >= 40) frame.put(frame.columns - 21, 0, "Alt+Tab  Switch task", .muted);
     frame.fillRow(2, .selected);
 
@@ -134,10 +136,17 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_
     frame.put(1, 2, if (recovering) "Recover Zigos" else "Unlock Zigos", .selected);
     frame.put(0, 4, if (recovering) "Enter your recovery key" else "Enter your device PIN", .body);
     const mask = "*" ** @import("trusted_auth_entry.zig").MAX_ENTRY_BYTES;
-    frame.put(0, 6, mask[0..@min(authentication.characters, mask.len)], .accent);
+    const count = @min(authentication.characters, mask.len);
+    var offset: usize = 0;
+    var row: usize = 6;
+    while (offset < count and row + 2 < frame.rows) : (row += 1) {
+        const take = @min(count - offset, frame.columns);
+        frame.put(0, row, mask[offset..][0..take], .accent);
+        offset += take;
+    }
     const message = switch (authentication.status) {
         .hidden, .entering => "",
-        .too_short => if (recovering) "Enter all 56 recovery characters." else "Enter at least 6 digits.",
+        .too_short => if (recovering) (if (authentication.recovery_characters == 128) "Enter all 128 recovery characters." else "Enter all 56 recovery characters.") else "Enter at least 6 digits.",
         .too_long => "Entry is too long. Press Esc to start again.",
         .invalid_code => "Check your recovery key for typing errors.",
         .pending, .verifying => if (recovering) "Recovering..." else "Unlocking...",
@@ -146,7 +155,7 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_
         .locked_out => if (authentication.recovery_available) "Too many attempts. Wait or press Ctrl+R for recovery." else "Too many attempts. Wait before trying again.",
         .unavailable => "Sign-in unavailable. Press Ctrl+Alt+Delete to retry.",
     };
-    frame.put(0, 8, message, if (authentication.status == .pending or authentication.status == .verifying) .body else .warning);
+    frame.put(0, @max(row + 1, 8), message, if (authentication.status == .pending or authentication.status == .verifying) .body else .warning);
     frame.put(0, frame.rows - 1, if (authentication.status == .pending or authentication.status == .verifying or authentication.status == .cancelling)
         "Esc  Cancel"
     else if (recovering)
@@ -157,12 +166,96 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_
         "Enter  Unlock  |  Esc  Clear PIN", .muted);
 }
 
+fn renderSetup(frame: *scanout.Frame, setup: *const @import("trusted_setup_entry.zig").View) void {
+    if (frame.rows < 10 or frame.columns == 0) return;
+    frame.fillRow(2, .selected);
+    frame.put(1, 2, "Set up Zigos", .selected);
+    if (setup.status == .record_recovery) {
+        if (frame.columns < 39 or frame.rows < 14) {
+            frame.put(0, 4, "More display space is needed.", .warning);
+            frame.put(0, 6, "Press Esc to restart setup.", .body);
+            return;
+        }
+        frame.put(0, 4, "Save all four lines outside this device:", .body);
+        for (0..4) |line| frame.put(0, 6 + line, setup.recovery_code[line * 40 ..][0..39], .accent);
+        frame.put(0, 11, "Keep this record private.", .body);
+        frame.put(0, 12, "You will re-enter it to finish setup.", .muted);
+        frame.put(0, frame.rows - 1, "Enter  Saved record  |  Esc  Cancel", .muted);
+        return;
+    }
+    frame.put(0, 4, switch (setup.status) {
+        .choose_pin => "Choose a PIN with 6 to 32 digits",
+        .confirm_pin => "Re-enter your PIN",
+        .preparing => "Creating your account...",
+        .confirm_recovery => "Re-enter the recovery record you saved",
+        .committing => "Finishing setup...",
+        .cancelling => "Pausing setup...",
+        .resume_setup => "Enter your saved recovery record",
+        .complete => "Your account is ready.",
+        .unavailable => "Setup is unavailable.",
+        .record_recovery => unreachable,
+    }, .body);
+    const mask = "*" ** @import("../services/identity_recovery_record.zig").CODE_BYTES;
+    const count = @min(setup.characters, mask.len);
+    var offset: usize = 0;
+    var row: usize = 6;
+    while (offset < count and row + 2 < frame.rows) : (row += 1) {
+        const take = @min(count - offset, frame.columns);
+        frame.put(0, row, mask[offset..][0..take], .accent);
+        offset += take;
+    }
+    frame.put(0, @max(row + 1, 8), switch (setup.notice) {
+        .none => "",
+        .too_short => "Enter at least 6 digits.",
+        .too_long => "Entry is too long. Try again.",
+        .mismatch => "Entries did not match. Try again.",
+        .invalid_record => "Check all 128 recovery characters.",
+        .failed => "Setup could not finish. Try again.",
+        .timeout => "Setup timed out. Please start again.",
+        .interrupted => "Input was interrupted. Please try again.",
+    }, .warning);
+    frame.put(0, frame.rows - 1, switch (setup.status) {
+        .preparing, .committing, .cancelling => "Esc  Pause setup",
+        .complete => "Finishing your workspace...",
+        else => "Enter  Continue  |  Esc  Clear  |  Ctrl+R  Resume",
+    }, .muted);
+}
+
+test "desktop view confines recovery export to the native setup screen" {
+    const std = @import("std");
+    const record = @import("../services/identity_recovery_record.zig");
+    var session = compositor.Session.init();
+    defer session.deinit();
+    var setup = @import("trusted_setup_entry.zig").View{ .status = .record_recovery };
+    const retained = record.Record{ .trusted = .{ .object_id = 1001, .digest = @splat(8) }, .key = @splat(9) };
+    try retained.format(&setup.recovery_code);
+    var trusted = @import("trusted_identity_entry.zig").View{ .setup = &setup };
+    session.trusted_view = &trusted;
+    var frame = try scanout.Frame.init(60, 20);
+    const app = Content{ .surface_id = 99, .text = "Private app content", .cursor = 0, .flags = .{ .active = true } };
+    render(&frame, &session, app);
+    try expectText(&frame, 1, 2, "Set up Zigos");
+    for (0..4) |line| try expectText(&frame, 0, 6 + line, setup.recovery_code[line * 40 ..][0..39]);
+    setup.status = .confirm_recovery;
+    setup.characters = 128;
+    render(&frame, &session, app);
+    try expectText(&frame, 0, 6, "*" ** 60);
+    try expectText(&frame, 0, 7, "*" ** 60);
+    try expectText(&frame, 0, 8, "*" ** 8);
+    for (frame.cells[9 * frame.columns ..][0..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
+    setup.status = .committing;
+    setup.characters = 0;
+    render(&frame, &session, app);
+    for (frame.cells[6 * frame.columns ..][0 .. 4 * frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
+}
+
 test "desktop view gives trusted authentication exclusive masked chrome" {
     const std = @import("std");
     var session = compositor.Session.init();
     defer session.deinit();
     var authentication = @import("trusted_auth_entry.zig").View{ .status = .entering, .characters = 8 };
-    session.authentication_view = &authentication;
+    var trusted = @import("trusted_identity_entry.zig").View{ .authentication = &authentication };
+    session.trusted_view = &trusted;
     var frame = try scanout.Frame.init(60, 20);
     frame.put(0, 12, "Previous private document", .body);
     const app = Content{ .surface_id = 99, .text = "73019428", .cursor = 8, .flags = .{ .active = true } };

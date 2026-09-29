@@ -144,7 +144,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     const boot = @import("../../../kernel/platform/secure_random.zig").bootInstanceId();
     var scratch: [catalog.MAX_BYTES]u8 = undefined;
     if (expected_rejection) |expected| {
-        try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null, expected);
+        try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null, null, expected);
         try requireLocked(&session);
         return;
     }
@@ -225,11 +225,12 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     }
     try requireLocked(&session);
     try session.close();
-    try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null, null);
+    try proveTrustedInput(manager, &session, capsule, pin, boot, &scratch, null, null, null);
     console.print("ZIGOS:TPM2:SESSION:VERIFIED\n");
 }
 
-pub fn runRecovery(manager: anytype, io: anytype, record: *const @import("../../services/identity_enrollment.zig").Record, package: *const @import("../../services/identity_recovery.zig").Package, recovery_key: *const tpm.Key) !void {
+pub fn runRecovery(manager: anytype, io: anytype, record: *const @import("../../services/identity_enrollment.zig").Record, package: *const @import("../../services/identity_recovery.zig").Package, retained: *const @import("../../services/identity_recovery_record.zig").Record) !void {
+    const recovery_key = &retained.key;
     var service = vault.Service.init();
     var identities = identity.Store.init();
     var graph = graph_mod.Graph.init();
@@ -269,17 +270,20 @@ pub fn runRecovery(manager: anytype, io: anytype, record: *const @import("../../
     try requireLocked(&session);
     session.enrollment = record.enrollment;
     if (io.commands != commands or io.da_resets != resets) return error.UntrustedRecoveryReachedTpm;
-    const codec = @import("../../platform/recovery_key.zig");
+    const codec = @import("../../services/identity_recovery_record.zig");
     var code: [codec.DISPLAY_BYTES]u8 = undefined;
     defer std.crypto.secureZero(u8, &code);
-    try codec.format(recovery_key, &code);
+    try retained.format(&code);
     code[0] = if (code[0] == '0') '1' else '0';
-    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, error.InvalidRecoveryCode);
-    try codec.format(&wrong_key, &code);
-    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, error.RecoveryAuthenticationFailed);
+    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, retained.trusted, error.InvalidRecoveryCode);
+    var wrong = retained.*;
+    defer wrong.erase();
+    wrong.key = wrong_key;
+    try wrong.format(&code);
+    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, retained.trusted, error.RecoveryAuthenticationFailed);
     if (io.commands != commands or io.da_resets != resets) return error.UntrustedRecoveryInputReachedTpm;
-    try codec.format(recovery_key, &code);
-    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, null);
+    try retained.format(&code);
+    try proveTrustedInput(manager, &session, &record.capsule, &code, boot, &scratch, package, retained.trusted, null);
     try session.close();
     const successful_resets = io.da_resets;
     io.corrupt_nv_read = true;
@@ -322,18 +326,18 @@ const xhci = @import("../../../kernel/drivers/xhci.zig");
 var input_report: ?xhci.HardwareBootKeyboardReport = null;
 var input_sequence: u64 = 0;
 
-fn pollInputReport() ?xhci.HardwareBootKeyboardReport {
+pub fn pollInputReport() ?xhci.HardwareBootKeyboardReport {
     const report = input_report orelse return null;
     std.crypto.secureZero(u8, &input_report.?.bytes);
     input_report = null;
     return report;
 }
 
-fn noInputProof() ?xhci.InputProof {
+pub fn noInputProof() ?xhci.InputProof {
     return null;
 }
 
-fn sendInput(manager: anytype, usage: u8, modifiers: u8, now_ticks: u64) void {
+pub fn sendInput(manager: anytype, usage: u8, modifiers: u8, now_ticks: u64) void {
     input_sequence += 1;
     input_report = .{ .sequence = input_sequence, .port_id = 1, .slot_id = 1, .endpoint_id = 3 };
     input_report.?.bytes[0] = modifiers;
@@ -344,21 +348,21 @@ fn sendInput(manager: anytype, usage: u8, modifiers: u8, now_ticks: u64) void {
 
 // Use elapsed invariant-clock ticks while exercising the real scheduler-facing
 // entry points. Synthetic epochs keep this proof independent of earlier boots.
-const ProofClock = struct {
+pub const ProofClock = struct {
     start: u64,
     per_tick: u64,
     epoch: u64 = 200,
-    fn init() ProofClock {
+    pub fn init() ProofClock {
         const interval = @import("../../../kernel/timer/tsc_clock.zig").afterMilliseconds(timer.MILLISECONDS_PER_TICK).value;
         return .{ .start = interval.start_ticks, .per_tick = interval.interval_ticks };
     }
-    fn now(self: ProofClock) u64 {
+    pub fn now(self: ProofClock) u64 {
         return self.epoch + (@import("../../../arch/x86.zig").rdtsc() -% self.start) / self.per_tick;
     }
 };
 const timer = @import("../../../kernel/timer/timer.zig");
 
-fn typeAuthentication(manager: anytype, value: []const u8, recovering: bool, clock: ProofClock) !void {
+pub fn typeAuthentication(manager: anytype, value: []const u8, recovering: bool, clock: ProofClock) !void {
     const router = manager.inputRouterPtr();
     sendInput(manager, 0, 0, clock.now());
     if (recovering) {
@@ -381,7 +385,7 @@ fn typeAuthentication(manager: anytype, value: []const u8, recovering: bool, clo
         if (router.queued_event_count != 0 or router.pollWakeTarget() != null) return error.LeakedAuthenticationInput;
     }
     const frame = @import("../../../kernel/platform/framebuffer_hw.zig").frame() orelse return error.MissingAuthenticationFrame;
-    for (0..characters) |i| if (frame.cells[6 * frame.columns + i].character != '*') return error.UnmaskedAuthenticationInput;
+    for (0..characters) |i| if (frame.cells[(6 + i / frame.columns) * frame.columns + i % frame.columns].character != '*') return error.UnmaskedAuthenticationInput;
     sendInput(manager, 0x28, 0, clock.now());
 }
 
@@ -395,11 +399,11 @@ fn serviceAttempt(manager: anytype, entry: anytype, clock: ProofClock) !void {
     @import("../../../kernel/utils/spin.zig").hint();
 }
 
-fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod.Capsule, value: []const u8, boot: [16]u8, scratch: *[catalog.MAX_BYTES]u8, package: ?*const @import("../../services/identity_recovery.zig").Package, rejection: ?anyerror) !void {
+fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod.Capsule, value: []const u8, boot: [16]u8, scratch: *[catalog.MAX_BYTES]u8, package: ?*const @import("../../services/identity_recovery.zig").Package, recovery_pin: ?@import("../../services/identity_provisioning.zig").Pin, rejection: ?anyerror) !void {
     const entry_mod = @import("../../platform/trusted_auth_entry.zig");
     const Adapter = @import("../../services/identity_authenticator.zig").Adapter(@TypeOf(session.io.*));
     const recovering = package != null;
-    var adapter = Adapter{ .session = session, .capsule = capsule, .recovery_package = package, .boot_instance = boot, .lifetime_ticks = 1000, .scratch = scratch };
+    var adapter = Adapter{ .session = session, .capsule = capsule, .recovery_package = package, .recovery_pin = recovery_pin, .boot_instance = boot, .lifetime_ticks = 1000, .scratch = scratch };
     defer adapter.deinit() catch @panic("authentication proof released a live worker");
     var entry = entry_mod.Entry{ .authenticator = adapter.authenticator(), .input_timeout_ticks = 50 };
     const clock = ProofClock.init();

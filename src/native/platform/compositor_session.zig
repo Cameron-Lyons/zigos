@@ -420,7 +420,7 @@ pub const CheckpointStore = struct {
 pub const Session = struct {
     // Live native authentication chrome never enters a checkpoint or a task's
     // surface snapshot. The exclusive input owner retains and detaches it.
-    authentication_view: ?*const @import("trusted_auth_entry.zig").View = null,
+    trusted_view: ?*const @import("trusted_identity_entry.zig").View = null,
     next_window_id: u64 = 1,
     active_window_id: u64 = 0,
     window_state: WindowStateStorage = if (heap_backed_window_state) null else WindowState.init(),
@@ -467,10 +467,10 @@ pub const Session = struct {
     }
 
     pub fn reset(self: *Session) void {
-        const authentication_view = self.authentication_view;
+        const trusted_view = self.trusted_view;
         self.deinit();
         self.* = init();
-        self.authentication_view = authentication_view;
+        self.trusted_view = trusted_view;
     }
 
     fn windowState(self: *Session) ?*WindowState {

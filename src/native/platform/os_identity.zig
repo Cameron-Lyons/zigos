@@ -266,6 +266,11 @@ pub const Store = struct {
         return .{};
     }
 
+    pub fn reset(self: *Store) void {
+        for (&self.credentials) |*credential| credential.* = zeroCredential();
+        self.credential_count = 0;
+    }
+
     // The enclosing vault catalog authenticates these bytes and commits them
     // with their sealed keys. No lease or unlock proof enters the snapshot.
     pub fn encodeSnapshot(self: *const Store, owner: principal.PrincipalId, secrets: *const secure_secret_store.Store, out: []u8) SnapshotError![]const u8 {

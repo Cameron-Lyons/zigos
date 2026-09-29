@@ -3,10 +3,11 @@
 //! trusted input/export owner may retain them; never log or put them in a view.
 const std = @import("std");
 pub const Key = [32]u8;
-pub const CODE_BYTES = 56;
-pub const DISPLAY_BYTES = CODE_BYTES + CODE_BYTES / 4 - 1;
+const base32 = @import("recovery_code.zig");
+const Codec = base32.Codec(32, "zigos:recovery-key:v1\x00");
+pub const CODE_BYTES = Codec.CODE_BYTES;
+pub const DISPLAY_BYTES = Codec.DISPLAY_BYTES;
 const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-const RAW_BYTES = 35;
 
 pub fn generate(entropy: anytype, out: *Key) !void {
     std.crypto.secureZero(u8, out);
@@ -17,24 +18,12 @@ pub fn generate(entropy: anytype, out: *Key) !void {
 
 // Input normalization happens at the trusted keyboard boundary. The decoder
 // accepts only the compact uppercase representation, with no ambiguous aliases.
-pub fn symbol(byte: u8) ?u8 {
-    const index = std.mem.indexOfScalar(u8, alphabet, byte) orelse return null;
-    return @intCast(index);
-}
+pub const symbol = base32.symbol;
 
 pub fn encode(key: *const Key, out: *[CODE_BYTES]u8) !void {
     std.crypto.secureZero(u8, out);
     try validate(key);
-    var raw: [RAW_BYTES]u8 = undefined;
-    defer std.crypto.secureZero(u8, &raw);
-    @memcpy(raw[0..32], key);
-    @memcpy(raw[32..], &checksum(key));
-    for (0..RAW_BYTES / 5) |group| {
-        var bits: u64 = 0;
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&bits));
-        for (raw[group * 5 ..][0..5]) |byte| bits = (bits << 8) | byte;
-        for (0..8) |i| out[group * 8 + i] = alphabet[(bits >> @as(u6, @intCast(35 - i * 5))) & 31];
-    }
+    Codec.encode(key, out);
 }
 
 pub fn format(key: *const Key, out: *[DISPLAY_BYTES]u8) !void {
@@ -42,41 +31,18 @@ pub fn format(key: *const Key, out: *[DISPLAY_BYTES]u8) !void {
     var compact: [CODE_BYTES]u8 = undefined;
     defer std.crypto.secureZero(u8, &compact);
     try encode(key, &compact);
-    for (0..CODE_BYTES / 4) |group| {
-        if (group != 0) out[group * 5 - 1] = '-';
-        @memcpy(out[group * 5 ..][0..4], compact[group * 4 ..][0..4]);
-    }
+    Codec.format(&compact, out);
 }
 
-pub fn decode(code: []const u8, out: *Key) !void {
+pub fn decode(value: []const u8, out: *Key) !void {
     std.crypto.secureZero(u8, out);
     errdefer std.crypto.secureZero(u8, out);
-    if (code.len != CODE_BYTES) return error.InvalidRecoveryCode;
-    var raw: [RAW_BYTES]u8 = @splat(0);
-    defer std.crypto.secureZero(u8, &raw);
-    for (0..CODE_BYTES / 8) |group| {
-        var bits: u64 = 0;
-        defer std.crypto.secureZero(u8, std.mem.asBytes(&bits));
-        for (code[group * 8 ..][0..8]) |byte| bits = (bits << 5) | (symbol(byte) orelse return error.InvalidRecoveryCode);
-        for (0..5) |i| raw[group * 5 + i] = @truncate(bits >> @as(u6, @intCast(32 - i * 8)));
-    }
-    if (!std.crypto.timing_safe.eql([3]u8, raw[32..35].*, checksum(raw[0..32]))) return error.InvalidRecoveryCode;
-    try validate(raw[0..32]);
-    out.* = raw[0..32].*;
+    try Codec.decode(value, out);
+    try validate(out);
 }
 
 fn validate(key: *const Key) !void {
     if (std.mem.allEqual(u8, key, 0)) return error.InvalidRecoveryKey;
-}
-
-fn checksum(key: *const Key) [3]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&hash));
-    hash.update("zigos:recovery-key:v1\x00");
-    hash.update(key);
-    var digest = hash.finalResult();
-    defer std.crypto.secureZero(u8, &digest);
-    return digest[0..3].*;
 }
 
 test "recovery key code roundtrips all key bytes and rejects altered or noncanonical codes" {

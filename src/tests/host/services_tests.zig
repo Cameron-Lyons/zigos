@@ -22,6 +22,9 @@ const userspace_service_ipc = @import("../../native/services/userspace_service_i
 test "service host tests import native service modules" {
     std.testing.refAllDecls(@import("../../native/services/identity_enrollment.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_provisioning.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_recovery_record.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_setup_worker.zig"));
+    std.testing.refAllDecls(@import("../../native/platform/trusted_setup_entry.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_recovery.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_session.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_authenticator.zig"));

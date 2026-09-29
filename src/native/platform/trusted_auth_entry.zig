@@ -6,16 +6,17 @@ const recovery = @import("recovery_key.zig");
 
 pub const MAX_PIN_BYTES = 32;
 pub const MIN_PIN_BYTES = 6;
-pub const MAX_ENTRY_BYTES = recovery.CODE_BYTES;
+pub const MAX_ENTRY_BYTES = @import("../services/identity_recovery_record.zig").CODE_BYTES;
 pub const Method = enum { pin, recovery };
 pub const Status = enum { hidden, entering, too_short, too_long, invalid_code, pending, verifying, cancelling, rejected, locked_out, unavailable };
-pub const View = struct { status: Status = .hidden, characters: u8 = 0, method: Method = .pin, recovery_available: bool = false };
+pub const View = struct { status: Status = .hidden, characters: u8 = 0, method: Method = .pin, recovery_available: bool = false, recovery_characters: u8 = recovery.CODE_BYTES };
 
 // Stable, exclusive service owner. Start copies/decodes the borrowed input; poll performs
 // one bounded worker step. Cancellation retains all backing until busy is false.
 pub const Authenticator = struct {
     context: *anyopaque,
     recovery_available: bool = false,
+    recovery_characters: u8 = recovery.CODE_BYTES,
     lock_fn: *const fn (*anyopaque) void,
     start_fn: *const fn (*anyopaque, Method, []const u8, u64) anyerror!void,
     poll_fn: *const fn (*anyopaque, u64) anyerror!bool,
@@ -108,7 +109,10 @@ pub const Entry = struct {
         self.pin_locked_out = false;
         self.view.method = .pin;
         self.view.recovery_available = self.authenticator.recovery_available;
+        self.view.recovery_characters = self.authenticator.recovery_characters;
         self.view.status = if (self.busy()) .cancelling else .entering;
+        if (self.view.recovery_characters != recovery.CODE_BYTES and self.view.recovery_characters != MAX_ENTRY_BYTES)
+            self.view.status = .unavailable;
         self.poll_deadline = if (self.busy()) now_ticks +| 1 else null;
         self.revision +|= 1;
     }
@@ -143,6 +147,7 @@ pub const Entry = struct {
         // and advance the router's neutral-report barrier. A running or already
         // submitted attempt must be cancelled before selecting another method.
         if (event.kind == .show_recovery) {
+            if (self.view.recovery_characters != recovery.CODE_BYTES and self.view.recovery_characters != MAX_ENTRY_BYTES) return;
             if (!self.authenticator.recovery_available or self.busy() or self.view.status == .pending or self.view.status == .verifying or self.view.status == .cancelling) return;
             self.erase();
             self.view.method = if (self.view.method == .pin) .recovery else .pin;
@@ -173,7 +178,7 @@ pub const Entry = struct {
                     byte = std.ascii.toUpper(byte);
                     if (recovery.symbol(byte) == null) return;
                 }
-                const limit: usize = if (self.view.method == .pin) MAX_PIN_BYTES else recovery.CODE_BYTES;
+                const limit: usize = if (self.view.method == .pin) MAX_PIN_BYTES else self.view.recovery_characters;
                 if (self.view.characters == limit) {
                     self.erase();
                     self.view.status = .too_long;
@@ -201,7 +206,7 @@ pub const Entry = struct {
                 self.view.status = .entering;
             },
             .activate => {
-                const minimum: usize = if (self.view.method == .pin) MIN_PIN_BYTES else recovery.CODE_BYTES;
+                const minimum: usize = if (self.view.method == .pin) MIN_PIN_BYTES else self.view.recovery_characters;
                 self.view.status = if (self.view.characters < minimum) .too_short else .pending;
             },
             // No paste, task switch, focus navigation, or global recovery
@@ -249,7 +254,7 @@ pub const Entry = struct {
         self.authenticator.lock_fn(self.authenticator.context);
         self.poll_deadline = if (self.busy()) now_ticks +| 1 else null;
         if (was_verifying) self.view.status = switch (err) {
-            error.PinRejected, error.RecoveryAuthenticationFailed => .rejected,
+            error.PinRejected, error.RecoveryAuthenticationFailed, error.RecoveryEnrollmentChanged => .rejected,
             error.InvalidRecoveryCode => .invalid_code,
             error.PinLockedOut => .locked_out,
             error.Cancelled => .entering,
@@ -294,9 +299,28 @@ pub const Entry = struct {
     }
 
     comptime {
-        if (@sizeOf(@This()) > 192) @compileError("trusted authentication entry exceeds bounded state");
+        if (@sizeOf(@This()) > 272) @compileError("trusted authentication entry exceeds bounded state");
     }
 };
+
+test "trusted recovery rejects unsupported input lengths across mode changes" {
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
+    for ([_]u8{ 0, 55, 57, 127, 129, 255 }) |length| {
+        var auth = backend.authenticator();
+        auth.recovery_available = true;
+        auth.recovery_characters = length;
+        var entry = Entry{ .authenticator = auth, .input_timeout_ticks = 20 };
+        entry.lock(1);
+        entry.handle(.{ .kind = .show_recovery }, 2);
+        for (0..256) |_| entry.handle(.{ .kind = .text, .data = '1' }, 2);
+        entry.handle(.{ .kind = .activate }, 2);
+        entry.handle(.{ .kind = .dismiss_recovery }, 2);
+        try std.testing.expect(entry.view.status == .unavailable and entry.view.characters == 0);
+        try std.testing.expect(!entry.prepareVerification(2));
+        try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
+    }
+    try std.testing.expectEqual(@as(usize, 0), backend.attempts);
+}
 
 test "trusted PIN worker keeps input private across cancellation late replies and teardown" {
     var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{ .polls_remaining = 3 };
@@ -356,7 +380,7 @@ test "trusted recovery entry normalizes grouped codes and isolates modes lockout
     entry.handle(.{ .kind = .activate }, 2);
     try std.testing.expect(entry.view.status == .too_short and backend.attempts == 0);
     for (grouped) |byte| entry.handle(.{ .kind = .text, .data = std.ascii.toLower(byte) }, 2);
-    try std.testing.expectEqualSlices(u8, &code, &entry.value);
+    try std.testing.expectEqualSlices(u8, &code, entry.value[0..code.len]);
     entry.handle(.{ .kind = .text, .data = '7' }, 2);
     try std.testing.expect(entry.view.status == .too_long);
     try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));

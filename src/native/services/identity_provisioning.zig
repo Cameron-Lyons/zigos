@@ -130,8 +130,8 @@ pub fn prepare(io: anytype, storage: *storage_service.Service, state: catalog.St
     state.vault.attachHardwareProvider(adapter.provider());
     defer {
         state.vault.unload();
-        state.identities.* = .init();
-        devices.* = .init();
+        state.identities.reset();
+        devices.reset();
     }
     const subjects = policy.SubjectSet{ .user_id = request.owner.serial };
     var authority = sealed.Authority{ .service = state.vault, .policies = policies, .subjects = subjects, .owner = request.owner, .holder = storage.owner, .task_id = storage.task_id };

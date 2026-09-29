@@ -6,6 +6,7 @@ const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const input_driver_task = @import("../drivers/input_driver_task.zig");
 const compositor_session = @import("compositor_session.zig");
+const trusted_identity = @import("trusted_identity_entry.zig");
 const trusted_auth = @import("trusted_auth_entry.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 const root = @import("root");
@@ -150,7 +151,8 @@ pub const Router = struct {
     last_event_sequence: u64 = 0,
     routing_epoch: u64 = 1,
     reports_accepted: usize = 0,
-    trusted_entry: ?*trusted_auth.Entry = null,
+    trusted_entry: ?trusted_identity.Entry = null,
+    trusted_view: trusted_identity.View = .none,
     trusted_revision: u64 = 0,
     drain_until_neutral: bool = false,
     released_since_boundary: bool = false,
@@ -205,7 +207,7 @@ pub const Router = struct {
     }
 
     pub fn bindHardwareSource(self: *Router, source: HardwareReportSource) void {
-        if (self.trusted_entry) |entry| entry.lock(entry.last_ticks);
+        if (self.trusted_entry) |entry| entry.lock(entry.lastTicks());
         self.routing_epoch +|= 1;
         self.dropAllInboxes();
         self.source = source;
@@ -216,7 +218,7 @@ pub const Router = struct {
     }
 
     pub fn clearHardwareSource(self: *Router) void {
-        if (self.trusted_entry) |entry| entry.inputInterrupted(entry.last_ticks);
+        if (self.trusted_entry) |entry| entry.inputInterrupted(entry.lastTicks());
         self.routing_epoch +|= 1;
         self.dropAllInboxes();
         self.source = null;
@@ -233,19 +235,19 @@ pub const Router = struct {
         if (self.compositor != null and
             (self.compositor.? != compositor or self.compositor_task_id != compositor_task_id))
         {
-            if (self.trusted_entry) |entry| entry.inputInterrupted(entry.last_ticks);
-            self.compositor.?.authentication_view = null;
+            if (self.trusted_entry) |entry| entry.inputInterrupted(entry.lastTicks());
+            self.compositor.?.trusted_view = null;
             self.routing_epoch +|= 1;
             self.dropAllInboxes();
         }
         self.compositor = compositor;
         self.compositor_task_id = compositor_task_id;
-        compositor.authentication_view = if (self.trusted_entry) |entry| &entry.view else null;
+        compositor.trusted_view = if (self.trusted_entry != null) &self.trusted_view else null;
     }
 
     pub fn clearCompositor(self: *Router) void {
-        if (self.trusted_entry) |entry| entry.inputInterrupted(entry.last_ticks);
-        if (self.compositor) |compositor| compositor.authentication_view = null;
+        if (self.trusted_entry) |entry| entry.inputInterrupted(entry.lastTicks());
+        if (self.compositor) |compositor| compositor.trusted_view = null;
         self.routing_epoch +|= 1;
         self.compositor = null;
         self.compositor_task_id = 0;
@@ -254,11 +256,12 @@ pub const Router = struct {
 
     // Native service binding only. Apps cannot request this through the input
     // ABI. Binding always locks the authenticator and discards old gestures.
-    pub fn bindTrustedEntry(self: *Router, entry: *trusted_auth.Entry, now_ticks: u64) void {
+    pub fn bindTrustedEntry(self: *Router, entry: trusted_identity.Entry, now_ticks: u64) void {
         self.clearTrustedEntry();
         self.trusted_entry = entry;
+        self.trusted_view = entry.view();
         entry.lock(now_ticks);
-        if (self.compositor) |compositor| compositor.authentication_view = &entry.view;
+        if (self.compositor) |compositor| compositor.trusted_view = &self.trusted_view;
         self.synchronizeTrustedInput();
     }
 
@@ -267,8 +270,9 @@ pub const Router = struct {
     pub fn clearTrustedEntry(self: *Router) void {
         if (self.trusted_entry) |entry| {
             entry.quiesce();
-            if (self.compositor) |compositor| compositor.authentication_view = null;
+            if (self.compositor) |compositor| compositor.trusted_view = null;
             self.trusted_entry = null;
+            self.trusted_view = .none;
             self.trusted_revision = 0;
             self.routing_epoch +|= 1;
             self.dropAllInboxes();
@@ -279,8 +283,8 @@ pub const Router = struct {
 
     pub fn synchronizeTrustedInput(self: *Router) void {
         const entry = self.trusted_entry orelse return;
-        if (self.trusted_revision == entry.revision and entry.revision != std.math.maxInt(u64)) return;
-        self.trusted_revision = entry.revision;
+        if (self.trusted_revision == entry.revision() and entry.revision() != std.math.maxInt(u64)) return;
+        self.trusted_revision = entry.revision();
         self.routing_epoch +|= 1;
         self.dropAllInboxes();
         self.drain_until_neutral = true;
@@ -399,10 +403,10 @@ pub const Router = struct {
                 if (!keyboard.saw_neutral) continue;
                 if (entry.capturing()) {
                     for (decoded.slice()) |event| {
-                        const revision = entry.revision;
+                        const revision = entry.revision();
                         entry.handle(event, now_ticks);
                         // A mode or authority change ends this report too.
-                        if (entry.revision != revision) break;
+                        if (entry.revision() != revision) break;
                     }
                     events_routed += decoded.count;
                     self.synchronizeTrustedInput();
@@ -460,7 +464,7 @@ pub const Router = struct {
             active.modal or active.view_type != .document_view or active.subject_task_id != pending.task_id or
             active.ui_surface_id != pending.surface_id) return false;
         if (self.trusted_entry) |entry| {
-            if (entry.capturing() or entry.revision != self.trusted_revision or entry.revision == std.math.maxInt(u64)) return false;
+            if (entry.capturing() or entry.revision() != self.trusted_revision or entry.revision() == std.math.maxInt(u64)) return false;
         }
         return true;
     }
@@ -919,7 +923,7 @@ test "input router isolates trusted PIN entry and drains both routing boundaries
     _ = router.service(1, 16);
     try std.testing.expectEqual(@as(usize, 1), router.queuedForTask(99));
     const old_epoch = router.routing_epoch;
-    router.bindTrustedEntry(&entry, 2);
+    router.bindTrustedEntry(.{ .authentication = &entry }, 2);
     try std.testing.expect(router.routing_epoch > old_epoch);
     try std.testing.expect(router.pollForTask(99) == null);
     try std.testing.expect(router.pollWakeTarget() == null);
@@ -1015,7 +1019,7 @@ test "input router isolates trusted PIN entry and drains both routing boundaries
     try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
     try std.testing.expect(router.pollForTask(99) == null);
     compositor.reset();
-    try std.testing.expect(compositor.authentication_view == &entry.view);
+    try std.testing.expect(compositor.trusted_view.?.authentication == &entry.view);
     router.clearHardwareSource();
     try std.testing.expectEqual(trusted_auth.Status.unavailable, entry.view.status);
     try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
@@ -1030,7 +1034,7 @@ test "input router isolates recovery method boundaries and discards same-report 
     var entry = trusted_auth.Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 50 };
     router.bindCompositor(&compositor, 99);
     router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
-    router.bindTrustedEntry(&entry, 1);
+    router.bindTrustedEntry(.{ .authentication = &entry }, 1);
     test_feed = .{};
     test_feed.reports[0] = makeTestReport(1, 1, 0, &.{});
     test_feed.count = 1;
@@ -1702,7 +1706,7 @@ test "keyboard repeat requires fresh release after USB slot reuse and never repe
     try std.testing.expect(f.router.nextWake() != null);
     var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
     var entry = trusted_auth.Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 500 };
-    f.router.bindTrustedEntry(&entry, 44);
+    f.router.bindTrustedEntry(.{ .authentication = &entry }, 44);
     defer f.router.clearTrustedEntry();
     try std.testing.expect(f.router.nextWake() == null);
     _ = f.feed(45, 1, 0, &.{});
@@ -1767,4 +1771,44 @@ test "keyboard repeat accepts initial controller activation but retains the rest
     _ = f.feed(4, 1, 0, &.{});
     try std.testing.expectEqual(@as(usize, 1), f.feed(5, 1, 0, &.{0x04}));
     try std.testing.expect(f.router.nextWake() != null);
+}
+
+test "input router keeps first-user PIN confirmation private across report and display boundaries" {
+    var compositor = compositor_session.Session.init();
+    defer compositor.deinit();
+    var router = Router{};
+    defer router.deinit();
+    var backend = @import("../../tests/fixtures/setup_entry.zig").Fixture{};
+    var entry = @import("trusted_setup_entry.zig").Entry{ .backend = backend.backend(), .input_timeout_ticks = 50 };
+    router.bindCompositor(&compositor, 99);
+    router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+    router.bindTrustedEntry(.{ .setup = &entry }, 1);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(1, 1, 0, &.{});
+    test_feed.count = 1;
+    _ = router.service(1, 16);
+    var sequence: u64 = 1;
+    for ("12345678") |byte| {
+        test_feed = .{};
+        sequence += 1;
+        test_feed.reports[0] = makeTestReport(sequence, 1, 0, &.{byte - '1' + 0x1e});
+        sequence += 1;
+        test_feed.reports[1] = makeTestReport(sequence, 1, 0, &.{});
+        test_feed.count = 2;
+        _ = router.service(2, 16);
+        try std.testing.expect(router.pollForTask(99) == null and router.pollWakeTarget() == null);
+    }
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(sequence + 1, 1, 0, &.{ 0x28, 0x1e });
+    test_feed.reports[1] = makeTestReport(sequence + 2, 1, 0, &.{0x1f});
+    test_feed.reports[2] = makeTestReport(sequence + 3, 1, 0, &.{});
+    test_feed.count = 3;
+    _ = router.service(3, 16);
+    try std.testing.expect(entry.view.status == .confirm_pin and entry.view.characters == 0);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
+    try std.testing.expect(router.pollForTask(99) == null and router.pollWakeTarget() == null and router.nextWake() == null);
+    try std.testing.expect(compositor.trusted_view.?.setup == &entry.view);
+    router.clearCompositor();
+    try std.testing.expect(entry.view.status == .choose_pin and entry.view.notice == .interrupted);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.first_pin, 0) and compositor.trusted_view == null);
 }

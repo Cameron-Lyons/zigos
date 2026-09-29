@@ -24,8 +24,8 @@ pub fn inputViewport(session: *const compositor.Session, event: abi.InputEventDe
 pub fn present(session: *const compositor.Session) bool {
     if (comptime builtin.os.tag != .freestanding) return false;
     const frame = hardware.frame() orelse return false;
-    if (session.authentication_view) |authentication| {
-        if (authentication.status != .hidden) {
+    if (session.trusted_view) |trusted| {
+        if (trusted.visible()) {
             view.render(frame, session, null);
             const result = hardware.present() catch return false;
             return result.pixels_written != 0;

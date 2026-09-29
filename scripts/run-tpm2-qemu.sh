@@ -284,8 +284,21 @@ run_ownership_boot() {
   check_transport_proof "$log"
   local recovery_count=0
   if [ "$name" = reboot ]; then recovery_count=1; fi
+  local setup_count=0 setup_marker=''
+  case "$name" in
+    interrupted|owner-interrupted|lockout-interrupted|policy-interrupted|define-interrupted|write-interrupted)
+      setup_count=1
+      setup_marker='ZIGOS:TPM2:SETUP:INTERRUPTED'
+      ;;
+    enrolled)
+      setup_count=1
+      setup_marker='ZIGOS:TPM2:SETUP:VERIFIED'
+      ;;
+  esac
   if [ "$(grep -c '^ZIGOS:TPM2:OWNER:' "$log" || true)" -ne 1 ] ||
     ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log" ||
+    [ "$(grep -c '^ZIGOS:TPM2:SETUP:' "$log" || true)" -ne "$setup_count" ] ||
+    { [ "$setup_count" -eq 1 ] && ! grep -Fxq "$setup_marker" "$log"; } ||
     [ "$(grep -c '^ZIGOS:TPM2:RECOVERY:' "$log" || true)" -ne "$recovery_count" ] ||
     { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY:VERIFIED' "$log"; } ||
     [ "$(grep -c '^ZIGOS:TPM2:RECOVERY_INPUT:' "$log" || true)" -ne "$recovery_count" ] ||
