@@ -1072,6 +1072,48 @@ fn pollTestReport() ?xhci.HardwareBootKeyboardReport {
     return test_feed.reports[test_feed.cursor];
 }
 
+test "input router requires separate released gestures for trusted credential approval" {
+    var compositor = compositor_session.Session.init();
+    defer compositor.deinit();
+    var router = Router{};
+    defer router.deinit();
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
+    var entry = trusted_auth.Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 50 };
+    router.bindCompositor(&compositor, 99);
+    router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof });
+    router.bindTrustedEntry(.{ .authentication = &entry }, 1);
+    backend.expires_at = 100;
+    backend.active = true;
+    entry.session_deadline = 100;
+    entry.view.status = .hidden;
+    try entry.beginReview("app.notes", "example.test", "https://example.test", 50, 2);
+    router.synchronizeTrustedInput();
+    router.trusted_view.presented(60, 20, true);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(1, 1, 0, &.{0x28}); // Queued Enter predates consent.
+    test_feed.reports[1] = makeTestReport(2, 1, 0, &.{});
+    test_feed.count = 2;
+    _ = router.service(3, 16);
+    try std.testing.expect(entry.view.review.state == .reviewing);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(3, 1, 0, &.{ 0x2b, 0x28 });
+    test_feed.reports[1] = makeTestReport(4, 1, 0, &.{});
+    test_feed.count = 2;
+    _ = router.service(4, 16);
+    try std.testing.expect(entry.view.review.allow_selected and entry.view.review.state == .reviewing);
+    try std.testing.expect(!entry.view.review.presented and router.repeat == null);
+    router.trusted_view.presented(60, 20, true);
+    test_feed = .{};
+    test_feed.reports[0] = makeTestReport(5, 1, 0, &.{0x28});
+    test_feed.reports[1] = makeTestReport(6, 1, 0, &.{});
+    test_feed.count = 2;
+    _ = router.service(5, 16);
+    try std.testing.expect(entry.view.review.state == .approved);
+    try std.testing.expect(router.pollForTask(99) == null and router.pollWakeTarget() == null);
+    router.clearHardwareSource();
+    try std.testing.expect(!entry.view.review.visible() and !backend.active);
+}
+
 fn noTestProof() ?xhci.InputProof {
     return null;
 }

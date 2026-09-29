@@ -300,8 +300,14 @@ requests.
   registered key. Mailbox v11 retains the 256-byte layout and adds a tagged
   identity binding. The ownership reboot proof drives the client in Ring3,
   verifies its signed result and durable counter, and locks a second request
-  during TPM work. Native consent and authenticated-origin acquisition, credential
-  registration and recovery IPC, and physical-hardware validation remain open.
+  during TPM work. A native approval screen now shows the launch-authenticated
+  application ID, full relying party and origin, with Cancel selected initially.
+  Approval requires successful complete scanout and separate released gestures;
+  lock, timeout, input interruption and process replacement discard the decision.
+  The native origin owner must still authenticate the website before requesting
+  consent: signed application provenance does not prove website ownership.
+  Authenticated-origin acquisition, credential registration and recovery IPC,
+  and physical-hardware validation remain open.
   Deadline and calibrated QEMU timer modes both derive ticks from elapsed TSC
   time, so capability and worker deadlines advance with interrupts masked.
   A bounded identity-session owner now connects PIN verification to authenticated

@@ -9,7 +9,7 @@ pub const MIN_PIN_BYTES = 6;
 pub const MAX_ENTRY_BYTES = @import("../services/identity_recovery_record.zig").CODE_BYTES;
 pub const Method = enum { pin, recovery };
 pub const Status = enum { hidden, entering, too_short, too_long, invalid_code, pending, verifying, cancelling, rejected, locked_out, unavailable };
-pub const View = struct { status: Status = .hidden, characters: u8 = 0, method: Method = .pin, recovery_available: bool = false, recovery_characters: u8 = recovery.CODE_BYTES };
+pub const View = struct { review: @import("trusted_credential_review.zig").Review = .{}, status: Status = .hidden, characters: u8 = 0, method: Method = .pin, recovery_available: bool = false, recovery_characters: u8 = recovery.CODE_BYTES };
 
 // Stable, exclusive service owner. Start copies/decodes the borrowed input; poll performs
 // one bounded worker step. Cancellation retains all backing until busy is false.
@@ -98,11 +98,12 @@ pub const Entry = struct {
     last_ticks: u64 = 0,
 
     pub fn capturing(self: *const Entry) bool {
-        return self.view.status != .hidden;
+        return self.view.status != .hidden or self.view.review.visible();
     }
 
     pub fn lock(self: *Entry, now_ticks: u64) void {
         self.authenticator.lock_fn(self.authenticator.context);
+        self.clearReview();
         self.erase();
         self.session_deadline = null;
         self.last_ticks = now_ticks;
@@ -128,6 +129,10 @@ pub const Entry = struct {
             return;
         }
         self.last_ticks = now_ticks;
+        if (self.view.review.visible() and now_ticks >= self.view.review.expires_at and self.view.review.state != .denied) {
+            self.view.review.state = .denied;
+            self.revision +|= 1;
+        }
         if (self.poll_deadline) |deadline| if (now_ticks >= deadline) self.poll(now_ticks);
         if (self.input_deadline) |deadline| if (now_ticks >= deadline) {
             self.erase();
@@ -137,12 +142,18 @@ pub const Entry = struct {
     }
 
     pub fn nextWake(self: *const Entry) ?u64 {
-        return self.poll_deadline orelse self.input_deadline orelse self.session_deadline;
+        const wake = self.poll_deadline orelse self.input_deadline orelse self.session_deadline;
+        if (self.view.review.visible()) return @min(wake orelse self.view.review.expires_at, self.view.review.expires_at);
+        return wake;
     }
 
     pub fn handle(self: *Entry, event: input.KeyboardEvent, now_ticks: u64) void {
         self.tick(now_ticks);
         if (!self.capturing()) return;
+        if (self.view.review.visible()) {
+            if (self.view.review.handle(event)) self.revision +|= 1;
+            return;
+        }
         // Ctrl+R is private to this prompt. Mode changes erase partial input
         // and advance the router's neutral-report barrier. A running or already
         // submitted attempt must be cancelled before selecting another method.
@@ -237,6 +248,20 @@ pub const Entry = struct {
         self.poll(now_ticks);
     }
 
+    pub fn beginReview(self: *Entry, application: []const u8, rp: []const u8, origin: []const u8, expires_at: u64, now: u64) !void {
+        self.tick(now);
+        if (self.capturing() or self.busy() or self.session_deadline == null or
+            expires_at <= now or expires_at > self.session_deadline.?) return error.IdentityUnavailable;
+        self.view.review = try @import("trusted_credential_review.zig").Review.init(application, rp, origin, expires_at);
+        self.revision +|= 1;
+    }
+
+    pub fn clearReview(self: *Entry) void {
+        if (!self.view.review.visible()) return;
+        self.view.review = .{};
+        self.revision +|= 1;
+    }
+
     pub fn busy(self: *const Entry) bool {
         return self.authenticator.busy_fn(self.authenticator.context);
     }
@@ -299,9 +324,39 @@ pub const Entry = struct {
     }
 
     comptime {
-        if (@sizeOf(@This()) > 272) @compileError("trusted authentication entry exceeds bounded state");
+        // Includes 240 bytes of bounded public consent text; only one entry exists per account owner.
+        if (@sizeOf(@This()) > 512) @compileError("trusted authentication entry exceeds bounded state");
     }
 };
+
+test "trusted credential consent cancels at deadline lock interruption and clock rollback" {
+    for (0..5) |variant| {
+        var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{ .active = true, .expires_at = 100 };
+        var entry = Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 20, .session_deadline = 100 };
+        try entry.beginReview("app.notes", "example.test", "https://example.test", 30, 10);
+        try std.testing.expectEqual(@as(?u64, 30), entry.nextWake());
+        entry.view.review.presented = true;
+        entry.handle(.{ .kind = .focus_next }, 11);
+        entry.view.review.presented = true;
+        entry.handle(.{ .kind = .activate }, 12);
+        try std.testing.expect(entry.view.review.state == .approved and entry.capturing());
+        switch (variant) {
+            0 => entry.tick(30),
+            1 => entry.lock(13),
+            2 => entry.inputInterrupted(13),
+            3 => entry.tick(9),
+            4 => {
+                backend.expires_at = 0;
+                entry.tick(13);
+            },
+            else => unreachable,
+        }
+        try std.testing.expect(entry.view.review.state != .approved);
+        entry.clearReview();
+        try std.testing.expect(std.mem.allEqual(u8, &entry.view.review.application, 0));
+        try std.testing.expectEqual(@as(usize, 0), backend.attempts);
+    }
+}
 
 test "trusted recovery rejects unsupported input lengths across mode changes" {
     var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};

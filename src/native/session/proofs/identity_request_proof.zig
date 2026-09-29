@@ -1,4 +1,4 @@
-//! Verification-only native consent fixture and real Ring3 assertion exchange.
+//! Verification-only origin fixture, trusted HID consent and real Ring3 exchange.
 const std = @import("std");
 const wire = @import("../../services/identity_assertion_wire.zig");
 const identity = @import("../../platform/os_identity.zig");
@@ -11,7 +11,7 @@ pub fn run(manager: anytype, owner: anytype, io: anytype, clock: anytype) !void 
     const public_key = credential.credential_public_key;
     const previous_count = credential.assertion_count;
     const previous_writes = io.nv_writes;
-    const binding = try manager.grantIdentityCredential(.{ .task_id = task_id, .credential_id = 1, .relying_party_id = "session.example", .origin = "https://session.example" }, clock.now());
+    const binding = try approve(manager, owner, task_id, clock);
     const challenge = probe.challenge(binding);
     var result: [wire.wire.MAX_BYTES]u8 = undefined;
     var result_len: usize = 0;
@@ -62,7 +62,7 @@ pub fn run(manager: anytype, owner: anytype, io: anytype, clock: anytype) !void 
 
     // Reuse the real application after retiring the first endpoint. Lock while
     // its next command is suspended; no result or partial reply may escape.
-    _ = try manager.grantIdentityCredential(.{ .task_id = task_id, .credential_id = 1, .relying_party_id = "session.example", .origin = "https://session.example" }, clock.now());
+    _ = try approve(manager, owner, task_id, clock);
     const commands = io.commands;
     while (owner.adapter.worker.state != .suspended or io.commands == commands) {
         try deadline(clock);
@@ -82,6 +82,35 @@ pub fn run(manager: anytype, owner: anytype, io: anytype, clock: anytype) !void 
     const mailbox = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), task_id) orelse return error.MissingIdentityMailbox;
     if (mailbox.ui_commit_count == 1) return error.PublishedCancelledIdentityRequest;
     @import("../../../kernel/utils/console.zig").print("ZIGOS:TPM2:IDENTITY_REQUEST:VERIFIED\n");
+}
+
+fn approve(manager: anytype, owner: anytype, task_id: u64, clock: anytype) !@import("../../../userspace/identity_protocol.zig").Binding {
+    const input = @import("identity_session_proof.zig");
+    const request = @import("../../services/identity_owner.zig").CredentialRequest{ .task_id = task_id, .credential_id = 1, .relying_party_id = "session.example", .origin = "https://session.example" };
+    // First reject using the default action. No endpoint may exist before the
+    // user sees and explicitly changes the native decision to Allow once.
+    try manager.requestIdentityCredential(request, clock.now());
+    for (&owner.channels) |*channel| if (channel.kernel != null) return error.PrematureIdentityGrant;
+    if (!owner.authentication.view.review.presented) return error.UnpresentedIdentityReview;
+    const frame = @import("../../../kernel/platform/framebuffer_hw.zig").frame() orelse return error.MissingIdentityReviewFrame;
+    for ("https://session.example", 0..) |byte, index| {
+        if (frame.cells[11 * frame.columns + index].character != byte) return error.IncorrectIdentityReviewOrigin;
+    }
+    input.sendInput(manager, 0, 0, clock.now());
+    input.sendInput(manager, 0x28, 0, clock.now());
+    if (owner.consent.kernel != null or owner.authentication.capturing()) return error.UncancelledIdentityReview;
+    for (&owner.channels) |*channel| if (channel.kernel != null) return error.DeniedIdentityGrant;
+    try manager.requestIdentityCredential(request, clock.now());
+    input.sendInput(manager, 0, 0, clock.now());
+    input.sendInput(manager, 0x2b, 0, clock.now());
+    input.sendInput(manager, 0, 0, clock.now());
+    if (!owner.authentication.view.review.allow_selected or !owner.authentication.view.review.presented) return error.UnselectedIdentityConsent;
+    input.sendInput(manager, 0x28, 0, clock.now());
+    if (owner.consent.kernel != null or owner.authentication.capturing() or manager.inputRouterPtr().queued_event_count != 0) return error.UnconsumedIdentityConsent;
+    const mailbox = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), task_id) orelse return error.MissingIdentityMailbox;
+    const binding = mailbox.identityBinding();
+    if (!binding.isValid()) return error.MissingApprovedIdentityBinding;
+    return .{ .endpoint_capability_id = binding.endpoint_capability_id, .service_endpoint_id = binding.service_endpoint_id, .credential_id = binding.credential_id };
 }
 
 fn deadline(clock: anytype) !void {

@@ -26,6 +26,7 @@ const update_health = @import("../../native/platform/update_health.zig");
 
 test "platform host tests import native platform modules" {
     std.testing.refAllDecls(@import("../../native/platform/trusted_auth_entry.zig"));
+    std.testing.refAllDecls(@import("../../native/platform/trusted_credential_review.zig"));
     std.testing.refAllDecls(@import("../../native/platform/recovery_key.zig"));
     std.testing.refAllDecls(@import("../../native/platform/input_router.zig"));
     std.testing.refAllDecls(tpm2_sealing);

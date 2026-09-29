@@ -6,12 +6,19 @@ const input = @import("../drivers/input_driver_task.zig");
 
 pub const View = union(enum) {
     none,
-    authentication: *const auth.View,
+    authentication: *auth.View,
     setup: *const setup.View,
+    // Only the native display owner acknowledges a complete successful scanout.
+    pub fn presented(self: View, columns: usize, rows: usize, success: bool) void {
+        switch (self) {
+            .authentication => |view| view.review.presented = success and view.review.fits(columns, rows),
+            else => {},
+        }
+    }
     pub fn visible(self: View) bool {
         return switch (self) {
             .none => false,
-            .authentication => |view| view.status != .hidden,
+            .authentication => |view| view.status != .hidden or view.review.visible(),
             .setup => true,
         };
     }

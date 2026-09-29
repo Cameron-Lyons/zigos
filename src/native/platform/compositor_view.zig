@@ -30,7 +30,7 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
     frame.put(0, 0, "Zigos", .accent);
     if (session.trusted_view) |trusted| if (trusted.visible()) {
         switch (trusted.*) {
-            .authentication => |authentication| renderAuthentication(frame, authentication.*),
+            .authentication => |authentication| renderAuthentication(frame, authentication),
             .setup => |setup| renderSetup(frame, setup),
             .none => unreachable,
         }
@@ -129,8 +129,12 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
     }
 }
 
-fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_auth_entry.zig").View) void {
+fn renderAuthentication(frame: *scanout.Frame, authentication: *const @import("trusted_auth_entry.zig").View) void {
     if (frame.rows < 10) return;
+    if (authentication.review.visible()) {
+        renderCredentialReview(frame, &authentication.review);
+        return;
+    }
     const recovering = authentication.method == .recovery;
     frame.fillRow(2, .selected);
     frame.put(1, 2, if (recovering) "Recover Zigos" else "Unlock Zigos", .selected);
@@ -164,6 +168,63 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: @import("trusted_
         "Enter  Unlock  |  Esc  Clear  |  Ctrl+R  Recovery"
     else
         "Enter  Unlock  |  Esc  Clear PIN", .muted);
+}
+
+fn renderCredentialReview(frame: *scanout.Frame, review: *const @import("trusted_credential_review.zig").Review) void {
+    frame.fillRow(2, .selected);
+    frame.put(1, 2, "Use a saved credential", .selected);
+    if (!review.fits(frame.columns, frame.rows)) {
+        frame.put(0, 4, "More display space is needed.", .warning);
+        frame.put(0, 6, "Esc  Cancel", .body);
+        return;
+    }
+    var row: usize = 4;
+    inline for (.{ "application", "relying_party", "origin" }, .{ "Application", "Account site", "Website" }) |field, label| {
+        frame.put(0, row, label, .muted);
+        row += 1;
+        const value = @field(review, field)[0..@field(review, field ++ "_len")];
+        var offset: usize = 0;
+        while (offset < value.len) {
+            const take = @min(value.len - offset, frame.columns);
+            frame.put(0, row, value[offset..][0..take], .accent);
+            row += 1;
+            offset += take;
+        }
+        row += 1;
+    }
+    frame.put(0, row, " Cancel ", if (!review.allow_selected) .selected else .body);
+    frame.put(12, row, " Allow once ", if (review.allow_selected) .selected else .body);
+    frame.put(0, frame.rows - 1, "Tab  Choose | Enter  Confirm | Esc  Cancel", .muted);
+}
+
+test "desktop view shows complete credential targets and acknowledges only sufficient scanout" {
+    const std = @import("std");
+    var session = compositor.Session.init();
+    defer session.deinit();
+    var authentication = @import("trusted_auth_entry.zig").View{};
+    authentication.review = try @import("trusted_credential_review.zig").Review.init("a" ** 64, "r" ** 64, "o" ** 95 ++ "z", 100);
+    var trusted = @import("trusted_identity_entry.zig").View{ .authentication = &authentication };
+    session.trusted_view = &trusted;
+    var frame = try scanout.Frame.init(40, 20);
+    render(&frame, &session, null);
+    try expectText(&frame, 0, 5, "a" ** 40);
+    try expectText(&frame, 0, 6, "a" ** 24);
+    try expectText(&frame, 0, 9, "r" ** 40);
+    try expectText(&frame, 0, 10, "r" ** 24);
+    try expectText(&frame, 0, 13, "o" ** 40);
+    try expectText(&frame, 0, 14, "o" ** 40);
+    try expectText(&frame, 0, 15, "o" ** 15 ++ "z");
+    try expectText(&frame, 0, 17, " Cancel ");
+    try std.testing.expect(!authentication.review.presented);
+    trusted.presented(40, 20, true);
+    try std.testing.expect(authentication.review.presented);
+    trusted.presented(40, 20, false);
+    try std.testing.expect(!authentication.review.presented);
+    frame = try scanout.Frame.init(40, 19);
+    render(&frame, &session, null);
+    trusted.presented(frame.columns, frame.rows, true);
+    try std.testing.expect(!authentication.review.presented);
+    try expectText(&frame, 0, 4, "More display space is needed.");
 }
 
 fn renderSetup(frame: *scanout.Frame, setup: *const @import("trusted_setup_entry.zig").View) void {

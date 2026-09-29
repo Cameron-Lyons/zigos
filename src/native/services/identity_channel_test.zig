@@ -9,6 +9,54 @@ const identity = @import("../platform/os_identity.zig");
 const client_mod = @import("../../userspace/identity_client.zig");
 const protocol = channel_mod.protocol;
 
+test "identity consent retains exact native process session and text until decision" {
+    const consent_mod = @import("identity_consent.zig");
+    const auth = @import("../platform/trusted_auth_entry.zig");
+    for (0..11) |variant| {
+        const f = try Fixture.init();
+        defer f.deinit();
+        const backend = f.channel.backend;
+        var grant = f.channel.grant;
+        grant.relying_party_id = "session.example";
+        var origin: [23]u8 = "https://session.example".*;
+        grant.origin = &origin;
+        f.channel.close(10);
+        const task = f.runtime.find(f.app).?;
+        task.launch.boundary = .userspace_process;
+        task.launch.signed = true;
+        task.launch.bundle_id_len = 9;
+        @memcpy(task.launch.bundle_id[0..9], "app.notes");
+        var verifier = @import("../../tests/fixtures/authenticator.zig").Fixture{ .active = true, .expires_at = 200 };
+        var entry = auth.Entry{ .authenticator = verifier.authenticator(), .input_timeout_ticks = 20, .session_deadline = 200 };
+        var consent = consent_mod.Pending{};
+        try consent.begin(&f.port, backend, &entry, f.app, grant, 10);
+        try std.testing.expect(entry.capturing() and consent.valid(&entry, 10));
+        @memset(&origin, 'x');
+        try std.testing.expectEqualStrings("https://session.example", consent.grant.origin);
+        try std.testing.expectError(error.IdentityRequestDenied, consent.begin(&f.port, backend, &entry, f.app, grant, 10));
+        var now: u64 = 11;
+        switch (variant) {
+            0 => {},
+            1 => task.process_generation += 1,
+            2 => task.owner.serial += 1,
+            3 => task.state = .suspended,
+            4 => task.launch.bundle_id[0] = 'x',
+            5 => task.launch.signed = false,
+            6 => f.allowed = false,
+            7 => now = 100,
+            8 => now = 9,
+            9 => entry.lock(11),
+            10 => consent.grant.session.session_nonce[0] = 3,
+            else => unreachable,
+        }
+        try std.testing.expectEqual(variant == 0, consent.valid(&entry, now));
+        consent.clear(&entry);
+        try std.testing.expect(consent.kernel == null and !entry.view.review.visible());
+        try std.testing.expect(std.mem.allEqual(u8, &entry.view.review.origin, 0));
+        try std.testing.expectEqual(@as(usize, 0), f.starts);
+    }
+}
+
 const Fixture = struct {
     runtime: runtime_mod.Runtime = .init(),
     caps: @import("../kernel_api/capability.zig").CapabilityTable = .init(),

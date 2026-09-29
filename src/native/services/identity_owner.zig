@@ -19,14 +19,10 @@ const graph_mod = @import("../sync/device_graph.zig");
 const channel_mod = @import("identity_channel.zig");
 const kernel_port = @import("../kernel_api/component_port.zig");
 
-// The trusted account/permission flow selects these after user approval and
-// authenticated origin validation. This is never decoded from application IPC.
-pub const CredentialGrant = struct {
-    task_id: u64,
-    credential_id: u64,
-    relying_party_id: []const u8,
-    origin: []const u8,
-};
+const consent_mod = @import("identity_consent.zig");
+
+pub const CredentialRequest = consent_mod.Request;
+pub const ApprovedCredential = struct { task_id: u64, binding: channel_mod.protocol.Binding };
 
 pub const HardwareIo = struct {
     pub fn execute(_: *@This(), command: []const u8, response: []u8, timeout_ms: u32) ![]u8 {
@@ -55,7 +51,8 @@ pub const Interface = struct {
     context: *anyopaque,
     service: *const fn (*anyopaque, *router_mod.Router, u64) bool,
     destroy: *const fn (*anyopaque) void,
-    grant_credential: *const fn (*anyopaque, *kernel_port.KernelPort, CredentialGrant, u64) anyerror!channel_mod.protocol.Binding,
+    review_credential: *const fn (*anyopaque, *kernel_port.KernelPort, CredentialRequest, u64) anyerror!void,
+    take_credential: *const fn (*anyopaque, u64) anyerror!?ApprovedCredential,
     revoke_credential: *const fn (*anyopaque, u64, u64) void,
     service_requests: *const fn (*anyopaque, u64) bool,
     requests_ready: *const fn (*anyopaque) bool,
@@ -83,6 +80,7 @@ pub fn Owner(comptime Io: type) type {
         unavailable_reported: bool,
         channels: [4]channel_mod.Channel,
         channel_cursor: u8,
+        consent: consent_mod.Pending,
 
         pub fn create(io: *Io, storage: *storage_mod.Service, config: Config) !*Self {
             if (config.owner.kind != .user or config.owner.serial == 0 or config.lifetime_ticks == 0 or
@@ -110,6 +108,7 @@ pub fn Owner(comptime Io: type) type {
             self.unavailable_reported = false;
             for (&self.channels) |*channel| channel.* = .{};
             self.channel_cursor = 0;
+            self.consent = .{};
             return self;
         }
 
@@ -117,32 +116,47 @@ pub fn Owner(comptime Io: type) type {
             router.bindTrustedEntry(.{ .setup = &self.setup }, now);
             self.setup.discover(now);
             router.synchronizeTrustedInput();
-            return .{ .context = self, .service = service, .destroy = destroy, .grant_credential = grantCredential, .revoke_credential = revokeCredential, .service_requests = serviceRequests, .requests_ready = requestsReady, .next_request_wake = nextRequestWake };
+            return .{ .context = self, .service = service, .destroy = destroy, .review_credential = reviewCredential, .take_credential = takeCredential, .revoke_credential = revokeCredential, .service_requests = serviceRequests, .requests_ready = requestsReady, .next_request_wake = nextRequestWake };
         }
 
-        fn grantCredential(context: *anyopaque, kernel: *kernel_port.KernelPort, grant: CredentialGrant, now: u64) !channel_mod.protocol.Binding {
+        fn reviewCredential(context: *anyopaque, kernel: *kernel_port.KernelPort, request: CredentialRequest, now: u64) !void {
             const self: *Self = @ptrCast(@alignCast(context));
             if (!self.authentication_ready or self.authentication.capturing() or self.authentication.busy()) return error.IdentityUnavailable;
+            for (&self.channels) |*channel| if (channel.kernel != null and channel.task_id == request.task_id) return error.IdentityChannelAlreadyOpen;
             const session_binding = try self.session.replay.binding();
-            const deadline = @min(self.session.expires_at_ticks, std.math.add(u64, now, self.config.operation_timeout_ticks) catch return error.IdentityUnavailable);
-            for (&self.channels) |*channel| {
-                if (channel.kernel != null and !channel.valid(now)) channel.close(now);
-                if (channel.kernel != null and channel.task_id == grant.task_id) return error.IdentityChannelAlreadyOpen;
+            const deadline = @min(self.session.expires_at_ticks, std.math.add(u64, now, self.config.input_timeout_ticks) catch return error.IdentityUnavailable);
+            try self.consent.begin(kernel, self.adapter.requests(), &self.authentication, request.task_id, .{
+                .credential_id = request.credential_id,
+                .relying_party_id = request.relying_party_id,
+                .origin = request.origin,
+                .session = session_binding,
+                .expires_at_ticks = deadline,
+            }, now);
+        }
+
+        fn takeCredential(context: *anyopaque, now: u64) !?ApprovedCredential {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (self.consent.kernel == null) return null;
+            self.authentication.tick(now);
+            if (!self.consent.valid(&self.authentication, now) or self.authentication.view.review.state == .denied) {
+                self.consent.clear(&self.authentication);
+                return null;
             }
+            if (self.authentication.view.review.state != .approved) return null;
+            defer self.consent.clear(&self.authentication);
+            // Approval consumes the exact reviewed session and process. Opening
+            // never renews the deadline or accepts changed caller-owned strings.
+            var grant = self.consent.grant;
+            grant.expires_at_ticks = @min(grant.expires_at_ticks, std.math.add(u64, now, self.config.operation_timeout_ticks) catch return error.IdentityUnavailable);
             for (&self.channels) |*channel| if (channel.kernel == null) {
-                return channel.open(kernel, self.adapter.requests(), grant.task_id, self.storage.task_id, .{
-                    .credential_id = grant.credential_id,
-                    .relying_party_id = grant.relying_party_id,
-                    .origin = grant.origin,
-                    .session = session_binding,
-                    .expires_at_ticks = deadline,
-                }, now);
+                return .{ .task_id = self.consent.task_id, .binding = try channel.open(self.consent.kernel.?, self.adapter.requests(), self.consent.task_id, self.storage.task_id, grant, now) };
             };
             return error.IdentityChannelTableFull;
         }
 
         fn revokeCredential(context: *anyopaque, task_id: u64, now: u64) void {
             const self: *Self = @ptrCast(@alignCast(context));
+            if (self.consent.kernel != null and self.consent.task_id == task_id) self.consent.clear(&self.authentication);
             for (&self.channels) |*channel| if (channel.task_id == task_id) {
                 channel.close(now);
             };
@@ -220,6 +234,7 @@ pub fn Owner(comptime Io: type) type {
             const self: *Self = @ptrCast(@alignCast(context));
             for (&self.channels) |*channel| channel.close(0);
             if (self.authentication_ready) {
+                self.consent.clear(&self.authentication);
                 self.authentication.quiesce();
                 self.adapter.deinit() catch unreachable;
                 self.session.close() catch {};

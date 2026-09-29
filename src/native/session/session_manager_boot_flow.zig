@@ -601,22 +601,31 @@ pub const SessionManager = struct {
         self.identity_owner = null;
     }
 
-    pub fn grantIdentityCredential(self: *SessionManager, grant: identity_owner_mod.CredentialGrant, now: u64) !@import("../services/identity_channel.zig").protocol.Binding {
+    // Native origin owners only. The app receives no endpoint until the trusted
+    // screen has been presented and a fresh user gesture approves this request.
+    pub fn requestIdentityCredential(self: *SessionManager, request: identity_owner_mod.CredentialRequest, now: u64) !void {
         const owner = self.identity_owner orelse return error.IdentityUnavailable;
-        const binding = try owner.grant_credential(owner.context, self.kernelPort() orelse return error.KernelUnavailable, grant, now);
-        errdefer owner.revoke_credential(owner.context, grant.task_id, now);
-        if (!self.runtime_context.userspace_executor.bindIdentityChannel(self.userspaceCatalogPtr(), self.runtimePtr(), self.capabilityTablePtr(), grant.task_id, .{
-            .endpoint_capability_id = binding.endpoint_capability_id,
-            .service_endpoint_id = binding.service_endpoint_id,
-            .credential_id = binding.credential_id,
-        }, now)) return error.IdentityBindingUnavailable;
-        _ = self.runtime_context.userspaceScheduler().?.wakeTask(grant.task_id, .external_event, 0, now);
-        return binding;
+        try owner.review_credential(owner.context, self.kernelPort() orelse return error.KernelUnavailable, request, now);
+        self.input_router.synchronizeTrustedInput();
+        _ = desktop_display.present(self.compositorSessionPtr());
     }
 
     fn serviceIdentityOwner(self: *SessionManager, now_ticks: u64) bool {
         const owner = self.identity_owner orelse return false;
-        return owner.service(owner.context, &self.input_router, now_ticks);
+        const changed = owner.service(owner.context, &self.input_router, now_ticks);
+        const before = if (self.input_router.trusted_entry) |entry| entry.revision() else 0;
+        if (owner.take_credential(owner.context, now_ticks) catch null) |approved| {
+            const binding = approved.binding;
+            if (self.runtime_context.userspace_executor.bindIdentityChannel(self.userspaceCatalogPtr(), self.runtimePtr(), self.capabilityTablePtr(), approved.task_id, .{
+                .endpoint_capability_id = binding.endpoint_capability_id,
+                .service_endpoint_id = binding.service_endpoint_id,
+                .credential_id = binding.credential_id,
+            }, now_ticks)) {
+                _ = self.runtime_context.userspaceScheduler().?.wakeTask(approved.task_id, .external_event, 0, now_ticks);
+            } else owner.revoke_credential(owner.context, approved.task_id, now_ticks);
+        }
+        self.input_router.synchronizeTrustedInput();
+        return changed or before != (if (self.input_router.trusted_entry) |entry| entry.revision() else 0);
     }
 
     pub fn serviceAuthenticationClock(self: *SessionManager, now_ticks: u64) void {
@@ -649,7 +658,8 @@ pub const SessionManager = struct {
                 _ = desktop_display.present(self.compositorSessionPtr());
             }
         }
-        if (self.serviceIdentityOwner(now_ticks)) _ = desktop_display.present(self.compositorSessionPtr());
+        const identity_changed = self.serviceIdentityOwner(now_ticks);
+        if (identity_changed or (events_routed != 0 and self.input_router.trusted_view.visible())) _ = desktop_display.present(self.compositorSessionPtr());
         if (!self.runtime_context.constructed) return events_routed;
         const runtime = self.runtime_context.taskRuntime().?;
         const scheduler = self.runtime_context.userspaceScheduler().?;

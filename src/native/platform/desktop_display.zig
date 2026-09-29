@@ -23,11 +23,16 @@ pub fn inputViewport(session: *const compositor.Session, event: abi.InputEventDe
 // never borrows task memory, and the renderer writes only damaged text cells.
 pub fn present(session: *const compositor.Session) bool {
     if (comptime builtin.os.tag != .freestanding) return false;
-    const frame = hardware.frame() orelse return false;
+    const frame = hardware.frame() orelse {
+        if (session.trusted_view) |trusted| trusted.presented(0, 0, false);
+        return false;
+    };
     if (session.trusted_view) |trusted| {
         if (trusted.visible()) {
             view.render(frame, session, null);
+            trusted.presented(0, 0, false);
             const result = hardware.present() catch return false;
+            trusted.presented(frame.columns, frame.rows, true);
             return result.pixels_written != 0;
         }
     }
