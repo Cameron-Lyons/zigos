@@ -56,7 +56,7 @@ requests.
   oversized documents, and text the current renderer cannot represent, while
   preserving an existing draft. Session opening now validates existing scoped
   authority, owns the channel's metadata, and publishes the opening binding
-  before the app's first instruction. Launch offers and document channels hold
+  before the app's first instruction. Workspace pickers and document channels hold
   a storage-service vault lease and sealed-key fingerprint instead of a raw
   signing seed. Each new save checks current signing policy, lease expiry,
   revocation, service ownership, and key binding before publishing a version.
@@ -74,12 +74,16 @@ requests.
   restores focus. Retiring a task releases its demand-paged stack while sibling
   tasks keep their shared page tables. Boot verification repeats failed
   activation beyond the stack-slot limit and checks physical page reclamation.
-  The compositor's Open and Cancel controls now consume a session-owned,
-  one-use document offer over a bounded endpoint channel. The session rechecks
-  permissions and document identity before activation, rejects replays, and
-  retires cancelled preparations. The 256-byte mailbox uses a typed UI channel
-  for either a launcher or an editor. Cold-boot and reboot verification exercise
-  these controls through the compositor ELF with modeled keyboard input.
+  The compositor provides a workspace document picker under supplied approved
+  grants. It lists four authorized UTF-8 paths per page, supports arrow-key
+  selection, Page Up/Down browsing, and Open/Cancel or Escape. The session pins
+  each row's path, object and version, rechecks authority before each outgoing
+  chunk and activation, and rejects old-page decisions. Complete pages publish
+  atomically; queue pressure retains one frame. Empty pages offer cancellation.
+  Native picker storage is lazy and capped at 2 KiB; client state stays within
+  512 bytes. The 256-byte mailbox and 528-byte surface snapshot remain unchanged.
+  Cold-boot and reboot verification browse pages through the compositor ELF,
+  choose a non-default row, and check the resulting Notes object, text and pixels.
   Native ABI v17 copies canonical text snapshots from validated task memory;
   the compositor owns each accepted revision and rejects conflicting updates.
   The native boot path now maps the firmware framebuffer and draws document
@@ -133,9 +137,9 @@ requests.
   unchanged 528-byte text snapshot. Boot verification reads back mapped device
   pixels for the launcher, edited Notes text, selection and undo/redo results, save
   progress, durable success, and a denied save after revocation. A production
-  document picker,
-  identity and permission provisioning, accelerated graphics, complete international text support,
-  physical display verification, and moving storage into userspace remain open.
+  launch flow with identity and permission provisioning, accelerated graphics,
+  complete international text support, physical display verification, and moving
+  storage into userspace remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
   checks instruction availability and success, bounds retries, rejects a stuck
   source, erases temporary seed buffers, and stops boot if seeding fails. Runtime

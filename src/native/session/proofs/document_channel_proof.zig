@@ -77,6 +77,7 @@ pub fn run(manager: anytype, graph: anytype, workspace_id: u64) !void {
         if (previous_source) |source| input.bindHardwareSource(source) else input.clearHardwareSource();
     }
     try cancelFromCompositor(manager, graph, workspace_id, document_key);
+    try browseFromCompositor(manager, graph, workspace_id, document_key);
     // Open executes in the already-running compositor ELF. The Notes tasks
     // share image and page tables, but retain independent editor state.
     const first = try openFromCompositor(manager, graph, workspace_id, document_key);
@@ -136,8 +137,8 @@ const PreparedEditor = struct {
 };
 
 fn chooseOffer(manager: anytype, prepared: PreparedEditor, cancel: bool) !void {
-    const label = "Notes document";
-    _ = try manager.offerDocumentLaunch(prepared.request, label, timer.getTicks());
+    const label = path;
+    _ = try manager.offerDocumentPicker(@import("../document_launcher.zig").Request.fromDocument(prepared.request), timer.getTicks());
     const window_id = manager.compositorSessionPtr().active_window_id;
     const compositor_task_id = manager.inputRouterPtr().compositor_task_id;
     var ready = false;
@@ -160,6 +161,81 @@ fn chooseOffer(manager: anytype, prepared: PreparedEditor, cancel: bool) !void {
     report_mode = if (cancel) .cancel else .open;
     report_cursor = 0;
     if (manager.servicePendingInputWork(timer.getTicks()) != @as(usize, if (cancel) 2 else 1)) return error.LaunchInputNotRouted;
+}
+
+fn browseFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer) !void {
+    const names = [_][]const u8{ "0-picker/a.md", "0-picker/b.md", "0-picker/c.md", "0-picker/d.md", "0-picker/e.md", "0-picker/f.md" };
+    const storage = manager.storageServicePtr();
+    try storage.beginTransaction(workspace_id);
+    errdefer storage.abortTransaction(workspace_id) catch {};
+    for (names) |name| {
+        const stored = try storage.putVersion(.{ .object_type = .document, .payload = name, .metadata = try document_key.signMetadata("Picker document", name, timer.getTicks()) });
+        try storage.stagePut(workspace_id, name, stored.object_id, stored.version_id, .document);
+    }
+    _ = try storage.commit(workspace_id, timer.getTicks());
+    // A fixture provisions the same workspace grant a permission decision would.
+    // The production picker itself cannot create grants or signing authority.
+    const prepared = try prepareEditor(manager, graph, workspace_id, names[5], 0xD0C5, document_key);
+    errdefer manager.cancelPreparedDocumentTask(prepared.task_id, timer.getTicks()) catch {};
+    try storage.shareWorkspace(workspace_id, .{ .principal_id = prepared.request.authority.principal, .can_read = true, .can_write = true, .expires_at_ticks = std.math.maxInt(u64), .network_scope = .local_only });
+    _ = try manager.offerDocumentPicker(@import("../document_launcher.zig").Request.fromDocument(prepared.request), timer.getTicks());
+    const first_page = "0-picker/a.md\n0-picker/b.md\n0-picker/c.md\n0-picker/d.md\nOpen    Cancel";
+    const second_page = "0-picker/e.md\n0-picker/f.md\ndocuments/notes-sibling.md\ndocuments/notes.md\nOpen    Cancel";
+    try awaitPicker(manager, prepared, first_page, 0);
+    try pickerKey(manager, 0x4e); // Page Down
+    try awaitPicker(manager, prepared, second_page, 0);
+    try pickerKey(manager, 0x4b); // Page Up
+    try awaitPicker(manager, prepared, first_page, 0);
+    try pickerKey(manager, 0x4e);
+    try awaitPicker(manager, prepared, second_page, 0);
+    try pickerKey(manager, 0x51); // Down selects the second row.
+    try awaitPicker(manager, prepared, second_page, 14);
+    if (!framebuffer.verifyText(0, 6, names[5])) return error.PickerSelectionPixelsMissing;
+    const frame = framebuffer.frame() orelse return error.PickerSelectionPixelsMissing;
+    if (frame.cells[6 * frame.columns].style != .accent) return error.PickerSelectionPixelsMissing;
+    try pickerKey(manager, 0x28);
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), prepared.task_id) orelse continue;
+        const binding = state.documentBinding();
+        if (!binding.isValid()) continue;
+        const window = manager.compositorSessionPtr().activeWindow() orelse continue;
+        if (window.subject_task_id != prepared.task_id) continue;
+        const selected = try storage.resolve(workspace_id, names[5]);
+        if (binding.object_id != selected.object_id.raw() or binding.version_id != selected.version_id.raw()) return error.PickerOpenedWrongDocument;
+        const editor = EditorSession{ .task_id = prepared.task_id, .surface_id = prepared.surface_id, .window_id = window.id, .binding = binding, .document_capability_id = prepared.request.authority.capability_id };
+        defer retireEditor(manager, editor);
+        try awaitPresentation(manager, editor, names[5], 0);
+        for (0..32) |_| _ = manager.runUserspaceScheduler(timer.getTicks());
+        common.printBootMarker(boot_markers.document_picker_userspace);
+        return;
+    }
+    return error.PickerOpenTimedOut;
+}
+
+fn awaitPicker(manager: anytype, prepared: PreparedEditor, text: []const u8, cursor: u16) !void {
+    for (0..512) |_| {
+        _ = manager.runUserspaceScheduler(timer.getTicks());
+        if (manager.userspaceSchedulerPtr().taskDispatchStats(prepared.task_id) != null) return error.EditorScheduledBeforeChoice;
+        const state = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), manager.inputRouterPtr().compositor_task_id) orelse continue;
+        if (state.ui_cursor == cursor and state.ui_presented_revision == state.ui_state_revision and
+            std.mem.eql(u8, &state.ui_text_digest, &protocol.digest(text)))
+        {
+            const first = std.mem.indexOfScalar(u8, text, '\n') orelse unreachable;
+            if (!framebuffer.verifyText(0, 5, text[0..first])) return error.PickerPagePixelsMissing;
+            return;
+        }
+    }
+    return error.PickerPageNotPresented;
+}
+
+fn pickerKey(manager: anytype, usage: u8) !void {
+    report_mode = .key;
+    report_cursor = 0;
+    report_usage = usage;
+    report_modifiers = 0;
+    report_keys = @splat(0);
+    if (manager.servicePendingInputWork(timer.getTicks()) != 1) return error.PickerInputNotRouted;
 }
 
 fn openFromCompositor(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer) !EditorSession {

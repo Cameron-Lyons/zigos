@@ -650,8 +650,7 @@ fn initializeUiState(ui: *UiRuntime, comptime bundle_id: []const u8, comptime co
 
 fn recordInputEvent(ui: *UiRuntime, state: *mailbox.Mailbox, event: abi.InputEventDescriptor, comptime saves_documents: bool) bool {
     if (ui.surface.model == .compositor and !ui.launcher.acceptsInput(event)) return false;
-    if (!applyInputEvent(state, &ui.surface, event)) return false;
-    if (ui.surface.model == .compositor) ui.launcher.recordActivation(event, &ui.surface);
+    if (!applyInputEvent(state, &ui.surface, event, if (ui.surface.model == .compositor) &ui.launcher else null)) return false;
     if (comptime saves_documents) {
         if (event.length != 0 and event.bytes[0] == abi.InputByte.commit_text) ui.document.requestSave(state.documentBinding(), &ui.surface);
         ui.clipboard.start(state.clipboardBinding(), &ui.surface, event);
@@ -663,9 +662,11 @@ fn applyInputEvent(
     state: *mailbox.Mailbox,
     surface: *ui_surface_state.State,
     event: abi.InputEventDescriptor,
+    launcher: ?*launcher_client.Client,
 ) bool {
     if (event.sequence == 0 or event.task_id != state.task_id) return false;
     if (surface.apply(event) == .rejected) return false;
+    if (launcher) |client| client.recordInput(event, surface);
     state.input_event_count +|= 1;
     state.last_input_sequence = event.sequence;
     state.last_input_window_id = event.window_id;
@@ -917,7 +918,7 @@ test "focused input telemetry rejects foreign events and records valid semantic 
         .length = 2,
         .bytes = abi.inputPacket(abi.InputByte.text, 'x'),
     };
-    try std.testing.expect(applyInputEvent(&state, &surface, event));
+    try std.testing.expect(applyInputEvent(&state, &surface, event, null));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
     try std.testing.expectEqual(@as(u64, 7), state.last_input_sequence);
     try std.testing.expectEqual(@as(u8, 'x'), state.last_input_text);
@@ -930,10 +931,10 @@ test "focused input telemetry rejects foreign events and records valid semantic 
 
     var foreign = event;
     foreign.task_id = 42;
-    try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
+    try std.testing.expect(!applyInputEvent(&state, &surface, foreign, null));
     foreign.task_id = 41;
     foreign.length = 0;
-    try std.testing.expect(!applyInputEvent(&state, &surface, foreign));
+    try std.testing.expect(!applyInputEvent(&state, &surface, foreign, null));
     try std.testing.expectEqual(@as(u64, 1), state.input_event_count);
 }
 
@@ -966,4 +967,26 @@ test "userspace service startup plans expose domain-specific endpoint operations
     try std.testing.expectEqual(@as(u8, 4), sync.operation_count);
     try std.testing.expect(!std.mem.eql(u8, storage.endpoint_label, network.endpoint_label));
     try std.testing.expect(!std.mem.eql(u8, package.operations[0].name, compositor.operations[0].name));
+}
+
+test "compositor picker navigation publishes its selected row through the mailbox" {
+    std.testing.refAllDecls(launcher_client);
+    var ui = UiRuntime{ .surface = ui_surface_state.State.init("zigos.system.display") };
+    var state = mailbox.Mailbox{ .task_id = 2 };
+    ui.launcher = .{ .binding = .{ .endpoint_capability_id = 3, .service_endpoint_id = 4 }, .window_id = 9, .token = 1, .finished = false, .page = .{ .window_id = 9, .text_length = 9, .count = 2, .previous = false, .next = false } };
+    @memcpy(ui.launcher.labels[0..9], "a.md\nb.md");
+    @memcpy(ui.surface.text[0..24], "a.md\nb.md\nOpen    Cancel");
+    ui.surface.text_length = 24;
+    ui.surface.window_id = 9;
+    ui.surface.flags.active = true;
+    var event = std.mem.zeroes(abi.InputEventDescriptor);
+    event.task_id = 2;
+    event.window_id = 9;
+    event.sequence = 1;
+    event.length = 2;
+    event.bytes = abi.inputPacket(abi.InputByte.cursor_down, 0);
+    try std.testing.expect(recordInputEvent(&ui, &state, event, false));
+    try std.testing.expectEqual(@as(u16, 5), state.ui_cursor);
+    try std.testing.expectEqual(ui.surface.revision, state.ui_state_revision);
+    try std.testing.expect(ui.surface.presentationText().isCanonical());
 }

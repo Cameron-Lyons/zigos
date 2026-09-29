@@ -70,11 +70,29 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
         const state = &record;
         const flags = state.flags;
         if (state.model == .compositor and flags.active) {
-            const end = @import("std").mem.indexOfScalar(u8, state.text, '\n') orelse state.text.len;
-            frame.put(0, text_row, state.text[0..end], .body);
-            frame.put(0, text_row + 2, " Open ", if (state.focus_index == 0) .selected else .body);
-            frame.put(10, text_row + 2, " Cancel ", if (state.focus_index == 1) .selected else .body);
-            frame.put(0, frame.rows - 1, "Tab  Choose  |  Enter  Confirm", .muted);
+            const std = @import("std");
+            const end = std.mem.lastIndexOfScalar(u8, state.text, '\n') orelse state.text.len;
+            const labels = state.text[0..end];
+            // Keep the selected row visible even at the minimum display height.
+            const room = (frame.rows -| text_row) -| 4;
+            var lines = std.mem.splitScalar(u8, labels, '\n');
+            var selected: usize = 0;
+            for (labels[0..@min(state.cursor, labels.len)]) |byte| {
+                if (byte == '\n') selected += 1;
+            }
+            const first = selected + 1 -| room;
+            var index: usize = 0;
+            var drawn: usize = 0;
+            while (lines.next()) |label| : (index += 1) {
+                if (index < first) continue;
+                if (drawn == room) break;
+                frame.put(0, text_row + drawn, label, if (index == selected) .accent else .body);
+                drawn += 1;
+            }
+            const empty = std.mem.eql(u8, state.text[@min(end + 1, state.text.len)..], "Cancel");
+            if (!empty) frame.put(0, text_row + drawn + 1, " Open ", if (state.focus_index == 0) .selected else .body);
+            frame.put(if (empty) 0 else 10, text_row + drawn + 1, " Cancel ", if (state.focus_index == 1) .selected else .body);
+            frame.put(0, frame.rows - 1, "Up/Down  Select | PgUp/PgDn  Browse | Tab  Choose | Enter  Confirm", .muted);
             return;
         } else if (flags.loading) {
             frame.put(0, text_row, "Opening document...", .muted);
@@ -370,4 +388,34 @@ test "desktop renders document save feedback without treating a dirty receipt as
 fn expectText(frame: *const scanout.Frame, column: usize, row: usize, text: []const u8) !void {
     const std = @import("std");
     for (text, 0..) |byte, index| try std.testing.expectEqual(byte, frame.cells[row * frame.columns + column + index].character);
+}
+
+test "desktop view keeps picker selection and controls visible on small displays" {
+    const std = @import("std");
+    const task_runtime = @import("../task/task_runtime.zig");
+    var runtime = task_runtime.Runtime.init();
+    const task = try runtime.createTask(.{ .owner = .{ .kind = .app, .serial = 73 }, .component_class = .app_component, .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 65536, .endpoint_slots = 4, .shared_memory_bytes = 4096 }, .ui_surface_id = 33, .local_only = true });
+    var session = compositor.Session.init();
+    defer session.deinit();
+    _ = try session.openTaskView(task, "Open document");
+    var content = Content{ .surface_id = 33, .text = "a.md\nb.md\nc.md\nd.md\nOpen    Cancel", .cursor = 15, .model = .compositor, .flags = .{ .active = true }, .focus_index = 0 };
+    var small = try scanout.Frame.init(20, 10);
+    render(&small, &session, content);
+    try expectText(&small, 0, 5, "d.md");
+    try std.testing.expectEqual(scanout.Style.accent, small.cells[5 * small.columns].style);
+    try expectText(&small, 0, 7, " Open ");
+    try expectText(&small, 10, 7, " Cancel ");
+    var large = try scanout.Frame.init(80, 20);
+    render(&large, &session, content);
+    try expectText(&large, 0, 5, "a.md");
+    try expectText(&large, 0, 8, "d.md");
+    try std.testing.expectEqual(scanout.Style.accent, large.cells[8 * large.columns].style);
+    try expectText(&large, 0, 10, " Open ");
+    content.text = "No documents available\nCancel";
+    content.cursor = 0;
+    content.focus_index = 1;
+    render(&large, &session, content);
+    try expectText(&large, 0, 7, " Cancel ");
+    try std.testing.expectEqual(scanout.Style.selected, large.cells[7 * large.columns].style);
+    try std.testing.expectEqual(@as(u21, ' '), large.cells[7 * large.columns + 10].character);
 }

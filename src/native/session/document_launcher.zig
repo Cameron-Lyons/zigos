@@ -13,11 +13,32 @@ const workspace = @import("../storage/workspace.zig");
 const kernel_memory = if (builtin.target.os.tag == .freestanding) @import("../../kernel/memory/memory.zig") else struct {};
 const heap_backed = builtin.target.os.tag == .freestanding;
 
+pub const Request = struct {
+    authority: storage_service.AuthorityContext,
+    client_bootstrap_capability_id: u64,
+    server_bootstrap_capability_id: u64,
+    workspace_id: u64,
+    signer: @import("../storage/sealed_object_signer.zig").Signer,
+
+    pub fn fromDocument(request: documents.OpenRequest) Request {
+        return .{ .authority = request.authority, .client_bootstrap_capability_id = request.client_bootstrap_capability_id, .server_bootstrap_capability_id = request.server_bootstrap_capability_id, .workspace_id = request.workspace_id, .signer = request.signer };
+    }
+
+    fn document(self: Request, path: []const u8) documents.OpenRequest {
+        return .{ .authority = self.authority, .client_bootstrap_capability_id = self.client_bootstrap_capability_id, .server_bootstrap_capability_id = self.server_bootstrap_capability_id, .workspace_id = self.workspace_id, .signer = self.signer, .path = path };
+    }
+};
+
 const Pending = struct {
-    request: documents.OpenRequest,
-    path: [workspace.MAX_ENTRY_PATH_BYTES]u8,
-    object_id: u64,
-    version_id: u64,
+    request: Request,
+    entries: [protocol.PAGE_ENTRIES]workspace.Entry = undefined,
+    count: u8 = 0,
+    first: u16 = 0,
+    next: bool = false,
+    text: [protocol.MAX_PAGE_TEXT_BYTES]u8 = @splat(0),
+    text_length: u16 = 0,
+    queued_text: u16 = 0,
+    sending_page: bool = false,
     window_id: u64,
     previous_window_id: u64,
 };
@@ -35,8 +56,8 @@ const State = struct {
     result: ?protocol.Result = null,
 };
 
-// One approved document offer per session, allocated only when used. Endpoint
-// messages contain no storage authority, path, signer, or executable choice.
+// One workspace picker per session, allocated only when used. Only authorized
+// display names leave the session; object identities, grants and signers stay here.
 pub const Launcher = struct {
     backing: if (heap_backed) ?*State else ?State = null,
     owner_task_id: u64 = 0,
@@ -52,41 +73,40 @@ pub const Launcher = struct {
         return if (self.backing) |*value| value else null;
     }
 
-    pub fn offer(self: *Launcher, manager: anytype, request: documents.OpenRequest, label: []const u8, now_ticks: u64) !u64 {
+    pub fn offer(self: *Launcher, manager: anytype, request: Request, now_ticks: u64) !u64 {
         if (self.state()) |s| if (s.pending != null or s.outgoing != null) return error.LauncherBusy;
         if (self.token == std.math.maxInt(u64)) return error.LaunchTokenExhausted;
-        if (request.path.len > workspace.MAX_ENTRY_PATH_BYTES) return error.InvalidDocumentRequest;
         const storage = manager.storageServicePtr();
         try request.signer.validateService(storage.owner, storage.task_id, now_ticks);
-        var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
-        _ = try protocol.encode(&bytes, .{ .token = self.token + 1, .body = .{ .offer = .{ .window_id = 1, .label = label } } });
-        var port = storage_service.StoragePort.init(manager.storageServicePtr(), manager.capabilityTablePtr());
-        var authority = request.authority;
-        authority.now_ticks = now_ticks;
-        const view = try port.openEntry(authority, request.workspace_id, request.path, .read);
-        if (view.object_type != .document) return error.NotDocument;
-        try port.requireDocumentWrite(authority, request.workspace_id, request.path, view.object_id.raw());
+        var pending = Pending{ .request = request, .window_id = 0, .previous_window_id = manager.compositorSessionPtr().active_window_id };
+        try selectPage(manager, &pending, 0, now_ticks);
         const s = try self.ensureChannel(manager, now_ticks);
         const compositor_task = manager.runtimePtr().find(s.client_task_id) orelse return error.TaskNotFound;
         if (compositor_task.state != .active) return error.TaskNotPrepared;
-        const compositor = manager.compositorSessionPtr();
-        const previous_window_id = compositor.active_window_id;
-        const window = try compositor.openTaskView(compositor_task, "Open document");
+        const window = try manager.compositorSessionPtr().openTaskView(compositor_task, "Open document");
+        pending.window_id = window.id;
         self.token += 1;
-        s.pending = .{
-            .request = request,
-            .path = undefined,
-            .object_id = view.object_id.raw(),
-            .version_id = view.version_id.raw(),
-            .window_id = window.id,
-            .previous_window_id = previous_window_id,
-        };
-        const pending = &s.pending.?;
-        @memcpy(pending.path[0..request.path.len], request.path);
-        pending.request.path = pending.path[0..request.path.len];
+        s.pending = pending;
         s.result = null;
-        queue(s, .{ .token = self.token, .body = .{ .offer = .{ .window_id = window.id, .label = label } } });
+        self.queuePage(s);
         return self.token;
+    }
+
+    fn queuePage(self: *Launcher, s: *State) void {
+        const pending = &s.pending.?;
+        pending.queued_text = 0;
+        pending.sending_page = true;
+        queue(s, .{ .token = self.token, .body = .{ .page = .{ .window_id = pending.window_id, .text_length = pending.text_length, .count = pending.count, .previous = pending.first != 0, .next = pending.next } } });
+    }
+
+    fn finish(self: *Launcher, manager: anytype, s: *State, result: protocol.Result, now_ticks: u64) void {
+        const pending = &s.pending.?;
+        if (result.status != .opened) manager.cancelPreparedDocumentTask(pending.request.authority.task_id, now_ticks) catch {};
+        closeOfferWindow(manager, pending, result.status != .opened);
+        @memset(std.mem.asBytes(pending), 0);
+        s.pending = null;
+        s.result = result;
+        queue(s, .{ .token = self.token, .body = .{ .result = result } });
     }
 
     fn ensureChannel(self: *Launcher, manager: anytype, now_ticks: u64) !*State {
@@ -155,19 +175,28 @@ pub const Launcher = struct {
             .suspended => return false,
             .active => {},
         }
-        if (s.outgoing != null) return flush(s, now_ticks) catch {
-            self.deinit(manager, now_ticks);
+        // Recheck before every chunk, including retries after queue pressure.
+        // A revoked grant cannot disclose the remainder of a buffered page.
+        if (s.pending != null and (pendingTaskRetired(s) or (s.outgoing != null and !current(manager, &s.pending.?, now_ticks)))) {
+            self.finish(manager, s, .{ .status = .unavailable }, now_ticks);
             return true;
-        };
-        if (pendingTaskRetired(s)) {
-            const pending = &s.pending.?;
-            closeOfferWindow(manager, pending, true);
-            @memset(std.mem.asBytes(pending), 0);
-            s.pending = null;
-            const result = protocol.Result{ .status = .unavailable };
-            s.result = result;
-            queue(s, .{ .token = self.token, .body = .{ .result = result } });
-            return true;
+        }
+        if (s.outgoing != null) {
+            const sent = flush(s, now_ticks) catch {
+                self.deinit(manager, now_ticks);
+                return true;
+            };
+            if (sent) if (s.pending) |*pending| {
+                if (pending.sending_page) {
+                    if (pending.queued_text < pending.text_length) {
+                        const offset = pending.queued_text;
+                        const length = @min(protocol.CHUNK_BYTES, pending.text_length - offset);
+                        queue(s, .{ .token = self.token, .body = .{ .text = .{ .offset = offset, .bytes = pending.text[offset..][0..length] } } });
+                        pending.queued_text += length;
+                    } else pending.sending_page = false;
+                }
+            };
+            return sent;
         }
         var bytes: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
         var attached: abi.CapabilityDescriptor = undefined;
@@ -189,22 +218,39 @@ pub const Launcher = struct {
         if (received.message.sender_task_id != s.client_task_id or received.message.sender_endpoint_id != s.client_endpoint_id) return true;
         const frame = protocol.decode(bytes[0..received.message.payload_len]) catch return true;
         if (frame.token != received.message.correlation_id or frame.token != self.token or
-            (frame.body != .open and frame.body != .cancel)) return true;
-        if (s.pending != null) {
-            const pending = &s.pending.?;
+            (frame.body != .open and frame.body != .cancel and frame.body != .move)) return true;
+        if (s.pending) |*pending| {
+            if (frame.body == .cancel) {
+                self.finish(manager, s, .{ .status = .cancelled }, now_ticks);
+                return true;
+            }
+            if (manager.compositorSessionPtr().active_window_id != pending.window_id or !current(manager, pending, now_ticks)) {
+                self.finish(manager, s, .{ .status = .unavailable }, now_ticks);
+                return true;
+            }
+            if (frame.body == .move) {
+                const forward = frame.body.move;
+                if ((forward and !pending.next) or (!forward and pending.first == 0)) return true;
+                if (self.token == std.math.maxInt(u64)) {
+                    self.finish(manager, s, .{ .status = .unavailable }, now_ticks);
+                    return true;
+                }
+                const first = if (forward) pending.first + protocol.PAGE_ENTRIES else pending.first - protocol.PAGE_ENTRIES;
+                selectPage(manager, pending, first, now_ticks) catch {
+                    self.finish(manager, s, .{ .status = .unavailable }, now_ticks);
+                    return true;
+                };
+                self.token += 1;
+                self.queuePage(s);
+                return true;
+            }
+            if (frame.body.open >= pending.count) return true;
             var result = protocol.Result{ .status = .unavailable };
-            if (frame.body == .open and unchanged(manager, pending, now_ticks)) {
-                if (manager.activateDocumentTask(pending.request, now_ticks)) |opened| {
-                    result = .{ .status = .opened, .task_id = opened.task_id, .window_id = opened.window_id };
-                } else |_| {}
-            } else if (frame.body == .cancel) result.status = .cancelled;
-            if (result.status != .opened) manager.cancelPreparedDocumentTask(pending.request.authority.task_id, now_ticks) catch {};
-            closeOfferWindow(manager, pending, result.status != .opened);
-            // No request can execute twice, including a contrary replay after
-            // cancellation. Retain only the terminal receipt, erase secrets.
-            @memset(std.mem.asBytes(pending), 0);
-            s.pending = null;
-            s.result = result;
+            if (manager.activateDocumentTask(pending.request.document(pending.entries[frame.body.open].pathSlice()), now_ticks)) |opened| {
+                result = .{ .status = .opened, .task_id = opened.task_id, .window_id = opened.window_id };
+            } else |_| {}
+            self.finish(manager, s, result, now_ticks);
+            return true;
         }
         if (s.result) |result| queue(s, .{ .token = self.token, .body = .{ .result = result } });
         return true;
@@ -240,12 +286,59 @@ pub const Launcher = struct {
     }
 };
 
-fn unchanged(manager: anytype, pending: *const Pending, now_ticks: u64) bool {
+fn selectPage(manager: anytype, pending: *Pending, first: u16, now_ticks: u64) !void {
     var port = storage_service.StoragePort.init(manager.storageServicePtr(), manager.capabilityTablePtr());
     var authority = pending.request.authority;
     authority.now_ticks = now_ticks;
-    const view = port.openEntry(authority, pending.request.workspace_id, pending.request.path, .read) catch return false;
-    return view.object_type == .document and view.object_id.raw() == pending.object_id and view.version_id.raw() == pending.version_id;
+    try port.requireWorkspaceCapability(authority, pending.request.workspace_id, .read);
+    try port.requireWorkspaceCapability(authority, pending.request.workspace_id, .write);
+    pending.first = first;
+    pending.count = 0;
+    pending.next = false;
+    pending.text_length = 0;
+    @memset(&pending.text, 0);
+    @memset(std.mem.asBytes(&pending.entries), 0);
+    var visible: usize = 0;
+    // The workspace itself is bounded at 96 entries. Examine each at most once;
+    // filter before copying any name or counting it toward the visible page.
+    for (try manager.storageServicePtr().entries(pending.request.workspace_id)) |entry| {
+        if (entry.object_type != .document or !protocol.validLabel(entry.pathSlice())) continue;
+        _ = port.openEntry(authority, pending.request.workspace_id, entry.pathSlice(), .read) catch continue;
+        port.requireDocumentWrite(authority, pending.request.workspace_id, entry.pathSlice(), entry.object_id.raw()) catch continue;
+        visible += 1;
+        if (visible <= first) continue;
+        if (pending.count == protocol.PAGE_ENTRIES) {
+            pending.next = true;
+            break;
+        }
+        pending.entries[pending.count] = entry;
+        if (pending.count != 0) {
+            pending.text[pending.text_length] = '\n';
+            pending.text_length += 1;
+        }
+        const label = entry.pathSlice();
+        @memcpy(pending.text[pending.text_length..][0..label.len], label);
+        pending.text_length += @intCast(label.len);
+        pending.count += 1;
+    }
+}
+
+fn current(manager: anytype, pending: *const Pending, now_ticks: u64) bool {
+    const task = manager.runtimePtr().find(pending.request.authority.task_id) orelse return false;
+    if (task.state != .active or !task.owner.eql(pending.request.authority.principal) or !task.hasCapability(pending.request.authority.capability_id)) return false;
+    const storage = manager.storageServicePtr();
+    pending.request.signer.validateService(storage.owner, storage.task_id, now_ticks) catch return false;
+    var port = storage_service.StoragePort.init(storage, manager.capabilityTablePtr());
+    var authority = pending.request.authority;
+    authority.now_ticks = now_ticks;
+    port.requireWorkspaceCapability(authority, pending.request.workspace_id, .read) catch return false;
+    port.requireWorkspaceCapability(authority, pending.request.workspace_id, .write) catch return false;
+    for (pending.entries[0..pending.count]) |entry| {
+        const view = port.openEntry(authority, pending.request.workspace_id, entry.pathSlice(), .read) catch return false;
+        if (view.object_type != .document or view.object_id.raw() != entry.object_id.raw() or view.version_id.raw() != entry.version_id.raw()) return false;
+        port.requireDocumentWrite(authority, pending.request.workspace_id, entry.pathSlice(), entry.object_id.raw()) catch return false;
+    }
+    return true;
 }
 
 fn closeOfferWindow(manager: anytype, pending: *const Pending, restore: bool) void {
@@ -294,8 +387,9 @@ fn pendingTaskRetired(s: *const State) bool {
 }
 
 comptime {
+    if (protocol.MAX_LABEL_BYTES != workspace.MAX_ENTRY_PATH_BYTES) @compileError("picker must represent full workspace paths");
     if (heap_backed and @sizeOf(Launcher) > 24) @compileError("launcher handle exceeds resident size bound");
-    if (@sizeOf(State) > 1024) @compileError("launcher exceeds bounded storage");
+    if (@sizeOf(State) > 2048) @compileError("launcher exceeds bounded storage");
 }
 
 fn prepareTestDocument(manager: anytype, signing_fixture: *@import("../../tests/fixtures/document_signer.zig").Fixture) !documents.OpenRequest {
@@ -378,18 +472,13 @@ test "document launcher consumes cancellation once and refuses revoked or replac
         const windows_before = manager.compositorSessionPtr().window_count;
         const focus_before = manager.compositorSessionPtr().active_window_id;
         const launcher = &manager.launcher;
-        var path_buffer = "documents/notes.md".*;
-        var borrowed = request;
-        borrowed.path = &path_buffer;
-        const token = try manager.offerDocumentLaunch(borrowed, "Notes", 1);
-        @memset(&path_buffer, 'x');
+        const token = try manager.offerDocumentPicker(Request.fromDocument(request), 1);
         const s = launcher.state().?;
-        try std.testing.expectEqualStrings(request.path, s.pending.?.request.path);
-        try std.testing.expectError(error.LauncherBusy, manager.offerDocumentLaunch(request, "Another", 1));
-        try std.testing.expect(launcher.service(manager, 1));
-        try std.testing.expect(try receiveTestFrame(s) == null);
+        try std.testing.expectEqualStrings(request.path, s.pending.?.entries[0].pathSlice());
+        try std.testing.expectError(error.LauncherBusy, manager.offerDocumentPicker(Request.fromDocument(request), 1));
+        try drainTestPage(launcher, manager);
         try std.testing.expect(!launcher.hasPendingWork());
-        try sendTestDecision(s, token + 1, .open);
+        try sendTestDecision(s, token + 1, .{ .open = 0 });
         try std.testing.expect(launcher.service(manager, 1));
         try std.testing.expect(s.pending != null);
         if (case == .revoke) try manager.capabilityTablePtr().revokeGrant(request.authority.capability_id);
@@ -404,7 +493,7 @@ test "document launcher consumes cancellation once and refuses revoked or replac
             try storage.stagePut(request.workspace_id, request.path, replacement.object_id, replacement.version_id, .document);
             _ = try storage.commit(request.workspace_id, 1);
         }
-        try sendTestDecision(s, token, if (case == .cancel) .cancel else .open);
+        try sendTestDecision(s, token, if (case == .cancel) .cancel else .{ .open = 0 });
         try std.testing.expect(launcher.service(manager, 1));
         try std.testing.expect(s.pending == null);
         try std.testing.expectEqual(if (case == .cancel) protocol.Status.cancelled else .unavailable, s.result.?.status);
@@ -416,7 +505,7 @@ test "document launcher consumes cancellation once and refuses revoked or replac
         try std.testing.expect(launcher.service(manager, 1));
         const result = (try receiveTestFrame(s)).?;
         const grants_after = manager.capabilityTablePtr().activeCount();
-        try sendTestDecision(s, token, .open);
+        try sendTestDecision(s, token, .{ .open = 0 });
         try std.testing.expect(launcher.service(manager, 1));
         try std.testing.expect(launcher.service(manager, 1));
         try std.testing.expectEqualDeep(result, (try receiveTestFrame(s)).?);
@@ -437,7 +526,7 @@ test "document launcher bounds queue pressure and retires pending offers on chan
     const request = try prepareTestDocument(manager, &signing_fixture);
     const endpoints_before = manager.kernelPort().?.kernel.endpoint_table.activeCount();
     const windows_before = manager.compositorSessionPtr().window_count;
-    _ = try manager.offerDocumentLaunch(request, "Notes", 1);
+    _ = try manager.offerDocumentPicker(Request.fromDocument(request), 1);
     const launcher = &manager.launcher;
     const s = launcher.state().?;
     const offer = s.outgoing.?;
@@ -470,11 +559,10 @@ test "document launcher rejects foreign endpoints and releases unexpected author
     const manager = session_manager.system();
     var signing_fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
     const request = try prepareTestDocument(manager, &signing_fixture);
-    const token = try manager.offerDocumentLaunch(request, "Notes", 1);
+    const token = try manager.offerDocumentPicker(Request.fromDocument(request), 1);
     const launcher = &manager.launcher;
     const s = launcher.state().?;
-    try std.testing.expect(launcher.service(manager, 1));
-    _ = try receiveTestFrame(s);
+    try drainTestPage(launcher, manager);
     const table = s.kernel.kernel.endpoint_table;
     const other = try table.create(ids.task(s.client_task_id), "wrong-launcher", .{ .local_only = true });
     try table.connect(other.id, ids.endpoint(s.server_endpoint_id));
@@ -514,4 +602,150 @@ test "document launcher rejects foreign endpoints and releases unexpected author
     try std.testing.expect(s.pending == null);
     try std.testing.expect(launcher.service(manager, 1));
     try std.testing.expectEqual(protocol.Status.unavailable, (try receiveTestFrame(s)).?.status);
+}
+
+fn drainTestPage(launcher: *Launcher, manager: anytype) !void {
+    const s = launcher.state().?;
+    var frames: usize = 0;
+    while (s.outgoing != null) {
+        try std.testing.expect(launcher.service(manager, 1));
+        try std.testing.expect(try receiveTestFrame(s) == null);
+        frames += 1;
+        try std.testing.expect(frames <= 1 + (protocol.MAX_PAGE_TEXT_BYTES + protocol.CHUNK_BYTES - 1) / protocol.CHUNK_BYTES);
+    }
+}
+
+test "document launcher pages authorized names and binds decisions to the displayed page" {
+    const session_manager = @import("session_manager.zig");
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    var fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+    const request = try prepareTestDocument(manager, &fixture);
+    const storage = manager.storageServicePtr();
+    try storage.beginTransaction(request.workspace_id);
+    for ([_][]const u8{ "a.md", "b.md", "c.md", "d.md", "e.md", "f.md" }) |path| {
+        const stored = try storage.putVersion(.{ .object_type = .document, .payload = path, .metadata = try request.signer.signMetadata("Notes", path, 1) });
+        try storage.stagePut(request.workspace_id, path, stored.object_id, stored.version_id, .document);
+    }
+    _ = try storage.commit(request.workspace_id, 1);
+    const launcher = &manager.launcher;
+    const token = try manager.offerDocumentPicker(Request.fromDocument(request), 1);
+    const s = launcher.state().?;
+    try std.testing.expectEqualStrings("a.md\nb.md\nc.md\nd.md", s.pending.?.text[0..s.pending.?.text_length]);
+    try std.testing.expect(s.pending.?.next);
+    try drainTestPage(launcher, manager);
+    try sendTestDecision(s, token, .{ .move = true });
+    try std.testing.expect(launcher.service(manager, 1));
+    try std.testing.expectEqual(token + 1, launcher.token);
+    try std.testing.expectEqualStrings("documents/notes.md\ne.md\nf.md", s.pending.?.text[0..s.pending.?.text_length]);
+    try std.testing.expect(!s.pending.?.next);
+    try drainTestPage(launcher, manager);
+    // A queued double page-down or old Open cannot choose a different document.
+    try sendTestDecision(s, token, .{ .move = true });
+    try sendTestDecision(s, token, .{ .open = 0 });
+    try std.testing.expect(launcher.service(manager, 1));
+    try std.testing.expect(launcher.service(manager, 1));
+    try std.testing.expectEqual(token + 1, launcher.token);
+    try std.testing.expect(s.pending != null);
+    try sendTestDecision(s, launcher.token, .{ .open = 3 });
+    try std.testing.expect(launcher.service(manager, 1));
+    try std.testing.expect(s.pending != null);
+    try sendTestDecision(s, launcher.token, .{ .move = false });
+    try std.testing.expect(launcher.service(manager, 1));
+    try std.testing.expectEqualStrings("a.md", s.pending.?.entries[0].pathSlice());
+    try drainTestPage(launcher, manager);
+    // Scope the workspace share to one object. Unlisted names stay hidden.
+    const ws = storage.workspaces.find(ids.workspace(request.workspace_id)).?;
+    ws.owner = .{ .kind = .user, .serial = 0xD0CF };
+    const entry = try storage.resolve(request.workspace_id, request.path);
+    try storage.shareWorkspace(request.workspace_id, try (workspace.ShareGrant{
+        .principal_id = request.authority.principal,
+        .can_read = true,
+        .can_write = true,
+        .expires_at_ticks = 1000,
+        .network_scope = .local_only,
+    }).withObjectScope(entry.object_id, request.path));
+    var pending = Pending{ .request = Request.fromDocument(request), .window_id = 1, .previous_window_id = 0 };
+    try selectPage(manager, &pending, 0, 1);
+    try std.testing.expectEqualStrings(request.path, pending.text[0..pending.text_length]);
+    try std.testing.expectEqual(@as(u8, 1), pending.count);
+    try std.testing.expect(!pending.next);
+    // The displayed page has lost access: navigation closes instead of using it.
+    try sendTestDecision(s, launcher.token, .{ .move = true });
+    try std.testing.expect(launcher.service(manager, 1));
+    try std.testing.expectEqual(protocol.Status.unavailable, s.result.?.status);
+}
+
+test "document launcher withdraws buffered names on revocation suspension and expiry" {
+    const session_manager = @import("session_manager.zig");
+    for ([_]enum { revoke, suspended, expire, membership, signing }{ .revoke, .suspended, .expire, .membership, .signing }) |case| {
+        session_manager.testing.resetState();
+        defer session_manager.testing.resetState();
+        session_manager.boot();
+        const manager = session_manager.system();
+        var fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+        const request = try prepareTestDocument(manager, &fixture);
+        _ = try manager.offerDocumentPicker(Request.fromDocument(request), 1);
+        const launcher = &manager.launcher;
+        const s = launcher.state().?;
+        // Publish only the header. No label byte has reached the client yet.
+        try std.testing.expect(launcher.service(manager, 1));
+        _ = try receiveTestFrame(s);
+        switch (case) {
+            .revoke => try manager.capabilityTablePtr().revokeGrant(request.authority.capability_id),
+            .suspended => {
+                _ = try manager.runtimePtr().suspendTask(request.authority.task_id, 1);
+            },
+            .membership => {
+                _ = try manager.runtimePtr().revokeCapability(request.authority.task_id, request.authority.capability_id);
+            },
+            .signing => fixture.service.findHandle(request.signer.key.handle_id).?.revoked = true,
+            .expire => {},
+        }
+        const now: u64 = if (case == .expire) 1001 else 1;
+        try std.testing.expect(launcher.service(manager, now));
+        try std.testing.expect(s.pending == null);
+        try std.testing.expect(launcher.service(manager, now));
+        try std.testing.expectEqual(protocol.Status.unavailable, (try receiveTestFrame(s)).?.status);
+        try std.testing.expect(!launcher.hasPendingWork());
+    }
+}
+
+test "document launcher validates empty workspaces and does not steal changed focus" {
+    const session_manager = @import("session_manager.zig");
+    for ([_]bool{ false, true }) |empty| {
+        session_manager.testing.resetState();
+        defer session_manager.testing.resetState();
+        session_manager.boot();
+        const manager = session_manager.system();
+        var fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+        const request = try prepareTestDocument(manager, &fixture);
+        if (empty) {
+            const storage = manager.storageServicePtr();
+            try storage.beginTransaction(request.workspace_id);
+            try storage.stageDelete(request.workspace_id, request.path);
+            _ = try storage.commit(request.workspace_id, 1);
+        }
+        const launcher = &manager.launcher;
+        const token = try manager.offerDocumentPicker(Request.fromDocument(request), 1);
+        const s = launcher.state().?;
+        try drainTestPage(launcher, manager);
+        if (empty) {
+            try std.testing.expectEqual(@as(u8, 0), s.pending.?.count);
+            try manager.capabilityTablePtr().revokeGrant(request.authority.capability_id);
+            try sendTestDecision(s, token, .{ .open = 0 });
+            try std.testing.expect(launcher.service(manager, 1));
+            try std.testing.expectEqual(protocol.Status.unavailable, s.result.?.status);
+        } else {
+            const other = try manager.compositorSessionPtr().openTaskView(manager.runtimePtr().find(s.client_task_id).?, "Another view");
+            const other_id = other.id;
+            try sendTestDecision(s, token, .{ .open = 0 });
+            try std.testing.expect(launcher.service(manager, 1));
+            try std.testing.expectEqual(protocol.Status.unavailable, s.result.?.status);
+            try std.testing.expectEqual(other_id, manager.compositorSessionPtr().active_window_id);
+            try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(request.authority.task_id) == null);
+        }
+    }
 }

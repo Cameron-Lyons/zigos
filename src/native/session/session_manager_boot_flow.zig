@@ -329,10 +329,10 @@ pub const SessionManager = struct {
         binding: userspace_mailbox.DocumentBinding,
     };
 
-    pub fn offerDocumentLaunch(self: *SessionManager, request: document_sessions.OpenRequest, label: []const u8, now_ticks: u64) !u64 {
+    pub fn offerDocumentPicker(self: *SessionManager, request: document_launcher.Request, now_ticks: u64) !u64 {
         const task = try self.requirePreparedDocumentTask(request.authority.task_id, false);
         if (!task.owner.eql(request.authority.principal) or !task.hasCapability(request.authority.capability_id)) return error.PermissionDenied;
-        return self.launcher.offer(self, request, label, now_ticks);
+        return self.launcher.offer(self, request, now_ticks);
     }
 
     // A prepared task has an identity for permission review, but no scheduler

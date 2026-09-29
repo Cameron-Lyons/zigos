@@ -220,6 +220,7 @@ pub const notes_daily_driver_typed_sync_ok = "ZIGOS:NOTES_DAILY:TYPED_SYNC:OK";
 pub const notes_daily_driver_typed_recovery_ok = "ZIGOS:NOTES_DAILY:TYPED_RECOVERY:OK";
 pub const notes_daily_driver_typed_loop_complete = "ZIGOS:NOTES_DAILY:TYPED_LOOP:COMPLETE";
 pub const document_channel_launch_rollback = "ZIGOS:DOCUMENT_CHANNEL:LAUNCH_ROLLBACK:PASS";
+pub const document_picker_userspace = "ZIGOS:DOCUMENT_PICKER:USERSPACE:PASS";
 pub const document_launcher_userspace_open = "ZIGOS:DOCUMENT_LAUNCHER:USERSPACE_OPEN:PASS";
 pub const document_launcher_userspace_cancel = "ZIGOS:DOCUMENT_LAUNCHER:USERSPACE_CANCEL:PASS";
 pub const document_channel_userspace_open = "ZIGOS:DOCUMENT_CHANNEL:USERSPACE_OPEN:PASS";

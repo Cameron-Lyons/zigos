@@ -786,6 +786,12 @@ pub const StoragePort = struct {
         return entry;
     }
 
+    // Checking a workspace capability does not authorize any entry name.
+    // Callers must still use openEntry for each object they expose.
+    pub fn requireWorkspaceCapability(self: *const StoragePort, authority: AuthorityContext, workspace_id: u64, access: Access) AuthorityError!void {
+        _ = try self.requireStorageAuthority(authority, ids.workspace(workspace_id), access);
+    }
+
     pub fn requireDocumentWrite(
         self: *StoragePort,
         authority: AuthorityContext,
