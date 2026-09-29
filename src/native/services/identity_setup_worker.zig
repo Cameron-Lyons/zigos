@@ -25,7 +25,7 @@ pub fn Worker(comptime Io: type) type {
         max_duration_ticks: u64,
         stack: ?guarded.Stack = null,
         worker: cooperative.Worker = .{ .stack = &.{} },
-        operation: ?enum { prepare, commit } = null,
+        operation: ?enum { load, prepare, commit } = null,
         value: [32]u8 = @splat(0),
         value_len: usize = 0,
         recovery_record: record.Record = .{},
@@ -37,7 +37,7 @@ pub fn Worker(comptime Io: type) type {
         deadline: u64 = 0,
 
         pub fn backend(self: *Self) entry.Backend {
-            return .{ .context = self, .start_prepare = startPrepare, .start_commit = startCommit, .poll = poll, .cancel = cancel, .busy = busy };
+            return .{ .context = self, .start_load = startLoad, .start_prepare = startPrepare, .start_commit = startCommit, .poll = poll, .cancel = cancel, .busy = busy };
         }
 
         pub fn deinit(self: *Self) !void {
@@ -74,6 +74,14 @@ pub fn Worker(comptime Io: type) type {
             self.deadline = deadline;
         }
 
+        fn startLoad(context: *anyopaque, now: u64) !void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            try self.prepare(now);
+            errdefer self.erase();
+            self.operation = .load;
+            try self.worker.start(self, run);
+        }
+
         fn startPrepare(context: *anyopaque, value: []const u8, now: u64) !void {
             const self: *Self = @ptrCast(@alignCast(context));
             try pin.validatePin(value);
@@ -81,7 +89,9 @@ pub fn Worker(comptime Io: type) type {
             errdefer self.erase();
             // Cancelled preparation may leave encrypted candidate objects. A
             // new attempt uses fresh IDs rather than replacing a retained card.
-            if (self.storage.latestVersion(self.request.record_object_id) != null or self.storage.latestVersion(self.request.catalog_object_id) != null) {
+            if (self.request.record_object_id == 0 or self.request.catalog_object_id == 0 or
+                self.storage.latestVersion(self.request.record_object_id) != null or self.storage.latestVersion(self.request.catalog_object_id) != null)
+            {
                 const next = self.storage.store.next_object_id;
                 if (next == 0 or next == std.math.maxInt(u64)) return error.ObjectIdExhausted;
                 self.request.catalog_object_id = next;
@@ -139,6 +149,12 @@ pub fn Worker(comptime Io: type) type {
             if (self.worker.cancel_requested) return error.Cancelled;
             switch (self.operation.?) {
                 .prepare => {
+                    if (self.request.device.serial == 0) {
+                        var serial: [8]u8 = undefined;
+                        try self.io.random(&serial);
+                        self.request.device.serial = std.mem.readInt(u64, &serial, .big);
+                        if (self.request.device.serial == 0) return error.EntropyUnavailable;
+                    }
                     try recovery_key.generate(self.io, &self.recovery_record.key);
                     self.recovery_record.trusted = try provisioning.prepare(self.io, self.storage, self.state, self.policies, self.request, self.value[0..self.value_len], &self.recovery_record.key, self.started_at, self.scratch);
                     if (self.worker.cancel_requested) return error.Cancelled;
@@ -149,7 +165,21 @@ pub fn Worker(comptime Io: type) type {
                     _ = try provisioning.load(self.storage, self.recovery_record.trusted);
                     self.result = .{ .kind = .prepared, .recovery_record = self.recovery_record };
                 },
-                .commit => self.result = .{ .kind = .committed, .identity = try provisioning.commit(self.io, self.storage, self.recovery_record.trusted, &self.recovery_record.key, self.scratch) },
+                .commit => {
+                    const bundle = try provisioning.load(self.storage, self.recovery_record.trusted);
+                    const enrolled = bundle.identity.enrollment;
+                    if (!enrolled.owner.eql(self.request.owner) or enrolled.parent.handle != self.request.parent_handle or
+                        enrolled.anchor_index != self.request.anchor_index or bundle.boot_index != self.request.boot_index) return error.RecoveryEnrollmentChanged;
+                    self.result = .{ .kind = .committed, .identity = try provisioning.commit(self.io, self.storage, self.recovery_record.trusted, &self.recovery_record.key, self.scratch), .trusted = self.recovery_record.trusted };
+                },
+                .load => {
+                    if (provisioning.loadBoot(self.io, self.storage, self.request.boot_index)) |loaded| {
+                        self.result = .{ .kind = .loaded, .identity = loaded.bundle.identity, .trusted = loaded.trusted };
+                    } else |err| {
+                        if (err != error.NvIndexMissing and err != error.BootPinIncomplete) return err;
+                        self.result = .{ .kind = if (err == error.NvIndexMissing) .fresh else .incomplete };
+                    }
+                },
             }
             if (self.worker.cancel_requested) return error.Cancelled;
         }

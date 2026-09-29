@@ -13,6 +13,8 @@ const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const input_router_mod = @import("../platform/input_router.zig");
 const trusted_auth = @import("../platform/trusted_auth_entry.zig");
+const identity_owner_mod = @import("../services/identity_owner.zig");
+var identity_hardware = identity_owner_mod.HardwareIo{};
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_util = @import("../core/util.zig");
@@ -133,6 +135,7 @@ pub const SessionManager = struct {
     peer_dispatch_tick: u64 = 0,
     peer_dispatch_pool: u2 = 0,
     peer_quote_worker: ?peer_quote.Interface = null,
+    identity_owner: ?identity_owner_mod.Interface = null,
 
     pub fn init() SessionManager {
         return initial_session_manager;
@@ -150,7 +153,7 @@ pub const SessionManager = struct {
     pub fn reset(self: *SessionManager) void {
         self.clearPeerAttestationWorker();
         // Revoke and drain authentication before any borrowed service is freed.
-        self.input_router.clearTrustedEntry();
+        self.clearIdentityOwner();
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
         const retired_peer_handles = self.peer_connections;
         self.peer_handshakes.deinit();
@@ -582,12 +585,32 @@ pub const SessionManager = struct {
         _ = desktop_display.present(self.compositorSessionPtr());
     }
 
+    pub fn attachIdentityOwner(self: *SessionManager, io: anytype, config: identity_owner_mod.Config, now_ticks: u64) !*identity_owner_mod.Owner(@TypeOf(io.*)) {
+        if (self.identity_owner != null) return error.IdentityOwnerAlreadyAttached;
+        const owner = try identity_owner_mod.Owner(@TypeOf(io.*)).create(io, self.storageServicePtr(), config);
+        self.identity_owner = owner.attach(&self.input_router, now_ticks);
+        _ = desktop_display.present(self.compositorSessionPtr());
+        return owner;
+    }
+
+    pub fn clearIdentityOwner(self: *SessionManager) void {
+        self.input_router.clearTrustedEntry();
+        if (self.identity_owner) |owner| owner.destroy(owner.context);
+        self.identity_owner = null;
+    }
+
+    fn serviceIdentityOwner(self: *SessionManager, now_ticks: u64) bool {
+        const owner = self.identity_owner orelse return false;
+        return owner.service(owner.context, &self.input_router, now_ticks);
+    }
+
     pub fn serviceAuthenticationClock(self: *SessionManager, now_ticks: u64) void {
         const entry = self.input_router.trusted_entry orelse return;
         const revision = entry.revision();
         entry.tick(now_ticks);
         self.input_router.synchronizeTrustedInput();
-        if (entry.revision() != revision) _ = desktop_display.present(self.compositorSessionPtr());
+        const changed = entry.revision() != revision;
+        if (self.serviceIdentityOwner(now_ticks) or changed) _ = desktop_display.present(self.compositorSessionPtr());
     }
 
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
@@ -611,6 +634,7 @@ pub const SessionManager = struct {
                 _ = desktop_display.present(self.compositorSessionPtr());
             }
         }
+        if (self.serviceIdentityOwner(now_ticks)) _ = desktop_display.present(self.compositorSessionPtr());
         if (!self.runtime_context.constructed) return events_routed;
         const runtime = self.runtime_context.taskRuntime().?;
         const scheduler = self.runtime_context.userspaceScheduler().?;
@@ -801,6 +825,23 @@ pub const SessionManager = struct {
         if (!trust.recordProductionMeasuredBoot(&graph)) {
             self.failBoot();
             return;
+        }
+        if (comptime !include_verification_evidence and builtin.target.os.tag == .freestanding) {
+            const timer = @import("../../kernel/timer/timer.zig");
+            _ = self.attachIdentityOwner(&identity_hardware, .{
+                .owner = graph.state.ids.session_user,
+                .parent_handle = 0x8100_0001,
+                .anchor_index = 0x0180_0002,
+                .boot_index = 0x0180_0001,
+                .boot_instance = @import("../../kernel/platform/secure_random.zig").bootInstanceId(),
+                .input_timeout_ticks = 5 * 60 * timer.TICKS_PER_SECOND,
+                .operation_timeout_ticks = 30 * timer.TICKS_PER_SECOND,
+                .lifetime_ticks = 15 * 60 * timer.TICKS_PER_SECOND,
+            }, timer.getTicks()) catch {
+                self.failBoot();
+                return;
+            };
+            common.printBootMarker(boot_markers.identity_owner_attached);
         }
         if (!self.finishUserspaceSurfacePresentation(&graph)) {
             self.failBoot();
@@ -1141,6 +1182,7 @@ pub const SessionManager = struct {
 
     pub fn failBoot(self: *SessionManager) void {
         self.clearPeerAttestationWorker();
+        self.clearIdentityOwner();
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
         self.peer_handshakes.deinit();
         self.peers.deinit();

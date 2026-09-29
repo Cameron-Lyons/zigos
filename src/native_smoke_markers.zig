@@ -48,6 +48,7 @@ pub const production_required = [_][]const u8{
     boot_markers.platform_measured_boot_recorded,
     boot_markers.platform_boot_image_unverified,
     boot_markers.storage_checkpoint_final_clean,
+    boot_markers.identity_owner_attached,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
     boot_markers.userspace_scheduler_idle,

@@ -331,6 +331,12 @@ pub const Graph = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *Graph) void {
+        self.user_roots.initializeAllocated();
+        self.devices.initializeAllocated();
+        self.trusted_device_count = 0;
+    }
+
     pub fn reset(self: *Graph) void {
         self.user_roots.reset();
         self.devices.reset();

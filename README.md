@@ -265,9 +265,20 @@ requests.
   publication after hardware waits. Missing, incomplete or changed anchors require
   explicit recovery with the externally retained record; ordinary boot never
   provisions them. The local TPM transport and verified boot remain trusted.
-  The native owner must still attach setup and TPM-backed enrollment loading at
-  production boot and hand completion to the sign-in session. The QEMU
-  export fixture models independent custody; production supplies no fixture key.
+  Production boot now attaches one retained native identity owner after measured
+  boot and before surface presentation. Discovery runs without keyboard input on
+  the guarded worker. A missing anchor offers explicit setup; an incomplete one
+  requests the saved record. Failed or cancelled discovery stays locked, with
+  Enter to retry and Ctrl+R to resume from the independently retained record.
+  Setup completion rechecks the bundle and configured user, parent and NV indexes,
+  releases its worker stack and binds sign-in across a fresh neutral-input boundary.
+  PIN or recovery then restores the catalog and private session; lock and expiry
+  erase authority. Reset and failed boot drain workers before releasing storage.
+  Catalog and recovery-bundle publication recheck storage after TPM signing
+  yields, so another task's intervening write is preserved. Owner backing
+  initializes in place and is erased on destruction. No fixture
+  signer is installed in production. The QEMU export fixture models independent
+  custody; physical persistence and user recovery-record custody remain unproven.
   A bounded identity-session owner now connects PIN verification to authenticated
   NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
   nonce before activation. Lock synchronously invalidates both lease tables,
@@ -276,7 +287,8 @@ requests.
   writes. Handle generations survive lock/reopen, so copied signing leases stay
   invalid even when the same catalog is restored. Unlock proofs retain the PIN's
   original verification time. Session operations lock on expiry or a backwards
-  service clock; the desktop owner must also check idle deadlines. QEMU covers
+  service clock; the production owner services idle deadlines before userspace
+  dispatch. QEMU covers
   rejected PINs, failed anchor/key/entropy checks,
   stale proofs and handles, and durable counter recovery after locking with a
   lost NV-write response. Coordination adds at most 4 KiB, borrows existing stores,
@@ -421,8 +433,13 @@ requests.
   replay-entropy failure, replay rejection and expiry. Host crash tests withhold
   TPM access after a failed disk barrier and keep the staged catalog and companion
   record in one checkpoint. The ownership suite runs in release preflight.
-  Production boot attachment and recovery-secret
-  custody remain open, along with physical TPM and input validation.
+  The same retained owner now drives these setup proofs and reboot discovery,
+  sign-in, lock/reopen and cancellation during teardown. Production smoke without
+  a TPM requires an exclusive unavailable outcome before idle. Userspace identity
+  dispatch, authenticated policy attachment and recovery-secret custody remain
+  open, along with physical TPM and input validation. Linking the shipped account
+  path adds about 240 KiB to the production payload; the ReleaseFast symbol budget
+  is 3,500, with identity proof modules explicitly excluded.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).

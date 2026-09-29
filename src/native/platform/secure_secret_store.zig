@@ -121,6 +121,12 @@ pub const Store = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *Store) void {
+        self.hardware_provider = .{};
+        self.handles = HandleArena.init();
+        self.clearUnpublished();
+    }
+
     pub fn attachHardwareProvider(self: *Store, provider: HardwareSealProvider) void {
         self.hardware_provider = provider;
     }

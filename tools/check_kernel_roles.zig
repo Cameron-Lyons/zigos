@@ -49,6 +49,8 @@ const verification_orchestration_symbol_prefixes = [_][]const u8{
     "native.session.trust_boot.TrustBoot.proveProductionAbImageRollback",
     "native.session.trust_boot.TrustBoot.proveProductionPostActivationHealthChecks",
     "native.session.proofs.tpm2_ownership_proof.",
+    "native.session.proofs.identity_setup_proof.",
+    "native.session.proofs.identity_session_proof.",
     "native.session.proofs.tpm2_quote_proof.",
 };
 const verification_only_signatures = [_][]const u8{

@@ -695,3 +695,33 @@ test "session manager setup deadlines erase private state without input activity
     try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
     try std.testing.expect(manager.nextServiceWake() == null and manager.inputRouterPtr().drain_until_neutral);
 }
+
+test "session manager identity owner boot failure drains discovery before releasing native state" {
+    const cooperative = @import("../task/cooperative_worker.zig");
+    const Io = struct {
+        drained: bool = false,
+        pub fn random(_: *@This(), _: []u8) !void {
+            return error.UnexpectedEntropy;
+        }
+        pub fn execute(self: *@This(), command: []const u8, _: []u8, _: u32) ![]u8 {
+            const first = command[0];
+            cooperative.current().?.yield();
+            try std.testing.expect(first == command[0] and cooperative.current().?.cancel_requested);
+            self.drained = true;
+            return error.Cancelled;
+        }
+    };
+    var io = Io{};
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.initializeAllocated();
+    defer manager.reset();
+    manager.boot();
+    const owner = try manager.attachIdentityOwner(&io, .{ .owner = .{ .kind = .user, .serial = 1 }, .parent_handle = 0x8100_1234, .boot_index = 0x0180_1234, .anchor_index = 0x0180_1235, .boot_instance = @splat(1), .input_timeout_ticks = 20, .operation_timeout_ticks = 20, .lifetime_ticks = 100 }, 1);
+    try std.testing.expectEqual(@as(?u64, 1), manager.nextServiceWake());
+    _ = manager.servicePendingInputWork(1);
+    manager.serviceAuthenticationClock(1);
+    try std.testing.expect(owner.setup.busy() and !io.drained);
+    manager.failBoot();
+    try std.testing.expect(io.drained and manager.identity_owner == null and manager.inputRouterPtr().trusted_entry == null);
+}

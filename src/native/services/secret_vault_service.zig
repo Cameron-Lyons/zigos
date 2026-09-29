@@ -153,6 +153,13 @@ pub const Service = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *Service) void {
+        self.store.initializeAllocated();
+        self.handles = HandleArena.init();
+        self.active_handle_count = 0;
+        self.next_reusable_handle = 0;
+    }
+
     pub fn attachHardwareProvider(self: *Service, provider: secure_secret_store.HardwareSealProvider) void {
         self.store.attachHardwareProvider(provider);
     }

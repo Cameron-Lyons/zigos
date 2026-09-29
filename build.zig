@@ -69,7 +69,9 @@ pub fn build(b: *std.Build) void {
     kernel_role_options.addOption(
         usize,
         "maximum_production_symbol_count",
-        if (optimize == .ReleaseFast) 3200 else std.math.maxInt(usize),
+        // Production now links native enrollment, TPM PIN/recovery and catalog
+        // restoration. Retain a bounded symbol budget for that shipped path.
+        if (optimize == .ReleaseFast) 3500 else std.math.maxInt(usize),
     );
     kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .Debug);
     const kernel_role_check_module = b.createModule(.{

@@ -184,6 +184,7 @@ fn renderSetup(frame: *scanout.Frame, setup: *const @import("trusted_setup_entry
         return;
     }
     frame.put(0, 4, switch (setup.status) {
+        .checking => "Checking your account...",
         .choose_pin => "Choose a PIN with 6 to 32 digits",
         .confirm_pin => "Re-enter your PIN",
         .preparing => "Creating your account...",
@@ -215,6 +216,8 @@ fn renderSetup(frame: *scanout.Frame, setup: *const @import("trusted_setup_entry
         .interrupted => "Input was interrupted. Please try again.",
     }, .warning);
     frame.put(0, frame.rows - 1, switch (setup.status) {
+        .checking => "Esc  Pause",
+        .unavailable => "Enter  Retry  |  Ctrl+R  Resume saved setup",
         .preparing, .committing, .cancelling => "Esc  Pause setup",
         .complete => "Finishing your workspace...",
         else => "Enter  Continue  |  Esc  Clear  |  Ctrl+R  Resume",

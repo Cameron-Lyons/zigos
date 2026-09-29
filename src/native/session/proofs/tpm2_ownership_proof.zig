@@ -252,6 +252,7 @@ pub fn run(manager: anytype, io: anytype) !void {
     bundle = boot_enrollment.bundle;
     if (io.owner_commands != 0 or io.nv_writes != 0 or io.nv_write_locks != 0 or io.da_resets != 0) return error.BootEnrollmentRequestedAdministration;
     console.print("ZIGOS:TPM2:BOOT_ENROLLMENT:VERIFIED\n");
+    try setup_proof.runBoot(manager, io, request, pin, retained.trusted);
     try client.openPersistent(io, identity.enrollment.parent);
     var tampered = tpm.Client{};
     defer tampered.close(io) catch {};

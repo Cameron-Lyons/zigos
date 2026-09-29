@@ -6,7 +6,7 @@ const pin = @import("tpm2_pin.zig");
 const recovery = @import("../services/identity_recovery_record.zig");
 const enrollment = @import("../services/identity_enrollment.zig");
 
-pub const Status = enum { choose_pin, confirm_pin, preparing, record_recovery, confirm_recovery, committing, cancelling, resume_setup, complete, unavailable };
+pub const Status = enum { checking, choose_pin, confirm_pin, preparing, record_recovery, confirm_recovery, committing, cancelling, resume_setup, complete, unavailable };
 pub const Notice = enum { none, too_short, too_long, mismatch, invalid_record, failed, timeout, interrupted };
 pub const View = struct {
     status: Status = .choose_pin,
@@ -16,22 +16,24 @@ pub const View = struct {
     recovery_code: [recovery.DISPLAY_BYTES]u8 = @splat(0),
 };
 pub const Result = struct {
-    kind: enum { pending, prepared, committed } = .pending,
+    kind: enum { pending, fresh, incomplete, loaded, prepared, committed } = .pending,
     recovery_record: recovery.Record = .{},
     identity: ?enrollment.Record = null,
+    trusted: ?@import("tpm2_boot_pin.zig").Pin = null,
     pub fn erase(self: *Result) void {
         std.crypto.secureZero(u8, std.mem.asBytes(self));
     }
 };
 pub const Backend = struct {
     context: *anyopaque,
+    start_load: *const fn (*anyopaque, u64) anyerror!void,
     start_prepare: *const fn (*anyopaque, []const u8, u64) anyerror!void,
     start_commit: *const fn (*anyopaque, *const recovery.Record, u64) anyerror!void,
     poll: *const fn (*anyopaque, u64) anyerror!Result,
     cancel: *const fn (*anyopaque) void,
     busy: *const fn (*anyopaque) bool,
 };
-const Operation = enum { prepare, commit };
+const Operation = enum { load, prepare, commit };
 
 pub const Entry = struct {
     backend: Backend,
@@ -44,6 +46,8 @@ pub const Entry = struct {
     pin_len: u8 = 0,
     recovery_record: recovery.Record = .{},
     identity: ?enrollment.Record = null,
+    trusted: ?@import("tpm2_boot_pin.zig").Pin = null,
+    requires_discovery: bool = false,
     pending: ?Operation = null,
     poll_deadline: ?u64 = null,
     input_deadline: ?u64 = null,
@@ -56,7 +60,16 @@ pub const Entry = struct {
         return self.backend.busy(self.backend.context);
     }
     pub fn nextWake(self: *const Entry) ?u64 {
+        if (self.pending != null) return self.last_ticks;
         return self.poll_deadline orelse self.input_deadline;
+    }
+
+    pub fn discover(self: *Entry, now: u64) void {
+        self.requires_discovery = true;
+        self.lock(now);
+        if (self.busy()) return;
+        self.pending = .load;
+        self.transition(.checking, .none);
     }
 
     pub fn lock(self: *Entry, now: u64) void {
@@ -64,9 +77,10 @@ pub const Entry = struct {
         self.erase();
         self.pending = null;
         self.identity = null;
+        self.trusted = null;
         self.last_ticks = now;
         self.poll_deadline = if (self.busy()) now +| 1 else null;
-        self.transition(if (self.busy()) .cancelling else if (self.committing) .resume_setup else .choose_pin, .none);
+        self.transition(if (self.busy()) .cancelling else if (self.requires_discovery) .unavailable else if (self.committing) .resume_setup else .choose_pin, .none);
     }
 
     pub fn inputInterrupted(self: *Entry, now: u64) void {
@@ -100,8 +114,14 @@ pub const Entry = struct {
             return;
         }
         if (self.busy() or self.pending != null) return;
+        if (self.view.status == .unavailable) {
+            if (event.kind == .activate) self.discover(now);
+            if (event.kind != .show_recovery) return;
+        }
         if (event.kind == .show_recovery and self.view.status != .complete) {
             self.erase();
+            self.requires_discovery = false;
+            self.committing = true;
             self.transition(.resume_setup, .none);
             return;
         }
@@ -214,6 +234,10 @@ pub const Entry = struct {
         self.pending = null;
         defer self.erase();
         switch (operation) {
+            .load => self.backend.start_load(self.backend.context, now) catch |err| {
+                self.failed(err, now);
+                return;
+            },
             .prepare => self.backend.start_prepare(self.backend.context, self.first_pin[0..self.pin_len], now) catch |err| {
                 self.failed(err, now);
                 return;
@@ -242,6 +266,15 @@ pub const Entry = struct {
         }
         self.poll_deadline = null;
         switch (result.kind) {
+            .fresh, .incomplete => {
+                if (self.view.status != .checking) {
+                    self.failed(error.InvalidSetupResult, now);
+                    return;
+                }
+                self.requires_discovery = false;
+                self.committing = result.kind == .incomplete;
+                self.transition(if (self.committing) .resume_setup else .choose_pin, .none);
+            },
             .prepared => {
                 if (self.view.status != .preparing) {
                     self.lock(now);
@@ -255,19 +288,23 @@ pub const Entry = struct {
                 self.transition(.record_recovery, .none);
                 self.armTimeout(now);
             },
-            .committed => {
-                if (self.view.status != .committing or result.identity == null) {
+            .committed, .loaded => {
+                const expected: Status = if (result.kind == .loaded) .checking else .committing;
+                if (self.view.status != expected or result.identity == null or result.trusted == null) {
                     self.failed(error.InvalidSetupResult, now);
                     return;
                 }
                 self.identity = result.identity;
+                self.trusted = result.trusted;
+                self.requires_discovery = true;
                 self.transition(.complete, .none);
             },
             .pending => unreachable,
         }
     }
 
-    fn failed(self: *Entry, _: anyerror, now: u64) void {
+    fn failed(self: *Entry, err: anyerror, now: u64) void {
+        if (err == error.TpmAlreadyProvisioned or err == error.BootPinAlreadyDefined or err == error.BootPinIncomplete) self.committing = true;
         self.lock(now);
         self.view.notice = .failed;
     }
@@ -410,4 +447,36 @@ test "trusted setup cancellation timeout and resumed commit retain no input secr
     entry.quiesce();
     try std.testing.expect(entry.view.status == .resume_setup and entry.identity == null and !entry.busy());
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&entry.recovery_record), 0));
+}
+
+test "trusted setup discovery remains exclusive through cancellation and requires an explicit retry" {
+    var backend = TestBackend{ .remaining = 1 };
+    var entry = Entry{ .backend = backend.backend(), .input_timeout_ticks = 10, .requires_discovery = true };
+    defer entry.quiesce();
+    entry.lock(1);
+    try std.testing.expect(entry.view.status == .unavailable and entry.capturing());
+    typeTest(&entry, "12345678", 1);
+    try std.testing.expect(entry.view.characters == 0 and entry.view.status == .unavailable);
+    submitTest(&entry, 2);
+    try std.testing.expect(entry.view.status == .checking and entry.nextWake().? == 2);
+    entry.runWork(2);
+    entry.tick(2);
+    entry.inputInterrupted(3);
+    entry.tick(4);
+    try std.testing.expect(!entry.busy() and entry.view.status == .unavailable and entry.nextWake() == null);
+    for ([_]@TypeOf(backend.load_kind){ .fresh, .incomplete, .loaded }) |kind| {
+        backend.load_kind = kind;
+        entry.discover(5);
+        entry.runWork(5);
+        entry.tick(6);
+        try std.testing.expect(entry.capturing());
+        switch (kind) {
+            .fresh => try std.testing.expect(entry.view.status == .choose_pin),
+            .incomplete => try std.testing.expect(entry.view.status == .resume_setup),
+            .loaded => try std.testing.expect(entry.view.status == .complete and entry.trusted != null and entry.identity != null),
+            else => unreachable,
+        }
+    }
+    entry.inputInterrupted(7);
+    try std.testing.expect(entry.view.status == .unavailable and entry.trusted == null and entry.identity == null);
 }

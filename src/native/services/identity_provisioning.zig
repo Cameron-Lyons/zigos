@@ -171,9 +171,17 @@ pub fn prepare(io: anytype, storage: *storage_service.Service, state: catalog.St
         .device_secret_id = secret_ids[2],
     } }, .initial_anchor = .{ .checkpoint = staged.checkpoint, .device_root_pin = try keys[1].publicKey(now) }, .package = .{} };
     try recovery.Package.seal(&bundle.identity, &secrets, recovery_key, io, &bundle.package);
+    return publishBundle(storage, &bundle, .{ .key = keys[0] }, now);
+}
+
+fn publishBundle(storage: *storage_service.Service, bundle: *const Bundle, signer: @import("../storage/sealed_object_signer.zig").Signer, now: u64) !Pin {
     var bytes: [MAX_BYTES]u8 = undefined;
     const payload = try bundle.encode(&bytes);
-    _ = try storage.putVersion(.{ .preferred_object_id = ids.object(request.record_object_id), .object_type = .secret, .payload = payload, .metadata = try (@import("../storage/sealed_object_signer.zig").Signer{ .key = keys[0] }).signObjectMetadata("Identity provisioning", CONTENT_TYPE, .secret, payload, now) });
+    const metadata = try signer.signObjectMetadata("Identity provisioning", CONTENT_TYPE, .secret, payload, now);
+    // The worker yields during signing. An ID that was free before the first
+    // TPM command may now belong to a different task; never replace its data.
+    if (storage.latestVersion(bundle.object_id) != null) return error.ProvisioningAlreadyPrepared;
+    _ = try storage.putVersion(.{ .preferred_object_id = ids.object(bundle.object_id), .object_type = .secret, .payload = payload, .metadata = metadata });
     return bundle.trustedPin();
 }
 
@@ -300,6 +308,35 @@ test "identity provisioning requires an independent pin over every bundle byte" 
     bundle.initial_anchor.checkpoint.generation = 1;
     bundle.package.bytes[8] ^= 1;
     try std.testing.expectError(error.RecoveryEnrollmentChanged, bundle.trustedPin());
+}
+
+test "identity provisioning never replaces a companion object created during signing" {
+    const durable = @import("../storage/document_save_test.zig");
+    const disk = try durable.Fixture.init(true);
+    defer disk.deinit();
+    var fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+    const identity = try @import("../../tests/fixtures/identity_enrollment.zig").record();
+    const signer = try fixture.init(identity.enrollment.owner, disk.service.owner, disk.service.task_id, durable.signer);
+    var bundle = Bundle{ .object_id = 1001, .boot_index = 0x0180_1235, .identity = identity, .initial_anchor = .{
+        .checkpoint = .{ .object_id = identity.enrollment.catalog_object_id, .owner = identity.enrollment.owner, .public_key = @splat(6), .generation = 1, .payload_digest = @splat(7) },
+        .device_root_pin = @splat(8),
+    }, .package = .{} };
+    const Entropy = struct {
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 9);
+        }
+    };
+    var entropy = Entropy{};
+    const secrets = recovery.Secrets{ .owner = @splat(1), .lockout = @splat(2), .vault = @splat(3) };
+    try recovery.Package.seal(&identity, &secrets, &(@as(tpm.Key, @splat(4))), &entropy, &bundle.package);
+    var race = @import("../../tests/fixtures/signing_publication_race.zig").Fixture{ .storage = &disk.service, .object_id = bundle.object_id };
+    fixture.service.attachHardwareProvider(race.provider());
+    try std.testing.expectError(error.ProvisioningAlreadyPrepared, publishBundle(&disk.service, &bundle, signer, 1));
+    try std.testing.expect(race.version_id != 0);
+    const current = disk.service.latestVersion(bundle.object_id).?;
+    try std.testing.expectEqual(race.version_id, current.id.raw());
+    var bytes: [MAX_BYTES]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "concurrent publisher", try disk.service.versionPayloadInto(current, &bytes));
 }
 
 test "identity provisioning rejects untrusted inputs and failed durability before TPM access" {

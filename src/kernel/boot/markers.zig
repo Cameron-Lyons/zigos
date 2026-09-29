@@ -3,6 +3,7 @@ pub const boot_profile_zigos_native = "BOOT:PROFILE:zigos_native";
 pub const boot_profile_recovery = "BOOT:PROFILE:recovery";
 pub const boot_profile_benchmark = "BOOT:PROFILE:benchmark";
 pub const kernel_role_production = "BOOT:ROLE:production";
+pub const identity_owner_attached = "ZIGOS:IDENTITY:OWNER:ATTACHED";
 pub const kernel_role_verification = "BOOT:ROLE:verification";
 pub const boot_core_ready = "BOOT:CORE_READY";
 pub const x86_64_paging_ready = "ZIGOS:ARCH:X86_64:PAGING:READY";

@@ -301,6 +301,8 @@ run_ownership_boot() {
     { [ "$setup_count" -eq 1 ] && ! grep -Fxq "$setup_marker" "$log"; } ||
     [ "$(grep -c '^ZIGOS:TPM2:BOOT_ENROLLMENT:' "$log" || true)" -ne "$recovery_count" ] ||
     { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:BOOT_ENROLLMENT:VERIFIED' "$log"; } ||
+    [ "$(grep -c '^ZIGOS:TPM2:IDENTITY_OWNER:' "$log" || true)" -ne "$recovery_count" ] ||
+    { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:IDENTITY_OWNER:VERIFIED' "$log"; } ||
     [ "$(grep -c '^ZIGOS:TPM2:RECOVERY:' "$log" || true)" -ne "$recovery_count" ] ||
     { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY:VERIFIED' "$log"; } ||
     [ "$(grep -c '^ZIGOS:TPM2:RECOVERY_INPUT:' "$log" || true)" -ne "$recovery_count" ] ||

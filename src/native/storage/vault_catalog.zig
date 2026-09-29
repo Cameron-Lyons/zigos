@@ -95,6 +95,7 @@ pub const Session = struct {
         if (signer.key.authority.?.service != service) return error.InvalidSigningAuthority;
         try storage.requireDurableBoundary();
         const head = storage.latestVersion(object_id);
+        const head_version_id = if (head) |version| version.id.raw() else 0;
         var previous_key: ?signing.PublicKey = null;
         var previous_digest: hash.Digest = @splat(0);
         const next_generation = if (self.pending) |pending| blk: {
@@ -130,6 +131,10 @@ pub const Session = struct {
         } else {
             const metadata = try signer.signObjectMetadata(label, CONTENT_TYPE, .secret, payload, now_ticks);
             if (previous_key) |key| if (!std.mem.eql(u8, &key, metadata.signature.publicKeySlice())) return error.UntrustedVaultCatalog;
+            // Signing may yield to another storage publisher. Retain only the
+            // version identity across that wait, then reacquire the current head.
+            const current = storage.latestVersion(object_id);
+            if ((if (current) |version| version.id.raw() else @as(u64, 0)) != head_version_id) return error.VaultCatalogChanged;
             storage.beginCheckpointBatch();
             defer storage.endCheckpointBatch();
             const stored = try storage.putVersion(.{
@@ -137,7 +142,7 @@ pub const Session = struct {
                 .object_type = .secret,
                 .payload = payload,
                 .metadata = metadata,
-                .parent_version_id = if (head) |version| version.id else null,
+                .parent_version_id = if (head_version_id != 0) ids.version(head_version_id) else null,
             });
             self.pending = .{
                 .object_id = object_id,
@@ -786,5 +791,24 @@ test "vault catalog staging checkpoints its companion record at one explicit bar
             try std.testing.expect(disk.service.latestVersion(test_object_id) == null);
             try std.testing.expect(disk.service.latestVersion(test_object_id + 1) == null);
         }
+    }
+}
+
+test "vault catalog rechecks first and later publication after a signing wait" {
+    for ([_]bool{ false, true }) |existing| {
+        const disk = try durable.Fixture.init(true);
+        defer disk.deinit();
+        var identities = identity.Store.init();
+        var fixture = SigningFixture{};
+        const signer = try prepare(&fixture, &disk.service);
+        var scratch: [MAX_BYTES]u8 = undefined;
+        var session = Session{};
+        const state = State{ .vault = &fixture.service, .identities = &identities };
+        const base = if (existing) (try session.save(&disk.service, state, signer, test_object_id, 0, 1, &scratch)).version_id else 0;
+        var race = @import("../../tests/fixtures/signing_publication_race.zig").Fixture{ .storage = &disk.service, .object_id = test_object_id };
+        fixture.service.attachHardwareProvider(race.provider());
+        try std.testing.expectError(error.VaultCatalogChanged, session.stage(&disk.service, state, signer, test_object_id, base, 2, &scratch));
+        try std.testing.expect(race.version_id != 0 and session.pending == null);
+        try std.testing.expectEqual(race.version_id, disk.service.latestVersion(test_object_id).?.id.raw());
     }
 }

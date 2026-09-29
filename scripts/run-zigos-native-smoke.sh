@@ -132,6 +132,12 @@ assert_production_boot_markers() {
   assert_marker_group "$log_path" production
   assert_marker_group_absent "$log_path" production_forbidden
   bash "$PRODUCTION_BOOT_LOG_CHECKER" "$log_path" >/dev/null
+  # This smoke machine has no TPM. The attached owner must finish discovery
+  # with the exclusive unavailable view before the scheduler becomes idle.
+  if ! grep -Fxq 'ZIGOS:IDENTITY:DISCOVERY:UNAVAILABLE' "$log_path"; then
+    echo "Zigos production smoke failed: missing locked identity discovery outcome in $log_path" >&2
+    exit 1
+  fi
 }
 
 assert_boot_markers() {
