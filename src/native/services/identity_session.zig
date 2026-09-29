@@ -116,9 +116,11 @@ pub fn Session(comptime Io: type) type {
             const devices = self.state.devices orelse return error.GraphDestinationRequired;
             try enrolled.validate();
             if (self.storage.owner.kind != .service or self.storage.owner.serial == 0 or self.storage.task_id == 0 or
+                self.subjects.user_id != enrolled.owner.serial or
                 !capsule.owner.eql(enrolled.owner) or !capsule.device.eql(enrolled.device) or std.mem.allEqual(u8, &boot_instance, 0)) return error.InvalidIdentitySession;
             if (lifetime_ticks == 0) return error.InvalidLease;
             const deadline = std.math.add(u64, now_ticks, lifetime_ticks) catch return error.InvalidLease;
+            if (!self.policies.sessionLifetimeDecision(self.subjects, lifetime_ticks).allowed) return error.IdentityPolicyDenied;
             if (!self.state.vault.store.empty() or self.state.vault.handles.countInUse() != 0 or self.state.vault.store.handles.countInUse() != 0 or
                 self.state.identities.credential_count != 0 or !graph_snapshot.empty(devices)) return error.VaultNotEmpty;
             try self.close();
@@ -151,6 +153,14 @@ pub fn Session(comptime Io: type) type {
             if (!std.mem.eql(u8, &(try catalog_key.publicKey(now_ticks)), &record.checkpoint.public_key)) return error.SigningKeyChanged;
             self.device_key = try self.lendKey(enrolled.device_secret_id, now_ticks);
             if (!std.mem.eql(u8, &(try self.device_key.publicKey(now_ticks)), device.device_signature.publicKeySlice())) return error.SigningKeyChanged;
+            // Key binding above enforces actual sealed, nonexportable hardware
+            // custody. Platform attestation and primary-device status are not
+            // inferred from TPM sealing or supplied by an application.
+            if (!self.policies.sessionTrustDecision(self.subjects, .{
+                .hardware_backed_credential = true,
+                .device_platform_backed = device.usesPlatformBackedKey(),
+                .unlock_age_ticks = 0,
+            }).allowed) return error.IdentityPolicyDenied;
             // TPM waits may yield to the desktop. Recheck the exact pinned
             // catalog before publishing its current storage version.
             _ = try catalog.inspect(self.storage, self.anchor_backend.current.trust(), scratch);
@@ -296,6 +306,13 @@ test "identity session lock erases authority before fallible TPM cleanup" {
     try std.testing.expect(!session.replay.active and session.coordinator == null);
     try std.testing.expect(keys.service.store.empty());
     try std.testing.expect(std.mem.allEqual(u8, &session.authorization, 0));
+    const calls = io.calls;
+    _ = try keys.policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = owner, .label = "bounded session", .max_session_unlock_age_ticks = 5 }, .{ .label = "policy fixture", .seed = @splat(11) });
+    try std.testing.expectError(error.IdentityPolicyDenied, session.unlock(&capsule, "123456", @splat(1), 1, 6, &scratch));
+    try std.testing.expectEqual(calls, io.calls);
+    session.subjects.user_id = null;
+    try std.testing.expectError(error.InvalidIdentitySession, session.unlock(&capsule, "123456", @splat(1), 1, 1, &scratch));
+    try std.testing.expectEqual(calls, io.calls);
 }
 
 test "identity session recovery authenticates enrollment before hardware and never provisions a replacement" {

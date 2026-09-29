@@ -24,7 +24,7 @@ const content_type = "application/x-zigos-tpm-owner-proof";
 const signer = signing.SignerIdentity{ .label = "owner-proof-enrollment", .seed = @splat(0xa6) };
 const Stage = enum(u8) { persistence, owner, lockout, parameters, definition, write, boot_definition, boot_write, boot_lock, finish, enrolled };
 const Aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
-const request = provisioning.Request{ .owner = .{ .kind = .user, .serial = 0x706 }, .device = .{ .kind = .device, .serial = 0x707 }, .record_object_id = object_id + 1, .catalog_object_id = 0x704_0001, .parent_handle = parent_handle, .anchor_index = 0x0180_7041, .boot_index = 0x0180_7042 };
+const request = provisioning.Request{ .owner = .{ .kind = .user, .serial = 0x706 }, .device = .{ .kind = .device, .serial = 0x707 }, .record_object_id = object_id + 1, .catalog_object_id = 0x704_0001, .parent_handle = parent_handle, .anchor_index = 0x0180_7041, .boot_index = 0x0180_7042, .max_session_ticks = 1000 };
 const Record = struct {
     stage: Stage = .persistence,
     ciphertext: [recovery_record.CODE_BYTES]u8,

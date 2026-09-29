@@ -133,7 +133,7 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
     const previous_task_id = router.compositor_task_id;
     router.bindHardwareSource(.{ .poll_report = identity_proof.pollInputReport, .input_proof = identity_proof.noInputProof });
     router.bindCompositor(manager.compositorSessionPtr(), manager.storageServicePtr().task_id);
-    const owner = try manager.attachIdentityOwner(io, .{ .owner = request.owner, .parent_handle = request.parent_handle, .anchor_index = request.anchor_index, .boot_index = request.boot_index, .boot_instance = @import("../../../kernel/platform/secure_random.zig").bootInstanceId(), .input_timeout_ticks = 3000, .operation_timeout_ticks = 3000, .lifetime_ticks = 1000 }, clock.now());
+    const owner = try manager.attachIdentityOwner(io, .{ .owner = request.owner, .parent_handle = request.parent_handle, .anchor_index = request.anchor_index, .boot_index = request.boot_index, .boot_instance = @import("../../../kernel/platform/secure_random.zig").bootInstanceId(), .input_timeout_ticks = 3000, .operation_timeout_ticks = 3000, .lifetime_ticks = 2000 }, clock.now());
     defer {
         manager.clearIdentityOwner();
         identity_proof.sendInput(manager, 0, 0, clock.now());
@@ -145,6 +145,19 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
     while (owner.setup.busy() or owner.setup.pending != null) try service(manager, &owner.setup, clock);
     if (!owner.authentication_ready or owner.authentication.view.status != .entering or owner.session.replay.active or
         !std.meta.eql(owner.adapter.recovery_pin.?, trusted) or owner.setup_worker.stack != null) return error.BootOwnerDidNotAuthenticateEnrollment;
+    if (owner.policies.policies.countInUse() != 1 or !owner.policies.verify(1) or
+        owner.adapter.lifetime_ticks != request.max_session_ticks) return error.BootOwnerMissingPolicy;
+    const policy_object = owner.policies.activeForScope(.user, request.owner.serial) orelse return error.BootOwnerMissingPolicy;
+    const before = io.commands;
+    if (owner.session.unlock(&owner.bundle.identity.capsule, pin, owner.config.boot_instance, clock.now(), request.max_session_ticks + 1, &owner.scratch)) |_|
+        return error.AcceptedExcessiveSession
+    else |err| if (err != error.IdentityPolicyDenied) return err;
+    policy_object.max_session_unlock_age_ticks += 1;
+    if (owner.session.unlock(&owner.bundle.identity.capsule, pin, owner.config.boot_instance, clock.now(), 1, &owner.scratch)) |_|
+        return error.AcceptedChangedPolicy
+    else |err| if (err != error.IdentityPolicyDenied) return err;
+    policy_object.max_session_unlock_age_ticks -= 1;
+    if (io.commands != before or owner.session.replay.active or !owner.vault.store.empty()) return error.PolicyRejectionTouchedHardware;
     for (0..2) |_| {
         try identity_proof.typeAuthentication(manager, pin, false, clock);
         while (owner.adapter.worker.state == .suspended) {
@@ -165,6 +178,7 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
     manager.clearIdentityOwner();
     if (router.trusted_entry != null or manager.identity_owner != null or router.queued_event_count != 0 or
         io.owner_commands != 0 or io.nv_writes != 0 or io.nv_write_locks != 0 or io.da_resets != 0) return error.OwnerBootRequestedAdministration;
+    console.print("ZIGOS:TPM2:IDENTITY_POLICY:VERIFIED\n");
     console.print("ZIGOS:TPM2:IDENTITY_OWNER:VERIFIED\n");
 }
 

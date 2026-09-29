@@ -16,10 +16,11 @@ const storage_service = @import("../storage/storage_service.zig");
 const sealed = @import("sealed_signing_key.zig");
 const enrollment = @import("identity_enrollment.zig");
 const recovery = @import("identity_recovery.zig");
+const identity_policy = @import("identity_policy.zig");
 const graph_snapshot = @import("../sync/device_graph_snapshot.zig");
 
 pub const CONTENT_TYPE = "application/x-zigos-identity-provisioning";
-pub const MAX_BYTES = 8 + 8 + 4 + 2 + enrollment.MAX_BYTES + nv.RECORD_BYTES + recovery.PACKAGE_BYTES;
+pub const MAX_BYTES = 8 + 8 + 4 + 2 + enrollment.MAX_BYTES + nv.RECORD_BYTES + recovery.PACKAGE_BYTES + identity_policy.BYTES;
 
 pub const Request = struct {
     owner: principal.PrincipalId,
@@ -29,9 +30,10 @@ pub const Request = struct {
     parent_handle: u32,
     anchor_index: u32,
     boot_index: u32,
+    max_session_ticks: u64,
 
     fn validate(self: Request) !void {
-        if (self.owner.kind != .user or self.owner.serial == 0 or self.device.kind != .device or self.device.serial == 0 or
+        if (self.max_session_ticks == 0 or self.owner.kind != .user or self.owner.serial == 0 or self.device.kind != .device or self.device.serial == 0 or
             self.record_object_id == 0 or self.catalog_object_id == 0 or self.record_object_id == self.catalog_object_id or
             self.parent_handle < 0x8100_0000 or self.parent_handle >= 0x8180_0000 or
             self.anchor_index < 0x0180_0000 or self.anchor_index > 0x0180_ffff or
@@ -49,6 +51,7 @@ pub const Bundle = struct {
     identity: enrollment.Record,
     initial_anchor: nv.Record,
     package: recovery.Package,
+    session_policy: identity_policy.Record,
 
     fn validate(self: *const Bundle) !void {
         try self.identity.validate();
@@ -59,6 +62,7 @@ pub const Bundle = struct {
             self.initial_anchor.checkpoint.object_id != e.catalog_object_id or
             !self.initial_anchor.checkpoint.owner.eql(e.owner) or self.initial_anchor.checkpoint.generation != 1 or
             self.initial_anchor.device_root_pin == null or std.mem.allEqual(u8, &self.initial_anchor.checkpoint.payload_digest, 0)) return error.InvalidProvisioningBundle;
+        try self.session_policy.verify(e.owner, self.initial_anchor.device_root_pin.?);
         if (!std.mem.eql(u8, self.package.bytes[0..8], "ZGIDRC01") or
             !std.crypto.timing_safe.eql(tpm.Key, self.package.bytes[8..40].*, try self.identity.digest())) return error.RecoveryEnrollmentChanged;
     }
@@ -68,13 +72,14 @@ pub const Bundle = struct {
         errdefer @memset(out, 0);
         try self.validate();
         var w = wire.Writer{ .bytes = out };
-        try w.put("ZGIDPR02");
+        try w.put("ZGIDPR03");
         try w.int(u64, self.object_id);
         try w.int(u32, self.boot_index);
         var identity: [enrollment.MAX_BYTES]u8 = undefined;
         try w.sized(try self.identity.encode(&identity));
         try w.put(&(try self.initial_anchor.encode()));
         try w.put(&self.package.bytes);
+        try w.put(&(try self.session_policy.encode()));
         return out[0..w.pos];
     }
 
@@ -87,7 +92,7 @@ pub const Bundle = struct {
         if (trusted.object_id == 0 or std.mem.allEqual(u8, &trusted.digest, 0) or bytes.len > MAX_BYTES or
             !std.crypto.timing_safe.eql(tpm.Key, digest(bytes), trusted.digest)) return error.UntrustedProvisioningBundle;
         var r = wire.Reader{ .bytes = bytes };
-        if (!std.mem.eql(u8, try r.take(8), "ZGIDPR02")) return error.InvalidProvisioningBundle;
+        if (!std.mem.eql(u8, try r.take(8), "ZGIDPR03")) return error.InvalidProvisioningBundle;
         const object_id = try r.int(u64);
         const boot_index = try r.int(u32);
         // The whole bundle has already matched an independent pin. Its capsule
@@ -99,8 +104,9 @@ pub const Bundle = struct {
         const identity = try enrollment.Record.decode(identity_bytes, &identity_hash.finalResult());
         const initial_anchor = try nv.Record.decode(try r.take(nv.RECORD_BYTES));
         const package = recovery.Package{ .bytes = (try r.take(recovery.PACKAGE_BYTES))[0..recovery.PACKAGE_BYTES].* };
+        const session_policy = try identity_policy.Record.decode(try r.take(identity_policy.BYTES));
         try r.end();
-        const result = Bundle{ .object_id = object_id, .boot_index = boot_index, .identity = identity, .initial_anchor = initial_anchor, .package = package };
+        const result = Bundle{ .object_id = object_id, .boot_index = boot_index, .identity = identity, .initial_anchor = initial_anchor, .package = package, .session_policy = session_policy };
         try result.validate();
         if (object_id != trusted.object_id) return error.UntrustedProvisioningBundle;
         return result;
@@ -160,6 +166,7 @@ pub fn prepare(io: anytype, storage: *storage_service.Service, state: catalog.St
     const staged = try checkpoint.stage(storage, state, .{ .key = keys[0] }, request.catalog_object_id, 0, now, scratch);
     storage.beginCheckpointBatch();
     defer storage.endCheckpointBatch();
+    const session_policy = try identity_policy.Record.issue(request.owner, request.max_session_ticks, keys[1], now);
     var bundle = Bundle{ .object_id = request.record_object_id, .boot_index = request.boot_index, .identity = .{ .capsule = capsule, .enrollment = .{
         .owner = request.owner,
         .device = request.device,
@@ -169,7 +176,7 @@ pub fn prepare(io: anytype, storage: *storage_service.Service, state: catalog.St
         .anchor_index = request.anchor_index,
         .catalog_secret_id = secret_ids[0],
         .device_secret_id = secret_ids[2],
-    } }, .initial_anchor = .{ .checkpoint = staged.checkpoint, .device_root_pin = try keys[1].publicKey(now) }, .package = .{} };
+    } }, .initial_anchor = .{ .checkpoint = staged.checkpoint, .device_root_pin = session_policy.signature.public_key }, .package = .{}, .session_policy = session_policy };
     try recovery.Package.seal(&bundle.identity, &secrets, recovery_key, io, &bundle.package);
     return publishBundle(storage, &bundle, .{ .key = keys[0] }, now);
 }
@@ -267,17 +274,18 @@ pub fn commit(io: anytype, storage: *storage_service.Service, trusted: Pin, reco
 
 fn digest(bytes: []const u8) tpm.Key {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
-    h.update("zigos:identity-provisioning:v2\x00");
+    h.update("zigos:identity-provisioning:v3\x00");
     h.update(bytes);
     return h.finalResult();
 }
 
 test "identity provisioning requires an independent pin over every bundle byte" {
     const identity = try @import("../../tests/fixtures/identity_enrollment.zig").record();
+    const session_policy = try testPolicy(identity.enrollment.owner);
     var bundle = Bundle{ .object_id = 1001, .boot_index = 0x0180_1235, .identity = identity, .initial_anchor = .{
         .checkpoint = .{ .object_id = identity.enrollment.catalog_object_id, .owner = identity.enrollment.owner, .public_key = @splat(6), .generation = 1, .payload_digest = @splat(7) },
-        .device_root_pin = @splat(8),
-    }, .package = .{} };
+        .device_root_pin = session_policy.signature.public_key,
+    }, .package = .{}, .session_policy = session_policy };
     const Entropy = struct {
         pub fn random(_: *@This(), out: []u8) !void {
             @memset(out, 9);
@@ -306,6 +314,12 @@ test "identity provisioning requires an independent pin over every bundle byte" 
     try std.testing.expectError(error.InvalidProvisioningBundle, bundle.encode(&bytes));
     try std.testing.expect(std.mem.allEqual(u8, &bytes, 0));
     bundle.initial_anchor.checkpoint.generation = 1;
+    bundle.session_policy.max_session_ticks += 1;
+    try std.testing.expectError(error.UntrustedPolicy, bundle.trustedPin());
+    bundle.session_policy.max_session_ticks -= 1;
+    bundle.initial_anchor.device_root_pin.?[0] ^= 1;
+    try std.testing.expectError(error.UntrustedPolicy, bundle.trustedPin());
+    bundle.initial_anchor.device_root_pin.?[0] ^= 1;
     bundle.package.bytes[8] ^= 1;
     try std.testing.expectError(error.RecoveryEnrollmentChanged, bundle.trustedPin());
 }
@@ -317,10 +331,11 @@ test "identity provisioning never replaces a companion object created during sig
     var fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
     const identity = try @import("../../tests/fixtures/identity_enrollment.zig").record();
     const signer = try fixture.init(identity.enrollment.owner, disk.service.owner, disk.service.task_id, durable.signer);
+    const session_policy = try testPolicy(identity.enrollment.owner);
     var bundle = Bundle{ .object_id = 1001, .boot_index = 0x0180_1235, .identity = identity, .initial_anchor = .{
         .checkpoint = .{ .object_id = identity.enrollment.catalog_object_id, .owner = identity.enrollment.owner, .public_key = @splat(6), .generation = 1, .payload_digest = @splat(7) },
-        .device_root_pin = @splat(8),
-    }, .package = .{} };
+        .device_root_pin = session_policy.signature.public_key,
+    }, .package = .{}, .session_policy = session_policy };
     const Entropy = struct {
         pub fn random(_: *@This(), out: []u8) !void {
             @memset(out, 9);
@@ -365,7 +380,7 @@ test "identity provisioning rejects untrusted inputs and failed durability befor
     var graph = graph_mod.Graph.init();
     const state = catalog.State{ .vault = &service, .identities = &identities, .devices = &graph };
     var policies = policy.Directory.init();
-    const request = Request{ .owner = .{ .kind = .user, .serial = 1 }, .device = .{ .kind = .device, .serial = 2 }, .record_object_id = 1001, .catalog_object_id = 1000, .parent_handle = 0x8100_1234, .anchor_index = 0x0180_1234, .boot_index = 0x0180_1235 };
+    const request = Request{ .owner = .{ .kind = .user, .serial = 1 }, .device = .{ .kind = .device, .serial = 2 }, .record_object_id = 1001, .catalog_object_id = 1000, .parent_handle = 0x8100_1234, .anchor_index = 0x0180_1234, .boot_index = 0x0180_1235, .max_session_ticks = 1000 };
     const key: tpm.Key = @splat(4);
     var bad = request;
     bad.record_object_id = bad.catalog_object_id;
@@ -381,7 +396,8 @@ test "identity provisioning rejects untrusted inputs and failed durability befor
     identity.enrollment.owner = request.owner;
     identity.capsule.owner = request.owner;
     identity.enrollment.capsule_digest = try identity.capsule.digest();
-    var bundle = Bundle{ .object_id = request.record_object_id, .boot_index = request.boot_index, .identity = identity, .initial_anchor = .{ .checkpoint = staged.checkpoint, .device_root_pin = @splat(8) }, .package = .{} };
+    const session_policy = try testPolicy(identity.enrollment.owner);
+    var bundle = Bundle{ .object_id = request.record_object_id, .boot_index = request.boot_index, .identity = identity, .initial_anchor = .{ .checkpoint = staged.checkpoint, .device_root_pin = session_policy.signature.public_key }, .package = .{}, .session_policy = session_policy };
     const Entropy = struct {
         pub fn random(_: *@This(), out: []u8) !void {
             @memset(out, 9);
@@ -414,4 +430,10 @@ test "identity provisioning rejects untrusted inputs and failed durability befor
     disk.service.store.latestVersion(request.catalog_object_id).?.metadata.signature.value[0] ^= 1;
     try std.testing.expectError(error.UntrustedVaultCatalog, commit(&io, &disk.service, trusted, &key, &scratch));
     try std.testing.expectEqual(@as(usize, 0), io.calls);
+}
+
+fn testPolicy(owner: principal.PrincipalId) !identity_policy.Record {
+    var fixture = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+    const signer = try fixture.init(owner, .{ .kind = .service, .serial = 1 }, 1, .{ .label = "enrollment policy fixture", .seed = @splat(11) });
+    return identity_policy.Record.issue(owner, 1000, signer.key, 1);
 }

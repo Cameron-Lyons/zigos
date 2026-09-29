@@ -81,13 +81,12 @@ pub fn Owner(comptime Io: type) type {
             self.vault.initializeAllocated();
             self.identities.reset();
             self.graph.initializeAllocated();
-            // Native identity operations enforce hardware sealing, nonexportable
-            // keys and bounded leases. No untrusted policy or fixture signer is
-            // installed here; authenticated policy overlays can narrow authority.
+            // Bootstrap is private and short-lived. The enrolled root-signed
+            // policy must be attached before any user session can be created.
             self.policies.initializeAllocated();
             // Read-only discovery/sign-in does not require fresh object IDs.
             // Choose IDs only when the user starts a new setup operation.
-            self.setup_worker = .{ .io = io, .storage = storage, .state = self.state(), .policies = &self.policies, .request = .{ .owner = config.owner, .device = .{ .kind = .device, .serial = 0 }, .record_object_id = 0, .catalog_object_id = 0, .parent_handle = config.parent_handle, .anchor_index = config.anchor_index, .boot_index = config.boot_index }, .scratch = &self.scratch, .max_duration_ticks = config.operation_timeout_ticks };
+            self.setup_worker = .{ .io = io, .storage = storage, .state = self.state(), .policies = &self.policies, .request = .{ .owner = config.owner, .device = .{ .kind = .device, .serial = 0 }, .record_object_id = 0, .catalog_object_id = 0, .parent_handle = config.parent_handle, .anchor_index = config.anchor_index, .boot_index = config.boot_index, .max_session_ticks = config.lifetime_ticks }, .scratch = &self.scratch, .max_duration_ticks = config.operation_timeout_ticks };
             self.setup = .{ .backend = self.setup_worker.backend(), .input_timeout_ticks = config.input_timeout_ticks, .requires_discovery = true };
             self.authentication_ready = false;
             self.unavailable_reported = false;
@@ -133,8 +132,9 @@ pub fn Owner(comptime Io: type) type {
             // All device work is complete before swapping owners. The router
             // drains queued reports and requires a new neutral report on bind.
             try self.setup_worker.deinit();
+            try self.bundle.session_policy.attach(&self.policies, enrolled.owner, self.bundle.initial_anchor.device_root_pin.?);
             self.session = .{ .io = self.io, .enrollment = enrolled, .state = self.state(), .storage = self.storage, .policies = &self.policies, .subjects = .{ .user_id = enrolled.owner.serial } };
-            self.adapter = .{ .session = &self.session, .capsule = &self.bundle.identity.capsule, .recovery_package = &self.bundle.package, .recovery_pin = trusted, .boot_instance = self.config.boot_instance, .lifetime_ticks = self.config.lifetime_ticks, .scratch = &self.scratch };
+            self.adapter = .{ .session = &self.session, .capsule = &self.bundle.identity.capsule, .recovery_package = &self.bundle.package, .recovery_pin = trusted, .boot_instance = self.config.boot_instance, .lifetime_ticks = @min(self.config.lifetime_ticks, self.bundle.session_policy.max_session_ticks), .scratch = &self.scratch };
             self.authentication = .{ .authenticator = self.adapter.authenticator(), .input_timeout_ticks = self.config.input_timeout_ticks };
             self.authentication_ready = true;
             router.bindTrustedEntry(.{ .authentication = &self.authentication }, now);

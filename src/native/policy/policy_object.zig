@@ -79,126 +79,32 @@ pub const Directory = struct {
         request: CreateRequest,
         signer: signing.SignerIdentity,
     ) (Error || anyerror)!*PolicyObject {
-        if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
-        if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
-        if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
+        if (self.policies.countInUse() >= MAX_POLICIES) return error.PolicyTableFull;
+        var policy = try policyFromRequest(request);
+        policy.signature = try signing.sign(signer, &policyDigest(&policy));
+        return self.insert(policy);
+    }
 
+    // Initial native attachment requires an independently authenticated issuer
+    // key and an empty directory. Detached request signatures do not authorize
+    // updates: replay must never acquire a newer local generation. Signer labels
+    // are not authenticated and are never retained from a borrowed caller buffer.
+    pub fn attachInitialAuthenticated(self: *Directory, request: CreateRequest, signature: manifest.Signature, issuer_key: signing.PublicKey) !*PolicyObject {
+        if (self.policies.countInUse() != 0) return error.PolicyAlreadyAttached;
+        var policy = try policyFromRequest(request);
+        try verifyRequest(request, signature, issuer_key);
+        policy.signature = signature;
+        policy.signature.signer = "";
+        return self.insert(policy);
+    }
+
+    fn insert(self: *Directory, candidate: PolicyObject) Error!*PolicyObject {
         const policy_count = self.policies.countInUse();
         if (policy_count >= MAX_POLICIES) return error.PolicyTableFull;
-
         const policy_id: u64 = @intCast(policy_count + 1);
-        var policy = zeroPolicy();
+        var policy = candidate;
         policy.id = policy_id;
-        policy.generation = nextGeneration(self, request.scope, request.subject_id);
-        policy.scope = request.scope;
-        policy.subject_id = request.subject_id;
-        policy.issuer = request.issuer;
-        policy.label_len = @intCast(native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong);
-        policy.install_source_mode = request.install_source_mode;
-        policy.network_egress_mode = request.network_egress_mode;
-        policy.removable_storage_allowed = request.removable_storage_allowed;
-        policy.screen_capture_allowed = request.screen_capture_allowed;
-        policy.clipboard_allowed = request.clipboard_allowed;
-        policy.camera_allowed = request.camera_allowed;
-        policy.microphone_allowed = request.microphone_allowed;
-        policy.location_allowed = request.location_allowed;
-        policy.contacts_allowed = request.contacts_allowed;
-        policy.sensors_allowed = request.sensors_allowed;
-        policy.peer_ipc_allowed = request.peer_ipc_allowed;
-        policy.remote_ai_allowed = request.remote_ai_allowed;
-        policy.ai_training_allowed = request.ai_training_allowed;
-        policy.max_ai_context_bytes = request.max_ai_context_bytes;
-        policy.require_ai_model_measurement = request.require_ai_model_measurement;
-        policy.require_trusted_ai_model_source = request.require_trusted_ai_model_source;
-        policy.max_ai_model_age_days = request.max_ai_model_age_days;
-        policy.require_hardware_backed_session = request.require_hardware_backed_session;
-        policy.require_platform_backed_device_session = request.require_platform_backed_device_session;
-        policy.require_primary_device_session = request.require_primary_device_session;
-        policy.max_session_unlock_age_ticks = request.max_session_unlock_age_ticks;
-        policy.require_package_sbom = request.require_package_sbom;
-        policy.require_reproducible_package_build = request.require_reproducible_package_build;
-        policy.require_trusted_package_builder = request.require_trusted_package_builder;
-        policy.require_vulnerability_scan = request.require_vulnerability_scan;
-        policy.agent_delegation_allowed = request.agent_delegation_allowed;
-        policy.max_agent_actions_per_session = request.max_agent_actions_per_session;
-        policy.max_agent_remote_calls_per_session = request.max_agent_remote_calls_per_session;
-        policy.require_agent_user_confirmation = request.require_agent_user_confirmation;
-        policy.require_agent_audit = request.require_agent_audit;
-        policy.require_agent_session_binding = request.require_agent_session_binding;
-        policy.require_agent_local_context = request.require_agent_local_context;
-        policy.max_agent_context_bytes = request.max_agent_context_bytes;
-        policy.min_agent_delegation_generation = request.min_agent_delegation_generation;
-        policy.require_agent_visible_plan = request.require_agent_visible_plan;
-        policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
-        policy.data_export_allowed = request.data_export_allowed;
-        policy.data_deletion_allowed = request.data_deletion_allowed;
-        policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
-        policy.max_data_export_bytes = request.max_data_export_bytes;
-        policy.object_backup_allowed = request.object_backup_allowed;
-        policy.object_restore_allowed = request.object_restore_allowed;
-        policy.require_encrypted_object_backup = request.require_encrypted_object_backup;
-        policy.require_backup_recovery_key = request.require_backup_recovery_key;
-        policy.require_restore_device_trust = request.require_restore_device_trust;
-        policy.max_object_backup_bytes = request.max_object_backup_bytes;
-        policy.max_object_restore_age_days = request.max_object_restore_age_days;
-        policy.semantic_memory_allowed = request.semantic_memory_allowed;
-        policy.require_local_semantic_model = request.require_local_semantic_model;
-        policy.require_encrypted_semantic_index = request.require_encrypted_semantic_index;
-        policy.require_redacted_semantic_snippets = request.require_redacted_semantic_snippets;
-        policy.max_semantic_query_bytes = request.max_semantic_query_bytes;
-        policy.credential_assertions_allowed = request.credential_assertions_allowed;
-        policy.deny_credential_password_fallback = request.deny_credential_password_fallback;
-        policy.require_phishing_resistant_credential = request.require_phishing_resistant_credential;
-        policy.require_hardware_backed_credential = request.require_hardware_backed_credential;
-        policy.require_local_credential_unlock = request.require_local_credential_unlock;
-        policy.max_credential_unlock_age_ticks = request.max_credential_unlock_age_ticks;
-        policy.secret_vault_allowed = request.secret_vault_allowed;
-        policy.require_hardware_backed_secrets = request.require_hardware_backed_secrets;
-        policy.deny_secret_raw_export = request.deny_secret_raw_export;
-        policy.max_secret_handle_lease_ticks = request.max_secret_handle_lease_ticks;
-        policy.task_lifecycle_allowed = request.task_lifecycle_allowed;
-        policy.require_lifecycle_checkpoint_before_terminate = request.require_lifecycle_checkpoint_before_terminate;
-        policy.quiet_until_tick = request.quiet_until_tick;
-        policy.max_visible_notifications = request.max_visible_notifications;
-        policy.max_interruptive_notifications = request.max_interruptive_notifications;
-        policy.allow_critical_interruption = request.allow_critical_interruption;
-        policy.require_adaptive_ui = request.require_adaptive_ui;
-        policy.require_screen_reader_support = request.require_screen_reader_support;
-        policy.require_keyboard_navigation = request.require_keyboard_navigation;
-        policy.require_reduced_motion_support = request.require_reduced_motion_support;
-        policy.require_high_contrast_support = request.require_high_contrast_support;
-        policy.max_background_duration_seconds = request.max_background_duration_seconds;
-        policy.max_background_cpu_time_ticks = request.max_background_cpu_time_ticks;
-        policy.max_background_memory_bytes = request.max_background_memory_bytes;
-        policy.max_background_shared_memory_bytes = request.max_background_shared_memory_bytes;
-        policy.allow_remote_background_network = request.allow_remote_background_network;
-        policy.require_visible_background_activity = request.require_visible_background_activity;
-        policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
-        policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
-        policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
-        policy.require_sensitive_capture_foreground = request.require_sensitive_capture_foreground;
-        policy.require_capture_indicator = request.require_capture_indicator;
-        policy.allow_background_capture = request.allow_background_capture;
-        policy.max_sensitive_capture_lease_ticks = request.max_sensitive_capture_lease_ticks;
-        policy.max_sensitive_capture_samples = request.max_sensitive_capture_samples;
-        policy.retention_days = request.retention_days;
-        policy.audit_export_required = request.audit_export_required;
-
-        for (request.allowed_install_sources, 0..) |source_identity, index| {
-            policy.allowed_install_source_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong);
-            policy.allowed_install_source_count += 1;
-        }
-        for (request.allowed_network_destinations, 0..) |destination, index| {
-            policy.allowed_network_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong);
-            policy.allowed_network_destination_count += 1;
-        }
-        for (request.allowed_sync_destinations, 0..) |destination, index| {
-            policy.allowed_sync_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong);
-            policy.allowed_sync_destination_count += 1;
-        }
-
-        const digest = policyDigest(&policy);
-        policy.signature = try signing.sign(signer, &digest);
+        policy.generation = nextGeneration(self, policy.scope, policy.subject_id);
         const slot_index = self.policies.reserveIndex(policy_id) orelse
             native_util.impossibleByInvariant("prechecked policy slot reservation must succeed");
         const slot = &self.policies.slots[slot_index];
@@ -437,6 +343,19 @@ pub const Directory = struct {
             if (!request.remote_model and policy.max_ai_model_age_days != 0 and request.model_age_days > policy.max_ai_model_age_days) {
                 return block(policy, .ai_model_staleness_denied);
             }
+        }
+        return allow();
+    }
+
+    // Reject excessive requested authority before PIN/recovery hardware work.
+    // Device posture is checked separately once authenticated keys are restored.
+    pub fn sessionLifetimeDecision(self: *const Directory, subjects: SubjectSet, lifetime_ticks: u64) PolicyDecision {
+        var iter = self.activePolicyIterator(subjects);
+        while (iter.next()) |policy| {
+            const signature_decision = self.requireVerified(policy);
+            if (!signature_decision.allowed) return signature_decision;
+            if (policy.max_session_unlock_age_ticks != 0 and lifetime_ticks > policy.max_session_unlock_age_ticks)
+                return block(policy, .session_unlock_stale);
         }
         return allow();
     }
@@ -935,6 +854,134 @@ fn permissionKindDenialReason(kind: manifest.PermissionKind) DecisionReason {
         .peer_ipc => .peer_ipc_denied,
         else => .none,
     };
+}
+
+// Local IDs, generations and revocation state belong to the directory. Detached
+// signatures cover the complete canonical request, shared with native creation.
+pub fn requestDigest(request: CreateRequest) !crypto_hash.Digest {
+    const candidate = try policyFromRequest(request);
+    return policyDigest(&candidate);
+}
+
+pub fn verifyRequest(request: CreateRequest, signature: manifest.Signature, issuer_key: signing.PublicKey) !void {
+    if (!std.mem.eql(u8, signature.publicKeySlice(), &issuer_key) or
+        !signing.verify(signature, &(try requestDigest(request)))) return error.UntrustedPolicy;
+}
+
+fn policyFromRequest(request: CreateRequest) Error!PolicyObject {
+    if (request.allowed_install_sources.len > MAX_ALLOW_LIST) return error.TooManyInstallSources;
+    if (request.allowed_network_destinations.len > MAX_ALLOW_LIST) return error.TooManyNetworkDestinations;
+    if (request.allowed_sync_destinations.len > MAX_ALLOW_LIST) return error.TooManySyncDestinations;
+
+    var policy = zeroPolicy();
+    policy.scope = request.scope;
+    policy.subject_id = request.subject_id;
+    policy.issuer = request.issuer;
+    policy.label_len = @intCast(native_util.copyTextExact(&policy.label, request.label) catch return error.LabelTooLong);
+    policy.install_source_mode = request.install_source_mode;
+    policy.network_egress_mode = request.network_egress_mode;
+    policy.removable_storage_allowed = request.removable_storage_allowed;
+    policy.screen_capture_allowed = request.screen_capture_allowed;
+    policy.clipboard_allowed = request.clipboard_allowed;
+    policy.camera_allowed = request.camera_allowed;
+    policy.microphone_allowed = request.microphone_allowed;
+    policy.location_allowed = request.location_allowed;
+    policy.contacts_allowed = request.contacts_allowed;
+    policy.sensors_allowed = request.sensors_allowed;
+    policy.peer_ipc_allowed = request.peer_ipc_allowed;
+    policy.remote_ai_allowed = request.remote_ai_allowed;
+    policy.ai_training_allowed = request.ai_training_allowed;
+    policy.max_ai_context_bytes = request.max_ai_context_bytes;
+    policy.require_ai_model_measurement = request.require_ai_model_measurement;
+    policy.require_trusted_ai_model_source = request.require_trusted_ai_model_source;
+    policy.max_ai_model_age_days = request.max_ai_model_age_days;
+    policy.require_hardware_backed_session = request.require_hardware_backed_session;
+    policy.require_platform_backed_device_session = request.require_platform_backed_device_session;
+    policy.require_primary_device_session = request.require_primary_device_session;
+    policy.max_session_unlock_age_ticks = request.max_session_unlock_age_ticks;
+    policy.require_package_sbom = request.require_package_sbom;
+    policy.require_reproducible_package_build = request.require_reproducible_package_build;
+    policy.require_trusted_package_builder = request.require_trusted_package_builder;
+    policy.require_vulnerability_scan = request.require_vulnerability_scan;
+    policy.agent_delegation_allowed = request.agent_delegation_allowed;
+    policy.max_agent_actions_per_session = request.max_agent_actions_per_session;
+    policy.max_agent_remote_calls_per_session = request.max_agent_remote_calls_per_session;
+    policy.require_agent_user_confirmation = request.require_agent_user_confirmation;
+    policy.require_agent_audit = request.require_agent_audit;
+    policy.require_agent_session_binding = request.require_agent_session_binding;
+    policy.require_agent_local_context = request.require_agent_local_context;
+    policy.max_agent_context_bytes = request.max_agent_context_bytes;
+    policy.min_agent_delegation_generation = request.min_agent_delegation_generation;
+    policy.require_agent_visible_plan = request.require_agent_visible_plan;
+    policy.max_remote_private_egress_bytes = request.max_remote_private_egress_bytes;
+    policy.data_export_allowed = request.data_export_allowed;
+    policy.data_deletion_allowed = request.data_deletion_allowed;
+    policy.require_data_deletion_receipt = request.require_data_deletion_receipt;
+    policy.max_data_export_bytes = request.max_data_export_bytes;
+    policy.object_backup_allowed = request.object_backup_allowed;
+    policy.object_restore_allowed = request.object_restore_allowed;
+    policy.require_encrypted_object_backup = request.require_encrypted_object_backup;
+    policy.require_backup_recovery_key = request.require_backup_recovery_key;
+    policy.require_restore_device_trust = request.require_restore_device_trust;
+    policy.max_object_backup_bytes = request.max_object_backup_bytes;
+    policy.max_object_restore_age_days = request.max_object_restore_age_days;
+    policy.semantic_memory_allowed = request.semantic_memory_allowed;
+    policy.require_local_semantic_model = request.require_local_semantic_model;
+    policy.require_encrypted_semantic_index = request.require_encrypted_semantic_index;
+    policy.require_redacted_semantic_snippets = request.require_redacted_semantic_snippets;
+    policy.max_semantic_query_bytes = request.max_semantic_query_bytes;
+    policy.credential_assertions_allowed = request.credential_assertions_allowed;
+    policy.deny_credential_password_fallback = request.deny_credential_password_fallback;
+    policy.require_phishing_resistant_credential = request.require_phishing_resistant_credential;
+    policy.require_hardware_backed_credential = request.require_hardware_backed_credential;
+    policy.require_local_credential_unlock = request.require_local_credential_unlock;
+    policy.max_credential_unlock_age_ticks = request.max_credential_unlock_age_ticks;
+    policy.secret_vault_allowed = request.secret_vault_allowed;
+    policy.require_hardware_backed_secrets = request.require_hardware_backed_secrets;
+    policy.deny_secret_raw_export = request.deny_secret_raw_export;
+    policy.max_secret_handle_lease_ticks = request.max_secret_handle_lease_ticks;
+    policy.task_lifecycle_allowed = request.task_lifecycle_allowed;
+    policy.require_lifecycle_checkpoint_before_terminate = request.require_lifecycle_checkpoint_before_terminate;
+    policy.quiet_until_tick = request.quiet_until_tick;
+    policy.max_visible_notifications = request.max_visible_notifications;
+    policy.max_interruptive_notifications = request.max_interruptive_notifications;
+    policy.allow_critical_interruption = request.allow_critical_interruption;
+    policy.require_adaptive_ui = request.require_adaptive_ui;
+    policy.require_screen_reader_support = request.require_screen_reader_support;
+    policy.require_keyboard_navigation = request.require_keyboard_navigation;
+    policy.require_reduced_motion_support = request.require_reduced_motion_support;
+    policy.require_high_contrast_support = request.require_high_contrast_support;
+    policy.max_background_duration_seconds = request.max_background_duration_seconds;
+    policy.max_background_cpu_time_ticks = request.max_background_cpu_time_ticks;
+    policy.max_background_memory_bytes = request.max_background_memory_bytes;
+    policy.max_background_shared_memory_bytes = request.max_background_shared_memory_bytes;
+    policy.allow_remote_background_network = request.allow_remote_background_network;
+    policy.require_visible_background_activity = request.require_visible_background_activity;
+    policy.max_sensitive_retention_days = request.max_sensitive_retention_days;
+    policy.max_permission_lease_ticks = request.max_permission_lease_ticks;
+    policy.require_sensitive_permission_lease = request.require_sensitive_permission_lease;
+    policy.require_sensitive_capture_foreground = request.require_sensitive_capture_foreground;
+    policy.require_capture_indicator = request.require_capture_indicator;
+    policy.allow_background_capture = request.allow_background_capture;
+    policy.max_sensitive_capture_lease_ticks = request.max_sensitive_capture_lease_ticks;
+    policy.max_sensitive_capture_samples = request.max_sensitive_capture_samples;
+    policy.retention_days = request.retention_days;
+    policy.audit_export_required = request.audit_export_required;
+
+    for (request.allowed_install_sources, 0..) |source_identity, index| {
+        policy.allowed_install_source_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_install_sources[index], source_identity) catch return error.InstallSourceTooLong);
+        policy.allowed_install_source_count += 1;
+    }
+    for (request.allowed_network_destinations, 0..) |destination, index| {
+        policy.allowed_network_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_network_destinations[index], destination) catch return error.NetworkDestinationTooLong);
+        policy.allowed_network_destination_count += 1;
+    }
+    for (request.allowed_sync_destinations, 0..) |destination, index| {
+        policy.allowed_sync_destination_lens[index] = @intCast(native_util.copyTextExact(&policy.allowed_sync_destinations[index], destination) catch return error.SyncDestinationTooLong);
+        policy.allowed_sync_destination_count += 1;
+    }
+
+    return policy;
 }
 
 fn zeroPolicy() PolicyObject {

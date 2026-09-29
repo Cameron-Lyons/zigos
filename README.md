@@ -276,8 +276,15 @@ requests.
   erase authority. Reset and failed boot drain workers before releasing storage.
   Catalog and recovery-bundle publication recheck storage after TPM signing
   yields, so another task's intervening write is preserved. Owner backing
-  initializes in place and is erased on destruction. No fixture
-  signer is installed in production. The QEMU export fixture models independent
+  initializes in place and is erased on destruction. Provisioning bundle v3
+  carries a compact policy signed by the sealed identity root. The TPM-pinned
+  bundle authenticates its issuer and user before policy attachment and sign-in.
+  The enrolled duration caps sessions, credential unlock age and private key
+  leases; hardware custody, local unlock, phishing resistance and denial of raw
+  export are mandatory. Boot configuration can shorten the enrolled duration.
+  Excessive session requests and tampered policy fail before TPM access. This
+  immutable enrollment baseline has no policy-update or legacy-format fallback.
+  No fixture signer is installed in production. The QEMU export fixture models independent
   custody; physical persistence and user recovery-record custody remain unproven.
   A bounded identity-session owner now connects PIN verification to authenticated
   NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
@@ -436,7 +443,7 @@ requests.
   The same retained owner now drives these setup proofs and reboot discovery,
   sign-in, lock/reopen and cancellation during teardown. Production smoke without
   a TPM requires an exclusive unavailable outcome before idle. Userspace identity
-  dispatch, authenticated policy attachment and recovery-secret custody remain
+  dispatch, policy updates and recovery-secret custody remain
   open, along with physical TPM and input validation. Linking the shipped account
   path adds about 240 KiB to the production payload; the ReleaseFast symbol budget
   is 3,500, with identity proof modules explicitly excluded.
