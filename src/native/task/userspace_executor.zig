@@ -808,21 +808,37 @@ pub const Executor = struct {
     // The compositor can receive its launcher after bootstrap. Read the task's
     // captured state when a sibling owns the shared mailbox, then capture the
     // binding immediately so the next sibling cannot erase it.
-    pub fn bindLauncherChannel(
+    pub fn bindLauncherChannel(self: *Executor, catalog: *userspace_loader.Catalog, runtime: *task_runtime.Runtime, capability_table: *const capability.CapabilityTable, task_id: u64, binding: userspace_bootstrap_mailbox.LauncherBinding, now_ticks: u64) bool {
+        return self.bindNativeChannel(catalog, runtime, capability_table, task_id, .{ .launcher = binding }, now_ticks);
+    }
+
+    pub fn bindIdentityChannel(self: *Executor, catalog: *userspace_loader.Catalog, runtime: *task_runtime.Runtime, capability_table: *const capability.CapabilityTable, task_id: u64, binding: userspace_bootstrap_mailbox.IdentityBinding, now_ticks: u64) bool {
+        return self.bindNativeChannel(catalog, runtime, capability_table, task_id, .{ .identity = binding }, now_ticks);
+    }
+
+    const NativeChannelBinding = union(enum) { launcher: userspace_bootstrap_mailbox.LauncherBinding, identity: userspace_bootstrap_mailbox.IdentityBinding };
+
+    fn bindNativeChannel(
         self: *Executor,
         catalog: *userspace_loader.Catalog,
         runtime: *task_runtime.Runtime,
         capability_table: *const capability.CapabilityTable,
         task_id: u64,
-        binding: userspace_bootstrap_mailbox.LauncherBinding,
+        binding: NativeChannelBinding,
         now_ticks: u64,
     ) bool {
         if (builtin.target.os.tag != .freestanding) return false;
-        if (self.active_task_id != 0 or self.bound_runtime != runtime or !binding.isValid()) return false;
+        const transport = switch (binding) {
+            inline else => |value| blk: {
+                if (!value.isValid()) return false;
+                break :blk value.endpoint_capability_id;
+            },
+        };
+        if (self.active_task_id != 0 or self.bound_runtime != runtime) return false;
         const task = runtime.find(task_id) orelse return false;
         if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable() or
-            !task.hasCapability(binding.endpoint_capability_id)) return false;
-        const granted = capability_table.requireUsable(binding.endpoint_capability_id, now_ticks) catch return false;
+            !task.hasCapability(transport)) return false;
+        const granted = capability_table.requireUsable(transport, now_ticks) catch return false;
         if (!granted.holder.eql(task.owner) or granted.scope.task_id != task_id or
             granted.target.kind != .endpoint or !granted.rights.has(.endpoint_send) or
             !granted.rights.has(.endpoint_recv)) return false;
@@ -837,9 +853,21 @@ pub const Executor = struct {
         const preserved = preservedMailboxForUpdate(mapping, readUserspaceMailboxFromMapping(mapping, update.address), update);
         if (update.preserve_runtime_state and preserved == null) return false;
         var mailbox = kernelPublishedMailbox(update, preserved);
-        if (mailbox.ui_channel_kind == .document) return false;
-        mailbox.ui_channel_kind = .launcher;
-        mailbox.ui_channel = .{ .launcher = binding };
+        switch (binding) {
+            .launcher => |value| {
+                if (mailbox.ui_channel_kind == .document) return false;
+                mailbox.ui_channel_kind = .launcher;
+                mailbox.ui_channel = .{ .launcher = value };
+            },
+            .identity => |value| {
+                if (mailbox.auxiliary_kind == .clipboard) return false;
+                if (mailbox.auxiliary_kind == .identity) {
+                    if (capability_table.requireUsable(mailbox.auxiliary.identity.endpoint_capability_id, now_ticks)) |_| return false else |_| {}
+                }
+                mailbox.auxiliary_kind = .identity;
+                mailbox.auxiliary = .{ .identity = value };
+            },
+        }
         freestanding.paging.writeOwnedUserRange(&mapping.address_space.?, update.address, std.mem.asBytes(&mailbox)) catch return false;
         storeCapturedMailbox(mapping, mailbox);
         mapping.initial_mailbox_prepared = true;

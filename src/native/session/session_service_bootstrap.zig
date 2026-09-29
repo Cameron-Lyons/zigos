@@ -842,7 +842,8 @@ pub fn connectClient(
             .budget = .{
                 .cpu_time_ticks = 6_000,
                 .memory_bytes = units.kibibytes(512),
-                .endpoint_slots = 16,
+                // One endpoint per service plus one transient identity grant.
+                .endpoint_slots = service_contract.ordered_service_contracts.len + 1,
                 .shared_memory_bytes = units.kibibytes(64),
                 .background_allowed = false,
             },

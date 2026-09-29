@@ -125,7 +125,7 @@ fn requireLocked(session: anytype) !void {
         session.state.vault.store.hardware_provider.operations != null or session.state.identities.credential_count != 0 or !graph_snapshot.empty(session.state.devices.?)) return error.RetainedLockedAuthority;
 }
 
-pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, digest: *const tpm.Key, pin: []const u8, expected_rejection: ?anyerror, parent: tpm.PersistentParent) !void {
+pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, digest: *const tpm.Key, pin: []const u8, expected_rejection: ?anyerror, parent: tpm.PersistentParent, expected_count: u64) !void {
     var service = vault.Service.init();
     var identities = identity.Store.init();
     var graph = graph_mod.Graph.init();
@@ -180,11 +180,12 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     try session.replay.require(old_binding);
     const credential = identities.findCredentialConst(1) orelse return error.MissingSessionCredential;
     const public_key = credential.credential_public_key;
-    const first = credential.assertion_count == 0;
+    if (credential.assertion_count != expected_count) return error.InvalidSessionCounter;
+    const first = expected_count == 0;
     if (first) {
         const assertion = try session.assertCredential(.{ .credential_id = 1, .relying_party_id = "session.example", .origin = "https://session.example", .challenge = "challenge", .local_unlock = old_proof }, 14, &scratch);
         if (assertion.assertion_counter != 1 or assertion.unlock_age_ticks != 4 or !identity.verifyAssertion(&assertion, &public_key)) return error.InvalidSessionAssertion;
-    } else if (credential.assertion_count != 2) return error.InvalidSessionCounter;
+    }
     session.lock();
     try requireLocked(&session);
     if (old_key.validate(15)) |_| return error.RetainedLockedKey else |err| {
@@ -201,7 +202,7 @@ pub fn run(manager: anytype, io: anytype, capsule: *const pin_mod.Capsule, diges
     if (session.assertCredential(.{ .credential_id = 1, .relying_party_id = "session.example", .origin = "https://session.example", .challenge = "challenge", .local_unlock = old_proof }, 21, &scratch)) |_| return error.ReplayedLockedProof else |err| {
         if (err != error.UnlockContextMismatch) return err;
     }
-    if (identities.findCredentialConst(1).?.assertion_count != (if (first) @as(u64, 1) else 2)) return error.LostSessionCounter;
+    if (identities.findCredentialConst(1).?.assertion_count != (if (first) @as(u64, 1) else expected_count)) return error.LostSessionCounter;
     const proof = try session.issueUnlockProof("session.example", "fresh", 22, 90);
     if (proof.issued_at_ticks != 20) return error.InvalidSessionVerificationTime;
     if (first) {
@@ -352,11 +353,23 @@ pub const ProofClock = struct {
     start: u64,
     per_tick: u64,
     epoch: u64 = 200,
+    native_time: bool = false,
     pub fn init() ProofClock {
         const interval = @import("../../../kernel/timer/tsc_clock.zig").afterMilliseconds(timer.MILLISECONDS_PER_TICK).value;
         return .{ .start = interval.start_ticks, .per_tick = interval.interval_ticks };
     }
+    pub fn native() ProofClock {
+        timer.synchronize();
+        var clock = init();
+        clock.epoch = timer.getTicks();
+        clock.native_time = true;
+        return clock;
+    }
     pub fn now(self: ProofClock) u64 {
+        if (self.native_time) {
+            timer.synchronize();
+            return timer.getTicks();
+        }
         return self.epoch + (@import("../../../arch/x86.zig").rdtsc() -% self.start) / self.per_tick;
     }
 };

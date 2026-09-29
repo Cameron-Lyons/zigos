@@ -286,6 +286,24 @@ requests.
   immutable enrollment baseline has no policy-update or legacy-format fallback.
   No fixture signer is installed in production. The QEMU export fixture models independent
   custody; physical persistence and user recovery-record custody remain unproven.
+  Applications can request one assertion through a native-approved, short-lived
+  endpoint channel. Trusted code selects the credential, canonical HTTPS origin,
+  relying party and exact application process; the application supplies only its
+  challenge. Four bounded channels share the existing guarded authentication
+  worker, with one poll per tick and explicit wake deadlines. They recheck the
+  live process, endpoint capabilities and current sign-in
+  session before work and every reply. Lock, expiry, restart or revocation cancels
+  pending work incrementally; teardown drains it before releasing backing stores.
+  The counter must reach disk and TPM NV before any assertion bytes are sent.
+  A userspace client reassembles bounded replies and exposes only a complete
+  canonical assertion; the relying party must verify it against its independently
+  registered key. Mailbox v11 retains the 256-byte layout and adds a tagged
+  identity binding. The ownership reboot proof drives the client in Ring3,
+  verifies its signed result and durable counter, and locks a second request
+  during TPM work. Native consent and authenticated-origin acquisition, credential
+  registration and recovery IPC, and physical-hardware validation remain open.
+  Deadline and calibrated QEMU timer modes both derive ticks from elapsed TSC
+  time, so capability and worker deadlines advance with interrupts masked.
   A bounded identity-session owner now connects PIN verification to authenticated
   NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
   nonce before activation. Lock synchronously invalidates both lease tables,
@@ -320,8 +338,7 @@ requests.
   secret-entry deadlines participate in the desktop wake schedule, with expiry
   checked before userspace dispatch. QEMU connects modeled HID reports through
   the normal router and framebuffer to the real TPM verifier, including rejected
-  PINs, lock/reopen, and expiry. Trusted enrollment still must attach the session
-  owner at production boot. PIN and recovery verification run on a lazy 128 KiB guarded,
+  PINs, lock/reopen, and expiry. PIN, recovery and credential assertion work share a lazy 128 KiB guarded,
   supervisor-only NX stack. The worker yields at TPM command boundaries and device
   waits so the native loop can service input, display and userspace tasks. The
   transport's bounded begin/poll/cancel engine releases its lock on every entry;
@@ -345,8 +362,7 @@ requests.
   the previous interaction left partial credit. Duplicate wakes of a ready task
   do not add credit, and explicit refills retain their exact amount. This prevents
   a compositor from reading a new action and exhausting its leftover budget
-  before it can send the decision. Production boot enrollment and physical input
-  validation remain open.
+  before it can send the decision. Physical input validation remains open.
   Origin validation
   accepts canonical HTTPS DNS origins
   and rejects URL paths, user-info, and malformed ports. A signed vault catalog

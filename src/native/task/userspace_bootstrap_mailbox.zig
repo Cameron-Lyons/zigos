@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const SECTION_NAME = ".zigos_userspace_bootstrap";
-pub const VERSION: u16 = 10;
+pub const VERSION: u16 = 11;
 pub const MAILBOX_RESERVED_BYTES: usize = 1;
 pub const MMU_ISOLATION_PROOF_ROLE_TAG: u32 = 0xA116;
 pub const FOREIGN_SHARED_MEMORY_PROBE_ADDR: u32 = 0x7000_0000;
@@ -151,8 +151,17 @@ pub const ServiceTelemetry = extern struct {
     _reserved: u16 = 0,
     status_flags: u32 = 0,
 };
-pub const AuxiliaryKind = enum(u8) { none, service, clipboard, _ };
-pub const Auxiliary = extern union { service: ServiceTelemetry, clipboard: ClipboardBinding };
+pub const IdentityBinding = extern struct {
+    endpoint_capability_id: u64 = 0,
+    service_endpoint_id: u64 = 0,
+    credential_id: u64 = 0,
+    _reserved: u64 = 0,
+    pub fn isValid(self: IdentityBinding) bool {
+        return self.endpoint_capability_id != 0 and self.service_endpoint_id != 0 and self.credential_id != 0 and self._reserved == 0;
+    }
+};
+pub const AuxiliaryKind = enum(u8) { none, service, clipboard, identity, _ };
+pub const Auxiliary = extern union { service: ServiceTelemetry, clipboard: ClipboardBinding, identity: IdentityBinding };
 
 pub const Mailbox = extern struct {
     version: u16 = VERSION,
@@ -209,6 +218,10 @@ pub const Mailbox = extern struct {
 
     pub fn clipboardBinding(self: Mailbox) ClipboardBinding {
         return if (self.auxiliary_kind == .clipboard) self.auxiliary.clipboard else .{};
+    }
+
+    pub fn identityBinding(self: Mailbox) IdentityBinding {
+        return if (self.auxiliary_kind == .identity) self.auxiliary.identity else .{};
     }
 };
 
@@ -295,6 +308,20 @@ test "mailbox isolates clipboard binding from service telemetry within the fixed
     state.auxiliary_kind = .clipboard;
     state.auxiliary = .{ .clipboard = .{ .endpoint_capability_id = 3, .service_endpoint_id = 4 } };
     try std.testing.expect(state.clipboardBinding().isValid());
+    try std.testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
+}
+
+test "mailbox isolates identity authority from clipboard and service telemetry" {
+    var state = Mailbox{ .auxiliary_kind = .service, .auxiliary = .{ .service = .{ .state_hash = 1, .endpoint_id = 2, .peer_endpoint_id = 3 } } };
+    try std.testing.expect(!state.identityBinding().isValid());
+    state.auxiliary_kind = .identity;
+    state.auxiliary = .{ .identity = .{ .endpoint_capability_id = 1, .service_endpoint_id = 2, .credential_id = 3 } };
+    try std.testing.expect(state.identityBinding().isValid());
+    try std.testing.expect(!state.clipboardBinding().isValid());
+    state.auxiliary.identity._reserved = 1;
+    try std.testing.expect(!state.identityBinding().isValid());
+    state.auxiliary_kind = @enumFromInt(255);
+    try std.testing.expect(!state.identityBinding().isValid());
     try std.testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
 }
 

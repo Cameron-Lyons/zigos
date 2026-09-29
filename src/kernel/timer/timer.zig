@@ -45,13 +45,13 @@ pub fn init(features: cpu_baseline.Features, mode: Mode) void {
     if (tsc_ticks_per_tick == 0) @panic("invalid TSC frequency for timer");
 
     x2apic.enable();
+    tsc_epoch = x86.rdtsc();
     switch (mode) {
         .tsc_deadline => {
             x86.writeMsr(
                 X2APIC_LVT_TIMER_MSR,
                 X2APIC_TIMER_MODE_TSC_DEADLINE | INTERRUPT_VECTOR,
             );
-            tsc_epoch = x86.rdtsc();
         },
         .calibrated_countdown => initCalibratedCountdownTimer(),
     }
@@ -97,7 +97,9 @@ fn scheduleNextTick(now: u64) void {
 }
 
 pub fn synchronize() void {
-    if (active_mode == .tsc_deadline) synchronizeTicks(x86.rdtsc());
+    // The calibrated QEMU wake source uses the same elapsed-time clock. Counting
+    // interrupts would freeze leases during boot proofs or masked interrupts.
+    if (tsc_ticks_per_tick != 0) synchronizeTicks(x86.rdtsc());
 }
 
 pub fn armSchedulerTick() void {
@@ -132,14 +134,9 @@ fn wakeDeadline(epoch: u64, now: u64, per_tick: u64, deadline: u64) u64 {
 }
 
 pub fn handleInterrupt() void {
-    switch (active_mode) {
-        .tsc_deadline => {
-            const now = x86.rdtsc();
-            synchronizeTicks(now);
-            if (scheduler_tick_enabled) scheduleNextTick(now);
-        },
-        .calibrated_countdown => ticks +%= 1,
-    }
+    const now = x86.rdtsc();
+    synchronizeTicks(now);
+    if (active_mode == .tsc_deadline and scheduler_tick_enabled) scheduleNextTick(now);
     x2apic.acknowledge();
 }
 

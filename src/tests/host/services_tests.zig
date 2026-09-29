@@ -26,6 +26,10 @@ test "service host tests import native service modules" {
     std.testing.refAllDecls(@import("../../native/services/identity_setup_worker.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_owner.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_policy.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_channel.zig"));
+    _ = @import("../../native/services/identity_channel_test.zig");
+    std.testing.refAllDecls(@import("../../userspace/identity_protocol.zig"));
+    std.testing.refAllDecls(@import("../../userspace/identity_assertion.zig"));
     std.testing.refAllDecls(@import("../../native/platform/trusted_setup_entry.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_recovery.zig"));
     std.testing.refAllDecls(@import("../../native/services/identity_session.zig"));

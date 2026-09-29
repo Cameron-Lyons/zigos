@@ -126,7 +126,9 @@ pub fn run(manager: anytype, io: anytype, request: provisioning.Request, pin: []
 }
 
 pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin: []const u8, trusted: provisioning.Pin) !void {
-    const clock = identity_proof.ProofClock.init();
+    // Real syscalls use the native timer. Minting a channel with a synthetic
+    // proof epoch would make its capabilities appear not-yet-issued to Ring3.
+    const clock = identity_proof.ProofClock.native();
     const router = manager.inputRouterPtr();
     const previous_source = router.source;
     const previous_compositor = router.compositor;
@@ -158,7 +160,7 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
     else |err| if (err != error.IdentityPolicyDenied) return err;
     policy_object.max_session_unlock_age_ticks -= 1;
     if (io.commands != before or owner.session.replay.active or !owner.vault.store.empty()) return error.PolicyRejectionTouchedHardware;
-    for (0..2) |_| {
+    for (0..2) |attempt| {
         try identity_proof.typeAuthentication(manager, pin, false, clock);
         while (owner.adapter.worker.state == .suspended) {
             if (clock.now() - clock.epoch > 3000) return error.OwnerSignInTimeout;
@@ -167,6 +169,8 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
         }
         if (owner.authentication.view.status != .hidden or !owner.session.replay.active or
             !std.mem.allEqual(u8, owner.adapter.stack.?.bytes, 0)) return error.OwnerSignInFailed;
+        if (attempt == 0) try @import("identity_request_proof.zig").run(manager, owner, io, clock);
+        if (attempt == 1 and owner.identities.findCredentialConst(1).?.assertion_count != 3) return error.LostIdentityRequestCounter;
         owner.authentication.lock(clock.now());
         router.synchronizeTrustedInput();
         if (owner.session.replay.active or !owner.vault.store.empty() or owner.identities.credential_count != 0)
@@ -177,7 +181,7 @@ pub fn runBoot(manager: anytype, io: anytype, request: provisioning.Request, pin
     if (owner.adapter.worker.state != .suspended) return error.OwnerSignInDidNotYield;
     manager.clearIdentityOwner();
     if (router.trusted_entry != null or manager.identity_owner != null or router.queued_event_count != 0 or
-        io.owner_commands != 0 or io.nv_writes != 0 or io.nv_write_locks != 0 or io.da_resets != 0) return error.OwnerBootRequestedAdministration;
+        io.owner_commands != 0 or io.nv_writes != 1 or io.nv_write_locks != 0 or io.da_resets != 0) return error.OwnerBootRequestedAdministration;
     console.print("ZIGOS:TPM2:IDENTITY_POLICY:VERIFIED\n");
     console.print("ZIGOS:TPM2:IDENTITY_OWNER:VERIFIED\n");
 }

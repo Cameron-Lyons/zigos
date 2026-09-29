@@ -929,7 +929,7 @@ fn assertionDigest(assertion: *const Assertion) crypto_hash.Digest {
 
 // Credential callers supply canonical HTTPS origins and ASCII DNS names
 // (including already encoded IDNA labels). Reject URL paths and user-info.
-fn originMatchesRelyingParty(origin: []const u8, relying_party_id: []const u8) bool {
+pub fn originMatchesRelyingParty(origin: []const u8, relying_party_id: []const u8) bool {
     const https = "https://";
     if (!std.mem.startsWith(u8, origin, https) or !validDnsName(relying_party_id)) return false;
     const authority = origin[https.len..];

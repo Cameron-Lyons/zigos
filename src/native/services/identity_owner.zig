@@ -16,6 +16,17 @@ const policy = @import("../policy/policy_object.zig");
 const vault_mod = @import("secret_vault_service.zig");
 const identity = @import("../platform/os_identity.zig");
 const graph_mod = @import("../sync/device_graph.zig");
+const channel_mod = @import("identity_channel.zig");
+const kernel_port = @import("../kernel_api/component_port.zig");
+
+// The trusted account/permission flow selects these after user approval and
+// authenticated origin validation. This is never decoded from application IPC.
+pub const CredentialGrant = struct {
+    task_id: u64,
+    credential_id: u64,
+    relying_party_id: []const u8,
+    origin: []const u8,
+};
 
 pub const HardwareIo = struct {
     pub fn execute(_: *@This(), command: []const u8, response: []u8, timeout_ms: u32) ![]u8 {
@@ -44,6 +55,11 @@ pub const Interface = struct {
     context: *anyopaque,
     service: *const fn (*anyopaque, *router_mod.Router, u64) bool,
     destroy: *const fn (*anyopaque) void,
+    grant_credential: *const fn (*anyopaque, *kernel_port.KernelPort, CredentialGrant, u64) anyerror!channel_mod.protocol.Binding,
+    revoke_credential: *const fn (*anyopaque, u64, u64) void,
+    service_requests: *const fn (*anyopaque, u64) bool,
+    requests_ready: *const fn (*anyopaque) bool,
+    next_request_wake: *const fn (*anyopaque) ?u64,
 };
 
 pub fn Owner(comptime Io: type) type {
@@ -65,6 +81,8 @@ pub fn Owner(comptime Io: type) type {
         authentication: auth_entry.Entry,
         authentication_ready: bool,
         unavailable_reported: bool,
+        channels: [4]channel_mod.Channel,
+        channel_cursor: u8,
 
         pub fn create(io: *Io, storage: *storage_mod.Service, config: Config) !*Self {
             if (config.owner.kind != .user or config.owner.serial == 0 or config.lifetime_ticks == 0 or
@@ -90,6 +108,8 @@ pub fn Owner(comptime Io: type) type {
             self.setup = .{ .backend = self.setup_worker.backend(), .input_timeout_ticks = config.input_timeout_ticks, .requires_discovery = true };
             self.authentication_ready = false;
             self.unavailable_reported = false;
+            for (&self.channels) |*channel| channel.* = .{};
+            self.channel_cursor = 0;
             return self;
         }
 
@@ -97,7 +117,63 @@ pub fn Owner(comptime Io: type) type {
             router.bindTrustedEntry(.{ .setup = &self.setup }, now);
             self.setup.discover(now);
             router.synchronizeTrustedInput();
-            return .{ .context = self, .service = service, .destroy = destroy };
+            return .{ .context = self, .service = service, .destroy = destroy, .grant_credential = grantCredential, .revoke_credential = revokeCredential, .service_requests = serviceRequests, .requests_ready = requestsReady, .next_request_wake = nextRequestWake };
+        }
+
+        fn grantCredential(context: *anyopaque, kernel: *kernel_port.KernelPort, grant: CredentialGrant, now: u64) !channel_mod.protocol.Binding {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.authentication_ready or self.authentication.capturing() or self.authentication.busy()) return error.IdentityUnavailable;
+            const session_binding = try self.session.replay.binding();
+            const deadline = @min(self.session.expires_at_ticks, std.math.add(u64, now, self.config.operation_timeout_ticks) catch return error.IdentityUnavailable);
+            for (&self.channels) |*channel| {
+                if (channel.kernel != null and !channel.valid(now)) channel.close(now);
+                if (channel.kernel != null and channel.task_id == grant.task_id) return error.IdentityChannelAlreadyOpen;
+            }
+            for (&self.channels) |*channel| if (channel.kernel == null) {
+                return channel.open(kernel, self.adapter.requests(), grant.task_id, self.storage.task_id, .{
+                    .credential_id = grant.credential_id,
+                    .relying_party_id = grant.relying_party_id,
+                    .origin = grant.origin,
+                    .session = session_binding,
+                    .expires_at_ticks = deadline,
+                }, now);
+            };
+            return error.IdentityChannelTableFull;
+        }
+
+        fn revokeCredential(context: *anyopaque, task_id: u64, now: u64) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            for (&self.channels) |*channel| if (channel.task_id == task_id) {
+                channel.close(now);
+            };
+        }
+
+        fn serviceRequests(context: *anyopaque, now: u64) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.authentication_ready) return false;
+            var work: usize = 0;
+            for (0..self.channels.len) |_| {
+                const channel = &self.channels[self.channel_cursor];
+                self.channel_cursor = @intCast((self.channel_cursor + 1) % self.channels.len);
+                if (channel.service(now)) work += 1;
+                if (work == 2) break;
+            }
+            return work != 0;
+        }
+
+        fn requestsReady(context: *anyopaque) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            for (&self.channels) |*channel| if (channel.hasPendingWork()) return true;
+            return false;
+        }
+
+        fn nextRequestWake(context: *anyopaque) ?u64 {
+            const self: *Self = @ptrCast(@alignCast(context));
+            var wake: ?u64 = null;
+            for (&self.channels) |*channel| if (channel.nextWake()) |deadline| {
+                wake = @min(wake orelse deadline, deadline);
+            };
+            return wake;
         }
 
         fn state(self: *Self) catalog.State {
@@ -142,6 +218,7 @@ pub fn Owner(comptime Io: type) type {
 
         fn destroy(context: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(context));
+            for (&self.channels) |*channel| channel.close(0);
             if (self.authentication_ready) {
                 self.authentication.quiesce();
                 self.adapter.deinit() catch unreachable;

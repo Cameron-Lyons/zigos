@@ -316,13 +316,15 @@ pub const SessionManager = struct {
         const copied = self.clipboard.service(self, now_ticks);
         const serviced = self.documents.service(now_ticks);
         const launched = self.launcher.service(self, now_ticks);
+        const identity_work = if (self.identity_owner) |owner| owner.service_requests(owner.context, now_ticks) else false;
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
         if (copied or serviced or launched or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
-        return copied or serviced or launched or dispatched or peer_work != 0 or quote_work;
+        return copied or serviced or launched or dispatched or identity_work or peer_work != 0 or quote_work;
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
+        if (self.identity_owner) |owner| if (owner.requests_ready(owner.context)) return true;
         return self.peerQuoteReady() or self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(self.peer_dispatch_tick) or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
@@ -484,7 +486,7 @@ pub const SessionManager = struct {
 
     pub fn nextServiceWake(self: *const SessionManager) ?u64 {
         var wake: ?u64 = null;
-        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.peer_connections.nextWake(), if (self.peer_quote_worker) |worker| worker.operations.next_wake(worker.context) else null, self.clipboard.nextWake(), self.input_router.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null }) |candidate| {
+        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.peer_connections.nextWake(), if (self.peer_quote_worker) |worker| worker.operations.next_wake(worker.context) else null, self.clipboard.nextWake(), self.input_router.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null, if (self.identity_owner) |owner| owner.next_request_wake(owner.context) else null }) |candidate| {
             if (candidate) |deadline| wake = if (wake) |value| @min(value, deadline) else deadline;
         }
         return wake;
@@ -597,6 +599,19 @@ pub const SessionManager = struct {
         self.input_router.clearTrustedEntry();
         if (self.identity_owner) |owner| owner.destroy(owner.context);
         self.identity_owner = null;
+    }
+
+    pub fn grantIdentityCredential(self: *SessionManager, grant: identity_owner_mod.CredentialGrant, now: u64) !@import("../services/identity_channel.zig").protocol.Binding {
+        const owner = self.identity_owner orelse return error.IdentityUnavailable;
+        const binding = try owner.grant_credential(owner.context, self.kernelPort() orelse return error.KernelUnavailable, grant, now);
+        errdefer owner.revoke_credential(owner.context, grant.task_id, now);
+        if (!self.runtime_context.userspace_executor.bindIdentityChannel(self.userspaceCatalogPtr(), self.runtimePtr(), self.capabilityTablePtr(), grant.task_id, .{
+            .endpoint_capability_id = binding.endpoint_capability_id,
+            .service_endpoint_id = binding.service_endpoint_id,
+            .credential_id = binding.credential_id,
+        }, now)) return error.IdentityBindingUnavailable;
+        _ = self.runtime_context.userspaceScheduler().?.wakeTask(grant.task_id, .external_event, 0, now);
+        return binding;
     }
 
     fn serviceIdentityOwner(self: *SessionManager, now_ticks: u64) bool {

@@ -133,7 +133,12 @@ pub fn run(manager: anytype) !void {
             console.print(std.fmt.bufPrint(&line, "ZIGOS:TPM2:OWNER:FAIL {s} command={x} code={x}\n", .{ @errorName(err), io.last_failed_command, io.last_tpm_error }) catch "ZIGOS:TPM2:OWNER:FAIL\n");
             return err;
         };
-        return;
+        // Ownership scenarios end at their terminal marker. Running subsequent
+        // document/sync fixtures races the harness stop and unpredictably grows
+        // the retained catalog used by the next ownership boot.
+        const x86 = @import("../../../arch/x86.zig");
+        x86.cli();
+        while (true) x86.hlt();
     };
     var client = sealing.Client{};
     defer client.close(&io) catch {};

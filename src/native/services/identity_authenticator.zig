@@ -13,6 +13,8 @@ const catalog = @import("../storage/vault_catalog.zig");
 const cooperative = @import("../task/cooperative_worker.zig");
 const guarded = @import("../task/guarded_worker_stack.zig");
 const tpm_lease = @import("../task/tpm_worker_lease.zig");
+const identity = @import("../platform/os_identity.zig");
+const request_mod = @import("identity_request.zig");
 
 pub fn Adapter(comptime Io: type) type {
     return struct {
@@ -32,9 +34,87 @@ pub fn Adapter(comptime Io: type) type {
         started_at: u64 = 0,
         now_ticks: u64 = 0,
         failure: ?anyerror = null,
+        operation: enum { authenticate, assertion } = .authenticate,
+        assertion_grant: request_mod.Grant = undefined,
+        relying_party_id: [identity.MAX_RP_ID_BYTES]u8 = @splat(0),
+        origin: [identity.MAX_ORIGIN_BYTES]u8 = @splat(0),
+        challenge: [identity.MAX_CHALLENGE_BYTES]u8 = @splat(0),
+        challenge_len: u8 = 0,
+        assertion_result: ?identity.Assertion = null,
 
         pub fn authenticator(self: *Self) entry.Authenticator {
             return .{ .context = self, .recovery_available = self.recovery_package != null, .recovery_characters = if (self.recovery_pin != null) recovery_record.CODE_BYTES else recovery_key.CODE_BYTES, .lock_fn = lock, .start_fn = start, .poll_fn = poll, .busy_fn = busy, .deadline_fn = deadline };
+        }
+
+        pub fn requests(self: *Self) request_mod.Backend {
+            return .{ .context = self, .authorized = authorized, .start = startAssertion, .poll = pollAssertion, .cancel = cancelAssertion };
+        }
+
+        fn authorized(context: *anyopaque, grant: request_mod.Grant, now: u64) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.session.replay.active or now < self.session.last_ticks or now >= self.session.expires_at_ticks or
+                now >= grant.expires_at_ticks or grant.expires_at_ticks > self.session.expires_at_ticks or
+                grant.relying_party_id.len > self.relying_party_id.len or grant.origin.len > self.origin.len or
+                !identity.originMatchesRelyingParty(grant.origin, grant.relying_party_id)) return false;
+            self.session.replay.require(grant.session) catch return false;
+            const credential = self.session.state.identities.findCredentialConst(grant.credential_id) orelse return false;
+            return credential.status == .active and credential.owner.eql(self.session.enrollment.owner) and
+                std.mem.eql(u8, credential.relyingPartySlice(), grant.relying_party_id);
+        }
+
+        fn startAssertion(context: *anyopaque, request: request_mod.Request, now: u64) !void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (busy(self) or self.assertion_result != null) return error.WorkerBusy;
+            if (!authorized(self, request.grant, now) or request.challenge.len == 0 or request.challenge.len > self.challenge.len)
+                return error.IdentityRequestDenied;
+            if (self.stack == null) self.stack = try guarded.Stack.allocate();
+            self.worker.stack = self.stack.?.bytes;
+            self.assertion_grant = request.grant;
+            @memcpy(self.relying_party_id[0..request.grant.relying_party_id.len], request.grant.relying_party_id);
+            @memcpy(self.origin[0..request.grant.origin.len], request.grant.origin);
+            self.assertion_grant.relying_party_id = self.relying_party_id[0..request.grant.relying_party_id.len];
+            self.assertion_grant.origin = self.origin[0..request.grant.origin.len];
+            @memcpy(self.challenge[0..request.challenge.len], request.challenge);
+            self.challenge_len = @intCast(request.challenge.len);
+            self.operation = .assertion;
+            self.started_at = now;
+            self.now_ticks = now;
+            self.failure = null;
+            errdefer self.eraseAssertion();
+            try self.worker.start(self, run);
+        }
+
+        fn pollAssertion(context: *anyopaque, now: u64) !?identity.Assertion {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (self.operation != .assertion) return error.NoIdentityRequest;
+            if (busy(self) and !(try poll(self, now))) return null;
+            if (self.failure) |err| return err;
+            if (!authorized(self, self.assertion_grant, now)) {
+                self.eraseAssertion();
+                return error.IdentityRequestDenied;
+            }
+            const result = self.assertion_result orelse return error.Cancelled;
+            self.eraseAssertion();
+            return result;
+        }
+
+        fn eraseAssertion(self: *Self) void {
+            @memset(&self.relying_party_id, 0);
+            @memset(&self.origin, 0);
+            @memset(&self.challenge, 0);
+            self.challenge_len = 0;
+            self.assertion_result = null;
+        }
+
+        fn cancelAssertion(context: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (self.operation != .assertion) return;
+            if (busy(self)) {
+                self.worker.cancel();
+                self.session.replay.lock();
+                return;
+            }
+            self.eraseAssertion();
         }
 
         // Detach trusted input and finish cancellation before releasing backing
@@ -58,12 +138,17 @@ pub fn Adapter(comptime Io: type) type {
             if (busy(self)) {
                 self.worker.cancel();
                 self.session.replay.lock();
-            } else self.session.lock();
+            } else {
+                self.session.lock();
+                self.eraseAssertion();
+            }
         }
 
         fn start(context: *anyopaque, method: entry.Method, value: []const u8, now_ticks: u64) !void {
             const self: *Self = @ptrCast(@alignCast(context));
             if (busy(self)) return error.WorkerBusy;
+            self.eraseAssertion();
+            self.operation = .authenticate;
             self.session.lock();
             std.crypto.secureZero(u8, &self.value);
             self.value_len = 0;
@@ -105,6 +190,8 @@ pub fn Adapter(comptime Io: type) type {
             const self: *Self = @ptrCast(@alignCast(context));
             if (!busy(self)) return error.NoAuthenticationAttempt;
             if (now_ticks < self.now_ticks) self.worker.cancel();
+            if (self.operation == .assertion and (now_ticks >= self.assertion_grant.expires_at_ticks or
+                !self.session.replay.active or now_ticks >= self.session.expires_at_ticks)) self.worker.cancel();
             self.now_ticks = now_ticks;
             try self.worker.step();
             if (busy(self)) return false;
@@ -122,7 +209,7 @@ pub fn Adapter(comptime Io: type) type {
                 return;
             })) self.worker.yield();
             defer tpm_lease.release();
-            self.authenticate() catch |err| {
+            self.perform() catch |err| {
                 // Every borrowed command has returned. Close can yield for
                 // FlushContext; do not publish failure until cleanup completes.
                 self.session.close() catch |cleanup_error| {
@@ -130,12 +217,25 @@ pub fn Adapter(comptime Io: type) type {
                     return;
                 };
                 self.failure = err;
+                self.assertion_result = null;
             };
         }
 
-        fn authenticate(self: *Self) !void {
+        fn perform(self: *Self) !void {
             if (self.worker.cancel_requested) return error.Cancelled;
-            switch (self.method) {
+            if (self.operation == .assertion) {
+                if (!authorized(self, self.assertion_grant, self.now_ticks)) return error.IdentityRequestDenied;
+                const proof = try self.session.issueUnlockProof(self.assertion_grant.relying_party_id, self.challenge[0..self.challenge_len], self.started_at, self.assertion_grant.expires_at_ticks);
+                if (self.worker.cancel_requested) return error.Cancelled;
+                self.assertion_result = try self.session.assertCredential(.{
+                    .credential_id = self.assertion_grant.credential_id,
+                    .relying_party_id = self.assertion_grant.relying_party_id,
+                    .origin = self.assertion_grant.origin,
+                    .challenge = self.challenge[0..self.challenge_len],
+                    .local_unlock = proof,
+                }, self.started_at, self.scratch);
+                self.assertion_result.?.signature.signer = "";
+            } else switch (self.method) {
                 .pin => try self.session.unlock(self.capsule, self.value[0..self.value_len], self.boot_instance, self.started_at, self.lifetime_ticks, self.scratch),
                 .recovery => try self.session.unlockRecovery(self.capsule, &self.recovery_package.?.bytes, &self.value, self.boot_instance, self.started_at, self.lifetime_ticks, self.scratch),
             }
@@ -149,7 +249,7 @@ pub fn Adapter(comptime Io: type) type {
 
         fn deadline(context: *anyopaque) u64 {
             const self: *Self = @ptrCast(@alignCast(context));
-            return if (!busy(self) and self.session.replay.active) self.session.expires_at_ticks else 0;
+            return if (self.session.replay.active and (!busy(self) or self.operation == .assertion)) self.session.expires_at_ticks else 0;
         }
     };
 }

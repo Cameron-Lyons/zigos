@@ -222,7 +222,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         defer empty_owner.close(io) catch {};
         if (empty_owner.createEnrollmentParent(io)) |_| return error.EmptyOwnerCreatedParent else |err| try requireAuthorizationRejection(&empty_owner, err);
         try identity_proof.addProofCredential(manager, io, identity, pin);
-        try identity_proof.run(manager, io, &identity.capsule, &identity.enrollment.capsule_digest, pin, null, identity.enrollment.parent);
+        try identity_proof.run(manager, io, &identity.capsule, &identity.enrollment.capsule_digest, pin, null, identity.enrollment.parent, 0);
         record.stage = .enrolled;
         try save(storage, record);
         try client.close(io);
@@ -261,7 +261,7 @@ pub fn run(manager: anytype, io: anytype) !void {
         if (err != error.IntegrityFailure or tampered.parent != 0) return error.BadParentAuthenticationFailure;
     }
     io.corrupt_parent_public = false;
-    try identity_proof.run(manager, io, &identity.capsule, &identity.enrollment.capsule_digest, pin, null, identity.enrollment.parent);
+    try identity_proof.run(manager, io, &identity.capsule, &identity.enrollment.capsule_digest, pin, null, identity.enrollment.parent, 3);
     if (io.owner_commands != 0) return error.IdentityRequestedOwnerAuthorization;
     var denied: tpm.Key = @splat(0);
     defer std.crypto.secureZero(u8, &denied);

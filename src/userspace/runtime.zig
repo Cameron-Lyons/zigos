@@ -223,6 +223,7 @@ pub fn zigos_userspace_contract_main(
         zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
         comptime ui_surface_state.modelForBundle(bundle_id) == .notes,
+        comptime std.mem.eql(u8, bundle_id, "zigos.system.service-client"),
     );
 }
 
@@ -247,6 +248,7 @@ pub fn zigos_userspace_service_main(
         zigos_userspace_bootstrap.heartbeat_increment,
         comptime (contract_flags & mailbox.FLAG_OWNS_UI_SURFACE) != 0,
         comptime ui_surface_state.modelForBundle(bundle_id) == .notes,
+        false,
     );
 }
 
@@ -745,10 +747,12 @@ const DocumentTransport = struct {
     }
 };
 
-fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool, comptime saves_documents: bool) noreturn {
+fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u32, comptime consumes_input: bool, comptime saves_documents: bool, comptime identity_probe: bool) noreturn {
+    var probe: if (identity_probe) @import("identity_client_proof.zig").Probe else void = if (identity_probe) .{} else {};
     const increment: u16 = @truncate(if (heartbeat_increment == 0) 1 else heartbeat_increment);
     var pulse: u16 = 4;
     while (true) {
+        const identity_work = if (comptime identity_probe) probe.step(&zigos_userspace_bootstrap, DocumentTransport{}) else false;
         const disposition: mailbox.YieldDisposition = if (comptime consumes_input) wait: {
             const launcher_work = if (ui.surface.model == .compositor) ui.launcher.step(zigos_userspace_bootstrap.launcherBinding(), &ui.surface, DocumentTransport{}) else false;
             const input = drainFocusedInput(ui, saves_documents);
@@ -759,7 +763,7 @@ fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u
             } else false;
             if (zigos_userspace_bootstrap.ui_state_revision != ui.surface.revision) publishUiState(&zigos_userspace_bootstrap, &ui.surface);
             _ = presentUiState(&zigos_userspace_bootstrap, &ui.surface);
-            break :wait if (input.exhausted and !document_work and !clipboard_work and !launcher_work and !ui.launcher.hasUnsentDecision()) blk: {
+            break :wait if (input.exhausted and !document_work and !clipboard_work and !launcher_work and !identity_work and !ui.launcher.hasUnsentDecision()) blk: {
                 parkUntilEvent();
                 break :blk .wait_for_event;
             } else .runnable;
