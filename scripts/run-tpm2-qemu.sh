@@ -335,11 +335,19 @@ if [ "$MODE" = quote ]; then
 elif [ "$MODE" = ownership ]; then
   # The build graph supplies a unified EFI image with the ownership selector.
   run_ownership_boot interrupted 'ZIGOS:TPM2:OWNER:INTERRUPTED'
+  run_ownership_boot owner-interrupted 'ZIGOS:TPM2:OWNER:OWNER_INTERRUPTED'
+  run_ownership_boot lockout-interrupted 'ZIGOS:TPM2:OWNER:LOCKOUT_INTERRUPTED'
+  run_ownership_boot policy-interrupted 'ZIGOS:TPM2:OWNER:POLICY_INTERRUPTED'
+  run_ownership_boot define-interrupted 'ZIGOS:TPM2:OWNER:DEFINE_INTERRUPTED'
+  run_ownership_boot write-interrupted 'ZIGOS:TPM2:OWNER:WRITE_INTERRUPTED'
+  cp --sparse=always "$STORE_IMAGE" "$TPM_WORK/setup-store.img"
   run_ownership_boot enrolled 'ZIGOS:TPM2:OWNER:ENROLLED'
   run_ownership_boot reboot 'ZIGOS:TPM2:OWNER:VERIFIED'
   mv "$TPM_WORK/state" "$TPM_WORK/original-state"
   mkdir "$TPM_WORK/state"
   run_ownership_boot replacement 'ZIGOS:TPM2:OWNER:REPLACEMENT_REJECTED'
+  cp --sparse=always "$TPM_WORK/setup-store.img" "$STORE_IMAGE"
+  run_ownership_boot setup-replacement 'ZIGOS:TPM2:OWNER:SETUP_REPLACEMENT_REJECTED'
 elif [ "$MODE" = sealing ]; then
   run_pin_lockout
   run_interrupted_enrollment

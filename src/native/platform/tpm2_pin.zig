@@ -105,7 +105,7 @@ fn validatePrincipals(owner: principal.PrincipalId, device: principal.PrincipalI
     if (owner.kind != .user or owner.serial == 0 or device.kind != .device or device.serial == 0) return error.InvalidPinCapsule;
 }
 
-fn validatePin(pin: []const u8) !void {
+pub fn validatePin(pin: []const u8) !void {
     if (pin.len < MIN_PIN_BYTES or pin.len > MAX_PIN_BYTES) return error.InvalidPin;
     for (pin) |byte| if (byte < '0' or byte > '9') return error.InvalidPin;
 }

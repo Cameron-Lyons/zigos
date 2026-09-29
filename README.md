@@ -233,6 +233,17 @@ requests.
   or owner/lockout authorization. This restores access on the original TPM; it
   cannot recover keys after that TPM is cleared or lost. Enrollment-root binding,
   first-user provisioning UI, and independent recovery-key export remain open.
+  A serialized provisioning service generates the three sealed catalog/root/device
+  signing keys and the owner/lockout/vault authorizations, then stages a signed
+  catalog and canonical recovery bundle. The caller must retain the bundle pin
+  and random recovery key independently before committing. Commit verifies both
+  objects and crosses one durable storage barrier before changing permanent TPM
+  state. A salted audit session authenticates hierarchy flags, allowing explicit
+  retries to select the retained new authorization after a lost successful reply
+  without probing with an old value. Parent identity and initial NV commitment
+  remain pinned; setup neither clears the TPM nor evicts existing parents.
+  This service supplies the setup transaction, not the production boot/UI binding
+  or the independent channel for exporting and retaining its recovery material.
   A bounded identity-session owner now connects PIN verification to authenticated
   NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
   nonce before activation. Lock synchronously invalidates both lease tables,
@@ -325,7 +336,7 @@ requests.
   used for the command HMAC. An already committed enrollment is compared exactly
   and never rewritten; a missing index requires explicit recovery. This closes
   the definition/first-write crash gap without another object or normal-checkpoint
-  NV write. Production authorization provisioning and first-user enrollment UI,
+  NV write. Production first-user enrollment UI and recovery-material custody,
   physical TPM persistence and trusted input validation, biometric verification,
   production enrollment binding for desktop sign-in, and userspace
   request dispatch remain open.
@@ -358,22 +369,25 @@ requests.
   both VM and TPM then completes that signed checkpoint, restores its credential
   counter, and resumes assertions. Catalog format v5 includes the authenticated
   device graph and predecessor digest and rejects older snapshots.
-  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-ownership-qemu-test` adds four
-  disposable boots: an interrupted persistence reply, explicit owner enrollment,
-  PIN unlock after restarting the VM and TPM, and rejection of a replacement TPM.
-  It authenticates existing parents before reconciling persistence, rejects a
-  damaged parent-response HMAC, reconciles a damaged owner-change reply using the
-  retained new authorization, and verifies that empty owner authorization cannot
-  create parents or define NV indexes. Normal identity unlock issues no owner
-  commands. Final administrator secrets are generated randomly, encrypted before
-  persistence, and restored from the disk package after reboot. The reboot also
-  exhausts all eight PIN attempts, requires recovery-key authentication before any
-  administrator command, rejects damaged packages and changed enrollment, and
-  verifies recovery through anchor tampering, replay-entropy failure, durable
-  assertion counters, replay rejection and expiry. The transport, sealing and
-  ownership suites run in release preflight.
-  Production first-user enrollment, independent enrollment-root binding and
-  recovery-secret custody/export remain open.
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-ownership-qemu-test` runs ten
+  disposable boots through the production provisioning service. It loses accepted
+  responses for parent persistence, owner and lockout authorization, lockout
+  parameters, NV definition, and the initial NV write, restarting the VM and TPM
+  after each. Completion reads the initialized anchor without another NV write.
+  A forged hierarchy-state HMAC fails before administrator commands; empty owner
+  authorization cannot create parents or define indexes. The fixture retains the
+  bundle pin under an independent compiled signer; no such signer or recovery
+  key is supplied to production. Both setup recovery and ordinary sign-in reject
+  a replacement TPM. Normal identity unlock issues no owner commands.
+  After provisioning, a separate verification credential exercises PIN unlock,
+  durable assertion counters and recovery. The reboot exhausts all eight PIN
+  attempts, requires recovery-key authentication before administrator commands,
+  rejects damaged packages and changed enrollment, and verifies anchor tampering,
+  replay-entropy failure, replay rejection and expiry. Host crash tests withhold
+  TPM access after a failed disk barrier and keep the staged catalog and companion
+  record in one checkpoint. The ownership suite runs in release preflight.
+  Production first-user UI, independent enrollment-root binding and recovery-secret
+  custody/export remain open, along with physical TPM and input validation.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).

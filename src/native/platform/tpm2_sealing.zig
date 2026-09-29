@@ -14,6 +14,7 @@ const NULL: u32 = 0x4000_0007;
 const PASSWORD: u32 = 0x4000_0009;
 const CREATE_PRIMARY: u32 = 0x131;
 const START_SESSION: u32 = 0x176;
+const GET_CAPABILITY: u32 = 0x17a;
 const CREATE: u32 = 0x153;
 const LOAD: u32 = 0x157;
 const UNSEAL: u32 = 0x15e;
@@ -31,6 +32,15 @@ const DA_RESET: u32 = 0x139;
 const NV_ATTRIBUTES: u32 = 0x0004_1004; // AUTHREAD, AUTHWRITE, WRITEALL; dictionary attack protected
 const NV_WRITTEN: u32 = 0x2000_0000;
 pub const MAX_NV_BYTES = 256;
+
+// TCG TPM 2.0 Part 2, TPMA_PERMANENT. These flags mean authorization has
+// been changed since TPM2_Clear; they do not prove it is currently nonempty.
+pub const HierarchyState = struct {
+    owner_auth_set: bool,
+    endorsement_auth_set: bool,
+    lockout_auth_set: bool,
+    in_lockout: bool,
+};
 
 pub const DictionaryAttackPolicy = struct {
     max_tries: u32,
@@ -486,6 +496,29 @@ pub const Client = struct {
         return self.writeNv(io, space, auth, data, false);
     }
 
+    // Authenticate TPM_PT_PERMANENT through a salted audit session. A public
+    // GetCapability response alone must never select an administrator secret.
+    // No hierarchy authorization is attempted, so querying cannot consume a
+    // dictionary-attack retry while reconciling an interrupted enrollment.
+    pub fn hierarchyState(self: *Client, io: anytype) !HierarchyState {
+        if (self.parent == 0) return error.NotInitialized;
+        if (self.failed) return error.Failed;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [12]u8 = undefined;
+        var w = wire.Writer{ .bytes = &parameters };
+        try w.int(u32, 6); // TPM_CAP_TPM_PROPERTIES
+        try w.int(u32, 0x200); // TPM_PT_PERMANENT
+        try w.int(u32, 1);
+        const reply = try self.authorizedHandles(io, &session, GET_CAPABILITY, &.{}, &.{}, "", &parameters, 0x81, false);
+        const state = try parseHierarchyState(reply.parameters);
+        try self.flush(io, session.handle);
+        session.handle = 0;
+        return state;
+    }
+
     // Explicit enrollment/rotation only. Null means the caller knows the
     // current lockout authorization is empty; never retry automatically with
     // empty auth after a failure. Retain the new authorization durably before
@@ -678,8 +711,9 @@ pub const Client = struct {
     }
 
     fn authorizedHandlesWithResponseAuth(self: *Client, io: anytype, session: *Session, code: u32, handles: []const u32, names: []const []const u8, auth: []const u8, response_auth: []const u8, parameters: []u8, attributes: u8, has_handle: bool) !Reply {
-        std.debug.assert(handles.len == names.len and handles.len > 0 and handles.len <= 2 and auth.len <= 32);
+        std.debug.assert(handles.len == names.len and handles.len <= 2 and auth.len <= 32);
         std.debug.assert(response_auth.len <= 32);
+        std.debug.assert(handles.len != 0 or (attributes == 0x81 and auth.len == 0 and response_auth.len == 0));
         var value: [64]u8 = @splat(0);
         defer std.crypto.secureZero(u8, &value);
         @memcpy(value[0..32], &session.key);
@@ -717,7 +751,10 @@ pub const Client = struct {
         var r = wire.Reader{ .bytes = reply.authorization };
         const next_nonce = try digest(try r.sized());
         const response_attributes = try r.int(u8);
-        if (response_attributes != attributes) return error.InvalidResponse;
+        // Audit exclusivity is reported by the TPM; every other requested
+        // attribute must agree. The response HMAC below covers the actual bits.
+        const variable: u8 = if (attributes & 0x80 != 0) 0x02 else 0;
+        if (response_attributes & ~variable != attributes) return error.InvalidResponse;
         const response_mac = try digest(try r.sized());
         try r.end();
         hash = Sha256.init(.{});
@@ -747,6 +784,15 @@ pub const Client = struct {
         return reply;
     }
 };
+
+fn parseHierarchyState(bytes: []const u8) !HierarchyState {
+    var r = wire.Reader{ .bytes = bytes };
+    if (try r.int(u8) > 1 or try r.int(u32) != 6 or try r.int(u32) != 1 or try r.int(u32) != 0x200) return error.InvalidResponse;
+    const flags = try r.int(u32);
+    try r.end();
+    if (flags & ~@as(u32, 0x707) != 0) return error.InvalidResponse;
+    return .{ .owner_auth_set = flags & 1 != 0, .endorsement_auth_set = flags & 2 != 0, .lockout_auth_set = flags & 4 != 0, .in_lockout = flags & 0x200 != 0 };
+}
 
 fn optionalAuthorization(auth: ?*const Key) !void {
     if (auth) |value| if (std.mem.allEqual(u8, value, 0)) return error.InvalidAuthorization;
@@ -1172,4 +1218,32 @@ test "TPM persistent parent public data cannot initialize a client without posse
     try std.testing.expectError(error.PersistentParentChanged, client.openPersistent(&io, changed_pin));
     try std.testing.expectEqual(@as(usize, 0), io.entropy);
     try std.testing.expectEqual(@as(u32, 0), client.parent);
+}
+
+test "TPM hierarchy state requires exactly one canonical permanent property" {
+    var bytes: [17]u8 = undefined;
+    var w = wire.Writer{ .bytes = &bytes };
+    try w.int(u8, 1);
+    try w.int(u32, 6);
+    try w.int(u32, 1);
+    try w.int(u32, 0x200);
+    try w.int(u32, 0x707);
+    const state = try parseHierarchyState(&bytes);
+    try std.testing.expect(state.owner_auth_set and state.lockout_auth_set and state.endorsement_auth_set and state.in_lockout);
+    for (0..bytes.len) |length| {
+        if (parseHierarchyState(bytes[0..length])) |_| return error.AcceptedTruncatedHierarchyState else |_| {}
+    }
+    const oversized = bytes ++ [_]u8{0};
+    if (parseHierarchyState(&oversized)) |_| return error.AcceptedOversizedHierarchyState else |_| {}
+    for ([_]usize{ 0, 4, 8, 12, 13 }) |offset| {
+        var changed = bytes;
+        changed[offset] ^= 0x80;
+        if (parseHierarchyState(&changed)) |_| return error.AcceptedMalformedHierarchyState else |_| {}
+    }
+    var client = Client{};
+    var io = RejectIo{};
+    try std.testing.expectError(error.NotInitialized, client.hierarchyState(&io));
+    client.parent = 0x8100_1234;
+    client.failed = true;
+    try std.testing.expectError(error.Failed, client.hierarchyState(&io));
 }

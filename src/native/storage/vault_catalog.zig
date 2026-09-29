@@ -65,6 +65,12 @@ pub const Receipt = struct {
     checkpoint_generation: u64,
 };
 
+pub const Staged = struct {
+    version_id: u64,
+    checkpoint: Checkpoint,
+    previous_digest: hash.Digest,
+};
+
 const Pending = struct {
     object_id: u64,
     base_version_id: u64,
@@ -80,7 +86,10 @@ pub const Session = struct {
     pending: ?Pending = null,
     anchor: ?*const Anchor = null,
 
-    pub fn save(self: *Session, storage: *storage_service.Service, state: State, signer: object_signer.Signer, object_id: u64, expected_version_id: u64, now_ticks: u64, scratch: *[MAX_BYTES]u8) !Receipt {
+    // Stage an immutable signed snapshot without acknowledging durability. This
+    // lets first-user provisioning checkpoint its catalog and recovery record
+    // together before publishing active identity or changing permanent TPM state.
+    pub fn stage(self: *Session, storage: *storage_service.Service, state: State, signer: object_signer.Signer, object_id: u64, expected_version_id: u64, now_ticks: u64, scratch: *[MAX_BYTES]u8) !Staged {
         const service = state.vault;
         try signer.validateService(storage.owner, storage.task_id, now_ticks);
         if (signer.key.authority.?.service != service) return error.InvalidSigningAuthority;
@@ -139,15 +148,20 @@ pub const Session = struct {
                 .key_digest = signer.key.sealed_digest,
             };
         }
-        const generation = try storage.checkpointDurable();
-        if (self.anchor) |anchor| try anchor.advance_fn(anchor.context, .{
+        return .{ .version_id = self.pending.?.version_id, .checkpoint = .{
             .object_id = object_id,
             .owner = signer.key.authority.?.owner,
             .public_key = storage.latestVersion(object_id).?.metadata.signature.publicKeySlice()[0..signing.PUBLIC_KEY_BYTES].*,
             .generation = next_generation,
             .payload_digest = self.pending.?.payload_digest,
-        }, previous_digest);
-        const receipt = Receipt{ .version_id = self.pending.?.version_id, .catalog_generation = next_generation, .checkpoint_generation = generation };
+        }, .previous_digest = previous_digest };
+    }
+
+    pub fn save(self: *Session, storage: *storage_service.Service, state: State, signer: object_signer.Signer, object_id: u64, expected_version_id: u64, now_ticks: u64, scratch: *[MAX_BYTES]u8) !Receipt {
+        const staged = try self.stage(storage, state, signer, object_id, expected_version_id, now_ticks, scratch);
+        const generation = try storage.checkpointDurable();
+        if (self.anchor) |anchor| try anchor.advance_fn(anchor.context, staged.checkpoint, staged.previous_digest);
+        const receipt = Receipt{ .version_id = staged.version_id, .catalog_generation = staged.checkpoint.generation, .checkpoint_generation = generation };
         self.pending = null;
         return receipt;
     }
@@ -740,4 +754,37 @@ test "vault catalog retains retired slot generations and rejects resurrection on
     _ = try used.store.importSecret(test_owner, "temporary", "old", false, true);
     try used.store.retireSecret(1);
     try std.testing.expectError(error.VaultNotEmpty, restore(&device.service, .{ .vault = &used, .identities = &identities }, try testTrust(), &scratch));
+}
+
+test "vault catalog staging checkpoints its companion record at one explicit barrier" {
+    for ([_]bool{ false, true }) |complete| {
+        const disk = try durable.Fixture.init(true);
+        defer disk.deinit();
+        var identities = identity.Store.init();
+        var fixture = SigningFixture{};
+        const signer = try prepare(&fixture, &disk.service);
+        var scratch: [MAX_BYTES]u8 = undefined;
+        var session = Session{};
+        const generation = disk.checkpoint.last_checkpoint_generation;
+        const staged = try session.stage(&disk.service, .{ .vault = &fixture.service, .identities = &identities }, signer, test_object_id, 0, 1, &scratch);
+        disk.service.beginCheckpointBatch();
+        _ = try disk.service.putVersion(.{ .preferred_object_id = ids.object(test_object_id + 1), .object_type = .secret, .payload = &staged.checkpoint.payload_digest, .metadata = try objects.signMetadata(durable.signer, "companion", "application/octet-stream", .secret, &staged.checkpoint.payload_digest, 1) });
+        disk.service.endCheckpointBatch();
+        try std.testing.expectEqual(generation, disk.checkpoint.last_checkpoint_generation);
+        disk.fail_flushes = !complete;
+        if (complete) {
+            try std.testing.expectEqual(generation + 1, try disk.service.checkpointDurable());
+        } else try std.testing.expectError(error.DurabilityBarrierFailed, disk.service.checkpointDurable());
+        disk.fail_flushes = false;
+        disk.crash();
+        if (complete) {
+            const companion = disk.service.latestVersion(test_object_id + 1).?;
+            var bytes: [hash.digest_bytes]u8 = undefined;
+            try std.testing.expectEqualSlices(u8, &staged.checkpoint.payload_digest, try disk.service.versionPayloadInto(companion, &bytes));
+            try std.testing.expectEqualDeep(staged.checkpoint, try inspect(&disk.service, try testTrust(), &scratch));
+        } else {
+            try std.testing.expect(disk.service.latestVersion(test_object_id) == null);
+            try std.testing.expect(disk.service.latestVersion(test_object_id + 1) == null);
+        }
+    }
 }

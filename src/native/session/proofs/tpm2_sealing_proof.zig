@@ -26,6 +26,10 @@ const Io = struct {
     corrupt_lockout_change: bool = false,
     corrupt_persistence: bool = false,
     corrupt_parent_public: bool = false,
+    corrupt_hierarchy_state: bool = false,
+    corrupt_hierarchy_auth: ?u32 = null,
+    corrupt_nv_define: bool = false,
+    corrupt_da_parameters: bool = false,
     owner_commands: usize = 0,
     persist_commands: usize = 0,
     commands: usize = 0,
@@ -85,6 +89,10 @@ const Io = struct {
         if (std.mem.indexOf(u8, reply, "ZGVAnch1") != null) return error.PlaintextAnchor;
         if (((self.corrupt_quote and code == 0x158) or
             (self.corrupt_persistence and code == 0x120) or
+            (self.corrupt_hierarchy_state and code == 0x17a and std.mem.readInt(u16, reply[0..2], .big) == 0x8002) or
+            (self.corrupt_hierarchy_auth != null and code == 0x129 and std.mem.readInt(u32, command[10..14], .big) == self.corrupt_hierarchy_auth.?) or
+            (self.corrupt_nv_define and code == 0x12a) or
+            (self.corrupt_da_parameters and code == 0x13a) or
             (self.corrupt_parent_public and code == 0x173 and std.mem.readInt(u16, reply[0..2], .big) == 0x8002) or
             (self.corrupt_lockout_change and std.mem.readInt(u32, command[6..10], .big) == 0x129) or
             (self.corrupt_unseal and std.mem.readInt(u32, command[6..10], .big) == 0x15e) or

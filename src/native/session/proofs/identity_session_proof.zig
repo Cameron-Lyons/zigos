@@ -21,8 +21,36 @@ pub fn enrollmentFor(capsule: *const pin_mod.Capsule, digest: tpm.Key, parent: t
     return .{ .owner = capsule.owner, .device = capsule.device, .capsule_digest = digest, .parent = parent, .catalog_object_id = object_id, .anchor_index = anchor_index, .catalog_secret_id = 1, .device_secret_id = 3 };
 }
 
-fn makePolicy(policies: *policy.Directory, owner: @import("../../core/principal.zig").PrincipalId) !void {
+pub fn makePolicy(policies: *policy.Directory, owner: @import("../../core/principal.zig").PrincipalId) !void {
     _ = try policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "session proof", .secret_vault_allowed = true, .require_hardware_backed_secrets = true, .deny_secret_raw_export = true, .max_secret_handle_lease_ticks = 1000, .credential_assertions_allowed = true }, .{ .label = "session policy fixture", .seed = @splat(0x72) });
+}
+
+// Extend a completed production enrollment with the verification credential
+// used by the ordinary PIN/recovery proofs. Setup itself creates no fixture key.
+pub fn addProofCredential(manager: anytype, io: anytype, record: *const @import("../../services/identity_enrollment.zig").Record, pin: []const u8) !void {
+    var service = vault.Service.init();
+    var identities = identity.Store.init();
+    var graph = graph_mod.Graph.init();
+    var policies = policy.Directory.init();
+    try makePolicy(&policies, record.enrollment.owner);
+    const storage = manager.storageServicePtr();
+    var session = session_mod.Session(@TypeOf(io.*)){
+        .io = io,
+        .enrollment = record.enrollment,
+        .state = .{ .vault = &service, .identities = &identities, .devices = &graph },
+        .storage = storage,
+        .policies = &policies,
+        .subjects = .{ .user_id = record.enrollment.owner.serial },
+    };
+    defer session.close() catch {};
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    try session.unlock(&record.capsule, pin, @import("../../../kernel/platform/secure_random.zig").bootInstanceId(), 1, 100, &scratch);
+    if (service.store.secret_count != 3 or identities.credential_count != 0) return error.UnexpectedProvisionedKeys;
+    const secret = try service.generateSigningKey(&policies, session.subjects, .{ .owner = record.enrollment.owner, .task_id = storage.task_id, .label = "session credential", .now_ticks = 2 }, null);
+    const handle = try service.lendHandle(&policies, session.subjects, .{ .owner = record.enrollment.owner, .holder = storage.owner, .task_id = storage.task_id, .secret_id = secret.id, .now_ticks = 2, .expires_at_ticks = 100 }, null);
+    _ = try session.coordinator.?.registerCredential(&graph, .{ .vault = &service, .policies = &policies, .subjects = session.subjects, .holder = storage.owner, .task_id = storage.task_id, .now_ticks = 2, .unlock_session = &session.replay }, .{ .owner = record.enrollment.owner, .device = record.enrollment.device, .relying_party_id = "session.example", .label = "session account", .key_handle_id = handle.id }, &scratch);
+    session.lock();
+    try requireLocked(&session);
 }
 
 pub fn provision(manager: anytype, io: anytype, client: *tpm.Client, capsule: *const pin_mod.Capsule, authorization: *const tpm.Key, owner_auth: ?*const tpm.Key) !void {
