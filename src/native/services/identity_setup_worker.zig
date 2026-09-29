@@ -192,7 +192,7 @@ test "identity setup worker preserves command borrows and erases cancelled or ex
     var graph = @import("../sync/device_graph.zig").Graph.init();
     var policies = policy.Directory.init();
     var scratch: [catalog.MAX_BYTES]u8 = undefined;
-    var worker = Worker(Io){ .io = &io, .storage = &disk.service, .state = .{ .vault = &vault, .identities = &identities, .devices = &graph }, .policies = &policies, .request = .{ .owner = .{ .kind = .user, .serial = 1 }, .device = .{ .kind = .device, .serial = 2 }, .catalog_object_id = 1000, .record_object_id = 1001, .parent_handle = 0x8100_1234, .anchor_index = 0x0180_1234 }, .scratch = &scratch, .max_duration_ticks = 20 };
+    var worker = Worker(Io){ .io = &io, .storage = &disk.service, .state = .{ .vault = &vault, .identities = &identities, .devices = &graph }, .policies = &policies, .request = .{ .owner = .{ .kind = .user, .serial = 1 }, .device = .{ .kind = .device, .serial = 2 }, .catalog_object_id = 1000, .record_object_id = 1001, .parent_handle = 0x8100_1234, .anchor_index = 0x0180_1234, .boot_index = 0x0180_1235 }, .scratch = &scratch, .max_duration_ticks = 20 };
     defer worker.deinit() catch unreachable;
     const backend = worker.backend();
     try std.testing.expectError(error.InvalidPin, backend.start_prepare(backend.context, "12345x", 1));

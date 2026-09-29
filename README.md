@@ -254,8 +254,19 @@ requests.
   state and 128 KiB stack. Cancelled preparation uses fresh object IDs on retry
   to preserve any independently retained candidate. In-place identity and device
   resets avoid a large temporary that exceeded the guarded worker stack in Debug.
-  The native owner must still attach setup at production boot, retain trusted
-  enrollment across boots and hand completion to the sign-in session. The QEMU
+  Setup now commits a separate 48-byte public enrollment pin in TPM NV. Its
+  immutable definition binds the exact bundle and index before the first write;
+  only owner authorization can write it, and a persistent write lock completes
+  enrollment. Existing conflicting indexes fail preflight before other permanent
+  mutations. Retries compare completed data without another write or lock command.
+  Boot loading reads this TPM-held candidate, verifies the disk bundle, proves
+  possession of the enrolled parent, then authenticates the locked index through
+  a salted HMAC read before exposing enrollment to PIN entry. It rechecks disk
+  publication after hardware waits. Missing, incomplete or changed anchors require
+  explicit recovery with the externally retained record; ordinary boot never
+  provisions them. The local TPM transport and verified boot remain trusted.
+  The native owner must still attach setup and TPM-backed enrollment loading at
+  production boot and hand completion to the sign-in session. The QEMU
   export fixture models independent custody; production supplies no fixture key.
   A bounded identity-session owner now connects PIN verification to authenticated
   NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
@@ -384,7 +395,7 @@ requests.
   both VM and TPM then completes that signed checkpoint, restores its credential
   counter, and resumes assertions. Catalog format v5 includes the authenticated
   device graph and predecessor digest and rejects older snapshots.
-  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-ownership-qemu-test` runs ten
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-ownership-qemu-test` runs thirteen
   disposable boots through native setup and the production provisioning service.
   The first boot types and confirms a PIN through modeled HID, checks mismatch
   and cancellation, reads the complete recovery record from native display cells,
@@ -392,14 +403,17 @@ requests.
   record to resume. The proof dispatches userspace during TPM waits and checks
   private input, worker erasure and exclusive rendering. It loses accepted
   responses for parent persistence, owner and lockout authorization, lockout
-  parameters, NV definition, and the initial NV write, restarting the VM and TPM
-  after each. Completion reads the initialized anchor without another NV write.
+  parameters, catalog NV definition and first write, and boot-pin definition,
+  first write and persistent locking, restarting the VM and TPM after each.
+  Completion reads both anchors without another NV write or lock command.
   A forged hierarchy-state HMAC fails before administrator commands; empty owner
   authorization cannot create parents or define indexes. A verification-only
   custody key encrypts the generated recovery record and an independent compiled
-  signer pins that fixture; neither key is supplied to production. Both setup
-  recovery and ordinary sign-in reject
-  a replacement TPM. Normal identity unlock issues no owner commands.
+  signer pins that recovery fixture; neither key is supplied to production.
+  Ordinary reboot obtains enrollment from the locked TPM index and rejects
+  incomplete public state, damaged disk metadata and a corrupt read HMAC before
+  PIN entry. Both setup recovery and ordinary sign-in reject a replacement TPM.
+  Boot loading issues no owner commands, NV writes, locks or lockout resets.
   After provisioning, a separate verification credential exercises PIN unlock,
   durable assertion counters and recovery. The reboot exhausts all eight PIN
   attempts, requires recovery-key authentication before administrator commands,
@@ -407,7 +421,7 @@ requests.
   replay-entropy failure, replay rejection and expiry. Host crash tests withhold
   TPM access after a failed disk barrier and keep the staged catalog and companion
   record in one checkpoint. The ownership suite runs in release preflight.
-  Production boot attachment, independent enrollment-root binding and recovery-secret
+  Production boot attachment and recovery-secret
   custody remain open, along with physical TPM and input validation.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)

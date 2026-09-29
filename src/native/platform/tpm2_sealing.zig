@@ -2,6 +2,7 @@ const std = @import("std");
 const wire = @import("tpm2_wire.zig");
 const crypto = @import("tpm2_crypto.zig");
 pub const quote = @import("tpm2_quote.zig");
+pub const boot_pin = @import("tpm2_boot_pin.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const Key = [32]u8;
@@ -26,6 +27,7 @@ const EVICT_CONTROL: u32 = 0x120;
 const NV_READ_PUBLIC: u32 = 0x169;
 const NV_READ: u32 = 0x14e;
 const NV_WRITE: u32 = 0x137;
+const NV_WRITE_LOCK: u32 = 0x138;
 const HIERARCHY_CHANGE_AUTH: u32 = 0x129;
 const DA_PARAMETERS: u32 = 0x13a;
 const DA_RESET: u32 = 0x139;
@@ -609,16 +611,169 @@ pub const Client = struct {
         session.handle = 0;
     }
 
+    // Public discovery only: the local TPM is the boot trust source, never the
+    // disk bundle. The caller must open the candidate's enrolled parent and
+    // verifyBootPin before accepting PIN input or publishing enrollment.
+    pub fn bootPinCandidate(self: *Client, io: anytype, index: u32) !boot_pin.Pin {
+        try boot_pin.validateIndex(index);
+        if (self.failed) return error.Failed;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        const public = try boot_pin.parsePublic(try self.readNvPublic(io, index), index);
+        try public.requireComplete();
+        var w = wire.Writer{ .bytes = &self.command };
+        try w.begin(0x8002, NV_READ);
+        try w.int(u32, index);
+        try w.int(u32, index);
+        try w.int(u32, 9);
+        try w.int(u32, PASSWORD);
+        try w.sized("");
+        try w.int(u8, 0);
+        try w.sized("");
+        try w.int(u16, boot_pin.BYTES);
+        try w.int(u16, 0);
+        const reply = try self.exchange(io, w.finish(), 0x8002, false, 2000);
+        if (!std.mem.eql(u8, reply.authorization, &.{ 0, 0, 1, 0, 0 })) return error.InvalidResponse;
+        var r = wire.Reader{ .bytes = reply.parameters };
+        const bytes = try r.sized();
+        const candidate = try boot_pin.Pin.decode(bytes);
+        try r.end();
+        if (!std.mem.eql(u8, &boot_pin.commitment(index, bytes[0..boot_pin.BYTES]), &public.commitment)) return error.BootPinChanged;
+        return candidate;
+    }
+
+    pub fn verifyBootPin(self: *Client, io: anytype, index: u32, expected: boot_pin.Pin) !void {
+        try boot_pin.validateIndex(index);
+        const bytes = try expected.encode();
+        if (self.parent == 0) return error.NotInitialized;
+        if (self.failed) return error.Failed;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        const public = try boot_pin.parsePublic(try self.readNvPublic(io, index), index);
+        try public.requireComplete();
+        if (!std.mem.eql(u8, &public.commitment, &boot_pin.commitment(index, &bytes))) return error.BootPinChanged;
+        const actual = try self.readBootPinAuthenticated(io, index, public);
+        if (!std.mem.eql(u8, &actual, &bytes)) return error.BootPinChanged;
+    }
+
+    // Preflight before other permanent enrollment mutations. Existing malformed
+    // or differently bound indexes are conflicts, never fresh storage.
+    pub fn checkBootPinEnrollment(self: *Client, io: anytype, index: u32, expected: boot_pin.Pin) !void {
+        try boot_pin.validateIndex(index);
+        const bytes = try expected.encode();
+        if (self.failed) return error.Failed;
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        if (self.readNvPublic(io, index)) |raw| {
+            const public = try boot_pin.parsePublic(raw, index);
+            if (!std.mem.eql(u8, &public.commitment, &boot_pin.commitment(index, &bytes))) return error.BootPinChanged;
+        } else |err| {
+            if (err != error.NvIndexMissing) return @as(anyerror!void, err);
+        }
+    }
+
+    // Explicit setup commit only. Definition binds the exact independently
+    // retained record before any data write. Retries never replace an index or
+    // rewrite completed data; WRITEDEFINE keeps the lock across TPM restarts.
+    pub fn enrollBootPin(self: *Client, io: anytype, index: u32, expected: boot_pin.Pin, owner_auth: *const Key) !void {
+        try boot_pin.validateIndex(index);
+        const bytes = try expected.encode();
+        const binding = boot_pin.commitment(index, &bytes);
+        try self.ready(owner_auth);
+        errdefer |err| self.rejectProtocolFailure(err);
+        defer self.wipeBuffers();
+        // Only exact handle absence permits definition. Malformed public data
+        // never becomes permission to create or replace an index.
+        var public = try self.ensureBootPinPublic(io, index, &binding, owner_auth);
+        if (!std.mem.eql(u8, &public.commitment, &binding)) return error.BootPinChanged;
+        if (!public.written) {
+            if (public.locked) return error.BootPinIncomplete;
+            var session = try self.startSession(io);
+            defer self.retireSession(io, &session);
+            var parameters: [boot_pin.BYTES + 4]u8 = undefined;
+            var w = wire.Writer{ .bytes = &parameters };
+            try w.sized(&bytes);
+            try w.int(u16, 0);
+            const reply = try self.authorizedHandles(io, &session, NV_WRITE, &.{ OWNER, index }, &.{ &.{ 0x40, 0, 0, 1 }, &public.name }, owner_auth, &parameters, 0x21, false);
+            if (reply.parameters.len != 0) return error.InvalidResponse;
+            try self.flush(io, session.handle);
+            session.handle = 0;
+            public = try boot_pin.parsePublic(try self.readNvPublic(io, index), index);
+            if (!std.mem.eql(u8, &public.commitment, &binding)) return error.BootPinChanged;
+        }
+        const actual = try self.readBootPinAuthenticated(io, index, public);
+        if (!std.mem.eql(u8, &actual, &bytes)) return error.BootPinChanged;
+        if (!public.locked) {
+            var session = try self.startSession(io);
+            defer self.retireSession(io, &session);
+            const reply = try self.authorizedHandles(io, &session, NV_WRITE_LOCK, &.{ OWNER, index }, &.{ &.{ 0x40, 0, 0, 1 }, &public.name }, owner_auth, &.{}, 1, false);
+            if (reply.parameters.len != 0) return error.InvalidResponse;
+            try self.flush(io, session.handle);
+            session.handle = 0;
+        }
+        try self.verifyBootPin(io, index, expected);
+    }
+
+    fn ensureBootPinPublic(self: *Client, io: anytype, index: u32, binding: *const Key, owner_auth: *const Key) !boot_pin.Public {
+        if (self.readNvPublic(io, index)) |raw| {
+            return boot_pin.parsePublic(raw, index);
+        } else |err| {
+            if (err != error.NvIndexMissing) return err;
+        }
+        try self.defineBootPin(io, index, binding, owner_auth);
+        return boot_pin.parsePublic(try self.readNvPublic(io, index), index);
+    }
+
+    fn defineBootPin(self: *Client, io: anytype, index: u32, binding: *const Key, owner_auth: *const Key) !void {
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [50]u8 = undefined;
+        var w = wire.Writer{ .bytes = &parameters };
+        try w.sized(""); // Empty AUTHREAD value; this index contains no secrets.
+        try w.int(u16, 46);
+        try w.int(u32, index);
+        try w.int(u16, 0x0b);
+        try w.int(u32, boot_pin.ATTRIBUTES);
+        try w.sized(binding);
+        try w.int(u16, boot_pin.BYTES);
+        const reply = try self.authorizedHandles(io, &session, NV_DEFINE, &.{OWNER}, &.{&.{ 0x40, 0, 0, 1 }}, owner_auth, &parameters, 0x21, false);
+        if (reply.parameters.len != 0) return error.InvalidResponse;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+    }
+
+    fn readBootPinAuthenticated(self: *Client, io: anytype, index: u32, public: boot_pin.Public) ![boot_pin.BYTES]u8 {
+        if (!public.written) return error.BootPinIncomplete;
+        var session = try self.startSession(io);
+        defer self.retireSession(io, &session);
+        var parameters: [4]u8 = undefined;
+        std.mem.writeInt(u16, parameters[0..2], boot_pin.BYTES, .big);
+        std.mem.writeInt(u16, parameters[2..4], 0, .big);
+        const reply = try self.authorizedHandles(io, &session, NV_READ, &.{ index, index }, &.{ &public.name, &public.name }, "", &parameters, 0x41, false);
+        var r = wire.Reader{ .bytes = reply.parameters };
+        const bytes = try r.sized();
+        if (bytes.len != boot_pin.BYTES) return error.InvalidResponse;
+        try r.end();
+        const result = bytes[0..boot_pin.BYTES].*;
+        try self.flush(io, session.handle);
+        session.handle = 0;
+        return result;
+    }
+
     fn nvPublic(self: *Client, io: anytype, space: NvSpace) !NvPublic {
+        return parseNvPublic(try self.readNvPublic(io, space.index), space);
+    }
+
+    fn readNvPublic(self: *Client, io: anytype, index: u32) ![]const u8 {
         var w = wire.Writer{ .bytes = &self.command };
         try w.begin(0x8001, NV_READ_PUBLIC);
-        try w.int(u32, space.index);
+        try w.int(u32, index);
         const reply = self.exchange(io, w.finish(), 0x8001, false, 2000) catch |err| {
             // TPM_RC_HANDLE, handle 1. Other errors must not become absence.
             if (err == error.TpmError and self.last_tpm_error == 0x18b) return error.NvIndexMissing;
             return err;
         };
-        return parseNvPublic(reply.parameters, space);
+        return reply.parameters;
     }
 
     fn rejectProtocolFailure(self: *Client, err: anyerror) void {
@@ -1246,4 +1401,34 @@ test "TPM hierarchy state requires exactly one canonical permanent property" {
     client.parent = 0x8100_1234;
     client.failed = true;
     try std.testing.expectError(error.Failed, client.hierarchyState(&io));
+}
+
+test "TPM boot pin operations reject invalid bounds and authority before hardware" {
+    const Io = struct {
+        calls: usize = 0,
+        pub fn execute(self: *@This(), _: []const u8, _: []u8, _: u32) ![]u8 {
+            self.calls += 1;
+            return error.UnexpectedHardwareAccess;
+        }
+        pub fn random(self: *@This(), _: []u8) !void {
+            self.calls += 1;
+            return error.UnexpectedHardwareAccess;
+        }
+    };
+    var io = Io{};
+    var client = Client{ .parent = 0x8100_1345 };
+    const expected = boot_pin.Pin{ .object_id = 1001, .digest = @splat(9) };
+    const owner: Key = @splat(8);
+    for ([_]u32{ 0, 0x017f_ffff, 0x0181_0000 }) |index| {
+        try std.testing.expectError(error.InvalidNvSpace, client.bootPinCandidate(&io, index));
+        try std.testing.expectError(error.InvalidNvSpace, client.verifyBootPin(&io, index, expected));
+        try std.testing.expectError(error.InvalidNvSpace, client.checkBootPinEnrollment(&io, index, expected));
+        try std.testing.expectError(error.InvalidNvSpace, client.enrollBootPin(&io, index, expected, &owner));
+    }
+    const bad = boot_pin.Pin{ .object_id = 0, .digest = expected.digest };
+    try std.testing.expectError(error.InvalidBootPin, client.verifyBootPin(&io, 0x0180_1345, bad));
+    try std.testing.expectError(error.InvalidBootPin, client.enrollBootPin(&io, 0x0180_1345, bad, &owner));
+    const zero: Key = @splat(0);
+    try std.testing.expectError(error.InvalidAuthorization, client.enrollBootPin(&io, 0x0180_1345, expected, &zero));
+    try std.testing.expectEqual(@as(usize, 0), io.calls);
 }

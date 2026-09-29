@@ -19,7 +19,7 @@ const recovery = @import("identity_recovery.zig");
 const graph_snapshot = @import("../sync/device_graph_snapshot.zig");
 
 pub const CONTENT_TYPE = "application/x-zigos-identity-provisioning";
-pub const MAX_BYTES = 8 + 8 + 2 + enrollment.MAX_BYTES + nv.RECORD_BYTES + recovery.PACKAGE_BYTES;
+pub const MAX_BYTES = 8 + 8 + 4 + 2 + enrollment.MAX_BYTES + nv.RECORD_BYTES + recovery.PACKAGE_BYTES;
 
 pub const Request = struct {
     owner: principal.PrincipalId,
@@ -28,21 +28,24 @@ pub const Request = struct {
     catalog_object_id: u64,
     parent_handle: u32,
     anchor_index: u32,
+    boot_index: u32,
 
     fn validate(self: Request) !void {
         if (self.owner.kind != .user or self.owner.serial == 0 or self.device.kind != .device or self.device.serial == 0 or
             self.record_object_id == 0 or self.catalog_object_id == 0 or self.record_object_id == self.catalog_object_id or
             self.parent_handle < 0x8100_0000 or self.parent_handle >= 0x8180_0000 or
-            self.anchor_index < 0x0180_0000 or self.anchor_index > 0x0180_ffff) return error.InvalidProvisioningRequest;
+            self.anchor_index < 0x0180_0000 or self.anchor_index > 0x0180_ffff or
+            self.boot_index < 0x0180_0000 or self.boot_index > 0x0180_ffff or self.boot_index == self.anchor_index) return error.InvalidProvisioningRequest;
     }
 };
 
 // A separate trusted channel must retain this pin. Reading it from the same
 // object being opened would turn a signature into self-authenticated enrollment.
-pub const Pin = struct { object_id: u64, digest: tpm.Key };
+pub const Pin = tpm.boot_pin.Pin;
 
 pub const Bundle = struct {
     object_id: u64,
+    boot_index: u32,
     identity: enrollment.Record,
     initial_anchor: nv.Record,
     package: recovery.Package,
@@ -52,6 +55,7 @@ pub const Bundle = struct {
         _ = try self.initial_anchor.encode();
         const e = self.identity.enrollment;
         if (self.object_id == 0 or self.object_id == e.catalog_object_id or
+            self.boot_index < 0x0180_0000 or self.boot_index > 0x0180_ffff or self.boot_index == e.anchor_index or
             self.initial_anchor.checkpoint.object_id != e.catalog_object_id or
             !self.initial_anchor.checkpoint.owner.eql(e.owner) or self.initial_anchor.checkpoint.generation != 1 or
             self.initial_anchor.device_root_pin == null or std.mem.allEqual(u8, &self.initial_anchor.checkpoint.payload_digest, 0)) return error.InvalidProvisioningBundle;
@@ -64,8 +68,9 @@ pub const Bundle = struct {
         errdefer @memset(out, 0);
         try self.validate();
         var w = wire.Writer{ .bytes = out };
-        try w.put("ZGIDPR01");
+        try w.put("ZGIDPR02");
         try w.int(u64, self.object_id);
+        try w.int(u32, self.boot_index);
         var identity: [enrollment.MAX_BYTES]u8 = undefined;
         try w.sized(try self.identity.encode(&identity));
         try w.put(&(try self.initial_anchor.encode()));
@@ -82,8 +87,9 @@ pub const Bundle = struct {
         if (trusted.object_id == 0 or std.mem.allEqual(u8, &trusted.digest, 0) or bytes.len > MAX_BYTES or
             !std.crypto.timing_safe.eql(tpm.Key, digest(bytes), trusted.digest)) return error.UntrustedProvisioningBundle;
         var r = wire.Reader{ .bytes = bytes };
-        if (!std.mem.eql(u8, try r.take(8), "ZGIDPR01")) return error.InvalidProvisioningBundle;
+        if (!std.mem.eql(u8, try r.take(8), "ZGIDPR02")) return error.InvalidProvisioningBundle;
         const object_id = try r.int(u64);
+        const boot_index = try r.int(u32);
         // The whole bundle has already matched an independent pin. Its capsule
         // digest may now be used to decode the embedded public enrollment.
         const identity_bytes = try r.sized();
@@ -94,7 +100,7 @@ pub const Bundle = struct {
         const initial_anchor = try nv.Record.decode(try r.take(nv.RECORD_BYTES));
         const package = recovery.Package{ .bytes = (try r.take(recovery.PACKAGE_BYTES))[0..recovery.PACKAGE_BYTES].* };
         try r.end();
-        const result = Bundle{ .object_id = object_id, .identity = identity, .initial_anchor = initial_anchor, .package = package };
+        const result = Bundle{ .object_id = object_id, .boot_index = boot_index, .identity = identity, .initial_anchor = initial_anchor, .package = package };
         try result.validate();
         if (object_id != trusted.object_id) return error.UntrustedProvisioningBundle;
         return result;
@@ -119,6 +125,9 @@ pub fn prepare(io: anytype, storage: *storage_service.Service, state: catalog.St
     const deadline = std.math.add(u64, now, 1) catch return error.InvalidLease;
     var client = tpm.Client{};
     defer client.close(io) catch {};
+    if (client.bootPinCandidate(io, request.boot_index)) |_| return error.BootPinAlreadyDefined else |err| {
+        if (err != error.NvIndexMissing) return err;
+    }
     try client.createEnrollmentParent(io);
     const hierarchy = try client.hierarchyState(io);
     if (hierarchy.owner_auth_set or hierarchy.lockout_auth_set or hierarchy.in_lockout) return error.TpmAlreadyProvisioned;
@@ -151,7 +160,7 @@ pub fn prepare(io: anytype, storage: *storage_service.Service, state: catalog.St
     const staged = try checkpoint.stage(storage, state, .{ .key = keys[0] }, request.catalog_object_id, 0, now, scratch);
     storage.beginCheckpointBatch();
     defer storage.endCheckpointBatch();
-    var bundle = Bundle{ .object_id = request.record_object_id, .identity = .{ .capsule = capsule, .enrollment = .{
+    var bundle = Bundle{ .object_id = request.record_object_id, .boot_index = request.boot_index, .identity = .{ .capsule = capsule, .enrollment = .{
         .owner = request.owner,
         .device = request.device,
         .capsule_digest = try capsule.digest(),
@@ -178,6 +187,25 @@ pub fn load(storage: *const storage_service.Service, trusted: Pin) !Bundle {
     return bundle;
 }
 
+pub const BootEnrollment = struct { trusted: Pin, bundle: Bundle };
+
+// The local TPM and authenticated boot path supply the device trust boundary.
+// Disk bytes never choose their own pin. Public discovery alone is insufficient:
+// confirm both private-parent possession and the locked index's salted HMAC
+// before exposing enrollment to PIN entry. A replacement/cleared TPM or partial
+// setup requires explicit recovery; this path never provisions or resets it.
+pub fn loadBoot(io: anytype, storage: *const storage_service.Service, index: u32) !BootEnrollment {
+    var client = tpm.Client{};
+    defer client.close(io) catch {};
+    const candidate = try client.bootPinCandidate(io, index);
+    const bundle = try load(storage, candidate);
+    if (bundle.boot_index != index) return error.BootPinChanged;
+    try client.openPersistent(io, bundle.identity.enrollment.parent);
+    try client.verifyBootPin(io, index, candidate);
+    // TPM waits can yield. Recheck disk publication before returning authority.
+    return .{ .trusted = candidate, .bundle = try load(storage, candidate) };
+}
+
 // Explicit setup/recovery authorization, never an ordinary unlock path. Retain
 // trusted and recovery_key outside the candidate's disk before invoking this.
 // Retry only by invoking this operation again with those same retained values;
@@ -196,6 +224,7 @@ pub fn commit(io: anytype, storage: *storage_service.Service, trusted: Pin, reco
     const e = bundle.identity.enrollment;
     var client = tpm.Client{};
     defer client.close(io) catch {};
+    try client.checkBootPinEnrollment(io, bundle.boot_index, trusted);
     client.openPersistent(io, e.parent) catch |err| {
         if (err != error.PersistentParentMissing) return err;
         try client.createEnrollmentParent(io);
@@ -224,19 +253,20 @@ pub fn commit(io: anytype, storage: *storage_service.Service, trusted: Pin, reco
         try client.nvRead(io, space, &secrets.vault, &actual);
     };
     if (!std.mem.eql(u8, &actual, &expected)) return error.VaultAnchorChanged;
+    try client.enrollBootPin(io, bundle.boot_index, trusted, &secrets.owner);
     return bundle.identity;
 }
 
 fn digest(bytes: []const u8) tpm.Key {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
-    h.update("zigos:identity-provisioning:v1\x00");
+    h.update("zigos:identity-provisioning:v2\x00");
     h.update(bytes);
     return h.finalResult();
 }
 
 test "identity provisioning requires an independent pin over every bundle byte" {
     const identity = try @import("../../tests/fixtures/identity_enrollment.zig").record();
-    var bundle = Bundle{ .object_id = 1001, .identity = identity, .initial_anchor = .{
+    var bundle = Bundle{ .object_id = 1001, .boot_index = 0x0180_1235, .identity = identity, .initial_anchor = .{
         .checkpoint = .{ .object_id = identity.enrollment.catalog_object_id, .owner = identity.enrollment.owner, .public_key = @splat(6), .generation = 1, .payload_digest = @splat(7) },
         .device_root_pin = @splat(8),
     }, .package = .{} };
@@ -298,7 +328,7 @@ test "identity provisioning rejects untrusted inputs and failed durability befor
     var graph = graph_mod.Graph.init();
     const state = catalog.State{ .vault = &service, .identities = &identities, .devices = &graph };
     var policies = policy.Directory.init();
-    const request = Request{ .owner = .{ .kind = .user, .serial = 1 }, .device = .{ .kind = .device, .serial = 2 }, .record_object_id = 1001, .catalog_object_id = 1000, .parent_handle = 0x8100_1234, .anchor_index = 0x0180_1234 };
+    const request = Request{ .owner = .{ .kind = .user, .serial = 1 }, .device = .{ .kind = .device, .serial = 2 }, .record_object_id = 1001, .catalog_object_id = 1000, .parent_handle = 0x8100_1234, .anchor_index = 0x0180_1234, .boot_index = 0x0180_1235 };
     const key: tpm.Key = @splat(4);
     var bad = request;
     bad.record_object_id = bad.catalog_object_id;
@@ -314,7 +344,7 @@ test "identity provisioning rejects untrusted inputs and failed durability befor
     identity.enrollment.owner = request.owner;
     identity.capsule.owner = request.owner;
     identity.enrollment.capsule_digest = try identity.capsule.digest();
-    var bundle = Bundle{ .object_id = request.record_object_id, .identity = identity, .initial_anchor = .{ .checkpoint = staged.checkpoint, .device_root_pin = @splat(8) }, .package = .{} };
+    var bundle = Bundle{ .object_id = request.record_object_id, .boot_index = request.boot_index, .identity = identity, .initial_anchor = .{ .checkpoint = staged.checkpoint, .device_root_pin = @splat(8) }, .package = .{} };
     const Entropy = struct {
         pub fn random(_: *@This(), out: []u8) !void {
             @memset(out, 9);

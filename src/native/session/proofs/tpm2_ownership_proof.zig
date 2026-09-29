@@ -22,9 +22,9 @@ const object_id = 0x706_0001;
 const parent_handle = 0x8100_7060;
 const content_type = "application/x-zigos-tpm-owner-proof";
 const signer = signing.SignerIdentity{ .label = "owner-proof-enrollment", .seed = @splat(0xa6) };
-const Stage = enum(u8) { persistence, owner, lockout, parameters, definition, write, finish, enrolled };
+const Stage = enum(u8) { persistence, owner, lockout, parameters, definition, write, boot_definition, boot_write, boot_lock, finish, enrolled };
 const Aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
-const request = provisioning.Request{ .owner = .{ .kind = .user, .serial = 0x706 }, .device = .{ .kind = .device, .serial = 0x707 }, .record_object_id = object_id + 1, .catalog_object_id = 0x704_0001, .parent_handle = parent_handle, .anchor_index = 0x0180_7041 };
+const request = provisioning.Request{ .owner = .{ .kind = .user, .serial = 0x706 }, .device = .{ .kind = .device, .serial = 0x707 }, .record_object_id = object_id + 1, .catalog_object_id = 0x704_0001, .parent_handle = parent_handle, .anchor_index = 0x0180_7041, .boot_index = 0x0180_7042 };
 const Record = struct {
     stage: Stage = .persistence,
     ciphertext: [recovery_record.CODE_BYTES]u8,
@@ -121,7 +121,7 @@ pub fn run(manager: anytype, io: anytype) !void {
     var retained = recovery_record.Record{};
     defer retained.erase();
     try record.open(&retained);
-    const bundle = try provisioning.load(storage, retained.trusted);
+    var bundle = try provisioning.load(storage, retained.trusted);
     const identity = &bundle.identity;
     var secrets = recovery.Secrets{};
     defer secrets.wipe();
@@ -134,6 +134,9 @@ pub fn run(manager: anytype, io: anytype) !void {
     if (record.stage != .persistence) {
         client.openPersistent(io, identity.enrollment.parent) catch |err| {
             if (err != error.PersistentParentMissing or io.owner_commands != 0) return err;
+            if (provisioning.loadBoot(io, storage, request.boot_index)) |_| return error.ReplacedBootEnrollment else |failure| {
+                if (failure != error.NvIndexMissing or io.owner_commands != 0) return error.UnsafeBootEnrollmentReplacement;
+            }
             if (record.stage == .enrolled) {
                 console.print("ZIGOS:TPM2:OWNER:REPLACEMENT_REJECTED\n");
             } else {
@@ -148,6 +151,12 @@ pub fn run(manager: anytype, io: anytype) !void {
     }
 
     if (record.stage != .enrolled) {
+        if (record.stage != .finish) {
+            if (provisioning.loadBoot(io, storage, request.boot_index)) |_| return error.PublishedIncompleteBootEnrollment else |err| {
+                const expected = if (record.stage == .boot_write or record.stage == .boot_lock) error.BootPinIncomplete else error.NvIndexMissing;
+                if (err != expected) return err;
+            }
+        }
         // Reject a forged hierarchy state before an administrator command.
         if (record.stage == .owner) {
             const before = io.owner_commands;
@@ -163,13 +172,18 @@ pub fn run(manager: anytype, io: anytype) !void {
             .lockout => io.corrupt_hierarchy_auth = 0x4000_000a,
             .parameters => io.corrupt_da_parameters = true,
             .definition => io.corrupt_nv_define = true,
-            .write => io.corrupt_nv_write = true,
+            .write, .boot_write => io.corrupt_nv_write = true,
+            .boot_definition => io.corrupt_nv_define = true,
+            .boot_lock => io.corrupt_nv_write_lock = true,
             .finish => {},
             .enrolled => unreachable,
         }
         if (record.stage != .finish) {
             _ = try setup_proof.run(manager, io, request, pin, &retained, setup_proof.NoExport{}, &scratch, error.IntegrityFailure);
             if (io.da_resets != 0 or (record.stage != .persistence and io.persist_commands != 0)) return error.RepeatedProvisioningMutation;
+            const expected_writes: usize = if (record.stage == .write or record.stage == .boot_write) 1 else 0;
+            const expected_locks: usize = if (record.stage == .boot_lock) 1 else 0;
+            if (io.nv_writes != expected_writes or io.nv_write_locks != expected_locks) return error.RepeatedEnrollmentNvMutation;
             const marker = switch (record.stage) {
                 .persistence => "ZIGOS:TPM2:OWNER:INTERRUPTED\n",
                 .owner => "ZIGOS:TPM2:OWNER:OWNER_INTERRUPTED\n",
@@ -177,6 +191,9 @@ pub fn run(manager: anytype, io: anytype) !void {
                 .parameters => "ZIGOS:TPM2:OWNER:POLICY_INTERRUPTED\n",
                 .definition => "ZIGOS:TPM2:OWNER:DEFINE_INTERRUPTED\n",
                 .write => "ZIGOS:TPM2:OWNER:WRITE_INTERRUPTED\n",
+                .boot_definition => "ZIGOS:TPM2:OWNER:BOOT_DEFINE_INTERRUPTED\n",
+                .boot_write => "ZIGOS:TPM2:OWNER:BOOT_WRITE_INTERRUPTED\n",
+                .boot_lock => "ZIGOS:TPM2:OWNER:BOOT_LOCK_INTERRUPTED\n",
                 else => unreachable,
             };
             record.stage = @enumFromInt(@intFromEnum(record.stage) + 1);
@@ -184,8 +201,18 @@ pub fn run(manager: anytype, io: anytype) !void {
             halt(marker);
         }
         const completed = (try setup_proof.run(manager, io, request, pin, &retained, setup_proof.NoExport{}, &scratch, null)) orelse return error.MissingSetupIdentity;
-        if (!std.mem.eql(u8, &(try completed.digest()), &(try identity.digest())) or io.persist_commands != 0 or io.nv_writes != 0 or io.da_resets != 0) return error.RepeatedCompletedEnrollment;
+        if (!std.mem.eql(u8, &(try completed.digest()), &(try identity.digest())) or io.persist_commands != 0 or io.nv_writes != 0 or io.nv_write_locks != 0 or io.da_resets != 0) return error.RepeatedCompletedEnrollment;
+        const boot_enrollment = try provisioning.loadBoot(io, storage, request.boot_index);
+        if (!std.meta.eql(boot_enrollment.trusted, retained.trusted)) return error.BootEnrollmentChanged;
         try client.openPersistent(io, identity.enrollment.parent);
+        var changed_pin = retained.trusted;
+        changed_pin.digest[0] ^= 1;
+        if (client.checkBootPinEnrollment(io, request.boot_index, changed_pin)) |_| return error.AcceptedBootPinConflict else |err| {
+            if (err != error.BootPinChanged) return err;
+        }
+        if (client.enrollBootPin(io, request.boot_index, changed_pin, &secrets.owner)) |_| return error.ReplacedBootPin else |err| {
+            if (err != error.BootPinChanged or io.nv_writes != 0 or io.nv_write_locks != 0) return error.UnsafeBootPinReplacement;
+        }
         const hierarchy = try client.hierarchyState(io);
         if (!hierarchy.owner_auth_set or !hierarchy.lockout_auth_set or hierarchy.in_lockout) return error.UnprotectedEnrolledHierarchy;
         const space = tpm.NvSpace{ .index = 0x0180_7060, .size = 32 };
@@ -202,6 +229,29 @@ pub fn run(manager: anytype, io: anytype) !void {
         halt("ZIGOS:TPM2:OWNER:ENROLLED\n");
     }
 
+    // Ordinary boot obtains its authority from locked TPM state, independently
+    // of the fixture's externally retained recovery record.
+    io.corrupt_boot_pin_read = true;
+    if (provisioning.loadBoot(io, storage, request.boot_index)) |_| return error.AcceptedUnauthenticatedBootPin else |err| {
+        if (err != error.IntegrityFailure) return err;
+    }
+    io.corrupt_boot_pin_read = false;
+    io.spoof_unwritten_once = true;
+    if (provisioning.loadBoot(io, storage, request.boot_index)) |_| return error.AcceptedUnwrittenBootPin else |err| {
+        if (err != error.BootPinIncomplete or io.spoof_unwritten_once) return error.InvalidBootPinStateFailure;
+    }
+    const disk_record = storage.store.latestVersion(retained.trusted.object_id).?;
+    disk_record.metadata.signature.value[0] ^= 1;
+    const damaged = provisioning.loadBoot(io, storage, request.boot_index);
+    disk_record.metadata.signature.value[0] ^= 1;
+    if (damaged) |_| return error.AcceptedUntrustedBootBundle else |err| {
+        if (err != error.UntrustedProvisioningBundle) return err;
+    }
+    const boot_enrollment = try provisioning.loadBoot(io, storage, request.boot_index);
+    if (!std.meta.eql(boot_enrollment.trusted, retained.trusted)) return error.BootEnrollmentChanged;
+    bundle = boot_enrollment.bundle;
+    if (io.owner_commands != 0 or io.nv_writes != 0 or io.nv_write_locks != 0 or io.da_resets != 0) return error.BootEnrollmentRequestedAdministration;
+    console.print("ZIGOS:TPM2:BOOT_ENROLLMENT:VERIFIED\n");
     try client.openPersistent(io, identity.enrollment.parent);
     var tampered = tpm.Client{};
     defer tampered.close(io) catch {};
@@ -222,6 +272,9 @@ pub fn run(manager: anytype, io: anytype) !void {
     if (identity.capsule.unlock(&client, io, &identity.enrollment.capsule_digest, pin, &denied)) |_| return error.MissingRecoveryLockout else |err| {
         if (err != error.PinLockedOut or !std.mem.allEqual(u8, &denied, 0)) return error.InvalidRecoveryLockout;
     }
+    const locked_boot = try provisioning.loadBoot(io, storage, request.boot_index);
+    if (!std.meta.eql(locked_boot.trusted, retained.trusted) or io.da_resets != 0 or io.owner_commands != 0)
+        return error.BootEnrollmentBypassedLockout;
     try identity_proof.runRecovery(manager, io, identity, &bundle.package, &retained);
     try identity.capsule.unlock(&client, io, &identity.enrollment.capsule_digest, pin, &denied);
     if (!std.crypto.timing_safe.eql(tpm.Key, denied, secrets.vault)) return error.RecoveryDidNotRestorePin;

@@ -29,6 +29,8 @@ const Io = struct {
     corrupt_hierarchy_state: bool = false,
     corrupt_hierarchy_auth: ?u32 = null,
     corrupt_nv_define: bool = false,
+    corrupt_nv_write_lock: bool = false,
+    corrupt_boot_pin_read: bool = false,
     corrupt_da_parameters: bool = false,
     owner_commands: usize = 0,
     persist_commands: usize = 0,
@@ -44,6 +46,7 @@ const Io = struct {
     interrupt_nv_write: bool = false,
     spoof_unwritten_once: bool = false,
     nv_writes: usize = 0,
+    nv_write_locks: usize = 0,
     corrupted: bool = false,
 
     pub fn random(_: *@This(), out: []u8) !void {
@@ -66,7 +69,9 @@ const Io = struct {
         self.commands += 1;
         if (code == 0x139) self.da_resets += 1;
         if (code == 0x120) self.persist_commands += 1;
-        if (code == 0x120 or code == 0x129 or code == 0x12a or code == 0x131) self.owner_commands += 1;
+        if (code == 0x138) self.nv_write_locks += 1;
+        if (code == 0x120 or code == 0x129 or code == 0x12a or code == 0x131 or
+            ((code == 0x137 or code == 0x138) and std.mem.readInt(u32, command[10..14], .big) == 0x4000_0001)) self.owner_commands += 1;
         // Client.close must never FlushContext a persistent object.
         if (code == 0x165 and std.mem.readInt(u32, command[10..14], .big) >> 24 == 0x81) return error.FlushedPersistentParent;
         const reply = try hardware.execute(command, response, timeout_ms);
@@ -92,6 +97,8 @@ const Io = struct {
             (self.corrupt_hierarchy_state and code == 0x17a and std.mem.readInt(u16, reply[0..2], .big) == 0x8002) or
             (self.corrupt_hierarchy_auth != null and code == 0x129 and std.mem.readInt(u32, command[10..14], .big) == self.corrupt_hierarchy_auth.?) or
             (self.corrupt_nv_define and code == 0x12a) or
+            (self.corrupt_nv_write_lock and code == 0x138) or
+            (self.corrupt_boot_pin_read and code == 0x14e and std.mem.readInt(u32, command[18..22], .big) != 9) or
             (self.corrupt_da_parameters and code == 0x13a) or
             (self.corrupt_parent_public and code == 0x173 and std.mem.readInt(u16, reply[0..2], .big) == 0x8002) or
             (self.corrupt_lockout_change and std.mem.readInt(u32, command[6..10], .big) == 0x129) or

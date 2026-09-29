@@ -286,7 +286,7 @@ run_ownership_boot() {
   if [ "$name" = reboot ]; then recovery_count=1; fi
   local setup_count=0 setup_marker=''
   case "$name" in
-    interrupted|owner-interrupted|lockout-interrupted|policy-interrupted|define-interrupted|write-interrupted)
+    interrupted|owner-interrupted|lockout-interrupted|policy-interrupted|define-interrupted|write-interrupted|boot-define-interrupted|boot-write-interrupted|boot-lock-interrupted)
       setup_count=1
       setup_marker='ZIGOS:TPM2:SETUP:INTERRUPTED'
       ;;
@@ -299,6 +299,8 @@ run_ownership_boot() {
     ! grep -Fxq "$marker" "$log" || grep -Fq FAIL "$log" ||
     [ "$(grep -c '^ZIGOS:TPM2:SETUP:' "$log" || true)" -ne "$setup_count" ] ||
     { [ "$setup_count" -eq 1 ] && ! grep -Fxq "$setup_marker" "$log"; } ||
+    [ "$(grep -c '^ZIGOS:TPM2:BOOT_ENROLLMENT:' "$log" || true)" -ne "$recovery_count" ] ||
+    { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:BOOT_ENROLLMENT:VERIFIED' "$log"; } ||
     [ "$(grep -c '^ZIGOS:TPM2:RECOVERY:' "$log" || true)" -ne "$recovery_count" ] ||
     { [ "$recovery_count" -eq 1 ] && ! grep -Fxq 'ZIGOS:TPM2:RECOVERY:VERIFIED' "$log"; } ||
     [ "$(grep -c '^ZIGOS:TPM2:RECOVERY_INPUT:' "$log" || true)" -ne "$recovery_count" ] ||
@@ -353,6 +355,9 @@ elif [ "$MODE" = ownership ]; then
   run_ownership_boot policy-interrupted 'ZIGOS:TPM2:OWNER:POLICY_INTERRUPTED'
   run_ownership_boot define-interrupted 'ZIGOS:TPM2:OWNER:DEFINE_INTERRUPTED'
   run_ownership_boot write-interrupted 'ZIGOS:TPM2:OWNER:WRITE_INTERRUPTED'
+  run_ownership_boot boot-define-interrupted 'ZIGOS:TPM2:OWNER:BOOT_DEFINE_INTERRUPTED'
+  run_ownership_boot boot-write-interrupted 'ZIGOS:TPM2:OWNER:BOOT_WRITE_INTERRUPTED'
+  run_ownership_boot boot-lock-interrupted 'ZIGOS:TPM2:OWNER:BOOT_LOCK_INTERRUPTED'
   cp --sparse=always "$STORE_IMAGE" "$TPM_WORK/setup-store.img"
   run_ownership_boot enrolled 'ZIGOS:TPM2:OWNER:ENROLLED'
   run_ownership_boot reboot 'ZIGOS:TPM2:OWNER:VERIFIED'
