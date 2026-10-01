@@ -300,9 +300,7 @@ pub const SurfaceText = extern struct {
         if (self.state.cursor_upstream and (self.state.model != 1 or self.cursor == 0 or text_layout.unicode.followsNewline(self.textSlice(), self.cursor))) return false;
         const save_state = std.enums.fromInt(DocumentSaveState, self.state.save_state) orelse return false;
         if (self.state.model != 1 and (save_state != .none or self.state.selection_anchor != self.cursor)) return false;
-        if (!text_layout.unicode.validText(self.textSlice()) or
-            !text_layout.unicode.isBoundary(self.textSlice(), self.cursor) or
-            !text_layout.unicode.isBoundary(self.textSlice(), self.state.selection_anchor)) return false;
+        if (!text_layout.unicode.validTextAndBoundaries(self.textSlice(), self.cursor, self.state.selection_anchor)) return false;
         return std.mem.allEqual(u8, self.text[self.text_length..], 0);
     }
 };
@@ -495,4 +493,14 @@ test "text surface rejects cursors inside scalars and grapheme clusters" {
     text.state.cursor_upstream = false;
     text.text[0] = 0xff;
     try std.testing.expect(!text.isCanonical());
+}
+
+test "text surface validates bytes beyond collapsed and selected caret positions" {
+    for ([_][]const u8{ "e\u{301}\x80", "valid\x1b", "ok\xc2\x85", "valid\xe2\x82" }) |bytes| {
+        var text = SurfaceText{ .text_length = @intCast(bytes.len), .state = .{ .model = 1 } };
+        @memcpy(text.text[0..bytes.len], bytes);
+        try std.testing.expect(!text.isCanonical());
+        text.state.selection_anchor = 1;
+        try std.testing.expect(!text.isCanonical());
+    }
 }

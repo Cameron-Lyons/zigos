@@ -51,9 +51,9 @@ pub fn run() noreturn {
         }
 
         x86.cli();
-        const ready_tasks = session_manager.userspaceSchedulerHasReadyTasks();
-        if (event_wake.any() or ready_tasks or session_manager.networkWorkPending()) {
-            if (ready_tasks) timer.armSchedulerTick();
+        const dispatchable_tasks = session_manager.userspaceSchedulerHasDispatchableTasks(timer.getTicks());
+        if (event_wake.any() or dispatchable_tasks or session_manager.networkWorkPending()) {
+            if (dispatchable_tasks) timer.armSchedulerTick();
             x86.sti();
             continue;
         }

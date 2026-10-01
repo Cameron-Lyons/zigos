@@ -363,6 +363,14 @@ pub const StorageCore = struct {
         return self.store.versionChunkCursor(version_record);
     }
 
+    pub fn versionChunkCursorAt(
+        self: *const Service,
+        version_record: *const object_store.VersionRecord,
+        byte_offset: usize,
+    ) object_store.Error!object_store.Store.VersionChunkCursor {
+        return self.store.versionChunkCursorAt(version_record, byte_offset);
+    }
+
     pub fn versionBlob(self: *const Service, version_record: *const object_store.VersionRecord) ?*const object_store.BlobRecord {
         return self.store.versionBlob(version_record);
     }

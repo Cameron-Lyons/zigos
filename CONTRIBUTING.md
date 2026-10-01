@@ -40,12 +40,15 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build uefi-verification-qemu-test` | You touched the verification ISO or first-hardware-target proof media. |
 | `./scripts/zig.sh build benchmark` | You touched performance-sensitive kernel or native-service paths. |
 | `./scripts/zig.sh build frame-allocator-benchmark` | Measure physical-page allocator reuse, sparse-memory searches, contiguous runs, and bounded exhaustion on the host without QEMU. Uses ReleaseFast and reports the median of five samples. |
-| `./scripts/zig.sh build heap-allocator-benchmark` | Measure heap allocation/free reuse and successful or failed allocation across 4096 separated free blocks. Uses ReleaseFast and reports the median of five samples. |
+| `./scripts/zig.sh build heap-allocator-benchmark` | Measure heap reuse, successful or failed allocation across 1024 separated free blocks, and 512 page-sized allocations freed in permuted order. Reports allocator array bytes and the median of five ReleaseFast samples. |
 | `./scripts/zig.sh build ipc-ring-benchmark` | Measure host IPC send/receive with full inline payloads and full-queue backpressure. Compares one receive snapshot with separate peek/pop calls in the same ReleaseFast build; reports the median of five samples. |
 | `./scripts/zig.sh build text-scanout-benchmark` | Measure host text rasterization, single-cell edits, and Unicode pool reordering with framebuffer damage counters. Uses ReleaseFast and reports the median of five samples. |
 | `./scripts/zig.sh build id-index-benchmark` | Measure ID hits, misses, generation reuse, empty-table lookups after deletion, and steady churn. Reports table bytes and the median of five ReleaseFast samples. |
 | `./scripts/zig.sh build endpoint-readiness-benchmark` | Compare owner scans and maintained readiness counts for 1–63 endpoints, including send/drain accounting. Checks results in the same ReleaseFast build. |
 | `./scripts/zig.sh build text-layout-benchmark` | Compare repeated layout and one-pass visible windows for ASCII and Unicode documents. Checks exact row/caret equivalence before timing. |
+| `./scripts/zig.sh build workspace-index-benchmark` | Measure path/object hits, empty misses after churn, and steady directory mutation using 192 path and 96 object buckets. Checks lookup results and replacement consistency. |
+| `./scripts/zig.sh build object-chunks-benchmark` | Compare prefix scans and positioned cursors for forward, reverse, and retransmitted object ranges. Checks reconstructed payload bytes and reports page visits. |
+| `./scripts/zig.sh build surface-text-benchmark` | Compare repeated and combined canonical text validation for 512-byte ASCII and Unicode documents, with collapsed and selected cursors. Checks acceptance parity. |
 
 ## Build And Cleanup Commands
 

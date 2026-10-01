@@ -127,6 +127,10 @@ pub fn userspaceSchedulerHasReadyTasks() bool {
     return default_manager.userspaceSchedulerHasReadyTasks();
 }
 
+pub fn userspaceSchedulerHasDispatchableTasks(now_ticks: u64) bool {
+    return default_manager.userspaceSchedulerHasDispatchableTasks(now_ticks);
+}
+
 pub fn servicePendingNetworkWork(now_ticks: u64) usize {
     return default_manager.servicePendingNetworkWork(now_ticks);
 }

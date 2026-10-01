@@ -607,6 +607,9 @@ Userspace dispatch and device interrupts share one explicit runtime owner on
 the bootstrap CPU. Each resource class has one ready queue; background, media,
 and batch work are serviced by the same dispatcher as interactive tasks. The
 service loop drains one atomic pending-work latch and rechecks it before idle.
+Idle checks use the dispatcher's eligibility rules: policy-delayed work remains
+queued while the CPU sleeps, and runnable work can pass a delayed queue head.
+Service deadlines still arm a wake timer even when no task can run yet.
 Application processors are online for TLB maintenance and otherwise sleep.
 Concurrent userspace dispatch requires independent executor state and service
 ownership before it can use those processors.
@@ -631,6 +634,10 @@ committed set is reconstructed from the selected root's version watermark;
 failed barriers retain dirty state, and retries or cold replay require no
 separate durability cache. Workspace-only and clean saves avoid reconstructing
 that set.
+Workspace path and object indexes close affected probe chains after deletion,
+so repeated directory edits leave no tombstones. Object sync positions a
+verified chunk cursor at each transport range rather than visiting every
+preceding payload page; version and manifest validation still precede access.
 
 Text scanout compares visible cell metadata and grapheme bytes independently
 of pool offsets, so recomposing an unchanged Unicode frame causes no pixel
@@ -640,6 +647,10 @@ full redraws, single-cell edits, and pool reordering on host memory.
 The compositor locates the caret and retains visible rows in one layout pass
 using a caller-owned row ring. Scrolling preserves grapheme boundaries and
 wrap affinity without a persistent layout cache.
+Canonical surface ingress validates UTF-8 and both selection boundaries in one
+traversal at each trust boundary. Presentation revisions belong to individual
+surfaces; switching surfaces can submit a lower revision, and the display
+driver replaces its active record only after the hardware accepts the update.
 
 Physical memory allocation uses a two-level availability index above its
 ownership bitmap to skip fully reserved or allocated regions. The index adds
@@ -655,10 +666,15 @@ The kernel heap uses per-CPU magazines for power-of-two size classes from
 32 bytes through 4 KiB, with eight cached spans per class. A locked span table
 handles cache misses, larger allocations, splitting, and adjacent-span
 coalescing. Payloads have no in-band header; a bounded address index validates
-allocation starts and rejects invalid or duplicate frees. Host tests exercise
-this same allocator in a bounded arena, including payload preservation and
-randomized fragmentation. `./scripts/zig.sh build heap-allocator-benchmark`
-measures reuse and allocation under fragmentation, including exhaustion.
+allocation starts and rejects invalid or duplicate frees. Compact 16-bit span
+links keep allocator arrays at 100,370 bytes. Free spans have doubly linked
+class lists for constant-time removal during coalescing; the address index
+hashes aligned span numbers across its full table and closes probe chains
+with bounded backward shifts after deletion. Host tests exercise this same
+allocator in a bounded arena, including all 4096 span slots, payload
+preservation, arbitrary release orders, and randomized fragmentation.
+`./scripts/zig.sh build heap-allocator-benchmark` measures reuse and allocation
+under fragmentation, including exhaustion and page-sized allocation batches.
 
 ## Design Decisions
 

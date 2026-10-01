@@ -2044,6 +2044,7 @@ fn unindexRemovedEntry(workspace: *WorkspaceRecord, remove_index: usize) void {
     workspace_index.removeEntryObjectSlot(
         ENTRY_OBJECT_INDEX_CAPACITY,
         workspace.path_index.objectSlots(),
+        entries[0..count_before],
         remove_index,
         removed.object_id.raw(),
     );
@@ -2068,6 +2069,7 @@ fn updateIndexedEntry(workspace: *WorkspaceRecord, existing_index: usize, staged
         workspace_index.removeEntryObjectSlot(
             ENTRY_OBJECT_INDEX_CAPACITY,
             workspace.path_index.objectSlots(),
+            entries[0..workspace.counts.entry_count],
             existing_index,
             previous.object_id.raw(),
         );

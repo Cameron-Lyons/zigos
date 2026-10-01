@@ -2,20 +2,32 @@ const std = @import("std");
 const heap = @import("heap_allocator").heap;
 
 var arena: [16 * 1024 * 1024]u8 align(16) = undefined;
-const Workload = enum { hot_reuse, fragmented_fit, fragmented_exhausted };
+const Workload = enum { hot_reuse, fragmented_fit, fragmented_exhausted, page_batches };
+const PAGE_BATCH_COUNT = 512;
+const PAGE_BATCH_BYTES = 8192;
 
 pub fn main(init: std.process.Init) !void {
     var output_buffer: [1024]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
     try output.interface.print("Heap allocator host benchmark: 16 MiB arena, 1024 separated free blocks\n", .{});
+    if (comptime @hasDecl(heap, "metadata_layout")) {
+        try output.interface.print("Allocator array metadata: {d} bytes, {d} bytes/span, {d} bytes/index\n", .{
+            heap.metadata_layout.array_bytes, heap.metadata_layout.span_bytes, heap.metadata_layout.index_bytes,
+        });
+    }
     inline for (comptime std.meta.tags(Workload)) |workload| {
-        const iterations: u32 = if (workload == .hot_reuse) 200_000 else 2000;
+        const iterations: u32 = switch (workload) {
+            .hot_reuse => 200_000,
+            .page_batches => 40,
+            else => 2000,
+        };
         var samples: [5]u64 = undefined;
         var checksum: u64 = 0;
         for (&samples) |*sample| {
             try heap.initHostArena(&arena);
-            if (workload != .hot_reuse) try fragment(workload == .fragmented_exhausted);
-            for (0..100) |_| _ = try runIteration(workload);
+            if (workload == .fragmented_fit or workload == .fragmented_exhausted)
+                try fragment(workload == .fragmented_exhausted);
+            for (0..if (workload == .page_batches) @as(usize, 2) else 100) |_| _ = try runIteration(workload);
             const start = std.Io.Clock.awake.now(init.io);
             for (0..iterations) |_| {
                 checksum +%= try runIteration(workload);
@@ -46,6 +58,7 @@ fn fragment(exhaust: bool) !void {
 }
 
 fn runIteration(comptime workload: Workload) !u64 {
+    if (workload == .page_batches) return pageBatch();
     const size: usize = if (workload == .hot_reuse) 64 else 3072;
     const allocation = heap.kmalloc(size);
     if (workload == .fragmented_exhausted) {
@@ -57,4 +70,30 @@ fn runIteration(comptime workload: Workload) !u64 {
     std.mem.doNotOptimizeAway(&arena);
     heap.kfree(ptr);
     return size;
+}
+
+fn pageBatch() !u64 {
+    var allocations: [PAGE_BATCH_COUNT]*anyopaque = undefined;
+    var count: usize = 0;
+    errdefer for (allocations[0..count]) |ptr| heap.kfree(ptr);
+    for (&allocations, 0..) |*allocation, index| {
+        allocation.* = heap.kmalloc(PAGE_BATCH_BYTES) orelse return error.OutOfMemory;
+        count += 1;
+        const bytes = @as([*]u8, @ptrCast(allocation.*))[0..PAGE_BATCH_BYTES];
+        bytes[0] = @truncate(index);
+        bytes[bytes.len - 1] = @as(u8, @truncate(index)) ^ 0xa5;
+    }
+    std.mem.doNotOptimizeAway(&arena);
+    var checksum: u64 = 0;
+    // Odd-stride order is a permutation: keep live neighbors around free spans
+    // and exercise allocation-start lookups and arbitrary free-list unlinking.
+    for (0..PAGE_BATCH_COUNT) |step| {
+        const index = (step * 73) % PAGE_BATCH_COUNT;
+        const bytes = @as([*]u8, @ptrCast(allocations[index]))[0..PAGE_BATCH_BYTES];
+        if (bytes[0] != @as(u8, @truncate(index)) or bytes[bytes.len - 1] != (@as(u8, @truncate(index)) ^ 0xa5))
+            return error.CorruptPayload;
+        checksum += bytes[0] + @as(u64, bytes[bytes.len - 1]);
+    }
+    for (0..PAGE_BATCH_COUNT) |step| heap.kfree(allocations[(step * 73) % PAGE_BATCH_COUNT]);
+    return checksum;
 }

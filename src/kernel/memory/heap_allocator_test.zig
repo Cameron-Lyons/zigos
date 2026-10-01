@@ -53,6 +53,44 @@ test "heap coalesces uncached spans in every release order" {
     }
 }
 
+test "heap recycles every span through fragmented page-sized frees" {
+    const count = heap.metadata_layout.span_capacity;
+    const bytes_per_span = 8192;
+    const arena = try std.testing.allocator.alignedAlloc(u8, .@"32", count * bytes_per_span);
+    defer std.testing.allocator.free(arena);
+    try heap.initHostArena(arena);
+    var blocks: [count]*anyopaque = undefined;
+    for ([_]usize{ 37, 61 }) |stride| {
+        for (&blocks, 0..) |*block, index| {
+            block.* = heap.kmalloc(bytes_per_span) orelse return error.OutOfMemory;
+            try std.testing.expectEqual(@intFromPtr(arena.ptr) + index * bytes_per_span, @intFromPtr(block.*));
+            const data = payload(block.*, bytes_per_span);
+            data[0] = @truncate(index);
+            data[data.len - 1] = @as(u8, @truncate(index)) ^ 0xa5;
+        }
+        try std.testing.expect(heap.kmalloc(1) == null);
+        // Keep live neighbors between free spans, then coalesce nodes from
+        // arbitrary positions in the same free list and wrapped lookup chains.
+        for (0..count / 2) |index| heap.kfree(blocks[index * 2]);
+        for (0..count / 2) |step| {
+            const index = ((step * stride) % (count / 2)) * 2 + 1;
+            const data = payload(blocks[index], bytes_per_span);
+            try std.testing.expectEqual(@as(u8, @truncate(index)), data[0]);
+            try std.testing.expectEqual(@as(u8, @truncate(index)) ^ 0xa5, data[data.len - 1]);
+            heap.kfree(blocks[index]);
+        }
+        const combined = heap.kmalloc(arena.len) orelse return error.OutOfMemory;
+        try std.testing.expectEqual(@intFromPtr(arena.ptr), @intFromPtr(combined));
+        heap.kfree(combined);
+    }
+}
+
+test "heap keeps compact links within its metadata budget" {
+    try std.testing.expectEqual(@as(usize, 2), heap.metadata_layout.index_bytes);
+    try std.testing.expect(heap.metadata_layout.span_bytes <= 20);
+    try std.testing.expect(heap.metadata_layout.array_bytes <= 101 * 1024);
+}
+
 test "heap preserves live payloads and free indexes under randomized fragmentation" {
     var arena: [128 * 1024]u8 align(16) = undefined;
     try heap.initHostArena(&arena);

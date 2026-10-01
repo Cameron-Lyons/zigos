@@ -109,6 +109,13 @@ const TaskSchedulingRank = struct {
     last_dispatch_tick: u64,
 };
 
+const ReadyCandidate = struct {
+    slot_index: usize,
+    task: ?*task_runtime.TaskRecord = null,
+    request: accelerator_scheduler.Request = .{ .class = .foreground_interactive },
+    decision: ?accelerator_scheduler.Decision = null,
+};
+
 pub const TaskDispatchStats = struct {
     task_id: u64,
     resource_class: accelerator_scheduler.ResourceClass,
@@ -568,6 +575,16 @@ pub const Scheduler = struct {
         return self.ready_task_count != 0;
     }
 
+    // Policy-delayed tasks retain their queue position while the owner sleeps.
+    // Invalid or exhausted entries remain actionable until runNext removes them.
+    pub fn hasDispatchableTasks(self: *const Scheduler, now_ticks: u64) bool {
+        if (!self.initialized or !smp.isRuntimeOwner()) return false;
+        for (engine_priority_order) |engine| {
+            if (self.accelerator_claim_counts[engineIndex(engine)] != 0 and self.physicalEngineAvailable(engine)) return true;
+        }
+        return self.selectReadyCandidate(now_ticks) != null;
+    }
+
     pub fn taskDispatchStats(self: *const Scheduler, task_id: u64) ?TaskDispatchStats {
         const slot = self.slots.getConst(task_id) orelse return null;
         const accounting = self.accountingForSlotConst(slot);
@@ -751,18 +768,19 @@ pub const Scheduler = struct {
         const runtime = self.runtime_ptr orelse return false;
 
         while (self.ready_task_count != 0) {
-            const class = self.selectReadyResourceClass(now_ticks) orelse {
+            const candidate = self.selectReadyCandidate(now_ticks) orelse {
                 if (self.accountBlockedReadyClasses(now_ticks)) {
                     self.last_dispatch_tick = now_ticks;
                 }
                 break;
             };
-            const index = self.popReadyIndex(class) orelse break;
+            const index = candidate.slot_index;
             const slot = &self.slots.slots[index];
+            self.unlinkReadyIndex(index);
             if (!slot.in_use) continue;
 
             const task_id = slot.task_id;
-            const task = runtime.findByHandle(slot.task_handle, task_id) orelse {
+            const task = candidate.task orelse {
                 _ = self.unregisterSlotIndex(index);
                 continue;
             };
@@ -774,14 +792,8 @@ pub const Scheduler = struct {
                 continue;
             }
 
-            const dispatch_request = self.dispatchRequestFor(slot, task);
-            const decision = self.planTaskDispatch(dispatch_request);
-            if (decision.delayed) {
-                _ = self.noteDelayed(slot, decision, now_ticks);
-                _ = self.enqueueReadyIndex(index, slot.resource_class);
-                self.last_dispatch_tick = now_ticks;
-                return false;
-            }
+            const dispatch_request = candidate.request;
+            const decision = candidate.decision.?;
             if (self.dispatchRequiresUnavailableAccelerator(slot, decision)) {
                 const requested_engine = requestedAcceleratorEngine(dispatch_request);
                 self.noteAcceleratorDenied(slot, decision, requested_engine);
@@ -909,27 +921,6 @@ pub const Scheduler = struct {
         return true;
     }
 
-    fn popReadyIndex(self: *Scheduler, class: accelerator_scheduler.ResourceClass) ?usize {
-        const queue_index = resourceClassIndex(class);
-        const slot_index = self.ready_heads[queue_index];
-        if (slot_index == QUEUE_NO_INDEX) return null;
-        if (slot_index >= self.slots.slots.len) return null;
-
-        const slot = &self.slots.slots[slot_index];
-        const next = slot.next_ready_index;
-        self.ready_heads[queue_index] = next;
-        if (self.ready_heads[queue_index] == QUEUE_NO_INDEX) self.ready_tails[queue_index] = QUEUE_NO_INDEX;
-        if (next != QUEUE_NO_INDEX) self.slots.slots[next].prev_ready_index = QUEUE_NO_INDEX;
-        slot.prev_ready_index = QUEUE_NO_INDEX;
-        slot.next_ready_index = QUEUE_NO_INDEX;
-        if (slot.queued_ready) {
-            slot.queued_ready = false;
-            self.ready_counts[queue_index] -= 1;
-            self.ready_task_count -= 1;
-        }
-        return @intCast(slot_index);
-    }
-
     fn unlinkReadyIndex(self: *Scheduler, slot_index: usize) void {
         if (slot_index >= self.slots.slots.len) return;
         const target = &self.slots.slots[slot_index];
@@ -957,17 +948,18 @@ pub const Scheduler = struct {
         self.ready_task_count -= 1;
     }
 
-    fn selectReadyResourceClass(self: *const Scheduler, now_ticks: u64) ?accelerator_scheduler.ResourceClass {
+    fn selectReadyCandidate(self: *const Scheduler, now_ticks: u64) ?ReadyCandidate {
+        var priority_candidate: ?ReadyCandidate = null;
+        var deadline_candidate: ?ReadyCandidate = null;
         var deadline_class: ?accelerator_scheduler.ResourceClass = null;
         var earliest_deadline: u64 = std.math.maxInt(u64);
         var selected_dispatch_count: u64 = std.math.maxInt(u64);
         var selected_last_dispatch_tick: u64 = std.math.maxInt(u64);
         for (resource_priority_order) |class| {
             if (!self.resourceClassDispatchable(class)) continue;
-            const queue_index = resourceClassIndex(class);
-            const head = self.ready_heads[queue_index];
-            if (head == QUEUE_NO_INDEX) continue;
-            const slot = &self.slots.slots[head];
+            const candidate = self.firstDispatchableCandidate(class) orelse continue;
+            if (priority_candidate == null) priority_candidate = candidate;
+            const slot = &self.slots.slots[candidate.slot_index];
             const deadline = slot.deadline_tick;
             if (deadline != 0 and
                 deadline <= now_ticks and
@@ -984,12 +976,29 @@ pub const Scheduler = struct {
                 selected_dispatch_count = slot.dispatch_count;
                 selected_last_dispatch_tick = slot.last_dispatch_tick;
                 deadline_class = class;
+                deadline_candidate = candidate;
             }
         }
-        if (deadline_class) |class| return class;
-        for (resource_priority_order) |class| {
-            if (!self.resourceClassDispatchable(class)) continue;
-            if (self.ready_heads[resourceClassIndex(class)] != QUEUE_NO_INDEX) return class;
+        if (deadline_candidate) |candidate| return candidate;
+        return priority_candidate;
+    }
+
+    fn firstDispatchableCandidate(self: *const Scheduler, class: accelerator_scheduler.ResourceClass) ?ReadyCandidate {
+        const runtime = self.runtime_ptr orelse return null;
+        var index = self.ready_heads[resourceClassIndex(class)];
+        while (index != QUEUE_NO_INDEX) : (index = self.slots.slots[index].next_ready_index) {
+            const slot = &self.slots.slots[index];
+            const task = runtime.findByHandle(slot.task_handle, slot.task_id) orelse
+                return .{ .slot_index = index };
+            if (task.state != .active or !task.runsAsUserspaceProcess() or
+                !task.hasLoadedExecutable() or !hasDispatchBudget(slot, task))
+            {
+                return .{ .slot_index = index, .task = task };
+            }
+            const request = self.dispatchRequestFor(slot, task);
+            const decision = self.planTaskDispatch(request);
+            if (decision.delayed) continue;
+            return .{ .slot_index = index, .task = task, .request = request, .decision = decision };
         }
         return null;
     }
@@ -998,7 +1007,7 @@ pub const Scheduler = struct {
         for (resource_priority_order) |class| {
             if (!latencySensitiveClass(class)) continue;
             if (!self.resourceClassDispatchable(class)) continue;
-            if (self.ready_heads[resourceClassIndex(class)] != QUEUE_NO_INDEX) return true;
+            if (self.firstDispatchableCandidate(class) != null) return true;
         }
         return false;
     }
@@ -1021,7 +1030,6 @@ pub const Scheduler = struct {
     fn accountBlockedReadyClasses(self: *Scheduler, now_ticks: u64) bool {
         var accounted = false;
         for (resource_priority_order) |class| {
-            if (self.resourceClassDispatchable(class)) continue;
             const queue_index = resourceClassIndex(class);
             const slot_index = self.ready_heads[queue_index];
             if (slot_index == QUEUE_NO_INDEX) continue;
@@ -1029,7 +1037,15 @@ pub const Scheduler = struct {
 
             const slot = &self.slots.slots[slot_index];
             if (!slot.in_use) continue;
-            if (self.noteDelayed(slot, self.blockedResourceDecision(class), now_ticks)) accounted = true;
+            const decision = if (!self.resourceClassDispatchable(class))
+                self.blockedResourceDecision(class)
+            else decision: {
+                const runtime = self.runtime_ptr orelse continue;
+                const task = runtime.findByHandle(slot.task_handle, slot.task_id) orelse continue;
+                break :decision self.planTaskDispatch(self.dispatchRequestFor(slot, task));
+            };
+            if (!decision.delayed) continue;
+            if (self.noteDelayed(slot, decision, now_ticks)) accounted = true;
         }
         return accounted;
     }
@@ -2031,6 +2047,7 @@ test "application processors cannot mutate or dispatch the shared runtime queues
             .resource_class = .background_light,
             .requested_at_tick = 10,
         }) == null);
+        try std.testing.expect(!scheduler.hasDispatchableTasks(10));
         try std.testing.expect(!scheduler.runNext(10));
         try std.testing.expectEqual(userspace_executor.ExecutionOutcome.unavailable, scheduler.executeTask(task.id, 10));
     }
@@ -2857,6 +2874,7 @@ test "userspace scheduler requires complete hardware telemetry before waking har
     try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.media));
     try std.testing.expectEqual(@as(u64, 1), scheduler.engineDenialCount(.media));
     try std.testing.expectEqual(@as(usize, 0), scheduler.readyQueueDepth(.media_export));
+    try std.testing.expect(!scheduler.hasDispatchableTasks(1));
 
     scheduler.configureResourceState(.{ .media_available = true });
     try std.testing.expect(!scheduler.runNext(2));
@@ -2899,6 +2917,7 @@ test "userspace scheduler requires complete hardware telemetry before waking har
     });
     scheduler.configureResourceTelemetryFromProvider(provider.telemetryProvider());
     try std.testing.expect(scheduler.observedResourceTelemetry());
+    try std.testing.expect(scheduler.hasDispatchableTasks(3));
     try std.testing.expect(!scheduler.runNext(3));
     const dispatched_slot = scheduler.slots.getConst(task.id).?;
     try std.testing.expectEqual(@as(u64, 1), dispatched_slot.dispatch_count);
@@ -3454,4 +3473,78 @@ test "userspace scheduler stops dispatching tasks after their cpu budget is cons
 
     try std.testing.expect(!scheduler.runNext(2));
     try std.testing.expectEqual(@as(u64, 1), scheduler.slots.getConst(task.id).?.dispatch_count);
+}
+
+test "policy blocked queues can idle and become dispatchable when policy changes" {
+    for ([_]accelerator_scheduler.ResourceClass{ .batch_compute, .background_light }) |class| {
+        var executor = userspace_executor.Executor{};
+        var scheduler = Scheduler.init(&executor);
+        defer scheduler.deinit();
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        scheduler.bind(&catalog, &runtime, &capabilities);
+        const task = try createRunnableSchedulerTask(&runtime, 601, class, "deferred", "app.example.deferred", null);
+        try std.testing.expect(scheduler.registerTask(task.id));
+        try std.testing.expect(scheduler.hasDispatchableTasks(1));
+        scheduler.configureResourceState(if (class == .batch_compute)
+            .{ .battery_saver = true }
+        else
+            .{ .thermal_pressure = .critical });
+
+        try std.testing.expect(scheduler.hasReadyTasks());
+        try std.testing.expect(!scheduler.hasDispatchableTasks(10));
+        try std.testing.expect(!scheduler.runNext(10));
+        const deadline = scheduler.slots.getConst(task.id).?.deadline_tick;
+        try std.testing.expect(!scheduler.hasDispatchableTasks(deadline + 1));
+        try std.testing.expect(!scheduler.runNext(deadline + 1));
+        try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(class));
+        try std.testing.expectEqual(@as(u64, 0), scheduler.taskDispatchStats(task.id).?.dispatch_count);
+
+        scheduler.configureResourceState(.{});
+        try std.testing.expect(scheduler.hasDispatchableTasks(deadline + 2));
+        _ = scheduler.runNext(deadline + 2);
+        try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(task.id).?.dispatch_count);
+        _ = scheduler.runNext(deadline + 3);
+        try std.testing.expect(!scheduler.hasReadyTasks());
+        try std.testing.expect(!scheduler.hasDispatchableTasks(deadline + 3));
+    }
+}
+
+test "request delayed heads preserve their place without blocking runnable tasks or idle" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    defer scheduler.deinit();
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    const deferred = try createRunnableSchedulerTask(&runtime, 611, .foreground_interactive, "deferred", "app.example.deferred", null);
+    const foreground = try createRunnableSchedulerTask(&runtime, 612, .foreground_interactive, "foreground", "app.example.foreground", null);
+    const media = try createRunnableSchedulerTask(&runtime, 613, .media_export, "media", "app.example.media", null);
+    for ([_]u64{ deferred.id, foreground.id, media.id }) |id| try std.testing.expect(scheduler.registerTask(id));
+    try std.testing.expect(scheduler.configureTaskDispatchRequest(deferred.id, .{
+        .class = .foreground_interactive,
+        .expected_cpu_ticks = 8_000,
+    }, false));
+    scheduler.configureResourceState(.{ .cpu_budget_ticks = 4_000 });
+    const original_head = scheduler.ready_heads[resourceClassIndex(.foreground_interactive)];
+
+    try std.testing.expect(scheduler.hasDispatchableTasks(1));
+    _ = scheduler.runNext(1);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(foreground.id).?.dispatch_count);
+    try std.testing.expectEqual(original_head, scheduler.ready_heads[resourceClassIndex(.foreground_interactive)]);
+    _ = scheduler.runNext(2);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(media.id).?.dispatch_count);
+    _ = scheduler.runNext(3);
+    try std.testing.expect(scheduler.hasReadyTasks());
+    try std.testing.expect(!scheduler.hasDispatchableTasks(3));
+    try std.testing.expect(!scheduler.hasReadyLatencySensitiveWork());
+    try std.testing.expectEqual(@as(u64, 0), scheduler.taskDispatchStats(deferred.id).?.dispatch_count);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.foreground_interactive));
+
+    scheduler.configureResourceState(.{ .cpu_budget_ticks = 8_000 });
+    try std.testing.expect(scheduler.hasDispatchableTasks(4));
+    _ = scheduler.runNext(4);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(deferred.id).?.dispatch_count);
 }

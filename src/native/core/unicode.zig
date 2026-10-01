@@ -46,11 +46,33 @@ pub fn validText(text: []const u8) bool {
     var offset: usize = 0;
     while (offset < text.len) {
         const scalar = decode(text, offset) orelse return false;
-        if ((scalar.point < 0x20 and scalar.point != '\n' and scalar.point != '\r' and scalar.point != '\t') or
-            (scalar.point >= 0x7f and scalar.point <= 0x9f)) return false;
+        if (!validTextPoint(scalar.point)) return false;
         offset = scalar.end;
     }
     return true;
+}
+
+// Validate document bytes and both caret/selection offsets in one traversal.
+// Once both boundaries are known, validate the remaining bytes without further
+// grapheme classification. The start/end offsets need only byte validation.
+pub fn validTextAndBoundaries(text: []const u8, first: usize, second: usize) bool {
+    if (first > text.len or second > text.len) return false;
+    var iterator = Iterator{ .text = text };
+    var first_boundary = first == 0 or first == text.len;
+    var second_boundary = second == 0 or second == text.len;
+    if (first_boundary and second_boundary) return validText(text);
+    while (iterator.nextMode(true) catch return false) |cluster| {
+        first_boundary = first_boundary or cluster.end == first;
+        second_boundary = second_boundary or cluster.end == second;
+        if (first_boundary and second_boundary) return validText(text[cluster.end..]);
+        if (cluster.end > @max(first, second)) return false;
+    }
+    return first_boundary and second_boundary;
+}
+
+fn validTextPoint(point: u21) bool {
+    return !((point < 0x20 and point != '\n' and point != '\r' and point != '\t') or
+        (point >= 0x7f and point <= 0x9f));
 }
 
 pub const Cluster = struct {
@@ -72,9 +94,14 @@ pub const Iterator = struct {
     // UAX #29 revision 49 extended grapheme rules, GB3..GB999. Each scalar
     // is visited once; prefix state covers Indic links, emoji ZWJ and RI pairs.
     pub fn next(self: *Iterator) ?Cluster {
+        return self.nextMode(false) catch unreachable;
+    }
+
+    fn nextMode(self: *Iterator, comptime strict: bool) error{InvalidText}!?Cluster {
         if (self.offset == self.text.len) return null;
         const start = self.offset;
-        const first = decode(self.text, start) orelse Scalar{ .point = 0xfffd, .end = start + 1 };
+        const first = decode(self.text, start) orelse if (strict) return error.InvalidText else Scalar{ .point = 0xfffd, .end = start + 1 };
+        if (strict and !validTextPoint(first.point)) return error.InvalidText;
         var result = Cluster{
             .start = start,
             .end = first.end,
@@ -94,7 +121,8 @@ pub const Iterator = struct {
         var emoji_run = previous.pictographic;
         var emoji_zwj = false;
         while (result.end < self.text.len) {
-            const current = decode(self.text, result.end) orelse Scalar{ .point = 0xfffd, .end = result.end + 1 };
+            const current = decode(self.text, result.end) orelse if (strict) return error.InvalidText else Scalar{ .point = 0xfffd, .end = result.end + 1 };
+            if (strict and !validTextPoint(current.point)) return error.InvalidText;
             const p = properties(current.point);
             const joined = join: {
                 if (previous.kind == .cr and p.kind == .lf) break :join true; // GB3
@@ -189,6 +217,13 @@ test "Unicode 18 extended grapheme boundaries match the official conformance cor
             try std.testing.expectEqual(end, cluster.end);
         }
         try std.testing.expect(iterator.next() == null);
+        if (validText(bytes[0..length])) {
+            for (0..length + 2) |offset| {
+                const expected = std.mem.indexOfScalar(usize, boundaries[0..count], offset) != null;
+                try std.testing.expectEqual(expected, validTextAndBoundaries(bytes[0..length], offset, 0));
+                try std.testing.expectEqual(expected, validTextAndBoundaries(bytes[0..length], 0, offset));
+            }
+        }
     }
     try std.testing.expect(cases > 700);
 }
@@ -201,6 +236,49 @@ test "Unicode rejects malformed UTF-8 and device controls without normalizing te
     try std.testing.expectEqual(@as(usize, 3), previousBoundary(text, 6));
     try std.testing.expect(!isBoundary(text, 1));
     try std.testing.expectEqual(@as(usize, 3), ceilBoundary(text, 1));
+}
+
+test "Unicode strict text validation preserves two boundary checks" {
+    for ([_][]const u8{
+        "",                         "abc",                       "a\r\nb\n",
+        "\t界\t",
+        "e\u{301}Café",
+        "🇺🇸🇨🇦🇬",
+        "👩‍💻x",
+        "क्‍ष",
+        "\u{1100}\u{1161}\u{11a8}", "\u{600}a\u{2028}b\u{2029}",
+    }) |text| {
+        for (0..text.len + 2) |first| {
+            for (0..text.len + 2) |second| {
+                const expected = validText(text) and isBoundary(text, first) and isBoundary(text, second);
+                try std.testing.expectEqual(expected, validTextAndBoundaries(text, first, second));
+            }
+        }
+    }
+}
+
+test "Unicode strict text validation inspects bytes after both boundaries" {
+    for ([_][]const u8{ "a\x80", "a\xc0\xaf", "a\xed\xa0\x80", "a\xf4\x90\x80\x80", "a\xe2\x82", "a\x1b", "a\xc2\x85" }) |text| {
+        try std.testing.expect(!validTextAndBoundaries(text, 0, 0));
+        try std.testing.expect(!validTextAndBoundaries(text, 1, 1));
+    }
+    var bytes: [4]u8 = undefined;
+    for (0..0xa0) |point| {
+        const length = try std.unicode.utf8Encode(@intCast(point), &bytes);
+        const expected = switch (point) {
+            '\t', '\n', '\r', 0x20...0x7e => true,
+            else => false,
+        };
+        try std.testing.expectEqual(expected, validText(bytes[0..length]));
+        try std.testing.expectEqual(expected, validTextAndBoundaries(bytes[0..length], 0, length));
+    }
+    // Display input still substitutes malformed bytes and accepts controls for
+    // conformance rendering; strict ingress must not change that policy.
+    var iterator = Iterator{ .text = "\x80e\u{301}\x1b" };
+    try std.testing.expectEqual(@as(usize, 1), iterator.next().?.end);
+    try std.testing.expectEqual(@as(usize, 4), iterator.next().?.end);
+    try std.testing.expectEqual(@as(usize, 5), iterator.next().?.end);
+    try std.testing.expect(iterator.next() == null);
 }
 
 test "Unicode generated property ranges cover every scalar with valid enum tags" {

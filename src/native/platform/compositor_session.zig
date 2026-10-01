@@ -2877,3 +2877,52 @@ test "compositor presents by shared-memory handle without a pixel copy" {
     try std.testing.expectEqual(@as(u64, 3), display_driver_task.activeScanout().revision);
     display_driver_task.reset();
 }
+
+test "compositor orders handle revisions per surface before driver submission" {
+    display_driver_task.reset();
+    defer display_driver_task.reset();
+    var runtime = task_runtime.Runtime.init();
+    const first_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 101 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 101,
+        .local_only = true,
+    });
+    const second_task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 102 },
+        .component_class = .app_component,
+        .budget = compositorTestBudget(4),
+        .ui_surface_id = 102,
+        .local_only = true,
+    });
+    var session = Session.init();
+    defer session.deinit();
+    var first = testSurfacePresentation(101, 4096);
+    first.revision = 100;
+    var second = testSurfacePresentation(102, 4096);
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(first_task, &first));
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(second_task, &second));
+    const second_scanout = display_driver_task.activeScanout();
+    try std.testing.expectEqual(second.buffer_object_id, second_scanout.object_id);
+    try std.testing.expectEqual(@as(u64, 1), second_scanout.revision);
+
+    first.revision = 99;
+    try std.testing.expectError(error.StalePresentation, session.presentSurface(first_task, &first));
+    try std.testing.expectEqual(second_scanout, display_driver_task.activeScanout());
+    var conflict = second;
+    conflict.buffer_offset = 64;
+    try std.testing.expectError(error.PresentationConflict, session.presentSurface(second_task, &conflict));
+    try std.testing.expectEqual(second_scanout, display_driver_task.activeScanout());
+
+    first.revision = 101;
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(first_task, &first));
+    const first_scanout = display_driver_task.activeScanout();
+    try std.testing.expectEqual(first.buffer_object_id, first_scanout.object_id);
+    try std.testing.expectEqual(PresentResult.duplicate, try session.presentSurface(second_task, &second));
+    try std.testing.expectEqual(first_scanout, display_driver_task.activeScanout());
+    second.revision = 2;
+    try std.testing.expectEqual(PresentResult.accepted, try session.presentSurface(second_task, &second));
+    try std.testing.expectEqual(second.buffer_object_id, display_driver_task.activeScanout().object_id);
+    try std.testing.expectEqual(@as(u64, 2), display_driver_task.activeScanout().revision);
+}

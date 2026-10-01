@@ -77,3 +77,37 @@ The text-layout case locates, moves, and relocates the caret in a full 512-byte
 document. It varies hard breaks, widths of 20 and 120 columns, wrap affinity,
 movement direction, and one-row versus 23-row page steps. Its checksum includes
 the resulting byte offset, row, and affinity; invalid caret results fail the run.
+
+`./scripts/zig.sh build heap-allocator-benchmark` uses a 16 MiB host arena.
+It measures small-allocation reuse, successful and exhausted searches through
+1024 separated free blocks, and batches of 512 eight-KiB allocations freed in
+a permutation. The batch checks live payload bytes before release and exercises
+allocation-start lookup and adjacent-span coalescing. Results report the median
+of five samples and allocator array metadata, excluding scalar globals.
+The same tool can import an earlier `heap_benchmark.zig` for comparison.
+
+`./scripts/zig.sh build workspace-index-benchmark` measures 192 path buckets
+and 96 object buckets with 64 live entries. Cases cover hits, empty misses after
+every home bucket has been occupied and retired, and steady insertion/deletion.
+Every replacement checks both indexes and rejects retained old entries. The
+tables remain 288 bytes together; deletion closes affected probe chains.
+The tool accepts either the old or new object-removal signature to support
+comparison against the parent implementation.
+
+`./scripts/zig.sh build object-chunks-benchmark` compares prefix traversal with
+positioned cursors in the same executable. Both paths verify the immutable
+manifest and copy 181-byte transport ranges; one-time verification is warmed
+equally before timing. It reconstructs two-page, fourteen-page, and maximum
+28-page payloads in forward, reverse, and retransmission order, checks exact
+payload bytes, and reports page visits and median time per payload. Positioned
+cursors remove prefix visits while retaining full manifest verification.
+Their setup can cost more for a range wholly within the first page, where
+there are no prefix visits to eliminate.
+
+`./scripts/zig.sh build surface-text-benchmark` compares the previous separate
+UTF-8 and cursor/anchor boundary checks with combined canonical validation in
+the same executable. Full 512-byte ASCII and Unicode documents place collapsed
+and selected cursors at the head, middle, and end. Both paths retain metadata,
+wrap-affinity, save-state, and zero-tail checks. Each case checks acceptance and
+reports the median of five samples. Host timings exclude syscall copying and
+supplement ingress and Unicode conformance tests.
