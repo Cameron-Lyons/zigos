@@ -17,6 +17,10 @@ const CREATE_PRIMARY: u32 = 0x131;
 const START_SESSION: u32 = 0x176;
 const GET_CAPABILITY: u32 = 0x17a;
 const CREATE: u32 = 0x153;
+const TPM_RC_YIELDED: u32 = 0x908;
+const TPM_RC_TESTING: u32 = 0x90a;
+const TPM_RC_RETRY: u32 = 0x922;
+const MAX_COMMAND_SUBMISSIONS = 5;
 const LOAD: u32 = 0x157;
 const UNSEAL: u32 = 0x15e;
 const QUOTE: u32 = 0x158;
@@ -809,25 +813,34 @@ pub const Client = struct {
     }
 
     fn exchange(self: *Client, io: anytype, command: []const u8, tag: u16, has_handle: bool, timeout_ms: u32) !Reply {
-        const bytes = io.execute(command, &self.response, timeout_ms) catch |err| {
-            self.failed = true;
-            return err;
-        };
-        var r = wire.Reader{ .bytes = bytes };
-        const response_tag = try r.int(u16);
-        if (try r.int(u32) != bytes.len) return error.InvalidResponse;
-        const response_code = try r.int(u32);
-        if (response_code != 0) {
-            self.last_tpm_error = response_code;
-            if (response_tag != 0x8001 or bytes.len != 10) return error.InvalidResponse;
-            return error.TpmError;
+        // These TPM warnings leave the session nonce unchanged and permit
+        // resubmitting the exact packet, including its encryption and HMAC.
+        // Bound submissions; never retry authorization or transport failures.
+        var submissions: usize = 0;
+        while (true) {
+            submissions += 1;
+            const bytes = io.execute(command, &self.response, timeout_ms) catch |err| {
+                self.failed = true;
+                return err;
+            };
+            var r = wire.Reader{ .bytes = bytes };
+            const response_tag = try r.int(u16);
+            if (try r.int(u32) != bytes.len) return error.InvalidResponse;
+            const response_code = try r.int(u32);
+            if (response_code != 0) {
+                self.last_tpm_error = response_code;
+                if (response_tag != 0x8001 or bytes.len != 10) return error.InvalidResponse;
+                if (submissions < MAX_COMMAND_SUBMISSIONS and
+                    (response_code == TPM_RC_RETRY or response_code == TPM_RC_TESTING or response_code == TPM_RC_YIELDED)) continue;
+                return error.TpmError;
+            }
+            if (response_tag != tag) return error.InvalidResponse;
+            const handle = if (has_handle) try r.int(u32) else 0;
+            const length = if (tag == 0x8002) try r.int(u32) else bytes.len - r.pos;
+            const offset = r.pos;
+            _ = try r.take(length);
+            return .{ .handle = handle, .parameters = bytes[offset..][0..length], .authorization = bytes[r.pos..] };
         }
-        if (response_tag != tag) return error.InvalidResponse;
-        const handle = if (has_handle) try r.int(u32) else 0;
-        const length = if (tag == 0x8002) try r.int(u32) else bytes.len - r.pos;
-        const offset = r.pos;
-        _ = try r.take(length);
-        return .{ .handle = handle, .parameters = bytes[offset..][0..length], .authorization = bytes[r.pos..] };
     }
 
     fn startSession(self: *Client, io: anytype) !Session {
@@ -1431,4 +1444,68 @@ test "TPM boot pin operations reject invalid bounds and authority before hardwar
     const zero: Key = @splat(0);
     try std.testing.expectError(error.InvalidAuthorization, client.enrollBootPin(&io, 0x0180_1345, expected, &zero));
     try std.testing.expectEqual(@as(usize, 0), io.calls);
+}
+
+test "TPM exchange retries transient warnings with the identical authorized packet" {
+    const Io = struct {
+        calls: usize = 0,
+        warning: u32,
+        pub fn execute(self: *@This(), command: []const u8, response: []u8, timeout_ms: u32) ![]u8 {
+            try std.testing.expectEqualSlices(u8, "encrypted command with session HMAC", command);
+            try std.testing.expectEqual(@as(u32, 2000), timeout_ms);
+            self.calls += 1;
+            var w = wire.Writer{ .bytes = response };
+            try w.begin(if (self.calls < 3) 0x8001 else 0x8002, if (self.calls < 3) self.warning else 0);
+            if (self.calls == 3) {
+                try w.int(u32, 0x8000_0001);
+                try w.int(u32, 2);
+                try w.put("ok");
+                try w.put("response HMAC");
+            }
+            return response[0..w.finish().len];
+        }
+    };
+    for ([_]u32{ TPM_RC_RETRY, TPM_RC_TESTING, TPM_RC_YIELDED }) |warning| {
+        var io = Io{ .warning = warning };
+        var client = Client{};
+        const reply = try client.exchange(&io, "encrypted command with session HMAC", 0x8002, true, 2000);
+        try std.testing.expectEqual(@as(usize, 3), io.calls);
+        try std.testing.expectEqual(@as(u32, 0x8000_0001), reply.handle);
+        try std.testing.expectEqualSlices(u8, "ok", reply.parameters);
+        try std.testing.expectEqualSlices(u8, "response HMAC", reply.authorization);
+        try std.testing.expect(!client.failed);
+    }
+}
+
+test "TPM exchange bounds retries and rejects other failures without resubmission" {
+    const Io = struct {
+        calls: usize = 0,
+        code: u32 = TPM_RC_RETRY,
+        tag: u16 = 0x8001,
+        trailing: bool = false,
+        transport_failure: bool = false,
+        pub fn execute(self: *@This(), _: []const u8, response: []u8, _: u32) ![]u8 {
+            self.calls += 1;
+            if (self.transport_failure) return error.Timeout;
+            var w = wire.Writer{ .bytes = response };
+            try w.begin(self.tag, self.code);
+            if (self.trailing) try w.int(u8, 0);
+            return response[0..w.finish().len];
+        }
+    };
+    for ([_]u32{ TPM_RC_RETRY, TPM_RC_TESTING, TPM_RC_YIELDED, 0x98e, 0x921, 0x1df }) |code| {
+        var io = Io{ .code = code };
+        var client = Client{};
+        try std.testing.expectError(error.TpmError, client.exchange(&io, "command", 0x8002, false, 2000));
+        const retryable = code == TPM_RC_RETRY or code == TPM_RC_TESTING or code == TPM_RC_YIELDED;
+        try std.testing.expectEqual(@as(usize, if (retryable) MAX_COMMAND_SUBMISSIONS else 1), io.calls);
+        try std.testing.expectEqual(code, client.last_tpm_error);
+    }
+    for ([_]Io{ .{ .tag = 0x8002 }, .{ .trailing = true }, .{ .transport_failure = true } }) |fixture| {
+        var io = fixture;
+        var client = Client{};
+        try std.testing.expectError(if (io.transport_failure) error.Timeout else error.InvalidResponse, client.exchange(&io, "command", 0x8002, false, 2000));
+        try std.testing.expectEqual(@as(usize, 1), io.calls);
+        try std.testing.expectEqual(io.transport_failure, client.failed);
+    }
 }
