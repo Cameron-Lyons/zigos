@@ -207,3 +207,94 @@ test "scanout fits ambiguous-width source glyphs into a single cell" {
     }
     try std.testing.expect(foreground != 0);
 }
+
+test "scanout ignores grapheme pool placement and retains the newest cache" {
+    const info = testInfo();
+    const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);
+    defer std.testing.allocator.free(pixels);
+    var renderer = try scanout.Renderer.init(info, pixels);
+    var frame = try scanout.Frame.init(renderer.columns, renderer.rows);
+    frame.put(0, 0, "e\u{301}", .body);
+    frame.put(5, 0, "界\u{301}", .accent);
+    _ = try renderer.present(&frame);
+    const original_offset = frame.cells[5].cluster_offset;
+
+    // Build identical pixels in a different order, moving both cluster offsets.
+    frame.clear();
+    frame.put(5, 0, "界\u{301}", .accent);
+    frame.put(0, 0, "e\u{301}", .body);
+    try std.testing.expect(original_offset != frame.cells[5].cluster_offset);
+    try std.testing.expectEqual(scanout.PresentStats{}, try renderer.present(&frame));
+    try std.testing.expectEqualDeep(frame.cells[0], renderer.previous[0]);
+    try std.testing.expectEqualDeep(frame.cells[5], renderer.previous[5]);
+    try std.testing.expectEqualSlices(u8, frame.clusters[0..frame.cluster_length], renderer.previous_clusters[0..renderer.previous_cluster_length]);
+    for ([_]usize{ 0, 5, 6 }) |column| try std.testing.expect(renderer.matchesCell(column, 0, frame.cells[column]));
+
+    // Equal metadata and byte counts still damage a genuinely changed accent.
+    frame.clear();
+    frame.put(5, 0, "界\u{301}", .accent);
+    frame.put(0, 0, "e\u{300}", .body);
+    try std.testing.expectEqual(@as(usize, 1), (try renderer.present(&frame)).changed_cells);
+    try std.testing.expect(renderer.matchesCell(0, 0, frame.cells[0]));
+
+    // A shorter earlier cluster also leaves the wide cluster's pixels intact.
+    frame.clear();
+    frame.put(0, 0, "é", .body);
+    frame.put(5, 0, "界\u{301}", .accent);
+    try std.testing.expectEqual(@as(usize, 1), (try renderer.present(&frame)).changed_cells);
+    try std.testing.expectEqual(scanout.PresentStats{}, try renderer.present(&frame));
+    for ([_]usize{ 0, 5, 6 }) |column| try std.testing.expect(renderer.matchesCell(column, 0, frame.cells[column]));
+}
+
+test "scanout row masks preserve every ASCII glyph and both cursor shapes" {
+    const info = testInfo();
+    const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);
+    defer std.testing.allocator.free(pixels);
+    var renderer = try scanout.Renderer.init(info, pixels);
+    var frame = try scanout.Frame.init(renderer.columns, renderer.rows);
+    const foreground = info.encodeColor(0x72d5bb);
+    const background = info.encodeColor(scanout.BACKGROUND);
+    for (' '..0x7f) |character| {
+        const glyph = @import("bitmap_font.zig").glyph(@intCast(character));
+        for (0..3) |cursor_shape| {
+            frame.cells[0] = .{ .character = @intCast(character), .style = .accent, .cursor = cursor_shape != 0, .cursor_trailing = cursor_shape == 2 };
+            _ = try renderer.present(&frame);
+            for (0..scanout.CELL_HEIGHT) |y| {
+                for (0..scanout.CELL_WIDTH) |x| {
+                    const glyph_ink = y >= 2 and y < 16 and x < 10 and
+                        glyph[(y - 2) / 2] & (@as(u5, 16) >> @intCast(x / 2)) != 0;
+                    const cursor_ink = if (cursor_shape == 1) y >= 18 else cursor_shape == 2 and x >= 10 and y >= 2 and y < 18;
+                    const pixel = pixels[(renderer.origin_y + y) * info.pixels_per_scan_line + renderer.origin_x + x];
+                    try std.testing.expectEqual(if (glyph_ink or cursor_ink) foreground else background, pixel);
+                }
+            }
+        }
+    }
+}
+
+test "scanout row masks preserve narrow wide and combining Unicode source pixels" {
+    const info = testInfo();
+    const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);
+    defer std.testing.allocator.free(pixels);
+    var renderer = try scanout.Renderer.init(info, pixels);
+    var frame = try scanout.Frame.init(renderer.columns, renderer.rows);
+    const foreground = info.encodeColor(0xe5ebf2);
+    const background = info.encodeColor(scanout.BACKGROUND);
+    for ([_][]const u8{ "é", "界", "☃", "e\u{301}", "界\u{301}", "👩‍💻" }) |text| {
+        frame.clear();
+        frame.put(0, 0, text, .body);
+        _ = try renderer.present(&frame);
+        const glyph = @import("unicode_font.zig").cluster(text);
+        const span: usize = if (frame.cells[0].part == .left) 24 else 12;
+        const ink_width = @min(@as(usize, glyph.width), span - 2);
+        const left = (span - ink_width) / 2;
+        for (0..scanout.CELL_HEIGHT) |y| {
+            for (0..span) |x| {
+                const ink = y >= 2 and y < 18 and x >= left and x < left + ink_width and
+                    glyph.rows[y - 2] & (@as(u16, 1) << @intCast(glyph.width - 1 - (if (ink_width == glyph.width) x - left else (x - left) * 16 / 10))) != 0;
+                const pixel = pixels[(renderer.origin_y + y) * info.pixels_per_scan_line + renderer.origin_x + x];
+                try std.testing.expectEqual(if (ink) foreground else background, pixel);
+            }
+        }
+    }
+}

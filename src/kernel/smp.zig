@@ -1,6 +1,5 @@
 const builtin = @import("builtin");
 const std = @import("std");
-const event_wake = @import("event_wake.zig");
 const config = @import("config.zig");
 const apic = @import("platform/apic.zig");
 const x2apic = @import("interrupts/x2apic.zig");
@@ -67,9 +66,9 @@ comptime {
 pub const TLB_IPI_VECTOR: u8 = 0x70;
 pub const AP_STACK_BYTES: usize = 16 * 1024;
 pub const STARTS_APPLICATION_PROCESSORS = true;
-pub const USES_PER_CPU_RUNQUEUES = true;
+pub const SINGLE_RUNTIME_OWNER = true;
 pub const SHOOTS_DOWN_REMOTE_TLB = true;
-pub const PINS_DEVICE_IRQS_TO_BSP = false;
+pub const PINS_DEVICE_IRQS_TO_BSP = true;
 pub const IDLES_PER_CPU = true;
 pub const SIPI_PHYSICAL_LIMIT: u32 = 1024 * 1024;
 
@@ -93,7 +92,7 @@ var bsp_cpu_index: u8 = 0;
 var tlb_target_pcid: u16 = 0;
 var tlb_ack_count: u32 = 0;
 var initialized = false;
-var irq_route_cursor: u8 = 0;
+var test_cpu_index: u8 = 0;
 
 pub fn init(madt: []const u8) void {
     const madt_table = madt;
@@ -126,29 +125,38 @@ pub fn onlineCpuCount() u8 {
 }
 
 pub fn currentCpuIndex() u8 {
-    if (builtin.target.os.tag != .freestanding) return 0;
+    if (builtin.target.os.tag != .freestanding) return if (builtin.is_test) test_cpu_index else 0;
+    // The verification IDT handoff can return with the user GS selector.
+    // Resolve an unpublished base as the BSP until native entry restores it.
     const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
-    if (gs_base < 4096) return @truncate(gs_base);
+    if (gs_base < 4096) return 0;
     const cpu_index: *const usize = @ptrFromInt(gs_base + 16);
-    return @truncate(cpu_index.*);
+    const index = cpu_index.*;
+    if (index >= MAX_CPUS) @panic("invalid native CPU state");
+    return @truncate(index);
+}
+
+// The shared executor, kernel port, and service tables belong to the BSP.
+// APs service architectural interrupts; they do not dispatch runtime work.
+pub fn runtimeOwnerCpu() u8 {
+    return bsp_cpu_index;
+}
+
+pub fn isRuntimeOwner() bool {
+    return currentCpuIndex() == runtimeOwnerCpu();
 }
 
 pub fn irqDestinationId() u32 {
-    if (!initialized) {
-        if (builtin.target.os.tag == .freestanding) return x2apic.localId();
-        return 0;
-    }
-    const online = onlineCpuCount();
-    if (online <= 1) return cpus[bsp_cpu_index].apic_id;
-    const irq_cpu = irq_route_cursor % online;
-    irq_route_cursor +%= 1;
-    return cpus[irq_cpu].apic_id;
+    if (!initialized and builtin.target.os.tag == .freestanding) return x2apic.localId();
+    return cpus[runtimeOwnerCpu()].apic_id;
 }
 
-pub fn assignedCpu(task_id: u64, pin_to_bsp: bool) u8 {
-    const online = onlineCpuCount();
-    if (pin_to_bsp or online <= 1) return 0;
-    return @intCast((task_id % (online - 1)) + 1);
+pub fn setOnlineCpuCountForTest(count: u8) u8 {
+    if (!builtin.is_test) @compileError("CPU topology override is test-only");
+    std.debug.assert(count > 0 and count <= MAX_CPUS);
+    const previous = online_count;
+    online_count = count;
+    return previous;
 }
 
 pub fn idle() void {
@@ -191,15 +199,15 @@ pub fn handleTlbIpi() void {
 }
 
 pub fn setCurrentCpuIndex(index: u8) void {
-    event_wake.bindCpu(index);
-    if (builtin.target.os.tag != .freestanding) return;
-    const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
-    if (gs_base >= 4096) {
-        const cpu_index: *usize = @ptrFromInt(gs_base + 16);
-        cpu_index.* = index;
+    if (index >= MAX_CPUS) @panic("invalid native CPU index");
+    if (builtin.target.os.tag != .freestanding) {
+        if (builtin.is_test) test_cpu_index = index;
         return;
     }
-    x86.writeMsr(x86.IA32_GS_BASE_MSR, index);
+    const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
+    if (gs_base < 4096) @panic("native CPU state must be published before CPU binding");
+    const cpu_index: *usize = @ptrFromInt(gs_base + 16);
+    cpu_index.* = index;
 }
 
 fn inventoryFromMadt(bsp_apic_id: u32, table: []const u8) void {
@@ -220,28 +228,24 @@ fn inventoryFromMadt(bsp_apic_id: u32, table: []const u8) void {
     cpu_count = next;
 }
 
-test "SMP assigns interactive work to the BSP and spreads background tasks" {
-    online_count = 4;
-    defer online_count = 1;
-    try std.testing.expectEqual(@as(u8, 0), assignedCpu(41, true));
-    try std.testing.expectEqual(@as(u8, 3), assignedCpu(41, false));
-    try std.testing.expectEqual(@as(u8, 1), assignedCpu(42, false));
-    try std.testing.expectEqual(@as(u8, 2), assignedCpu(43, false));
-}
-
-test "SMP IRQ affinity spreads across online CPUs" {
+test "SMP routes runtime and device interrupts to one owner with multiple CPUs online" {
+    const previous_count = setOnlineCpuCountForTest(4);
+    defer _ = setOnlineCpuCountForTest(previous_count);
+    const previous_initialized = initialized;
+    defer initialized = previous_initialized;
+    const previous_bsp = cpus[0];
+    defer cpus[0] = previous_bsp;
     initialized = true;
-    defer initialized = false;
-    irq_route_cursor = 0;
     cpus[0].apic_id = 7;
-    cpus[1].apic_id = 9;
-    cpus[2].apic_id = 11;
-    online_count = 3;
-    defer online_count = 1;
-    try std.testing.expectEqual(@as(u32, 7), irqDestinationId());
-    try std.testing.expectEqual(@as(u32, 9), irqDestinationId());
-    try std.testing.expectEqual(@as(u32, 11), irqDestinationId());
-    try std.testing.expect(!PINS_DEVICE_IRQS_TO_BSP);
+
+    try std.testing.expectEqual(@as(u8, 4), onlineCpuCount());
+    try std.testing.expectEqual(@as(u8, 0), runtimeOwnerCpu());
+    try std.testing.expect(isRuntimeOwner());
+    for (0..MAX_CPUS) |_| {
+        try std.testing.expectEqual(@as(u32, 7), irqDestinationId());
+    }
+    try std.testing.expect(SINGLE_RUNTIME_OWNER);
+    try std.testing.expect(PINS_DEVICE_IRQS_TO_BSP);
     try std.testing.expect(STARTS_APPLICATION_PROCESSORS);
     try std.testing.expect(SHOOTS_DOWN_REMOTE_TLB);
     try std.testing.expect(IDLES_PER_CPU);

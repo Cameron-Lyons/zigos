@@ -29,7 +29,7 @@ pub fn run() noreturn {
     while (true) {
         timer.synchronize();
         const now_ticks = timer.getTicks();
-        const pending = event_wake.takeAll();
+        const pending = event_wake.take();
         // Expiry revokes input/identity authority before a userspace task can
         // consume another event, including wakes without keyboard activity.
         session_manager.system().serviceAuthenticationClock(now_ticks);

@@ -10,6 +10,7 @@ const event_wake = @import("../kernel/event_wake.zig");
 const ipc_ring = @import("kernel_api/ipc_ring.zig");
 const service_catalog = @import("session/service_catalog.zig");
 const shared_memory = @import("kernel_api/shared_memory.zig");
+const smp = @import("../kernel/smp.zig");
 const storage_driver_task = @import("drivers/storage_driver_task.zig");
 const syscall_abi = @import("kernel_api/syscall_abi.zig");
 const sync_service = @import("sync/sync_service.zig");
@@ -44,7 +45,8 @@ pub const sync_private_overlay = .{
 };
 
 pub const native_2026 = .{
-    .interrupt_driven_idle = event_wake.INTERRUPT_DRIVEN_IDLE and event_wake.WAKES_PER_CPU,
+    .interrupt_driven_idle = event_wake.INTERRUPT_DRIVEN_IDLE and event_wake.WAKES_RUNTIME_OWNER and
+        smp.SINGLE_RUNTIME_OWNER and smp.PINS_DEVICE_IRQS_TO_BSP,
     .unified_table_backing = table_backing.HEAP_BACKS_ON_ALL_TARGETS and table_backing.UNIFIED_ALLOCATOR,
     .ring_default_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and endpoint.PREFERS_SEALED_RING_DATAPLANE and endpoint.AUTO_ATTACHES_DATA_RINGS and endpoint.RINGS_ONLY_DATAPLANE,
     .present_by_handle = compositor_session.PRESENTS_BY_HANDLE and display_driver_task.PRESENTS_BY_HANDLE and abi.SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE,

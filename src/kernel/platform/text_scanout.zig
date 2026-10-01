@@ -149,8 +149,10 @@ pub const Renderer = struct {
             stats.pixels_written = @as(usize, self.info.width) * self.info.height;
         }
         for (frame.cells[0 .. self.columns * self.rows], 0..) |cell, index| {
-            const old: u64 = if (self.painted) @bitCast(self.previous[index]) else @bitCast(Cell{});
-            if (old != @as(u64, @bitCast(cell)) or (cell.cluster_length != 0 and !std.mem.eql(u8, clusterBytes(cell, frame.clusters[0..frame.cluster_length]), clusterBytes(self.previous[index], self.previous_clusters[0..self.previous_cluster_length])))) {
+            const previous = if (self.painted) self.previous[index] else Cell{};
+            // Equal scalar cells never need to load either grapheme pool.
+            const same_scalar = @as(u64, @bitCast(cell)) == @as(u64, @bitCast(previous)) and cell.cluster_length == 0;
+            if (!same_scalar and !sameCell(cell, frame.clusters[0..frame.cluster_length], previous, self.previous_clusters[0..self.previous_cluster_length])) {
                 self.drawCell(index % self.columns, index / self.columns, cell, frame.clusters[0..frame.cluster_length]);
                 stats.changed_cells += 1;
                 stats.pixels_written += CELL_WIDTH * CELL_HEIGHT;
@@ -164,10 +166,6 @@ pub const Renderer = struct {
         return stats;
     }
 
-    fn cursorPixel(cell: Cell, x: usize, y: usize) bool {
-        return cell.cursor and (if (cell.cursor_trailing) x >= 10 and y >= 2 and y < 18 else y >= 18);
-    }
-
     fn drawCell(self: *Renderer, column: usize, row: usize, cell: Cell, pool: []const u8) void {
         const raster = Raster.init(cell, pool);
         const foreground = self.foregrounds[@intFromEnum(cell.style)];
@@ -175,10 +173,11 @@ pub const Renderer = struct {
         const left = self.origin_x + column * CELL_WIDTH;
         const top = self.origin_y + row * CELL_HEIGHT;
         for (0..CELL_HEIGHT) |y| {
-            for (0..CELL_WIDTH) |x| {
-                const ink = raster.ink(cell, x, y);
-                const cursor = cursorPixel(cell, x, y);
-                self.pixels[(top + y) * self.info.pixels_per_scan_line + left + x] = if (ink or cursor) foreground else background;
+            const pixels = self.pixels[(top + y) * self.info.pixels_per_scan_line + left ..][0..CELL_WIDTH];
+            var ink = raster.rows[y];
+            for (pixels) |*pixel| {
+                pixel.* = if (ink & 1 != 0) foreground else background;
+                ink >>= 1;
             }
         }
     }
@@ -192,15 +191,30 @@ pub const Renderer = struct {
         const left = self.origin_x + column * CELL_WIDTH;
         const top = self.origin_y + row * CELL_HEIGHT;
         for (0..CELL_HEIGHT) |y| {
-            for (0..CELL_WIDTH) |x| {
-                const ink = raster.ink(cell, x, y);
-                const expected = if (ink or cursorPixel(cell, x, y)) foreground else background;
-                if (self.pixels[(top + y) * self.info.pixels_per_scan_line + left + x] != expected) return false;
+            const pixels = self.pixels[(top + y) * self.info.pixels_per_scan_line + left ..][0..CELL_WIDTH];
+            var ink = raster.rows[y];
+            for (pixels) |pixel| {
+                const expected = if (ink & 1 != 0) foreground else background;
+                if (pixel != expected) return false;
+                ink >>= 1;
             }
         }
         return true;
     }
 };
+
+// Pool offsets describe storage, not visible content. Recomposition can move an
+// unchanged grapheme within the pool without damaging its rendered cell.
+fn sameCell(current: Cell, current_pool: []const u8, previous: Cell, previous_pool: []const u8) bool {
+    var current_content = current;
+    current_content.cluster_offset = 0;
+    current_content.reserved = 0;
+    var previous_content = previous;
+    previous_content.cluster_offset = 0;
+    previous_content.reserved = 0;
+    return @as(u64, @bitCast(current_content)) == @as(u64, @bitCast(previous_content)) and
+        (current.cluster_length == 0 or std.mem.eql(u8, clusterBytes(current, current_pool), clusterBytes(previous, previous_pool)));
+}
 
 fn clusterBytes(cell: Cell, pool: []const u8) []const u8 {
     const offset: usize = cell.cluster_offset;
@@ -209,30 +223,47 @@ fn clusterBytes(cell: Cell, pool: []const u8) []const u8 {
     return pool[offset..][0..length];
 }
 
-const Raster = union(enum) {
-    ascii: [7]u5,
-    unicode: unicode_font.Glyph,
+const Raster = struct {
+    rows: [CELL_HEIGHT]u12 = @splat(0),
 
     fn init(cell: Cell, pool: []const u8) Raster {
-        if (cell.character < 0x80 and cell.cluster_length == 0) return .{ .ascii = font.glyph(@intCast(cell.character)) };
-        const glyph = if (cell.cluster_length == 0) unicode_font.glyph(cell.character) else unicode_font.cluster(clusterBytes(cell, pool));
-        return .{ .unicode = glyph };
-    }
-    fn ink(self: Raster, cell: Cell, x: usize, y: usize) bool {
-        return switch (self) {
-            .ascii => |glyph| y >= 2 and y < 16 and x < 10 and (glyph[(y - 2) / 2] & (@as(u5, 16) >> @intCast(x / 2))) != 0,
-            .unicode => |glyph| blk: {
-                if (y < 2 or y >= 18) break :blk false;
-                const span: usize = if (cell.part == .single) CELL_WIDTH else CELL_WIDTH * 2;
-                // Ambiguous-width symbols can have a 16-pixel source glyph
-                // in a one-column layout. Fit their ink instead of discarding
-                // a supported character; normal wide glyphs keep every pixel.
-                const ink_width = @min(@as(usize, glyph.width), span - 2);
-                const left = (span - ink_width) / 2;
+        var raster = Raster{};
+        if (cell.character < 0x80 and cell.cluster_length == 0) {
+            const glyph = font.glyph(@intCast(cell.character));
+            for (glyph, 0..) |source, y| {
+                var ink: u12 = 0;
+                for (0..5) |x| {
+                    if (source & (@as(u5, 16) >> @intCast(x)) != 0) ink |= @as(u12, 3) << @intCast(x * 2);
+                }
+                raster.rows[2 + y * 2] = ink;
+                raster.rows[3 + y * 2] = ink;
+            }
+        } else {
+            const glyph = if (cell.cluster_length == 0) unicode_font.glyph(cell.character) else unicode_font.cluster(clusterBytes(cell, pool));
+            const span: usize = if (cell.part == .single) CELL_WIDTH else CELL_WIDTH * 2;
+            // Fit ambiguous-width source glyphs to one cell. Compute the
+            // horizontal sampling once, rather than once per device pixel.
+            const ink_width = @min(@as(usize, glyph.width), span - 2);
+            const left = (span - ink_width) / 2;
+            for (0..CELL_WIDTH) |x| {
                 const gx = x + @as(usize, if (cell.part == .right) CELL_WIDTH else 0);
-                if (gx < left or gx >= left + ink_width) break :blk false;
-                break :blk glyph.rows[y - 2] & (@as(u16, 1) << @intCast(glyph.width - 1 - (if (ink_width == glyph.width) gx - left else (gx - left) * 16 / 10))) != 0;
-            },
-        };
+                if (gx < left or gx >= left + ink_width) continue;
+                const source_x = (gx - left) * glyph.width / ink_width;
+                const source_bit = @as(u16, 1) << @intCast(glyph.width - 1 - source_x);
+                const target_bit = @as(u12, 1) << @intCast(x);
+                for (glyph.rows, 0..) |source, y| {
+                    if (source & source_bit != 0) raster.rows[2 + y] |= target_bit;
+                }
+            }
+        }
+        if (cell.cursor) {
+            if (cell.cursor_trailing) {
+                for (raster.rows[2..18]) |*row| row.* |= 0xc00;
+            } else {
+                raster.rows[18] = 0xfff;
+                raster.rows[19] = 0xfff;
+            }
+        }
+        return raster;
     }
 };

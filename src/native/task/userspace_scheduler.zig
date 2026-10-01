@@ -51,10 +51,9 @@ const arena_no_index = indexed_arena.no_index;
 pub const QueueSlotIndex = u8;
 pub const QUEUE_NO_INDEX: QueueSlotIndex = @intCast(task_runtime.MAX_TASKS);
 pub const COMPACT_QUEUE_METADATA = true;
-pub const USES_PER_CPU_RUNQUEUES = true;
+pub const SINGLE_RUNTIME_OWNER = true;
 pub const PREEMPTS_BATCH_FOR_INTERACTIVE = true;
 var bound_preempt_scheduler: ?*Scheduler = null;
-pub const MAX_SCHEDULER_CPUS: usize = smp.MAX_CPUS;
 pub const STEADY_UI_ELIGIBILITY_CATALOG_LOOKUPS: u8 = 0;
 pub const TASK_REGISTRATION_HANDLE_SLOT_RELOOKUPS: u8 = 0;
 pub const TASK_WAKE_HANDLE_SLOT_RELOOKUPS: u8 = 0;
@@ -227,7 +226,7 @@ pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 176;
 pub const DISPATCH_ACCOUNTING_IS_COLD = true;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
 pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
-pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_800 else 46_680;
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_696 else 46_576;
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
@@ -265,9 +264,9 @@ pub const Scheduler = struct {
     endpoint_table_ptr: ?*const endpoint.Table = null,
     slots: SchedulerSlotArena = SchedulerSlotArena.init(),
     dispatch_accounting: ?*DispatchAccountingStorage = null,
-    ready_heads: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
-    ready_tails: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
-    ready_counts: [MAX_SCHEDULER_CPUS][RESOURCE_CLASS_COUNT]QueueSlotIndex = [_][RESOURCE_CLASS_COUNT]QueueSlotIndex{[_]QueueSlotIndex{0} ** RESOURCE_CLASS_COUNT} ** MAX_SCHEDULER_CPUS,
+    ready_heads: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
+    ready_tails: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
+    ready_counts: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{0} ** RESOURCE_CLASS_COUNT,
     ready_task_count: QueueSlotIndex = 0,
     accelerator_claim_backing: AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) null else AcceleratorClaimBacking.init(),
     accelerator_claim_heads: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
@@ -300,15 +299,12 @@ pub const Scheduler = struct {
     }
 
     pub fn initializeAllocated(self: *Scheduler, executor: *userspace_executor.Executor) void {
+        requireRuntimeOwner();
         @memset(std.mem.asBytes(self), 0);
         self.executor = executor;
         self.slots.free_head = indexed_arena.reusableNoIndex(task_runtime.MAX_TASKS);
-        for (&self.ready_heads) |*cpu_heads| {
-            for (cpu_heads) |*head| head.* = QUEUE_NO_INDEX;
-        }
-        for (&self.ready_tails) |*cpu_tails| {
-            for (cpu_tails) |*tail| tail.* = QUEUE_NO_INDEX;
-        }
+        @memset(&self.ready_heads, QUEUE_NO_INDEX);
+        @memset(&self.ready_tails, QUEUE_NO_INDEX);
         for (&self.accelerator_claim_heads) |*head| head.* = QUEUE_NO_INDEX;
         for (&self.accelerator_claim_tails) |*tail| tail.* = QUEUE_NO_INDEX;
         for (&self.accelerator_deadline_heads) |*head| head.* = QUEUE_NO_INDEX;
@@ -352,6 +348,7 @@ pub const Scheduler = struct {
     }
 
     pub fn deinit(self: *Scheduler) void {
+        requireRuntimeOwner();
         if (bound_preempt_scheduler == self) {
             bound_preempt_scheduler = null;
             userspace_executor.setPreemptCheck(null);
@@ -394,6 +391,7 @@ pub const Scheduler = struct {
         runtime: *task_runtime.Runtime,
         capability_table: *const capability.CapabilityTable,
     ) void {
+        requireRuntimeOwner();
         if (self.initialized or self.runtime_ptr != null) self.reset();
         if (!self.executor.claimRuntimeBinding(self, runtime)) {
             native_util.impossibleByInvariant("userspace executor already has an owner");
@@ -421,6 +419,7 @@ pub const Scheduler = struct {
     }
 
     pub fn configureResourceState(self: *Scheduler, state: accelerator_scheduler.SystemState) void {
+        requireRuntimeOwner();
         self.resource_state = state;
         self.resource_telemetry_source = .synthetic;
         self.resource_telemetry_observed_tick = 0;
@@ -428,6 +427,7 @@ pub const Scheduler = struct {
     }
 
     pub fn configureResourceTelemetry(self: *Scheduler, sample: accelerator_scheduler.TelemetrySample) void {
+        requireRuntimeOwner();
         if (!accelerator_scheduler.telemetrySampleIsFresh(
             self.resource_telemetry_source,
             self.resource_telemetry_observed_tick,
@@ -443,6 +443,7 @@ pub const Scheduler = struct {
         self: *Scheduler,
         provider: accelerator_scheduler.TelemetryProvider,
     ) void {
+        requireRuntimeOwner();
         self.configureResourceTelemetry(provider.read());
     }
 
@@ -451,6 +452,7 @@ pub const Scheduler = struct {
     }
 
     pub fn registerTask(self: *Scheduler, task_id: u64) bool {
+        if (!smp.isRuntimeOwner()) return false;
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
@@ -479,6 +481,7 @@ pub const Scheduler = struct {
         request: accelerator_scheduler.Request,
         require_accelerator: bool,
     ) bool {
+        if (!smp.isRuntimeOwner()) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
         const slot = self.slots.get(task_id) orelse return false;
@@ -490,11 +493,13 @@ pub const Scheduler = struct {
     }
 
     pub fn unregisterTask(self: *Scheduler, task_id: u64) bool {
+        if (!smp.isRuntimeOwner()) return false;
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         return self.unregisterSlotIndex(slot_index);
     }
 
     pub fn parkTaskUntilEvent(self: *Scheduler, task_id: u64) bool {
+        if (!smp.isRuntimeOwner()) return false;
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         if (self.hasPendingIpc(task_id)) return false;
         self.unlinkReadyIndex(slot_index);
@@ -502,6 +507,7 @@ pub const Scheduler = struct {
     }
 
     pub fn bindEndpointTable(self: *Scheduler, table: *const endpoint.Table) void {
+        requireRuntimeOwner();
         self.endpoint_table_ptr = table;
     }
 
@@ -517,6 +523,7 @@ pub const Scheduler = struct {
         now_ticks: u64,
         deadline_tick: u64,
     ) bool {
+        if (!smp.isRuntimeOwner()) return false;
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
@@ -546,6 +553,7 @@ pub const Scheduler = struct {
     }
 
     pub fn refillTaskBudget(self: *Scheduler, task_id: u64, cpu_ticks: u64, now_ticks: u64) bool {
+        if (!smp.isRuntimeOwner()) return false;
         const slot = self.slots.get(task_id) orelse return false;
         slot.cpu_budget_remaining_ticks = std.math.add(u64, slot.cpu_budget_remaining_ticks, cpu_ticks) catch std.math.maxInt(u64);
         return self.wakeTask(task_id, .budget_refill, now_ticks, 0);
@@ -553,11 +561,7 @@ pub const Scheduler = struct {
 
     pub fn readyQueueDepth(self: *const Scheduler, class: accelerator_scheduler.ResourceClass) usize {
         const queue_index = resourceClassIndex(class);
-        var total: usize = 0;
-        for (self.ready_counts) |cpu_counts| {
-            total += cpu_counts[queue_index];
-        }
-        return total;
+        return self.ready_counts[queue_index];
     }
 
     pub fn hasReadyTasks(self: *const Scheduler) bool {
@@ -629,6 +633,7 @@ pub const Scheduler = struct {
     }
 
     pub fn enqueueAcceleratorClaim(self: *Scheduler, request: AcceleratorClaimRequest) ?u64 {
+        if (!smp.isRuntimeOwner()) return null;
         if (!self.initialized or request.engine == .cpu) return null;
         const task_slot = self.slots.get(request.task_id) orelse return null;
         return self.enqueueAcceleratorClaimForSlot(request, task_slot);
@@ -679,6 +684,7 @@ pub const Scheduler = struct {
         engine: accelerator_scheduler.Engine,
         now_ticks: u64,
     ) ?AcceleratorClaimRecord {
+        if (!smp.isRuntimeOwner()) return null;
         if (!self.physicalEngineAvailable(engine)) return null;
         const backing = self.acceleratorClaimBacking() orelse return null;
         const claim_index = self.popBestAcceleratorClaimIndex(backing, engine, now_ticks) orelse return null;
@@ -711,6 +717,7 @@ pub const Scheduler = struct {
     }
 
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
+        if (!smp.isRuntimeOwner()) return .unavailable;
         if (!self.initialized) return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
         const task = runtime.find(task_id) orelse return .unavailable;
@@ -738,7 +745,7 @@ pub const Scheduler = struct {
     }
 
     pub fn runNext(self: *Scheduler, now_ticks: u64) bool {
-        if (!self.initialized) return false;
+        if (!self.initialized or !smp.isRuntimeOwner()) return false;
 
         self.wakeAvailableAcceleratorClaims(now_ticks);
         const runtime = self.runtime_ptr orelse return false;
@@ -886,40 +893,38 @@ pub const Scheduler = struct {
         if (!slot.in_use) return false;
         if (slot.queued_ready) return true;
 
-        const cpu = slotCpu(slot);
         const queue_index = resourceClassIndex(class);
         slot.resource_class = class;
-        slot.prev_ready_index = self.ready_tails[cpu][queue_index];
+        slot.prev_ready_index = self.ready_tails[queue_index];
         slot.next_ready_index = QUEUE_NO_INDEX;
-        if (self.ready_tails[cpu][queue_index] == QUEUE_NO_INDEX) {
-            self.ready_heads[cpu][queue_index] = compactQueueIndex(slot_index);
+        if (self.ready_tails[queue_index] == QUEUE_NO_INDEX) {
+            self.ready_heads[queue_index] = compactQueueIndex(slot_index);
         } else {
-            self.slots.slots[self.ready_tails[cpu][queue_index]].next_ready_index = compactQueueIndex(slot_index);
+            self.slots.slots[self.ready_tails[queue_index]].next_ready_index = compactQueueIndex(slot_index);
         }
-        self.ready_tails[cpu][queue_index] = compactQueueIndex(slot_index);
-        self.ready_counts[cpu][queue_index] += 1;
+        self.ready_tails[queue_index] = compactQueueIndex(slot_index);
+        self.ready_counts[queue_index] += 1;
         self.ready_task_count += 1;
         slot.queued_ready = true;
         return true;
     }
 
     fn popReadyIndex(self: *Scheduler, class: accelerator_scheduler.ResourceClass) ?usize {
-        const cpu = dispatchCpu();
         const queue_index = resourceClassIndex(class);
-        const slot_index = self.ready_heads[cpu][queue_index];
+        const slot_index = self.ready_heads[queue_index];
         if (slot_index == QUEUE_NO_INDEX) return null;
         if (slot_index >= self.slots.slots.len) return null;
 
         const slot = &self.slots.slots[slot_index];
         const next = slot.next_ready_index;
-        self.ready_heads[cpu][queue_index] = next;
-        if (self.ready_heads[cpu][queue_index] == QUEUE_NO_INDEX) self.ready_tails[cpu][queue_index] = QUEUE_NO_INDEX;
+        self.ready_heads[queue_index] = next;
+        if (self.ready_heads[queue_index] == QUEUE_NO_INDEX) self.ready_tails[queue_index] = QUEUE_NO_INDEX;
         if (next != QUEUE_NO_INDEX) self.slots.slots[next].prev_ready_index = QUEUE_NO_INDEX;
         slot.prev_ready_index = QUEUE_NO_INDEX;
         slot.next_ready_index = QUEUE_NO_INDEX;
         if (slot.queued_ready) {
             slot.queued_ready = false;
-            self.ready_counts[cpu][queue_index] -= 1;
+            self.ready_counts[queue_index] -= 1;
             self.ready_task_count -= 1;
         }
         return @intCast(slot_index);
@@ -930,18 +935,17 @@ pub const Scheduler = struct {
         const target = &self.slots.slots[slot_index];
         if (!target.in_use or !target.queued_ready) return;
 
-        const cpu = slotCpu(target);
         const queue_index = resourceClassIndex(target.resource_class);
         const previous = target.prev_ready_index;
         const next = target.next_ready_index;
 
         if (previous == QUEUE_NO_INDEX) {
-            self.ready_heads[cpu][queue_index] = next;
+            self.ready_heads[queue_index] = next;
         } else {
             self.slots.slots[previous].next_ready_index = next;
         }
         if (next == QUEUE_NO_INDEX) {
-            self.ready_tails[cpu][queue_index] = previous;
+            self.ready_tails[queue_index] = previous;
         } else {
             self.slots.slots[next].prev_ready_index = previous;
         }
@@ -949,7 +953,7 @@ pub const Scheduler = struct {
         target.queued_ready = false;
         target.prev_ready_index = QUEUE_NO_INDEX;
         target.next_ready_index = QUEUE_NO_INDEX;
-        self.ready_counts[cpu][queue_index] -= 1;
+        self.ready_counts[queue_index] -= 1;
         self.ready_task_count -= 1;
     }
 
@@ -961,7 +965,7 @@ pub const Scheduler = struct {
         for (resource_priority_order) |class| {
             if (!self.resourceClassDispatchable(class)) continue;
             const queue_index = resourceClassIndex(class);
-            const head = self.ready_heads[dispatchCpu()][queue_index];
+            const head = self.ready_heads[queue_index];
             if (head == QUEUE_NO_INDEX) continue;
             const slot = &self.slots.slots[head];
             const deadline = slot.deadline_tick;
@@ -985,7 +989,7 @@ pub const Scheduler = struct {
         if (deadline_class) |class| return class;
         for (resource_priority_order) |class| {
             if (!self.resourceClassDispatchable(class)) continue;
-            if (self.ready_heads[dispatchCpu()][resourceClassIndex(class)] != QUEUE_NO_INDEX) return class;
+            if (self.ready_heads[resourceClassIndex(class)] != QUEUE_NO_INDEX) return class;
         }
         return null;
     }
@@ -994,7 +998,7 @@ pub const Scheduler = struct {
         for (resource_priority_order) |class| {
             if (!latencySensitiveClass(class)) continue;
             if (!self.resourceClassDispatchable(class)) continue;
-            if (self.ready_heads[dispatchCpu()][resourceClassIndex(class)] != QUEUE_NO_INDEX) return true;
+            if (self.ready_heads[resourceClassIndex(class)] != QUEUE_NO_INDEX) return true;
         }
         return false;
     }
@@ -1019,7 +1023,7 @@ pub const Scheduler = struct {
         for (resource_priority_order) |class| {
             if (self.resourceClassDispatchable(class)) continue;
             const queue_index = resourceClassIndex(class);
-            const slot_index = self.ready_heads[dispatchCpu()][queue_index];
+            const slot_index = self.ready_heads[queue_index];
             if (slot_index == QUEUE_NO_INDEX) continue;
             if (slot_index >= self.slots.slots.len) continue;
 
@@ -1211,6 +1215,7 @@ pub const Scheduler = struct {
     }
 
     fn publishColdNote(self: *Scheduler) void {
+        requireRuntimeOwner();
         if (!self.cold_note.active) return;
         const note = self.cold_note;
         self.cold_note.active = false;
@@ -1637,6 +1642,12 @@ pub const Scheduler = struct {
     }
 };
 
+fn requireRuntimeOwner() void {
+    if (!smp.isRuntimeOwner()) {
+        native_util.impossibleByInvariant("userspace scheduler mutation belongs to the runtime owner CPU");
+    }
+}
+
 fn schedulerSlotTaskId(slot: *const Slot) u64 {
     return slot.task_id;
 }
@@ -1735,17 +1746,6 @@ const engine_priority_order = [_]accelerator_scheduler.Engine{
     .npu,
     .media,
 };
-
-fn dispatchCpu() u8 {
-    return smp.currentCpuIndex();
-}
-
-fn slotCpu(slot: *const Slot) u8 {
-    const pin_to_bsp = slot.owns_ui_surface or
-        slot.resource_class == .foreground_interactive or
-        slot.resource_class == .emergency_system_critical;
-    return smp.assignedCpu(slot.task_id, pin_to_bsp);
-}
 
 fn resourceClassIndex(class: accelerator_scheduler.ResourceClass) usize {
     return switch (class) {
@@ -1960,6 +1960,89 @@ test "allocated scheduler initialization preserves empty queue invariants" {
     try std.testing.expect(scheduler.slots.removeIndex(slot_index));
 }
 
+test "all resource classes dispatch and reach idle with application processors online" {
+    const previous_cpu_count = smp.setOnlineCpuCountForTest(4);
+    defer _ = smp.setOnlineCpuCountForTest(previous_cpu_count);
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+
+    var task_ids: [RESOURCE_CLASS_COUNT]u64 = undefined;
+    for (resource_priority_order, 0..) |class, index| {
+        const task = try createRunnableSchedulerTask(
+            &runtime,
+            index + 1,
+            class,
+            "owner-dispatch",
+            "app.example.owner-dispatch",
+            null,
+        );
+        task_ids[index] = task.id;
+        try std.testing.expect(scheduler.registerTask(task.id));
+        try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(class));
+    }
+    try std.testing.expectEqual(@as(u8, 4), smp.onlineCpuCount());
+    for (0..RESOURCE_CLASS_COUNT) |index| {
+        _ = scheduler.runNext(index + 1);
+    }
+    for (task_ids, resource_priority_order) |task_id, class| {
+        const stats = scheduler.taskDispatchStats(task_id).?;
+        try std.testing.expectEqual(@as(u64, 1), stats.dispatch_count);
+        try std.testing.expectEqual(@as(usize, 0), scheduler.readyQueueDepth(class));
+    }
+    try std.testing.expect(!scheduler.hasReadyTasks());
+    try std.testing.expect(!scheduler.runNext(RESOURCE_CLASS_COUNT + 1));
+}
+
+test "application processors cannot mutate or dispatch the shared runtime queues" {
+    const previous_cpu_count = smp.setOnlineCpuCountForTest(4);
+    defer _ = smp.setOnlineCpuCountForTest(previous_cpu_count);
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer scheduler.deinit();
+    const task = try createRunnableSchedulerTask(&runtime, 1, .background_light, "owner", "app.example.owner", null);
+    const other = try createRunnableSchedulerTask(&runtime, 2, .batch_compute, "other", "app.example.other", null);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    const before = scheduler.taskDispatchStats(task.id).?;
+    const before_budget = scheduler.slots.getConst(task.id).?.cpu_budget_remaining_ticks;
+
+    {
+        const previous_cpu = smp.currentCpuIndex();
+        smp.setCurrentCpuIndex(1);
+        defer smp.setCurrentCpuIndex(previous_cpu);
+        try std.testing.expect(!smp.isRuntimeOwner());
+        try std.testing.expect(!scheduler.registerTask(other.id));
+        try std.testing.expect(!scheduler.wakeTask(task.id, .external_event, 10, 20));
+        try std.testing.expect(!scheduler.refillTaskBudget(task.id, 10_000, 10));
+        try std.testing.expect(!scheduler.configureTaskDispatchRequest(task.id, .{ .class = .background_light }, true));
+        try std.testing.expect(!scheduler.parkTaskUntilEvent(task.id));
+        try std.testing.expect(!scheduler.unregisterTask(task.id));
+        try std.testing.expect(scheduler.enqueueAcceleratorClaim(.{
+            .task_id = task.id,
+            .engine = .gpu,
+            .resource_class = .background_light,
+            .requested_at_tick = 10,
+        }) == null);
+        try std.testing.expect(!scheduler.runNext(10));
+        try std.testing.expectEqual(userspace_executor.ExecutionOutcome.unavailable, scheduler.executeTask(task.id, 10));
+    }
+
+    try std.testing.expectEqualDeep(before, scheduler.taskDispatchStats(task.id).?);
+    try std.testing.expectEqual(before_budget, scheduler.slots.getConst(task.id).?.cpu_budget_remaining_ticks);
+    try std.testing.expect(scheduler.slots.getConst(other.id) == null);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.background_light));
+    _ = scheduler.runNext(11);
+    try std.testing.expect(!scheduler.hasReadyTasks());
+}
+
 test "post-dispatch requeue validates retained task identity and state" {
     var runtime = task_runtime.Runtime.init();
     const task = try createRunnableSchedulerTask(
@@ -2167,8 +2250,8 @@ test "userspace scheduler unlinks ready queue slots through prev links" {
     const second_index = scheduler.slots.slotIndexOf(second_task.id).?;
     const third_index = scheduler.slots.slotIndexOf(third_task.id).?;
     const queue_index = resourceClassIndex(.foreground_interactive);
-    try std.testing.expectEqual(compactQueueIndex(first_index), scheduler.ready_heads[0][queue_index]);
-    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_tails[0][queue_index]);
+    try std.testing.expectEqual(compactQueueIndex(first_index), scheduler.ready_heads[queue_index]);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_tails[queue_index]);
     try std.testing.expectEqual(compactQueueIndex(first_index), scheduler.slots.slots[second_index].prev_ready_index);
     try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.slots.slots[second_index].next_ready_index);
 
@@ -2180,8 +2263,8 @@ test "userspace scheduler unlinks ready queue slots through prev links" {
     try std.testing.expectEqual(QUEUE_NO_INDEX, scheduler.slots.slots[second_index].next_ready_index);
 
     try std.testing.expect(scheduler.unregisterTask(first_task.id));
-    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_heads[0][queue_index]);
-    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_tails[0][queue_index]);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_heads[queue_index]);
+    try std.testing.expectEqual(compactQueueIndex(third_index), scheduler.ready_tails[queue_index]);
     try std.testing.expectEqual(QUEUE_NO_INDEX, scheduler.slots.slots[third_index].prev_ready_index);
 }
 

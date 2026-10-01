@@ -603,6 +603,27 @@ machine-readable requirement coverage, and QEMU proof profiles validate boot,
 smoke, recovery, storage durability, driver restart, and benchmark paths against
 observable boot markers.
 
+Userspace dispatch and device interrupts share one explicit runtime owner on
+the bootstrap CPU. Each resource class has one ready queue; background, media,
+and batch work are serviced by the same dispatcher as interactive tasks. The
+service loop drains one atomic pending-work latch and rechecks it before idle.
+Application processors are online for TLB maintenance and otherwise sleep.
+Concurrent userspace dispatch requires independent executor state and service
+ownership before it can use those processors.
+
+Storage append logs reuse chunks already referenced by committed versions and
+emit each new shared chunk and affected blob manifest once per batch. The
+committed set is reconstructed from the selected root's version watermark;
+failed barriers retain dirty state, and retries or cold replay require no
+separate durability cache. Workspace-only and clean saves avoid reconstructing
+that set.
+
+Text scanout compares visible cell metadata and grapheme bytes independently
+of pool offsets, so recomposing an unchanged Unicode frame causes no pixel
+writes. Damaged cells resolve glyph scaling and cursor coverage into row masks
+before writing the framebuffer. The `text-scanout-benchmark` target measures
+full redraws, single-cell edits, and pool reordering on host memory.
+
 Physical memory allocation uses a two-level availability index above its
 ownership bitmap to skip fully reserved or allocated regions. The index adds
 266,240 bytes for the 512 GiB managed aperture; total allocator metadata remains

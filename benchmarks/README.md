@@ -40,6 +40,16 @@ slots remain occupied. Each result is the median of five 200,000-iteration
 samples after warmup. These host timings are informational; the QEMU kernel
 benchmark remains the integration gate.
 
+`./scripts/zig.sh build text-scanout-benchmark` measures 1280×720 text scanout
+using ordinary host RAM. `full_redraw` alternates every cell's glyph;
+`single_cell` changes one glyph; `pool_only` moves unchanged combining
+graphemes within the frame's byte pool. Each result is the median of five
+samples after warmup. The target checks exact damage: all cells, one cell,
+and zero cells respectively. Each damaged cell writes 240 pixels. Host timings
+exclude device memory latency and supplement the QEMU and hardware display
+proofs. The tool also runs without `--check-damage` for comparison with an
+earlier implementation that redraws cells when pool offsets change.
+
 The text-layout case locates, moves, and relocates the caret in a full 512-byte
 document. It varies hard breaks, widths of 20 and 120 columns, wrap affinity,
 movement direction, and one-row versus 23-row page steps. Its checksum includes

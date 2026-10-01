@@ -42,6 +42,24 @@ pub fn addIpcBenchmark(b: *std.Build) void {
     b.step("ipc-ring-benchmark", "Measure bounded IPC ring send/receive and backpressure on the host").dependOn(&run.step);
 }
 
+pub fn addTextScanoutBenchmark(b: *std.Build) void {
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/benchmark_text_scanout.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    module.addImport("text_scanout", b.createModule(.{
+        .root_source_file = b.path("src/text_scanout_benchmark.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    }));
+    const executable = b.addExecutable(.{ .name = "benchmark-text-scanout", .root_module = module });
+    const run = b.addRunArtifact(executable);
+    run.addArg("--check-damage");
+    run.has_side_effects = true;
+    b.step("text-scanout-benchmark", "Measure text rasterization and incremental framebuffer damage on the host").dependOn(&run.step);
+}
+
 pub fn addBenchmarkGate(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
