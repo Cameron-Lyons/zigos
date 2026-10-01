@@ -10,7 +10,7 @@ pub const MAX_PRINCIPAL_LABEL_BYTES = 48;
 pub const MAX_PUBLISHER_BYTES = 64;
 pub const COMPACT_KEY_RECORD_METADATA = true;
 pub const PRINCIPAL_KEY_RECORD_SIZE_CEILING_BYTES: usize = 136;
-pub const KEYRING_SIZE_CEILING_BYTES: usize = 8_056;
+pub const KEYRING_SIZE_CEILING_BYTES: usize = 7_864;
 
 comptime {
     if (MAX_PUBLISHER_BYTES > std.math.maxInt(u8)) {

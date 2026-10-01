@@ -22,6 +22,7 @@ pub export fn zigos_x86_arch_compile_check(port: u16, value: u32) u64 {
         cpu_features.enableModernFeatures(features, .hardware_pcid, .hardware);
     }
     if (features.rdseed) _ = x86.rdseed64();
+    if (features.rdpid) _ = x86.readProcessorId();
     x86.invalidatePage(x86.readCr2());
     x86.loadIdt(&empty_idt);
     x86.writeCr0(x86.readCr0());

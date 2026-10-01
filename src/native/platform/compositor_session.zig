@@ -46,10 +46,10 @@ pub const WINDOW_RECORD_SIZE_CEILING_BYTES: usize = 344;
 pub const REVIEW_ITEM_RECORD_SIZE_CEILING_BYTES: usize = 512;
 // Eight bounded text snapshots add 4,288 bytes; freestanding resident handles
 // stay unchanged because the surface arena is allocated on first presentation.
-pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_424;
-pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_432;
-pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_440;
-pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 224;
+pub const SESSION_SNAPSHOT_SIZE_CEILING_BYTES: usize = 28_200;
+pub const CHECKPOINT_STORE_SIZE_CEILING_BYTES: usize = 28_208;
+pub const HOST_SESSION_SIZE_CEILING_BYTES: usize = 28_216;
+pub const FREESTANDING_SESSION_SIZE_CEILING_BYTES: usize = 208;
 pub const SESSION_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_SESSION_SIZE_CEILING_BYTES
 else

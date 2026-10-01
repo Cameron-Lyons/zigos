@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const cpu_identity = @import("cpu_identity.zig");
 const config = @import("config.zig");
 const apic = @import("platform/apic.zig");
 const x2apic = @import("interrupts/x2apic.zig");
@@ -7,13 +8,6 @@ const x86 = if (builtin.target.os.tag == .freestanding)
     @import("../arch/x86.zig")
 else
     struct {
-        pub const IA32_GS_BASE_MSR: u32 = 0;
-        pub const EFER_MSR: u32 = 0;
-        pub const CR3_ADDRESS_MASK: usize = 0;
-        pub fn readMsr(_: u32) u64 {
-            return 0;
-        }
-        pub fn writeMsr(_: u32, _: u64) void {}
         pub fn readCr3() usize {
             return 0;
         }
@@ -22,10 +16,7 @@ else
             return false;
         }
         pub fn invalidatePcid(_: u16) void {}
-        pub fn sti() void {}
-        pub fn hlt() void {}
         pub fn stiHlt() void {}
-        pub fn enableSse() void {}
     };
 const tsc_clock = if (builtin.target.os.tag == .freestanding)
     @import("timer/tsc_clock.zig")
@@ -56,13 +47,8 @@ else
         pub fn print(_: []const u8) void {}
     };
 
-pub const MAX_CPUS: usize = 8;
+pub const MAX_CPUS = cpu_identity.MAX_CPUS;
 
-comptime {
-    if (MAX_CPUS != @import("memory/memory.zig").MAGAZINE_CPUS) {
-        @compileError("per-CPU heap magazines must cover every scheduler CPU");
-    }
-}
 pub const TLB_IPI_VECTOR: u8 = 0x70;
 pub const AP_STACK_BYTES: usize = 16 * 1024;
 pub const STARTS_APPLICATION_PROCESSORS = true;
@@ -92,7 +78,6 @@ var bsp_cpu_index: u8 = 0;
 var tlb_target_pcid: u16 = 0;
 var tlb_ack_count: u32 = 0;
 var initialized = false;
-var test_cpu_index: u8 = 0;
 
 pub fn init(madt: []const u8) void {
     const madt_table = madt;
@@ -106,7 +91,6 @@ pub fn init(madt: []const u8) void {
     cpu_count = 1;
     online_count = 1;
     bsp_cpu_index = 0;
-    setCurrentCpuIndex(0);
 
     if (builtin.target.os.tag == .freestanding) {
         inventoryFromMadt(bsp_apic_id, madt_table);
@@ -125,15 +109,7 @@ pub fn onlineCpuCount() u8 {
 }
 
 pub fn currentCpuIndex() u8 {
-    if (builtin.target.os.tag != .freestanding) return if (builtin.is_test) test_cpu_index else 0;
-    // The verification IDT handoff can return with the user GS selector.
-    // Resolve an unpublished base as the BSP until native entry restores it.
-    const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
-    if (gs_base < 4096) return 0;
-    const cpu_index: *const usize = @ptrFromInt(gs_base + 16);
-    const index = cpu_index.*;
-    if (index >= MAX_CPUS) @panic("invalid native CPU state");
-    return @truncate(index);
+    return cpu_identity.currentIndex();
 }
 
 // The shared executor, kernel port, and service tables belong to the BSP.
@@ -198,16 +174,8 @@ pub fn handleTlbIpi() void {
     _ = @atomicRmw(u32, &tlb_ack_count, .Add, 1, .acq_rel);
 }
 
-pub fn setCurrentCpuIndex(index: u8) void {
-    if (index >= MAX_CPUS) @panic("invalid native CPU index");
-    if (builtin.target.os.tag != .freestanding) {
-        if (builtin.is_test) test_cpu_index = index;
-        return;
-    }
-    const gs_base = x86.readMsr(x86.IA32_GS_BASE_MSR);
-    if (gs_base < 4096) @panic("native CPU state must be published before CPU binding");
-    const cpu_index: *usize = @ptrFromInt(gs_base + 16);
-    cpu_index.* = index;
+pub fn setCurrentCpuIndexForTest(index: u8) void {
+    cpu_identity.setIndexForTest(index);
 }
 
 fn inventoryFromMadt(bsp_apic_id: u32, table: []const u8) void {

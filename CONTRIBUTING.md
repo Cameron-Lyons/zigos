@@ -43,6 +43,9 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build heap-allocator-benchmark` | Measure heap allocation/free reuse and successful or failed allocation across 4096 separated free blocks. Uses ReleaseFast and reports the median of five samples. |
 | `./scripts/zig.sh build ipc-ring-benchmark` | Measure host IPC send/receive with full inline payloads and full-queue backpressure. Compares one receive snapshot with separate peek/pop calls in the same ReleaseFast build; reports the median of five samples. |
 | `./scripts/zig.sh build text-scanout-benchmark` | Measure host text rasterization, single-cell edits, and Unicode pool reordering with framebuffer damage counters. Uses ReleaseFast and reports the median of five samples. |
+| `./scripts/zig.sh build id-index-benchmark` | Measure ID hits, misses, generation reuse, empty-table lookups after deletion, and steady churn. Reports table bytes and the median of five ReleaseFast samples. |
+| `./scripts/zig.sh build endpoint-readiness-benchmark` | Compare owner scans and maintained readiness counts for 1–63 endpoints, including send/drain accounting. Checks results in the same ReleaseFast build. |
+| `./scripts/zig.sh build text-layout-benchmark` | Compare repeated layout and one-pass visible windows for ASCII and Unicode documents. Checks exact row/caret equivalence before timing. |
 
 ## Build And Cleanup Commands
 

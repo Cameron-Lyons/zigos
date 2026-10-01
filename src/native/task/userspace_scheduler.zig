@@ -2016,8 +2016,8 @@ test "application processors cannot mutate or dispatch the shared runtime queues
 
     {
         const previous_cpu = smp.currentCpuIndex();
-        smp.setCurrentCpuIndex(1);
-        defer smp.setCurrentCpuIndex(previous_cpu);
+        smp.setCurrentCpuIndexForTest(1);
+        defer smp.setCurrentCpuIndexForTest(previous_cpu);
         try std.testing.expect(!smp.isRuntimeOwner());
         try std.testing.expect(!scheduler.registerTask(other.id));
         try std.testing.expect(!scheduler.wakeTask(task.id, .external_event, 10, 20));

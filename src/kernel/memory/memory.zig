@@ -13,7 +13,7 @@ const PAGE_SIZE: usize = 4096;
 const MAX_SPANS: usize = 4096;
 const NO_SPAN: u32 = std.math.maxInt(u32);
 const MAGAZINE_DEPTH: usize = 8;
-pub const MAGAZINE_CPUS: usize = 8;
+pub const MAGAZINE_CPUS = @import("../cpu_identity.zig").MAX_CPUS;
 const CLASS_COUNT = heap_geometry.free_list_class_count;
 
 extern var __kernel_end: u8;
@@ -91,13 +91,7 @@ pub fn kernelEndAddress() usize {
 
 fn currentCpu() usize {
     if (comptime builtin.os.tag != .freestanding) return 0;
-    // CpuState.cpu_index lives at GS+16. A segment load stays on the allocate/free path;
-    // reading IA32_GS_BASE with RDMSR does not.
-    const index = asm volatile ("movq %%gs:16, %[out]"
-        : [out] "=r" (-> usize),
-    );
-    if (index >= MAGAZINE_CPUS) return 0;
-    return index;
+    return @import("../cpu_identity.zig").currentIndex();
 }
 
 fn pauseInterrupts() bool {

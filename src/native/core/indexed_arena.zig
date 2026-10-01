@@ -134,7 +134,6 @@ pub fn UniqueIndex(comptime capacity: usize) type {
         pub fn reset(self: *Self) void {
             @memset(&self.table.ids, 0);
             @memset(&self.table.slot_indices, 0);
-            @memset(&self.table.states, .empty);
         }
 
         pub fn lookup(self: *const Self, key: u64) ?usize {
@@ -236,6 +235,24 @@ pub fn MultimapIndex(
             return publicIndex(self.links[slot_index].previous);
         }
 
+        pub fn bucketIndexForKey(self: *const Self, key: u64) ?usize {
+            const bucket_index = self.bucket_index.lookup(key) orelse return null;
+            if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap bucket index points outside buckets");
+            const entry = &self.buckets[bucket_index];
+            if (!entry.in_use or entry.key != key) native_util.impossibleByInvariant("multimap bucket index points at the wrong bucket");
+            return bucket_index;
+        }
+
+        pub fn bucketIndexForSlot(self: *const Self, slot_index: usize) ?usize {
+            if (slot_index >= link_capacity) return null;
+            const bucket_index = self.links[slot_index].bucket;
+            if (bucket_index == compact_no_index) return null;
+            if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap link points outside buckets");
+            const entry = &self.buckets[bucket_index];
+            if (!entry.in_use or entry.count == 0 or entry.key == 0) native_util.impossibleByInvariant("multimap link belongs to a live bucket");
+            return @intCast(bucket_index);
+        }
+
         pub fn append(self: *Self, key: u64, slot_index: usize) bool {
             if (key == 0 or slot_index >= link_capacity) return false;
             const link = &self.links[slot_index];
@@ -320,11 +337,8 @@ pub fn MultimapIndex(
         }
 
         fn bucketConst(self: *const Self, key: u64) ?*const Bucket {
-            const bucket_index = self.bucket_index.lookup(key) orelse return null;
-            if (bucket_index >= bucket_capacity) native_util.impossibleByInvariant("multimap bucket index points outside buckets");
-            const slot = &self.buckets[bucket_index];
-            if (!slot.in_use or slot.key != key) native_util.impossibleByInvariant("multimap bucket index points at the wrong bucket");
-            return slot;
+            const bucket_index = self.bucketIndexForKey(key) orelse return null;
+            return &self.buckets[bucket_index];
         }
 
         fn findOrCreateBucketIndex(self: *Self, key: u64) ?CompactIndex {
@@ -1883,7 +1897,40 @@ test "multimap indexes initialize allocated storage in place" {
     try std.testing.expect(index.append(42, 2));
 }
 
-test "indexed arena reuses tombstoned primary index slots" {
+test "multimap bucket identities follow linked slots through removal and recycling" {
+    const Index = MultimapIndex(5, 3, 7);
+    var index = Index.init();
+    try std.testing.expect(index.bucketIndexForKey(0) == null);
+    try std.testing.expect(index.bucketIndexForKey(41) == null);
+    try std.testing.expect(index.bucketIndexForSlot(2) == null);
+    try std.testing.expect(index.bucketIndexForSlot(5) == null);
+
+    try std.testing.expect(index.append(41, 2));
+    try std.testing.expect(index.append(41, 4));
+    try std.testing.expect(index.append(42, 1));
+    const first_bucket = index.bucketIndexForKey(41).?;
+    const second_bucket = index.bucketIndexForKey(42).?;
+    try std.testing.expect(first_bucket != second_bucket);
+    try std.testing.expectEqual(@as(?usize, first_bucket), index.bucketIndexForSlot(2));
+    try std.testing.expectEqual(@as(?usize, first_bucket), index.bucketIndexForSlot(4));
+    try std.testing.expectEqual(@as(?usize, second_bucket), index.bucketIndexForSlot(1));
+
+    try std.testing.expect(index.remove(41, 2));
+    try std.testing.expect(index.bucketIndexForSlot(2) == null);
+    try std.testing.expectEqual(@as(?usize, first_bucket), index.bucketIndexForKey(41));
+    try std.testing.expect(index.remove(41, 4));
+    try std.testing.expect(index.bucketIndexForKey(41) == null);
+    try std.testing.expect(index.bucketIndexForSlot(4) == null);
+    try std.testing.expect(index.append(43, 2));
+    try std.testing.expectEqual(@as(?usize, first_bucket), index.bucketIndexForKey(43));
+    try std.testing.expectEqual(@as(?usize, first_bucket), index.bucketIndexForSlot(2));
+    try std.testing.expectEqual(@as(?usize, second_bucket), index.bucketIndexForSlot(1));
+    index.reset();
+    try std.testing.expect(index.bucketIndexForKey(43) == null);
+    try std.testing.expect(index.bucketIndexForSlot(2) == null);
+}
+
+test "indexed arena reuses deleted primary index slots" {
     const Arena = IndexedArena(TestSlot, 2, 2, testSlotId);
     var arena = Arena.init();
 
@@ -1900,19 +1947,28 @@ test "indexed arena reuses tombstoned primary index slots" {
     try std.testing.expectEqualStrings("final", arena.get(99).?.record.label);
 }
 
-test "indexed arena claims the first tombstone for proven absent keys" {
+test "indexed arena preserves colliding keys while reusing deleted primary slots" {
     const Arena = IndexedArena(TestSlot, 3, 4, testSlotId);
     var arena = Arena.init();
 
-    _ = arena.insertIndex(1, .{ .record = .{ .id = 1, .label = "first" } }).?;
-    _ = arena.insertIndex(5, .{ .record = .{ .id = 5, .label = "second" } }).?;
-    try std.testing.expect(arena.remove(1));
-    _ = arena.insertIndex(9, .{ .record = .{ .id = 9, .label = "replacement" } }).?;
+    var keys: [3]u64 = undefined;
+    var found: usize = 0;
+    var candidate: u64 = 1;
+    const shared_bucket = id_index.hash(candidate, 4);
+    while (found < keys.len) : (candidate += 1) {
+        if (id_index.hash(candidate, 4) != shared_bucket) continue;
+        keys[found] = candidate;
+        found += 1;
+    }
+    const first_index = arena.insertIndex(keys[0], .{ .record = .{ .id = keys[0], .label = "first" } }).?;
+    _ = arena.insertIndex(keys[1], .{ .record = .{ .id = keys[1], .label = "second" } }).?;
+    try std.testing.expect(arena.remove(keys[0]));
+    const replacement_index = arena.insertIndex(keys[2], .{ .record = .{ .id = keys[2], .label = "replacement" } }).?;
 
-    const shared_bucket = id_index.hash(1, 4);
-    try std.testing.expectEqual(@as(u64, 9), arena.primary_index.table.ids[shared_bucket]);
-    try std.testing.expectEqualStrings("replacement", arena.get(9).?.record.label);
-    try std.testing.expectEqualStrings("second", arena.get(5).?.record.label);
+    try std.testing.expectEqual(first_index, replacement_index);
+    try std.testing.expect(arena.get(keys[0]) == null);
+    try std.testing.expectEqualStrings("replacement", arena.get(keys[2]).?.record.label);
+    try std.testing.expectEqualStrings("second", arena.get(keys[1]).?.record.label);
 }
 
 test "indexed arena reserves explicit free indexes" {
@@ -2059,9 +2115,9 @@ test "multimap indexes size links to their fixed capacities" {
     const WordIndex = MultimapIndex(256, 256, 512);
 
     try std.testing.expectEqual(@as(usize, 384), @sizeOf(@FieldType(ByteIndex, "links")));
-    try std.testing.expectEqual(@as(usize, 5_000), @sizeOf(ByteIndex));
+    try std.testing.expectEqual(@as(usize, 4_744), @sizeOf(ByteIndex));
     try std.testing.expectEqual(@as(usize, 1_536), @sizeOf(@FieldType(WordIndex, "links")));
-    try std.testing.expectEqual(@as(usize, 11_272), @sizeOf(WordIndex));
+    try std.testing.expectEqual(@as(usize, 10_760), @sizeOf(WordIndex));
 }
 
 test "indexed arena supports constant-time arbitrary multimap removal" {

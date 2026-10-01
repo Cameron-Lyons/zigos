@@ -50,6 +50,29 @@ exclude device memory latency and supplement the QEMU and hardware display
 proofs. The tool also runs without `--check-damage` for comparison with an
 earlier implementation that redraws cells when pool offsets change.
 
+`./scripts/zig.sh build id-index-benchmark` measures 512-bucket ID tables with
+sequential keys, keys differing only in their high generation bits, misses
+after every home bucket has been occupied and emptied, and repeated insertion
+and deletion. It reports resident table bytes, lookup checksums, and the median
+of five samples. The tool imports only the public ID-index functions so it can
+also measure an earlier core implementation. Deletion now shifts affected
+probe-chain entries; both lookup and deletion remain bounded by capacity.
+
+`./scripts/zig.sh build endpoint-readiness-benchmark` compares the original
+owner scan with maintained nonempty-queue counts in the same build. Owners
+hold 1, 8, 32, or 63 endpoints. Cases check empty queues, a pending message in
+the last visited endpoint, and send/drain with readiness checks. Both paths pay
+the current send/drain accounting cost, making the scan comparison conservative.
+Each result is the median of five 200,000-iteration samples; unexpected
+readiness or message results fail the run.
+
+`./scripts/zig.sh build text-layout-benchmark` compares caret location followed
+by a second row scan with one visible-window pass over 512-byte ASCII and
+Unicode documents. Cases place the caret at the head, middle, and end. Before
+timing, every case verifies identical caret locations, first visible rows,
+and row contents. Both paths run in the same ReleaseFast build and report the
+median of five samples. These host benchmarks supplement booted validation.
+
 The text-layout case locates, moves, and relocates the caret in a full 512-byte
 document. It varies hard breaks, widths of 20 and 120 columns, wrap affinity,
 movement direction, and one-row versus 23-row page steps. Its checksum includes

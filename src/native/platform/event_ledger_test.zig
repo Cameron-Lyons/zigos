@@ -32,7 +32,7 @@ test "event ledger text metadata stays compact" {
     try std.testing.expectEqual(event_ledger.PendingPersistenceCount, @FieldType(Ledger, "pending_persist_count"));
     try std.testing.expectEqual(@as(usize, 136), event_ledger.LEDGER_RESIDENT_SIZE_BYTES);
     try std.testing.expectEqual(@as(usize, 584), @sizeOf(Event));
-    try std.testing.expectEqual(@as(usize, 46_536), @sizeOf(event_ledger.EventBacking));
+    try std.testing.expectEqual(@as(usize, 46_080), @sizeOf(event_ledger.EventBacking));
 }
 
 test "event ledger reset clears events indexes and sequence state" {

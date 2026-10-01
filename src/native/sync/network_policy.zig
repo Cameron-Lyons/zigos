@@ -16,7 +16,7 @@ pub const COMPACT_POLICY_METADATA = true;
 pub const DENSE_POLICY_IDS = true;
 pub const DERIVES_POLICY_IDS_FROM_DENSE_SLOTS = true;
 pub const POLICY_RECORD_SIZE_CEILING_BYTES: usize = 224;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_344;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = 4_312;
 const POLICY_REQUEST_INDEX_CAPACITY: usize = MAX_POLICIES * 2;
 
 comptime {

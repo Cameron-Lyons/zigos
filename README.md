@@ -611,6 +611,20 @@ Application processors are online for TLB maintenance and otherwise sleep.
 Concurrent userspace dispatch requires independent executor state and service
 ownership before it can use those processors.
 
+CPU identity comes from RDPID reading the kernel-owned IA32_TSC_AUX value.
+Each processor publishes and verifies its bounded logical number before native
+entry, paging, or heap allocation. Scheduler ownership checks, syscall state,
+and allocator caches use this number without trusting userspace GS state or
+reading a privileged MSR on each lookup. RDPID is required for every boot;
+its architectural contract is documented in the
+[Intel instruction reference](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf).
+
+Native ID indexes mix all 64 bits, including handle generations, and close
+probe chains after deletion. Zero marks an empty bucket, removing tombstones,
+membership bytes, and whole-table rebuilds. Endpoint readiness counts nonempty
+queues per owner; successful enqueue, final receive, and retirement maintain
+the count so sleep checks avoid scanning every owned endpoint.
+
 Storage append logs reuse chunks already referenced by committed versions and
 emit each new shared chunk and affected blob manifest once per batch. The
 committed set is reconstructed from the selected root's version watermark;
@@ -623,6 +637,9 @@ of pool offsets, so recomposing an unchanged Unicode frame causes no pixel
 writes. Damaged cells resolve glyph scaling and cursor coverage into row masks
 before writing the framebuffer. The `text-scanout-benchmark` target measures
 full redraws, single-cell edits, and pool reordering on host memory.
+The compositor locates the caret and retains visible rows in one layout pass
+using a caller-owned row ring. Scrolling preserves grapheme boundaries and
+wrap affinity without a persistent layout cache.
 
 Physical memory allocation uses a two-level availability index above its
 ownership bitmap to skip fully reserved or allocated regions. The index adds
@@ -755,11 +772,11 @@ Use the pinned toolchain and repo entrypoints:
 - `nasm`
 - `qemu-system-x86_64`
 - Python 3 for the two-node network fault relay and its tests
-- An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, PGE, PCID/INVPCID,
+- An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, RDPID, PGE, PCID/INVPCID,
   x2APIC, XSAVE/XSAVES, CET IBT and shadow-stack support, FRED, LASS, LKGS,
   1 GiB pages, and a calibrated invariant TSC with deadline timers. Production
   boots require the complete floor. QEMU media explicitly selects its software
-  CPU fallback for features unavailable in the emulator; RDSEED remains required.
+  CPU fallback for features unavailable in the emulator; RDSEED and RDPID remain required.
   The native UEFI loader enters the x86-64 kernel directly.
 - Supported boots initialize the calibrated invariant-TSC clock before emitting
   their first marker. COM1 transmit readiness uses a 100 ms elapsed deadline,

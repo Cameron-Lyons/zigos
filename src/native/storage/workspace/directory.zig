@@ -189,7 +189,7 @@ const heap_backed_recoverable_delete_logs = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_
 pub const HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING = true;
 const heap_backed_workspace_entries = HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
 pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 152 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 7_192 else 357_400;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 7_032 else 357_240;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
 const WorkspaceEntryBacking = if (heap_backed_workspace_entries) ?*WorkspaceEntryState else WorkspaceEntryState;
@@ -2212,7 +2212,7 @@ test "workspace sharing uses capacity-sized indexed backing" {
     try std.testing.expectEqual(@as(usize, 1_472), @sizeOf(WorkspaceShareTable));
     try std.testing.expectEqual(@as(usize, 43_928), @sizeOf(WorkspaceRecord));
     try std.testing.expectEqual(@as(usize, 43_936), @sizeOf(WorkspaceSlot));
-    try std.testing.expectEqual(@as(usize, 357_400), @sizeOf(Directory));
+    try std.testing.expectEqual(@as(usize, 357_240), @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {

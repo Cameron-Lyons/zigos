@@ -168,6 +168,7 @@ pub const IA32_LSTAR_MSR: u32 = 0xC000_0082;
 pub const IA32_FMASK_MSR: u32 = 0xC000_0084;
 pub const IA32_GS_BASE_MSR: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
+pub const IA32_TSC_AUX_MSR: u32 = 0xC000_0103;
 pub const IA32_U_CET_MSR: u32 = 0x6A0;
 pub const IA32_S_CET_MSR: u32 = 0x6A2;
 pub const CET_SH_STK_EN: u64 = 1 << 0;
@@ -179,6 +180,15 @@ pub const IA32_FRED_RSP3_MSR: u32 = 0x1CF;
 pub const IA32_FRED_STKLVLS_MSR: u32 = 0x1D0;
 pub const IA32_FRED_CONFIG_MSR: u32 = 0x1D4;
 pub const FRED_CONFIG_ENTRY_ALIGN: u64 = 64;
+
+// CPUID.7.0:ECX[22] gates RDPID and IA32_TSC_AUX. It reads the kernel's
+// logical CPU signature without reading mutable GS state or using RDMSR.
+pub inline fn readProcessorId() u32 {
+    const signature = asm volatile ("rdpid %[out]"
+        : [out] "=r" (-> usize),
+    );
+    return @truncate(signature);
+}
 
 pub inline fn enableNoExecute() void {
     writeMsr(EFER_MSR, readMsr(EFER_MSR) | EFER_NXE);

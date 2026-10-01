@@ -17,7 +17,7 @@ pub const MAX_DMA_WINDOWS: usize = 8;
 pub const MAX_DMA_PROGRAMS: usize = MAX_DEVICES * 2;
 pub const HEAP_BACKED_DMA_PROGRAMS_ON_FREESTANDING = true;
 pub const COMPACT_DMA_WINDOW_COUNTS = true;
-pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_440;
+pub const DMA_PROGRAM_BACKING_SIZE_CEILING_BYTES: usize = 3_408;
 pub const DMA_PROGRAM_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 
 comptime {

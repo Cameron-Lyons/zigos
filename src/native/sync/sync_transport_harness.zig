@@ -27,13 +27,13 @@ pub const TelemetryCount = u32;
 pub const ENCRYPTED_PACKET_SIZE_CEILING_BYTES: usize = 352;
 pub const SIGNED_ENCRYPTED_FRAME_SIZE_CEILING_BYTES: usize = 504;
 pub const RELAY_PACKET_SLOT_SIZE_CEILING_BYTES: usize = 368;
-pub const HOST_RELAY_SIZE_CEILING_BYTES: usize = 7_008;
+pub const HOST_RELAY_SIZE_CEILING_BYTES: usize = 6_816;
 pub const FREESTANDING_RELAY_SIZE_CEILING_BYTES: usize = 16;
 pub const RELAY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_RELAY_SIZE_CEILING_BYTES
 else
     HOST_RELAY_SIZE_CEILING_BYTES;
-pub const HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 7_104;
+pub const HOST_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 6_912;
 pub const FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = 112;
 pub const BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES
@@ -1494,14 +1494,14 @@ test "compact relay metadata preserves exact packet and domain capacities" {
     try std.testing.expectEqual(@as(usize, EMULATED_NATIVE_TRANSPORT_SIZE_CEILING_BYTES), @sizeOf(EmulatedNativeTransport));
     try std.testing.expect(relay_queue_layout.heap_backs_queue_on_freestanding);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), relay_queue_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 6_872), relay_queue_layout.backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 6_864), relay_queue_layout.freestanding_resident_savings_bytes);
+    try std.testing.expectEqual(@as(usize, 6_808), relay_queue_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 6_800), relay_queue_layout.freestanding_resident_savings_bytes);
     try std.testing.expect(relay_queue_layout.uses_packet_arena);
     try std.testing.expect(relay_queue_layout.uses_session_index);
     try std.testing.expect(@sizeOf(Relay) <= RELAY_SIZE_CEILING_BYTES);
-    try std.testing.expectEqual(@as(usize, if (builtin.target.os.tag == .freestanding) 16 else 6880), @sizeOf(Relay));
+    try std.testing.expectEqual(@as(usize, RELAY_SIZE_CEILING_BYTES), @sizeOf(Relay));
     try std.testing.expect(@sizeOf(BootedOverlayRelayService) <= BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES);
-    try std.testing.expectEqual(@as(usize, if (builtin.target.os.tag == .freestanding) 112 else 6976), @sizeOf(BootedOverlayRelayService));
+    try std.testing.expectEqual(@as(usize, BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES), @sizeOf(BootedOverlayRelayService));
 
     const packet_bytes = [_]u8{0xA5} ** MAX_PACKET_BYTES;
     var packet = std.mem.zeroes(EncryptedPacket);

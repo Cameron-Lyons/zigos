@@ -13,6 +13,7 @@ const userspace_executor = @import("task/userspace_executor.zig");
 const task_runtime = @import("task/task_runtime.zig");
 const storage_volume = @import("storage/storage_volume.zig");
 const cpu_baseline = @import("../arch/cpu_baseline.zig");
+const cpu_identity = @import("../kernel/cpu_identity.zig");
 const x86 = @import("../arch/x86.zig");
 
 pub const generated_from_typed_idl = true;
@@ -32,6 +33,7 @@ pub const Floor = struct {
     eight_address_spaces: bool,
     checkpoint_only_cold_load: bool,
     fred_only_traps: bool,
+    trusted_cpu_identity: bool,
 };
 
 pub const floor: Floor = .{
@@ -70,6 +72,7 @@ pub const floor: Floor = .{
         storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD and
         storage_volume.COMPACTS_IN_BACKGROUND,
     .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,
+    .trusted_cpu_identity = cpu_baseline.REQUIRES_RDPID and cpu_identity.USES_RDPID,
 };
 
 test "2026 contract floor is generated from typed flags" {
