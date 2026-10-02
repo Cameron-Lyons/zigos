@@ -119,7 +119,6 @@ fn apEntry(cpu_index: u64) callconv(.c) noreturn {
     idt.init();
     x2apic.enable();
     syscall64.initApplicationProcessor(index, bringup_cpus[index].kernel_stack_top);
-    smp.setCurrentCpuIndex(index);
     bringup_cpus[index].online = true;
     bringup_online_count.* += 1;
     while (true) smp.idle();

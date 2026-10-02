@@ -81,7 +81,7 @@ pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 288;
 pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 390_736 else 3_003_216;
+pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 384_976 else 2_997_456;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -490,6 +490,7 @@ pub const ChunkRecord = struct {
 pub const Error = error{
     ContentTypeTooLong,
     InvalidObjectId,
+    InvalidPayloadOffset,
     InvalidSignature,
     LabelTooLong,
     NoSpaceLeft,
@@ -1107,11 +1108,24 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         pub fn versionChunkCursor(self: *Self, version_record: *const VersionRecord) Error!VersionChunkCursor {
+            return self.versionChunkCursorAt(version_record, 0);
+        }
+
+        /// Starts at the verified canonical chunk containing byte_offset.
+        /// Chunk bytes stay complete and offsets stay absolute; callers skip
+        /// the prefix within the first chunk. EOF produces an empty cursor.
+        pub fn versionChunkCursorAt(self: *Self, version_record: *const VersionRecord, byte_offset: usize) Error!VersionChunkCursor {
             const blob_record = try self.verifiedBlobManifest(version_record);
+            const payload_len = blob_record.payloadLen();
+            if (byte_offset > payload_len) return error.InvalidPayloadOffset;
+            const chunk_count = blob_record.chunkCount();
+            const first_chunk = if (byte_offset == payload_len) chunk_count else byte_offset / MAX_CHUNK_BYTES;
             return .{
                 .store = self,
                 .blob = blob_record,
-                .chunk_count = blob_record.chunkCount(),
+                .chunk_count = chunk_count,
+                .next_chunk_index = first_chunk,
+                .byte_offset = if (byte_offset == payload_len) payload_len else first_chunk * MAX_CHUNK_BYTES,
             };
         }
 

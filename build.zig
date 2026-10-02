@@ -47,8 +47,7 @@ pub fn build(b: *std.Build) void {
         @panic("Zigos supports only the x86_64-freestanding-none target");
     }
     const optimize = b.standardOptimizeOption(.{});
-    benchmarks_build.addAllocatorBenchmarks(b);
-    benchmarks_build.addIpcBenchmark(b);
+    benchmarks_build.addHostBenchmarks(b);
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
     const test_artifacts = tests_build.addTestArtifacts(b, optimize, userspace_images);
     const x86_64_architecture_compile_check = kernel_build.addX86_64ArchitectureCompileCheck(b, optimize);

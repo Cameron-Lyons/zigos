@@ -313,7 +313,7 @@ pub fn claimSipiTrampolinePage() ?u32 {
 }
 
 pub const USES_PER_CPU_FRAME_CACHE = true;
-const FRAME_CACHE_CPUS: usize = 8;
+const FRAME_CACHE_CPUS = @import("../cpu_identity.zig").MAX_CPUS;
 const FRAME_CACHE_DEPTH: u8 = 16;
 var general_frame_cache: [FRAME_CACHE_CPUS][FRAME_CACHE_DEPTH]frame_allocator.PhysicalAddress = undefined;
 var general_frame_cache_len: [FRAME_CACHE_CPUS]u8 = [_]u8{0} ** FRAME_CACHE_CPUS;
@@ -321,12 +321,7 @@ var general_frame_cache_total: u8 = 0;
 
 fn frameCacheCpu() u8 {
     if (comptime builtin.target.os.tag != .freestanding) return 0;
-    // CpuState.cpu_index lives at GS+16.
-    const index = asm volatile ("movq %%gs:16, %[out]"
-        : [out] "=r" (-> usize),
-    );
-    if (index >= FRAME_CACHE_CPUS) return 0;
-    return @truncate(index);
+    return @import("../cpu_identity.zig").currentIndex();
 }
 
 fn cachedFrame(base: frame_allocator.PhysicalAddress) bool {

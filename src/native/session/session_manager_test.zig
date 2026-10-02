@@ -31,6 +31,58 @@ fn noFocusedInputTestProof() ?xhci.InputProof {
     return null;
 }
 
+test "session idle readiness respects future worker deadlines and resumes at the deadline" {
+    const peer_quote = @import("../services/peer_attestation_worker.zig");
+    const DeferredWorker = struct {
+        pending: bool = true,
+        not_before: u64 = 50,
+
+        fn ready(context: *anyopaque, _: peer_quote.Owner, now: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.pending and now >= self.not_before;
+        }
+
+        fn service(context: *anyopaque, owner: peer_quote.Owner, now: u64) bool {
+            if (!ready(context, owner, now)) return false;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pending = false;
+            return true;
+        }
+
+        fn nextWake(context: *anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return if (self.pending) self.not_before else null;
+        }
+
+        fn quiesce(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pending = false;
+        }
+
+        const operations = peer_quote.Interface.Operations{
+            .ready = ready,
+            .service = service,
+            .next_wake = nextWake,
+            .quiesce = quiesce,
+        };
+    };
+    var worker = DeferredWorker{};
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.initializeAllocated();
+    defer manager.reset();
+    try manager.runtime_context.ensureConstructed();
+    manager.bindPeerAttestationWorker(.{ .context = &worker, .operations = &DeferredWorker.operations });
+
+    try std.testing.expect(!manager.userspaceSchedulerHasDispatchableTasks(49));
+    try std.testing.expectEqual(@as(?u64, 50), manager.nextServiceWake());
+    try std.testing.expect(!manager.servicePeerAttestationWork(49));
+    try std.testing.expect(manager.userspaceSchedulerHasDispatchableTasks(50));
+    try std.testing.expect(manager.servicePeerAttestationWork(50));
+    try std.testing.expect(!manager.userspaceSchedulerHasDispatchableTasks(50));
+    try std.testing.expect(manager.nextServiceWake() == null);
+}
+
 test "session manager authentication deadlines wake and revoke without keyboard activity" {
     var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
     var entry = @import("../platform/trusted_auth_entry.zig").Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 20 };

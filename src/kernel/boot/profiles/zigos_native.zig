@@ -29,7 +29,7 @@ pub fn run() noreturn {
     while (true) {
         timer.synchronize();
         const now_ticks = timer.getTicks();
-        const pending = event_wake.takeAll();
+        const pending = event_wake.take();
         // Expiry revokes input/identity authority before a userspace task can
         // consume another event, including wakes without keyboard activity.
         session_manager.system().serviceAuthenticationClock(now_ticks);
@@ -51,9 +51,9 @@ pub fn run() noreturn {
         }
 
         x86.cli();
-        const ready_tasks = session_manager.userspaceSchedulerHasReadyTasks();
-        if (event_wake.any() or ready_tasks or session_manager.networkWorkPending()) {
-            if (ready_tasks) timer.armSchedulerTick();
+        const dispatchable_tasks = session_manager.userspaceSchedulerHasDispatchableTasks(timer.getTicks());
+        if (event_wake.any() or dispatchable_tasks or session_manager.networkWorkPending()) {
+            if (dispatchable_tasks) timer.armSchedulerTick();
             x86.sti();
             continue;
         }

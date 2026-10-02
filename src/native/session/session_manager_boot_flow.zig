@@ -324,8 +324,17 @@ pub const SessionManager = struct {
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
+        return self.hasReadyServiceWork(self.peer_dispatch_tick) or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+    }
+
+    pub fn userspaceSchedulerHasDispatchableTasks(self: *const SessionManager, now_ticks: u64) bool {
+        if (!self.runtime_context.constructed) return false;
+        return self.hasReadyServiceWork(now_ticks) or self.runtime_context.userspaceSchedulerConst().?.hasDispatchableTasks(now_ticks);
+    }
+
+    fn hasReadyServiceWork(self: *const SessionManager, now_ticks: u64) bool {
         if (self.identity_owner) |owner| if (owner.requests_ready(owner.context)) return true;
-        return self.peerQuoteReady() or self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(self.peer_dispatch_tick) or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        return self.peerQuoteReady(now_ticks) or self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(now_ticks) or self.peer_handshakes.hasReadyWork(now_ticks) or self.peers.hasReadyWork(now_ticks) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork();
     }
 
     pub const DocumentTask = struct {
@@ -439,9 +448,9 @@ pub const SessionManager = struct {
         return worker.operations.service(worker.context, self.peerQuoteOwner(), now_ticks);
     }
 
-    fn peerQuoteReady(self: *const SessionManager) bool {
+    fn peerQuoteReady(self: *const SessionManager, now_ticks: u64) bool {
         const worker = self.peer_quote_worker orelse return false;
-        return worker.operations.ready(worker.context, self.peerQuoteOwner(), self.peer_dispatch_tick);
+        return worker.operations.ready(worker.context, self.peerQuoteOwner(), now_ticks);
     }
 
     fn peerQuoteOwner(self: *const SessionManager) peer_quote.Owner {

@@ -173,6 +173,32 @@ test "object sender backpressure retains ciphertext without advancing a transpor
     try std.testing.expect(f.identical_retries);
 }
 
+test "object sender resumes and retries from a later storage page" {
+    var payload: [objects.MAX_CHUNK_BYTES + transfer.MAX_CHUNK * 3 + 17]u8 = undefined;
+    for (&payload, 0..) |*byte, i| byte.* = @truncate(i * 19 + i / objects.MAX_CHUNK_BYTES);
+    const f = try Fixture.init(&payload);
+    defer f.deinit();
+    try f.attach();
+    for (0..100) |_| {
+        f.tick();
+        if (f.sender.acknowledged >= objects.MAX_CHUNK_BYTES) break;
+    } else return error.LaterPageNotReached;
+    f.block_source = true;
+    const acknowledged = f.sender.acknowledged;
+    f.tick();
+    const nonce = f.base.sender.crypto.transport.send.nonce;
+    for (0..10) |_| f.tick();
+    try std.testing.expect(f.failed_len != 0 and f.identical_retries);
+    try std.testing.expectEqual(acknowledged, f.sender.acknowledged);
+    try std.testing.expectEqual(nonce, f.base.sender.crypto.transport.send.nonce);
+    f.block_source = false;
+    try f.finish();
+    f.base.disk.crash();
+    const entry = try f.base.disk.service.resolve(f.base.disk.workspace_id, @import("../storage/document_save_test.zig").path);
+    var actual: [payload.len]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &payload, try f.base.disk.service.versionPayloadInto(f.base.disk.service.version(entry.version_id).?, &actual));
+}
+
 test "object sender rejects stale speculative and premature durable receipts" {
     const f = try Fixture.init("a payload awaiting its first chunk");
     defer f.deinit();

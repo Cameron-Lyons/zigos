@@ -6,6 +6,7 @@ const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
 const volume_backend = @import("volume/backend.zig");
 const volume_capacity = @import("volume/capacity.zig");
+const volume_delta_payloads = @import("volume/delta_payloads.zig");
 const volume_errors = @import("volume/errors.zig");
 const volume_hashing = @import("volume/hashing.zig");
 const volume_layout = @import("volume/layout.zig");
@@ -828,22 +829,31 @@ fn buildDeltaLog(
 ) Error!BuiltLog {
     var writer = CursorWriter{ .buffer = buffer };
     try volume_log.appendRecordPayload(&writer, .segment_boundary, &.{});
+    var record_count: u16 = 1;
     const version_watermark = volume_root_slot.versionWatermark(root);
     const snapshot_watermark = volume_root_slot.snapshotWatermark(root);
+    var payloads: ?volume_delta_payloads.Tracker = null;
 
     for (store.dirtyObjectIds()) |object_id| {
         const object_record = store.object(object_id) orelse continue;
         if (object_record.latest_version_id.raw() <= version_watermark) continue;
         try appendObjectRecord(&writer, object_record);
+        record_count += 1;
     }
 
     for (store.dirtyVersionIds()) |version_id| {
         const version_record = store.version(version_id) orelse continue;
         if (version_record.id.raw() <= version_watermark) continue;
-        try appendVersionPayloadChunks(&writer, store, version_record);
+        if (payloads == null) payloads = try volume_delta_payloads.Tracker.init(store, version_watermark);
+        const tracker = &payloads.?;
         const blob = store.versionBlob(version_record) orelse return error.CorruptImage;
-        try appendBlobRecord(&writer, store, blob);
+        if (try tracker.includeBlob(version_record.blob_slot_index)) {
+            record_count += try appendVersionPayloadChunks(&writer, store, version_record, tracker);
+            try appendBlobRecord(&writer, store, blob);
+            record_count += 1;
+        }
         try appendVersionRecord(&writer, store, version_record);
+        record_count += 1;
     }
 
     for (workspaces.dirtyWorkspaceIds()) |workspace_id| {
@@ -854,18 +864,20 @@ fn buildDeltaLog(
             if (persisted.generation == workspace_record.generation and persisted.state_hash == state_hash) continue;
         }
         try appendWorkspaceRecord(&writer, workspace_record);
+        record_count += 1;
     }
 
     for (workspaces.dirtySnapshotIds()) |snapshot_id| {
         const snapshot_record = workspaces.findSnapshotConst(snapshot_id) orelse continue;
         if (snapshot_record.id.raw() <= snapshot_watermark) continue;
         try appendSnapshotRecord(&writer, snapshot_record);
+        record_count += 1;
     }
 
     if (writer.offset == volume_log.recordHeaderLen()) return .{};
     return .{
         .bytes_len = writer.offset,
-        .record_count = countLogRecords(buffer[0..writer.offset]) catch return error.CorruptImage,
+        .record_count = record_count,
         .segment_count = 1,
     };
 }
@@ -1012,17 +1024,6 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     workspaces.rebuildDirectoryIndexes();
 }
 
-fn countLogRecords(log: []const u8) Error!u16 {
-    var reader = CursorReader{ .buffer = log };
-    var count: u16 = 0;
-    while (reader.offset < reader.buffer.len) {
-        const header = try volume_log.readRecordHeader(&reader);
-        _ = try reader.readSlice(header.payload_len);
-        count += 1;
-    }
-    return count;
-}
-
 fn appendObjectRecord(writer: *CursorWriter, record: *const object_store.ObjectRecord) Error!void {
     const header_offset = try volume_log.beginRecord(writer, .object_state);
     try encodeObjectBody(writer, record);
@@ -1039,11 +1040,16 @@ fn appendVersionPayloadChunks(
     writer: *CursorWriter,
     store: *object_store.Store,
     version_record: *const object_store.VersionRecord,
-) Error!void {
+    payloads: *volume_delta_payloads.Tracker,
+) Error!u16 {
     var cursor = store.versionChunkCursor(version_record) catch return error.CorruptImage;
+    var record_count: u16 = 0;
     while (cursor.next() catch return error.CorruptImage) |chunk| {
+        if (!try payloads.includeChunk(cursor.blob.chunk_slot_indexes[chunk.index])) continue;
         try appendPayloadChunkRecord(writer, chunk);
+        record_count += 1;
     }
+    return record_count;
 }
 
 fn appendWorkspaceRecord(writer: *CursorWriter, record: *const workspace.WorkspaceRecord) Error!void {

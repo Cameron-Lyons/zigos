@@ -52,7 +52,7 @@ pub const DRAINS_FULL_RECEIVE_QUEUE_WITHOUT_COPY = true;
 pub const USERSPACE_I225_DATAPLANE = true;
 pub const KERNEL_LATCHES_ONLY = true;
 pub const NetworkTelemetryCount = u32;
-pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 32 else 2_080;
+pub const NATIVE_NETWORK_STACK_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 32 else 1_952;
 const PEER_LINK_INDEX_CAPACITY: usize = MAX_PEER_LINKS * 2;
 const PeerLinkIndex = indexed_arena.UniqueIndex(PEER_LINK_INDEX_CAPACITY);
 
@@ -782,9 +782,6 @@ pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task
     active_device = device;
     active_service_id = service_id;
     active_task_id = task_id;
-    const event_wake = @import("../../kernel/event_wake.zig");
-    const smp = @import("../../kernel/smp.zig");
-    event_wake.bind(.network, smp.assignedCpu(task_id, false));
     return true;
 }
 
@@ -1273,8 +1270,8 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expectEqual(@as(usize, 0), bounded_metadata_layout.receive_overflow_scratch_bytes);
     try std.testing.expect(peer_link_directory_layout.heap_backs_directory_on_freestanding);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), peer_link_directory_layout.freestanding_handle_size_bytes);
-    try std.testing.expectEqual(@as(usize, 2_056), peer_link_directory_layout.backing_size_bytes);
-    try std.testing.expectEqual(@as(usize, 2_048), peer_link_directory_layout.freestanding_resident_savings_bytes);
+    try std.testing.expectEqual(@as(usize, 1_928), peer_link_directory_layout.backing_size_bytes);
+    try std.testing.expectEqual(@as(usize, 1_920), peer_link_directory_layout.freestanding_resident_savings_bytes);
     try std.testing.expect(peer_link_directory_layout.uses_device_index);
     try std.testing.expect(peer_link_directory_layout.uses_mac_index);
     try std.testing.expect(DERIVES_CONNECTION_IDS_FROM_OPEN_COUNT);

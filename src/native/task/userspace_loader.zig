@@ -377,7 +377,7 @@ test "userspace catalog uses capacity-sized resident metadata" {
     try std.testing.expectEqual(task_runtime.UserImageByteLength, @FieldType(ImageRecord, "byte_len"));
     try std.testing.expectEqual(@as(usize, 712), @sizeOf(ImageRecord));
     try std.testing.expectEqual(@as(usize, 720), @sizeOf(ImageSlot));
-    try std.testing.expectEqual(@as(usize, 24_616), @sizeOf(Catalog));
+    try std.testing.expectEqual(@as(usize, 24_488), @sizeOf(Catalog));
     try std.testing.expect(DERIVES_IMAGE_IDS_FROM_ARENA_COUNT);
     try std.testing.expect(!@hasField(Catalog, "next_image_id"));
 }

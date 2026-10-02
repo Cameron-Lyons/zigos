@@ -1590,7 +1590,7 @@ fn validateNuc11tnki5KernelProofSources(
         "xhci_driver_task.inputProof()",
         "session_manager.servicePendingInputWork(now_ticks)",
         "xhci_driver_task.lifecyclePending()",
-        "userspaceSchedulerHasReadyTasks",
+        "userspaceSchedulerHasDispatchableTasks(timer.getTicks())",
         "timer.armSchedulerTick()",
         "timer.disarmSchedulerTick()",
         "x86.cli()",

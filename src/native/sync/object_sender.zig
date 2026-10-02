@@ -126,11 +126,12 @@ pub const Sender = struct {
 
     fn readChunk(self: *Sender, output: []u8) ![]const u8 {
         const version = self.store.version(self.version_id) orelse return error.VersionNotFound;
-        var chunks = try self.store.versionChunkCursor(version);
+        var chunks = try self.store.versionChunkCursorAt(version, self.acknowledged);
         const length = @min(output.len, self.request.length - self.acknowledged);
         var copied: usize = 0;
-        // At most 28 metadata entries are visited. Only the requested bytes are
-        // copied; no storage pointer survives the synchronous cursor walk.
+        // Verified page lengths locate the first chunk directly. A transport
+        // frame visits only its containing page and any page it crosses; no
+        // storage pointer survives the synchronous cursor walk.
         while (try chunks.next()) |chunk| {
             const position = self.acknowledged + copied;
             if (position >= chunk.offset + chunk.bytes.len) continue;

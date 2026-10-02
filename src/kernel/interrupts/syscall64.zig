@@ -1,13 +1,12 @@
 const x86 = @import("../../arch/x86.zig");
 const gdt = @import("gdt64.zig");
-const smp = @import("../smp.zig");
+const cpu_identity = @import("../cpu_identity.zig");
 
 pub const FRED_ONLY_TRAPS = @import("../../arch/cpu_baseline.zig").FRED_ONLY_TRAPS;
 
 const CpuState = extern struct {
     kernel_stack_top: usize = 0,
     user_stack_pointer: usize = 0,
-    cpu_index: usize = 0,
     kernel_port: usize = 0,
     active_task_id: u64 = 0,
 };
@@ -31,12 +30,11 @@ const SYSCALL_RFLAGS_MASK = RFLAGS_TRAP |
 extern fn zigos_syscall_entry() callconv(.c) void;
 extern var stack_top: u8;
 
-pub export var zigos_syscall_cpu_states: [smp.MAX_CPUS]CpuState align(64) = [_]CpuState{.{}} ** smp.MAX_CPUS;
-pub const zigos_syscall_cpu_state = &zigos_syscall_cpu_states[0];
+var cpu_states: [cpu_identity.MAX_CPUS]CpuState align(64) = [_]CpuState{.{}} ** cpu_identity.MAX_CPUS;
 
 pub fn init() void {
     bindCpu(0, @intFromPtr(&stack_top));
-    enableNativeEntry(zigos_syscall_cpu_states[0].kernel_stack_top);
+    enableNativeEntry(cpu_states[0].kernel_stack_top);
     if (!enabled()) unreachable;
 }
 
@@ -53,10 +51,6 @@ pub fn setKernelStack(stack_top_value: usize) void {
     if (x86.fredEnabled()) {
         x86.setFredRsp0(stack_top_value);
     }
-}
-
-pub fn currentCpuIndex() u8 {
-    return @truncate(currentState().cpu_index);
 }
 
 pub fn enabled() bool {
@@ -110,28 +104,26 @@ fn syscallMsrsEnabled() bool {
 
 fn bindCpu(cpu_index: u8, stack_top_value: usize) void {
     if (stack_top_value == 0 or (stack_top_value & 0xF) != 0) unreachable;
-    if (cpu_index >= smp.MAX_CPUS) unreachable;
-    zigos_syscall_cpu_states[cpu_index] = .{
+    if (cpu_index >= cpu_identity.MAX_CPUS) unreachable;
+    if (!@import("../../arch/cpu_features.zig").detect().rdpid) @panic("RDPID is required for native CPU identity");
+    cpu_states[cpu_index] = .{
         .kernel_stack_top = stack_top_value,
-        .cpu_index = cpu_index,
     };
-    const state_addr = @intFromPtr(&zigos_syscall_cpu_states[cpu_index]);
+    const state_addr = @intFromPtr(&cpu_states[cpu_index]);
     x86.writeMsr(x86.IA32_GS_BASE_MSR, state_addr);
     x86.writeMsr(x86.IA32_KERNEL_GS_BASE_MSR, state_addr);
+    cpu_identity.initialize(cpu_index);
 }
 
 fn currentState() *CpuState {
-    const addr = x86.readMsr(x86.IA32_GS_BASE_MSR);
-    if (addr == 0) return &zigos_syscall_cpu_states[0];
-    return @ptrFromInt(addr);
+    return &cpu_states[cpu_identity.currentIndex()];
 }
 
 comptime {
     if (@offsetOf(CpuState, "kernel_stack_top") != 0 or
         @offsetOf(CpuState, "user_stack_pointer") != 8 or
-        @offsetOf(CpuState, "cpu_index") != 16 or
-        @offsetOf(CpuState, "kernel_port") != 24 or
-        @offsetOf(CpuState, "active_task_id") != 32)
+        @offsetOf(CpuState, "kernel_port") != 16 or
+        @offsetOf(CpuState, "active_task_id") != 24)
     {
         @compileError("x86-64 FRED CPU state layout diverged from GS-relative fields");
     }

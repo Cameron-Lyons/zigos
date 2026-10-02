@@ -12,6 +12,7 @@ const leaf7_ebx_invpcid: u32 = 1 << 10;
 const leaf7_ebx_rdseed: u32 = 1 << 18;
 const leaf7_ebx_smap: u32 = 1 << 20;
 const leaf7_ecx_pku: u32 = 1 << 3;
+const leaf7_ecx_rdpid: u32 = 1 << 22;
 const leaf7_ecx_umip: u32 = 1 << 2;
 const leaf7_ecx_cet_ss: u32 = 1 << 7;
 const leaf7_edx_cet_ibt: u32 = 1 << 20;
@@ -46,6 +47,7 @@ pub const Registers = struct {
 };
 
 pub const REQUIRES_XSAVES = true;
+pub const REQUIRES_RDPID = true;
 pub const REQUIRES_CET = true;
 pub const REQUIRES_PKU = false;
 pub const REQUIRES_LASS = true;
@@ -66,6 +68,7 @@ pub const Features = struct {
     pcid: bool = false,
     invpcid: bool = false,
     rdseed: bool = false,
+    rdpid: bool = false,
     x2apic: bool = false,
     xsave: bool = false,
     xsaves: bool = false,
@@ -105,6 +108,7 @@ pub const MissingFeature = enum {
     pages_1g,
     tsc,
     rdseed,
+    rdpid,
 };
 
 pub fn decode(registers: Registers) Features {
@@ -126,6 +130,7 @@ pub fn decode(registers: Registers) Features {
         features.smap = (registers.leaf7_ebx & leaf7_ebx_smap) != 0;
         features.umip = (registers.leaf7_ecx & leaf7_ecx_umip) != 0;
         features.pku = (registers.leaf7_ecx & leaf7_ecx_pku) != 0;
+        features.rdpid = (registers.leaf7_ecx & leaf7_ecx_rdpid) != 0;
         features.cet_ss = (registers.leaf7_ecx & leaf7_ecx_cet_ss) != 0;
         features.cet_ibt = (registers.leaf7_edx & leaf7_edx_cet_ibt) != 0;
         if (registers.leaf7_eax >= 1) {
@@ -188,6 +193,7 @@ pub fn firstMissing(features: Features) ?MissingFeature {
     if (!features.pages_1g) return .pages_1g;
     if (!features.tsc_deadline or !features.invariant_tsc or features.tsc_frequency_hz == 0) return .tsc;
     if (!features.rdseed) return .rdseed;
+    if (!features.rdpid) return .rdpid;
     return null;
 }
 
@@ -198,6 +204,7 @@ pub fn isSupported(features: Features) bool {
 pub fn completeFeatures() Features {
     return .{
         .rdseed = true,
+        .rdpid = true,
         .cpuid = true,
         .sse2 = true,
         .long_mode = true,
@@ -237,7 +244,7 @@ fn modernRegisters() Registers {
         .leaf15_ecx = 24_000_000,
         .leaf7_eax = 1,
         .leaf7_ebx = leaf7_ebx_smep | leaf7_ebx_invpcid | leaf7_ebx_smap | leaf7_ebx_rdseed,
-        .leaf7_ecx = leaf7_ecx_umip | leaf7_ecx_cet_ss | leaf7_ecx_pku,
+        .leaf7_ecx = leaf7_ecx_umip | leaf7_ecx_cet_ss | leaf7_ecx_pku | leaf7_ecx_rdpid,
         .leaf7_edx = leaf7_edx_cet_ibt,
         .leaf7_1_eax = leaf7_1_eax_lass | leaf7_1_eax_fred | leaf7_1_eax_lkgs,
         .max_extended_leaf = 0x8000_0007,
@@ -250,6 +257,7 @@ test "decode recognizes the 2026 x86-64 baseline" {
     const features = decode(modernRegisters());
     try std.testing.expect(isSupported(features));
     try std.testing.expect(features.rdseed);
+    try std.testing.expect(features.rdpid);
     try std.testing.expect(features.pcid);
     try std.testing.expect(features.invpcid);
     try std.testing.expect(features.pku);
@@ -259,6 +267,35 @@ test "decode recognizes the 2026 x86-64 baseline" {
     try std.testing.expect(features.cet_ibt);
     try std.testing.expect(features.cet_ss);
     try std.testing.expectEqual(@as(?MissingFeature, null), firstMissing(features));
+}
+
+test "RDPID decoding requires advertised CPUID leaf 7 and exactly ECX bit 22" {
+    for ([_]u32{ 0, 1, 6 }) |max_basic_leaf| {
+        try std.testing.expect(!decode(.{
+            .cpuid_available = true,
+            .max_basic_leaf = max_basic_leaf,
+            .leaf7_ecx = 0x0040_0000,
+        }).rdpid);
+    }
+    try std.testing.expect(!decode(.{
+        .max_basic_leaf = 7,
+        .leaf7_ecx = 0x0040_0000,
+    }).rdpid);
+    // Leaf 7 subleaf zero advertises RDPID even without subleaf one.
+    try std.testing.expect(decode(.{
+        .cpuid_available = true,
+        .max_basic_leaf = 7,
+        .leaf7_ecx = 0x0040_0000,
+    }).rdpid);
+    for ([_]u32{ 0x0020_0000, 0x0080_0000, 0x00a0_0000, 0xffbf_ffff }) |ecx| {
+        try std.testing.expect(!decode(.{
+            .cpuid_available = true,
+            .max_basic_leaf = 7,
+            .leaf7_ebx = 0x0040_0000,
+            .leaf7_ecx = ecx,
+            .leaf7_edx = 0x0040_0000,
+        }).rdpid);
+    }
 }
 
 test "decode ignores registers outside advertised CPUID ranges" {
@@ -312,6 +349,9 @@ test "baseline rejects every missing required feature" {
     var missing_rdseed = completeFeatures();
     missing_rdseed.rdseed = false;
     try std.testing.expectEqual(MissingFeature.rdseed, firstMissing(missing_rdseed).?);
+    var missing_rdpid = completeFeatures();
+    missing_rdpid.rdpid = false;
+    try std.testing.expectEqual(MissingFeature.rdpid, firstMissing(missing_rdpid).?);
     var missing_syscall = completeFeatures();
     missing_syscall.syscall = false;
     try std.testing.expectEqual(MissingFeature.syscall, firstMissing(missing_syscall).?);

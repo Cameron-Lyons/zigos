@@ -369,27 +369,25 @@ fn drawTextAt(frame: *scanout.Frame, start_row: usize, text: []const u8, caret: 
     const viewport = textViewport(frame.columns, frame.rows, start_row);
     if (viewport.rows == 0) return;
     const layout = abi.text_layout.Layout{ .text = text, .columns = viewport.columns };
-    const position = layout.locate(caret);
-    const first_row = position.index -| (@as(usize, viewport.rows) - 1);
+    var row_storage: [scanout.MAX_ROWS]abi.text_layout.Row = undefined;
+    const window = layout.visibleWindow(caret, row_storage[0..viewport.rows]);
+    const position = window.location;
     const anchor = selection_anchor orelse caret.offset;
     const selection_start = @min(anchor, caret.offset);
     const selection_end = @max(anchor, caret.offset);
-    var iterator = layout.rows();
-    var index: usize = 0;
-    while (iterator.next()) |row| : (index += 1) {
-        if (index < first_row) continue;
-        if (index >= first_row + viewport.rows) break;
-        const cells = frame.cells[(start_row + index - first_row) * frame.columns ..][0..frame.columns];
+    for (0..window.count) |index| {
+        const row = window.rowAt(index);
+        const cells = frame.cells[(start_row + index) * frame.columns ..][0..frame.columns];
         var clusters = abi.text_layout.unicode.Iterator{ .text = text[0..row.end], .offset = row.start };
         var column: usize = 0;
         while (clusters.next()) |cluster| {
             const width = @min(cluster.columns(column), frame.columns - column);
-            frame.putCluster(column, start_row + index - first_row, text[cluster.start..cluster.end], width, if (cluster.start >= selection_start and cluster.start < selection_end) .selected else .body);
+            frame.putCluster(column, start_row + index, text[cluster.start..cluster.end], width, if (cluster.start >= selection_start and cluster.start < selection_end) .selected else .body);
             column += width;
         }
         if (row.next > row.end and column < frame.columns and row.end >= selection_start and row.end < selection_end)
             cells[column].style = .selected;
-        if (index == position.index) {
+        if (window.first_index + index == position.index) {
             const cell = &cells[@min(position.column, frame.columns - 1)];
             cell.cursor = true;
             cell.cursor_trailing = position.column == frame.columns;
@@ -501,6 +499,34 @@ test "desktop selection highlights both directions across newlines and clears on
     try std.testing.expectEqual(scanout.Style.selected, frame.cells[6 * 20 + 1].style);
     try std.testing.expectEqual(scanout.Style.body, frame.cells[6 * 20 + 2].style);
     try std.testing.expect(frame.cells[6 * 20 + 2].cursor);
+}
+
+test "desktop row window keeps Unicode selection and cursor after repeated scrolling" {
+    const std = @import("std");
+    const line = "界e\u{301}\tZ\r\n";
+    const text = line ** 30 ++ "tail";
+    var frame = try scanout.Frame.init(20, 10);
+    drawText(&frame, 5, text, text.len, text.len - 4 - line.len + 3);
+    const first = frame.cells[5 * frame.columns ..][0..frame.columns];
+    try std.testing.expectEqual(@as(u21, '界'), first[0].character);
+    try std.testing.expectEqual(.left, first[0].part);
+    try std.testing.expectEqual(.right, first[1].part);
+    try std.testing.expectEqual(scanout.Style.body, first[0].style);
+    try std.testing.expectEqual(@as(u21, 'e'), first[2].character);
+    try std.testing.expectEqualStrings("e\u{301}", frame.clusters[first[2].cluster_offset..][0..first[2].cluster_length]);
+    try std.testing.expectEqual(@as(u21, ' '), first[3].character);
+    try std.testing.expectEqual(@as(u21, 'Z'), first[4].character);
+    for (first[2..6]) |cell| try std.testing.expectEqual(scanout.Style.selected, cell.style);
+    try expectText(&frame, 0, 6, "tail");
+    for (frame.cells[6 * frame.columns ..][0..4]) |cell| try std.testing.expectEqual(scanout.Style.selected, cell.style);
+    try std.testing.expect(frame.cells[6 * frame.columns + 4].cursor);
+    try std.testing.expectEqual(scanout.Style.body, frame.cells[6 * frame.columns + 4].style);
+
+    frame.clear();
+    drawText(&frame, 5, text, 0, null);
+    try std.testing.expect(frame.cells[5 * frame.columns].cursor);
+    for (frame.cells[5 * frame.columns .. 7 * frame.columns]) |cell| try std.testing.expectEqual(scanout.Style.body, cell.style);
+    try std.testing.expect(!frame.cells[6 * frame.columns + 4].cursor);
 }
 
 test "desktop renders document save feedback without treating a dirty receipt as saved" {

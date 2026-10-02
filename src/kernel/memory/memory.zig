@@ -11,9 +11,10 @@ pub const HEAP_SIZE: usize = boot_image.KERNEL_HEAP_BYTES;
 const GRANULE = heap_geometry.granule;
 const PAGE_SIZE: usize = 4096;
 const MAX_SPANS: usize = 4096;
-const NO_SPAN: u32 = std.math.maxInt(u32);
+const SpanId = u16;
+const NO_SPAN: SpanId = std.math.maxInt(SpanId);
 const MAGAZINE_DEPTH: usize = 8;
-pub const MAGAZINE_CPUS: usize = 8;
+pub const MAGAZINE_CPUS = @import("../cpu_identity.zig").MAX_CPUS;
 const CLASS_COUNT = heap_geometry.free_list_class_count;
 
 extern var __kernel_end: u8;
@@ -27,22 +28,23 @@ const SPAN_CLAIMED: u8 = 3;
 const Span = struct {
     offset: u32 = 0,
     length: u32 = 0,
-    next_free: u32 = NO_SPAN,
-    address_next: u32 = NO_SPAN,
-    address_prev: u32 = NO_SPAN,
+    next_free: SpanId = NO_SPAN,
+    previous_free: SpanId = NO_SPAN,
+    address_next: SpanId = NO_SPAN,
+    address_prev: SpanId = NO_SPAN,
     class_index: u8 = 0,
     state: u8 = SPAN_FREE,
 };
 
-const SPAN_LOOKUP_SLOTS: usize = 8192;
+const SPAN_LOOKUP_SLOTS: usize = MAX_SPANS * 2;
 
 const Magazine = struct {
     len: u8 = 0,
-    slots: [MAGAZINE_DEPTH]u32 = .{NO_SPAN} ** MAGAZINE_DEPTH,
+    slots: [MAGAZINE_DEPTH]SpanId = .{NO_SPAN} ** MAGAZINE_DEPTH,
 };
 
 const CpuHeap = struct {
-    recent_span: u32 = NO_SPAN,
+    recent_span: SpanId = NO_SPAN,
     recent_payload: usize = 0,
     classes: [CLASS_COUNT]Magazine = [_]Magazine{.{}} ** CLASS_COUNT,
 };
@@ -52,6 +54,9 @@ const CpuHeapSlot = struct {
 };
 
 comptime {
+    if (MAX_SPANS >= NO_SPAN or !std.math.isPowerOfTwo(SPAN_LOOKUP_SLOTS)) {
+        @compileError("heap span indices require a reserved sentinel and power-of-two lookup capacity");
+    }
     if (@alignOf(CpuHeapSlot) < 128 or @sizeOf(CpuHeapSlot) % 128 != 0) {
         @compileError("per-CPU heap magazines must occupy distinct cache lines");
     }
@@ -64,12 +69,20 @@ var early_claimed_bytes: usize = 0;
 var is_initialized = false;
 var allocator_lock = spin.Lock.init();
 var spans: [MAX_SPANS]Span = [_]Span{.{}} ** MAX_SPANS;
-var span_used: u32 = 0;
-var recycled: u32 = NO_SPAN;
-var address_head: u32 = NO_SPAN;
-var class_heads: [CLASS_COUNT]u32 = .{NO_SPAN} ** CLASS_COUNT;
+var span_used: SpanId = 0;
+var recycled: SpanId = NO_SPAN;
+var address_head: SpanId = NO_SPAN;
+var class_heads: [CLASS_COUNT]SpanId = .{NO_SPAN} ** CLASS_COUNT;
 var cpu_heaps: [MAGAZINE_CPUS]CpuHeapSlot = [_]CpuHeapSlot{.{}} ** MAGAZINE_CPUS;
-var span_lookup: [SPAN_LOOKUP_SLOTS]u32 = .{NO_SPAN} ** SPAN_LOOKUP_SLOTS;
+var span_lookup: [SPAN_LOOKUP_SLOTS]SpanId = .{NO_SPAN} ** SPAN_LOOKUP_SLOTS;
+
+pub const metadata_layout = .{
+    .span_capacity = MAX_SPANS,
+    .span_bytes = @sizeOf(Span),
+    .index_bytes = @sizeOf(SpanId),
+    .array_bytes = @sizeOf(@TypeOf(spans)) + @sizeOf(@TypeOf(span_lookup)) +
+        @sizeOf(@TypeOf(class_heads)) + @sizeOf(@TypeOf(cpu_heaps)),
+};
 
 fn alignUp(addr: usize, alignment: usize) usize {
     return (addr + alignment - 1) & ~(alignment - 1);
@@ -91,13 +104,7 @@ pub fn kernelEndAddress() usize {
 
 fn currentCpu() usize {
     if (comptime builtin.os.tag != .freestanding) return 0;
-    // CpuState.cpu_index lives at GS+16. A segment load stays on the allocate/free path;
-    // reading IA32_GS_BASE with RDMSR does not.
-    const index = asm volatile ("movq %%gs:16, %[out]"
-        : [out] "=r" (-> usize),
-    );
-    if (index >= MAGAZINE_CPUS) return 0;
-    return index;
+    return @import("../cpu_identity.zig").currentIndex();
 }
 
 fn pauseInterrupts() bool {
@@ -113,15 +120,15 @@ fn resumeInterrupts(were_enabled: bool) void {
     @import("../../arch/x86.zig").sti();
 }
 
-fn loadSpanState(id: u32) u8 {
+fn loadSpanState(id: SpanId) u8 {
     return @atomicLoad(u8, &spans[id].state, .acquire);
 }
 
-fn storeSpanState(id: u32, state: u8) void {
+fn storeSpanState(id: SpanId, state: u8) void {
     @atomicStore(u8, &spans[id].state, state, .release);
 }
 
-fn claimLiveSpan(id: u32) bool {
+fn claimLiveSpan(id: SpanId) bool {
     return @cmpxchgStrong(u8, &spans[id].state, SPAN_LIVE, SPAN_CLAIMED, .acq_rel, .acquire) == null;
 }
 
@@ -241,7 +248,7 @@ fn allocateLocked(size: usize) ?*anyopaque {
     return @ptrFromInt(payload_base + spans[span_id].offset);
 }
 
-fn releaseSpan(span_id: u32) void {
+fn releaseSpan(span_id: SpanId) void {
     const class_index: usize = spans[span_id].class_index;
     if (heap_geometry.reusableMagazineBytes(class_index, @as(usize, spans[span_id].length)) != null) {
         const cpu = currentCpu();
@@ -256,7 +263,7 @@ fn releaseSpan(span_id: u32) void {
     freeSpan(span_id);
 }
 
-fn pushMagazine(cpu: usize, span_id: u32) bool {
+fn pushMagazine(cpu: usize, span_id: SpanId) bool {
     const class_index: usize = spans[span_id].class_index;
     if (heap_geometry.reusableMagazineBytes(class_index, @as(usize, spans[span_id].length)) == null) return false;
     var magazine = &cpuHeap(cpu).classes[class_index];
@@ -269,7 +276,7 @@ fn pushMagazine(cpu: usize, span_id: u32) bool {
     return true;
 }
 
-fn popMagazine(cpu: usize, class_index: usize) ?u32 {
+fn popMagazine(cpu: usize, class_index: usize) ?SpanId {
     const class_bytes = heap_geometry.sizeClassBytes(class_index) orelse return null;
     var magazine = &cpuHeap(cpu).classes[class_index];
     if (magazine.len == 0) return null;
@@ -281,7 +288,7 @@ fn popMagazine(cpu: usize, class_index: usize) ?u32 {
     return span_id;
 }
 
-fn createSpan(offset: u32, length: u32) ?u32 {
+fn createSpan(offset: u32, length: u32) ?SpanId {
     const id = if (recycled != NO_SPAN) recycled_id: {
         const recycled_id = recycled;
         recycled = spans[recycled_id].next_free;
@@ -299,7 +306,7 @@ fn createSpan(offset: u32, length: u32) ?u32 {
     return id;
 }
 
-fn recycleSpan(id: u32) void {
+fn recycleSpan(id: SpanId) void {
     forgetSpan(id);
     for (0..MAGAZINE_CPUS) |cpu| invalidateRecent(cpu, id);
     spans[id] = .{};
@@ -307,58 +314,53 @@ fn recycleSpan(id: u32) void {
     recycled = id;
 }
 
-fn pushFree(id: u32) void {
+fn pushFree(id: SpanId) void {
     const class_index = heap_geometry.freeListIndex(spans[id].length, PAGE_SIZE);
     spans[id].class_index = @intCast(class_index);
     storeSpanState(id, SPAN_FREE);
     spans[id].next_free = class_heads[class_index];
+    spans[id].previous_free = NO_SPAN;
+    if (class_heads[class_index] != NO_SPAN) spans[class_heads[class_index]].previous_free = id;
     class_heads[class_index] = id;
 }
 
-fn unlinkFree(id: u32) void {
+fn unlinkFree(id: SpanId) void {
     const class_index = spans[id].class_index;
-    var previous = NO_SPAN;
-    var current = class_heads[class_index];
-    while (current != NO_SPAN) {
-        if (current == id) {
-            if (previous == NO_SPAN) {
-                class_heads[class_index] = spans[current].next_free;
-            } else {
-                spans[previous].next_free = spans[current].next_free;
-            }
-            spans[id].next_free = NO_SPAN;
-            return;
-        }
-        previous = current;
-        current = spans[current].next_free;
+    const previous = spans[id].previous_free;
+    const next = spans[id].next_free;
+    if (previous == NO_SPAN) {
+        if (class_heads[class_index] != id) @panic("kernel heap free-list head mismatch");
+        class_heads[class_index] = next;
+    } else {
+        if (spans[previous].next_free != id) @panic("kernel heap free-list predecessor mismatch");
+        spans[previous].next_free = next;
     }
+    if (next != NO_SPAN) {
+        if (spans[next].previous_free != id) @panic("kernel heap free-list successor mismatch");
+        spans[next].previous_free = previous;
+    }
+    spans[id].next_free = NO_SPAN;
+    spans[id].previous_free = NO_SPAN;
 }
 
-fn takeSpan(start_class: usize, request: usize) ?u32 {
+fn takeSpan(start_class: usize, request: usize) ?SpanId {
     var class_index = start_class;
     while (class_index < CLASS_COUNT) : (class_index += 1) {
-        var previous = NO_SPAN;
         var current = class_heads[class_index];
         while (current != NO_SPAN) {
             if (spans[current].length >= request) {
-                if (previous == NO_SPAN) {
-                    class_heads[class_index] = spans[current].next_free;
-                } else {
-                    spans[previous].next_free = spans[current].next_free;
-                }
-                spans[current].next_free = NO_SPAN;
+                unlinkFree(current);
                 splitRemainder(current, @intCast(request));
                 spans[current].class_index = @intCast(start_class);
                 return current;
             }
-            previous = current;
             current = spans[current].next_free;
         }
     }
     return null;
 }
 
-fn splitRemainder(id: u32, request: u32) void {
+fn splitRemainder(id: SpanId, request: u32) void {
     const length = spans[id].length;
     const remainder = heap_geometry.splitRemainder(length, request, 0, GRANULE) orelse return;
     const rest = createSpan(spans[id].offset + request, @intCast(remainder)) orelse return;
@@ -367,7 +369,7 @@ fn splitRemainder(id: u32, request: u32) void {
     pushFree(rest);
 }
 
-fn insertAfter(id: u32, rest: u32) void {
+fn insertAfter(id: SpanId, rest: SpanId) void {
     const next = spans[id].address_next;
     spans[rest].address_prev = id;
     spans[rest].address_next = next;
@@ -375,7 +377,7 @@ fn insertAfter(id: u32, rest: u32) void {
     if (next != NO_SPAN) spans[next].address_prev = rest;
 }
 
-fn unlinkAddress(id: u32) void {
+fn unlinkAddress(id: SpanId) void {
     const previous = spans[id].address_prev;
     const next = spans[id].address_next;
     if (previous == NO_SPAN) {
@@ -386,7 +388,7 @@ fn unlinkAddress(id: u32) void {
     if (next != NO_SPAN) spans[next].address_prev = previous;
 }
 
-fn freeSpan(id: u32) void {
+fn freeSpan(id: SpanId) void {
     var current = id;
     storeSpanState(current, SPAN_FREE);
     if (spans[current].address_next != NO_SPAN) {
@@ -411,20 +413,20 @@ fn freeSpan(id: u32) void {
     pushFree(current);
 }
 
-fn noteRecent(cpu: usize, span_id: u32) void {
+fn noteRecent(cpu: usize, span_id: SpanId) void {
     const heap = cpuHeap(cpu);
     heap.recent_span = span_id;
     heap.recent_payload = payload_base + spans[span_id].offset;
 }
 
-fn invalidateRecent(cpu: usize, span_id: u32) void {
+fn invalidateRecent(cpu: usize, span_id: SpanId) void {
     const heap = cpuHeap(cpu);
     if (heap.recent_span != span_id) return;
     heap.recent_span = NO_SPAN;
     heap.recent_payload = 0;
 }
 
-fn recentSpan(cpu: usize, payload: usize) ?u32 {
+fn recentSpan(cpu: usize, payload: usize) ?SpanId {
     const heap = cpuHeap(cpu);
     if (heap.recent_span == NO_SPAN or payload != heap.recent_payload) return null;
     if (payload < payload_base) return null;
@@ -433,16 +435,20 @@ fn recentSpan(cpu: usize, payload: usize) ?u32 {
     return heap.recent_span;
 }
 
-fn spanForPayload(payload: usize) ?u32 {
+fn spanForPayload(payload: usize) ?SpanId {
     if (recentSpan(currentCpu(), payload)) |span_id| return span_id;
     return findSpan(payload);
 }
 
 fn spanLookupSlot(offset: u32) usize {
-    return (@as(usize, offset) *% 0x9E3779B1) & (SPAN_LOOKUP_SLOTS - 1);
+    // Heap offsets are granule-aligned. Use the high product bits so large
+    // aligned spans do not all land in the same one or two low-bit buckets.
+    const product = (offset / @as(u32, GRANULE)) *% @as(u32, 0x9E37_79B1);
+    const shift: u5 = comptime 32 - std.math.log2_int(usize, SPAN_LOOKUP_SLOTS);
+    return product >> shift;
 }
 
-fn rememberSpan(id: u32) void {
+fn rememberSpan(id: SpanId) void {
     var slot = spanLookupSlot(spans[id].offset);
     var steps: usize = 0;
     while (steps < SPAN_LOOKUP_SLOTS) : (steps += 1) {
@@ -456,31 +462,40 @@ fn rememberSpan(id: u32) void {
     @panic("kernel heap span lookup is full");
 }
 
-fn forgetSpan(id: u32) void {
+fn forgetSpan(id: SpanId) void {
     var slot = spanLookupSlot(spans[id].offset);
     var steps: usize = 0;
     while (steps < SPAN_LOOKUP_SLOTS) : (steps += 1) {
         const found = span_lookup[slot];
         if (found == NO_SPAN) return;
         if (found == id) {
-            span_lookup[slot] = NO_SPAN;
+            // Move only entries whose probe path crosses the hole, in one
+            // bounded pass rather than reinserting the whole cluster.
+            var hole = slot;
             var next = (slot + 1) & (SPAN_LOOKUP_SLOTS - 1);
-            while (span_lookup[next] != NO_SPAN) {
+            for (0..SPAN_LOOKUP_SLOTS - 1) |_| {
                 const moved = span_lookup[next];
-                span_lookup[next] = NO_SPAN;
-                rememberSpan(moved);
+                if (moved == NO_SPAN) break;
+                const home = spanLookupSlot(spans[moved].offset);
+                if (((hole + SPAN_LOOKUP_SLOTS - home) & (SPAN_LOOKUP_SLOTS - 1)) <
+                    ((next + SPAN_LOOKUP_SLOTS - home) & (SPAN_LOOKUP_SLOTS - 1)))
+                {
+                    span_lookup[hole] = moved;
+                    hole = next;
+                }
                 next = (next + 1) & (SPAN_LOOKUP_SLOTS - 1);
             }
+            span_lookup[hole] = NO_SPAN;
             return;
         }
         slot = (slot + 1) & (SPAN_LOOKUP_SLOTS - 1);
     }
 }
 
-fn findSpan(payload: usize) ?u32 {
+fn findSpan(payload: usize) ?SpanId {
     if (payload < payload_base) return null;
     const offset_usize = payload - payload_base;
-    if (offset_usize >= payload_bytes or offset_usize > std.math.maxInt(u32)) return null;
+    if (offset_usize >= payload_bytes or offset_usize % GRANULE != 0 or offset_usize > std.math.maxInt(u32)) return null;
     const offset: u32 = @intCast(offset_usize);
     var slot = spanLookupSlot(offset);
     var steps: usize = 0;
@@ -524,4 +539,14 @@ fn liveSpanLength(payload: usize) ?u32 {
     const span_id = findSpan(payload) orelse return null;
     if (loadSpanState(span_id) != SPAN_LIVE) return null;
     return spans[span_id].length;
+}
+
+test "heap address hashing distributes page-aligned spans across the table" {
+    for ([_]u32{ PAGE_SIZE, 2 * PAGE_SIZE }) |stride| {
+        var occupied: [SPAN_LOOKUP_SLOTS]bool = @splat(false);
+        for (0..MAX_SPANS) |index| occupied[spanLookupSlot(@as(u32, @intCast(index)) * stride)] = true;
+        var count: usize = 0;
+        for (occupied) |used| count += @intFromBool(used);
+        try std.testing.expect(count >= MAX_SPANS / 2);
+    }
 }

@@ -26,6 +26,7 @@ pub const FREESTANDING_TABLE_SIZE_CEILING_BYTES: usize = 12_000;
 
 comptime {
     const byte_capacities = [_]usize{
+        MAX_ENDPOINTS,
         MAX_ENDPOINT_QUEUE,
         MAX_MESSAGE_BYTES,
         MAX_ENDPOINT_LABEL_BYTES,
@@ -164,6 +165,7 @@ pub const MovedCapabilityCleanup = struct {
 pub const Table = struct {
     arena: EndpointArena = EndpointArena.init(),
     owner_index: EndpointOwnerIndex = EndpointOwnerIndex.init(),
+    pending_endpoint_counts: [MAX_ENDPOINTS]u8 = @splat(0),
 
     comptime {
         if (@sizeOf(@This()) > FREESTANDING_TABLE_SIZE_CEILING_BYTES) {
@@ -198,6 +200,7 @@ pub const Table = struct {
         for (&self.arena.slots) |*slot| {
             if (slot.in_use) releaseEndpointRing(&slot.endpoint);
         }
+        @memset(&self.pending_endpoint_counts, 0);
     }
 
     pub fn create(self: *Table, owner_task_id: ids.TaskId, label: []const u8, flags: EndpointFlags) Error!Endpoint {
@@ -284,7 +287,7 @@ pub const Table = struct {
         const peer_endpoint_id = endpoint.peer_endpoint_id;
         if (peer_endpoint_id.isZero()) return error.PeerNotConnected;
         const peer = self.find(peer_endpoint_id) orelse return error.EndpointNotFound;
-        return enqueue(endpoint, peer, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+        return self.enqueue(endpoint, peer, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
     }
 
     // Services have no implicit peer. The kernel supplies the sender endpoint
@@ -305,10 +308,11 @@ pub const Table = struct {
         const client = self.find(reply_endpoint_id) orelse return error.EndpointNotFound;
         if (!service.flags.service_port or client.flags.service_port or
             !client.peer_endpoint_id.eql(service.id)) return error.ScopeViolation;
-        return enqueue(service, client, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
+        return self.enqueue(service, client, sender_task_id, correlation_id, payload, attached_capability_id, move_attached_capability);
     }
 
     fn enqueue(
+        self: *Table,
         source: *const Endpoint,
         peer: *Endpoint,
         sender_task_id: ids.TaskId,
@@ -340,6 +344,7 @@ pub const Table = struct {
             error.RingFull => return error.RingFull,
             error.RingTooSmall, error.RingCorrupt, error.RingEmpty, error.PayloadTooLarge => return error.RingCorrupt,
         };
+        if (peer.queue_len == 0) self.pendingCountForEndpoint(peer).* += 1;
         peer.queue_len += 1;
         return peer.owner_task_id;
     }
@@ -395,6 +400,7 @@ pub const Table = struct {
             .len = record.payload_len,
         };
         endpoint.queue_len -= 1;
+        if (endpoint.queue_len == 0) self.clearPendingEndpoint(endpoint);
         return received;
     }
 
@@ -414,13 +420,11 @@ pub const Table = struct {
         return @intCast(self.owner_index.count(task_id.raw()));
     }
 
-    // Only visit this owner's endpoints when deciding whether it can sleep.
+    // Readiness depends on nonempty endpoint queues, independently of how many
+    // empty endpoints the owner holds. Bucket reuse starts with a zero count.
     pub fn hasPendingForTask(self: *const Table, task_id: ids.TaskId) bool {
-        var slot_index = self.owner_index.head(task_id.raw());
-        while (slot_index != indexed_arena.no_index) : (slot_index = self.owner_index.next(slot_index)) {
-            if (self.arena.slots[slot_index].endpoint.queue_len != 0) return true;
-        }
-        return false;
+        const bucket_index = self.owner_index.bucketIndexForKey(task_id.raw()) orelse return false;
+        return self.pending_endpoint_counts[bucket_index] != 0;
     }
 
     pub fn activeCount(self: *const Table) usize {
@@ -457,6 +461,7 @@ pub const Table = struct {
         if (!slot.in_use) native_util.impossibleByInvariant("retiring endpoint slot remains live");
         retired.endpoint_ids[retired.endpoint_count] = slot.endpoint.id;
         retired.endpoint_count += 1;
+        if (slot.endpoint.queue_len != 0) self.clearPendingEndpoint(&slot.endpoint);
         if (!self.owner_index.remove(slot.endpoint.owner_task_id.raw(), slot_index)) {
             native_util.impossibleByInvariant("live endpoint is absent from its owner index");
         }
@@ -497,6 +502,19 @@ pub const Table = struct {
     fn findConst(self: *const Table, endpoint_id: ids.EndpointId) ?*const Endpoint {
         const slot = self.arena.getConstByHandle(EndpointHandle{ .value = endpoint_id.raw() }) orelse return null;
         return &slot.endpoint;
+    }
+
+    fn pendingCountForEndpoint(self: *Table, endpoint: *const Endpoint) *u8 {
+        const slot_index = (EndpointHandle{ .value = endpoint.id.raw() }).slotIndex();
+        const bucket_index = self.owner_index.bucketIndexForSlot(slot_index) orelse
+            native_util.impossibleByInvariant("live endpoint belongs to an owner bucket");
+        return &self.pending_endpoint_counts[bucket_index];
+    }
+
+    fn clearPendingEndpoint(self: *Table, endpoint: *const Endpoint) void {
+        const count = self.pendingCountForEndpoint(endpoint);
+        if (count.* == 0) native_util.impossibleByInvariant("nonempty endpoint is counted in owner readiness");
+        count.* -= 1;
     }
 };
 
@@ -939,6 +957,85 @@ test "endpoint readiness follows queued ownership through drains and retirement"
     _ = table.retireTask(client.owner_task_id, null);
     _ = try table.create(client.owner_task_id, "replacement", .{});
     try std.testing.expect(!table.hasPendingForTask(client.owner_task_id));
+}
+
+test "owner readiness survives partial drains failed receives and queued endpoint closure" {
+    var table = Table.init();
+    defer table.deinit();
+    const owner = ids.task(20);
+    const first_sender = try table.create(ids.task(10), "first sender", .{});
+    const second_sender = try table.create(first_sender.owner_task_id, "second sender", .{});
+    const first = try table.create(owner, "first receiver", .{});
+    const second = try table.create(owner, "second receiver", .{});
+    _ = try table.create(owner, "empty receiver", .{});
+    try table.connect(first_sender.id, first.id);
+    try table.connect(second_sender.id, second.id);
+    {
+        const buffer = table.find(second.id).?.data_ring;
+        const original_magic_byte = buffer[0];
+        buffer[0] ^= 0xff;
+        defer buffer[0] = original_magic_byte;
+        try std.testing.expectError(error.RingCorrupt, table.send(second_sender.id, second_sender.owner_task_id, 0, "failed", null, false));
+        try std.testing.expect(!table.hasPendingForTask(owner));
+    }
+    _ = try table.send(first_sender.id, first_sender.owner_task_id, 1, "first", null, false);
+    _ = try table.send(first_sender.id, first_sender.owner_task_id, 2, "second", null, false);
+    _ = try table.send(second_sender.id, second_sender.owner_task_id, 3, "remaining", ids.capability(99), true);
+    try std.testing.expect(table.hasPendingForTask(owner));
+
+    var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
+    _ = (try table.recvInto(first.id, &payload)).?;
+    try std.testing.expect(table.hasPendingForTask(owner));
+    _ = try table.close(first.id, null);
+    try std.testing.expect(table.hasPendingForTask(owner));
+    var short: [1]u8 = undefined;
+    try std.testing.expectError(error.ReceiveBufferTooSmall, table.recvInto(second.id, &short));
+    try std.testing.expect(table.hasPendingForTask(owner));
+    const ring_buffer = table.find(second.id).?.data_ring;
+    const original_magic_byte = ring_buffer[0];
+    ring_buffer[0] ^= 0xff;
+    try std.testing.expectError(error.RingCorrupt, table.recvInto(second.id, &payload));
+    try std.testing.expect(table.hasPendingForTask(owner));
+    ring_buffer[0] = original_magic_byte;
+    for (1..MAX_ENDPOINT_QUEUE) |sequence| {
+        _ = try table.send(second_sender.id, second_sender.owner_task_id, sequence + 3, "queued", null, false);
+    }
+    try std.testing.expectError(error.RingFull, table.send(second_sender.id, second_sender.owner_task_id, 99, "overflow", null, false));
+    try std.testing.expect(table.hasPendingForTask(owner));
+    const preserved = (try table.recvInto(second.id, &payload)).?;
+    try std.testing.expectEqualStrings("remaining", payload[0..preserved.len]);
+    try std.testing.expectEqual(ids.capability(99), preserved.attached_capability_id.?);
+    try std.testing.expect(preserved.move_attached_capability);
+    for (1..MAX_ENDPOINT_QUEUE) |_| {
+        try std.testing.expect(table.hasPendingForTask(owner));
+        _ = (try table.recvInto(second.id, &payload)).?;
+    }
+    try std.testing.expect(!table.hasPendingForTask(owner));
+}
+
+test "owner readiness clears on retirement deinit reset and owner bucket reuse" {
+    var table = Table.init();
+    defer table.deinit();
+    const sender = try table.create(ids.task(10), "sender", .{});
+    const receiver = try table.create(ids.task(20), "receiver", .{});
+    try table.connect(sender.id, receiver.id);
+    _ = try table.send(sender.id, sender.owner_task_id, 1, "retired", null, false);
+    try std.testing.expect(table.hasPendingForTask(receiver.owner_task_id));
+    _ = table.retireTask(receiver.owner_task_id, null);
+    const replacement = try table.create(ids.task(30), "new owner", .{});
+    try std.testing.expect(!table.hasPendingForTask(receiver.owner_task_id));
+    try std.testing.expect(!table.hasPendingForTask(replacement.owner_task_id));
+    const new_sender = try table.create(sender.owner_task_id, "new sender", .{});
+    try table.connect(new_sender.id, replacement.id);
+    _ = try table.send(new_sender.id, new_sender.owner_task_id, 2, "deinitialized", null, false);
+    try std.testing.expect(table.hasPendingForTask(replacement.owner_task_id));
+    table.deinit();
+    try std.testing.expect(!table.hasPendingForTask(replacement.owner_task_id));
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(replacement.id)).queued_messages);
+    table.reset();
+    const restored = try table.create(replacement.owner_task_id, "reset owner", .{});
+    try std.testing.expect(!table.hasPendingForTask(restored.owner_task_id));
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
 }
 
 test "ring replacement rejects malformed storage and preserves queued messages" {

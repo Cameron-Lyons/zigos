@@ -26,6 +26,10 @@ pub const Row = struct {
     width: usize = 0,
     simple: bool = true,
 
+    fn contains(self: Row, caret: Caret) bool {
+        return caret.offset <= self.end and (caret.offset < self.end or !self.soft or caret.upstream);
+    }
+
     pub fn atColumn(self: Row, text: []const u8, column: usize) Caret {
         if (self.simple) {
             const offset = self.start + @min(column, self.width);
@@ -55,6 +59,20 @@ pub const Row = struct {
 };
 pub const Location = struct { row: Row, index: usize, column: usize };
 
+pub const VisibleWindow = struct {
+    storage: []const Row,
+    first_slot: usize,
+    first_index: usize,
+    count: usize,
+    location: Location,
+
+    pub fn rowAt(self: VisibleWindow, index: usize) Row {
+        std.debug.assert(index < self.count);
+        const slot = self.first_slot + index;
+        return self.storage[if (slot < self.storage.len) slot else slot - self.storage.len];
+    }
+};
+
 // Bounded, allocation-free layout shared by editor navigation and scanout.
 // Width zero means no soft wrapping when no display geometry is available.
 pub const Layout = struct {
@@ -70,7 +88,7 @@ pub const Layout = struct {
         var iterator = self.rows();
         var index: usize = 0;
         while (iterator.next()) |row| : (index += 1) {
-            if (offset <= row.end and (offset < row.end or !row.soft or caret.upstream))
+            if (row.contains(.{ .offset = offset, .upstream = caret.upstream }))
                 return .{ .row = row, .index = index, .column = row.columnAt(self.text, offset) };
         }
         unreachable;
@@ -86,6 +104,39 @@ pub const Layout = struct {
     pub fn vertical(self: Layout, caret: Caret, column: usize, down: bool, count: usize) Caret {
         const index = self.locate(caret).index;
         return self.rowAt(if (down) index +| count else index -| count).atColumn(self.text, column);
+    }
+
+    // The caller provides one row slot per visible line. Retain preceding rows
+    // while finding the caret, then finish the window without restarting layout.
+    // Storage must be nonempty and remain alive while the window is consumed.
+    // In-range caret offsets must be grapheme boundaries.
+    pub fn visibleWindow(self: Layout, caret: Caret, storage: []Row) VisibleWindow {
+        std.debug.assert(storage.len != 0);
+        const bounded = Caret{ .offset = @min(caret.offset, self.text.len), .upstream = caret.upstream };
+        var iterator = self.rows();
+        var position: ?Location = null;
+        var slot: usize = 0;
+        var count: usize = 0;
+        var index: usize = 0;
+        while (iterator.next()) |row| : (index += 1) {
+            storage[slot] = row;
+            slot += 1;
+            if (slot == storage.len) slot = 0;
+            count = @min(count + 1, storage.len);
+            if (position == null and row.contains(bounded))
+                position = .{ .row = row, .index = index, .column = row.columnAt(self.text, bounded.offset) };
+            if (position) |location| {
+                if (index + 1 >= @max(location.index + 1, storage.len)) break;
+            }
+        }
+        const location = position orelse unreachable;
+        return .{
+            .storage = storage,
+            .first_slot = if (count == storage.len) slot else 0,
+            .first_index = location.index -| (storage.len - 1),
+            .count = count,
+            .location = location,
+        };
     }
 };
 
@@ -250,6 +301,45 @@ test "text layout word scan finds the first newline without reading past the sli
             try std.testing.expectEqual(position, newlineOffset(bytes[0..length]));
             if (position + 1 < length) bytes[position + 1] = 'x';
             bytes[position] = 'x';
+        }
+    }
+}
+
+test "visible text windows match independent caret lookup and row traversal" {
+    const guard = Row{ .start = std.math.maxInt(usize), .end = std.math.maxInt(usize), .next = std.math.maxInt(usize), .soft = false };
+    for ([_][]const u8{
+        "",                                              "\n", "\n\n", "abc", "abc\n", "abcdefghij\nxy\n",
+        "Ae\u{301}界Z\r\n\t猫\u{2028}x\u{2029}",
+        "👩‍💻🇺🇸☃\u{fe0f}\tक्‍ष\r\nend",
+        "abcd\nefgh\nijkl\nmnop\nqrst\nuvwx\nyz\n" ** 3,
+    }) |text| {
+        for ([_]usize{ 0, 1, 2, 4, 5, 20 }) |columns| {
+            const layout = Layout{ .text = text, .columns = columns };
+            for (0..text.len + 1) |offset| {
+                if (!unicode.isBoundary(text, offset)) continue;
+                for ([_]bool{ false, true }) |upstream| {
+                    const caret = Caret{ .offset = offset, .upstream = upstream };
+                    const expected_location = layout.locate(caret);
+                    for (1..49) |capacity| {
+                        var storage: [50]Row = @splat(guard);
+                        const window = layout.visibleWindow(caret, storage[1 .. capacity + 1]);
+                        try std.testing.expectEqualDeep(expected_location, window.location);
+                        try std.testing.expectEqual(expected_location.index -| (capacity - 1), window.first_index);
+                        var expected_rows = layout.rows();
+                        var index: usize = 0;
+                        var count: usize = 0;
+                        while (expected_rows.next()) |row| : (index += 1) {
+                            if (index < window.first_index) continue;
+                            if (count == capacity) break;
+                            try std.testing.expectEqualDeep(row, window.rowAt(count));
+                            count += 1;
+                        }
+                        try std.testing.expectEqual(count, window.count);
+                        try std.testing.expectEqualDeep(guard, storage[0]);
+                        try std.testing.expectEqualDeep(guard, storage[capacity + 1]);
+                    }
+                }
+            }
         }
     }
 }

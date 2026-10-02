@@ -529,6 +529,69 @@ test "object store accepts payloads beyond the old sixteen-page ceiling" {
     try std.testing.expectEqualSlices(u8, &payload, loaded);
 }
 
+test "offset chunk cursors match canonical traversal at boundaries and EOF" {
+    var store = Store.init();
+    defer store.reset();
+    const signer = signing.SignerIdentity{ .label = "cursor-offset", .seed = signing.seedFromByte(0x48) };
+    var bytes: [MAX_CHUNK_BYTES * 2 + 17]u8 = undefined;
+    for (&bytes, 0..) |*byte, i| byte.* = @truncate(i * 37 + i / MAX_CHUNK_BYTES);
+    for ([_]usize{ 0, 1, MAX_CHUNK_BYTES, MAX_CHUNK_BYTES + 1, bytes.len }) |payload_len| {
+        const result = try store.putLocallySignedVersion(.{
+            .object_type = .blob,
+            .payload = bytes[0..payload_len],
+            .signer = signer,
+            .label = "offset-cursor",
+            .content_type = "application/octet-stream",
+            .created_at_ticks = 1,
+        });
+        const version = store.version(result.version_id).?;
+        try std.testing.expectError(error.InvalidPayloadOffset, store.versionChunkCursorAt(version, payload_len + 1));
+        try std.testing.expectError(error.InvalidPayloadOffset, store.versionChunkCursorAt(version, std.math.maxInt(usize)));
+        var eof = try store.versionChunkCursorAt(version, payload_len);
+        try std.testing.expectEqual(payload_len, eof.byte_offset);
+        try std.testing.expectEqual(@as(?object_store.PayloadChunk, null), try eof.next());
+        var offset: usize = 0;
+        while (offset < payload_len) : (offset += 1) {
+            var original = try store.versionChunkCursor(version);
+            var positioned = try store.versionChunkCursorAt(version, offset);
+            while (try original.next()) |expected| {
+                if (offset >= expected.offset + expected.bytes.len) continue;
+                const actual = (try positioned.next()) orelse return error.MissingChunk;
+                try std.testing.expectEqual(expected.index, actual.index);
+                try std.testing.expectEqual(expected.offset, actual.offset);
+                try std.testing.expectEqual(expected.bytes.ptr, actual.bytes.ptr);
+                try std.testing.expectEqualSlices(u8, expected.bytes, actual.bytes);
+                try std.testing.expectEqualSlices(u8, &expected.address, &actual.address);
+            }
+            try std.testing.expectEqual(@as(?object_store.PayloadChunk, null), try positioned.next());
+        }
+    }
+}
+
+test "offset chunk cursors retain whole-manifest corruption checks" {
+    var store = Store.init();
+    defer store.reset();
+    const signer = signing.SignerIdentity{ .label = "cursor-corruption", .seed = signing.seedFromByte(0x49) };
+    var bytes = [_]u8{'a'} ** (MAX_CHUNK_BYTES + 1);
+    bytes[MAX_CHUNK_BYTES] = 'b';
+    const result = try store.putLocallySignedVersion(.{
+        .object_type = .blob,
+        .payload = &bytes,
+        .signer = signer,
+        .label = "corrupt-prefix",
+        .content_type = "application/octet-stream",
+        .created_at_ticks = 1,
+    });
+    const version = store.version(result.version_id).?;
+    const blob = store.versionBlob(version).?;
+    const first_chunk_slot = store.blobChunkSlotIndex(blob, 0).?;
+    store.chunkSlotAt(first_chunk_slot).chunk.payload[0] ^= 1;
+    // Seeking to the second page or EOF must verify even the skipped prefix.
+    try std.testing.expectError(error.CorruptBlob, store.versionChunkCursorAt(version, MAX_CHUNK_BYTES));
+    try std.testing.expectError(error.CorruptBlob, store.versionChunkCursorAt(version, bytes.len));
+    try std.testing.expectEqual(@as(usize, 0), store.verifiedBlobManifestCount());
+}
+
 test "inline payload reads are bounded independently from object capacity" {
     try std.testing.expect(MAX_INLINE_PAYLOAD_BYTES < MAX_PAYLOAD_BYTES);
     var store = Store.init();

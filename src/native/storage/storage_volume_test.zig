@@ -3,6 +3,8 @@ const object_store = @import("object_store.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
 const storage_volume = @import("storage_volume.zig");
+const volume_layout = @import("volume/layout.zig");
+const volume_log = @import("volume/log.zig");
 const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
 
@@ -27,6 +29,7 @@ const WriteBackBackend = struct {
     var event_count: usize = 0;
     var flush_count: usize = 0;
     var fail_on_flush: usize = 0;
+    var written_bytes: usize = 0;
 
     fn attach(volume: *Volume, visible_image: []u8, durable_image: []u8) void {
         visible = visible_image;
@@ -46,6 +49,7 @@ const WriteBackBackend = struct {
         event_count = 0;
         flush_count = 0;
         fail_on_flush = failing_flush;
+        written_bytes = 0;
     }
 
     fn powerLoss() void {
@@ -65,6 +69,7 @@ const WriteBackBackend = struct {
         const end = start + buffer_len;
         if (end > visible.len) return false;
         record(if (start_lba < storage_volume.header_sectors) .root_write else .data_write);
+        written_bytes += buffer_len;
         @memcpy(visible[start..end], buffer_ptr[0..buffer_len]);
         return true;
     }
@@ -194,6 +199,197 @@ test "storage backend commits log and root through ordered durability barriers" 
 test "storage backend barrier failures preserve dirty state and withhold the new root" {
     try expectBarrierFailurePreservesDirtyState(1, 0xB402);
     try expectBarrierFailurePreservesDirtyState(2, 0xB403);
+}
+
+const LogRecordStats = struct {
+    counts: [9]usize = [_]usize{0} ** 9,
+    bytes: [9]usize = [_]usize{0} ** 9,
+};
+
+fn latestLogRecordStats(image: []const u8) !LogRecordStats {
+    const root = (try volume_root_slot.findLatestImageRoot(image)).?.root;
+    const start = volume_layout.data_start_byte + root.data_offset;
+    const log = image[start .. start + root.log_bytes];
+    var stats = LogRecordStats{};
+    var offset: usize = 0;
+    while (offset < log.len) {
+        const kind = log[offset];
+        if (kind >= stats.counts.len) return error.CorruptImage;
+        const payload_length = std.mem.readInt(u32, log[offset + 1 ..][0..4], .little);
+        const record_length = volume_log.recordHeaderLen() + payload_length;
+        if (record_length > log.len - offset) return error.CorruptImage;
+        stats.counts[kind] += 1;
+        stats.bytes[kind] += record_length;
+        offset += record_length;
+    }
+    return stats;
+}
+
+test "storage deltas persist shared chunks once across committed versions and dirty batches" {
+    const allocator = std.testing.allocator;
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.* = Volume.init();
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    const signer = signing.SignerIdentity{ .label = "dedup", .seed = signing.seedFromByte(0x6D) };
+
+    var payload: [object_store.MAX_CHUNK_BYTES * 3]u8 = undefined;
+    for (0..3) |index| @memset(payload[index * object_store.MAX_CHUNK_BYTES ..][0..object_store.MAX_CHUNK_BYTES], @intCast(index + 1));
+    const first = try store.putVersion(.{
+        .object_type = .media_asset,
+        .payload = &payload,
+        .metadata = try object_store.signMetadata(signer, "asset", "application/octet-stream", .media_asset, &payload, 1),
+    });
+    _ = try volume.saveToImage(image, &store, &workspaces);
+
+    for (2..4) |tick| {
+        _ = try store.putVersion(.{
+            .preferred_object_id = first.object_id,
+            .object_type = .media_asset,
+            .payload = &payload,
+            .metadata = try object_store.signMetadata(signer, "asset", "application/octet-stream", .media_asset, &payload, tick),
+        });
+    }
+    const checkpoint_bytes = try storage_volume.testing.latestImageLogBytes(image);
+    _ = try volume.saveToImage(image, &store, &workspaces);
+    const shared = try latestLogRecordStats(image);
+    try std.testing.expectEqual(@as(usize, 0), shared.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
+    try std.testing.expectEqual(@as(usize, 1), shared.counts[@intFromEnum(volume_log.RecordKind.blob_state)]);
+    try std.testing.expectEqual(@as(u16, 6), try storage_volume.testing.latestImageLogRecordCount(image));
+    // Two revisions of 12 KiB content require less than one KiB of new metadata.
+    try std.testing.expect((try storage_volume.testing.latestImageLogBytes(image)) - checkpoint_bytes < 1024);
+
+    // A cold replay reconstructs the committed set without a process-local cache.
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    volume.reset();
+    _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
+    payload[object_store.MAX_CHUNK_BYTES + 17] = 9;
+    const edited = try loaded_store.putVersion(.{
+        .preferred_object_id = first.object_id,
+        .object_type = .media_asset,
+        .payload = &payload,
+        .metadata = try object_store.signMetadata(signer, "asset", "application/octet-stream", .media_asset, &payload, 4),
+    });
+    _ = try volume.saveToImage(image, &loaded_store, &loaded_workspaces);
+    const changed = try latestLogRecordStats(image);
+    try std.testing.expectEqual(@as(usize, 1), changed.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
+    try std.testing.expectEqual(
+        volume_log.recordHeaderLen() + @sizeOf(object_store.ChunkAddress) + @sizeOf(u16) + object_store.MAX_CHUNK_BYTES,
+        changed.bytes[@intFromEnum(volume_log.RecordKind.chunk_state)],
+    );
+    try std.testing.expectEqual(@as(u16, 11), try storage_volume.testing.latestImageLogRecordCount(image));
+    volume.reset();
+    store.reset();
+    _ = try volume.loadFromImage(image, &store, &workspaces);
+    var output: [payload.len]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &payload, try store.versionPayloadInto(store.version(edited.version_id).?, &output));
+    try std.testing.expectEqual(@as(u16, 3), store.versionBlob(store.version(first.version_id).?).?.refCount());
+}
+
+test "storage delta chunk reuse survives failed barriers retries and power loss" {
+    for (1..3) |failing_flush| {
+        const allocator = std.testing.allocator;
+        const visible = try allocator.alloc(u8, image_bytes);
+        defer allocator.free(visible);
+        const durable = try allocator.alloc(u8, image_bytes);
+        defer allocator.free(durable);
+        const volume = try allocator.create(Volume);
+        defer allocator.destroy(volume);
+        volume.* = Volume.init();
+        WriteBackBackend.attach(volume, visible, durable);
+        var store = object_store.Store.init();
+        var workspaces = workspace.Directory.init();
+        const signer = signing.SignerIdentity{ .label = "retry-dedup", .seed = signing.seedFromByte(0x6E) };
+        var payload: [object_store.MAX_CHUNK_BYTES * 3]u8 = undefined;
+        for (0..3) |index| @memset(payload[index * object_store.MAX_CHUNK_BYTES ..][0..object_store.MAX_CHUNK_BYTES], @intCast(index + 1));
+        const first = try store.putVersion(.{
+            .object_type = .media_asset,
+            .payload = &payload,
+            .metadata = try object_store.signMetadata(signer, "asset", "application/octet-stream", .media_asset, &payload, 1),
+        });
+        _ = try volume.saveToVolume(&store, &workspaces);
+        payload[object_store.MAX_CHUNK_BYTES + 17] = 9;
+        const edited = try store.putVersion(.{
+            .preferred_object_id = first.object_id,
+            .object_type = .media_asset,
+            .payload = &payload,
+            .metadata = try object_store.signMetadata(signer, "asset", "application/octet-stream", .media_asset, &payload, 2),
+        });
+        WriteBackBackend.beginAttempt(failing_flush);
+        try std.testing.expectError(error.DurabilityBarrierFailed, volume.saveToVolume(&store, &workspaces));
+        try std.testing.expectEqual(@as(usize, 1), store.dirtyVersionIds().len);
+        WriteBackBackend.powerLoss();
+        const reboot = try allocator.create(Volume);
+        defer allocator.destroy(reboot);
+        reboot.* = Volume.init();
+        var reboot_store = object_store.Store.init();
+        var reboot_workspaces = workspace.Directory.init();
+        _ = try reboot.loadFromImage(durable, &reboot_store, &reboot_workspaces);
+        try std.testing.expectEqual(first.version_id, reboot_store.latestVersion(first.object_id).?.id);
+
+        WriteBackBackend.beginAttempt(0);
+        _ = try volume.saveToVolume(&store, &workspaces);
+        // One changed page plus metadata touches two data blocks and one root.
+        try std.testing.expectEqual(@as(usize, 3 * storage_volume.sector_size), WriteBackBackend.written_bytes);
+        const stats = try latestLogRecordStats(durable);
+        try std.testing.expectEqual(@as(usize, 1), stats.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
+        WriteBackBackend.powerLoss();
+        reboot.reset();
+        reboot_store.reset();
+        _ = try reboot.loadFromImage(durable, &reboot_store, &reboot_workspaces);
+        var output: [payload.len]u8 = undefined;
+        try std.testing.expectEqualSlices(u8, &payload, try reboot_store.versionPayloadInto(reboot_store.version(edited.version_id).?, &output));
+    }
+}
+
+test "storage delta deduplicates new shared chunks between distinct blobs in one batch" {
+    const allocator = std.testing.allocator;
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.* = Volume.init();
+    var store = object_store.Store.init();
+    var workspaces = workspace.Directory.init();
+    _ = try volume.saveToImage(image, &store, &workspaces);
+    const signer = signing.SignerIdentity{ .label = "batch-dedup", .seed = signing.seedFromByte(0x6F) };
+    var payload: [object_store.MAX_CHUNK_BYTES * 2]u8 = undefined;
+    @memset(payload[0..object_store.MAX_CHUNK_BYTES], 1);
+    @memset(payload[object_store.MAX_CHUNK_BYTES..], 2);
+    const first = try store.putVersion(.{
+        .object_type = .media_asset,
+        .payload = &payload,
+        .metadata = try object_store.signMetadata(signer, "first", "application/octet-stream", .media_asset, &payload, 1),
+    });
+    @memset(payload[object_store.MAX_CHUNK_BYTES..], 3);
+    const second = try store.putVersion(.{
+        .object_type = .media_asset,
+        .payload = &payload,
+        .metadata = try object_store.signMetadata(signer, "other", "application/octet-stream", .media_asset, &payload, 2),
+    });
+    _ = try volume.saveToImage(image, &store, &workspaces);
+    const stats = try latestLogRecordStats(image);
+    try std.testing.expectEqual(@as(usize, 3), stats.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
+    try std.testing.expectEqual(@as(usize, 2), stats.counts[@intFromEnum(volume_log.RecordKind.blob_state)]);
+    try std.testing.expectEqual(
+        @as(usize, 3) * (volume_log.recordHeaderLen() + @sizeOf(object_store.ChunkAddress) + @sizeOf(u16) + object_store.MAX_CHUNK_BYTES),
+        stats.bytes[@intFromEnum(volume_log.RecordKind.chunk_state)],
+    );
+    try std.testing.expectEqual(@as(u16, 11), try storage_volume.testing.latestImageLogRecordCount(image));
+    var loaded_store = object_store.Store.init();
+    var loaded_workspaces = workspace.Directory.init();
+    volume.reset();
+    _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
+    var output: [payload.len]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &payload, try loaded_store.versionPayloadInto(loaded_store.version(second.version_id).?, &output));
+    @memset(payload[object_store.MAX_CHUNK_BYTES..], 2);
+    try std.testing.expectEqualSlices(u8, &payload, try loaded_store.versionPayloadInto(loaded_store.version(first.version_id).?, &output));
 }
 
 test "storage volume exposes the first supported product capacity envelope" {
