@@ -32,7 +32,10 @@ pub inline fn currentIndex() u8 {
         test_cpu_index
     else
         0;
-    return indexFromSignature(signature) orelse @panic("invalid logical CPU signature");
+    // Keep the hot read scalar: constructing ?u8 here spills its tag and
+    // payload to the stack at every allocator and syscall identity lookup.
+    if (signature >= MAX_CPUS) @panic("invalid logical CPU signature");
+    return @intCast(signature);
 }
 
 pub fn setIndexForTest(index: u8) void {
