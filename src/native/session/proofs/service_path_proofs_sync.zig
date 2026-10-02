@@ -185,6 +185,13 @@ pub fn proveBootedSyncServicePath(
 
     _ = try sync_port.ensureUserRoot(sync_authority, user, "owner", user_signer);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, laptop, "laptop", user_signer, laptop_signer, 106);
+    const enrolled_laptop = sync_instance.findDeviceRecord(laptop).?.*;
+    // A live service capability does not authorize a different signing key to
+    // enroll peers, replace a trusted device key, or revoke the owner's device.
+    try std.testing.expectError(error.RootAuthorityMismatch, sync_port.enrollTrustedDevice(sync_authority, user, tablet, "tablet", laptop_signer, tablet_signer, 107));
+    try std.testing.expectError(error.RootAuthorityMismatch, sync_port.rotateDeviceKey(sync_authority, user, laptop, tablet_signer, tablet_signer, 107));
+    try std.testing.expectError(error.RootAuthorityMismatch, sync_port.revokeTrustedDevice(sync_authority, user, laptop, tablet_signer, 107));
+    try std.testing.expectEqualDeep(enrolled_laptop, sync_instance.findDeviceRecord(laptop).?.*);
     _ = try sync_port.enrollTrustedDevice(sync_authority, user, tablet, "tablet", user_signer, tablet_signer, 107);
     _ = try peer_port.ensureUserRoot(peer_authority, user, "owner", user_signer);
     _ = try peer_port.enrollTrustedDevice(peer_authority, user, laptop, "laptop", user_signer, laptop_signer, 112);
@@ -727,7 +734,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
 
     try stack.bindPeerLink(target_device, .{ 0x02, 0x5A, 0x47, 0, 0, 2 });
-    const connection = try stack.openServiceIdentity(&broker, .{
+    var connection = try stack.openServiceIdentity(&broker, .{
         .task_id = network_service_task.id,
         .principal_id = network_service_task.owner,
         .capability_id = policy_capability.id,
@@ -746,6 +753,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         },
         .now_ticks = 121,
     }, source_device, target_device);
+    defer connection.deinit();
     try std.testing.expect(connection.attestation_required);
     try std.testing.expect(connection.identity_pinned);
     try std.testing.expectEqualStrings("overlay.service-path.notes", connection.serviceIdentitySlice());
@@ -804,7 +812,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
     }, source_device));
     try std.testing.expectEqual(network_policy.EgressDecisionReason.destination_mismatch, discovery_stack.last_denial_reason);
 
-    const discovery_connection = try discovery_stack.openLocalDiscovery(&broker, .{
+    var discovery_connection = try discovery_stack.openLocalDiscovery(&broker, .{
         .task_id = network_service_task.id,
         .principal_id = network_service_task.owner,
         .capability_id = discovery_capability.id,
@@ -812,6 +820,7 @@ fn proveBootedIdentityFirstNativeNetworkStack(
         .evidence = .{ .destination = .{ .discovery_class = "printer" } },
         .now_ticks = 124,
     }, source_device);
+    defer discovery_connection.deinit();
     try std.testing.expect(discovery_connection.scoped_discovery);
     try std.testing.expectEqualStrings("printer", discovery_connection.discoveryClassSlice());
 
@@ -837,7 +846,7 @@ fn verifiedBootedNetworkPeer(generation: u64) !measured_boot.BootRecord {
     try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .policy, "identity-first", "strict");
     try addMeasuredNetworkArtifact(&recorder, &artifact_manifest, .driver_set, "signed-network-driver", "net");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
     return boot;
 }
 

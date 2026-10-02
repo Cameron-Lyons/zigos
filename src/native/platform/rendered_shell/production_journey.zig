@@ -468,7 +468,7 @@ pub const ProductionJourneyService = struct {
         const task = try self.requireTask();
         if (!self.document_opened) return error.DocumentRequired;
 
-        const edited = try self.document_saver.save(self.storage, .{
+        const edited = try self.document_saver.saveForVerification(self.storage, .{
             .workspace_id = self.config.workspace_id,
             .path = self.config.document_path,
             .expected_version_id = self.document_version_id,

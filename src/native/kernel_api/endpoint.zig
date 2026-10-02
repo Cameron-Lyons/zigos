@@ -80,8 +80,17 @@ pub const AUTO_ATTACHES_DATA_RINGS = true;
 pub const RINGS_ONLY_DATAPLANE = true;
 pub const DEFAULT_DATA_RING_CAPACITY: u32 = 1024;
 const DataRingStorage = struct {
-    bytes: [ipc_ring.HEADER_BYTES + DEFAULT_DATA_RING_CAPACITY]u8 align(64) = undefined,
+    // The kernel heap guarantees its granule alignment, not cache-line
+    // alignment. Retain the aligned ring's prefix length to free its allocation.
+    bytes: [ipc_ring.minimumBytes(MAX_ENDPOINT_QUEUE) + ipc_ring.STORAGE_ALIGNMENT - 1]u8 = undefined,
+
+    fn ring(self: *DataRingStorage) []u8 {
+        const address = @intFromPtr(&self.bytes);
+        const offset = std.mem.alignForward(usize, address, ipc_ring.STORAGE_ALIGNMENT) - address;
+        return self.bytes[offset..][0..ipc_ring.minimumBytes(MAX_ENDPOINT_QUEUE)];
+    }
 };
+const BORROWED_RING: u8 = std.math.maxInt(u8);
 const ENDPOINT_RESIDENT_SIZE_CEILING_BYTES: usize = 160;
 
 pub const Endpoint = struct {
@@ -94,7 +103,7 @@ pub const Endpoint = struct {
     peer_closed: bool = false,
     queue_len: u8 = 0,
     data_ring: []u8 = &.{},
-    owns_data_ring: bool = false,
+    ring_allocation_offset: u8 = BORROWED_RING,
 
     comptime {
         if (@hasField(@This(), "queue")) @compileError("endpoint payloads live in the sealed ring");
@@ -181,7 +190,8 @@ pub const Table = struct {
 
     pub fn reset(self: *Table) void {
         self.deinit();
-        self.* = Table.init();
+        self.arena.reset();
+        self.owner_index.reset();
     }
 
     pub fn deinit(self: *Table) void {
@@ -330,20 +340,30 @@ pub const Table = struct {
             error.RingFull => return error.RingFull,
             error.RingTooSmall, error.RingCorrupt, error.RingEmpty, error.PayloadTooLarge => return error.RingCorrupt,
         };
-        peer.queue_len = @intCast(ipc_ring.queued(peer.data_ring) catch return error.RingCorrupt);
+        peer.queue_len += 1;
         return peer.owner_task_id;
     }
 
+    // The caller retains storage lifetime; only this serialized table may
+    // access the ring until replacement or endpoint retirement.
     pub fn attachDataRing(self: *Table, endpoint_id: ids.EndpointId, buffer: []u8) Error!void {
         const endpoint = self.find(endpoint_id) orelse return error.EndpointNotFound;
         if (endpoint.queue_len != 0) return error.EndpointBusy;
         if (buffer.len < ipc_ring.minimumBytes(1) or
             buffer.len > ipc_ring.minimumBytes(MAX_ENDPOINT_QUEUE) or
-            @intFromPtr(buffer.ptr) % @alignOf(ipc_ring.Record) != 0) return error.RingCorrupt;
+            @intFromPtr(buffer.ptr) % ipc_ring.STORAGE_ALIGNMENT != 0) return error.RingCorrupt;
+        for (&self.arena.slots) |*slot| {
+            if (!slot.in_use or slot.endpoint.data_ring.len == 0) continue;
+            const existing = &slot.endpoint;
+            const owned = existing.ring_allocation_offset != BORROWED_RING;
+            const base = @intFromPtr(existing.data_ring.ptr) - if (owned) existing.ring_allocation_offset else @as(usize, 0);
+            const length = if (owned) @sizeOf(DataRingStorage) else existing.data_ring.len;
+            const candidate = @intFromPtr(buffer.ptr);
+            if (if (candidate >= base) candidate - base < length else base - candidate < buffer.len) return error.EndpointBusy;
+        }
         _ = ipc_ring.init(buffer, @intCast(buffer.len - ipc_ring.HEADER_BYTES)) catch return error.RingCorrupt;
         releaseOwnedRing(endpoint);
         endpoint.data_ring = buffer;
-        endpoint.owns_data_ring = false;
     }
 
     pub fn recvInto(
@@ -360,10 +380,10 @@ pub const Table = struct {
 
         x86.allowSupervisorUserMemory();
         defer x86.forbidSupervisorUserMemory();
-        const pending = ipc_ring.peekRecord(endpoint.data_ring) catch return error.RingCorrupt;
-        if (pending.payload_len > payload_out.len) return error.ReceiveBufferTooSmall;
-        const record = ipc_ring.popRecord(endpoint.data_ring) catch return error.RingCorrupt;
-        if (record.payload_len != 0) @memcpy(payload_out[0..record.payload_len], record.bytes[0..record.payload_len]);
+        const record = ipc_ring.receive(endpoint.data_ring, payload_out) catch |err| switch (err) {
+            error.PayloadTooLarge => return error.ReceiveBufferTooSmall,
+            else => return error.RingCorrupt,
+        };
         const attached = ids.capability(record.attached_capability_id);
         const received = ReceivedMessage{
             .sender_endpoint_id = ids.endpoint(record.sender_endpoint_id),
@@ -374,7 +394,7 @@ pub const Table = struct {
             .flags = @bitCast(record.flags),
             .len = record.payload_len,
         };
-        endpoint.queue_len = @intCast(ipc_ring.queued(endpoint.data_ring) catch 0);
+        endpoint.queue_len -= 1;
         return received;
     }
 
@@ -495,23 +515,22 @@ fn releaseEndpointRing(endpoint: *Endpoint) void {
 fn ensureDataRing(endpoint: *Endpoint) error{NoSpaceLeft}!void {
     if (endpoint.data_ring.len != 0) return;
     const storage = table_backing.alloc(DataRingStorage) orelse return error.NoSpaceLeft;
-    const buffer = storage.bytes[0..];
+    const buffer = storage.ring();
     _ = ipc_ring.init(buffer, DEFAULT_DATA_RING_CAPACITY) catch {
         table_backing.free(DataRingStorage, storage);
         return error.NoSpaceLeft;
     };
     endpoint.data_ring = buffer;
-    endpoint.owns_data_ring = true;
+    endpoint.ring_allocation_offset = @intCast(@intFromPtr(buffer.ptr) - @intFromPtr(storage));
 }
 
 fn releaseOwnedRing(endpoint: *Endpoint) void {
-    if (endpoint.owns_data_ring and endpoint.data_ring.len != 0) {
-        const bytes: *align(64) [ipc_ring.HEADER_BYTES + DEFAULT_DATA_RING_CAPACITY]u8 = @ptrCast(@alignCast(endpoint.data_ring.ptr));
-        const storage: *DataRingStorage = @fieldParentPtr("bytes", bytes);
+    if (endpoint.ring_allocation_offset != BORROWED_RING) {
+        const storage: *DataRingStorage = @ptrCast(endpoint.data_ring.ptr - endpoint.ring_allocation_offset);
         table_backing.free(DataRingStorage, storage);
     }
     endpoint.data_ring = &.{};
-    endpoint.owns_data_ring = false;
+    endpoint.ring_allocation_offset = BORROWED_RING;
 }
 
 fn zeroEndpoint() Endpoint {
@@ -708,6 +727,25 @@ test "endpoint ids reject stale handles after slot reuse" {
     try std.testing.expect(!endpoint.id.eql(replacement.id));
     try std.testing.expectError(error.EndpointNotFound, table.descriptor(endpoint.id));
     try std.testing.expectEqual(replacement.id.raw(), (try table.descriptor(replacement.id)).endpoint_id);
+}
+
+test "endpoint exhaustion survives table reset without reviving stale authority" {
+    var table = Table.init();
+    defer table.deinit();
+    table.arena.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION;
+    const last = try table.create(ids.task(10), "last", .{});
+    const ordinary = try table.create(ids.task(11), "ordinary", .{});
+    table.reset();
+    const next = try table.create(ids.task(12), "next", .{});
+    try std.testing.expectEqual(@as(usize, 1), (EndpointHandle{ .value = next.id.raw() }).slotIndex());
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(last.id));
+    try std.testing.expectError(error.EndpointNotFound, table.descriptor(ordinary.id));
+    try std.testing.expectEqual(@as(u16, 0), table.activeForTask(ids.task(10)));
+    try std.testing.expectEqual(@as(u16, 1), table.activeForTask(ids.task(12)));
+    table.reset();
+    @memset(&table.arena.slot_generations, indexed_arena.EXHAUSTED_HANDLE_GENERATION);
+    try std.testing.expectError(error.TableFull, table.create(ids.task(13), "exhausted", .{}));
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
 }
 
 test "endpoint table rejection preserves active endpoints" {
@@ -917,4 +955,65 @@ test "ring replacement rejects malformed storage and preserves queued messages" 
     var payload: [MAX_MESSAGE_BYTES]u8 = undefined;
     const received = (try table.recvInto(right.id, &payload)).?;
     try std.testing.expectEqualStrings("pending", payload[0..received.len]);
+}
+
+test "endpoint ring storage aligns from every possible allocation offset" {
+    var arena: [@sizeOf(DataRingStorage) + ipc_ring.STORAGE_ALIGNMENT]u8 align(ipc_ring.STORAGE_ALIGNMENT) = undefined;
+    for (0..ipc_ring.STORAGE_ALIGNMENT) |offset| {
+        const storage: *DataRingStorage = @ptrCast(&arena[offset]);
+        const ring = storage.ring();
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(ring.ptr) % ipc_ring.STORAGE_ALIGNMENT);
+        try std.testing.expect(@intFromPtr(ring.ptr) >= @intFromPtr(storage));
+        try std.testing.expect(@intFromPtr(ring.ptr) + ring.len <= @intFromPtr(storage) + @sizeOf(DataRingStorage));
+        _ = try ipc_ring.init(ring, DEFAULT_DATA_RING_CAPACITY);
+        try ipc_ring.push(ring, "aligned");
+        var out: [MAX_MESSAGE_BYTES]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 7), try ipc_ring.pop(ring, &out));
+        try std.testing.expectEqualStrings("aligned", out[0..7]);
+    }
+}
+
+test "endpoint ring replacement rejects non power of two storage without losing ownership" {
+    var table = Table.init();
+    defer table.deinit();
+    const client = try table.create(ids.task(101), "client", .{});
+    const server = try table.create(ids.task(102), "server", .{});
+    try table.connect(client.id, server.id);
+    const allocation = table.find(server.id).?.data_ring.ptr;
+    const prefix = table.find(server.id).?.ring_allocation_offset;
+    var malformed: [ipc_ring.minimumBytes(3)]u8 align(ipc_ring.STORAGE_ALIGNMENT) = @splat(0xa5);
+    try std.testing.expectError(error.RingCorrupt, table.attachDataRing(server.id, &malformed));
+    try std.testing.expectEqual(allocation, table.find(server.id).?.data_ring.ptr);
+    try std.testing.expectEqual(prefix, table.find(server.id).?.ring_allocation_offset);
+    for (malformed) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+    _ = try table.send(client.id, client.owner_task_id, 1, "still connected", null, false);
+    var out: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(server.id, &out)).?;
+    try std.testing.expectEqualStrings("still connected", out[0..received.len]);
+
+    var replacement: [ipc_ring.minimumBytes(1)]u8 align(ipc_ring.STORAGE_ALIGNMENT) = undefined;
+    try table.attachDataRing(server.id, &replacement);
+    try std.testing.expectEqual(BORROWED_RING, table.find(server.id).?.ring_allocation_offset);
+    _ = try table.send(client.id, client.owner_task_id, 2, "one slot", null, false);
+    try std.testing.expectError(error.RingFull, table.send(client.id, client.owner_task_id, 3, "full", null, false));
+    try std.testing.expectEqual(@as(u16, 1), (try table.descriptor(server.id)).queued_messages);
+    _ = try table.recvInto(server.id, &out);
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(server.id)).queued_messages);
+}
+
+test "endpoint ring attachment rejects aliases before resetting or freeing storage" {
+    var table = Table.init();
+    defer table.deinit();
+    const client = try table.create(ids.task(101), "client", .{});
+    const server = try table.create(ids.task(102), "server", .{});
+    try table.connect(client.id, server.id);
+    const existing = table.find(server.id).?.data_ring;
+    try std.testing.expectError(error.EndpointBusy, table.attachDataRing(server.id, existing));
+    try std.testing.expectError(error.EndpointBusy, table.attachDataRing(client.id, existing));
+    try std.testing.expectError(error.EndpointBusy, table.attachDataRing(client.id, existing[64..][0..ipc_ring.minimumBytes(2)]));
+    _ = try table.send(client.id, client.owner_task_id, 1, "still owned", ids.capability(77), true);
+    var out: [MAX_MESSAGE_BYTES]u8 = undefined;
+    const received = (try table.recvInto(server.id, &out)).?;
+    try std.testing.expectEqualStrings("still owned", out[0..received.len]);
+    try std.testing.expectEqual(ids.capability(77), received.attached_capability_id.?);
 }

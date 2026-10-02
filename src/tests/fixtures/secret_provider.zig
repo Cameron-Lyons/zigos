@@ -6,6 +6,16 @@ const key: [32]u8 = @splat(0x51);
 pub fn provider() sealing.Provider {
     return .{ .operations = &.{ .seal = seal, .open = open } };
 }
+
+pub fn maximumEnvelopeProvider() sealing.Provider {
+    return .{ .operations = &.{ .seal = sealMaximumEnvelope, .open = open } };
+}
+
+fn sealMaximumEnvelope(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {
+    // Fill the wrapped-key capacity to exercise multi-page ciphertext catalogs.
+    const wrapped = [_]u8{0x55} ** @import("../../native/platform/tpm2_sealing.zig").MAX_BLOB_BYTES;
+    try sealing.encrypt(raw, &key, @splat(0x26), binding, &wrapped, out);
+}
 fn seal(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {
     try sealing.encrypt(raw, &key, @splat(0x26), binding, "verification-only", out);
 }

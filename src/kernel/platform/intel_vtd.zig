@@ -6,6 +6,7 @@ const mmio_windows = @import("../memory/mmio_windows.zig");
 const paging = @import("../memory/paging64.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
 const dmar = @import("dmar.zig");
+const cpu_features = @import("../../arch/cpu_features.zig");
 
 const PAGE_SIZE: u32 = 4096;
 const PAGE_MASK: u64 = PAGE_SIZE - 1;
@@ -285,8 +286,23 @@ pub fn enforceDevices(
     summary: *const dmar.Summary,
     domains: []const DmaDomain,
 ) Error!void {
-    if (enabled) return error.AlreadyEnabled;
     if (!summary.productionEnforcementReady()) return error.FirmwarePolicyUnsupported;
+    return enforceValidatedDevices(summary, domains, false);
+}
+
+pub fn enforceScopedDevices(table: []const u8, domains: []const DmaDomain) Error!void {
+    try validateDomains(domains);
+    var requesters: [MAX_DMA_DOMAINS]u16 = undefined;
+    for (domains, 0..) |domain, index| requesters[index] = requesterId(domain.device);
+    const summary = dmar.scopedEnforcementSummary(table, requesters[0..domains.len]) catch
+        return error.FirmwarePolicyUnsupported;
+    return enforceValidatedDevices(&summary, domains, true);
+}
+
+var page_walk_cache_line_bytes: usize = 0;
+
+fn enforceValidatedDevices(summary: *const dmar.Summary, domains: []const DmaDomain, allow_cache_maintenance: bool) Error!void {
+    if (enabled) return error.AlreadyEnabled;
     if (pci.bootBusMasterCount() != 0) return error.ActiveBusMaster;
     if (pci.bootLegacyInterruptCount() != 0 or
         (pci.bootMessageSignaledInterruptCount() catch return error.ActiveInterruptSource) != 0)
@@ -297,8 +313,9 @@ pub fn enforceDevices(
 
     var units: [dmar.MAX_REMAPPING_UNITS]UnitRegisters = undefined;
     var common_sagaw: u8 = CAP_SAGAW_MASK;
+    page_walk_cache_line_bytes = 0;
     for (summary.units(), 0..) |unit, index| {
-        const registers = try probeUnit(unit, index, summary.host_address_width);
+        const registers = try probeUnit(unit, index, summary.host_address_width, allow_cache_maintenance);
         units[index] = registers;
         common_sagaw &= @intCast((registers.capability >> CAP_SAGAW_SHIFT) & CAP_SAGAW_MASK);
     }
@@ -327,7 +344,7 @@ pub fn enforceDevices(
         );
         @memset(@as([*]u8, @ptrFromInt(queue_address.alias))[0..PAGE_SIZE], 0);
     }
-    publishTables();
+    publishDmaRange(table_memory.alias, @as(usize, retained_page_count) * PAGE_SIZE);
 
     may_release_tables = false;
     for (units[0..remapping_unit_count], 0..) |unit, index| {
@@ -404,7 +421,7 @@ fn chooseAddressWidth(sagaw: u8) ?AddressWidth {
     return null;
 }
 
-fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8) Error!UnitRegisters {
+fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8, allow_cache_maintenance: bool) Error!UnitRegisters {
     if (unit.segment != 0) return error.FirmwarePolicyUnsupported;
     const register_base = std.math.cast(usize, unit.register_base_address) orelse
         return error.InvalidRegisterRange;
@@ -422,7 +439,10 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8) Err
 
     const capability = read64(virtual_base + REG_CAPABILITY);
     const extended = read64(virtual_base + REG_EXTENDED_CAPABILITY);
-    try validateCapabilities(capability, extended, host_address_width);
+    if (extended & ECAP_PAGE_WALK_COHERENT == 0 and allow_cache_maintenance) {
+        page_walk_cache_line_bytes = cpu_features.clflushLineBytes() orelse return error.NonCoherentPageWalk;
+    }
+    try validateCapabilitiesWithCacheMaintenance(capability, extended, host_address_width, page_walk_cache_line_bytes != 0);
 
     var iotlb_virtual: usize = 0;
     const enhanced_srtp = (capability & CAP_ENHANCED_SRTP) != 0;
@@ -486,7 +506,11 @@ fn probeUnit(unit: dmar.RemappingUnit, index: usize, host_address_width: u8) Err
 }
 
 fn validateCapabilities(capability: u64, extended: u64, host_address_width: u8) Error!void {
-    if ((extended & ECAP_PAGE_WALK_COHERENT) == 0) return error.NonCoherentPageWalk;
+    return validateCapabilitiesWithCacheMaintenance(capability, extended, host_address_width, false);
+}
+
+fn validateCapabilitiesWithCacheMaintenance(capability: u64, extended: u64, host_address_width: u8, cache_maintenance: bool) Error!void {
+    if ((extended & ECAP_PAGE_WALK_COHERENT) == 0 and !cache_maintenance) return error.NonCoherentPageWalk;
     const remapping = ECAP_QUEUED_INVALIDATION | ECAP_INTERRUPT_REMAP;
     if ((extended & remapping) != remapping) {
         return error.InterruptRemappingUnsupported;
@@ -706,13 +730,13 @@ pub fn routeInterrupt(
 
     const encoded = interruptRemappingEntry(source_id, vector, destination_id);
     entry[1] = encoded[1];
-    publishTables();
+    publishDmaRange(@intFromPtr(entry), @sizeOf(@TypeOf(entry.*)));
     entry[0] = encoded[0];
-    publishTables();
+    publishDmaRange(@intFromPtr(entry), @sizeOf(@TypeOf(entry.*)));
     errdefer {
         entry[0] = 0;
         entry[1] = 0;
-        publishTables();
+        publishDmaRange(@intFromPtr(entry), @sizeOf(@TypeOf(entry.*)));
         for (activeUnits(), 0..) |unit, unit_index| {
             globallyInvalidateInterruptEntries(
                 unit.base,
@@ -753,6 +777,7 @@ fn globallyInvalidateInterruptEntries(unit_base: usize, queue_address: DmaAddres
     const completion: *volatile u32 = @ptrFromInt(status_address.alias);
 
     completion.* = 0;
+    publishDmaRange(status_address.alias, @sizeOf(u32));
     write64(unit_base + REG_INVALIDATION_QUEUE_TAIL, 0);
     write64(unit_base + REG_INVALIDATION_QUEUE_ADDRESS, queue_address.physical);
     writeGlobalCommand(unit_base, GLOBAL_QUEUED_INVALIDATION_ENABLE, 0);
@@ -763,12 +788,13 @@ fn globallyInvalidateInterruptEntries(unit_base: usize, queue_address: DmaAddres
     queue[1] = descriptors[0][1];
     queue[2] = descriptors[1][0];
     queue[3] = descriptors[1][1];
-    publishTables();
+    publishDmaRange(queue_address.alias, INVALIDATION_QUEUE_TAIL);
     write64(unit_base + REG_INVALIDATION_QUEUE_TAIL, INVALIDATION_QUEUE_TAIL);
 
     const deadline = tsc_clock.afterMilliseconds(COMMAND_TIMEOUT_MILLISECONDS);
     var completed = false;
     while (!deadline.expired()) {
+        publishDmaRange(status_address.alias, @sizeOf(u32));
         if ((read32(unit_base + REG_FAULT_STATUS) & FAULT_STATUS_INVALIDATION_ERRORS) != 0) {
             return error.InvalidationQueueError;
         }
@@ -947,6 +973,21 @@ fn publishTables() void {
     } else {
         asm volatile ("" ::: .{ .memory = true });
     }
+}
+
+/// Only dirty translation/interrupt entries and invalidation command/status
+/// lines need maintenance. The normal coherent-hardware path keeps its fence.
+fn publishDmaRange(address: usize, length: usize) void {
+    if (page_walk_cache_line_bytes != 0) {
+        var line = address & ~(page_walk_cache_line_bytes - 1);
+        while (line < address + length) : (line += page_walk_cache_line_bytes) {
+            asm volatile ("clflush (%[address])"
+                :
+                : [address] "r" (line),
+                : .{ .memory = true });
+        }
+    }
+    publishTables();
 }
 
 fn read32(address: usize) u32 {
@@ -1322,4 +1363,17 @@ test "VT-d interrupt isolation requires coherent queued-remapping hardware" {
         error.UnsupportedAddressWidth,
         validateCapabilities(@as(u64, 37) << CAP_MGAW_SHIFT, required, 39),
     );
+    try validateCapabilitiesWithCacheMaintenance(capability, required & ~ECAP_PAGE_WALK_COHERENT, 39, true);
+    try std.testing.expectError(error.InterruptRemappingUnsupported, validateCapabilitiesWithCacheMaintenance(
+        capability,
+        required & ~(ECAP_PAGE_WALK_COHERENT | ECAP_INTERRUPT_REMAP),
+        39,
+        true,
+    ));
+    try std.testing.expectError(error.ExtendedInterruptModeUnsupported, validateCapabilitiesWithCacheMaintenance(
+        capability,
+        required & ~(ECAP_PAGE_WALK_COHERENT | ECAP_EXTENDED_INTERRUPT_MODE),
+        39,
+        true,
+    ));
 }

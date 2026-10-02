@@ -1163,12 +1163,21 @@
         "src/main.zig",
         "src/native_smoke_markers.zig",
         "tools/generate_userspace_archive.zig",
-        "scripts/run-zigos-native-smoke.sh"
+        "scripts/run-zigos-native-smoke.sh",
+        "src/boot/efi_stub.zig",
+        "src/boot/efi_elf.zig",
+        "src/boot/image_info.zig",
+        "scripts/run-unified-efi-qemu.sh",
+        "src/boot/efi_tcg2.zig",
+        "src/boot/tcg_event_log.zig",
+        "src/boot/tpm_pcr.zig",
+        "src/boot/tpm_info.zig",
+        "src/kernel/platform/tpm_boot.zig"
       ],
       "negative_tests": [
         {
           "file": "src/native/platform/measured_boot.zig",
-          "name": "bootloader measurement handoff rejects unsigned manifests and tampered startup artifacts"
+          "name": "measurement snapshot rejects unsigned manifests and tampered startup artifacts"
         },
         {
           "file": "src/native/platform/measured_boot.zig",
@@ -1177,6 +1186,94 @@
         {
           "file": "src/native_smoke_markers.zig",
           "name": "native smoke gate requires measured boot reboot comparison markers"
+        },
+        {
+          "file": "src/boot/efi_elf.zig",
+          "name": "ELF64 parser rejects unsafe layouts before physical allocation"
+        },
+        {
+          "file": "src/boot/efi_elf.zig",
+          "name": "ELF64 parser rejects page overlap and accepts adjacent reservations"
+        },
+        {
+          "file": "src/boot/image_info.zig",
+          "name": "EFI authentication requires complete enforcing firmware state"
+        },
+        {
+          "file": "src/kernel/boot/multiboot2.zig",
+          "name": "EFI image provenance rejects duplicates and invalid encoded claims"
+        },
+        {
+          "file": "src/native/sync/sync_state_store.zig",
+          "name": "sync state rejects the retired unauthenticated bootloader provenance"
+        },
+        {
+          "file": "src/kernel/memory/firmware_memory_map.zig",
+          "name": "kernel and EFI heap reservations preserve free gaps and firmware NVS"
+        },
+        {
+          "file": "src/kernel/memory/firmware_memory_map.zig",
+          "name": "kernel reservation rejects overlapping or overflowing EFI heap ranges atomically"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 log rejects truncated framing, substituted digests and incorrect last-entry pointers"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 replay includes earlier PCR extensions and refuses duplicate or later boot events"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 log handles multiple digest banks and rejects duplicate or unknown algorithms"
+        },
+        {
+          "file": "src/boot/tpm_pcr.zig",
+          "name": "PCR read rejects substituted banks, extra selections and malformed replies"
+        },
+        {
+          "file": "src/kernel/boot/multiboot2.zig",
+          "name": "EFI TPM log handoff rejects duplicate and malformed measurement tags"
+        },
+        {
+          "file": "src/kernel/memory/firmware_memory_map.zig",
+          "name": "copied TPM event log remains reserved and malformed extents fail before mutation"
+        },
+        {
+          "file": "src/native/platform/tpm2_quote.zig",
+          "name": "TPM quote rejects every truncated or altered byte and trailing data"
+        },
+        {
+          "file": "src/native/platform/tpm2_quote.zig",
+          "name": "TPM quote rejects correctly signed incompatible claims and weakened key templates"
+        },
+        {
+          "file": "src/native/platform/tpm2_quote.zig",
+          "name": "TPM quote challenge rejects replay expiry cancellation clock rollback and failed entropy"
+        },
+        {
+          "file": "src/native/platform/tpm2_sealing.zig",
+          "name": "TPM quote client validates pinned enrollment and clears failed outputs before hardware access"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 final events merge once with prior readers and retain exit retry measurements"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 final events reject changed overlap malformed counts truncation and overflow atomically"
+        },
+        {
+          "file": "src/boot/tcg_event_log.zig",
+          "name": "TCG2 exit replay requires authenticated final invocation and success with exact scope"
+        },
+        {
+          "file": "src/boot/efi_tcg2.zig",
+          "name": "TCG2 firmware log bounds reject free device missing and overflowing memory"
+        },
+        {
+          "file": "src/boot/efi_tcg2.zig",
+          "name": "TCG2 final table discovery requires one bounded unambiguous firmware entry"
         }
       ]
     },
@@ -1184,7 +1281,13 @@
       "status": "enforced",
       "enforcement_modules": [
         "src/native/platform/measured_boot.zig",
-        "src/native/platform/attestation_service.zig"
+        "src/native/platform/attestation_service.zig",
+        "src/native/platform/tpm_attestation.zig",
+        "src/native/platform/tpm_attestation_wire.zig",
+        "src/native/sync/peer_attestation.zig",
+        "src/native/sync/peer_connections.zig",
+        "src/native/services/peer_attestation_worker.zig",
+        "src/native/task/tpm_worker_lease.zig"
       ],
       "negative_tests": [
         {
@@ -1193,11 +1296,115 @@
         },
         {
           "file": "src/native/platform/attestation_service.zig",
-          "name": "attestation service rejects emulator measured roots for remote attestations"
+          "name": "attestation service rejects emulator and unauthenticated measured roots for remote attestations"
         },
         {
           "file": "src/native/platform/attestation_service.zig",
           "name": "attestation verification rejects measured state and statement tampering"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation response cannot be relabeled for another verifier policy"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation signatures bind every request restriction and actual verifier metadata"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation rejects malformed bounded records before hashing or signing"
+        },
+        {
+          "file": "src/native/platform/attestation_service.zig",
+          "name": "attestation signing and provisioning failures leave committed state unchanged"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds verifier policy enrollment PCR and nonce with one use"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation rejects stale revoked malformed and expired verifier state"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation service rejects invalid requests without TPM commands or state changes"
+        },
+        {
+          "file": "src/native/sync/tpm_attestation_test.zig",
+          "name": "TPM remote attestation gates native driver and endpoint connections before transmission"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation.zig",
+          "name": "TPM remote attestation binds once to its authenticated channel and rejects prior quotes"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation_wire.zig",
+          "name": "TPM wire challenge is canonical bounded and validated against local enrollment"
+        },
+        {
+          "file": "src/native/platform/tpm_attestation_wire.zig",
+          "name": "TPM wire response rejects malformed lengths headers tails and truncation"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation reassembles reordered ciphertext exactly once and survives corrupted and duplicate packets"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation rejects authenticated malformed fragments before quote work"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation challenge deadlines and rollback terminate idle work"
+        },
+        {
+          "file": "src/native/sync/peer_connections_test.zig",
+          "name": "peer connections require attestation before durable transfer and retry lost fragments and acceptance"
+        },
+        {
+          "file": "src/native/sync/peer_connections_test.zig",
+          "name": "peer connections delayed attestation cannot revive released expired revoked or retired transfers"
+        },
+        {
+          "file": "src/native/sync/peer_attestation_test.zig",
+          "name": "peer attestation rejects session substitution and mixed fragment contexts"
+        },
+        {
+          "file": "src/native/sync/peer_connections_test.zig",
+          "name": "session manager peer connections reject completions before another dispatcher visit after owner loss"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker rejects invalid local authority before allocation or hardware"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker drains borrowed buffers through cancellation revocation expiry and stale handles"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker scheduler avoids polling twice per tick and retires failed jobs"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker detach drains before freeing stacks and preserves unpublished history"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation publication checks current policy and commits history only after delivery"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation workers serialize complete TPM jobs and queued cancellation never touches another borrow"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation worker binding runs outside packet dispatch and detaches on boot failure"
+        },
+        {
+          "file": "src/native/services/peer_attestation_worker_test.zig",
+          "name": "peer attestation cancelled cleanup observes later clock rollback without stranding buffers"
         }
       ]
     },
@@ -1668,6 +1875,8 @@
     "REQ-WINDOWS-AND-VIEWS": {
       "status": "enforced",
       "enforcement_modules": [
+        "src/native/platform/input_router.zig",
+        "src/native/drivers/input_driver_task.zig",
         "src/native/platform/compositor_display.zig",
         "src/native/platform/compositor_session.zig",
         "src/native/session/service_bootstrap.zig",
@@ -1675,6 +1884,18 @@
         "src/native/session/service_path_proofs.zig"
       ],
       "negative_tests": [
+        {
+          "file": "src/native/platform/input_router.zig",
+          "name": "keyboard repeat cancels across focus round trips modal ownership and task retirement"
+        },
+        {
+          "file": "src/native/platform/input_router.zig",
+          "name": "keyboard repeat processes releases before deadlines and never overtakes the report budget"
+        },
+        {
+          "file": "src/native/session/session_manager_test.zig",
+          "name": "keyboard repeat wakes an idle session and cannot renew revoked or suspended task authority"
+        },
         {
           "file": "src/native/platform/compositor_session.zig",
           "name": "compositor service closes task windows during app removal"

@@ -1625,7 +1625,7 @@ test "capability ids encode slot generations and reject stale reuse" {
     try std.testing.expect(table.query(replacement.id) != null);
 
     try table.revokeGrant(replacement.id);
-    table.slots.slot_generations[slot_index] = std.math.maxInt(u32);
+    table.slots.slot_generations[slot_index] = indexed_arena.MAX_HANDLE_GENERATION;
     const last_generation = try table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
@@ -1634,18 +1634,38 @@ test "capability ids encode slot generations and reject stale reuse" {
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
     });
-    try std.testing.expectEqual(std.math.maxInt(u32), @as(u32, @intCast(last_generation.id >> 32)));
+    try std.testing.expectEqual(indexed_arena.MAX_HANDLE_GENERATION, @as(u32, @intCast(last_generation.id >> 32)));
     try table.revokeGrant(last_generation.id);
-    const wrapped = try table.mintBootRoot(.{
+    try std.testing.expectError(error.TableFull, table.mintBootRoot(.{
         .holder = holder,
         .issuer = holder,
         .target = .{ .kind = .service, .id = 1 },
         .rights = .{ .service = .{ .capability_query = true } },
         .scope = .{},
         .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 },
-    });
-    try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(wrapped.id >> 32)));
+    }));
     try std.testing.expect(table.query(last_generation.id) == null);
+    try std.testing.expect(table.query(first.id) == null);
+}
+
+test "capability grant plans skip exhausted slots without publishing partial authority" {
+    const SmallTable = CapabilityTableWith(.{ .max_capabilities = 2, .target_generation_index_capacity = 2, .max_target_generations = 1 });
+    var table = SmallTable.init();
+    table.slots.slot_generations[0] = indexed_arena.EXHAUSTED_HANDLE_GENERATION;
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 1 };
+    const request = MintRequest{ .holder = holder, .issuer = holder, .target = .{ .kind = .service, .id = 1 }, .rights = .{ .service = .{ .capability_query = true } }, .scope = .{}, .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 10 } };
+    var plan = GrantPlan{};
+    try plan.addMint(1, request);
+    try plan.addMint(1, request);
+    var output: [2]Capability = undefined;
+    const before = table;
+    try std.testing.expectError(error.TableFull, table.applyGrantPlan(&plan, &output));
+    try std.testing.expectEqualDeep(before, table);
+    plan = .{};
+    try plan.addMint(1, request);
+    const granted = try table.applyGrantPlan(&plan, &output);
+    try std.testing.expectEqual(@as(usize, 1), granted.len);
+    try std.testing.expectEqual(@as(usize, 1), table.findSlotIndex(granted[0].id).?);
 }
 
 test "capability allocation leaves a full table unchanged" {

@@ -288,7 +288,29 @@ const cases = benchmark_cases.benchmarkCases(.{
     .slo_nvme_queued_io = benchmarkSloNvmeQueuedIo,
     .slo_endpoint_rtt = benchmarkSloEndpointRtt,
     .slo_focused_input = benchmarkSloFocusedInput,
+    .text_navigation = benchmarkTextNavigation,
 });
+
+var navigation_text: [abi.SURFACE_TEXT_BYTES]u8 = initial: {
+    var text: [abi.SURFACE_TEXT_BYTES]u8 = undefined;
+    for (&text, 0..) |*byte, index| byte.* = if (index % 31 == 30) '\n' else 'a';
+    break :initial text;
+};
+
+fn benchmarkTextNavigation(iteration: u32) u64 {
+    // Vary the document, viewport, caret and direction. One measured operation
+    // includes locating the old caret, moving it, and locating its new cell.
+    navigation_text[255] = if (iteration & 1 == 0) '\n' else 'b';
+    const layout = abi.text_layout.Layout{ .text = &navigation_text, .columns = if (iteration & 2 == 0) 20 else 120 };
+    const caret = abi.text_layout.Caret{ .offset = iteration % (navigation_text.len + 1), .upstream = iteration & 4 != 0 };
+    const before = layout.locate(caret);
+    const next = layout.vertical(caret, before.column, iteration & 8 != 0, if (iteration & 16 == 0) 1 else 23);
+    const after = layout.locate(next);
+    if (after.row.start + after.column != next.offset or next.offset > navigation_text.len) {
+        benchmark_reporting.benchStepFailure("text layout navigation", error.InvalidCaret);
+    }
+    return 1 + next.offset + 513 * after.index + @intFromBool(next.upstream);
+}
 
 const quality_gates = benchmark_cases.qualityGateCases(.{
     .battery_saver_batch_delay = qualityBatterySaverBatchDelay,
@@ -2603,10 +2625,19 @@ fn benchmarkSloFocusedInput(iteration: u32) u64 {
         .vendor_id = 0x046D,
         .product_id = 0xC31C,
     };
-    report.bytes[2] = 0x04;
+    // Alternate pressed keys so each report releases the previous key and
+    // produces one new transition. Repeating a held key measures empty polls.
+    const usage: u8 = if (slo_input_context.sequence & 1 == 0) 0x04 else 0x05;
+    report.bytes[2] = usage;
     slo_input_context.pending = report;
     const routed = slo_input_context.router.service(slo_input_context.sequence, 1);
-    const event = slo_input_context.router.pollForTask(slo_input_context.task_id) orelse return 0;
+    const event = slo_input_context.router.pollForTask(slo_input_context.task_id) orelse
+        benchmark_reporting.benchStepFailure("focused input delivery", error.InputNotDelivered);
+    if (routed != 1 or event.sequence == 0 or event.task_id != slo_input_context.task_id or
+        event.event.kind != .text or event.event.data != 'a' + (usage - 0x04))
+    {
+        benchmark_reporting.benchStepFailure("focused input delivery", error.InputMismatch);
+    }
     return routed + event.sequence + event.task_id;
 }
 

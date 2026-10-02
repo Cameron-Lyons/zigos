@@ -36,11 +36,26 @@ pub fn publishUserspaceActiveTaskId(task_id: u64) void {
     syscall_cpu.setActiveTaskId(task_id);
 }
 
-pub fn bootloaderMeasurementDigest() [32]u8 {
+pub fn bootDescriptorDigest() [32]u8 {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "bootloader", "efi");
     crypto_hash.updateBytes(&hasher, "boot-profile", config.name());
     crypto_hash.updateBytes(&hasher, "entry-assembly", bootloaderSourcePath());
+    return crypto_hash.finalize(&hasher);
+}
+
+pub fn bootImageAuthenticated() bool {
+    const info = @import("kernel/boot/handoff.zig").capturedInfo() orelse return false;
+    const image = info.boot_image orelse return false;
+    return image.firmware_authenticated;
+}
+
+pub fn bootImageDigest() ![32]u8 {
+    const info = @import("kernel/boot/handoff.zig").capturedInfo() orelse return error.MissingBootImage;
+    const image = info.boot_image orelse return error.MissingBootImage;
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "embedded-kernel-elf", &image.kernel_digest);
+    crypto_hash.updateBytes(&hasher, "embedded-command-line", &image.cmdline_digest);
     return crypto_hash.finalize(&hasher);
 }
 

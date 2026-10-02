@@ -284,7 +284,7 @@ target_id=asus-nuc15crsu7
 board_sku=RNUC15CRSU7
 bios_version=TNTGL357.0071.2025.0123.1200
 boot_mode=UEFI
-secure_boot=disabled-for-local-proof-media
+secure_boot=enabled
 storage_mode=nvme
 wake_suspend=S3 wake by keyboard and power button enabled
 changed_options=boot order set to USB first
@@ -650,6 +650,18 @@ printf '%s\n' "$checkpoint" >> "$checkpoint_after_ready/production-serial.next"
 mv "$checkpoint_after_ready/production-serial.next" "$checkpoint_after_ready/production-serial.log"
 write_statement "$checkpoint_after_ready"
 expect_fail "$checkpoint_after_ready"
+
+disabled_secure_boot="$(copy_valid disabled-secure-boot)"
+sed 's/^secure_boot=enabled$/secure_boot=disabled/' "$disabled_secure_boot/firmware-settings.txt" > "$disabled_secure_boot/firmware-settings.next"
+mv "$disabled_secure_boot/firmware-settings.next" "$disabled_secure_boot/firmware-settings.txt"
+write_statement "$disabled_secure_boot"
+expect_fail "$disabled_secure_boot"
+
+unverified_boot_image="$(copy_valid unverified-boot-image)"
+sed 's/BOOT_IMAGE:FIRMWARE_AUTHENTICATED/BOOT_IMAGE:UNVERIFIED/' "$unverified_boot_image/production-serial.log" > "$unverified_boot_image/production-serial.next"
+mv "$unverified_boot_image/production-serial.next" "$unverified_boot_image/production-serial.log"
+write_statement "$unverified_boot_image"
+expect_fail "$unverified_boot_image"
 
 missing_verification_ready="$(copy_valid missing-verification-ready)"
 grep -v '^ZIGOS:NATIVE:READY$' "$missing_verification_ready/verification-serial.log" > "$missing_verification_ready/verification-serial.next"

@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const transport_crypto = @import("../core/transport_crypto.zig");
 const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const capability = @import("../kernel_api/capability.zig");
@@ -54,7 +55,7 @@ pub const Error = harness.Error || endpoint.Error || network_driver_task.Error |
 
 pub const MAX_CAPTURED_PACKETS: usize = 16;
 pub const MAX_NATIVE_IN_FLIGHT_FRAMES: usize = 4;
-pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 3;
+pub const NATIVE_TRANSPORT_ABI_VERSION: u16 = 4;
 pub const COMPACT_CAPTURE_METADATA = true;
 pub const DERIVES_CAPTURE_METADATA_FROM_ARENA_STATE = true;
 pub const HEAP_BACKED_PACKET_CAPTURE_ON_FREESTANDING = true;
@@ -92,7 +93,7 @@ pub const NativeTransportAbi = struct {
     pub const fixed_header_bytes: usize = 4 + 2 + 2 + (4 * @sizeOf(u64)) + 4 + (4 * @sizeOf(u64)) + 2;
 };
 
-pub const NATIVE_FRAME_DIGEST_BYTES: usize = 2 * @sizeOf(crypto_hash.Digest);
+pub const NATIVE_FRAME_DIGEST_BYTES: usize = transport_crypto.AUTH_BYTES + @sizeOf(crypto_hash.Digest);
 pub const MAX_NATIVE_PAYLOAD_BYTES: usize = @min(
     MAX_PACKET_BYTES,
     @min(
@@ -115,8 +116,8 @@ pub const NativeSyncFrameView = struct {
     policy_id: u64,
     capability_id: u64,
     ciphertext: []const u8,
-    payload_digest: []const u8,
-    packet_digest: []const u8,
+    authentication: []const u8,
+    wire_mac: []const u8,
 
     pub fn encrypted(self: NativeSyncFrameView) bool {
         return (self.flags & NativeTransportAbi.flag_encrypted) != 0;
@@ -363,6 +364,11 @@ pub const NativeConnection = struct {
     pub fn isConnected(self: *const NativeConnection) bool {
         return self.connected;
     }
+
+    pub fn deinit(self: *NativeConnection) void {
+        self.session.deinit();
+        self.connected = false;
+    }
 };
 
 pub const NativeDelivery = struct {
@@ -525,12 +531,13 @@ pub const NativeTransportService = struct {
         target_device: principal.PrincipalId,
     ) Error!NativeConnection {
         try self.ensureTrustedTransportDevices(source_device, target_device);
-        const session = try self.harness.openDeviceToDevice(
+        var session = try self.harness.openDeviceToDevice(
             broker,
             request,
             source_device,
             target_device,
         );
+        defer session.deinit();
         return self.openEndpointBackedConnection(session, source_task_id, target_task_id, true);
     }
 
@@ -544,12 +551,13 @@ pub const NativeTransportService = struct {
         target_device: principal.PrincipalId,
     ) Error!NativeConnection {
         try self.ensureTrustedTransportDevices(source_device, target_device);
-        const session = try self.harness.openServiceIdentity(
+        var session = try self.harness.openServiceIdentity(
             broker,
             request,
             source_device,
             target_device,
         );
+        defer session.deinit();
         return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
     }
 
@@ -563,12 +571,28 @@ pub const NativeTransportService = struct {
         target_device: principal.PrincipalId,
     ) Error!NativeConnection {
         try self.ensureTrustedTransportDevices(source_device, target_device);
-        const session = try self.harness.openVerifiedServiceIdentity(
+        var session = try self.harness.openVerifiedServiceIdentity(
             broker,
             request,
             source_device,
             target_device,
         );
+        defer session.deinit();
+        return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
+    }
+
+    pub fn openTpmServiceIdentity(
+        self: *NativeTransportService,
+        broker: *network_policy.EgressBroker,
+        request: network_policy.TpmServiceIdentityOpenRequest,
+        source_task_id: u64,
+        target_task_id: u64,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!NativeConnection {
+        try self.ensureTrustedTransportDevices(source_device, target_device);
+        var session = try self.harness.openTpmServiceIdentity(broker, request, source_device, target_device);
+        defer session.deinit();
         return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
     }
 
@@ -583,13 +607,14 @@ pub const NativeTransportService = struct {
         relay_domain: []const u8,
     ) Error!NativeConnection {
         try self.ensureTrustedTransportDevices(source_device, target_device);
-        const session = try self.harness.openRelay(
+        var session = try self.harness.openRelay(
             broker,
             request,
             source_device,
             target_device,
             relay_domain,
         );
+        defer session.deinit();
         return self.openEndpointBackedConnection(session, source_task_id, target_task_id, false);
     }
 
@@ -678,10 +703,11 @@ pub const NativeTransportService = struct {
 
     pub fn assertLastCapturedFrame(
         self: *const NativeTransportService,
+        session: *const TransportSession,
         expectation: CapturedFrameExpectation,
     ) Error!NativeSyncFrameView {
         const capture = self.capture.stateConst() orelse return error.NativeTransportFrameMissing;
-        return assertLastCapturedNativeSyncFrame(capture, expectation);
+        return assertLastCapturedNativeSyncFrame(capture, session, expectation);
     }
 
     pub fn sendWithRelayFallback(
@@ -844,10 +870,11 @@ fn markSequenceSent(connection: *NativeConnection, sequence: u64) void {
 
 pub fn assertLastCapturedNativeSyncFrame(
     capture: *const PacketCapture,
+    session: *const TransportSession,
     expectation: CapturedFrameExpectation,
 ) Error!NativeSyncFrameView {
     const captured = capture.lastPtr() orelse return error.NativeTransportFrameMissing;
-    const view = try decodeNativeSyncFrame(captured.slice());
+    const view = try decodeNativeSyncFrame(session, captured.slice());
     if (view.abi_version != NativeTransportAbi.version or view.header_len != NativeTransportAbi.fixed_header_bytes) {
         return error.NativeTransportMalformedFrame;
     }
@@ -871,8 +898,9 @@ pub fn assertLastCapturedNativeSyncFrame(
     return view;
 }
 
-pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
-    if (frame.len < NativeTransportAbi.fixed_header_bytes + 64) return error.NativeTransportMalformedFrame;
+/// Structural inspection is used only by wire diagnostics. It grants no trust.
+pub fn inspectNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
+    if (frame.len < NativeTransportAbi.fixed_header_bytes + NATIVE_FRAME_DIGEST_BYTES or frame.len > network_driver_task.MAX_NATIVE_FRAME_BYTES) return error.NativeTransportMalformedFrame;
 
     var reader = NativeFrameReader{ .buffer = frame };
     if (!std.mem.eql(u8, try reader.readSlice(NativeTransportAbi.magic.len), &NativeTransportAbi.magic)) return error.NativeTransportMalformedFrame;
@@ -905,29 +933,11 @@ pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
     if (policy_id == 0 or capability_id == 0) return error.NativeTransportMalformedFrame;
     if (source_serial == 0 or target_serial == 0 or source_serial == target_serial) return error.NativeTransportMalformedFrame;
     const ciphertext_len = try reader.readU16();
-    if (ciphertext_len > MAX_PACKET_BYTES) return error.NativeTransportMalformedFrame;
-    if (reader.remaining() != ciphertext_len + 64) return error.NativeTransportMalformedFrame;
+    if (ciphertext_len == 0 or ciphertext_len > MAX_NATIVE_PAYLOAD_BYTES) return error.NativeTransportMalformedFrame;
+    if (reader.remaining() != ciphertext_len + NATIVE_FRAME_DIGEST_BYTES) return error.NativeTransportMalformedFrame;
     const ciphertext = try reader.readSlice(ciphertext_len);
-    const payload_digest = try reader.readSlice(32);
-    const packet_digest = try reader.readSlice(32);
-
-    var packet = EncryptedPacket{
-        .session_id = session_id,
-        .transport = transport,
-        .policy_id = policy_id,
-        .capability_id = capability_id,
-        .source_device = .{ .kind = source_kind, .serial = source_serial },
-        .target_device = .{ .kind = target_kind, .serial = target_serial },
-        .ciphertext_len = ciphertext_len,
-        .ciphertext = [_]u8{0} ** MAX_PACKET_BYTES,
-        .payload_digest = payload_digest[0..32].*,
-        .encrypted = encrypted,
-        .egress_allowed = egress_allowed,
-    };
-    if (ciphertext.len > packet.ciphertext.len) return error.NativeTransportMalformedFrame;
-    @memcpy(packet.ciphertext[0..ciphertext.len], ciphertext);
-    const expected_digest = harness.packetDigest(packet);
-    if (!std.mem.eql(u8, &expected_digest, packet_digest)) return error.PacketAuthenticationFailed;
+    const authentication = try reader.readSlice(transport_crypto.AUTH_BYTES);
+    const wire_mac = try reader.readSlice(32);
 
     return .{
         .abi_version = abi_version,
@@ -943,9 +953,40 @@ pub fn decodeNativeSyncFrame(frame: []const u8) Error!NativeSyncFrameView {
         .policy_id = policy_id,
         .capability_id = capability_id,
         .ciphertext = ciphertext,
-        .payload_digest = payload_digest,
-        .packet_digest = packet_digest,
+        .authentication = authentication,
+        .wire_mac = wire_mac,
     };
+}
+
+/// Authenticate framing. Receive admission must also match the local task and
+/// trusted peer, check replay state and authorize the requested object operation.
+pub fn decodeNativeSyncFrame(session: *const TransportSession, frame: []const u8) Error!NativeSyncFrameView {
+    const view = try inspectNativeSyncFrame(frame);
+    if (view.session_id != session.id or view.transport != session.transport or
+        view.policy_id != session.policy_id or view.capability_id != session.capability_id or
+        !view.source_device.eql(session.source_device) or !view.target_device.eql(session.target_device)) return error.PacketTargetMismatch;
+    if (!transport_crypto.verifyWireMac(session.key, frame[0 .. frame.len - 32], view.wire_mac[0..32].*)) return error.PacketAuthenticationFailed;
+    return view;
+}
+
+pub fn decryptNativeSyncFrame(session: *const TransportSession, frame: []const u8, output: []u8) Error![]const u8 {
+    errdefer std.crypto.secureZero(u8, output[0..@min(output.len, MAX_PACKET_BYTES)]);
+    const view = try decodeNativeSyncFrame(session, frame);
+    var packet = EncryptedPacket{
+        .session_id = view.session_id,
+        .transport = view.transport,
+        .policy_id = view.policy_id,
+        .capability_id = view.capability_id,
+        .source_serial = view.source_device.serial,
+        .target_serial = view.target_device.serial,
+        .ciphertext_len = @intCast(view.ciphertext.len),
+        .ciphertext = @splat(0),
+        .authentication = view.authentication[0..transport_crypto.AUTH_BYTES].*,
+        .encrypted = view.encrypted(),
+        .egress_allowed = view.egressAllowed(),
+    };
+    @memcpy(packet.ciphertext[0..view.ciphertext.len], view.ciphertext);
+    return decryptForSession(session, packet, output);
 }
 
 pub fn encodeNativeSyncFrame(
@@ -959,7 +1000,7 @@ pub fn encodeNativeSyncFrame(
     try validateNativeFrameForSession(session, source_task_id, target_task_id, &frame.packet);
     const ciphertext = frame.packet.ciphertextSlice();
     if (ciphertext.len > std.math.maxInt(u16)) return error.PacketTooLarge;
-    const required_len = NativeTransportAbi.fixed_header_bytes + ciphertext.len + frame.packet.payload_digest.len + frame.packet_digest.len;
+    const required_len = NativeTransportAbi.fixed_header_bytes + ciphertext.len + frame.packet.authentication.len + frame.packet_digest.len;
     if (buffer.len < required_len) return error.PacketTooLarge;
 
     var writer = NativeFrameWriter{ .buffer = buffer };
@@ -971,19 +1012,20 @@ pub fn encodeNativeSyncFrame(
     try writer.writeU64(source_task_id);
     try writer.writeU64(target_task_id);
     try writer.writeByte(@intFromEnum(session.transport));
-    try writer.writeByte(@intFromEnum(frame.packet.source_device.kind));
-    try writer.writeByte(@intFromEnum(frame.packet.target_device.kind));
+    try writer.writeByte(@intFromEnum(principal.PrincipalKind.device));
+    try writer.writeByte(@intFromEnum(principal.PrincipalKind.device));
     const flags = (if (frame.packet.encrypted) NativeTransportAbi.flag_encrypted else 0) |
         (if (frame.packet.egress_allowed) NativeTransportAbi.flag_egress_allowed else 0);
     try writer.writeByte(flags);
     try writer.writeU64(frame.packet.policy_id);
     try writer.writeU64(frame.packet.capability_id);
-    try writer.writeU64(frame.packet.source_device.serial);
-    try writer.writeU64(frame.packet.target_device.serial);
+    try writer.writeU64(frame.packet.source_serial);
+    try writer.writeU64(frame.packet.target_serial);
     try writer.writeU16(@intCast(ciphertext.len));
     try writer.writeBytes(ciphertext);
-    try writer.writeBytes(&frame.packet.payload_digest);
-    try writer.writeBytes(&frame.packet_digest);
+    try writer.writeBytes(&frame.packet.authentication);
+    const mac = transport_crypto.wireMac(session.key, buffer[0..writer.offset]);
+    try writer.writeBytes(&mac);
     return buffer[0..writer.offset];
 }
 
@@ -1000,14 +1042,14 @@ fn validateNativeFrameForSession(
     if (session.source_device.kind != .device or session.target_device.kind != .device) return error.NativeTransportMalformedFrame;
     if (session.source_device.serial == 0 or session.target_device.serial == 0) return error.NativeTransportMalformedFrame;
     if (session.source_device.eql(session.target_device)) return error.NativeTransportMalformedFrame;
-    if (packet.ciphertext_len > packet.ciphertext.len) return error.PacketTooLarge;
+    if (packet.ciphertext_len == 0 or packet.ciphertext_len > MAX_NATIVE_PAYLOAD_BYTES) return error.PacketTooLarge;
     if (!packet.encrypted or !packet.egress_allowed) return error.NativeTransportMalformedFrame;
     if (packet.session_id != session.id or
         packet.transport != session.transport or
         packet.policy_id != session.policy_id or
         packet.capability_id != session.capability_id or
-        !packet.source_device.eql(session.source_device) or
-        !packet.target_device.eql(session.target_device))
+        packet.source_serial != session.source_device.serial or
+        packet.target_serial != session.target_device.serial)
     {
         return error.NativeTransportMalformedFrame;
     }
@@ -1216,7 +1258,7 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expect(std.mem.startsWith(u8, captured.slice(), "ZGST"));
     try std.testing.expect(std.mem.indexOf(u8, captured.slice(), "object delta") == null);
     try std.testing.expectEqualSlices(u8, captured.slice(), Driver.last_frame[0..Driver.last_frame_len]);
-    const view = try native_transport.assertLastCapturedFrame(.{
+    const view = try native_transport.assertLastCapturedFrame(&connection.session, .{
         .session_id = connection.session.id,
         .sequence = delivered.sequence,
         .source_task_id = connection.source_task_id,
@@ -1233,8 +1275,30 @@ test "native sync transport captures encrypted driver packets and handles replay
     try std.testing.expect(view.encrypted());
     try std.testing.expect(view.egressAllowed());
     try std.testing.expect(!std.mem.eql(u8, view.ciphertext, "object delta"));
-    try std.testing.expectEqualSlices(u8, delivered.signed_frame.packet.payload_digest[0..], view.payload_digest);
-    try std.testing.expectEqualSlices(u8, delivered.signed_frame.packet_digest[0..], view.packet_digest);
+    try std.testing.expectEqualSlices(u8, delivered.signed_frame.packet.authentication[0..], view.authentication);
+    try std.testing.expectEqual(@as(usize, 32), view.wire_mac.len);
+    var plaintext_out: [MAX_NATIVE_PAYLOAD_BYTES]u8 = undefined;
+    try std.testing.expectEqualStrings("object delta", try decryptNativeSyncFrame(&connection.session, captured.slice(), &plaintext_out));
+    for (0..captured.len) |index| {
+        var changed = captured;
+        changed.bytes[index] ^= 1;
+        @memset(&plaintext_out, 0xa5);
+        if (decryptNativeSyncFrame(&connection.session, changed.slice(), &plaintext_out)) |_| {
+            return error.UnauthenticatedFrameAccepted;
+        } else |_| {}
+        try std.testing.expect(std.mem.allEqual(u8, &plaintext_out, 0));
+    }
+    var other_session = connection.session;
+    defer other_session.deinit();
+    other_session.key = try transport_crypto.freshKey(crypto_hash.zero_digest);
+    try std.testing.expectError(error.PacketAuthenticationFailed, decryptNativeSyncFrame(&other_session, captured.slice(), &plaintext_out));
+    var old_abi = captured;
+    std.mem.writeInt(u16, old_abi.bytes[4..6], 3, .little);
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, old_abi.slice()));
+    // A public packet checksum cannot substitute for the secret wire MAC.
+    var forged_checksum = captured;
+    @memcpy(forged_checksum.bytes[forged_checksum.len - 32 ..][0..32], &delivered.signed_frame.packet_digest);
+    try std.testing.expectError(error.PacketAuthenticationFailed, decodeNativeSyncFrame(&connection.session, forged_checksum.slice()));
     const session_id_offset = 4 + 2 + 2;
     const sequence_offset = session_id_offset + @sizeOf(u64);
     const source_task_id_offset = sequence_offset + @sizeOf(u64);
@@ -1251,61 +1315,61 @@ test "native sync transport captures encrypted driver packets and handles replay
 
     var zero_session_id = captured;
     std.mem.writeInt(u64, zero_session_id.bytes[session_id_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_session_id.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_session_id.slice()));
     var zero_sequence = captured;
     std.mem.writeInt(u64, zero_sequence.bytes[sequence_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_sequence.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_sequence.slice()));
     var zero_source_task = captured;
     std.mem.writeInt(u64, zero_source_task.bytes[source_task_id_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_source_task.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_source_task.slice()));
     var zero_target_task = captured;
     std.mem.writeInt(u64, zero_target_task.bytes[target_task_id_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_target_task.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_target_task.slice()));
     var same_task_ids = captured;
     std.mem.writeInt(u64, same_task_ids.bytes[target_task_id_offset..][0..@sizeOf(u64)], connection.source_task_id, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(same_task_ids.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, same_task_ids.slice()));
     var unsupported_transport = captured;
     unsupported_transport.bytes[transport_offset] = 0xff;
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(unsupported_transport.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, unsupported_transport.slice()));
     var tampered_flags = captured;
     tampered_flags.bytes[flags_offset] |= 0x80;
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(tampered_flags.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, tampered_flags.slice()));
     var missing_encryption_flag = captured;
     missing_encryption_flag.bytes[flags_offset] &= ~NativeTransportAbi.flag_encrypted;
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(missing_encryption_flag.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, missing_encryption_flag.slice()));
     var missing_egress_flag = captured;
     missing_egress_flag.bytes[flags_offset] &= ~NativeTransportAbi.flag_egress_allowed;
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(missing_egress_flag.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, missing_egress_flag.slice()));
     var non_device_source = captured;
     non_device_source.bytes[source_kind_offset] = @intFromEnum(principal.PrincipalKind.app);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(non_device_source.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, non_device_source.slice()));
     var non_device_target = captured;
     non_device_target.bytes[target_kind_offset] = @intFromEnum(principal.PrincipalKind.service);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(non_device_target.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, non_device_target.slice()));
     var zero_policy = captured;
     std.mem.writeInt(u64, zero_policy.bytes[policy_id_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_policy.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_policy.slice()));
     var zero_capability = captured;
     std.mem.writeInt(u64, zero_capability.bytes[capability_id_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_capability.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_capability.slice()));
     var zero_source_serial = captured;
     std.mem.writeInt(u64, zero_source_serial.bytes[source_serial_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_source_serial.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_source_serial.slice()));
     var zero_target_serial = captured;
     std.mem.writeInt(u64, zero_target_serial.bytes[target_serial_offset..][0..@sizeOf(u64)], 0, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(zero_target_serial.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, zero_target_serial.slice()));
     var same_device_serials = captured;
     std.mem.writeInt(u64, same_device_serials.bytes[target_serial_offset..][0..@sizeOf(u64)], source.serial, .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(same_device_serials.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, same_device_serials.slice()));
     var oversized_ciphertext = captured;
     std.mem.writeInt(u16, oversized_ciphertext.bytes[ciphertext_len_offset..][0..@sizeOf(u16)], @intCast(MAX_PACKET_BYTES + 1), .little);
-    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(oversized_ciphertext.slice()));
-    var tampered_payload_digest = captured;
-    tampered_payload_digest.bytes[tampered_payload_digest.len - 64] ^= 0x40;
-    try std.testing.expectError(error.PacketAuthenticationFailed, decodeNativeSyncFrame(tampered_payload_digest.slice()));
+    try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, oversized_ciphertext.slice()));
+    var tampered_authentication = captured;
+    tampered_authentication.bytes[tampered_authentication.len - 64] ^= 0x40;
+    try std.testing.expectError(error.PacketAuthenticationFailed, decodeNativeSyncFrame(&connection.session, tampered_authentication.slice()));
     var tampered_packet_digest = captured;
     tampered_packet_digest.bytes[tampered_packet_digest.len - 1] ^= 0x20;
-    try std.testing.expectError(error.PacketAuthenticationFailed, decodeNativeSyncFrame(tampered_packet_digest.slice()));
+    try std.testing.expectError(error.PacketAuthenticationFailed, decodeNativeSyncFrame(&connection.session, tampered_packet_digest.slice()));
 
     var forged_frame = delivered.signed_frame;
     forged_frame.packet.session_id += 1;
@@ -1320,10 +1384,10 @@ test "native sync transport captures encrypted driver packets and handles replay
     forged_frame.packet.capability_id += 1;
     try expectNativeEncodeError(error.NativeTransportMalformedFrame, &connection.session, &forged_frame);
     forged_frame = delivered.signed_frame;
-    forged_frame.packet.source_device = target;
+    forged_frame.packet.source_serial = target.serial;
     try expectNativeEncodeError(error.NativeTransportMalformedFrame, &connection.session, &forged_frame);
     forged_frame = delivered.signed_frame;
-    forged_frame.packet.target_device = source;
+    forged_frame.packet.target_serial = source.serial;
     try expectNativeEncodeError(error.NativeTransportMalformedFrame, &connection.session, &forged_frame);
     forged_frame = delivered.signed_frame;
     forged_frame.packet.encrypted = false;
@@ -1418,7 +1482,7 @@ fn verifiedSyncPeerBoot(generation: u64) !measured_boot.BootRecord {
     try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "production-sync-policy", "strict");
     try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "production-sync-drivers", "i225");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
     return boot;
 }
 
@@ -1712,6 +1776,20 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         .now_ticks = 31,
     }, 176, 177, source, target));
 
+    try std.testing.expectError(error.ProductionAttestationRequired, production_transport.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 176,
+        .principal_id = app,
+        .capability_id = service_identity_capability.id,
+        .policy_id = service_identity_policy.id,
+        .service_identity = "overlay.production.sync",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 31,
+    }, 176, 177, source, .{ .kind = .device, .serial = target.serial + 1 }));
+    try std.testing.expectEqual(@as(usize, 0), ProductionDriver.send_count);
+
     var production_service_connection = try production_transport.openVerifiedServiceIdentity(&broker, .{
         .task_id = 176,
         .principal_id = app,
@@ -1887,6 +1965,6 @@ test "compact native result metadata preserves bounded payload capacities" {
     try std.testing.expect(COMPACT_NATIVE_RESULT_METADATA);
     try std.testing.expectEqual(NativePayloadLength, @FieldType(NativeDelivery, "payload_len"));
     try std.testing.expectEqual(ObjectSharePayloadLength, @FieldType(ObjectShareEnvelope, "payload_len"));
-    try std.testing.expectEqual(@as(usize, 520), @sizeOf(NativeDelivery));
+    try std.testing.expectEqual(@as(usize, 512), @sizeOf(NativeDelivery));
     try std.testing.expectEqual(@as(usize, 288), @sizeOf(ObjectShareEnvelope));
 }

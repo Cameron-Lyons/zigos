@@ -243,10 +243,7 @@ const notes_daily_policy_signer = signing.SignerIdentity{
     .label = "zigos-notes-daily-policy",
     .seed = signing.seedFromByte(0xd2),
 };
-const notes_daily_user_signer = signing.SignerIdentity{
-    .label = "zigos-notes-daily-user",
-    .seed = signing.seedFromByte(0xd3),
-};
+const notes_daily_user_signer = scenario_support.user_root_signer;
 const notes_daily_primary_device_signer = signing.SignerIdentity{
     .label = "zigos-notes-daily-primary",
     .seed = signing.seedFromByte(0xd4),
@@ -539,6 +536,10 @@ fn runBootedNotesTypedInputLoop(
 
     if (!system.dispatchInput(.{ .kind = .boot, .tick = 260 }).accepted) return evidenceCheckFailed("typed.input_boot");
     if (!system.dispatchInput(.{ .kind = .start_task, .tick = 261 }).accepted) return evidenceCheckFailed("typed.input_start_task");
+    defer {
+        _ = compositor_service.session.closeWindowsForTask(shell.state.task_id);
+        _ = context.runtime.terminateTask(shell.state.task_id, 267) catch false;
+    }
     if (!system.dispatchInput(.{ .kind = .open_workspace, .tick = 262 }).accepted) return evidenceCheckFailed("typed.input_open_workspace");
     if (!system.dispatchInput(.{ .kind = .open_document, .tick = 263 }).accepted) return evidenceCheckFailed("typed.input_open_document");
     const previous_version_id = shell.state.document_version_id;

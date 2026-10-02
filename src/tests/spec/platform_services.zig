@@ -52,7 +52,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try artifact_manifest.add(.driver_set, "signed-drivers", "gpu+npu+net");
     try recorder.add(.driver_set, "signed-drivers", "gpu+npu+net");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
 
     var checkpoint_store = storage_service.CheckpointStore{};
     checkpoint_store.resetPersistent();
@@ -172,7 +172,7 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
         .scope = .synced,
         .key_handle_id = passkey_handle,
     });
-    const unlock = try os_identity.createLocalUnlockProof(passkey_user, passkey_device, "zigos.dev", "spec-nonce", .biometric, 8, 12, passkey_device_signer);
+    const unlock = try os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, passkey_user, passkey_device, "zigos.dev", "spec-nonce", .biometric, 8, 12, passkey_device_signer);
     const passkey_assertion = try identities.assertCredential(&graph, identity_keys.at(authority, 9), .{
         .credential_id = passkey.id,
         .device = passkey_device,

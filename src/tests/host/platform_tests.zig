@@ -1,6 +1,8 @@
 const std = @import("std");
 const tpm2_secret_provider = @import("../../native/platform/tpm2_secret_provider.zig");
 const tpm2_sealing = @import("../../native/platform/tpm2_sealing.zig");
+const tpm2_vault_anchor = @import("../../native/platform/tpm2_vault_anchor.zig");
+const tpm2_pin = @import("../../native/platform/tpm2_pin.zig");
 
 const attestation_service = @import("../../native/platform/attestation_service.zig");
 const base_boot_selector = @import("../../native/platform/base_boot_selector.zig");
@@ -15,6 +17,7 @@ const native_ux = @import("../../native/platform/native_ux.zig");
 const os_contract = @import("../../native/platform/os_contract.zig");
 const contract_2026 = @import("../../native/contract_2026.zig");
 const os_identity = @import("../../native/platform/os_identity.zig");
+const unlock_context = @import("../../native/platform/unlock_context.zig");
 const platform_policy_signals = @import("../../native/platform/platform_policy_signals.zig");
 const recovery_environment = @import("../../native/platform/recovery_environment.zig");
 const rendered_shell = @import("../../native/platform/rendered_shell.zig");
@@ -22,9 +25,17 @@ const secure_secret_store = @import("../../native/platform/secure_secret_store.z
 const update_health = @import("../../native/platform/update_health.zig");
 
 test "platform host tests import native platform modules" {
+    std.testing.refAllDecls(@import("../../native/platform/trusted_auth_entry.zig"));
+    std.testing.refAllDecls(@import("../../native/platform/trusted_credential_review.zig"));
+    std.testing.refAllDecls(@import("../../native/platform/recovery_key.zig"));
+    std.testing.refAllDecls(@import("../../native/platform/input_router.zig"));
     std.testing.refAllDecls(tpm2_sealing);
+    std.testing.refAllDecls(tpm2_sealing.quote);
+    std.testing.refAllDecls(tpm2_vault_anchor);
+    std.testing.refAllDecls(tpm2_pin);
     std.testing.refAllDecls(tpm2_secret_provider);
     std.testing.refAllDecls(attestation_service);
+    std.testing.refAllDecls(attestation_service.tpm);
     std.testing.refAllDecls(base_boot_selector);
     std.testing.refAllDecls(compositor_display);
     std.testing.refAllDecls(compositor_view);
@@ -37,6 +48,7 @@ test "platform host tests import native platform modules" {
     std.testing.refAllDecls(os_contract);
     std.testing.refAllDecls(contract_2026);
     std.testing.refAllDecls(os_identity);
+    std.testing.refAllDecls(unlock_context);
     std.testing.refAllDecls(platform_policy_signals);
     std.testing.refAllDecls(recovery_environment);
     std.testing.refAllDecls(rendered_shell);

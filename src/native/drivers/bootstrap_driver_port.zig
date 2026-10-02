@@ -376,9 +376,12 @@ pub fn activateNetworkDevice(device_id: u64, service_id: u64) bool {
 }
 
 pub fn activateNetworkDeviceForTask(device_id: u64, service_id: u64, task_id: u64) bool {
-    if (!networkPublicationMatchesTargetI225(device_id)) return false;
+    if (!networkPublicationMatchesDetectedDevice(device_id)) return false;
     if (publicationForActivation(NetworkPublication, &published_network, device_id, service_id)) |publication| {
         if (builtin.target.os.tag == .freestanding and !kernel_device_start.startNetworkDataplane()) return false;
+        if (builtin.target.os.tag == .freestanding) {
+            @import("../../kernel/drivers/network_hw.zig").activate() catch return false;
+        }
         if (publication.network_device == null) {
             const activator = publication.activator orelse return false;
             publication.network_device = activator(device_id) orelse return false;
@@ -554,7 +557,7 @@ fn publicationForDeactivation(comptime T: type, publication: *?T, service_id: u6
     return null;
 }
 
-fn networkPublicationMatchesTargetI225(device_id: u64) bool {
+fn networkPublicationMatchesDetectedDevice(device_id: u64) bool {
     const production_device_id = device_inventory.requireProductionDriverDeviceId(.network_adapter) catch return false;
     return production_device_id == device_id;
 }

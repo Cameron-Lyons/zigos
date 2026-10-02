@@ -45,7 +45,7 @@ const ChunkedArchive = struct {
 
 const BuildArtifactKind = enum(u8) {
     bootloader_source,
-    bootloader_measurement,
+    boot_descriptor,
     userspace_image,
 };
 
@@ -384,7 +384,7 @@ fn writeBuildArtifactManifest(
     defer allocator.free(bootloader_bytes);
 
     try build_manifest.addDigest(.bootloader_source, bootloader_label, rawSha256(bootloader_bytes));
-    try build_manifest.addDigest(.bootloader_measurement, bootloaderMeasurementLabel(boot_profile), bootloaderMeasurementDigest(boot_profile, bootloader_label));
+    try build_manifest.addDigest(.boot_descriptor, bootloaderMeasurementLabel(boot_profile), bootDescriptorDigest(boot_profile, bootloader_label));
     for (artifacts) |artifact| {
         try build_manifest.addDigest(.userspace_image, artifact.bundle_id, artifact.embedded_info.file_sha256);
     }
@@ -443,7 +443,7 @@ fn bootloaderMeasurementLabel(boot_profile: []const u8) []const u8 {
     return "efi:zigos_native";
 }
 
-fn bootloaderMeasurementDigest(boot_profile: []const u8, bootloader_label: []const u8) crypto_hash.Digest {
+fn bootDescriptorDigest(boot_profile: []const u8, bootloader_label: []const u8) crypto_hash.Digest {
     var hasher = crypto_hash.init();
     crypto_hash.updateBytes(&hasher, "bootloader", "efi");
     crypto_hash.updateBytes(&hasher, "boot-profile", boot_profile);

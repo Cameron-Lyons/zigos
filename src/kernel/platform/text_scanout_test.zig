@@ -29,6 +29,10 @@ test "scanout preserves padding and guards and writes only damaged cells" {
     const top_left = renderer.origin_y * info.pixels_per_scan_line + renderer.origin_x;
     try std.testing.expectEqual(info.encodeColor(scanout.BACKGROUND), pixels[top_left + 2 * info.pixels_per_scan_line]);
     try std.testing.expectEqual(info.encodeColor(0x72d5bb), pixels[top_left + 2 * info.pixels_per_scan_line + 2]);
+    try std.testing.expect(renderer.matchesCell(0, 0, frame.cells[0]));
+    pixels[top_left + 2 * info.pixels_per_scan_line + 2] = 0;
+    try std.testing.expect(!renderer.matchesCell(0, 0, frame.cells[0]));
+    pixels[top_left + 2 * info.pixels_per_scan_line + 2] = info.encodeColor(0x72d5bb);
     try std.testing.expectEqual(@as(u32, 0xbad0cafe), storage[0]);
     try std.testing.expectEqual(@as(u32, 0xbad0cafe), storage[storage.len - 1]);
     for (0..info.height) |row| {
@@ -45,6 +49,11 @@ test "scanout preserves padding and guards and writes only damaged cells" {
     try std.testing.expectEqual(@as(usize, 1), cursor.changed_cells);
     try std.testing.expectEqual(@as(usize, scanout.CELL_WIDTH * scanout.CELL_HEIGHT), cursor.pixels_written);
     try std.testing.expectEqual(info.encodeColor(0x72d5bb), pixels[top_left + 19 * info.pixels_per_scan_line]);
+    frame.cells[0].cursor_trailing = true;
+    try std.testing.expectEqual(@as(usize, 1), (try renderer.present(&frame)).changed_cells);
+    try std.testing.expectEqual(info.encodeColor(0x72d5bb), pixels[top_left + 2 * info.pixels_per_scan_line + 11]);
+    try std.testing.expectEqual(info.encodeColor(scanout.BACKGROUND), pixels[top_left + 19 * info.pixels_per_scan_line]);
+    try std.testing.expect(renderer.matchesCell(0, 0, frame.cells[0]));
     frame.clear();
     try std.testing.expectEqual(@as(usize, 1), (try renderer.present(&frame)).changed_cells);
     for (0..scanout.CELL_HEIGHT) |y| {
@@ -74,6 +83,7 @@ test "incremental scanout matches fresh rendering across text and style changes"
                 .character = random.intRangeAtMost(u8, ' ', '~'),
                 .style = @enumFromInt(random.uintLessThan(u3, 5)),
                 .cursor = random.boolean(),
+                .cursor_trailing = random.boolean(),
             };
         }
         _ = try renderer.present(&frame);
@@ -139,4 +149,61 @@ test "framebuffer colors use exact byte order and scale contiguous bitmasks" {
     try std.testing.expectError(error.InvalidAddress, framebuffer.validate(info));
     info.physical_address = std.math.maxInt(u64) - 3;
     try std.testing.expectError(error.InvalidAddress, framebuffer.validate(info));
+}
+
+test "scanout paints UTF-8 glyphs wide cells and exact combining cluster changes" {
+    const info = testInfo();
+    const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);
+    defer std.testing.allocator.free(pixels);
+    var renderer = try scanout.Renderer.init(info, pixels);
+    var frame = try scanout.Frame.init(renderer.columns, renderer.rows);
+    frame.put(0, 0, "ée\u{301}界", .body);
+    _ = try renderer.present(&frame);
+    try std.testing.expectEqual(@as(u21, 'é'), frame.cells[0].character);
+    try std.testing.expectEqual(@as(u21, 'e'), frame.cells[1].character);
+    try std.testing.expectEqual(.left, frame.cells[2].part);
+    try std.testing.expectEqual(.right, frame.cells[3].part);
+    for (0..4) |x| try std.testing.expect(renderer.matchesCell(x, 0, frame.cells[x]));
+    try std.testing.expectEqual(scanout.PresentStats{}, try renderer.present(&frame));
+    // Identical cell metadata and pool offsets must not hide changed accents.
+    frame.clear();
+    frame.put(0, 0, "ée\u{300}界", .body);
+    try std.testing.expectEqual(@as(usize, 1), (try renderer.present(&frame)).changed_cells);
+    const fresh_pixels = try std.testing.allocator.alloc(u32, pixels.len);
+    defer std.testing.allocator.free(fresh_pixels);
+    @memset(fresh_pixels, 0);
+    // Padding is not part of rendering; initialize it identically for comparison.
+    for (0..info.height) |y| @memset(pixels[y * info.pixels_per_scan_line + info.width ..][0 .. info.pixels_per_scan_line - info.width], 0);
+    var fresh = try scanout.Renderer.init(info, fresh_pixels);
+    _ = try fresh.present(&frame);
+    try std.testing.expectEqualSlices(u32, fresh_pixels, pixels);
+    const retained_bytes = frame.cluster_length;
+    frame.clear();
+    try std.testing.expect(std.mem.allEqual(u8, frame.clusters[0..retained_bytes], 0));
+    _ = try renderer.present(&frame);
+    try std.testing.expect(std.mem.allEqual(u8, renderer.previous_clusters[0..retained_bytes], 0));
+    for (0..4) |x| try std.testing.expect(renderer.matchesCell(x, 0, .{}));
+}
+
+test "scanout fits ambiguous-width source glyphs into a single cell" {
+    const info = testInfo();
+    const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);
+    defer std.testing.allocator.free(pixels);
+    var renderer = try scanout.Renderer.init(info, pixels);
+    var frame = try scanout.Frame.init(renderer.columns, renderer.rows);
+    frame.put(0, 0, "☃", .body);
+    _ = try renderer.present(&frame);
+    try std.testing.expectEqual(.single, frame.cells[0].part);
+    const source = @import("unicode_font.zig").glyph('☃');
+    try std.testing.expectEqual(@as(u5, 16), source.width);
+    var foreground: usize = 0;
+    for (0..16) |y| {
+        for (0..10) |x| {
+            const ink = source.rows[y] & (@as(u16, 1) << @intCast(15 - x * 16 / 10)) != 0;
+            const pixel = pixels[(renderer.origin_y + 2 + y) * info.pixels_per_scan_line + renderer.origin_x + 1 + x];
+            try std.testing.expectEqual(info.encodeColor(if (ink) 0xe5ebf2 else scanout.BACKGROUND), pixel);
+            foreground += @intFromBool(ink);
+        }
+    }
+    try std.testing.expect(foreground != 0);
 }

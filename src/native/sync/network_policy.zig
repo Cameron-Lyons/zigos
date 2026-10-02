@@ -104,6 +104,19 @@ pub const Decision = struct {
     identity_pinned: bool = false,
 };
 
+pub const TpmServiceIdentityOpenRequest = struct {
+    task_id: u64,
+    principal_id: principal.PrincipalId,
+    capability_id: u64,
+    policy_id: u64,
+    service_identity: []const u8,
+    pending: *attestation_service.tpm.Pending,
+    response: *const attestation_service.tpm.Response,
+    // Verifier monotonic milliseconds, distinct from capability lease ticks.
+    now_ms: u64,
+    now_ticks: u64,
+};
+
 pub const ConnectionEvidence = struct {
     destination: Destination,
     attested: bool = false,
@@ -130,12 +143,40 @@ pub const ConnectionEvidence = struct {
             .attested = true,
             .verified_remote_attestation = true,
             .attestation_request_digest_present = true,
-            .attestation_request_digest = response.request_digest,
+            .attestation_request_digest = request.digest(),
             .peer_root_digest_present = true,
             .peer_root_digest = response.statement.root_digest,
             .attestation_verifier_metadata_digest_present = response.attestation_verifier_metadata_digest_present,
             .attestation_verifier_metadata_digest_bound = request.attestation_verifier_metadata_digest_required,
             .attestation_verifier_metadata_digest = response.attestation_verifier_metadata_digest,
+        };
+    }
+
+    pub fn fromTpmAttestation(
+        destination: Destination,
+        target_device: principal.PrincipalId,
+        pending: *attestation_service.tpm.Pending,
+        response: *const attestation_service.tpm.Response,
+        now_ms: u64,
+    ) ?ConnectionEvidence {
+        // Observe time even when routing rejects the response before crypto.
+        // A later clock rollback must not revive that verifier challenge.
+        pending.verifier.observe(now_ms) catch return null;
+        pending.challenge.request.validate() catch return null;
+        if (!target_device.eql(pending.enrollment.device) or
+            !destinationMatchesRemoteParty(destination, pending.challenge.request.remotePartySlice())) return null;
+        const accepted = pending.accept(response, now_ms) catch return null;
+        return .{
+            .destination = destination,
+            .attested = true,
+            .verified_remote_attestation = true,
+            .attestation_request_digest_present = true,
+            .attestation_request_digest = accepted.request_digest,
+            .peer_root_digest_present = true,
+            .peer_root_digest = accepted.boot_digest,
+            .attestation_verifier_metadata_digest_present = true,
+            .attestation_verifier_metadata_digest_bound = true,
+            .attestation_verifier_metadata_digest = accepted.enrollment_digest,
         };
     }
 

@@ -1,12 +1,14 @@
 const std = @import("std");
+pub const text_layout = @import("text_layout.zig");
 
-pub const ABI_VERSION: u16 = 10;
+pub const ABI_VERSION: u16 = 18;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
 pub const WAIT_PLUS_SEALED_RINGS = true;
 
 pub const InputByte = struct {
+    // bytes[1..length] carries one supported UTF-8 scalar (1..4 bytes).
     pub const text: u8 = 1;
     pub const backspace: u8 = 2;
     pub const commit_text: u8 = 3;
@@ -17,7 +19,26 @@ pub const InputByte = struct {
     pub const task_switch_previous: u8 = 8;
     pub const show_recovery: u8 = 9;
     pub const dismiss_recovery: u8 = 10;
+    pub const cursor_left: u8 = 11;
+    pub const cursor_right: u8 = 12;
+    pub const cursor_up: u8 = 13;
+    pub const cursor_down: u8 = 14;
+    pub const line_start: u8 = 15;
+    pub const line_end: u8 = 16;
+    pub const document_start: u8 = 17;
+    pub const document_end: u8 = 18;
+    pub const delete_forward: u8 = 19;
+    pub const select_all: u8 = 20;
+    pub const undo: u8 = 21;
+    pub const redo: u8 = 22;
+    pub const copy: u8 = 23;
+    pub const cut: u8 = 24;
+    pub const paste: u8 = 25;
+    pub const page_up: u8 = 26;
+    pub const page_down: u8 = 27;
 };
+
+pub const INPUT_EXTEND_SELECTION: u8 = 1;
 
 pub fn inputPacket(op: u8, data: u8) [INPUT_PACKET_BYTES]u8 {
     var bytes = [_]u8{0} ** INPUT_PACKET_BYTES;
@@ -188,6 +209,9 @@ pub const AccountingDescriptor = extern struct {
 };
 
 pub const InputEventDescriptor = extern struct {
+    // Nonzero, strictly increasing per routed event for the session lifetime.
+    // Several events may originate in one hardware report; replacing that
+    // source does not restart the event sequence of surviving tasks.
     sequence: u64,
     tick: u64,
     window_id: u64,
@@ -196,7 +220,8 @@ pub const InputEventDescriptor = extern struct {
     port_id: u8,
     slot_id: u8,
     length: u8,
-    _reserved: [5]u8 = [_]u8{0} ** 5,
+    viewport: text_layout.Viewport = .{},
+    _reserved: [3]u8 = [_]u8{0} ** 3,
     bytes: [INPUT_PACKET_BYTES]u8 = [_]u8{0} ** INPUT_PACKET_BYTES,
 };
 
@@ -205,6 +230,22 @@ pub const InputRecvResponse = extern struct {
     _reserved: [7]u8 = [_]u8{0} ** 7,
     event: InputEventDescriptor,
 };
+
+test "input viewport and caret affinity preserve fixed native wire sizes" {
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(InputEventDescriptor));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(InputRecvResponse));
+    try std.testing.expectEqual(@as(usize, 43), @offsetOf(InputEventDescriptor, "viewport"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(InputEventDescriptor, "bytes"));
+    try std.testing.expectEqual(@as(usize, 528), @sizeOf(SurfaceText));
+    var text = SurfaceText{ .text_length = 1, .cursor = 1, .state = .{ .model = 1, .cursor_upstream = true } };
+    text.text[0] = 'a';
+    try std.testing.expect(text.isCanonical());
+    text.text[0] = '\n';
+    try std.testing.expect(!text.isCanonical());
+    text.text[0] = 'a';
+    text.cursor = 0;
+    try std.testing.expect(!text.isCanonical());
+}
 
 pub const SurfacePresentation = extern struct {
     surface_id: u64,
@@ -217,6 +258,90 @@ pub const SurfacePresentation = extern struct {
         return self.buffer_object_id != 0 and self.buffer_bytes != 0;
     }
 };
+
+// Bounded text surfaces are copied once from task-owned memory. The compositor
+// retains its own snapshot; subsequent userspace writes cannot change a frame.
+pub const SURFACE_TEXT_BYTES: usize = 512;
+pub const DocumentSaveState = enum(u8) {
+    none,
+    saving,
+    saved,
+    retryable,
+    permission_denied,
+    document_changed,
+    unavailable,
+    failed,
+};
+
+pub const SurfaceTextState = packed struct(u32) {
+    selection_anchor: u10 = 0,
+    focus_index: u2 = 0,
+    model: u3 = 0,
+    flags: u8 = 0,
+    save_state: u4 = 0,
+    cursor_upstream: bool = false,
+    reserved: u4 = 0,
+};
+
+pub const SurfaceText = extern struct {
+    window_id: u64 = 0,
+    text_length: u16 = 0,
+    cursor: u16 = 0,
+    state: SurfaceTextState = .{},
+    text: [SURFACE_TEXT_BYTES]u8 = [_]u8{0} ** SURFACE_TEXT_BYTES,
+
+    pub fn textSlice(self: *const SurfaceText) []const u8 {
+        return self.text[0..self.text_length];
+    }
+
+    pub fn isCanonical(self: *const SurfaceText) bool {
+        if (self.text_length > SURFACE_TEXT_BYTES or self.cursor > self.text_length or self.state.selection_anchor > self.text_length or
+            self.state.reserved != 0 or self.state.model == 0 or self.state.model > 6 or self.state.flags & 0x80 != 0) return false;
+        if (self.state.cursor_upstream and (self.state.model != 1 or self.cursor == 0 or text_layout.unicode.followsNewline(self.textSlice(), self.cursor))) return false;
+        const save_state = std.enums.fromInt(DocumentSaveState, self.state.save_state) orelse return false;
+        if (self.state.model != 1 and (save_state != .none or self.state.selection_anchor != self.cursor)) return false;
+        if (!text_layout.unicode.validText(self.textSlice()) or
+            !text_layout.unicode.isBoundary(self.textSlice(), self.cursor) or
+            !text_layout.unicode.isBoundary(self.textSlice(), self.state.selection_anchor)) return false;
+        return std.mem.allEqual(u8, self.text[self.text_length..], 0);
+    }
+};
+
+test "text surface save feedback stays bounded and rejects noncanonical states" {
+    try std.testing.expectEqual(@as(usize, 528), @sizeOf(SurfaceText));
+    var text = SurfaceText{ .state = .{ .model = 1, .save_state = @intFromEnum(DocumentSaveState.retryable) } };
+    try std.testing.expect(text.isCanonical());
+    text.state.save_state = 15;
+    try std.testing.expect(!text.isCanonical());
+    text.state.save_state = @intFromEnum(DocumentSaveState.saved);
+    text.state.model = 5;
+    try std.testing.expect(!text.isCanonical());
+    text.state.save_state = 0;
+    try std.testing.expect(text.isCanonical());
+}
+
+test "text surface selections use bounded packed metadata and reject ambiguous state" {
+    try std.testing.expectEqual(@as(usize, 4), @sizeOf(SurfaceTextState));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(SurfaceText, "text"));
+    var text = SurfaceText{ .text_length = 3, .cursor = 1, .state = .{ .model = 1, .selection_anchor = 3 } };
+    @memcpy(text.text[0..3], "abc");
+    try std.testing.expect(text.isCanonical());
+    text.state.selection_anchor = 4;
+    try std.testing.expect(!text.isCanonical());
+    text.state.selection_anchor = 3;
+    text.state.reserved = 1;
+    try std.testing.expect(!text.isCanonical());
+    text.state.reserved = 0;
+    text.state.flags = 0x80;
+    try std.testing.expect(!text.isCanonical());
+    text.state.flags = 0;
+    text.state.model = 7;
+    try std.testing.expect(!text.isCanonical());
+    text.state.model = 2;
+    try std.testing.expect(!text.isCanonical());
+    text.state.selection_anchor = @intCast(text.cursor);
+    try std.testing.expect(text.isCanonical());
+}
 
 pub const ServiceConnectionDescriptor = extern struct {
     service_id: u64,
@@ -318,7 +443,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 10), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 18), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));
@@ -350,4 +475,24 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
     presentation.buffer_object_id = 0;
     try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
+}
+
+test "text surface rejects cursors inside scalars and grapheme clusters" {
+    const bytes = "e\u{301}界\r\n";
+    var text = SurfaceText{ .text_length = bytes.len, .cursor = bytes.len, .state = .{ .model = 1, .selection_anchor = bytes.len } };
+    @memcpy(text.text[0..bytes.len], bytes);
+    try std.testing.expect(text.isCanonical());
+    for ([_]u16{ 1, 2, 4, 5, 7 }) |offset| {
+        text.cursor = offset;
+        try std.testing.expect(!text.isCanonical());
+        text.cursor = bytes.len;
+        text.state.selection_anchor = @intCast(offset);
+        try std.testing.expect(!text.isCanonical());
+        text.state.selection_anchor = bytes.len;
+    }
+    text.state.cursor_upstream = true;
+    try std.testing.expect(!text.isCanonical());
+    text.state.cursor_upstream = false;
+    text.text[0] = 0xff;
+    try std.testing.expect(!text.isCanonical());
 }

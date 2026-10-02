@@ -60,6 +60,7 @@ pub const BlobAddress = store.BlobAddress;
 pub const ChunkAddress = store.ChunkAddress;
 pub const VersionAddress = store.VersionAddress;
 pub const SignedMetadata = store.SignedMetadata;
+pub const MAX_METADATA_MESSAGE_BYTES = store.MAX_METADATA_MESSAGE_BYTES;
 pub const PutRequest = store.PutRequest;
 pub const PutLocallySignedRequest = store.PutLocallySignedRequest;
 pub const PutResult = store.PutResult;

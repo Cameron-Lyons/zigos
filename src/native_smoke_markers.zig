@@ -40,21 +40,37 @@ pub const production_required = [_][]const u8{
     boot_markers.service_boot_service_contracts_ready,
     boot_markers.userspace_input_abi_ready,
     boot_markers.userspace_surface_presentation_ready,
-    boot_markers.platform_bootloader_measurement_provided,
+    boot_markers.desktop_framebuffer_ready,
+    boot_markers.platform_boot_descriptor_verified,
     boot_markers.platform_build_artifact_manifest_verified,
-    boot_markers.platform_bootloader_handoff_verified,
+    boot_markers.platform_measurement_snapshot_verified,
     boot_markers.platform_artifact_manifest_verified,
     boot_markers.platform_measured_boot_recorded,
-    boot_markers.platform_measured_boot_verified_root,
+    boot_markers.platform_boot_image_unverified,
     boot_markers.storage_checkpoint_final_clean,
+    boot_markers.identity_owner_attached,
     boot_markers.task_session_ready,
     boot_markers.native_ready,
     boot_markers.userspace_scheduler_idle,
 };
 
 pub const production_forbidden = [_][]const u8{
+    boot_markers.platform_boot_image_authenticated,
+    boot_markers.platform_measured_boot_verified_root,
+    boot_markers.document_channel_launch_rollback,
+    boot_markers.document_picker_userspace,
+    boot_markers.document_launcher_userspace_open,
+    boot_markers.document_launcher_userspace_cancel,
     boot_markers.document_channel_userspace_open,
     boot_markers.document_channel_userspace_save,
+    boot_markers.document_surface_pixels,
+    boot_markers.document_save_feedback,
+    boot_markers.document_input_ordering,
+    boot_markers.document_input_repeat,
+    boot_markers.document_clipboard,
+    boot_markers.document_visual_navigation,
+    boot_markers.document_unicode,
+    boot_markers.document_channel_sibling_editors,
     boot_markers.document_channel_retirement,
     boot_markers.kernel_role_verification,
     boot_markers.runtime_proof_process_isolation,
@@ -173,9 +189,10 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.permission_xhci_boot_flow_commands,
     boot_markers.userspace_input_abi_ready,
     boot_markers.userspace_surface_presentation_ready,
-    boot_markers.platform_bootloader_measurement_provided,
+    boot_markers.desktop_framebuffer_ready,
+    boot_markers.platform_boot_descriptor_verified,
     boot_markers.platform_build_artifact_manifest_verified,
-    boot_markers.platform_bootloader_handoff_verified,
+    boot_markers.platform_measurement_snapshot_verified,
     boot_markers.platform_artifact_manifest_verified,
     boot_markers.platform_health_checks_boot_rollback,
     boot_markers.platform_health_checks_core_rollback,
@@ -184,7 +201,7 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.platform_health_checks_ui_rollback,
     boot_markers.platform_health_checks_promote_ok,
     boot_markers.platform_measured_boot_recorded,
-    boot_markers.platform_measured_boot_verified_root,
+    boot_markers.platform_boot_image_unverified,
     boot_markers.notes_daily_driver_install_open_ok,
     boot_markers.notes_daily_driver_edit_saved_ok,
     boot_markers.notes_daily_driver_share_sync_ok,
@@ -195,8 +212,20 @@ pub const cold_boot_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_sync_ok,
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
+    boot_markers.document_channel_launch_rollback,
+    boot_markers.document_picker_userspace,
+    boot_markers.document_launcher_userspace_open,
+    boot_markers.document_launcher_userspace_cancel,
     boot_markers.document_channel_userspace_open,
     boot_markers.document_channel_userspace_save,
+    boot_markers.document_surface_pixels,
+    boot_markers.document_save_feedback,
+    boot_markers.document_input_ordering,
+    boot_markers.document_input_repeat,
+    boot_markers.document_clipboard,
+    boot_markers.document_visual_navigation,
+    boot_markers.document_unicode,
+    boot_markers.document_channel_sibling_editors,
     boot_markers.document_channel_retirement,
     boot_markers.notes_daily_driver_complete,
     boot_markers.task_session_ready,
@@ -241,6 +270,7 @@ pub const service_startup_required = [_][]const u8{
     boot_markers.userspace_scheduler_event_wait_ready,
     boot_markers.userspace_ui_state_ready,
     boot_markers.userspace_surface_presentation_ready,
+    boot_markers.desktop_framebuffer_ready,
     boot_markers.userspace_exec_probe_ok,
     boot_markers.userspace_resume_ok,
     boot_markers.transport_native_kernel_ready,
@@ -365,6 +395,12 @@ pub const storage_durability_required = [_][]const u8{
 };
 
 pub const sync_two_node_required = [_][]const u8{
+    "ZIGOS:VIRTIO_NET:DMA_AND_MSIX_READY",
+    boot_markers.sync_native_driver_peer_frame_received,
+    boot_markers.sync_peer_authenticated,
+    boot_markers.sync_peer_ciphertext_rejected,
+    boot_markers.sync_peer_replay_rejected,
+    boot_markers.sync_peer_object_durable,
     boot_markers.boot_start,
     boot_markers.boot_profile_zigos_native,
     boot_markers.kernel_role_verification,
@@ -401,8 +437,20 @@ pub const notes_daily_driver_required = [_][]const u8{
     boot_markers.notes_daily_driver_typed_sync_ok,
     boot_markers.notes_daily_driver_typed_recovery_ok,
     boot_markers.notes_daily_driver_typed_loop_complete,
+    boot_markers.document_channel_launch_rollback,
+    boot_markers.document_picker_userspace,
+    boot_markers.document_launcher_userspace_open,
+    boot_markers.document_launcher_userspace_cancel,
     boot_markers.document_channel_userspace_open,
     boot_markers.document_channel_userspace_save,
+    boot_markers.document_surface_pixels,
+    boot_markers.document_save_feedback,
+    boot_markers.document_input_ordering,
+    boot_markers.document_input_repeat,
+    boot_markers.document_clipboard,
+    boot_markers.document_visual_navigation,
+    boot_markers.document_unicode,
+    boot_markers.document_channel_sibling_editors,
     boot_markers.document_channel_retirement,
     boot_markers.notes_daily_driver_complete,
 };
@@ -461,7 +509,7 @@ test "production smoke gate requires core readiness and excludes verification ev
         boot_markers.userspace_artifacts_ready,
         boot_markers.service_boot_service_contracts_ready,
         boot_markers.platform_artifact_manifest_verified,
-        boot_markers.platform_measured_boot_verified_root,
+        boot_markers.platform_boot_image_unverified,
         boot_markers.native_ready,
         boot_markers.userspace_scheduler_idle,
     };
@@ -533,11 +581,11 @@ test "native smoke gate requires runtime isolation proof markers" {
 }
 
 test "native smoke gate requires measured boot reboot comparison markers" {
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_measurement_provided));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_boot_descriptor_verified));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_build_artifact_manifest_verified));
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_bootloader_handoff_verified));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measurement_snapshot_verified));
     try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_recorded));
-    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_measured_boot_verified_root));
+    try std.testing.expect(contains(&cold_boot_required, boot_markers.platform_boot_image_unverified));
     try std.testing.expect(contains(&first_boot_required, boot_markers.platform_measured_boot_first));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_root));
     try std.testing.expect(contains(&cold_reboot_required, boot_markers.platform_measured_boot_same_shape));
@@ -601,6 +649,12 @@ test "native smoke gate requires two-node sync transport proof markers" {
     try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:SYNC:SYNC:RELAY"));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_packet_captured));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_frame_sent));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_peer_frame_received));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_authenticated));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_ciphertext_rejected));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_replay_rejected));
+    try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_peer_object_durable));
+    try std.testing.expect(contains(&sync_two_node_required, "ZIGOS:VIRTIO_NET:DMA_AND_MSIX_READY"));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_malformed_packet_rejected));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_reconnect_ok));
     try std.testing.expect(contains(&sync_two_node_required, boot_markers.sync_native_driver_replay_rejected));

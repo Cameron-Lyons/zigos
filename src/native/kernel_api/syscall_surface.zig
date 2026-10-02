@@ -266,17 +266,20 @@ const TestSurfaceReceiver = struct {
     calls: usize = 0,
     last_task_id: u64 = 0,
     last_presentation: abi.SurfacePresentation = std.mem.zeroes(abi.SurfacePresentation),
+    last_text: ?abi.SurfaceText = null,
     status: native_kernel.SurfacePresentStatus = .accepted,
 
     fn present(
         context: *anyopaque,
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
+        text: ?*const abi.SurfaceText,
     ) native_kernel.SurfacePresentStatus {
         const self: *TestSurfaceReceiver = @ptrCast(@alignCast(context));
         self.calls += 1;
         self.last_task_id = task.id;
         self.last_presentation = presentation.*;
+        self.last_text = if (text) |content| content.* else null;
         return self.status;
     }
 };
@@ -702,6 +705,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
         .port_id = 1,
         .slot_id = 2,
         .length = 2,
+        .viewport = .{ .columns = 80, .rows = 24 },
         .bytes = abi.inputPacket(abi.InputByte.text, 'x'),
     } };
     test_kernel.kernel.bindFocusedInputReceiver(.{
@@ -728,6 +732,7 @@ test "syscall surface delivers focused input only through task-scoped authority"
     try std.testing.expectEqual(@as(u64, 9), response.event.sequence);
     try std.testing.expectEqual(app_task.id, response.event.task_id);
     try std.testing.expectEqual(@as(u8, 'x'), response.event.bytes[1]);
+    try std.testing.expectEqual(abi.text_layout.Viewport{ .columns = 80, .rows = 24 }, response.event.viewport);
 
     response = std.mem.zeroes(abi.InputRecvResponse);
     const empty = dispatchRequest(
@@ -848,6 +853,36 @@ test "syscall surface copies bounded presentations through task-scoped authority
     try std.testing.expectEqual(app_task.id, receiver.last_task_id);
     try std.testing.expect(receiver.last_presentation.presentsByHandle());
     try std.testing.expectEqual(@as(u64, 12), receiver.last_presentation.buffer_object_id);
+
+    var content = abi.SurfaceText{ .state = .{ .model = 1, .selection_anchor = 2 }, .text_length = 5, .cursor = 5 };
+    @memcpy(content.text[0..5], "Draft");
+    var with_text = request;
+    with_text.text = &content;
+    const text_result = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.success, text_result.status);
+    @memset(content.text[0..5], 'x');
+    content.state.selection_anchor = 0;
+    try std.testing.expectEqualStrings("Draft", receiver.last_text.?.textSlice());
+    try std.testing.expectEqual(@as(u10, 2), receiver.last_text.?.state.selection_anchor);
+    with_text.text = @ptrFromInt(0x1000);
+    const invalid_text = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, invalid_text.status);
+    with_text.text = &content;
+    content.state.selection_anchor = 6;
+    const bad_selection = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, bad_selection.status);
+    try std.testing.expectEqual(@as(usize, 2), receiver.calls);
+    content.state.selection_anchor = 5;
+    content.state.reserved = 1;
+    const reserved_selection = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, reserved_selection.status);
+    try std.testing.expectEqual(@as(usize, 2), receiver.calls);
+    content.state.reserved = 0;
+    content.text_length = 513;
+    const oversized_text = dispatchRequest(&test_kernel.port, app_task.id, 50, @intFromPtr(&with_text), @intFromPtr(&response), @sizeOf(abi.BoolResponse));
+    try std.testing.expectEqual(abi.SyscallStatus.not_found, oversized_text.status);
+    try std.testing.expectEqual(@as(usize, 2), receiver.calls);
+    receiver.calls = 1;
 
     receiver.status = .duplicate;
     response = std.mem.zeroes(abi.BoolResponse);

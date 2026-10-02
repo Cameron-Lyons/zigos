@@ -7,6 +7,7 @@ pub const PAYLOAD_BYTES: usize = 88;
 pub const HEADER_BYTES: usize = 192;
 pub const HEAD_OFFSET: usize = 64;
 pub const TAIL_OFFSET: usize = 128;
+pub const STORAGE_ALIGNMENT: usize = 64;
 
 pub const Record = extern struct {
     sender_endpoint_id: u64 = 0,
@@ -47,8 +48,15 @@ pub fn minimumBytes(slot_count: u32) usize {
 
 pub fn init(buffer: []u8, capacity: u32) Error!*Preface {
     if (capacity < SLOT_BYTES or buffer.len < HEADER_BYTES) return error.RingTooSmall;
+    // The wrapping sequence counters must map to the same slots on either
+    // side of u32 rollover. Only power-of-two slot counts have that property.
+    if (capacity % SLOT_BYTES != 0 or !std.math.isPowerOfTwo(capacity / SLOT_BYTES) or
+        !aligned(buffer)) return error.RingCorrupt;
     const slot_count: u32 = @intCast(capacity / SLOT_BYTES);
-    if (slot_count == 0 or buffer.len < minimumBytes(slot_count)) return error.RingTooSmall;
+    if (buffer.len < minimumBytes(slot_count)) return error.RingTooSmall;
+    // Initialization requires exclusive ownership, including the header's
+    // cache-line padding. Never expose bytes from an earlier allocation.
+    @memset(buffer[0..minimumBytes(slot_count)], 0);
     const preface: *Preface = @ptrCast(@alignCast(buffer.ptr));
     preface.* = .{
         .magic = MAGIC,
@@ -56,43 +64,61 @@ pub fn init(buffer: []u8, capacity: u32) Error!*Preface {
     };
     @atomicStore(u32, indexPtr(buffer, HEAD_OFFSET), 0, .release);
     @atomicStore(u32, indexPtr(buffer, TAIL_OFFSET), 0, .release);
-    @memset(buffer[HEADER_BYTES..minimumBytes(slot_count)], 0);
     return preface;
 }
 
+// One producer and one consumer, or externally serialized endpoint operations.
+// Header geometry stays immutable while the ring is live. An independent
+// observer must synchronize with one side before calling queued().
 pub fn queued(buffer: []u8) Error!u32 {
-    if (prefaceOf(buffer) == null) return error.RingCorrupt;
+    const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
     const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .acquire);
     const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .acquire);
-    return head -% tail;
+    return occupancy(head, tail, preface.slot_count);
 }
 
 pub fn pushRecord(buffer: []u8, record: Record) Error!void {
     const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
     if (record.payload_len > PAYLOAD_BYTES) return error.PayloadTooLarge;
+    if (!validRecord(record)) return error.RingCorrupt;
     const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .acquire);
     const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .monotonic);
-    if (head -% tail == preface.slot_count) return error.RingFull;
-    slotPtr(buffer, head % preface.slot_count).* = record;
+    if (try occupancy(head, tail, preface.slot_count) == preface.slot_count) return error.RingFull;
+    slotPtr(buffer, head & (preface.slot_count - 1)).* = record;
     @atomicStore(u32, indexPtr(buffer, HEAD_OFFSET), head +% 1, .release);
 }
 
 pub fn peekRecord(buffer: []u8) Error!Record {
-    const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
-    const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .acquire);
-    const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .monotonic);
-    if (head == tail) return error.RingEmpty;
-    return slotPtr(buffer, tail % preface.slot_count).*;
+    return (try readPending(buffer)).record;
 }
 
 pub fn popRecord(buffer: []u8) Error!Record {
+    const pending = try readPending(buffer);
+    @atomicStore(u32, indexPtr(buffer, TAIL_OFFSET), pending.tail +% 1, .release);
+    return pending.record;
+}
+
+// Validate and snapshot once, and release the slot only after checking the
+// destination. A short receive must preserve the message and its capability.
+pub fn receive(buffer: []u8, out: []u8) Error!Record {
+    const pending = try readPending(buffer);
+    const record = pending.record;
+    if (record.payload_len > out.len) return error.PayloadTooLarge;
+    @memcpy(out[0..record.payload_len], record.bytes[0..record.payload_len]);
+    @atomicStore(u32, indexPtr(buffer, TAIL_OFFSET), pending.tail +% 1, .release);
+    return record;
+}
+
+const Pending = struct { tail: u32, record: Record };
+
+inline fn readPending(buffer: []u8) Error!Pending {
     const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
     const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .acquire);
     const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .monotonic);
-    if (head == tail) return error.RingEmpty;
-    const record = slotPtr(buffer, tail % preface.slot_count).*;
-    @atomicStore(u32, indexPtr(buffer, TAIL_OFFSET), tail +% 1, .release);
-    return record;
+    if (try occupancy(head, tail, preface.slot_count) == 0) return error.RingEmpty;
+    const record = slotPtr(buffer, tail & (preface.slot_count - 1)).*;
+    if (!validRecord(record)) return error.RingCorrupt;
+    return .{ .tail = tail, .record = record };
 }
 
 pub fn push(buffer: []u8, bytes: []const u8) Error!void {
@@ -103,18 +129,32 @@ pub fn push(buffer: []u8, bytes: []const u8) Error!void {
 }
 
 pub fn pop(buffer: []u8, out: []u8) Error!usize {
-    const record = try popRecord(buffer);
-    if (record.payload_len > out.len) return error.PayloadTooLarge;
-    if (record.payload_len != 0) @memcpy(out[0..record.payload_len], record.bytes[0..record.payload_len]);
-    return record.payload_len;
+    return (try receive(buffer, out)).payload_len;
 }
 
-fn prefaceOf(buffer: []u8) ?*Preface {
-    if (buffer.len < HEADER_BYTES) return null;
-    const preface: *Preface = @ptrCast(@alignCast(buffer.ptr));
-    if (preface.magic != MAGIC or preface.slot_count == 0 or preface.slot_bytes != SLOT_BYTES) return null;
+fn prefaceOf(buffer: []u8) ?Preface {
+    if (buffer.len < HEADER_BYTES or !aligned(buffer)) return null;
+    const pointer: *const Preface = @ptrCast(@alignCast(buffer.ptr));
+    const preface = pointer.*;
+    if (preface.magic != MAGIC or !std.math.isPowerOfTwo(preface.slot_count) or
+        preface.slot_bytes != SLOT_BYTES or preface._reserved != 0) return null;
     if (buffer.len < minimumBytes(preface.slot_count)) return null;
     return preface;
+}
+
+fn aligned(buffer: []u8) bool {
+    return @intFromPtr(buffer.ptr) % STORAGE_ALIGNMENT == 0;
+}
+
+fn occupancy(head: u32, tail: u32, slot_count: u32) Error!u32 {
+    const count = head -% tail;
+    if (count > slot_count) return error.RingCorrupt;
+    return count;
+}
+
+fn validRecord(record: Record) bool {
+    return record.payload_len <= PAYLOAD_BYTES and record.move_attached <= 1 and
+        std.mem.eql(u8, &record._pad, &.{ 0, 0, 0 });
 }
 
 fn indexPtr(buffer: []u8, offset: usize) *u32 {
@@ -139,4 +179,105 @@ test "ipc ring moves fixed slots without a kernel endpoint queue" {
     try std.testing.expectEqual(@as(usize, 4), try pop(&storage, &second));
     try std.testing.expectEqualStrings("docs", second[0..4]);
     try std.testing.expectError(error.RingEmpty, pop(&storage, &first));
+}
+
+test "ipc ring rejects invalid geometry and alignment without modifying storage" {
+    var storage: [minimumBytes(8) + STORAGE_ALIGNMENT]u8 align(STORAGE_ALIGNMENT) = @splat(0xa5);
+    const before = storage;
+    for ([_]u32{ SLOT_BYTES + 1, SLOT_BYTES * 3, SLOT_BYTES * 5 }) |capacity| {
+        try std.testing.expectError(error.RingCorrupt, init(&storage, capacity));
+    }
+    try std.testing.expectError(error.RingTooSmall, init(&storage, SLOT_BYTES * 16));
+    try std.testing.expectError(error.RingCorrupt, init(storage[1..], SLOT_BYTES));
+    try std.testing.expectError(error.RingCorrupt, queued(storage[1..]));
+    try std.testing.expectError(error.RingCorrupt, popRecord(storage[1..]));
+    try std.testing.expectEqualSlices(u8, &before, &storage);
+
+    _ = try init(&storage, SLOT_BYTES * 8);
+    try std.testing.expectEqualSlices(u8, &(@as([HEADER_BYTES - @sizeOf(Preface)]u8, @splat(0))), storage[@sizeOf(Preface)..HEADER_BYTES]);
+    try std.testing.expectEqual(@as(u8, 0xa5), storage[minimumBytes(8)]);
+}
+
+test "ipc ring retains FIFO order and full detection across sequence rollover" {
+    inline for (.{ 1, 2, 4, 8, 32 }) |capacity| {
+        var storage: [minimumBytes(capacity)]u8 align(STORAGE_ALIGNMENT) = undefined;
+        _ = try init(&storage, capacity * SLOT_BYTES);
+        const start = std.math.maxInt(u32) - 1;
+        @atomicStore(u32, indexPtr(&storage, HEAD_OFFSET), start, .release);
+        @atomicStore(u32, indexPtr(&storage, TAIL_OFFSET), start, .release);
+        for (0..4) |round| {
+            for (0..capacity) |sequence| {
+                try pushRecord(&storage, .{ .correlation_id = round * capacity + sequence });
+            }
+            try std.testing.expectEqual(@as(u32, capacity), try queued(&storage));
+            const full = storage;
+            try std.testing.expectError(error.RingFull, push(&storage, "overflow"));
+            try std.testing.expectEqualSlices(u8, &full, &storage);
+            for (0..capacity) |sequence| {
+                const expected = round * capacity + sequence;
+                try std.testing.expectEqual(@as(u64, expected), (try peekRecord(&storage)).correlation_id);
+                try std.testing.expectEqual(@as(u64, expected), (try popRecord(&storage)).correlation_id);
+            }
+            try std.testing.expectEqual(@as(u32, 0), try queued(&storage));
+            try std.testing.expectError(error.RingEmpty, popRecord(&storage));
+        }
+    }
+}
+
+test "ipc ring rejects impossible occupancy before reading or overwriting a slot" {
+    var storage: [minimumBytes(2)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    for ([_][2]u32{ .{ 3, 0 }, .{ 0, 1 }, .{ 0, std.math.maxInt(u32) - 2 } }) |counters| {
+        _ = try init(&storage, SLOT_BYTES * 2);
+        @atomicStore(u32, indexPtr(&storage, HEAD_OFFSET), counters[0], .release);
+        @atomicStore(u32, indexPtr(&storage, TAIL_OFFSET), counters[1], .release);
+        const before = storage;
+        var out: [PAYLOAD_BYTES]u8 = @splat(0xa5);
+        try std.testing.expectError(error.RingCorrupt, queued(&storage));
+        try std.testing.expectError(error.RingCorrupt, push(&storage, "overwrite"));
+        try std.testing.expectError(error.RingCorrupt, peekRecord(&storage));
+        try std.testing.expectError(error.RingCorrupt, popRecord(&storage));
+        try std.testing.expectError(error.RingCorrupt, receive(&storage, &out));
+        try std.testing.expectEqualSlices(u8, &before, &storage);
+        try std.testing.expectEqualSlices(u8, &(@as([PAYLOAD_BYTES]u8, @splat(0xa5))), &out);
+    }
+}
+
+test "ipc ring rejects malformed records without consuming or exposing payload" {
+    var storage: [minimumBytes(2)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    for ([_]Record{
+        .{ .payload_len = PAYLOAD_BYTES + 1 },
+        .{ .payload_len = std.math.maxInt(u16) },
+        .{ .move_attached = 2 },
+        .{ ._pad = .{ 0, 1, 0 } },
+    }) |malformed| {
+        _ = try init(&storage, SLOT_BYTES * 2);
+        try push(&storage, "valid");
+        slotPtr(&storage, 0).* = malformed;
+        const before = storage;
+        var out: [PAYLOAD_BYTES + 1]u8 = @splat(0xa5);
+        try std.testing.expectError(error.RingCorrupt, peekRecord(&storage));
+        try std.testing.expectError(error.RingCorrupt, popRecord(&storage));
+        try std.testing.expectError(error.RingCorrupt, receive(&storage, &out));
+        try std.testing.expectEqualSlices(u8, &before, &storage);
+        for (out) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+    }
+}
+
+test "ipc ring short receives preserve message capability and output" {
+    var storage: [minimumBytes(2)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    _ = try init(&storage, SLOT_BYTES * 2);
+    var record = Record{ .payload_len = 5, .attached_capability_id = 42, .move_attached = 1 };
+    @memcpy(record.bytes[0..5], "notes");
+    try pushRecord(&storage, record);
+    const before = storage;
+    var short: [4]u8 = @splat(0xa5);
+    try std.testing.expectError(error.PayloadTooLarge, pop(&storage, &short));
+    try std.testing.expectEqualSlices(u8, &before, &storage);
+    for (short) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+    var out: [5]u8 = undefined;
+    const received = try receive(&storage, &out);
+    try std.testing.expectEqualStrings("notes", &out);
+    try std.testing.expectEqual(@as(u64, 42), received.attached_capability_id);
+    try std.testing.expectEqual(@as(u8, 1), received.move_attached);
+    try std.testing.expectEqual(@as(u32, 0), try queued(&storage));
 }

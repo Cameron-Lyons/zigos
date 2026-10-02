@@ -57,6 +57,28 @@ pub const Sessions = struct {
         }
     }
 
+    // Explicit clipboard gestures use the document's existing authority and
+    // session policy context. They never grant ambient clipboard observation.
+    pub fn allowsClipboard(self: *Sessions, task_id: u64, writing: bool, now_ticks: u64) bool {
+        const items = self.channels() orelse return false;
+        for (items) |*item| {
+            const server = if (item.server) |*value| value else continue;
+            if (item.taskId() != task_id) continue;
+            const task = server.kernel.kernel.runtime.findConst(task_id) orelse return false;
+            if (task.state != .active or !task.owner.eql(server.binding.authority.principal) or
+                !task.hasCapability(server.binding.authority.capability_id)) return false;
+            var authority = server.binding.authority;
+            authority.now_ticks = now_ticks;
+            const entry = server.storage.openEntry(authority, server.binding.workspace_id, server.binding.path, if (writing) .write else .read) catch return false;
+            if (entry.object_id.raw() != server.binding.object_id or entry.object_type != .document) return false;
+            const context = server.binding.signer.key.authority orelse return false;
+            var subjects = context.subjects;
+            subjects.workspace_id = server.binding.workspace_id;
+            return context.policies.permissionKindDecision(subjects, .clipboard).allowed;
+        }
+        return false;
+    }
+
     pub fn service(self: *Sessions, now_ticks: u64) bool {
         const items = self.channels() orelse return false;
         var progress: usize = 0;

@@ -13,8 +13,11 @@ pub const MAX_VALUE_BYTES: usize = sealing.MAX_VALUE_BYTES;
 pub const Value = sealing.Value;
 pub const SealedBlob = sealing.Blob;
 pub const RawValue = struct { len: u8 = 0, bytes: Value = @splat(0) };
+pub const MAX_SIGNING_MESSAGE_BYTES: usize = 256;
 pub const DIRECT_SECRET_LOOKUP = true;
-pub const DENSE_SECRET_TABLE = true;
+pub const GENERATIONAL_SECRET_IDS = true;
+pub const RETIRED_ID_BIT: u64 = @as(u64, 1) << 63;
+pub const MAX_SECRET_ID: u64 = RETIRED_ID_BIT - 1;
 pub const COMPACT_SECRET_METADATA = true;
 pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true;
 pub const DIRECT_HANDLE_LOOKUP = true;
@@ -69,11 +72,16 @@ pub const Error = sealing.Error || error{
     HandleHolderMismatch,
     HandleNotFound,
     HandleTableFull,
+    HandleGenerationExhausted,
     LabelTooLong,
     RawExportDenied,
     SecretNotFound,
     SecretTableFull,
+    SecretIdExhausted,
+    InvalidSecretId,
+    SecretSlotOccupied,
     InvalidSigningKey,
+    InvalidSigningMessage,
 };
 
 const HandleSlot = struct {
@@ -113,6 +121,12 @@ pub const Store = struct {
         return .{};
     }
 
+    pub fn initializeAllocated(self: *Store) void {
+        self.hardware_provider = .{};
+        self.handles = HandleArena.init();
+        self.clearUnpublished();
+    }
+
     pub fn attachHardwareProvider(self: *Store, provider: HardwareSealProvider) void {
         self.hardware_provider = provider;
     }
@@ -127,16 +141,15 @@ pub const Store = struct {
     ) Error!*SecretRecord {
         if (raw.len > MAX_VALUE_BYTES) return error.SecretTooLarge;
         if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
-        const slot_index = self.countSecrets();
-        if (slot_index >= MAX_SECRETS) return error.SecretTableFull;
-        const secret_id: u64 = @intCast(slot_index + 1);
+        const slot_index = try self.nextSecretSlot();
+        const secret_id = self.nextSecretId(slot_index);
         var blob = SealedBlob{};
         if (hardware_backed) {
             const binding = materialBinding(owner, label, exportable);
             try self.hardware_provider.seal(&binding, raw, &blob);
         }
         const secret = &self.secrets[slot_index];
-        if (secret.id != 0) native_util.impossibleByInvariant("dense secret imports append into pre-zeroed slots");
+        if (isLiveId(secret.id)) native_util.impossibleByInvariant("secret imports reuse pre-zeroed inactive slots");
         secret.id = secret_id;
         secret.owner = owner;
         secret.hardware_backed = hardware_backed;
@@ -158,17 +171,17 @@ pub const Store = struct {
     }
 
     // Generate a nonexportable signing key without accepting or returning its
-    // seed. The provider must finish before the next dense slot is published.
+    // seed. The provider must finish before a reusable slot is published.
     pub fn generateSigningKey(self: *Store, owner: principal.PrincipalId, label: []const u8) Error!*const SecretRecord {
         if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
-        const slot_index = self.countSecrets();
-        if (slot_index >= MAX_SECRETS) return error.SecretTableFull;
+        const slot_index = try self.nextSecretSlot();
+        const secret_id = self.nextSecretId(slot_index);
         const binding = materialBinding(owner, label, false);
         var blob = SealedBlob{};
         try self.hardware_provider.generateSigningKey(&binding, &blob);
         const secret = &self.secrets[slot_index];
-        std.debug.assert(secret.id == 0);
-        secret.id = @intCast(slot_index + 1);
+        std.debug.assert(!isLiveId(secret.id));
+        secret.id = secret_id;
         secret.owner = owner;
         secret.hardware_backed = true;
         secret.hardware_provider_used = true;
@@ -217,8 +230,7 @@ pub const Store = struct {
         allow_raw_export: bool,
     ) Error!SecretHandle {
         const handle_id = if (retired_handle) |retired|
-            self.handles.replaceHandle(retired) orelse
-                native_util.impossibleByInvariant("secure store replacement keeps its retired handle live")
+            self.handles.replaceHandle(retired) orelse return error.HandleGenerationExhausted
         else
             self.handles.reserveHandleForOverwrite() orelse return error.HandleTableFull;
         const handle = SecretHandle{
@@ -250,14 +262,25 @@ pub const Store = struct {
     // Restore only after authenticating the encrypted record against its supplied
     // metadata. Restoring records never restores handles or their authority.
     pub fn restoreSealed(self: *Store, owner: principal.PrincipalId, label: []const u8, blob: []const u8, exportable: bool) Error!*SecretRecord {
+        const slot = try self.nextSecretSlot();
+        return self.restoreSealedAt(self.nextSecretId(slot), owner, label, blob, exportable);
+    }
+
+    // Authenticated catalog recovery supplies the exact generation. It may only
+    // populate a never-published slot, or advance a retired slot's generation.
+    pub fn restoreSealedAt(self: *Store, id: u64, owner: principal.PrincipalId, label: []const u8, blob: []const u8, exportable: bool) Error!*SecretRecord {
+        if (!isLiveId(id)) return error.InvalidSecretId;
+        const slot_index = slotForId(id) orelse return error.InvalidSecretId;
+        const previous = self.secrets[slot_index].id;
+        if (isLiveId(previous)) return error.SecretSlotOccupied;
+        if (previous != 0 and id <= (previous & MAX_SECRET_ID)) return error.InvalidSecretId;
         if (label.len > MAX_LABEL_BYTES) return error.LabelTooLong;
-        if (self.countSecrets() >= MAX_SECRETS) return error.SecretTableFull;
         const binding = materialBinding(owner, label, exportable);
         var scratch: Value = undefined;
         defer std.crypto.secureZero(u8, &scratch);
         _ = try self.hardware_provider.open(&binding, blob, &scratch);
-        const secret = &self.secrets[self.countSecrets()];
-        secret.id = @intCast(self.countSecrets() + 1);
+        const secret = &self.secrets[slot_index];
+        secret.id = id;
         secret.owner = owner;
         secret.hardware_backed = true;
         secret.hardware_provider_used = true;
@@ -284,9 +307,14 @@ pub const Store = struct {
         return out[0..len];
     }
 
-    // Signing does not grant raw export. Only the fixed-size caller digest enters
-    // Ed25519; the recovered seed and expanded key pair expire with this call.
+    // Signing does not grant raw export. The bounded message enters Ed25519;
+    // the recovered seed and expanded key pair expire with this call.
     pub fn signDigest(self: *const Store, handle_id: u64, context: ExportContext, digest: *const sealing.Binding) Error!manifest.Signature {
+        return self.signMessage(handle_id, context, digest);
+    }
+
+    pub fn signMessage(self: *const Store, handle_id: u64, context: ExportContext, message: []const u8) Error!manifest.Signature {
+        if (message.len == 0 or message.len > MAX_SIGNING_MESSAGE_BYTES) return error.InvalidSigningMessage;
         const handle = self.describeHandle(handle_id) orelse return error.HandleNotFound;
         if (!handle.holder.eql(context.holder) or handle.task_id != context.task_id) return error.HandleHolderMismatch;
         const secret = self.findSecretConst(handle.secret_id) orelse return error.SecretNotFound;
@@ -297,7 +325,7 @@ pub const Store = struct {
         const Ed25519 = std.crypto.sign.Ed25519;
         var pair = Ed25519.KeyPair.generateDeterministic(raw[0..32].*) catch return error.InvalidSigningKey;
         defer std.crypto.secureZero(u8, std.mem.asBytes(&pair));
-        const signature = pair.sign(digest, null) catch return error.InvalidSigningKey;
+        const signature = pair.sign(message, null) catch return error.InvalidSigningKey;
         var result = manifest.Signature{ .signer = secret.labelSlice(), .public_key_len = 32, .value_len = 64 };
         result.public_key[0..32].* = pair.public_key.toBytes();
         result.value[0..64].* = signature.toBytes();
@@ -328,16 +356,76 @@ pub const Store = struct {
         return &self.secrets[slot_index];
     }
 
+    pub fn empty(self: *const Store) bool {
+        for (self.secrets) |secret| if (secret.id != 0) return false;
+        return self.secret_count == 0;
+    }
+
     fn countSecrets(self: *const Store) usize {
-        return @intCast(self.secret_count);
+        return self.secret_count;
+    }
+
+    pub fn nextSecretSlot(self: *const Store) Error!usize {
+        if (self.secret_count == MAX_SECRETS) return error.SecretTableFull;
+        // Sequential filling needs no scan. Sparse stores may use this pristine
+        // slot too; otherwise the bounded search finds a reusable generation.
+        if (self.secrets[self.secret_count].id == 0) return self.secret_count;
+        for (self.secrets, 0..) |secret, index| {
+            if (secret.id == 0 or (!isLiveId(secret.id) and (secret.id & MAX_SECRET_ID) <= MAX_SECRET_ID - MAX_SECRETS)) return index;
+        }
+        return error.SecretIdExhausted;
+    }
+
+    fn nextSecretId(self: *const Store, slot: usize) u64 {
+        const previous = self.secrets[slot].id;
+        return if (previous == 0) slot + 1 else (previous & MAX_SECRET_ID) + MAX_SECRETS;
+    }
+
+    pub fn retireSecret(self: *Store, secret_id: u64) Error!void {
+        const secret = self.findSecret(secret_id) orelse return error.SecretNotFound;
+        for (self.handles.slots) |slot| {
+            if (slot.in_use and slot.handle.secret_id == secret_id) _ = self.handles.removeHandle(.{ .value = slot.handle.id });
+        }
+        std.crypto.secureZero(u8, std.mem.asBytes(secret));
+        secret.* = zeroSecret();
+        secret.id = secret_id | RETIRED_ID_BIT;
+        self.secret_count -= 1;
+    }
+
+    // Drop session authority without rewinding handle generations. Secret IDs
+    // may be restored from an authenticated catalog; old leases must stay dead.
+    pub fn unload(self: *Store) void {
+        self.hardware_provider = .{};
+        self.handles.reset();
+        self.clearUnpublished();
+    }
+
+    // For an unpublished restore or a store whose leases were all invalidated.
+    pub fn clearUnpublished(self: *Store) void {
+        std.debug.assert(self.handles.countInUse() == 0);
+        for (&self.secrets) |*secret| {
+            std.crypto.secureZero(u8, std.mem.asBytes(secret));
+            secret.* = zeroSecret();
+        }
+        self.secret_count = 0;
     }
 
     fn secretSlotIndex(self: *const Store, secret_id: u64) ?usize {
-        if (secret_id == 0 or secret_id > self.countSecrets()) return null;
-        const slot_index: usize = @intCast(secret_id - 1);
+        if (!isLiveId(secret_id)) return null;
+        const slot_index = slotForId(secret_id) orelse return null;
         return if (self.secrets[slot_index].id == secret_id) slot_index else null;
     }
 };
+
+pub fn isLiveId(id: u64) bool {
+    return id != 0 and (id & RETIRED_ID_BIT) == 0;
+}
+
+pub fn slotForId(id: u64) ?usize {
+    const serial = id & MAX_SECRET_ID;
+    if (serial == 0) return null;
+    return @intCast((serial - 1) % MAX_SECRETS);
+}
 
 fn zeroSecret() SecretRecord {
     return .{
@@ -505,11 +593,11 @@ test "secure secret store replaces one handle with a direct generation" {
     const owner = principal.PrincipalId{ .kind = .user, .serial = 6 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 48 };
     const secret = try store.importSecret(owner, "replaceable", "replaceable material", false, true);
-    store.handles.slot_generations[0] = std.math.maxInt(u32);
+    store.handles.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION - 1;
     const retired = try store.lendHandle(secret.id, holder, 95, true);
     const retired_id = HandleId{ .value = retired.id };
     try std.testing.expectEqual(@as(usize, 0), retired_id.slotIndex());
-    try std.testing.expectEqual(std.math.maxInt(u32), retired_id.generation());
+    try std.testing.expectEqual(indexed_arena.MAX_HANDLE_GENERATION - 1, retired_id.generation());
 
     try std.testing.expectError(error.HandleNotFound, store.replaceHandle(999, secret.id, holder, 96, true));
     try std.testing.expect(store.describeHandle(retired.id) != null);
@@ -517,11 +605,19 @@ test "secure secret store replaces one handle with a direct generation" {
     const replacement = try store.replaceHandle(retired.id, secret.id, holder, 96, true);
     const replacement_id = HandleId{ .value = replacement.id };
     try std.testing.expectEqual(retired_id.slotIndex(), replacement_id.slotIndex());
-    try std.testing.expectEqual(@as(u32, 1), replacement_id.generation());
+    try std.testing.expectEqual(indexed_arena.MAX_HANDLE_GENERATION, replacement_id.generation());
     try std.testing.expect(!retired_id.eql(replacement_id));
     try std.testing.expect(store.describeHandle(retired.id) == null);
     try std.testing.expectEqual(@as(u64, 96), store.describeHandle(replacement.id).?.task_id);
     try std.testing.expectEqual(@as(usize, 1), store.handles.countInUse());
+    const before = store;
+    try std.testing.expectError(error.HandleGenerationExhausted, store.replaceHandle(replacement.id, secret.id, holder, 97, true));
+    try std.testing.expectEqualDeep(before, store);
+    try std.testing.expect(store.handles.removeHandle(replacement_id));
+    const next = try store.lendHandle(secret.id, holder, 97, true);
+    try std.testing.expectEqual(@as(usize, 1), (HandleId{ .value = next.id }).slotIndex());
+    try std.testing.expect(store.describeHandle(retired.id) == null);
+    try std.testing.expect(store.describeHandle(replacement.id) == null);
 }
 
 test "secure secret store keeps secrets dense and handles direct through full tables" {
@@ -694,4 +790,50 @@ test "signing key generation rejects invalid labels capacity and failed provider
     try std.testing.expectError(error.SecretTableFull, store.generateSigningKey(owner, "key"));
     try std.testing.expectEqual(calls, generator.calls);
     try std.testing.expectEqualDeep(full, store);
+}
+
+test "secret retirement reclaims slots with constant-time stale identity rejection" {
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    const holder = principal.PrincipalId{ .kind = .service, .serial = 2 };
+    const first = (try store.importSecret(owner, "first", "private", false, true)).id;
+    const sibling = (try store.importSecret(owner, "sibling", "kept", false, true)).id;
+    const old_handle = try store.lendHandle(first, holder, 1, true);
+    const sibling_handle = try store.lendHandle(sibling, holder, 1, true);
+    try store.retireSecret(first);
+    try std.testing.expectEqual(@as(u8, 1), store.secret_count);
+    try std.testing.expect(store.describeSecret(first) == null);
+    try std.testing.expect(store.describeHandle(old_handle.id) == null);
+    try std.testing.expect(!store.empty());
+    var empty_record = zeroSecret();
+    empty_record.id = first | RETIRED_ID_BIT;
+    try std.testing.expectEqualDeep(empty_record, store.secrets[0]);
+    var previous = first;
+    for (0..MAX_SECRETS * 4) |_| {
+        const id = (try store.importSecret(owner, "replacement", "new", false, true)).id;
+        try std.testing.expectEqual(previous + MAX_SECRETS, id);
+        try std.testing.expectEqual(@as(usize, 0), slotForId(id).?);
+        try std.testing.expect(store.describeSecret(previous) == null);
+        try std.testing.expectError(error.SecretNotFound, store.lendHandle(previous, holder, 1, true));
+        try store.retireSecret(id);
+        previous = id;
+    }
+    var out: Value = undefined;
+    defer std.crypto.secureZero(u8, &out);
+    try std.testing.expectEqualStrings("kept", try store.exportRaw(sibling_handle.id, .{ .holder = holder, .task_id = 1 }, &out));
+    try std.testing.expectError(error.SecretNotFound, store.retireSecret(first));
+}
+
+test "secret retirement never wraps an exhausted slot generation" {
+    var store = Store.init();
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    for (&store.secrets, 0..) |*secret, index| {
+        const last_id = MAX_SECRET_ID - ((MAX_SECRET_ID - 1 - index) % MAX_SECRETS);
+        secret.id = last_id | RETIRED_ID_BIT;
+    }
+    try std.testing.expectError(error.SecretIdExhausted, store.importSecret(owner, "exhausted", "private", false, true));
+    store.secrets[1] = zeroSecret();
+    const next = try store.importSecret(owner, "available", "new", false, true);
+    try std.testing.expectEqual(@as(u64, 2), next.id);
+    try std.testing.expect(store.describeSecret(1) == null);
 }

@@ -8,6 +8,8 @@ const device_inventory = @import("../../../native/drivers/device_inventory.zig")
 const xhci_driver_task = @import("../../../native/drivers/xhci_driver_task.zig");
 const event_wake = @import("../../event_wake.zig");
 const smp = @import("../../smp.zig");
+const framebuffer_hw = @import("../../platform/framebuffer_hw.zig");
+const desktop_display = @import("../../../native/platform/desktop_display.zig");
 
 var recorded_input_report_count: u64 = 0;
 var reported_scheduler_idle = false;
@@ -15,15 +17,22 @@ var reported_scheduler_idle = false;
 pub const INTERRUPT_DRIVEN_IDLE = event_wake.INTERRUPT_DRIVEN_IDLE;
 
 pub fn run() noreturn {
+    framebuffer_hw.init() catch {
+        common.printBootMarker("ZIGOS:DESKTOP:FRAMEBUFFER:UNAVAILABLE");
+    };
     session_manager.bindHardwareInput(.{
         .poll_report = pollHardwareKeyboardReport,
         .input_proof = hardwareInputProof,
+        .continuity_epoch = xhci_driver_task.keyboardContinuityEpoch,
     });
     session_manager.boot();
     while (true) {
         timer.synchronize();
         const now_ticks = timer.getTicks();
         const pending = event_wake.takeAll();
+        // Expiry revokes input/identity authority before a userspace task can
+        // consume another event, including wakes without keyboard activity.
+        session_manager.system().serviceAuthenticationClock(now_ticks);
 
         if (pending.xhci or pending.timer) {
             const bound_task_id = xhci_driver_task.boundTaskId();
@@ -31,24 +40,27 @@ pub fn run() noreturn {
                 _ = session_manager.wakeUserspaceTask(bound_task_id, now_ticks);
             }
         }
-        if (pending.network) {
+        if (pending.network or session_manager.networkWorkPending()) {
             _ = session_manager.servicePendingNetworkWork(now_ticks);
         }
         _ = session_manager.runUserspaceScheduler(now_ticks);
         if (pending.xhci or pending.timer) {
             harvestInputProof();
             _ = session_manager.servicePendingInputWork(now_ticks);
+            _ = desktop_display.present(session_manager.system().compositorSessionPtr());
         }
 
         x86.cli();
         const ready_tasks = session_manager.userspaceSchedulerHasReadyTasks();
-        if (event_wake.any() or ready_tasks) {
+        if (event_wake.any() or ready_tasks or session_manager.networkWorkPending()) {
             if (ready_tasks) timer.armSchedulerTick();
             x86.sti();
             continue;
         }
         if (xhci_driver_task.lifecyclePending()) {
             timer.armSchedulerTick();
+        } else if (session_manager.nextServiceWake()) |deadline| {
+            timer.armWakeAt(deadline);
         } else {
             timer.disarmSchedulerTick();
             if (!reported_scheduler_idle) {

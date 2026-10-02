@@ -124,7 +124,9 @@ pub const Service = struct {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: missing foreground session");
             return error.MissingForegroundSession;
         }
-        if (request.destination_task_id == 0 or request.destination_task_id == request.source_task_id) {
+        if (request.source_task_id == 0 or request.destination_task_id == 0 or
+            (request.destination_task_id == request.source_task_id and !request.subject.eql(request.destination)))
+        {
             try recordOffer(ledger, request, 0, false, "pasteboard offer denied: invalid destination");
             return error.InvalidDestination;
         }
@@ -229,6 +231,10 @@ pub const Service = struct {
         try recordRead(ledger, request, true, request.detail);
         @memcpy(output[0..payload_len], grant.payloadSlice());
         grant.consumed = true;
+        if (grant.read_once) {
+            @memset(&grant.payload, 0);
+            grant.payload_len = 0;
+        }
         return output[0..payload_len];
     }
 
@@ -237,7 +243,7 @@ pub const Service = struct {
             try recordRevoke(ledger, request, false, "pasteboard revoke denied: missing grant");
             return error.GrantNotFound;
         };
-        if (grant.source_task_id != request.source_task_id) {
+        if (grant.source_task_id != request.source_task_id or !grant.subject.eql(request.subject)) {
             try recordRevoke(ledger, request, false, request.detail);
             return error.SourceMismatch;
         }
@@ -265,16 +271,14 @@ pub const Service = struct {
         }
         for (0..MAX_GRANTS) |offset| {
             const grant_index = (@as(usize, self.next_reusable_grant) + offset) % MAX_GRANTS;
+            if ((TokenId{ .value = self.grants[grant_index].token_id }).nextInSlot(grant_index) == null) continue;
             if (grantReusableAt(&self.grants[grant_index], now_ticks)) return grant_index;
         }
         return null;
     }
 
     fn nextTokenId(self: *const Service, grant_index: usize) u64 {
-        const current_generation = (TokenId{ .value = self.grants[grant_index].token_id }).generation();
-        const incremented = current_generation +% 1;
-        const generation = if (incremented == 0) 1 else incremented;
-        return TokenId.fromParts(grant_index, generation).value;
+        return (TokenId{ .value = self.grants[grant_index].token_id }).nextInSlot(grant_index).?.value;
     }
 };
 
@@ -340,6 +344,52 @@ fn copyPurposeInto(purpose: []const u8) [MAX_PURPOSE_BYTES]u8 {
     var buffer: [MAX_PURPOSE_BYTES]u8 = [_]u8{0} ** MAX_PURPOSE_BYTES;
     _ = copyText(&buffer, purpose);
     return buffer;
+}
+
+test "secure pasteboard preserves exhausted grants without issuing zero or stale tokens" {
+    var service = Service.init();
+    const request = OfferRequest{
+        .subject = .{ .kind = .app, .serial = 7101 },
+        .destination = .{ .kind = .app, .serial = 7102 },
+        .source_task_id = 71,
+        .destination_task_id = 72,
+        .user_gesture_id = 5,
+        .foreground_session_id = 8,
+        .expires_at_ticks = 50,
+        .now_ticks = 10,
+        .purpose = "paste into note",
+        .payload = "private text",
+    };
+    for (0..MAX_GRANTS) |index| {
+        const grant = try service.offer(request, null);
+        grant.token_id = TokenId.fromParts(index, indexed_arena.MAX_HANDLE_GENERATION).value;
+        grant.revoked = true;
+    }
+    const before = service;
+    try std.testing.expectError(error.GrantTableFull, service.offer(request, null));
+    try std.testing.expectEqualDeep(before, service);
+    service.grants[7].token_id = TokenId.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION - 1).value;
+    const last = try service.offer(request, null);
+    try std.testing.expectEqual(TokenId.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION).value, last.token_id);
+    try std.testing.expect(service.find(TokenId.fromParts(7, 1).value) == null);
+    var output = [_]u8{0x55} ** MAX_PAYLOAD_BYTES;
+    var read_request = ReadRequest{
+        .subject = request.destination,
+        .destination_task_id = request.destination_task_id,
+        .token_id = TokenId.fromParts(7, 1).value,
+        .user_gesture_id = 6,
+        .foreground_session_id = request.foreground_session_id,
+        .now_ticks = 11,
+    };
+    try std.testing.expectError(error.GrantNotFound, service.read(read_request, &output, null));
+    try std.testing.expect(std.mem.allEqual(u8, &output, 0x55));
+    read_request.token_id = last.token_id;
+    try std.testing.expectEqualStrings(request.payload, try service.read(read_request, &output, null));
+    try std.testing.expect(last.consumed);
+    const exhausted = service;
+    try std.testing.expectError(error.GrantTableFull, service.offer(request, null));
+    try std.testing.expectEqualDeep(exhausted, service);
+    try std.testing.expect(service.find(0) == null);
 }
 
 test "secure pasteboard rejects overlong purposes without issuing grants" {
@@ -438,10 +488,10 @@ test "secure pasteboard uses direct generational tokens through bounded capacity
     try std.testing.expectEqual(@as(u32, 2), (TokenId{ .value = replacement.token_id }).generation());
     try std.testing.expect(service.find(first_token_id) == null);
 
-    const wrapped_from = TokenId.fromParts(0, std.math.maxInt(u32)).value;
-    replacement.token_id = wrapped_from;
+    const exhausted_token = TokenId.fromParts(0, indexed_arena.MAX_HANDLE_GENERATION).value;
+    replacement.token_id = exhausted_token;
     replacement.revoked = true;
-    const wrapped = try service.offer(.{
+    const request = OfferRequest{
         .subject = source,
         .destination = destination,
         .source_task_id = 304,
@@ -452,10 +502,15 @@ test "secure pasteboard uses direct generational tokens through bounded capacity
         .now_ticks = 22,
         .purpose = "paste into note",
         .payload = "private pasteboard payload",
-    }, null);
-    try std.testing.expectEqual(@as(usize, 0), (TokenId{ .value = wrapped.token_id }).slotIndex());
-    try std.testing.expectEqual(@as(u32, 1), (TokenId{ .value = wrapped.token_id }).generation());
-    try std.testing.expect(service.find(wrapped_from) == null);
+    };
+    const before = service;
+    try std.testing.expectError(error.GrantTableFull, service.offer(request, null));
+    try std.testing.expectEqualDeep(before, service);
+    service.grants[1].revoked = true;
+    const reused = try service.offer(request, null);
+    try std.testing.expectEqual(TokenId.fromParts(1, 2).value, reused.token_id);
+    try std.testing.expectEqual(exhausted_token, service.grants[0].token_id);
+    try std.testing.expect(service.find(first_token_id) == null);
 }
 
 test "secure pasteboard requires foreground gestures destination scope expiry and read once" {
@@ -571,6 +626,14 @@ test "secure pasteboard requires foreground gestures destination scope expiry an
         .payload = "revoked private pasteboard payload",
         .detail = "revoked private pasteboard payload",
     }, &ledger);
+    const before_revoke = revoked.*;
+    try std.testing.expectError(error.SourceMismatch, service.revoke(.{
+        .subject = imposter,
+        .source_task_id = 71,
+        .token_id = revoked.token_id,
+        .now_ticks = 21,
+    }, &ledger));
+    try std.testing.expectEqualDeep(before_revoke, revoked.*);
     try service.revoke(.{
         .subject = source,
         .source_task_id = 71,

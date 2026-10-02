@@ -27,7 +27,7 @@ BASELINE_MARKER="ZIGOS:STORAGE:DURABILITY:BASELINE_CHECKPOINTED"
 INTERRUPTED_WRITE_MARKER="ZIGOS:STORAGE:DURABILITY:INTERRUPTED_WRITE_STAGED"
 FINAL_MARKER="ZIGOS:STORAGE:DURABILITY:FINAL_CHECKPOINTED"
 BAD_ROOT_MARKER="ZIGOS:STORAGE:DURABILITY:BAD_ROOT_SLOT_FALLBACK_OK"
-ROOT_SLOT_SECTOR_BYTES=512
+ROOT_SLOT_BLOCK_BYTES="${4:?volume block size required}"
 LATEST_ROOT_SLOT_INDEX=1
 
 mkdir -p "$(dirname "$LOG_PATH")"
@@ -81,7 +81,7 @@ assert_marker_group() {
 }
 
 corrupt_latest_root_slot() {
-  local root_slot_offset=$((LATEST_ROOT_SLOT_INDEX * ROOT_SLOT_SECTOR_BYTES))
+  local root_slot_offset=$((LATEST_ROOT_SLOT_INDEX * ROOT_SLOT_BLOCK_BYTES))
   if ! printf '\377' | dd of="$NATIVE_STORE_IMAGE" bs=1 seek="$root_slot_offset" count=1 conv=notrunc >/dev/null 2>&1; then
     echo "Storage durability QEMU test failed: could not corrupt root slot $LATEST_ROOT_SLOT_INDEX in $NATIVE_STORE_IMAGE" >&2
     exit 1
@@ -101,7 +101,7 @@ run_boot_until_marker "$BOOT4_LOG" preserve "$BAD_ROOT_MARKER"
   printf '\n=== FORCED REBOOT: RECOVERY AND FINAL CHECKPOINT ===\n'
   cat "$BOOT3_LOG"
   printf '\n=== HOST ROOT SLOT CORRUPTION ===\n'
-  printf 'STORAGE_DURABILITY:CORRUPTED_ROOT_SLOT %d offset=%d\n' "$LATEST_ROOT_SLOT_INDEX" "$((LATEST_ROOT_SLOT_INDEX * ROOT_SLOT_SECTOR_BYTES))"
+  printf 'STORAGE_DURABILITY:CORRUPTED_ROOT_SLOT %d offset=%d\n' "$LATEST_ROOT_SLOT_INDEX" "$((LATEST_ROOT_SLOT_INDEX * ROOT_SLOT_BLOCK_BYTES))"
   printf '\n=== FORCED REBOOT: BAD ROOT SLOT RECOVERY ===\n'
   cat "$BOOT4_LOG"
 } >"$LOG_PATH"

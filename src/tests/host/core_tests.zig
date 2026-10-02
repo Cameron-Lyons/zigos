@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const cpu_baseline = @import("../../arch/cpu_baseline.zig");
+const cpu_features = @import("../../arch/cpu_features.zig");
 const firmware_memory_map = @import("../../kernel/memory/firmware_memory_map.zig");
 const frame_allocator = @import("../../kernel/memory/frame_allocator.zig");
 const heap_geometry = @import("../../kernel/memory/heap_geometry.zig");
@@ -24,16 +25,21 @@ const x2apic = @import("../../kernel/interrupts/x2apic.zig");
 
 test "core host tests import native core modules" {
     std.testing.refAllDecls(cpu_baseline);
+    _ = cpu_features;
     std.testing.refAllDecls(firmware_memory_map);
     std.testing.refAllDecls(frame_allocator);
     std.testing.refAllDecls(heap_geometry);
     std.testing.refAllDecls(heap_allocator_tests);
     std.testing.refAllDecls(text_scanout_tests);
     std.testing.refAllDecls(page_table64);
+    _ = @import("../../kernel/memory/paging64.zig");
     std.testing.refAllDecls(virtual_layout);
     std.testing.refAllDecls(tsc_deadline);
+    _ = @import("../../kernel/timer/timer.zig");
     std.testing.refAllDecls(abi);
     std.testing.refAllDecls(crypto_hash);
+    _ = @import("../../native/core/transport_crypto.zig");
+    _ = @import("../../native/core/noise_xx.zig");
     std.testing.refAllDecls(ids);
     std.testing.refAllDecls(indexed_arena);
     std.testing.refAllDecls(native_smoke_markers);

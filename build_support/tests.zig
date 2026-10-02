@@ -1,6 +1,7 @@
 const std = @import("std");
 const native_modules = @import("native_modules.zig");
 const userspace_build = @import("userspace.zig");
+const shared = @import("shared.zig");
 
 pub const TestArtifacts = struct {
     run_host_tests: *std.Build.Step.Run,
@@ -14,12 +15,18 @@ pub fn addTestArtifacts(
     userspace_images: userspace_build.ArtifactSet,
 ) TestArtifacts {
     const test_modules = native_modules.addUserspaceRuntimeHostTestModules(b, optimize);
+    const kernel_options = b.addOptions();
+    kernel_options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
+    kernel_options.addOption(shared.KernelRole, "kernel_role", .production);
+    kernel_options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", .none);
 
     const host_tests_module = b.createModule(.{
         .root_source_file = b.path("src/native_host_test.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
+    host_tests_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
+    host_tests_module.addOptions("build_options", kernel_options);
     addNativeTestImports(host_tests_module, test_modules.wire, userspace_images);
     const host_tests = b.addTest(.{
         .name = "native-host-tests",
@@ -31,6 +38,7 @@ pub fn addTestArtifacts(
         .target = b.graph.host,
         .optimize = optimize,
     });
+    spec_tests_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
     addNativeTestImports(spec_tests_module, test_modules.wire, userspace_images);
     const spec_tests = b.addTest(.{
         .name = "zigos-spec-tests",

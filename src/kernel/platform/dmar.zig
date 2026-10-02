@@ -246,6 +246,42 @@ pub fn parseDmar(table: []const u8) Error!Summary {
     return summary;
 }
 
+/// Accept an explicitly scoped, single segment-zero unit only when every DMA
+/// requester is an exact single-hop PCI endpoint in its firmware scope. Bridge
+/// scopes need topology resolution and are deliberately not inferred here.
+pub fn scopedEnforcementSummary(table: []const u8, requesters: []const u16) (Error || error{RequesterNotCovered})!Summary {
+    const summary = try parseDmar(table);
+    if (requesters.len == 0 or summary.remapping_unit_count != 1 or
+        summary.units()[0].segment != 0 or
+        summary.host_address_width < MIN_PRODUCTION_HOST_ADDRESS_WIDTH or
+        !summary.interrupt_remapping or summary.x2apic_opt_out or summary.dma_remapping_opt_out or
+        summary.reserved_memory_with_non_pci_scope_count != 0) return error.RequesterNotCovered;
+    if (summary.units()[0].include_pci_all) return summary;
+    const table_length = endian.readU32Le(table[4..8]);
+    for (requesters) |requester| {
+        var matches: usize = 0;
+        var offset: usize = DMAR_HEADER_LENGTH;
+        while (offset < table_length) {
+            const length: usize = endian.readU16Le(table[offset + 2 ..][0..2]);
+            if (endian.readU16Le(table[offset..][0..2]) == DRHD_TYPE) {
+                var scope = offset + DRHD_MIN_BYTES;
+                while (scope < offset + length) {
+                    const scope_length = table[scope + 1];
+                    if (table[scope] == DEVICE_SCOPE_TYPE_PCI_ENDPOINT and scope_length == DEVICE_SCOPE_MIN_BYTES) {
+                        const source = (@as(u16, table[scope + 5]) << 8) |
+                            (@as(u16, table[scope + 6]) << 3) | table[scope + 7];
+                        if (source == requester) matches += 1;
+                    }
+                    scope += scope_length;
+                }
+            }
+            offset += length;
+        }
+        if (matches != 1) return error.RequesterNotCovered;
+    }
+    return summary;
+}
+
 fn parseRemappingUnit(structure: []const u8, host_address_width: u8) Error!RemappingUnit {
     if (structure.len < DRHD_MIN_BYTES) return error.InvalidRemappingUnit;
     const flags = structure[4];
@@ -427,6 +463,43 @@ test "DMAR summary uses capacity-sized discovery counts" {
     try std.testing.expectEqual(u32, @FieldType(Summary, "reserved_memory_with_non_pci_scope_count"));
     try std.testing.expectEqual(u32, @FieldType(Summary, "ats_capability_count"));
     try std.testing.expectEqual(@as(usize, SUMMARY_SIZE_CEILING_BYTES), @sizeOf(Summary));
+}
+
+test "DMAR explicit scopes cover exact requesters without asserting catch-all policy" {
+    var table = validDmar();
+    endian.writeU32Le(table[4..8], 72);
+    checksum.finishSum8Prefix(&table, 9, 72);
+    const summary = try scopedEnforcementSummary(&table, &.{0x0010});
+    try std.testing.expect(!summary.productionEnforcementReady());
+    try std.testing.expectEqual(@as(u8, 1), summary.remapping_unit_count);
+    for ([_]u16{ 0x0011, 0x0110, 0x0018 }) |requester| {
+        try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{requester}));
+    }
+    try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{ 0x0010, 0x0018 }));
+    try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{}));
+    table[64] = DEVICE_SCOPE_TYPE_PCI_SUB_HIERARCHY;
+    checksum.finishSum8Prefix(&table, 9, 72);
+    try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{0x0010}));
+    table[64] = DEVICE_SCOPE_TYPE_PCI_ENDPOINT;
+    table[FLAGS_OFFSET] |= FLAG_X2APIC_OPT_OUT;
+    checksum.finishSum8Prefix(&table, 9, 72);
+    try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{0x0010}));
+}
+
+test "DMAR explicit scopes reject duplicate endpoints and multiple remapping units" {
+    var table = validDmar();
+    try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{0x0010}));
+    endian.writeU32Le(table[4..8], 80);
+    endian.writeU16Le(table[50..52], 32);
+    @memcpy(table[72..80], table[64..72]);
+    checksum.finishSum8Prefix(&table, 9, 80);
+    try std.testing.expectError(error.RequesterNotCovered, scopedEnforcementSummary(&table, &.{0x0010}));
+    table[78] = 3;
+    checksum.finishSum8Prefix(&table, 9, 80);
+    _ = try scopedEnforcementSummary(&table, &.{ 0x0010, 0x0018 });
+    table[70] = 32;
+    checksum.finishSum8Prefix(&table, 9, 80);
+    try std.testing.expectError(error.InvalidDeviceScope, scopedEnforcementSummary(&table, &.{0x0010}));
 }
 
 test "DMAR parser discovers production-policy segment-zero VT-d units" {

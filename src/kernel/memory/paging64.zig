@@ -106,9 +106,10 @@ pub const DIRECT_MAP_PDPT_ENTRIES: usize = @intCast(MANAGED_PHYSICAL_BYTES / PAG
 pub const DIRECT_MAP_1G_LEAF_COUNT: usize = DIRECT_MAP_PDPT_ENTRIES - 1;
 pub const DIRECT_MAP_PAGE_DIRECTORY_COUNT: usize = 1;
 // Keep synchronized with __kernel_precise_identity_end in the linker script.
-pub const PRECISE_IDENTITY_PAGE_TABLES: usize = 8;
+pub const PRECISE_IDENTITY_PAGE_TABLES: usize = 32;
 pub const PRECISE_IDENTITY_BYTES: u32 = PRECISE_IDENTITY_PAGE_TABLES * 2 * 1024 * 1024;
-const BOOTSTRAP_PAGE_TABLE_COUNT = 5 + 2 * PRECISE_IDENTITY_PAGE_TABLES;
+const HEAP_IDENTITY_PAGE_TABLES = memory.HEAP_SIZE / LARGE_2M_PAGE_SIZE + 1;
+const BOOTSTRAP_PAGE_TABLE_COUNT = 5 + 2 * PRECISE_IDENTITY_PAGE_TABLES + HEAP_IDENTITY_PAGE_TABLES;
 
 const TABLE_OWNER_INHERITED: u3 = 0;
 const TABLE_OWNER_KERNEL_DYNAMIC: u3 = 1;
@@ -130,6 +131,7 @@ const BootstrapPageTables = struct {
     direct_pdpt: PageTable align(PAGE_SIZE),
     direct_page_directory: PageTable align(PAGE_SIZE),
     direct_page_tables: [PRECISE_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE),
+    heap_page_tables: [HEAP_IDENTITY_PAGE_TABLES]PageTable align(PAGE_SIZE),
 };
 
 var bootstrap_page_tables: ?*BootstrapPageTables = null;
@@ -596,18 +598,17 @@ fn mapFailure(error_value: UserMapError) noreturn {
 }
 
 pub fn mapKernelBorrowedPage(virt_addr: usize, phys_addr: usize, flags: u32) void {
-    if (!table64.isCanonicalVirtualAddress(virt_addr))
-        haltWithMessage("Kernel mapping uses a non-canonical virtual address!\n");
-    if (!table64.physicalAddressFits(phys_addr))
-        haltWithMessage("Kernel physical mapping exceeds the x86-64 address width!\n");
-    mapBorrowedPageIn(
-        kernelPageDirectory(),
-        virt_addr,
-        phys_addr,
-        flags & ~PAGE_USER,
-        TABLE_OWNER_KERNEL_DYNAMIC,
-        true,
-    ) catch |err| mapFailure(err);
+    tryMapKernelBorrowedPage(virt_addr, phys_addr, flags) catch |err| mapFailure(err);
+}
+
+pub fn tryMapKernelBorrowedPage(virt_addr: usize, phys_addr: usize, flags: u32) UserMapError!void {
+    if (!table64.isCanonicalVirtualAddress(virt_addr) or !table64.physicalAddressFits(phys_addr))
+        return error.InvalidRange;
+    try mapBorrowedPageIn(kernelPageDirectory(), virt_addr, phys_addr, flags & ~PAGE_USER, TABLE_OWNER_KERNEL_DYNAMIC, true);
+}
+
+pub fn kernelAddressSpaceActive() bool {
+    return getCurrentPageDirectory() == kernelPageDirectory();
 }
 
 fn lookupLeaf(pml4: *PageDirectory, virt_addr: usize) ?*PageTableEntry {
@@ -1077,6 +1078,7 @@ fn initializeKernelHierarchy() void {
         tables.page_directory[directory_index] = large2MiBPhysicalEntry(identity_physical_address);
         identity_physical_address += @intCast(LARGE_2M_PAGE_SIZE);
     }
+    initializeHeapIdentityMappings(tables, memory.heapStartAddress(), image);
 
     var direct_physical_address: frame_allocator.PhysicalAddress = 0;
     for (&tables.direct_page_tables, 0..) |*page_table, table_index| {
@@ -1104,6 +1106,26 @@ fn initializeKernelHierarchy() void {
     for (tables.direct_pdpt[1..DIRECT_MAP_PDPT_ENTRIES]) |*entry| {
         entry.* = large1GiBPhysicalEntry(direct_physical_address);
         direct_physical_address += LARGE_1G_PAGE_SIZE;
+    }
+}
+
+fn initializeHeapIdentityMappings(tables: *BootstrapPageTables, heap_start: usize, image: KernelImageExtents) void {
+    const first = heap_start / LARGE_2M_PAGE_SIZE;
+    const last = (heap_start + memory.HEAP_SIZE - 1) / LARGE_2M_PAGE_SIZE;
+    // Firmware may place the heap anywhere in the identity aperture. Its stack
+    // guards require 4 KiB leaves even when it is far from the kernel image.
+    for (first..last + 1, 0..) |directory_index, table_index| {
+        const page_table = &tables.heap_page_tables[table_index];
+        var physical: u32 = @intCast(directory_index * LARGE_2M_PAGE_SIZE);
+        for (page_table) |*entry| {
+            entry.* = tableEntry(physical, kernelIdentityLeafFlags(physical, image), PAGE_OWNER_BORROWED);
+            physical += PAGE_SIZE;
+        }
+        tables.page_directory[directory_index] = tableEntry(
+            @intFromPtr(page_table),
+            ENTRY_PRESENT | ENTRY_WRITABLE,
+            TABLE_OWNER_INHERITED,
+        );
     }
 }
 
@@ -1183,13 +1205,15 @@ pub fn init() void {
 
     initializeKernelHierarchy();
 
-    const kernel_end = memory.getReservedMemoryEnd();
-    const reserved_end = std.math.add(usize, kernel_end, PAGE_SIZE - 1) catch
-        haltWithMessage("Kernel reserved-memory extent overflow!\n");
-    const reserved_frame_count = std.math.cast(u32, reserved_end / PAGE_SIZE) orelse
-        haltWithMessage("Kernel reserved-memory extent exceeds the managed physical aperture!\n");
-    physical_frames.reserve(.{ .base = 0, .count = reserved_frame_count }) catch
-        haltWithMessage("Invalid physical-memory reservation!\n");
+    firmware_memory_map.reserveKernelRanges(
+        MANAGED_PHYSICAL_BYTES,
+        PAGE_SIZE,
+        &physical_frames,
+        memory.kernelStartAddress(),
+        memory.kernelEndAddress(),
+        memory.heapStartAddress(),
+        memory.HEAP_SIZE,
+    ) catch haltWithMessage("Invalid kernel or EFI heap reservation!\n");
     physical_frames.sealReservations() catch
         haltWithMessage("Physical-memory reservation table overflow!\n");
     if (physical_frames.stats().free == 0) {
@@ -1299,8 +1323,8 @@ comptime {
     if (LOW_IDENTITY_PHYSICAL_LIMIT != LARGE_1G_PAGE_SIZE) {
         @compileError("the low identity aperture must occupy exactly one page directory");
     }
-    if (PRECISE_IDENTITY_BYTES != 16 * 1024 * 1024) {
-        @compileError("the precise identity region must cover the first 16 MiB");
+    if (PRECISE_IDENTITY_BYTES != 64 * 1024 * 1024) {
+        @compileError("the precise identity region must cover the first 64 MiB");
     }
     if (@sizeOf(BootstrapPageTables) != BOOTSTRAP_PAGE_TABLE_COUNT * PAGE_SIZE or
         @alignOf(BootstrapPageTables) != PAGE_SIZE)
@@ -1366,8 +1390,30 @@ test "kernel identity mapping executes only the linker-bounded text pages" {
 
 test "precise identity mapping retains verification image headroom" {
     try std.testing.expect(PRECISE_IDENTITY_LIMIT_MATCHES_LINKER);
-    try std.testing.expectEqual(@as(usize, 8), PRECISE_IDENTITY_PAGE_TABLES);
-    try std.testing.expectEqual(@as(u32, 16 * 1024 * 1024), PRECISE_IDENTITY_BYTES);
+    try std.testing.expectEqual(@as(usize, 32), PRECISE_IDENTITY_PAGE_TABLES);
+    try std.testing.expectEqual(@as(u32, 64 * 1024 * 1024), PRECISE_IDENTITY_BYTES);
+}
+
+test "EFI heap mappings retain guard-sized supervisor NX leaves across directory boundaries" {
+    var tables: BootstrapPageTables = undefined;
+    const image = KernelImageExtents{ .text_start = 32 * 1024 * 1024, .text_end = 33 * 1024 * 1024, .immutable_end = 34 * 1024 * 1024 };
+    const heap_start = LOW_IDENTITY_PHYSICAL_LIMIT - memory.HEAP_SIZE - PAGE_SIZE;
+    zeroTable(&tables.page_directory);
+    initializeHeapIdentityMappings(&tables, heap_start, image);
+    const first = heap_start / LARGE_2M_PAGE_SIZE;
+    const last = (heap_start + memory.HEAP_SIZE - 1) / LARGE_2M_PAGE_SIZE;
+    try std.testing.expectEqual(@as(usize, HEAP_IDENTITY_PAGE_TABLES), last - first + 1);
+    for (first..last + 1, 0..) |index, table_index| {
+        try std.testing.expect(entryPresent(tables.page_directory[index]));
+        try std.testing.expect(!table64.isLargePage(tables.page_directory[index]));
+        for (tables.heap_page_tables[table_index], 0..) |entry, page| {
+            try std.testing.expectEqual(@as(u64, index * LARGE_2M_PAGE_SIZE + page * PAGE_SIZE), entryAddress(entry));
+            try std.testing.expect(entryPresent(entry) and entry & ENTRY_WRITABLE != 0 and entry & ENTRY_USER == 0);
+            try std.testing.expect(!table64.isExecutable(entry));
+            try std.testing.expectEqual(PAGE_OWNER_BORROWED, entryOwner(entry));
+        }
+    }
+    try std.testing.expect(!entryPresent(tables.page_directory[first - 1]));
 }
 
 test "kernel direct mapping is non-executable and preserves image immutability" {

@@ -161,12 +161,15 @@ const FIRST_HARDWARE_TARGET_REQUIRED_PRODUCTION_MARKERS = [_][]const u8{
     "ZIGOS:SERVICE_BOOT:SERVICE_CONTRACTS:READY",
     "ZIGOS:COMPOSITOR:INPUT_ROUTER:READY",
     "ZIGOS:USERSPACE:INPUT_ABI:READY",
-    "ZIGOS:PLATFORM:BOOTLOADER_MEASUREMENT:PROVIDED",
+    "ZIGOS:PLATFORM:BOOT_DESCRIPTOR:VERIFIED",
     "ZIGOS:PLATFORM:BUILD_ARTIFACT_MANIFEST:VERIFIED",
-    "ZIGOS:PLATFORM:BOOTLOADER_HANDOFF:VERIFIED",
+    "ZIGOS:PLATFORM:MEASUREMENT_SNAPSHOT:VERIFIED",
     "ZIGOS:PLATFORM:ARTIFACT_MANIFEST:VERIFIED",
     "ZIGOS:PLATFORM:MEASURED_BOOT:RECORDED",
     "ZIGOS:PLATFORM:MEASURED_BOOT:VERIFIED_ROOT",
+    "ZIGOS:PLATFORM:BOOT_IMAGE:FIRMWARE_AUTHENTICATED",
+    "ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED",
+    "ZIGOS:TPM2:FINAL_EVENTS:VERIFIED",
     "ZIGOS:STORAGE:CHECKPOINT:FINAL enabled=true dirty=false",
     "ZIGOS:TASK:SESSION_READY",
     "ZIGOS:NATIVE:READY",
@@ -1633,7 +1636,7 @@ fn validateNuc11tnki5KernelProofSources(
         "const boot_link = b.addSystemCommand",
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
-        "qemu_iso.addFileArg(boot_kernel)",
+        "addEfiImage(b, .ReleaseSmall, boot_kernel",
         "scripts/build-efi-iso.sh",
         "scripts/check-efi-image.sh",
         "src/boot/cmdline-qemu.txt",
@@ -1652,7 +1655,7 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
         try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
     }
-    if (std.mem.indexOf(u8, kernel_build_source, "addEfiStub") == null or
+    if (std.mem.indexOf(u8, kernel_build_source, "addEfiImage") == null or
         std.mem.indexOf(u8, kernel_build_source, ".os_tag = .uefi") == null)
     {
         try common.addError(errors, allocator, "kernel build must emit a native x86-64 UEFI stub", .{});
@@ -1671,10 +1674,12 @@ fn validateNuc11tnki5KernelProofSources(
         "efi_elf.load",
         "efi_handoff.encode",
         "enterKernel",
-        "KERNEL_PATH",
-        "CMDLINE_PATH",
-        "preferredCommandLine",
-        "loadCommandLineFile",
+        "payload.kernel",
+        "payload.cmdline",
+        "embeddedCommandLine",
+        "authenticatedFirmwareState",
+        "readFirmwareByte",
+        "segment.pageCount()",
         "HANDOFF_MAX_ADDRESS",
         "128 * 1024 * 1024",
     };
@@ -1689,7 +1694,8 @@ fn validateNuc11tnki5KernelProofSources(
         "EXITS_BOOT_SERVICES",
         "TAG_ACPI_NEW",
         "TAG_EFI64_SYSTEM_TABLE",
-        "preferredCommandLine",
+        "embeddedCommandLine",
+        "boot_image",
     };
     for (required_efi_handoff_snippets) |snippet| {
         if (std.mem.indexOf(u8, efi_handoff_source, snippet) == null) {
@@ -1833,7 +1839,7 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "kernel build must include the FRED event-delivery assembly", .{});
     }
     if (std.mem.indexOf(u8, kernel_build_source, "src/boot/efi_stub.zig") == null or
-        std.mem.indexOf(u8, kernel_build_source, "addNativeEfiStub") == null)
+        std.mem.indexOf(u8, kernel_build_source, "addEfiImage") == null)
     {
         try common.addError(errors, allocator, "kernel build must compile the native EFI long-mode stub", .{});
     }
@@ -2162,7 +2168,9 @@ fn validateNuc11tnki5KernelProofSources(
         "KeyboardIdentity",
         "event_slots",
         "free_event_head",
-        "report.sequence <= self.last_sequence",
+        "report.sequence <= self.last_report_sequence",
+        "std.math.add(u64, self.last_event_sequence, 1) catch return false",
+        "self.last_event_sequence = sequence",
         "window.modal and window.reviewer_task_id != 0",
         "window.subject_task_id",
         "compositor.switchVisible",
@@ -2253,7 +2261,7 @@ fn validateNuc11tnki5KernelProofSources(
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "executionRemainsReady(outcome)" },
         .{ .label = userspace_scheduler_path, .source = userspace_scheduler_source, .snippet = "ui_revision > accounting.last_ui_state_revision" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const INPUT_EVENTS_PER_DISPATCH: usize = 8" },
-        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput(comptime saves_documents: bool)" },
+        .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn drainFocusedInput(ui: *UiRuntime, comptime saves_documents: bool)" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = ".wait_for_event" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn parkUntilEvent()" },
         .{ .label = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "makeHeader(.wait" },
@@ -3452,7 +3460,11 @@ fn validateBootAttestationProviderTrack(
         "containsAsciiIgnoreCase",
         "!self.hasProductionUnsafeName()",
         "hasTestOnlyOperationalName(key.label)",
-        "hasTestOnlyOperationalName(provider.label())",
+        "hasTestOnlyOperationalName(label)",
+        "zigos.remote-attestation-context.v2",
+        "request_context_digest",
+        "attestation response cannot be relabeled for another verifier policy",
+        "attestation rejects malformed bounded records before hashing or signing",
         "AttestationVerifierMetadata.fromProvider",
         "ExternalAttestationRootProvider.init",
         "production attestation descriptors reject test-only operational names",
@@ -3521,7 +3533,7 @@ fn validateSecretVaultHardwareProviderBoundary(
         "pub fn signDigest",
         "pub const IMPORTS_INTO_PREZEROED_SECRET_SLOTS = true",
         "const secret = &self.secrets[slot_index]",
-        "dense secret imports append into pre-zeroed slots",
+        "secret imports reuse pre-zeroed inactive slots",
         "self.secret_count += 1",
         "secure secret store requires a hardware provider before hardware-backed imports",
     };
@@ -3555,7 +3567,7 @@ fn validateSecretVaultHardwareProviderBoundary(
         "pub const GenerateSigningKeyRequest",
         "self.store.generateSigningKey(request.owner, request.label)",
         ".operation = .generate_signing_key",
-        "self.store.secrets[slot_index] = unused_slot",
+        "errdefer self.discardUnpublishedSecret(slot_index, previous_id)",
         "service.attachHardwareProvider(testHardwareProvider())",
         "expiry_service.attachHardwareProvider(testHardwareProvider())",
         "export_service.attachHardwareProvider(testHardwareProvider())",
@@ -3888,7 +3900,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 10",
+        "pub const ABI_VERSION: u16 = 18",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -4017,14 +4029,14 @@ fn validateUserspaceDriverDataPathTrack(
         .{ .path = native_kernel_path, .source = native_kernel_source, .snippet = "authorizeSubjectTaskOperation(.surface_present" },
         .{ .path = compositor_session_path, .source = compositor_session_source, .snippet = "pub fn presentSurface(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "bindSurfacePresentationReceiver" },
-        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 8" },
+        .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const VERSION: u16 = 11" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "pub const ABI_SIZE_BYTES: usize = 256" },
         .{ .path = userspace_mailbox_path, .source = userspace_mailbox_source, .snippet = "heartbeat_increment: u32 = 1" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = "granted.rights.has(.surface_present)" },
         .{ .path = userspace_executor_path, .source = userspace_executor_source, .snippet = ".heartbeat_increment = update.heartbeat_increment" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "fn presentUiState(" },
         .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "zigos_userspace_bootstrap.heartbeat_increment" },
-        .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const input = drainFocusedInput(saves_documents);" },
+        .{ .path = userspace_runtime_path, .source = userspace_runtime_source, .snippet = "const input = drainFocusedInput(ui, saves_documents);" },
         .{ .path = userspace_ui_state_path, .source = userspace_ui_state_source, .snippet = "pub fn presentation(" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "provisionSurfacePresentationCapabilities" },
         .{ .path = session_manager_boot_flow_path, .source = session_manager_boot_flow_source, .snippet = "proveUserspaceSurfacePresentation" },
@@ -4163,14 +4175,15 @@ fn validateUserspaceDriverDataPathTrack(
     }
 
     const network_activation_snippets = [_][]const u8{
-        "networkPublicationMatchesTargetI225",
+        "networkPublicationMatchesDetectedDevice",
         "device_inventory.requireProductionDriverDeviceId(.network_adapter)",
-        "if (!networkPublicationMatchesTargetI225(device_id)) return false",
+        "if (!networkPublicationMatchesDetectedDevice(device_id)) return false",
+        "@import(\"../../kernel/drivers/network_hw.zig\").activate() catch return false",
         "try std.testing.expect(!activateNetworkDevice(i225_device_id, 9))",
     };
     for (network_activation_snippets) |snippet| {
         if (std.mem.indexOf(u8, bootstrap_driver_port_source, snippet) == null) {
-            try common.addError(errors, allocator, "Userspace driver data path must keep I225-only network activation snippet: {s}", .{snippet});
+            try common.addError(errors, allocator, "Userspace driver data path must validate the selected NIC before publication: {s}", .{snippet});
         }
     }
     const network_driver_spec_snippets = [_][]const u8{

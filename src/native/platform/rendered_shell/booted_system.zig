@@ -231,9 +231,29 @@ pub const BootedSystem = struct {
             .task_switch_previous => self.dispatchInput(.{ .kind = .task_switch_previous, .tick = tick }),
             .show_recovery => self.dispatchInput(.{ .kind = .show_recovery, .tick = tick }),
             .dismiss_recovery => self.dispatchInput(.{ .kind = .dismiss_recovery, .tick = tick }),
-            .text => self.stageHardwareText(event.text, tick),
+            .text => self.stageHardwareText(event.data, tick),
             .backspace => self.backspaceHardwareText(tick),
             .commit_text => self.commitHardwareText(tick),
+            // Cursor editing belongs to the Notes ELF, not this scripted
+            // shell journey's append-only diagnostic text input.
+            .cursor_left,
+            .cursor_right,
+            .cursor_up,
+            .page_up,
+            .page_down,
+            .cursor_down,
+            .line_start,
+            .line_end,
+            .document_start,
+            .document_end,
+            .delete_forward,
+            .select_all,
+            .undo,
+            .redo,
+            .copy,
+            .cut,
+            .paste,
+            => self.result(.tick, false),
         };
     }
 

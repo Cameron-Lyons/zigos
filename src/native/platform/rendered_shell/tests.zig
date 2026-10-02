@@ -1447,7 +1447,7 @@ test "booted rendered system runs input loop compositor prompts task switching r
     const booted = system.dispatchInput(.{ .kind = .boot, .tick = 10 });
     try std.testing.expect(booted.accepted);
     try std.testing.expectEqual(booted_system.BootPhase.running, booted.phase);
-    const text_without_document = system.dispatchKeyboardEvent(.{ .kind = .text, .text = 'X' }, 10);
+    const text_without_document = system.dispatchKeyboardEvent(.{ .kind = .text, .data = 'X' }, 10);
     try std.testing.expect(!text_without_document.accepted);
     try std.testing.expectEqual(HumaneShellStatus.invalid_order, text_without_document.status);
     const blocked = system.dispatchInput(.{ .kind = .open_workspace, .tick = 11 });
@@ -1512,7 +1512,7 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try std.testing.expect(dismissed.accepted);
     try std.testing.expectEqual(booted_system.BootPhase.running, dismissed.phase);
     const text_before = shell.documentTextSlice().len;
-    try std.testing.expect(system.dispatchKeyboardEvent(.{ .kind = .text, .text = 'X' }, 23).accepted);
+    try std.testing.expect(system.dispatchKeyboardEvent(.{ .kind = .text, .data = 'X' }, 23).accepted);
     const rejected_edit = system.dispatchInput(.{
         .kind = .text_input,
         .tick = 24,

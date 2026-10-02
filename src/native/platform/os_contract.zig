@@ -3915,7 +3915,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         credential.sealed_credential_secret and
         credential.isRecoverableThroughDeviceGraph();
 
-    const unlock = os_identity.createLocalUnlockProof(user, laptop, "accounts.example", "nonce-1", .biometric, 4, 8, laptop_identity) catch return evidence;
+    const unlock = os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, laptop, "accounts.example", "nonce-1", .biometric, 4, 8, laptop_identity) catch return evidence;
     const assertion = identities.assertCredential(&graph, identity_keys.at(authority, 5), .{
         .credential_id = credential_id,
         .device = laptop,
@@ -3982,7 +3982,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         ) catch return evidence;
     }
 
-    const expired_unlock = os_identity.createLocalUnlockProof(user, laptop, "accounts.example", "nonce-expired", .biometric, 4, 5, laptop_identity) catch return evidence;
+    const expired_unlock = os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, laptop, "accounts.example", "nonce-expired", .biometric, 4, 5, laptop_identity) catch return evidence;
     evidence.fresh_unlock_enforced = if (identities.assertCredential(&graph, identity_keys.at(authority, 9), .{
         .credential_id = credential_id,
         .device = laptop,
@@ -4001,7 +4001,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         .scope = .device_bound,
         .key_handle_id = handle_bound_credential_identity,
     }) catch return evidence;
-    const phone_unlock = os_identity.createLocalUnlockProof(user, phone, "admin.example", "bound-nonce", .biometric, 11, 15, phone_identity) catch return evidence;
+    const phone_unlock = os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "admin.example", "bound-nonce", .biometric, 11, 15, phone_identity) catch return evidence;
     evidence.device_bound_wrong_device_rejected = if (identities.assertCredential(&graph, identity_keys.at(authority, 12), .{
         .credential_id = bound.id,
         .device = phone,
@@ -4013,8 +4013,8 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
     })) |_| false else |err| err == error.DeviceBoundCredentialWrongDevice;
 
     const recovery_challenge = identities.recoveryChallenge(authority, credential_id, phone, handle_replacement_credential_identity) catch return evidence;
-    const recovery_unlock = os_identity.createLocalUnlockProof(user, phone, "accounts.example", &recovery_challenge, .recovery_key, 13, 18, phone_identity) catch return evidence;
-    const laptop_recovery_unlock = os_identity.createLocalUnlockProof(user, laptop, "accounts.example", &recovery_challenge, .recovery_key, 13, 18, laptop_identity) catch return evidence;
+    const recovery_unlock = os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "accounts.example", &recovery_challenge, .recovery_key, 13, 18, phone_identity) catch return evidence;
+    const laptop_recovery_unlock = os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, laptop, "accounts.example", &recovery_challenge, .recovery_key, 13, 18, laptop_identity) catch return evidence;
     const recovered = identities.recoverCredential(&graph, identity_keys.at(authority, 14), .{
         .credential_id = credential_id,
         .recovery_device = phone,
@@ -4041,7 +4041,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         "private credential recovery for accounts.example",
     ) catch return evidence;
 
-    const bound_recovery_unlock = os_identity.createLocalUnlockProof(user, phone, "admin.example", "recover-bound", .recovery_key, 15, 19, phone_identity) catch return evidence;
+    const bound_recovery_unlock = os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "admin.example", "recover-bound", .recovery_key, 15, 19, phone_identity) catch return evidence;
     evidence.device_bound_recovery_denied = if (identities.recoverCredential(&graph, identity_keys.at(authority, 16), .{
         .credential_id = bound.id,
         .recovery_device = phone,
@@ -4065,7 +4065,7 @@ fn identityCredentialEvidence() IdentityCredentialEvidence {
         17,
         "private credential revocation for accounts.example",
     ) catch return evidence;
-    const post_revoke_unlock = os_identity.createLocalUnlockProof(user, phone, "accounts.example", "post-revoke", .device_pin, 18, 21, phone_identity) catch return evidence;
+    const post_revoke_unlock = os_identity.createLocalUnlockProofForVerification(identity_keys.unlock_session.current, user, phone, "accounts.example", "post-revoke", .device_pin, 18, 21, phone_identity) catch return evidence;
     evidence.revocation_gate = if (identities.assertCredential(&graph, identity_keys.at(authority, 19), .{
         .credential_id = credential_id,
         .device = phone,

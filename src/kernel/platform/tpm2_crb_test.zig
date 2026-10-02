@@ -15,6 +15,8 @@ const FakeIo = struct {
     buffer_writes: usize = 0,
     buffer_reads: usize = 0,
     writes: usize = 0,
+    reads: usize = 0,
+    pauses: usize = 0,
     command: [22]u8 = undefined,
 
     fn init(fault: Fault) FakeIo {
@@ -32,6 +34,7 @@ const FakeIo = struct {
         self.regs[@intFromEnum(reg) / 4] = value;
     }
     pub fn read(self: *FakeIo, reg: crb.Reg) u32 {
+        self.reads += 1;
         return self.regs[@intFromEnum(reg) / 4];
     }
     pub fn write(self: *FakeIo, reg: crb.Reg, value: u32) void {
@@ -87,6 +90,7 @@ const FakeIo = struct {
         return self.now >= time;
     }
     pub fn pause(self: *FakeIo) void {
+        self.pauses += 1;
         self.now += 1;
     }
 };
@@ -229,4 +233,203 @@ test "TPM property replies reject malformed framing and wrong property selectors
         bytes[offset] ^= 0x40;
         try std.testing.expectError(error.InvalidResponse, crb.parseProperty(&bytes, crb.FAMILY_INDICATOR));
     }
+}
+
+fn pollBounded(operation: *crb.Operation(u32), io: *FakeIo) crb.Error!?[]u8 {
+    const before = .{ io.reads, io.writes, io.buffer_reads, io.buffer_writes, io.now, io.pauses };
+    defer {
+        // Includes the largest phase: validate both hardware buffer descriptors.
+        std.debug.assert(io.reads - before[0] <= 12);
+        std.debug.assert(io.writes - before[1] <= 3);
+        std.debug.assert(io.buffer_reads - before[2] <= 2);
+        std.debug.assert(io.buffer_writes - before[3] <= 1);
+        std.debug.assert(io.now == before[4]);
+        std.debug.assert(io.pauses == before[5]);
+    }
+    return operation.poll(io);
+}
+
+fn finishBounded(operation: *crb.Operation(u32), io: *FakeIo) ![]u8 {
+    for (0..32) |_| {
+        if (try pollBounded(operation, io)) |reply| return reply;
+        // The event loop, not the transport, advances time between polls.
+        io.now += 1000;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "CRB asynchronous polling leaves slow device waits to the event loop" {
+    var io = FakeIo.init(.command);
+    var transport = crb.Transport{ .discovery = .{ .physical_base = physical_base } };
+    const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+    var response: [27]u8 = @splat(0xaa);
+    var operation = try transport.begin(&io, &command, &response, 2000);
+    try std.testing.expectEqual(@as(usize, 0), io.reads + io.writes);
+    var desktop_frames: usize = 0;
+    for (0..128) |_| {
+        try std.testing.expect(try pollBounded(&operation, &io) == null);
+        desktop_frames += 1;
+        io.now += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 128), desktop_frames);
+    try std.testing.expectEqual(@as(usize, 1), io.buffer_writes);
+    try std.testing.expectEqual(@as(usize, 0), io.buffer_reads);
+    try std.testing.expectError(error.Busy, transport.begin(&io, &command, &response, 2000));
+    const bytes = propertyReply(crb.FAMILY_INDICATOR, 0x322e_3000);
+    @memcpy(io.memory[0x80..][0..bytes.len], &bytes);
+    io.set(.start, 0);
+    var completed = false;
+    for (0..16) |_| {
+        if (try pollBounded(&operation, &io)) |reply| {
+            try std.testing.expectEqualSlices(u8, &bytes, reply);
+            completed = true;
+            break;
+        }
+    }
+    try std.testing.expect(completed);
+    try std.testing.expect(!transport.busy and !transport.failed);
+    try std.testing.expectEqual(@as(u32, 0), io.read(.locality_status));
+    try std.testing.expectEqual(@as(usize, 0), operation.command.len + operation.response.len);
+    try std.testing.expectError(error.NoCommand, operation.poll(&io));
+}
+
+test "CRB cancellation at every handoff erases replies and releases the command slot" {
+    const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+    // Includes cancellation before locality, before submission, after completion,
+    // while returning to idle, and after relinquishing locality but before return.
+    for (0..10) |handoff| {
+        var io = FakeIo.init(.none);
+        var transport = crb.Transport{ .discovery = .{ .physical_base = physical_base } };
+        var response: [27]u8 = @splat(0xaa);
+        var operation = try transport.begin(&io, &command, &response, 2000);
+        for (0..handoff) |_| try std.testing.expect(try pollBounded(&operation, &io) == null);
+        operation.cancel();
+        operation.cancel();
+        try std.testing.expect(transport.busy);
+        try std.testing.expectError(error.Cancelled, finishBounded(&operation, &io));
+        try std.testing.expectEqualSlices(u8, &(@as([27]u8, @splat(0))), &response);
+        try std.testing.expect(!transport.busy and !transport.failed);
+        try std.testing.expectEqual(@as(u32, 0), io.read(.locality_status));
+        if (handoff < 6) try std.testing.expectEqual(@as(usize, 0), io.buffer_writes);
+        _ = try transport.execute(&io, &command, &response, 2000);
+    }
+}
+
+test "CRB active cancellation waits for TPM cleanup before allowing reuse" {
+    var io = FakeIo.init(.command);
+    var transport = crb.Transport{ .discovery = .{ .physical_base = physical_base } };
+    const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+    var response: [27]u8 = @splat(0xaa);
+    var operation = try transport.begin(&io, &command, &response, 2000);
+    for (0..6) |_| try std.testing.expect(try pollBounded(&operation, &io) == null);
+    try std.testing.expect(io.submitted);
+    operation.cancel();
+    try std.testing.expect(try pollBounded(&operation, &io) == null);
+    try std.testing.expectEqual(@as(usize, 1), io.cancel_count);
+    try std.testing.expectEqual(@as(usize, 0), io.buffer_reads);
+    try std.testing.expectError(error.Busy, transport.begin(&io, &command, &response, 2000));
+    try std.testing.expectError(error.Cancelled, finishBounded(&operation, &io));
+    try std.testing.expect(!transport.busy and !transport.failed);
+    io.fault = .none;
+    _ = try transport.execute(&io, &command, &response, 2000);
+}
+
+test "CRB cleanup faults after cancellation disable the device without exposing a reply" {
+    for ([_]Fault{ .cancel, .idle, .release, .seized, .device }) |fault| {
+        var io = FakeIo.init(if (fault == .cancel) .cancel else .command);
+        var transport = crb.Transport{ .discovery = .{ .physical_base = physical_base } };
+        const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+        var response: [27]u8 = @splat(0xaa);
+        var operation = try transport.begin(&io, &command, &response, 2000);
+        for (0..6) |_| try std.testing.expect(try pollBounded(&operation, &io) == null);
+        io.fault = fault;
+        if (fault == .seized) io.set(.locality_status, 2);
+        if (fault == .device) io.set(.status, 1);
+        operation.cancel();
+        try std.testing.expectError(error.Cancelled, finishBounded(&operation, &io));
+        try std.testing.expect(transport.failed and !transport.busy);
+        try std.testing.expectEqualSlices(u8, &(@as([27]u8, @splat(0))), &response);
+        try std.testing.expectEqual(@as(usize, 0), io.buffer_reads);
+        try std.testing.expectError(error.DeviceFailed, transport.begin(&io, &command, &response, 2000));
+        if (fault == .cancel) {
+            try std.testing.expectEqual(@as(u32, 1), io.read(.start));
+            try std.testing.expectEqual(@as(u32, 1), io.read(.locality_status));
+        }
+    }
+}
+
+test "CRB pending locality cancellation and elapsed command deadlines are bounded" {
+    const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+    var response: [27]u8 = @splat(0xaa);
+    var io = FakeIo.init(.locality);
+    var transport = crb.Transport{ .discovery = .{ .physical_base = physical_base } };
+    var operation = try transport.begin(&io, &command, &response, 2000);
+    try std.testing.expect(try pollBounded(&operation, &io) == null);
+    operation.cancel();
+    try std.testing.expectError(error.Cancelled, finishBounded(&operation, &io));
+    try std.testing.expect(!transport.failed);
+    try std.testing.expectEqual(@as(usize, 0), io.buffer_writes);
+
+    io = FakeIo.init(.command);
+    operation = try transport.begin(&io, &command, &response, 2000);
+    for (0..6) |_| try std.testing.expect(try pollBounded(&operation, &io) == null);
+    io.now = 1999;
+    try std.testing.expect(try pollBounded(&operation, &io) == null);
+    try std.testing.expect(!transport.failed);
+    io.now = 2000;
+    try std.testing.expect(try pollBounded(&operation, &io) == null);
+    try std.testing.expect(transport.failed and transport.busy);
+    // Cancelling after a timeout cannot replace the original failure or retry.
+    operation.cancel();
+    try std.testing.expectError(error.CommandTimeout, finishBounded(&operation, &io));
+    try std.testing.expectEqual(@as(usize, 1), io.buffer_writes);
+    try std.testing.expectEqual(@as(usize, 1), io.cancel_count);
+}
+
+test "CRB command tickets reject stale completion and cancellation without wrapping" {
+    var io = FakeIo.init(.none);
+    var transport = crb.Transport{ .discovery = .{ .physical_base = physical_base } };
+    var slot = crb.CommandSlot(u32){};
+    const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+    var response: [27]u8 = @splat(0xaa);
+    const first = try slot.begin(&transport, &io, &command, &response, 2000);
+    try std.testing.expectError(error.Busy, slot.begin(&transport, &io, &command, &response, 2000));
+    var completed = false;
+    for (0..16) |_| {
+        if (try slot.poll(&io, first) != null) {
+            completed = true;
+            break;
+        }
+    }
+    try std.testing.expect(completed);
+    const second = try slot.begin(&transport, &io, &command, &response, 2000);
+    const accesses = io.reads + io.writes;
+    try std.testing.expectError(error.NoCommand, slot.poll(&io, first));
+    try std.testing.expectError(error.NoCommand, slot.cancel(first));
+    try std.testing.expectEqual(accesses, io.reads + io.writes);
+    try slot.cancel(second);
+    try std.testing.expectError(error.Cancelled, slot.poll(&io, second));
+    try std.testing.expect(slot.operation == null and !transport.busy);
+    try std.testing.expectError(error.NoCommand, slot.poll(&io, second));
+
+    slot.next_ticket = std.math.maxInt(u64);
+    const last = try slot.begin(&transport, &io, &command, &response, 2000);
+    try slot.cancel(last);
+    try std.testing.expectError(error.Cancelled, slot.poll(&io, last));
+    try std.testing.expectError(error.TicketExhausted, slot.begin(&transport, &io, &command, &response, 2000));
+    try std.testing.expect(!transport.busy and !transport.failed);
+}
+
+test "CRB cancellation cannot hide lost locality before command submission" {
+    var io = FakeIo.init(.none);
+    var transport = crb.Transport{ .discovery = .{ .physical_base = physical_base } };
+    const command = crb.propertyCommand(crb.FAMILY_INDICATOR);
+    var response: [27]u8 = @splat(0xaa);
+    var operation = try transport.begin(&io, &command, &response, 2000);
+    for (0..2) |_| try std.testing.expect(try pollBounded(&operation, &io) == null);
+    try std.testing.expectEqual(@as(usize, 0), io.buffer_writes);
+    io.set(.locality_status, 2);
+    operation.cancel();
+    try std.testing.expectError(error.Cancelled, finishBounded(&operation, &io));
+    try std.testing.expect(transport.failed and !transport.busy);
 }

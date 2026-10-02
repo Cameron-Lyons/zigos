@@ -104,6 +104,52 @@ pub const MemoryBar = struct {
     width: MemoryBarWidth,
 };
 
+pub const BarAperture = struct { address: u64 = 0, length: u64 = 0 };
+
+/// Size endpoint BARs only while DMA and address decoding are stopped. The
+/// configuration lock spans the destructive sizing writes and their restoration.
+pub fn probeMemoryBars(dev: PCIDevice) error{ UnsafeBarProbe, InvalidBar }![6]BarAperture {
+    acquireConfigurationLock();
+    defer releaseConfigurationLock();
+    const command: u16 = @truncate(readConfigUnlocked(dev.bus, dev.device, dev.function, 4));
+    if (command & PCI_COMMAND_BUS_MASTER != 0 or
+        (readConfigUnlocked(dev.bus, dev.device, dev.function, 0x0C) >> 16) & 0x7F != 0) return error.UnsafeBarProbe;
+    // Upper status bits are write-one-to-clear, so always write zero there.
+    writeConfigUnlocked(dev.bus, dev.device, dev.function, 4, command & ~@as(u16, 3));
+    defer writeConfigUnlocked(dev.bus, dev.device, dev.function, 4, command);
+    var bars = [_]BarAperture{.{}} ** 6;
+    var index: u16 = 0;
+    while (index < 6) : (index += 1) {
+        const offset: u16 = 0x10 + index * 4;
+        const low = readConfigUnlocked(dev.bus, dev.device, dev.function, offset);
+        if (low & 1 != 0) continue;
+        const wide = low & 6 == 4;
+        if ((low & 6 != 0 and !wide) or (wide and index == 5)) return error.InvalidBar;
+        const high = if (wide) readConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4) else 0;
+        writeConfigUnlocked(dev.bus, dev.device, dev.function, offset, 0xFFFF_FFFF);
+        if (wide) writeConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4, 0xFFFF_FFFF);
+        const mask_low = readConfigUnlocked(dev.bus, dev.device, dev.function, offset) & 0xFFFF_FFF0;
+        const mask_high = if (wide) readConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4) else 0xFFFF_FFFF;
+        writeConfigUnlocked(dev.bus, dev.device, dev.function, offset, low);
+        if (wide) writeConfigUnlocked(dev.bus, dev.device, dev.function, offset + 4, high);
+        if (mask_low != 0 or (wide and mask_high != 0)) {
+            const mask = (@as(u64, mask_high) << 32) | mask_low;
+            const length = std.math.add(u64, ~mask, 1) catch return error.InvalidBar;
+            const address = (@as(u64, high) << 32) | (low & 0xFFFF_FFF0);
+            if (!std.math.isPowerOfTwo(length) or address == 0 or address % length != 0) return error.InvalidBar;
+            _ = std.math.add(u64, address, length - 1) catch return error.InvalidBar;
+            bars[index] = .{ .address = address, .length = length };
+        }
+        if (wide) index += 1;
+    }
+    return bars;
+}
+
+pub fn enableMemoryDecoding(dev: PCIDevice) void {
+    const command = readConfigWord(dev.bus, dev.device, dev.function, PCI_COMMAND_OFFSET);
+    writeConfigWord(dev.bus, dev.device, dev.function, PCI_COMMAND_OFFSET, command | PCI_COMMAND_MEMORY_SPACE);
+}
+
 pub const PCI_CLASS_STORAGE_CONTROLLER: u8 = 0x01;
 pub const PCI_SUBCLASS_NVM: u8 = 0x08;
 pub const PCI_PROG_IF_NVME: u8 = 0x02;

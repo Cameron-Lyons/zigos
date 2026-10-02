@@ -45,33 +45,33 @@ const storage_restart_probe_sectors: u64 = 2;
 const booted_storage_sector_count: u64 = storage_restart_scratch_lba + storage_restart_probe_sectors;
 const booted_storage_image_bytes: usize = @as(usize, @intCast(booted_storage_sector_count)) * storage_volume_mod.sector_size;
 
-const i225_bridge = if (builtin.target.os.tag == .freestanding)
+const network_bridge = if (builtin.target.os.tag == .freestanding)
     struct {
-        extern fn zigosNetworkBootstrapI225Attached() callconv(.c) bool;
-        extern fn zigosNetworkBootstrapI225Send(
+        extern fn zigosNetworkBootstrapAttached() callconv(.c) bool;
+        extern fn zigosNetworkBootstrapSend(
             destination_ptr: [*]const u8,
             payload_ptr: [*]const u8,
             payload_len: usize,
         ) callconv(.c) bool;
-        extern fn zigosNetworkBootstrapI225Receive(
+        extern fn zigosNetworkBootstrapReceive(
             output_ptr: [*]u8,
             output_capacity: usize,
             output_len: *usize,
         ) callconv(.c) u8;
-        extern fn zigosNetworkBootstrapI225WorkPending() callconv(.c) bool;
-        extern fn zigosNetworkBootstrapI225Mac(output: [*]u8) callconv(.c) bool;
+        extern fn zigosNetworkBootstrapWorkPending() callconv(.c) bool;
+        extern fn zigosNetworkBootstrapMac(output: [*]u8) callconv(.c) bool;
 
         pub fn attached() bool {
-            return zigosNetworkBootstrapI225Attached();
+            return zigosNetworkBootstrapAttached();
         }
 
         pub fn send(destination: [6]u8, payload: []const u8) bool {
-            return zigosNetworkBootstrapI225Send(&destination, payload.ptr, payload.len);
+            return zigosNetworkBootstrapSend(&destination, payload.ptr, payload.len);
         }
 
         pub fn receive(output: []u8) bootstrap_driver_port.ReceiveResult {
             var length: usize = 0;
-            const status = zigosNetworkBootstrapI225Receive(output.ptr, output.len, &length);
+            const status = zigosNetworkBootstrapReceive(output.ptr, output.len, &length);
             return .{
                 .status = switch (status) {
                     0 => .empty,
@@ -84,12 +84,12 @@ const i225_bridge = if (builtin.target.os.tag == .freestanding)
         }
 
         pub fn workPending() bool {
-            return zigosNetworkBootstrapI225WorkPending();
+            return zigosNetworkBootstrapWorkPending();
         }
 
         pub fn mac() ?[6]u8 {
             var address: [6]u8 = undefined;
-            if (!zigosNetworkBootstrapI225Mac(&address)) return null;
+            if (!zigosNetworkBootstrapMac(&address)) return null;
             return address;
         }
     }
@@ -118,12 +118,12 @@ else
 
 const BootedNetworkDataPlane = struct {
     fn send(destination: [6]u8, data: []const u8) bool {
-        if (i225_bridge.attached()) return i225_bridge.send(destination, data);
+        if (network_bridge.attached()) return network_bridge.send(destination, data);
         return builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled();
     }
 
     fn receive(output: []u8) bootstrap_driver_port.ReceiveResult {
-        if (i225_bridge.attached()) return i225_bridge.receive(output);
+        if (network_bridge.attached()) return network_bridge.receive(output);
         if (builtin.target.os.tag != .freestanding or device_inventory.modelDeviceInventoryEnabled()) {
             return .{ .status = .empty };
         }
@@ -131,11 +131,11 @@ const BootedNetworkDataPlane = struct {
     }
 
     fn workPending() bool {
-        return i225_bridge.attached() and i225_bridge.workPending();
+        return network_bridge.attached() and network_bridge.workPending();
     }
 
     fn getMacAddress() [6]u8 {
-        if (i225_bridge.mac()) |address| return address;
+        if (network_bridge.mac()) |address| return address;
         return .{ 0x02, 0x5A, 0x47, 0x00, 0x00, 0x01 };
     }
 
@@ -146,10 +146,24 @@ const BootedNetworkDataPlane = struct {
         .getMacAddress = getMacAddress,
     };
 
+    // Retain hardware callbacks after containment. Losing attachment must not
+    // turn a failed real-device send into a successful model-inventory send.
+    const hardware_device = bootstrap_driver_port.NetworkDevice{
+        .send = network_bridge.send,
+        .receive = network_bridge.receive,
+        .workPending = network_bridge.workPending,
+        .getMacAddress = hardwareMacAddress,
+    };
+
+    fn hardwareMacAddress() [6]u8 {
+        return network_bridge.mac() orelse [_]u8{0} ** 6;
+    }
+
     fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
         if (device_id != device_inventory.deviceIdForClass(.network_adapter)) return null;
+        if (network_bridge.attached()) return &hardware_device;
         if (builtin.target.os.tag == .freestanding and
-            !i225_bridge.attached() and
+            !network_bridge.attached() and
             !device_inventory.modelDeviceInventoryEnabled()) return null;
         return &device;
     }
@@ -728,8 +742,8 @@ fn activateDrivers(
     if (!publishBootedDeviceDataPlane(env, state.services.media_service.id, audio_driver, "zigos.system.apps", 58)) return false;
     if (!publishBootedDeviceDataPlane(env, state.services.compositor_service.id, compositor_policy_driver, "zigos.system.display", 59)) return false;
 
-    const network_activation_mode = activateBootstrapDriver(env, state.services.network_service.id, network_driver, 53) orelse return false;
     const storage_activation_mode = activateBootstrapDriver(env, state.services.storage_service.id, storage_driver, 54) orelse return false;
+    const network_activation_mode = activateBootstrapDriver(env, state.services.network_service.id, network_driver, 53) orelse return false;
     _ = activateBootstrapDriver(env, state.services.compositor_service.id, graphics_driver, 55) orelse return false;
     _ = activateBootstrapDriver(env, state.services.compositor_service.id, usb_driver, 56) orelse return false;
     _ = activateBootstrapDriver(env, state.services.compositor_service.id, input_driver, 57) orelse return false;
@@ -828,7 +842,8 @@ pub fn connectClient(
             .budget = .{
                 .cpu_time_ticks = 6_000,
                 .memory_bytes = units.kibibytes(512),
-                .endpoint_slots = 16,
+                // One endpoint per service plus one transient identity grant.
+                .endpoint_slots = service_contract.ordered_service_contracts.len + 1,
                 .shared_memory_bytes = units.kibibytes(64),
                 .background_allowed = false,
             },

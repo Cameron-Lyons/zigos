@@ -7,7 +7,8 @@ PHDRS
 
 SECTIONS
 {
-    . = 1M;
+    /* Leave firmware's low ACPI NVS and runtime allocations intact. */
+    . = 32M;
     __kernel_start = .;
     __kernel_measure_start = .;
 
@@ -80,7 +81,7 @@ SECTIONS
 
     __kernel_end = .;
     /* Keep synchronized with PRECISE_IDENTITY_BYTES in paging64.zig. */
-    __kernel_precise_identity_end = 16M;
+    __kernel_precise_identity_end = 64M;
 
     ASSERT(__kernel_start == __kernel_text_start,
            "unexpected loadable section before kernel text")

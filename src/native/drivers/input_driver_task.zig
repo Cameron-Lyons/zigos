@@ -1,4 +1,5 @@
 const std = @import("std");
+const abi = @import("../core/abi.zig");
 
 pub const BOOT_KEYBOARD_REPORT_BYTES: usize = 8;
 pub const BOOT_KEY_SLOTS: usize = 6;
@@ -32,11 +33,28 @@ pub const EventKind = enum(u8) {
     task_switch_previous,
     show_recovery,
     dismiss_recovery,
+    cursor_left,
+    cursor_right,
+    cursor_up,
+    cursor_down,
+    line_start,
+    line_end,
+    document_start,
+    document_end,
+    delete_forward,
+    select_all,
+    undo,
+    redo,
+    copy,
+    cut,
+    paste,
+    page_up,
+    page_down,
 };
 
 pub const KeyboardEvent = struct {
     kind: EventKind,
-    text: u8 = 0,
+    data: u8 = 0,
 };
 
 pub const Error = error{InvalidBootKeyboardReport};
@@ -58,6 +76,18 @@ pub const DecodedEvents = struct {
 
 pub const Decoder = struct {
     previous_keys: [BOOT_KEY_SLOTS]u8 = [_]u8{0} ** BOOT_KEY_SLOTS,
+
+    // Call before decode, and use only after decode validates the report. A
+    // chord containing any new command key must never acquire repeat authority.
+    pub fn newRepeatUsage(self: *const Decoder, report: [BOOT_KEYBOARD_REPORT_BYTES]u8) ?u8 {
+        var candidate: ?u8 = null;
+        for (report[2..]) |usage| {
+            if (usage == 0 or containsUsage(&self.previous_keys, usage)) continue;
+            _ = repeatEvent(usage, report[0]) orelse return null;
+            candidate = usage;
+        }
+        return candidate;
+    }
 
     pub fn decode(
         self: *Decoder,
@@ -86,6 +116,17 @@ pub const Decoder = struct {
     }
 };
 
+// Repeat is restricted to ordinary document editing. In particular, neither
+// clipboard authorization nor activation/save/recovery can be synthesized.
+pub fn repeatEvent(usage: u8, modifiers: u8) ?KeyboardEvent {
+    if (modifiers & ~SHIFT_MASK != 0) return null;
+    const event = eventForUsage(usage, modifiers) orelse return null;
+    return switch (event.kind) {
+        .text, .backspace, .delete_forward, .cursor_left, .cursor_right, .cursor_up, .cursor_down, .line_start, .line_end, .page_up, .page_down => event,
+        else => null,
+    };
+}
+
 fn validateKeys(keys: []const u8) Error!void {
     for (keys, 0..) |usage, index| {
         if (usage >= 1 and usage <= 3) return error.InvalidBootKeyboardReport;
@@ -109,7 +150,42 @@ fn eventForUsage(usage: u8, modifiers: u8) ?KeyboardEvent {
     const alt = (modifiers & ALT_MASK) != 0;
     const gui = (modifiers & GUI_MASK) != 0;
 
+    // USB HID Keyboard/Keypad page 0x07, usages 0x4A..0x52.
+    // Shift extends the selection; Ctrl+Home/End reaches document boundaries.
+    if (usage >= 0x4A and usage <= 0x52) {
+        if (alt or gui) return null;
+        const kind: EventKind = switch (usage) {
+            0x4A => if (control) .document_start else .line_start,
+            0x4D => if (control) .document_end else .line_end,
+            0x4B => if (control) return null else .page_up,
+            0x4E => if (control) return null else .page_down,
+            0x4C => if (control or shift) return null else .delete_forward,
+            0x4F => if (control) return null else .cursor_right,
+            0x50 => if (control) return null else .cursor_left,
+            0x51 => if (control) return null else .cursor_down,
+            0x52 => if (control) return null else .cursor_up,
+            else => return null,
+        };
+        return .{ .kind = kind, .data = if (shift) abi.INPUT_EXTEND_SELECTION else 0 };
+    }
+
     return switch (usage) {
+        0x06, 0x1B, 0x19 => if (control and !shift and !alt and !gui)
+            .{ .kind = switch (usage) {
+                0x06 => .copy,
+                0x1B => .cut,
+                else => .paste,
+            } }
+        else
+            textEvent(usage, shift, control or alt or gui),
+        0x1D => if (control and !alt and !gui)
+            .{ .kind = if (shift) .redo else .undo }
+        else
+            textEvent(usage, shift, control or alt or gui),
+        0x04 => if (control and !shift and !alt and !gui)
+            .{ .kind = .select_all }
+        else
+            textEvent(usage, shift, control or alt or gui),
         0x29 => .{ .kind = .dismiss_recovery },
         0x2A => .{ .kind = .backspace },
         0x2B => if (alt)
@@ -128,7 +204,7 @@ fn eventForUsage(usage: u8, modifiers: u8) ?KeyboardEvent {
 fn textEvent(usage: u8, shift: bool, shortcut_modifier: bool) ?KeyboardEvent {
     if (shortcut_modifier) return null;
     const text = asciiFromUsage(usage, shift) orelse return null;
-    return .{ .kind = .text, .text = text };
+    return .{ .kind = .text, .data = text };
 }
 
 fn asciiFromUsage(usage: u8, shifted: bool) ?u8 {
@@ -175,10 +251,10 @@ fn expectDecoded(
 
 test "input decoder emits transitions once and accepts a key after release" {
     var decoder = Decoder{};
-    try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{.{ .kind = .text, .text = 'a' }});
+    try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{.{ .kind = .text, .data = 'a' }});
     try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{});
     try expectDecoded(&decoder, testReport(0, &.{}), &.{});
-    try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{.{ .kind = .text, .text = 'a' }});
+    try expectDecoded(&decoder, testReport(0, &.{0x04}), &.{.{ .kind = .text, .data = 'a' }});
 }
 
 test "input decoder maps navigation recovery commit and shifted text" {
@@ -197,11 +273,67 @@ test "input decoder maps navigation recovery commit and shifted text" {
     try expectDecoded(&decoder, testReport(0, &.{}), &.{});
 
     const expected = [_]KeyboardEvent{
-        .{ .kind = .text, .text = 'A' },
-        .{ .kind = .text, .text = '!' },
-        .{ .kind = .text, .text = '?' },
+        .{ .kind = .text, .data = 'A' },
+        .{ .kind = .text, .data = '!' },
+        .{ .kind = .text, .data = '?' },
     };
     try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{ 0x04, 0x1E, 0x38 }), &expected);
+}
+
+test "input decoder maps cursor editing keys and isolates unsupported modifiers" {
+    const usages = [_]u8{ 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52 };
+    const kinds = [_]EventKind{ .line_start, .page_up, .delete_forward, .line_end, .page_down, .cursor_right, .cursor_left, .cursor_down, .cursor_up };
+    for (usages, kinds) |usage, kind| {
+        var decoder = Decoder{};
+        try expectDecoded(&decoder, testReport(0, &.{usage}), &.{.{ .kind = kind }});
+        try expectDecoded(&decoder, testReport(0, &.{usage}), &.{});
+        for ([_]u8{ ALT_MASK, GUI_MASK }) |modifier| {
+            try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+            try expectDecoded(&decoder, testReport(modifier, &.{usage}), &.{});
+        }
+    }
+    var decoder = Decoder{};
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4A, 0x4D }), &.{ .{ .kind = .document_start }, .{ .kind = .document_end } });
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4C, 0x4F, 0x50, 0x51, 0x52 }), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{ 0x4B, 0x4E }), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{ 0x4B, 0x4E }), &.{
+        .{ .kind = .page_up, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .page_down, .data = abi.INPUT_EXTEND_SELECTION },
+    });
+}
+
+test "input decoder carries Shift selection and select all without growing event batches" {
+    var decoder = Decoder{};
+    try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{ 0x4A, 0x4D, 0x4F, 0x50, 0x51, 0x52 }), &.{
+        .{ .kind = .line_start, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .line_end, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .cursor_right, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .cursor_left, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .cursor_down, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .cursor_up, .data = abi.INPUT_EXTEND_SELECTION },
+    });
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK | SHIFT_MASK, &.{ 0x4A, 0x4D }), &.{
+        .{ .kind = .document_start, .data = abi.INPUT_EXTEND_SELECTION },
+        .{ .kind = .document_end, .data = abi.INPUT_EXTEND_SELECTION },
+    });
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{0x04}), &.{.{ .kind = .select_all }});
+    try expectDecoded(&decoder, testReport(SHIFT_MASK, &.{0x4C}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK | ALT_MASK, &.{0x04}), &.{});
+    try std.testing.expectEqual(@as(usize, 2), @sizeOf(KeyboardEvent));
+    try std.testing.expectEqual(@as(usize, 13), @sizeOf(DecodedEvents));
+}
+
+test "input decoder maps Ctrl Z and Ctrl Shift Z to distinct history operations" {
+    var decoder = Decoder{};
+    try expectDecoded(&decoder, testReport(CONTROL_MASK, &.{0x1D}), &.{.{ .kind = .undo }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK | SHIFT_MASK, &.{0x1D}), &.{.{ .kind = .redo }});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(CONTROL_MASK | ALT_MASK, &.{0x1D}), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{}), &.{});
+    try expectDecoded(&decoder, testReport(0, &.{0x1D}), &.{.{ .kind = .text, .data = 'z' }});
 }
 
 test "input decoder rejects malformed reports and bounds decoded batches" {
@@ -219,12 +351,12 @@ test "input decoder rejects malformed reports and bounds decoded batches" {
     );
 
     const expected = [_]KeyboardEvent{
-        .{ .kind = .text, .text = 'a' },
-        .{ .kind = .text, .text = 'b' },
-        .{ .kind = .text, .text = 'c' },
-        .{ .kind = .text, .text = 'd' },
-        .{ .kind = .text, .text = 'e' },
-        .{ .kind = .text, .text = 'f' },
+        .{ .kind = .text, .data = 'a' },
+        .{ .kind = .text, .data = 'b' },
+        .{ .kind = .text, .data = 'c' },
+        .{ .kind = .text, .data = 'd' },
+        .{ .kind = .text, .data = 'e' },
+        .{ .kind = .text, .data = 'f' },
     };
     try expectDecoded(&decoder, testReport(0, &.{ 0x04, 0x05, 0x06, 0x07, 0x08, 0x09 }), &expected);
     try std.testing.expect(BATCHED_DECODER_OUTPUT);

@@ -31,6 +31,31 @@ fn noFocusedInputTestProof() ?xhci.InputProof {
     return null;
 }
 
+test "session manager authentication deadlines wake and revoke without keyboard activity" {
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
+    var entry = @import("../platform/trusted_auth_entry.zig").Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 20 };
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.* = .init();
+    defer manager.reset();
+    manager.bindTrustedAuthentication(&entry, 1);
+    try std.testing.expect(manager.nextServiceWake() == null);
+    entry.handle(.{ .kind = .text, .data = '7' }, 2);
+    try std.testing.expectEqual(@as(?u64, 22), manager.nextServiceWake());
+    manager.serviceAuthenticationClock(22);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
+    try std.testing.expect(manager.nextServiceWake() == null);
+    for (backend.expected) |byte| entry.handle(.{ .kind = .text, .data = byte }, 23);
+    entry.handle(.{ .kind = .activate }, 24);
+    _ = manager.servicePendingInputWork(24);
+    try std.testing.expect(backend.active);
+    try std.testing.expectEqual(@as(?u64, 124), manager.nextServiceWake());
+    manager.serviceAuthenticationClock(124);
+    try std.testing.expect(!backend.active and entry.capturing());
+    try std.testing.expect(manager.inputRouterPtr().drain_until_neutral);
+    try std.testing.expect(manager.nextServiceWake() == null);
+}
+
 test "boot assembles core services without running explicit scenarios" {
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();
@@ -541,4 +566,162 @@ test "boot is idempotent once initialized" {
     try std.testing.expectEqual(tasks_after_first_boot, session_manager.testing.countTasks());
     try std.testing.expectEqual(bindings_after_first_boot, session_manager.testing.serviceDirectoryPtr().bindingCount());
     try std.testing.expectEqual(diagnostics_after_first_boot, session_manager.testing.supervisorPtr().diagnostic_count);
+}
+
+fn prepareNotesForLaunchTest(manager: *session_manager.SessionManager) !*task_runtime.TaskRecord {
+    return @import("../task/userspace_launch.zig").prepareRegisteredDirect(manager.userspaceCatalogPtr(), manager.runtimePtr(), "app.notes", .{
+        .owner = .{ .kind = .app, .serial = 0xD0C4 },
+        .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .ui_surface_id = 0xD0C4,
+    });
+}
+
+fn rejectedDocumentRequest(task: *const task_runtime.TaskRecord) @import("document_sessions.zig").OpenRequest {
+    return .{
+        .authority = .{ .task_id = task.id, .principal = task.owner, .capability_id = 0, .now_ticks = 0 },
+        .client_bootstrap_capability_id = 0,
+        .server_bootstrap_capability_id = 0,
+        .workspace_id = 0,
+        .path = "documents/notes.md",
+        .signer = .{},
+    };
+}
+
+test "prepared document task waits for activation and cancellation retires grants and windows" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const task = try prepareNotesForLaunchTest(manager);
+    const task_id = task.id;
+    const address_space_id = task.address_space_id;
+    const capabilities = manager.capabilityTablePtr();
+    const grants_before = capabilities.activeCount();
+    const windows_before = manager.compositorSessionPtr().window_count;
+    const granted = try capabilities.mintBootRoot(.{
+        .holder = task.owner,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .task, .id = task_id },
+        .rights = .{ .task = .{ .input_recv = true } },
+        .scope = .{ .task_id = task_id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    try manager.runtimePtr().grantCapability(task_id, granted.id);
+    _ = try manager.compositorSessionPtr().openTaskView(task, "Pending review");
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+    _ = manager.userspaceSchedulerPtr().runNext(1);
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+    try manager.cancelPreparedDocumentTask(task_id, 2);
+    try std.testing.expectEqual(task_runtime.TaskState.terminated, task.state);
+    try std.testing.expect(manager.runtimePtr().findAddressSpaceConst(address_space_id) == null);
+    try std.testing.expectEqual(grants_before, capabilities.activeCount());
+    try std.testing.expectEqual(windows_before, manager.compositorSessionPtr().window_count);
+    try std.testing.expectError(error.TaskNotPrepared, manager.cancelPreparedDocumentTask(task_id, 3));
+}
+
+test "document activation denial retires preparation but never cancels a scheduled editor" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const task = try prepareNotesForLaunchTest(manager);
+    const task_id = task.id;
+    const address_space_id = task.address_space_id;
+    try std.testing.expectError(error.PermissionDenied, manager.activateDocumentTask(rejectedDocumentRequest(task), 0));
+    try std.testing.expectEqual(task_runtime.TaskState.terminated, task.state);
+    try std.testing.expect(manager.runtimePtr().findAddressSpaceConst(address_space_id) == null);
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+
+    const active = try prepareNotesForLaunchTest(manager);
+    try std.testing.expect(manager.userspaceSchedulerPtr().registerTask(active.id));
+    try std.testing.expectError(error.TaskAlreadyScheduled, manager.activateDocumentTask(rejectedDocumentRequest(active), 0));
+    try std.testing.expectError(error.TaskAlreadyScheduled, manager.cancelPreparedDocumentTask(active.id, 0));
+    try std.testing.expectEqual(task_runtime.TaskState.active, active.state);
+    try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(active.id) != null);
+}
+
+fn repeatContinuityEpoch() ?u64 {
+    return 1;
+}
+
+test "keyboard repeat wakes an idle session and cannot renew revoked or suspended task authority" {
+    for (0..3) |boundary| {
+        const manager = try std.testing.allocator.create(session_manager.SessionManager);
+        defer std.testing.allocator.destroy(manager);
+        manager.* = .init();
+        defer manager.reset();
+        manager.boot();
+        const task = try manager.runtimePtr().createTask(.{
+            .owner = .{ .kind = .app, .serial = 9 },
+            .component_class = .app_component,
+            .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 64 * 1024, .endpoint_slots = 4, .shared_memory_bytes = 4096, .background_allowed = false },
+            .ui_surface_id = 987,
+            .local_only = true,
+        });
+        _ = try manager.compositorSessionPtr().openDocumentView(task, 7, "repeat.md");
+        manager.bindHardwareInput(.{ .poll_report = pollFocusedInputTestReport, .input_proof = noFocusedInputTestProof, .continuity_epoch = repeatContinuityEpoch });
+        focused_input_test_report = .{ .sequence = 1, .port_id = 1, .slot_id = 1, .endpoint_id = 3, .bytes = .{ 0, 0, 0x04, 0, 0, 0, 0, 0 } };
+        try std.testing.expectEqual(@as(usize, 1), manager.servicePendingInputWork(100));
+        const first = manager.inputRouterPtr().pollAbiForTask(task.id).?;
+        try std.testing.expectEqual(@as(?u64, 140), manager.nextServiceWake());
+        try std.testing.expectEqual(@as(usize, 1), manager.servicePendingInputWork(140));
+        const repeated = manager.inputRouterPtr().pollAbiForTask(task.id).?;
+        try std.testing.expect(repeated.sequence > first.sequence);
+        const grant = manager.focusedInputCapabilityForTask(task.id, 140).?;
+        const grants_before = task.capability_count;
+        if (boundary != 0) {
+            try std.testing.expect(try manager.runtimePtr().suspendTask(task.id, 141));
+            if (boundary == 2) try std.testing.expect(try manager.runtimePtr().resumeTask(task.id, 142));
+        } else try manager.capabilityTablePtr().revokeGrant(grant);
+        try std.testing.expectEqual(@as(usize, 0), manager.servicePendingInputWork(144));
+        try std.testing.expectEqual(grants_before, task.capability_count);
+        try std.testing.expect(manager.inputRouterPtr().pollAbiForTask(task.id) == null);
+        try std.testing.expect(manager.nextServiceWake() == null);
+    }
+}
+
+test "session manager setup deadlines erase private state without input activity" {
+    var backend = @import("../../tests/fixtures/setup_entry.zig").Fixture{};
+    var entry = @import("../platform/trusted_setup_entry.zig").Entry{ .backend = backend.backend(), .input_timeout_ticks = 20 };
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.* = .init();
+    defer manager.reset();
+    manager.bindTrustedSetup(&entry, 1);
+    entry.handle(.{ .kind = .text, .data = '7' }, 2);
+    try std.testing.expectEqual(@as(?u64, 22), manager.nextServiceWake());
+    manager.serviceAuthenticationClock(22);
+    try std.testing.expect(entry.view.status == .choose_pin and entry.view.notice == .timeout);
+    try std.testing.expect(std.mem.allEqual(u8, &entry.value, 0));
+    try std.testing.expect(manager.nextServiceWake() == null and manager.inputRouterPtr().drain_until_neutral);
+}
+
+test "session manager identity owner boot failure drains discovery before releasing native state" {
+    const cooperative = @import("../task/cooperative_worker.zig");
+    const Io = struct {
+        drained: bool = false,
+        pub fn random(_: *@This(), _: []u8) !void {
+            return error.UnexpectedEntropy;
+        }
+        pub fn execute(self: *@This(), command: []const u8, _: []u8, _: u32) ![]u8 {
+            const first = command[0];
+            cooperative.current().?.yield();
+            try std.testing.expect(first == command[0] and cooperative.current().?.cancel_requested);
+            self.drained = true;
+            return error.Cancelled;
+        }
+    };
+    var io = Io{};
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.initializeAllocated();
+    defer manager.reset();
+    manager.boot();
+    const owner = try manager.attachIdentityOwner(&io, .{ .owner = .{ .kind = .user, .serial = 1 }, .parent_handle = 0x8100_1234, .boot_index = 0x0180_1234, .anchor_index = 0x0180_1235, .boot_instance = @splat(1), .input_timeout_ticks = 20, .operation_timeout_ticks = 20, .lifetime_ticks = 100 }, 1);
+    try std.testing.expectEqual(@as(?u64, 1), manager.nextServiceWake());
+    _ = manager.servicePendingInputWork(1);
+    manager.serviceAuthenticationClock(1);
+    try std.testing.expect(owner.setup.busy() and !io.drained);
+    manager.failBoot();
+    try std.testing.expect(io.drained and manager.identity_owner == null and manager.inputRouterPtr().trusted_entry == null);
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const durable_identity_service = @import("../../native/services/durable_identity_service.zig");
 
 const agent_delegation_service = @import("../../native/services/agent_delegation_service.zig");
 const attention_broker_service = @import("../../native/services/attention_broker_service.zig");
@@ -19,6 +20,24 @@ const typed_component_abi = @import("../../native/services/typed_component_abi.z
 const userspace_service_ipc = @import("../../native/services/userspace_service_ipc.zig");
 
 test "service host tests import native service modules" {
+    std.testing.refAllDecls(@import("../../native/services/identity_enrollment.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_provisioning.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_recovery_record.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_setup_worker.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_owner.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_policy.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_channel.zig"));
+    _ = @import("../../native/services/identity_channel_test.zig");
+    std.testing.refAllDecls(@import("../../userspace/identity_protocol.zig"));
+    std.testing.refAllDecls(@import("../../userspace/identity_assertion.zig"));
+    std.testing.refAllDecls(@import("../../native/platform/trusted_setup_entry.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_recovery.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_session.zig"));
+    std.testing.refAllDecls(@import("../../native/services/identity_authenticator.zig"));
+    _ = @import("../../native/services/peer_attestation_worker_test.zig");
+    _ = @import("../../native/services/public_enrollment_test.zig");
+    _ = @import("../../native/services/durable_enrollment_test.zig");
+    std.testing.refAllDecls(durable_identity_service);
     std.testing.refAllDecls(component_abi_schema);
     std.testing.refAllDecls(agent_delegation_service);
     std.testing.refAllDecls(attention_broker_service);

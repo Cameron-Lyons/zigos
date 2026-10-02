@@ -73,7 +73,14 @@ pub const Fixture = struct {
         allocator.destroy(self);
     }
 
-    fn request(self: *Fixture, payload: []const u8) document_save.Request {
+    // Tests with multiple independent images select the device before each
+    // serialized storage operation; the modeled driver has one active disk.
+    pub fn activate(self: *Fixture) void {
+        active = self;
+        storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush });
+    }
+
+    fn request(self: *Fixture, payload: []const u8) document_save.VerificationRequest {
         return .{ .workspace_id = self.workspace_id, .path = path, .expected_version_id = self.original_version_id, .payload = payload, .signer = signer, .tick = 10 };
     }
 
@@ -121,7 +128,7 @@ test "document save acknowledges one durable object and path checkpoint and reop
     defer fixture.deinit();
     var editor = document_save.Session{};
     const generation = fixture.checkpoint.last_checkpoint_generation;
-    const saved = try editor.save(&fixture.service, fixture.request("saved draft"));
+    const saved = try editor.saveForVerification(&fixture.service, fixture.request("saved draft"));
     try std.testing.expectEqual(generation + 1, saved.checkpoint_generation);
     try std.testing.expectEqual(fixture.original_version_id, saved.previous_version_id);
     try std.testing.expectEqual(@as(usize, 2), fixture.service.versionCount());
@@ -140,14 +147,14 @@ test "failed document writes retain one pending version across retries" {
     var editor = document_save.Session{};
     fixture.fail_writes = true;
     for (0..4) |_| {
-        try std.testing.expectError(error.CorruptImage, editor.save(&fixture.service, fixture.request("pending draft")));
+        try std.testing.expectError(error.CorruptImage, editor.saveForVerification(&fixture.service, fixture.request("pending draft")));
         try std.testing.expectEqual(@as(usize, 2), fixture.service.versionCount());
         try std.testing.expect(editor.pending != null);
         try std.testing.expect(fixture.checkpoint.dirty);
     }
     const pending_version = editor.pending.?.version_id;
     fixture.fail_writes = false;
-    const saved = try editor.save(&fixture.service, fixture.request("pending draft"));
+    const saved = try editor.saveForVerification(&fixture.service, fixture.request("pending draft"));
     try std.testing.expectEqual(pending_version, saved.version_id);
     try std.testing.expectEqual(@as(usize, 2), fixture.service.versionCount());
     fixture.crash();
@@ -162,7 +169,7 @@ test "failed flush is not acknowledged and volatile draft disappears after power
         defer fixture.deinit();
         var editor = document_save.Session{};
         fixture.fail_flush_from = fixture.flushes + barrier;
-        try std.testing.expectError(error.DurabilityBarrierFailed, editor.save(&fixture.service, fixture.request("volatile draft")));
+        try std.testing.expectError(error.DurabilityBarrierFailed, editor.saveForVerification(&fixture.service, fixture.request("volatile draft")));
         try std.testing.expect(fixture.checkpoint.dirty);
         fixture.crash();
         try std.testing.expect(fixture.service.loaded_from_volume);
@@ -176,11 +183,11 @@ test "failed root commit barrier is retried before a document save is acknowledg
     defer fixture.deinit();
     var editor = document_save.Session{};
     fixture.fail_flush_from = fixture.flushes + 2;
-    try std.testing.expectError(error.DurabilityBarrierFailed, editor.save(&fixture.service, fixture.request("pending root")));
+    try std.testing.expectError(error.DurabilityBarrierFailed, editor.saveForVerification(&fixture.service, fixture.request("pending root")));
     const pending_version = editor.pending.?.version_id;
     const failed_flushes = fixture.flushes;
     fixture.fail_flush_from = null;
-    const saved = try editor.save(&fixture.service, fixture.request("pending root"));
+    const saved = try editor.saveForVerification(&fixture.service, fixture.request("pending root"));
     try std.testing.expect(fixture.flushes > failed_flushes);
     try std.testing.expectEqual(pending_version, saved.version_id);
     try std.testing.expectEqual(@as(usize, 2), fixture.service.versionCount());
@@ -193,12 +200,12 @@ test "save retry flushes the original version before accepting a newer draft" {
     defer fixture.deinit();
     var editor = document_save.Session{};
     fixture.fail_flushes = true;
-    try std.testing.expectError(error.DurabilityBarrierFailed, editor.save(&fixture.service, fixture.request("first draft")));
+    try std.testing.expectError(error.DurabilityBarrierFailed, editor.saveForVerification(&fixture.service, fixture.request("first draft")));
     const pending_version = editor.pending.?.version_id;
-    try std.testing.expectError(error.DurabilityBarrierFailed, editor.save(&fixture.service, fixture.request("second draft")));
+    try std.testing.expectError(error.DurabilityBarrierFailed, editor.saveForVerification(&fixture.service, fixture.request("second draft")));
     try std.testing.expectEqual(@as(usize, 2), fixture.service.versionCount());
     fixture.fail_flushes = false;
-    const saved = try editor.save(&fixture.service, fixture.request("second draft"));
+    const saved = try editor.saveForVerification(&fixture.service, fixture.request("second draft"));
     try std.testing.expectEqual(pending_version, saved.previous_version_id);
     try std.testing.expectEqual(@as(usize, 3), fixture.service.versionCount());
     fixture.crash();
@@ -211,15 +218,15 @@ test "stale editor and pending save cannot overwrite another editor" {
     var first = document_save.Session{};
     var second = document_save.Session{};
     fixture.fail_writes = true;
-    try std.testing.expectError(error.CorruptImage, first.save(&fixture.service, fixture.request("first")));
+    try std.testing.expectError(error.CorruptImage, first.saveForVerification(&fixture.service, fixture.request("first")));
     fixture.fail_writes = false;
     var next = fixture.request("second");
     next.expected_version_id = first.pending.?.version_id;
-    _ = try second.save(&fixture.service, next);
+    _ = try second.saveForVerification(&fixture.service, next);
     const count = fixture.service.versionCount();
     const writes = fixture.writes;
-    try std.testing.expectError(error.DocumentChanged, first.save(&fixture.service, fixture.request("first")));
-    try std.testing.expectError(error.DocumentChanged, second.save(&fixture.service, fixture.request("stale")));
+    try std.testing.expectError(error.DocumentChanged, first.saveForVerification(&fixture.service, fixture.request("first")));
+    try std.testing.expectError(error.DocumentChanged, second.saveForVerification(&fixture.service, fixture.request("stale")));
     try std.testing.expectEqual(count, fixture.service.versionCount());
     try std.testing.expectEqual(writes, fixture.writes);
     try std.testing.expectEqualStrings("second", try fixture.text());
@@ -230,10 +237,10 @@ test "explicit document save rejects absent devices and incomplete checkpoints" 
     defer fixture.deinit();
     var editor = document_save.Session{};
     const count = fixture.service.versionCount();
-    try std.testing.expectError(error.NoBackingDevice, editor.save(&fixture.service, fixture.request("no device")));
+    try std.testing.expectError(error.NoBackingDevice, editor.saveForVerification(&fixture.service, fixture.request("no device")));
     try std.testing.expectError(error.NoBackingDevice, fixture.service.checkpointDurable());
     try fixture.service.beginTransaction(fixture.workspace_id);
-    try std.testing.expectError(error.CheckpointDeferred, editor.save(&fixture.service, fixture.request("transaction")));
+    try std.testing.expectError(error.CheckpointDeferred, editor.saveForVerification(&fixture.service, fixture.request("transaction")));
     try fixture.service.abortTransaction(fixture.workspace_id);
     fixture.service.beginCheckpointBatch();
     try std.testing.expectError(error.CheckpointDeferred, fixture.service.checkpointDurable());
@@ -257,7 +264,7 @@ test "saving a pinned workspace version preserves other workspace pointers" {
     try fixture.service.stagePut(other.id, path, newer.object_id, newer.version_id, .document);
     _ = try fixture.service.commit(other.id, 4);
     var editor = document_save.Session{};
-    const saved = try editor.save(&fixture.service, fixture.request("pinned draft"));
+    const saved = try editor.saveForVerification(&fixture.service, fixture.request("pinned draft"));
     try std.testing.expectEqual(fixture.original_version_id, saved.previous_version_id);
     try std.testing.expectEqual(newer.version_id, fixture.service.version(saved.version_id).?.previousVersionId());
     try std.testing.expectEqual(newer.version_id, (try fixture.service.resolve(other.id, path)).version_id);
@@ -272,7 +279,7 @@ test "an empty document and explicit save with automatic checkpoints disabled ar
     defer fixture.deinit();
     var editor = document_save.Session{};
     fixture.service.checkpoint_enabled = false;
-    _ = try editor.save(&fixture.service, fixture.request(""));
+    _ = try editor.saveForVerification(&fixture.service, fixture.request(""));
     fixture.crash();
     try std.testing.expectEqualStrings("", try fixture.text());
 }

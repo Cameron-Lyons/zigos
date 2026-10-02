@@ -12,6 +12,9 @@ const manifest = @import("../policy/manifest.zig");
 const compositor_display = @import("../platform/compositor_display.zig");
 const compositor_session = @import("../platform/compositor_session.zig");
 const input_router_mod = @import("../platform/input_router.zig");
+const trusted_auth = @import("../platform/trusted_auth_entry.zig");
+const identity_owner_mod = @import("../services/identity_owner.zig");
+var identity_hardware = identity_owner_mod.HardwareIo{};
 const event_ledger = @import("../platform/event_ledger.zig");
 const native_service_registry = @import("../services/service_registry.zig");
 const native_util = @import("../core/util.zig");
@@ -29,6 +32,13 @@ const storage_durability_qemu = @import("../storage/storage_durability_qemu.zig"
 const storage_service_mod = @import("../storage/storage_service.zig");
 const supervisor_mod = @import("supervisor.zig");
 const sync_service_mod = @import("../sync/sync_service.zig");
+const peer_admission = @import("../sync/peer_admission.zig");
+const peer_handshake = @import("../sync/peer_handshake.zig");
+const peer_connections = @import("../sync/peer_connections.zig");
+const peer_channel = @import("../sync/peer_channel.zig");
+const tpm_attestation = @import("../platform/tpm_attestation.zig");
+const peer_quote = @import("../services/peer_attestation_worker.zig");
+const network_driver = @import("../drivers/network_driver_task.zig");
 const session_service_bootstrap = @import("session_service_bootstrap.zig");
 const background_dispatch = @import("../task/background_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
@@ -38,6 +48,9 @@ const trust_boot = @import("trust_boot.zig");
 const userspace_executor = @import("../task/userspace_executor.zig");
 const userspace_launch = @import("../task/userspace_launch.zig");
 const document_sessions = @import("document_sessions.zig");
+const document_launcher = @import("document_launcher.zig");
+const clipboard_sessions = @import("clipboard_sessions.zig");
+const desktop_display = @import("../platform/desktop_display.zig");
 const userspace_mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const userspace_loader = @import("../task/userspace_loader.zig");
 const userspace_scheduler = @import("../task/userspace_scheduler.zig");
@@ -110,8 +123,19 @@ pub const SessionManager = struct {
     native_store: native_store_mount.NativeStoreMount = native_store_mount.NativeStoreMount.init(),
     recovery_context: session_contexts.RecoveryContext = session_contexts.RecoveryContext.init(),
     input_router: input_router_mod.Router = .{},
+    input_repeat_lifecycle: u64 = 0,
+    input_repeat_capability: u64 = 0,
     surface_authority_scanned_lifecycle_generation: u64 = 0,
     documents: document_sessions.Sessions = .{},
+    clipboard: clipboard_sessions.Sessions = .{},
+    launcher: document_launcher.Launcher = .{},
+    peers: peer_admission.Sessions = .{},
+    peer_handshakes: peer_handshake.Handshakes = .{},
+    peer_connections: peer_connections.Connections = .{},
+    peer_dispatch_tick: u64 = 0,
+    peer_dispatch_pool: u2 = 0,
+    peer_quote_worker: ?peer_quote.Interface = null,
+    identity_owner: ?identity_owner_mod.Interface = null,
 
     pub fn init() SessionManager {
         return initial_session_manager;
@@ -127,6 +151,15 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.clearPeerAttestationWorker();
+        // Revoke and drain authentication before any borrowed service is freed.
+        self.clearIdentityOwner();
+        self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
+        const retired_peer_handles = self.peer_connections;
+        self.peer_handshakes.deinit();
+        self.peers.deinit();
+        self.launcher.deinit(self, 0);
+        self.clipboard.deinit(0);
         self.documents.deinit(0);
         self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
@@ -146,6 +179,7 @@ pub const SessionManager = struct {
         self.service_graph_builder.releasePackageService();
         self.native_store.resetPersistent();
         self.initializeAllocated();
+        self.peer_connections = retired_peer_handles;
         bootstrap_driver_port.reset();
         session_service_bootstrap.resetBootedDataPlanes();
         if (self.ensureConstructed()) self.runtime_context.resetScheduler();
@@ -272,36 +306,93 @@ pub const SessionManager = struct {
 
     pub fn runUserspaceScheduler(self: *SessionManager, now_ticks: u64) bool {
         if (!self.runtime_context.constructed) return false;
+        const peer_work = self.servicePeerWork(now_ticks);
+        const quote_work = self.servicePeerAttestationWork(now_ticks);
         const runtime = self.runtime_context.taskRuntime().?;
-        _ = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
+        const pruned = self.recovery_context.review_compositor_session.pruneSurfacePresentations(runtime);
         if (runtime.taskLifecycleGeneration() != self.surface_authority_scanned_lifecycle_generation) {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
+        const copied = self.clipboard.service(self, now_ticks);
         const serviced = self.documents.service(now_ticks);
+        const launched = self.launcher.service(self, now_ticks);
+        const identity_work = if (self.identity_owner) |owner| owner.service_requests(owner.context, now_ticks) else false;
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
-        return serviced or dispatched;
+        if (copied or serviced or launched or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
+        return copied or serviced or launched or dispatched or identity_work or peer_work != 0 or quote_work;
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
         if (!self.runtime_context.constructed) return false;
-        return self.documents.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
+        if (self.identity_owner) |owner| if (owner.requests_ready(owner.context)) return true;
+        return self.peerQuoteReady() or self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(self.peer_dispatch_tick) or self.peer_handshakes.hasReadyWork(self.peer_dispatch_tick) or self.peers.hasReadyWork(self.peer_dispatch_tick) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork() or self.runtime_context.userspaceSchedulerConst().?.hasReadyTasks();
     }
 
-    // The opener supplies existing task-scoped storage and transport authority.
-    // Bind before the app's first dispatch; reopening requires a fresh task.
-    pub fn openDocumentChannel(self: *SessionManager, request: document_sessions.OpenRequest, now_ticks: u64) !userspace_mailbox.DocumentBinding {
+    pub const DocumentTask = struct {
+        task_id: u64,
+        window_id: u64,
+        binding: userspace_mailbox.DocumentBinding,
+    };
+
+    pub fn offerDocumentPicker(self: *SessionManager, request: document_launcher.Request, now_ticks: u64) !u64 {
+        const task = try self.requirePreparedDocumentTask(request.authority.task_id, false);
+        if (!task.owner.eql(request.authority.principal) or !task.hasCapability(request.authority.capability_id)) return error.PermissionDenied;
+        return self.launcher.offer(self, request, now_ticks);
+    }
+
+    // A prepared task has an identity for permission review, but no scheduler
+    // slot. Existing approved grants must be supplied by the caller. Publish to
+    // the scheduler only after the document, window, and UI authority are ready.
+    pub fn activateDocumentTask(self: *SessionManager, request: document_sessions.OpenRequest, now_ticks: u64) !DocumentTask {
+        const task = try self.requirePreparedDocumentTask(request.authority.task_id, false);
+        const previous_window_id = self.compositorSessionPtr().active_window_id;
+        errdefer {
+            self.retirePreparedDocumentTask(task, now_ticks);
+            if (previous_window_id != 0) {
+                _ = self.compositorSessionPtr().switchView(previous_window_id) catch {};
+            }
+        }
+        if ((task.ui_surface_id orelse 0) == 0) return error.SurfaceRequired;
         const port = self.kernelPort() orelse return error.KernelUnavailable;
         const binding = try self.documents.open(port, self.storageServicePtr(), request, now_ticks);
-        errdefer self.documents.closeTask(request.authority.task_id, now_ticks);
+        const window = try self.compositorSessionPtr().openDocumentView(task, request.workspace_id, request.path);
+        const clipboard = try self.clipboard.open(self, task.id, now_ticks);
+        _ = self.ensureFocusedInputCapabilityForResolvedTask(task, self.capabilityTablePtr(), now_ticks) orelse return error.InputAuthorityUnavailable;
+        _ = self.ensureSurfacePresentationCapabilityForResolvedTask(task, now_ticks) orelse return error.SurfaceAuthorityUnavailable;
         if (!self.runtime_context.userspace_executor.bindInitialDocument(
             self.userspaceCatalogPtr(),
             self.runtimePtr(),
             self.capabilityTablePtr(),
             request.authority.task_id,
             binding,
+            clipboard,
             now_ticks,
         )) return error.DocumentLaunchUnavailable;
-        return binding;
+        if (!self.userspaceSchedulerPtr().registerTask(task.id)) return error.SchedulerUnavailable;
+        return .{ .task_id = task.id, .window_id = window.id, .binding = binding };
+    }
+
+    pub fn cancelPreparedDocumentTask(self: *SessionManager, task_id: u64, now_ticks: u64) !void {
+        const task = try self.requirePreparedDocumentTask(task_id, true);
+        self.retirePreparedDocumentTask(task, now_ticks);
+    }
+
+    fn requirePreparedDocumentTask(self: *SessionManager, task_id: u64, allow_suspended: bool) !*task_runtime.TaskRecord {
+        const task = self.runtimePtr().find(task_id) orelse return error.TaskNotFound;
+        if ((task.state != .active and !(allow_suspended and task.state == .suspended)) or
+            !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return error.TaskNotPrepared;
+        if (!std.mem.eql(u8, task.launchBundleIdSlice(), "app.notes")) return error.UnsupportedDocumentEditor;
+        if (self.userspaceSchedulerPtr().taskDispatchStats(task_id) != null) return error.TaskAlreadyScheduled;
+        return task;
+    }
+
+    fn retirePreparedDocumentTask(self: *SessionManager, task: *task_runtime.TaskRecord, now_ticks: u64) void {
+        const task_id = task.id;
+        self.clipboard.closeTask(task_id, now_ticks);
+        self.documents.closeTask(task_id, now_ticks);
+        _ = self.compositorSessionPtr().closeWindowsForTask(task_id);
+        _ = self.input_router.dropForTask(task_id);
+        _ = self.runtimePtr().terminateResolvedTask(task, now_ticks);
     }
 
     pub fn servicePendingNetworkWork(self: *SessionManager, now_ticks: u64) usize {
@@ -311,6 +402,165 @@ pub const SessionManager = struct {
             _ = self.wakeUserspaceTask(task_id, now_ticks);
         }
         return service.frames_queued;
+    }
+
+    pub fn openPeerConnection(self: *SessionManager, request: peer_connections.Request) !peer_connections.Handle {
+        if (!self.runtime_context.constructed or request.capabilities != self.capabilityTablePtr() or request.store != self.storageServicePtr() or
+            !self.peerOwnersActive(request.service, request.store)) return error.PeerAdmissionDenied;
+        const handle = try self.peer_connections.open(&self.peer_handshakes, &self.peers, request);
+        network_driver.reserveReceivePrefix(peer_channel.MAGIC.*);
+        self.peer_dispatch_tick = request.authority.now_ticks;
+        return handle;
+    }
+
+    pub fn peerConnectionStatus(self: *const SessionManager, handle: peer_connections.Handle) ?peer_connections.Status {
+        return self.peer_connections.status(handle);
+    }
+
+    pub fn releasePeerConnection(self: *SessionManager, handle: peer_connections.Handle) !void {
+        try self.peer_connections.release(&self.peer_handshakes, &self.peers, handle);
+        self.refreshPeerReservation();
+    }
+
+    // Trusted native provisioning supplies this borrowed worker. Reset drains
+    // it before releasing services; ordinary peer revocation remains nonblocking.
+    pub fn bindPeerAttestationWorker(self: *SessionManager, worker: peer_quote.Interface) void {
+        self.clearPeerAttestationWorker();
+        self.peer_quote_worker = worker;
+    }
+
+    pub fn clearPeerAttestationWorker(self: *SessionManager) void {
+        if (self.peer_quote_worker) |worker| worker.operations.quiesce(worker.context);
+        self.peer_quote_worker = null;
+    }
+
+    pub fn servicePeerAttestationWork(self: *SessionManager, now_ticks: u64) bool {
+        const worker = self.peer_quote_worker orelse return false;
+        return worker.operations.service(worker.context, self.peerQuoteOwner(), now_ticks);
+    }
+
+    fn peerQuoteReady(self: *const SessionManager) bool {
+        const worker = self.peer_quote_worker orelse return false;
+        return worker.operations.ready(worker.context, self.peerQuoteOwner(), self.peer_dispatch_tick);
+    }
+
+    fn peerQuoteOwner(self: *const SessionManager) peer_quote.Owner {
+        return .{ .context = @constCast(self), .next_fn = nextPeerQuote, .challenge_fn = getPeerQuote, .complete_fn = finishPeerQuote, .release_fn = abandonPeerQuote };
+    }
+
+    fn nextPeerQuote(context: *anyopaque, device: u64, start: usize) ?peer_connections.Handle {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        return self.peer_connections.nextAttestationQuote(device, start);
+    }
+
+    fn getPeerQuote(context: *anyopaque, handle: peer_connections.Handle, now: u64) ?tpm_attestation.Challenge {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        return self.peerAttestationChallenge(handle, now);
+    }
+
+    fn finishPeerQuote(context: *anyopaque, handle: peer_connections.Handle, response: *const tpm_attestation.Response, now: u64) anyerror!void {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        try self.completePeerAttestation(handle, response, now);
+    }
+
+    fn abandonPeerQuote(context: *anyopaque, handle: peer_connections.Handle) void {
+        const self: *SessionManager = @ptrCast(@alignCast(context));
+        self.releasePeerConnection(handle) catch {};
+    }
+
+    pub fn peerAttestationChallenge(self: *SessionManager, handle: peer_connections.Handle, now_ticks: u64) ?tpm_attestation.Challenge {
+        self.retirePeerConnections();
+        defer self.refreshPeerReservation();
+        return self.peer_connections.attestationChallenge(handle, now_ticks);
+    }
+
+    pub fn completePeerAttestation(self: *SessionManager, handle: peer_connections.Handle, response: *const tpm_attestation.Response, now_ticks: u64) !void {
+        self.retirePeerConnections();
+        defer self.refreshPeerReservation();
+        try self.peer_connections.completeAttestation(handle, response, now_ticks);
+    }
+
+    fn refreshPeerReservation(self: *const SessionManager) void {
+        if (!self.peers.hasSessions() and !self.peer_handshakes.hasSessions() and !self.peer_connections.hasAttestations()) network_driver.reserveReceivePrefix(null);
+    }
+
+    pub fn nextServiceWake(self: *const SessionManager) ?u64 {
+        var wake: ?u64 = null;
+        for ([_]?u64{ self.peers.nextWake(), self.peer_handshakes.nextWake(), self.peer_connections.nextWake(), if (self.peer_quote_worker) |worker| worker.operations.next_wake(worker.context) else null, self.clipboard.nextWake(), self.input_router.nextWake(), if (self.input_router.trusted_entry) |entry| entry.nextWake() else null, if (self.identity_owner) |owner| owner.next_request_wake(owner.context) else null }) |candidate| {
+            if (candidate) |deadline| wake = if (wake) |value| @min(value, deadline) else deadline;
+        }
+        return wake;
+    }
+
+    fn peerFramesPending(self: *const SessionManager) bool {
+        return (self.peers.hasSessions() or self.peer_handshakes.hasSessions() or self.peer_connections.hasAttestations()) and network_driver.hasQueuedFrameWithPrefix(peer_channel.MAGIC);
+    }
+
+    fn handshakeTaskActive(self: *const SessionManager, handshake: *const peer_handshake.Handshake) bool {
+        const runtime = self.runtime_context.taskRuntimeConst() orelse return false;
+        const task = runtime.findConst(handshake.service.task_id) orelse return false;
+        return task.state == .active and task.owner.eql(handshake.service.owner);
+    }
+
+    fn peerTasksActive(self: *const SessionManager, session: *const peer_admission.Session) bool {
+        return self.peerOwnersActive(session.syncService(), session.storageService());
+    }
+
+    fn peerOwnersActive(self: *const SessionManager, service: *sync_service_mod.Service, store: *storage_service_mod.Service) bool {
+        const runtime = self.runtime_context.taskRuntimeConst() orelse return false;
+        const sync_task = runtime.findConst(service.task_id) orelse return false;
+        const storage_task = runtime.findConst(store.task_id) orelse return false;
+        return sync_task.state == .active and storage_task.state == .active and
+            sync_task.owner.eql(service.owner) and storage_task.owner.eql(store.owner);
+    }
+
+    fn retirePeerConnections(self: *SessionManager) void {
+        if (!network_driver.hasActiveDevice()) self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
+        self.peer_connections.retireInactive(&self.peer_handshakes, &self.peers, self, peerOwnersActive);
+        self.peer_connections.reap(&self.peer_handshakes, &self.peers);
+    }
+
+    pub fn servicePeerWork(self: *SessionManager, now_ticks: u64) usize {
+        self.peer_dispatch_tick = now_ticks;
+        self.retirePeerConnections();
+        if (!self.peers.hasSessions() and !self.peer_handshakes.hasSessions() and !self.peer_connections.hasAttestations()) {
+            self.refreshPeerReservation();
+            return 0;
+        }
+        for (&self.peer_handshakes.slots) |*slot| if (slot.*) |handshake| {
+            if (!self.handshakeTaskActive(handshake) or !network_driver.hasActiveDevice()) {
+                handshake.close();
+                slot.* = null;
+            }
+        };
+        for (&self.peers.slots) |*slot| if (slot.*) |session| {
+            if (!self.peerTasksActive(session) or !network_driver.hasActiveDevice()) {
+                session.close();
+                slot.* = null;
+            }
+        };
+        var frame: [peer_channel.MAX_FRAME]u8 = undefined;
+        for (0..NETWORK_RECEIVE_SERVICE_BUDGET) |_| {
+            const result = network_driver.receiveQueuedFrameWithPrefix(peer_channel.MAGIC, &frame);
+            if (result.status == .empty) break;
+            if (result.status == .frame and !self.peer_handshakes.admit(frame[0..result.length], now_ticks) and !self.peer_connections.admitAttestation(frame[0..result.length], now_ticks)) _ = self.peers.admit(frame[0..result.length], now_ticks);
+        }
+        // Rotate establishment, attestation and object traffic through one
+        // shared budget. Hardware quotes are completed separately by the owner.
+        var work = self.peer_connections.advance(&self.peer_handshakes, &self.peers, now_ticks, peer_admission.DISPATCH_BUDGET);
+        for (0..3) |offset| {
+            const remaining = peer_admission.DISPATCH_BUDGET - work;
+            work += switch ((@as(usize, self.peer_dispatch_pool) + offset) % 3) {
+                0 => self.peer_handshakes.service(now_ticks, network_driver.sendActiveFrame, remaining),
+                1 => self.peer_connections.serviceAttestations(now_ticks, network_driver.sendActiveFrame, remaining),
+                else => self.peers.serviceBudget(now_ticks, network_driver.sendActiveFrame, remaining),
+            };
+        }
+        self.peer_dispatch_pool = (self.peer_dispatch_pool + 1) % 3;
+        self.peer_connections.wakeAttestationOwners(self, wakeUserspaceTask, now_ticks);
+        self.peer_connections.reap(&self.peer_handshakes, &self.peers);
+        self.refreshPeerReservation();
+        return work;
     }
 
     pub fn wakeUserspaceTask(self: *SessionManager, task_id: u64, now_ticks: u64) bool {
@@ -327,8 +577,89 @@ pub const SessionManager = struct {
         self.input_router.bindHardwareSource(source);
     }
 
+    pub fn bindTrustedAuthentication(self: *SessionManager, entry: *trusted_auth.Entry, now_ticks: u64) void {
+        self.input_router.bindTrustedEntry(.{ .authentication = entry }, now_ticks);
+        _ = desktop_display.present(self.compositorSessionPtr());
+    }
+
+    pub fn bindTrustedSetup(self: *SessionManager, entry: *@import("../platform/trusted_setup_entry.zig").Entry, now_ticks: u64) void {
+        self.input_router.bindTrustedEntry(.{ .setup = entry }, now_ticks);
+        _ = desktop_display.present(self.compositorSessionPtr());
+    }
+
+    pub fn attachIdentityOwner(self: *SessionManager, io: anytype, config: identity_owner_mod.Config, now_ticks: u64) !*identity_owner_mod.Owner(@TypeOf(io.*)) {
+        if (self.identity_owner != null) return error.IdentityOwnerAlreadyAttached;
+        const owner = try identity_owner_mod.Owner(@TypeOf(io.*)).create(io, self.storageServicePtr(), config);
+        self.identity_owner = owner.attach(&self.input_router, now_ticks);
+        _ = desktop_display.present(self.compositorSessionPtr());
+        return owner;
+    }
+
+    pub fn clearIdentityOwner(self: *SessionManager) void {
+        self.input_router.clearTrustedEntry();
+        if (self.identity_owner) |owner| owner.destroy(owner.context);
+        self.identity_owner = null;
+    }
+
+    // Native origin owners only. The app receives no endpoint until the trusted
+    // screen has been presented and a fresh user gesture approves this request.
+    pub fn requestIdentityCredential(self: *SessionManager, request: identity_owner_mod.CredentialRequest, now: u64) !void {
+        const owner = self.identity_owner orelse return error.IdentityUnavailable;
+        try owner.review_credential(owner.context, self.kernelPort() orelse return error.KernelUnavailable, request, now);
+        self.input_router.synchronizeTrustedInput();
+        _ = desktop_display.present(self.compositorSessionPtr());
+    }
+
+    fn serviceIdentityOwner(self: *SessionManager, now_ticks: u64) bool {
+        const owner = self.identity_owner orelse return false;
+        const changed = owner.service(owner.context, &self.input_router, now_ticks);
+        const before = if (self.input_router.trusted_entry) |entry| entry.revision() else 0;
+        if (owner.take_credential(owner.context, now_ticks) catch null) |approved| {
+            const binding = approved.binding;
+            if (self.runtime_context.userspace_executor.bindIdentityChannel(self.userspaceCatalogPtr(), self.runtimePtr(), self.capabilityTablePtr(), approved.task_id, .{
+                .endpoint_capability_id = binding.endpoint_capability_id,
+                .service_endpoint_id = binding.service_endpoint_id,
+                .credential_id = binding.credential_id,
+            }, now_ticks)) {
+                _ = self.runtime_context.userspaceScheduler().?.wakeTask(approved.task_id, .external_event, 0, now_ticks);
+            } else owner.revoke_credential(owner.context, approved.task_id, now_ticks);
+        }
+        self.input_router.synchronizeTrustedInput();
+        return changed or before != (if (self.input_router.trusted_entry) |entry| entry.revision() else 0);
+    }
+
+    pub fn serviceAuthenticationClock(self: *SessionManager, now_ticks: u64) void {
+        const entry = self.input_router.trusted_entry orelse return;
+        const revision = entry.revision();
+        entry.tick(now_ticks);
+        self.input_router.synchronizeTrustedInput();
+        const changed = entry.revision() != revision;
+        if (self.serviceIdentityOwner(now_ticks) or changed) _ = desktop_display.present(self.compositorSessionPtr());
+    }
+
     pub fn servicePendingInputWork(self: *SessionManager, now_ticks: u64) usize {
+        // A held key cannot renew revoked input authority or outlive its task.
+        // Fresh physical presses keep the ordinary capability bootstrap path.
+        if (self.runtime_context.constructed) if (self.input_router.repeatingTask()) |task_id| {
+            const task = self.runtime_context.taskRuntime().?.find(task_id);
+            if (task == null or task.?.state != .active or
+                self.input_repeat_lifecycle != self.runtime_context.taskRuntime().?.taskLifecycleGeneration() or
+                focusedInputCapabilityForResolvedTask(self.kernel_context.capabilityTable().?, task.?, now_ticks) != self.input_repeat_capability)
+            {
+                _ = self.input_router.dropForTask(task_id);
+            }
+        };
         const events_routed = self.input_router.service(now_ticks, input_router_mod.DEFAULT_REPORT_BUDGET);
+        if (self.input_router.trusted_entry) |entry| {
+            if (entry.prepareWork(now_ticks)) {
+                _ = desktop_display.present(self.compositorSessionPtr());
+                entry.runWork(now_ticks);
+                self.input_router.synchronizeTrustedInput();
+                _ = desktop_display.present(self.compositorSessionPtr());
+            }
+        }
+        const identity_changed = self.serviceIdentityOwner(now_ticks);
+        if (identity_changed or (events_routed != 0 and self.input_router.trusted_view.visible())) _ = desktop_display.present(self.compositorSessionPtr());
         if (!self.runtime_context.constructed) return events_routed;
         const runtime = self.runtime_context.taskRuntime().?;
         const scheduler = self.runtime_context.userspaceScheduler().?;
@@ -338,6 +669,10 @@ pub const SessionManager = struct {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
             };
+            if (task.state != .active) {
+                _ = self.input_router.dropForTask(task_id);
+                continue;
+            }
             if (self.ensureFocusedInputCapabilityForResolvedTask(task, capability_table, now_ticks) == null) {
                 _ = self.input_router.dropForTask(task_id);
                 continue;
@@ -348,6 +683,10 @@ pub const SessionManager = struct {
                 now_ticks,
                 now_ticks +% 1,
             );
+        }
+        if (self.input_router.repeatingTask()) |task_id| {
+            self.input_repeat_lifecycle = runtime.taskLifecycleGeneration();
+            self.input_repeat_capability = self.focusedInputCapabilityForTask(task_id, now_ticks) orelse 0;
         }
         return events_routed;
     }
@@ -512,6 +851,23 @@ pub const SessionManager = struct {
             self.failBoot();
             return;
         }
+        if (comptime !include_verification_evidence and builtin.target.os.tag == .freestanding) {
+            const timer = @import("../../kernel/timer/timer.zig");
+            _ = self.attachIdentityOwner(&identity_hardware, .{
+                .owner = graph.state.ids.session_user,
+                .parent_handle = 0x8100_0001,
+                .anchor_index = 0x0180_0002,
+                .boot_index = 0x0180_0001,
+                .boot_instance = @import("../../kernel/platform/secure_random.zig").bootInstanceId(),
+                .input_timeout_ticks = 5 * 60 * timer.TICKS_PER_SECOND,
+                .operation_timeout_ticks = 30 * timer.TICKS_PER_SECOND,
+                .lifetime_ticks = 15 * 60 * timer.TICKS_PER_SECOND,
+            }, timer.getTicks()) catch {
+                self.failBoot();
+                return;
+            };
+            common.printBootMarker(boot_markers.identity_owner_attached);
+        }
         if (!self.finishUserspaceSurfacePresentation(&graph)) {
             self.failBoot();
             return;
@@ -532,15 +888,17 @@ pub const SessionManager = struct {
                 return;
             }
             if (builtin.target.os.tag == .freestanding) {
+                // Recover identity checkpoints before unrelated verification
+                // journeys can persist another round of workspace mutations.
+                @import("proofs/tpm2_sealing_proof.zig").run(self) catch {
+                    self.failBoot();
+                    return;
+                };
                 const booted_evidence = @import("booted_evidence.zig");
                 if (!booted_evidence.runProduction(self, &graph)) {
                     self.failBoot();
                     return;
                 }
-                @import("proofs/tpm2_sealing_proof.zig").run(self) catch {
-                    self.failBoot();
-                    return;
-                };
             }
         }
         stack_watermark.reportPeak();
@@ -556,6 +914,8 @@ pub const SessionManager = struct {
             }
         }
         common.printBootMarker(boot_markers.task_session_ready);
+        _ = desktop_display.present(self.compositorSessionPtr());
+        if (desktop_display.hasPresented()) common.printBootMarker(boot_markers.desktop_framebuffer_ready);
         common.printBootMarker(boot_markers.native_ready);
         printReadyBanner();
     }
@@ -683,6 +1043,7 @@ pub const SessionManager = struct {
     }
 
     pub fn bindFocusedInputRouting(self: *SessionManager, graph: *const ServiceGraph) bool {
+        self.clipboard.owner_task_id = graph.service_bindings.bindingFor(.secure_pasteboard).task_id;
         const compositor_task_id = graph.service_bindings.bindingFor(.compositor_ui_session).task_id;
         const compositor_task = self.runtimePtr().find(compositor_task_id) orelse return false;
         self.input_router.bindCompositor(
@@ -690,7 +1051,7 @@ pub const SessionManager = struct {
             compositor_task_id,
         );
         self.kernel_context.kernel_instance.bindFocusedInputReceiver(.{
-            .context = &self.input_router,
+            .context = self,
             .poll = pollFocusedInputForKernel,
         });
         self.kernel_context.kernel_instance.bindSurfacePresentationReceiver(.{
@@ -821,7 +1182,7 @@ pub const SessionManager = struct {
                 mailbox.stage,
                 mailbox.last_counter,
                 mailbox.service_operation_count,
-                mailbox.service_status_flags,
+                mailbox.auxiliary.service.status_flags,
                 mailbox.ui_state_revision,
                 mailbox.ui_presented_revision,
                 mailbox.ui_presentation_failures,
@@ -845,6 +1206,14 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.clearPeerAttestationWorker();
+        self.clearIdentityOwner();
+        self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
+        self.peer_handshakes.deinit();
+        self.peers.deinit();
+        network_driver.reserveReceivePrefix(null);
+        self.launcher.deinit(self, 0);
+        self.clipboard.deinit(0);
         self.documents.deinit(0);
         self.initialized = false;
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
@@ -874,8 +1243,11 @@ pub const SessionManager = struct {
 const initial_session_manager = SessionManager{};
 
 fn pollFocusedInputForKernel(context: *anyopaque, task_id: u64) ?abi.InputEventDescriptor {
-    const router: *input_router_mod.Router = @ptrCast(@alignCast(context));
-    return router.pollAbiForTask(task_id);
+    const manager: *SessionManager = @ptrCast(@alignCast(context));
+    var event = manager.input_router.pollAbiForTask(task_id) orelse return null;
+    event.viewport = desktop_display.inputViewport(manager.compositorSessionPtr(), event);
+    manager.clipboard.observe(manager, event);
+    return event;
 }
 
 fn sessionHasTaskSurfaceWindow(
@@ -1094,6 +1466,7 @@ fn prepareKernelInterface(
     policy_authority: principal.PrincipalId,
     session_task_id: u64,
 ) *component_port.KernelPort {
+    self.launcher.owner_task_id = session_task_id;
     const kernel_port = self.kernel_context.prepare(
         policy_authority,
         &self.runtime_context.runtime_service,
@@ -1137,9 +1510,10 @@ fn presentSurfaceForKernel(
     context: *anyopaque,
     task: *const task_runtime.TaskRecord,
     presentation: *const abi.SurfacePresentation,
+    text: ?*const abi.SurfaceText,
 ) native_kernel.SurfacePresentStatus {
     const session: *compositor_session.Session = @ptrCast(@alignCast(context));
-    return switch (session.presentSurface(task, presentation) catch |err| switch (err) {
+    return switch (session.presentSurfaceText(task, presentation, text) catch |err| switch (err) {
         error.StalePresentation, error.PresentationConflict => return .stale,
         error.SurfaceTableFull, error.OutOfMemory => return .full,
         else => return .invalid_surface,

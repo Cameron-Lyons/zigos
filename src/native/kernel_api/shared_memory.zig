@@ -1334,6 +1334,24 @@ test "shared memory object ids reject stale handles after slot reuse" {
     try std.testing.expectEqual(replacement.id.raw(), (try table.descriptor(replacement.id)).object_id);
 }
 
+test "shared memory exhaustion retires object slots before allocating frames" {
+    var table = Table.init();
+    defer table.deinit();
+    const backing = try table.ensureBacking();
+    backing.arena.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION;
+    const last = try table.create(ids.task(7), PAGE_SIZE);
+    _ = try table.revoke(last.id);
+    const next = try table.create(ids.task(8), PAGE_SIZE);
+    try std.testing.expectEqual(@as(usize, 1), (ObjectHandle{ .value = next.id.raw() }).slotIndex());
+    try std.testing.expectError(error.SharedMemoryNotFound, table.map(last.id, ids.task(8)));
+    _ = try table.revoke(next.id);
+    @memset(&backing.arena.slot_generations, indexed_arena.EXHAUSTED_HANDLE_GENERATION);
+    const next_frame = table.mmuForTests().next_physical_frame;
+    try std.testing.expectError(error.TableFull, table.create(ids.task(9), PAGE_SIZE));
+    try std.testing.expectEqual(next_frame, table.mmuForTests().next_physical_frame);
+    try std.testing.expectEqual(@as(usize, 0), table.activeCount());
+}
+
 test "shared memory object creation failures preserve capacity and frame allocation" {
     var table = Table.init();
 

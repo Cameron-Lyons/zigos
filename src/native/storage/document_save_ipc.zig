@@ -2,13 +2,13 @@ const std = @import("std");
 const abi = @import("../core/abi.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const document_save = @import("document_save.zig");
-const signing = @import("../core/signing.zig");
+const object_signer = @import("sealed_object_signer.zig");
 const storage_service = @import("storage_service.zig");
 pub const protocol = @import("../../userspace/document_protocol.zig");
 
 // The broker binds this channel to an already-opened document. No path,
 // principal, signer, or authority identifier comes from a save frame.
-// The path and signer label are borrowed and must outlive this channel.
+// The path and session signing authority must outlive this channel.
 pub const Binding = struct {
     client_endpoint_id: u64,
     server_endpoint_capability_id: u64,
@@ -16,7 +16,7 @@ pub const Binding = struct {
     workspace_id: u64,
     path: []const u8,
     object_id: u64,
-    signer: signing.SignerIdentity,
+    signer: object_signer.Signer,
 };
 
 const Attempt = struct {
@@ -169,6 +169,17 @@ pub const Server = struct {
                     .signer = self.binding.signer,
                     .tick = now_ticks,
                 }) catch |err| return .{ .status = switch (err) {
+                    error.PolicyDenied,
+                    error.HandleRevoked,
+                    error.HandleExpired,
+                    error.HandleHolderMismatch,
+                    error.VaultHandleNotFound,
+                    error.SecretOwnerMismatch,
+                    error.SigningKeyChanged,
+                    error.SigningAuthorityUnavailable,
+                    error.InvalidSigningAuthority,
+                    error.SealedSigningKeyRequired,
+                    => .permission_denied,
                     error.DocumentChanged, error.NotDocument, error.ObjectMissing => .document_changed,
                     error.DurabilityBarrierFailed, error.NoBackingDevice, error.CheckpointDeferred, error.CorruptImage => .durability_failed,
                     else => .storage_failed,

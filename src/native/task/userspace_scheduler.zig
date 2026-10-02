@@ -517,7 +517,6 @@ pub const Scheduler = struct {
         now_ticks: u64,
         deadline_tick: u64,
     ) bool {
-        _ = reason;
         if (!self.initialized) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
@@ -525,6 +524,7 @@ pub const Scheduler = struct {
         const task_handle = runtime.taskHandleForResolved(task);
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         const slot = &self.slots.slots[slot_index];
+        const already_ready = slot.queued_ready;
         if (slot.queued_ready and slot.resource_class != task.resourceClass()) {
             self.unlinkReadyIndex(slot_index);
         }
@@ -535,8 +535,12 @@ pub const Scheduler = struct {
         accounting.last_wake_tick = now_ticks;
         accounting.wake_event_count += 1;
         slot.deadline_tick = if (deadline_tick != 0) deadline_tick else deadlineFromNow(slot.resource_class, now_ticks);
-        if (slot.cpu_budget_remaining_ticks == 0 and task.budget.cpu_time_ticks != 0) {
-            slot.cpu_budget_remaining_ticks = task.budget.cpu_time_ticks;
+        // A newly woken task starts an activation with its configured budget.
+        // Leftover credit from a previous interaction must not strand this one
+        // between reading input and publishing its reply. Coalesced wakes do
+        // not refill an already-ready task; explicit refills keep their amount.
+        if (!already_ready and reason != .budget_refill) {
+            slot.cpu_budget_remaining_ticks = @max(slot.cpu_budget_remaining_ticks, task.budget.cpu_time_ticks);
         }
         return self.enqueueReadyIndex(slot_index, slot.resource_class);
     }
@@ -2337,6 +2341,53 @@ test "userspace scheduler uses event wakeups and explicit budget refills" {
     try std.testing.expect(!scheduler.runNext(4));
     try std.testing.expectEqual(@as(u64, 2), scheduler.slots.getConst(task.id).?.dispatch_count);
     try std.testing.expectEqual(@as(u64, 2), scheduler.taskDispatchAccounting(task.id).?.wake_event_count);
+}
+
+test "userspace scheduler gives new event activations a full budget without accumulating duplicate wakes" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    const image = try schedulerTestUserspaceImage(false);
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 6 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = DISPATCH_CPU_TICK_COST * 3, .memory_bytes = TEST_TASK_MEMORY_BYTES, .endpoint_slots = TEST_TASK_ENDPOINT_SLOTS, .shared_memory_bytes = 0 },
+        .local_only = true,
+        .launch = .{ .boundary = .userspace_process, .image_id = 6, .component_abi_version = 1, .signed = true, .bundle_id = "app.activation-budget" },
+        .userspace_image = &image,
+    });
+    try std.testing.expect(scheduler.registerTask(task.id));
+    const index = scheduler.slots.slotIndexOf(task.id).?;
+    const slot = &scheduler.slots.slots[index];
+    // The first interaction uses two dispatches, then parks with one left.
+    _ = scheduler.runNext(1);
+    _ = scheduler.runNext(2);
+    scheduler.unlinkReadyIndex(index); // Model a userspace event wait on the host.
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST, slot.cpu_budget_remaining_ticks);
+    try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 3, 0));
+    _ = scheduler.runNext(3); // Read the next interaction.
+    for (0..8) |_| try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 3, 0));
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST * 2, slot.cpu_budget_remaining_ticks);
+    _ = scheduler.runNext(4); // Publish its reply without waiting for another event.
+    try std.testing.expectEqual(@as(u64, 4), slot.dispatch_count);
+    try std.testing.expect(slot.queued_ready);
+    // Explicit small refills are exact and cannot silently become a full grant.
+    _ = scheduler.runNext(5);
+    try std.testing.expect(!slot.queued_ready);
+    try std.testing.expect(scheduler.refillTaskBudget(task.id, 0, 6));
+    _ = scheduler.runNext(6);
+    try std.testing.expectEqual(@as(u64, 5), slot.dispatch_count);
+    try std.testing.expect(scheduler.refillTaskBudget(task.id, DISPATCH_CPU_TICK_COST / 2, 7));
+    _ = scheduler.runNext(7);
+    try std.testing.expectEqual(@as(u64, 5), slot.dispatch_count);
+    try std.testing.expectEqual(DISPATCH_CPU_TICK_COST / 2, slot.cpu_budget_remaining_ticks);
+    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, 8, 0));
+    _ = scheduler.runNext(8);
+    _ = scheduler.runNext(9);
+    try std.testing.expectEqual(@as(u64, 7), slot.dispatch_count);
 }
 
 test "userspace scheduler separates accelerator claim queues from cpu ready queues" {

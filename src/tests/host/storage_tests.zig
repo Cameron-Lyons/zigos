@@ -1,6 +1,8 @@
 const std = @import("std");
+const vault_catalog = @import("../../native/storage/vault_catalog.zig");
 
 const document_save_test = @import("../../native/storage/document_save_test.zig");
+const object_signer = @import("../../native/storage/sealed_object_signer.zig");
 const document_save_ipc_test = @import("../../native/storage/document_save_ipc_test.zig");
 const object_store = @import("../../native/storage/object_store.zig");
 const storage_service = @import("../../native/storage/storage_service.zig");
@@ -12,7 +14,9 @@ const workspace = @import("../../native/storage/workspace.zig");
 const workspace_test = @import("../../native/storage/workspace_test.zig");
 
 test "storage host tests import native storage modules" {
+    std.testing.refAllDecls(vault_catalog);
     std.testing.refAllDecls(document_save_test);
+    std.testing.refAllDecls(object_signer);
     std.testing.refAllDecls(document_save_ipc_test);
     std.testing.refAllDecls(object_store);
     std.testing.refAllDecls(storage_service);

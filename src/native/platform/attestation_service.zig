@@ -6,6 +6,7 @@ const measured_boot = @import("measured_boot.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
 const signing = @import("../core/signing.zig");
+pub const tpm = @import("tpm_attestation.zig");
 
 const addMeasuredArtifact = measured_boot.addMeasuredArtifact;
 
@@ -18,7 +19,7 @@ pub const MAX_REVOKED_ROOT_GENERATIONS: usize = 8;
 pub const MIN_REMOTE_NONCE_BYTES: usize = 16;
 pub const MAX_REMOTE_NONCE_HISTORY: usize = 8;
 pub const COMPACT_ATTESTATION_METADATA = true;
-pub const STATEMENT_SIZE_CEILING_BYTES: usize = 408;
+pub const STATEMENT_SIZE_CEILING_BYTES: usize = 440;
 pub const REMOTE_REQUEST_SIZE_CEILING_BYTES: usize = 344;
 pub const REMOTE_RESPONSE_SIZE_CEILING_BYTES: usize = 616;
 pub const SERVICE_SIZE_CEILING_BYTES: usize = 696;
@@ -514,7 +515,20 @@ pub const Statement = struct {
     root_digest: crypto_hash.Digest,
     root_provenance: measured_boot.RootProvenance,
     manifest_verified: bool,
+    // Zero for a standalone statement. Remote responses bind their complete
+    // request and the actual provider metadata before asking the root to sign.
+    request_context_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     signature: manifest.Signature,
+
+    fn isWellFormed(self: *const Statement) bool {
+        return canonicalField(&self.remote_party, self.remote_party_len) and
+            canonicalField(&self.nonce, self.nonce_len) and
+            canonicalField(&self.root_label, self.root_label_len) and
+            canonicalField(&self.root_key_id, self.root_key_id_len) and
+            self.device.kind == .device and self.device.serial != 0 and
+            self.record_count <= measured_boot.MAX_RECORDS and
+            @as(usize, self.critical_service_count) + self.policy_count + self.driver_count <= self.record_count;
+    }
 
     pub fn remotePartySlice(self: *const Statement) []const u8 {
         return self.remote_party[0..@as(usize, self.remote_party_len)];
@@ -543,6 +557,7 @@ pub const VerificationExpectation = struct {
     minimum_root_generation: u64 = 0,
     revoked_root_generations: []const u64 = &.{},
     attestation_root: ?signing.PublicIdentity = null,
+    request_context_digest: crypto_hash.Digest = crypto_hash.zero_digest,
 };
 
 pub const RemoteAttestationRequestInit = struct {
@@ -597,7 +612,18 @@ pub const RemoteAttestationRequest = struct {
         for (args.revoked_root_generations, 0..) |generation, index| {
             request.revoked_root_generations[index] = generation;
         }
+        try request.validate();
         return request;
+    }
+
+    pub fn validate(self: *const RemoteAttestationRequest) Error!void {
+        if (!canonicalField(&self.remote_party, self.remote_party_len) or
+            !canonicalField(&self.nonce, self.nonce_len) or
+            !canonicalField(&self.policy_label, self.policy_label_len) or
+            !canonicalField(&self.root_key_id, self.root_key_id_len) or
+            !canonicalGenerations(&self.revoked_root_generations, self.revoked_root_generation_count) or
+            !canonicalDigest(self.attestation_verifier_metadata_digest_required, &self.attestation_verifier_metadata_digest))
+            return error.InvalidAttestationRequest;
     }
 
     pub fn remotePartySlice(self: *const RemoteAttestationRequest) []const u8 {
@@ -620,8 +646,10 @@ pub const RemoteAttestationRequest = struct {
         return self.revoked_root_generations[0..@as(usize, self.revoked_root_generation_count)];
     }
 
+    // Call validate before hashing a request received across a trust boundary.
     pub fn digest(self: *const RemoteAttestationRequest) crypto_hash.Digest {
         var hasher = crypto_hash.init();
+        crypto_hash.updateBytes(&hasher, "schema", "zigos.remote-attestation-request.v2");
         crypto_hash.updateBytes(&hasher, "remote-party", self.remotePartySlice());
         crypto_hash.updateBytes(&hasher, "nonce", self.nonceSlice());
         crypto_hash.updateBytes(&hasher, "policy-label", self.policyLabelSlice());
@@ -645,7 +673,6 @@ pub const RemoteAttestationRequest = struct {
 };
 
 pub const RemoteAttestationResponse = struct {
-    request_digest: crypto_hash.Digest,
     policy_label_len: u8 = 0,
     policy_label: [MAX_POLICY_LABEL_BYTES]u8 = [_]u8{0} ** MAX_POLICY_LABEL_BYTES,
     minimum_root_generation: u64 = 0,
@@ -654,6 +681,13 @@ pub const RemoteAttestationResponse = struct {
     attestation_verifier_metadata_digest_present: bool = false,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     statement: Statement,
+
+    fn isWellFormed(self: *const RemoteAttestationResponse) bool {
+        return self.statement.isWellFormed() and
+            canonicalField(&self.policy_label, self.policy_label_len) and
+            canonicalGenerations(&self.revoked_root_generations, self.revoked_root_generation_count) and
+            canonicalDigest(self.attestation_verifier_metadata_digest_present, &self.attestation_verifier_metadata_digest);
+    }
 
     pub fn policyLabelSlice(self: *const RemoteAttestationResponse) []const u8 {
         return self.policy_label[0..@as(usize, self.policy_label_len)];
@@ -665,6 +699,7 @@ pub const RemoteAttestationResponse = struct {
 };
 
 pub const Error = error{
+    InvalidAttestationRequest,
     NonceTooLong,
     RemotePartyTooLong,
     PolicyLabelTooLong,
@@ -720,22 +755,33 @@ pub const Service = struct {
     }
 
     pub fn provisionRootProvider(self: *Service, provider: RootProvider) Error!void {
+        const label = provider.label();
+        const key_id = provider.keyId();
         if (!isBackedRootOrigin(provider.origin()) or !provider.descriptor.hardware_backed) return error.UnbackedAttestationRoot;
         if (provider.descriptor.role == .production and !provider.descriptor.productionEligible()) return error.UnbackedAttestationRoot;
-        if (provider.descriptor.role == .production and hasTestOnlyOperationalName(provider.label())) return error.UnbackedAttestationRoot;
+        if (provider.descriptor.role == .production and hasTestOnlyOperationalName(label)) return error.UnbackedAttestationRoot;
         if (!provider.descriptor.rotation_supported or !provider.descriptor.revocation_supported) return error.RootLifecycleUnsupported;
         if (provider.keyGeneration() == 0) return error.InvalidRootGeneration;
-        if (provider.label().len == 0 or provider.keyId().len == 0) return error.RootIdentityMissing;
+        if (label.len == 0 or key_id.len == 0) return error.RootIdentityMissing;
+        if (label.len > MAX_ROOT_LABEL_BYTES) return error.RootLabelTooLong;
+        if (key_id.len > MAX_ROOT_KEY_ID_BYTES) return error.RootKeyIdTooLong;
         if (provider.testOnly() and !self.allow_test_root_providers) return error.TestRootProviderRejected;
         if (self.isRootGenerationRevoked(provider.keyGeneration())) return error.RootGenerationRevoked;
         const verifier_metadata_digest = provider.verifierMetadataDigest();
         if (provider.descriptor.role == .production and verifier_metadata_digest == null) {
             return error.AttestationVerifierMetadataMissing;
         }
+        if (verifier_metadata_digest) |digest| if (std.mem.allEqual(u8, &digest, 0)) return error.AttestationVerifierMetadataMissing;
+        var staged_label = [_]u8{0} ** MAX_ROOT_LABEL_BYTES;
+        var staged_key_id = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES;
+        @memcpy(staged_label[0..label.len], label);
+        @memcpy(staged_key_id[0..key_id.len], key_id);
         self.has_provisioned_root = true;
         self.root_origin = provider.origin();
-        self.root_label_len = @intCast(native_util.copyTextExact(&self.root_label, provider.label()) catch return error.RootLabelTooLong);
-        self.root_key_id_len = @intCast(native_util.copyTextExact(&self.root_key_id, provider.keyId()) catch return error.RootLabelTooLong);
+        self.root_label = staged_label;
+        self.root_key_id = staged_key_id;
+        self.root_label_len = @intCast(label.len);
+        self.root_key_id_len = @intCast(key_id.len);
         self.root_key_generation = provider.keyGeneration();
         self.root_verifier_metadata_digest_present = verifier_metadata_digest != null;
         self.root_verifier_metadata_digest = verifier_metadata_digest orelse crypto_hash.zero_digest;
@@ -784,6 +830,10 @@ pub const Service = struct {
         nonce: []const u8,
         user_visible: bool,
     ) (Error || anyerror)!Statement {
+        return self.attestProvisioned(boot, remote_party, nonce, user_visible, crypto_hash.zero_digest);
+    }
+
+    fn attestProvisioned(self: *Service, boot: measured_boot.BootRecord, remote_party: []const u8, nonce: []const u8, user_visible: bool, request_context: crypto_hash.Digest) !Statement {
         if (!self.has_provisioned_root) return error.RootNotProvisioned;
         const provider = self.root_provider orelse return error.RootNotProvisioned;
         if (!isBackedRootOrigin(provider.origin())) return error.UnbackedAttestationRoot;
@@ -793,7 +843,7 @@ pub const Service = struct {
         if (!boot.isRemoteAttestable()) return error.UnverifiedMeasuredRoot;
         if (!boot.isInternallyConsistent()) return error.UnverifiedMeasuredRoot;
 
-        return self.attestWithProviderInternal(boot, remote_party, nonce, provider, user_visible);
+        return self.attestWithProviderInternal(boot, remote_party, nonce, provider, user_visible, request_context);
     }
 
     pub fn respondToRemoteAttestationRequest(
@@ -801,6 +851,8 @@ pub const Service = struct {
         boot: measured_boot.BootRecord,
         request: RemoteAttestationRequest,
     ) (Error || anyerror)!RemoteAttestationResponse {
+        try request.validate();
+        if (request.remote_party_len == 0) return error.InvalidAttestationRequest;
         const provider = self.root_provider orelse return error.RootNotProvisioned;
         if (request.expected_key_origin) |expected_origin| {
             if (provider.origin() != expected_origin) return error.UnbackedAttestationRoot;
@@ -816,14 +868,15 @@ pub const Service = struct {
                 return error.AttestationVerifierMetadataMismatch;
             }
         }
-        const statement = try self.attestWithProvisionedRoot(
+        const context = remoteContextDigest(&request, self.root_verifier_metadata_digest_present, &self.root_verifier_metadata_digest);
+        const statement = try self.attestProvisioned(
             boot,
             request.remotePartySlice(),
             request.nonceSlice(),
             request.user_visible,
+            context,
         );
         var response = RemoteAttestationResponse{
-            .request_digest = request.digest(),
             .minimum_root_generation = request.minimum_root_generation,
             .revoked_root_generation_count = request.revoked_root_generation_count,
             .statement = statement,
@@ -839,14 +892,58 @@ pub const Service = struct {
         return response;
     }
 
+    // The enrolled key/blob and authorization come from local provisioning.
+    // The verifier's PCR expectation is checked against the TPM's live quote;
+    // this path makes no claim about software runtime measurement records.
+    pub fn respondToTpmAttestationRequest(
+        self: *Service,
+        client: *@import("tpm2_sealing.zig").Client,
+        io: anytype,
+        blob: []const u8,
+        auth: *const crypto_hash.Digest,
+        enrolled: *const tpm.Enrollment,
+        challenge: *const tpm.Challenge,
+        out: *tpm.Response,
+    ) !void {
+        out.* = .{};
+        errdefer out.* = .{};
+        const request = challenge.*;
+        const enrollment = enrolled.*;
+        try self.validateTpmAttestationRequest(&enrollment, &request);
+        const qualifying_data = request.qualifyingData();
+        try client.quoteAttestation(io, blob, auth, &enrollment.identity, &qualifying_data, &request.approved_pcr11, out);
+        const Publication = struct {
+            pub fn publish(_: @This()) !void {}
+        };
+        try self.finishTpmAttestationRequest(&enrollment, &request, Publication{});
+    }
+
+    pub fn validateTpmAttestationRequest(self: *const Service, enrolled: *const tpm.Enrollment, challenge: *const tpm.Challenge) !void {
+        try challenge.validate(enrolled);
+        if (!self.device.eql(enrolled.device)) return error.RootIdentityMismatch;
+        if (self.isRootGenerationRevoked(enrolled.generation)) return error.RootGenerationRevoked;
+        try self.validateRemoteChallenge(challenge.request.remotePartySlice(), challenge.request.nonceSlice(), challenge.request.user_visible);
+    }
+
+    // Trusted native quote owners call this only after the client verifies the
+    // TPM response. Publication must not yield; failed delivery leaves nonce and
+    // visibility history untouched. Recheck policy after all hardware waits.
+    pub fn finishTpmAttestationRequest(self: *Service, enrolled: *const tpm.Enrollment, challenge: *const tpm.Challenge, publication: anytype) !void {
+        try self.validateTpmAttestationRequest(enrolled, challenge);
+        try publication.publish();
+        self.recordVisibleRequest(challenge.request.remotePartySlice(), challenge.request.nonceSlice());
+    }
+
     pub fn verifyRemoteAttestationResponse(
         response: RemoteAttestationResponse,
         request: RemoteAttestationRequest,
         boot: *const measured_boot.BootRecord,
         trusted_root: signing.PublicIdentity,
     ) bool {
-        const request_digest = request.digest();
-        if (!std.mem.eql(u8, &response.request_digest, &request_digest)) return false;
+        request.validate() catch return false;
+        if (request.remote_party_len == 0 or !request.user_visible or request.nonce_len < MIN_REMOTE_NONCE_BYTES or
+            !response.isWellFormed()) return false;
+        const context = remoteContextDigest(&request, response.attestation_verifier_metadata_digest_present, &response.attestation_verifier_metadata_digest);
         if (!std.mem.eql(u8, response.policyLabelSlice(), request.policyLabelSlice())) return false;
         if (response.minimum_root_generation != request.minimum_root_generation) return false;
         if (!std.mem.eql(u64, response.revokedRootGenerationsSlice(), request.revokedRootGenerationsSlice())) return false;
@@ -865,6 +962,7 @@ pub const Service = struct {
             .minimum_root_generation = request.minimum_root_generation,
             .revoked_root_generations = request.revokedRootGenerationsSlice(),
             .attestation_root = trusted_root,
+            .request_context_digest = context,
         });
     }
 
@@ -894,9 +992,11 @@ pub const Service = struct {
         user_visible: bool,
         origin: KeyOrigin,
     ) !Statement {
+        if (!boot.isInternallyConsistent()) return error.UnverifiedMeasuredRoot;
         var statement = try self.buildStatement(boot, remote_party, nonce, signer.label, signer.label, 0, user_visible, origin);
         const digest = statementDigest(statement);
         statement.signature = try signing.signWithDefaultRegistry(.ed25519, signer, &digest);
+        self.recordSuccessfulRequest(&statement);
         return statement;
     }
 
@@ -907,6 +1007,7 @@ pub const Service = struct {
         nonce: []const u8,
         provider: RootProvider,
         user_visible: bool,
+        request_context: crypto_hash.Digest,
     ) !Statement {
         var statement = try self.buildStatement(
             boot,
@@ -918,13 +1019,15 @@ pub const Service = struct {
             user_visible,
             provider.origin(),
         );
+        statement.request_context_digest = request_context;
         const digest = statementDigest(statement);
         statement.signature = try provider.sign(&digest);
+        self.recordSuccessfulRequest(&statement);
         return statement;
     }
 
     fn buildStatement(
-        self: *Service,
+        self: *const Service,
         boot: measured_boot.BootRecord,
         remote_party: []const u8,
         nonce: []const u8,
@@ -960,18 +1063,27 @@ pub const Service = struct {
         statement.remote_party_len = @intCast(native_util.copyTextExact(&statement.remote_party, remote_party) catch return error.RemotePartyTooLong);
         statement.nonce_len = @intCast(native_util.copyTextExact(&statement.nonce, nonce) catch return error.NonceTooLong);
         statement.root_label_len = @intCast(native_util.copyTextExact(&statement.root_label, root_label) catch return error.RootLabelTooLong);
-        statement.root_key_id_len = @intCast(native_util.copyTextExact(&statement.root_key_id, root_key_id) catch return error.RootLabelTooLong);
-
-        if (user_visible) {
-            self.visible_request_count += 1;
-            self.last_remote_party_len = @intCast(native_util.copyTextExact(&self.last_remote_party, remote_party) catch return error.RemotePartyTooLong);
-            if (remote_party.len != 0) {
-                self.last_remote_nonce_len = @intCast(native_util.copyTextExact(&self.last_remote_nonce, nonce) catch return error.NonceTooLong);
-                self.rememberRemoteChallenge(remote_party, nonce);
-            }
-        }
+        statement.root_key_id_len = @intCast(native_util.copyTextExact(&statement.root_key_id, root_key_id) catch return error.RootKeyIdTooLong);
 
         return statement;
+    }
+
+    fn recordSuccessfulRequest(self: *Service, statement: *const Statement) void {
+        if (!statement.user_visible) return;
+        self.recordVisibleRequest(statement.remotePartySlice(), statement.nonceSlice());
+    }
+
+    fn recordVisibleRequest(self: *Service, remote_party: []const u8, nonce: []const u8) void {
+        self.visible_request_count +|= 1;
+        self.last_remote_party_len = @intCast(remote_party.len);
+        @memset(&self.last_remote_party, 0);
+        @memcpy(self.last_remote_party[0..remote_party.len], remote_party);
+        if (remote_party.len != 0) {
+            self.last_remote_nonce_len = @intCast(nonce.len);
+            @memset(&self.last_remote_nonce, 0);
+            @memcpy(self.last_remote_nonce[0..nonce.len], nonce);
+            self.rememberRemoteChallenge(remote_party, nonce);
+        }
     }
 
     fn rememberRemoteChallenge(self: *Service, remote_party: []const u8, nonce: []const u8) void {
@@ -986,13 +1098,13 @@ pub const Service = struct {
     }
 
     pub fn verify(statement: Statement) bool {
+        if (!statement.isWellFormed()) return false;
         const digest = statementDigest(statement);
         return signing.verifyWithDefaultRegistry(statement.signature, &digest);
     }
 
     pub fn verifyForBoot(statement: Statement, expectation: VerificationExpectation) bool {
-        const digest = statementDigest(statement);
-        if (!signing.verifyWithDefaultRegistry(statement.signature, &digest)) return false;
+        if (!statement.isWellFormed() or !std.mem.eql(u8, &statement.request_context_digest, &expectation.request_context_digest)) return false;
         if (!expectation.boot.isRemoteAttestable()) return false;
         if (!expectation.boot.isInternallyConsistent()) return false;
         if (!isBackedRootOrigin(statement.key_origin)) return false;
@@ -1015,11 +1127,12 @@ pub const Service = struct {
         for (expectation.revoked_root_generations) |revoked_generation| {
             if (statement.root_key_generation == revoked_generation) return false;
         }
+        const digest = statementDigest(statement);
         if (expectation.attestation_root) |expected_root| {
             if (!std.mem.eql(u8, statement.rootLabelSlice(), expected_root.label)) return false;
-            if (!signing.verifyTrustedPublicKey(statement.signature, &digest, expected_root)) return false;
+            return signing.verifyTrustedPublicKey(statement.signature, &digest, expected_root);
         }
-        return true;
+        return signing.verifyWithDefaultRegistry(statement.signature, &digest);
     }
 
     fn rootLabelSlice(self: *const Service) []const u8 {
@@ -1045,8 +1158,32 @@ fn isBackedRootOrigin(origin: KeyOrigin) bool {
     return origin != .software;
 }
 
+fn canonicalField(bytes: []const u8, len: usize) bool {
+    return len <= bytes.len and std.mem.allEqual(u8, bytes[len..], 0);
+}
+
+fn canonicalGenerations(generations: []const u64, count: usize) bool {
+    return count <= generations.len and std.mem.allEqual(u64, generations[count..], 0);
+}
+
+fn canonicalDigest(present: bool, digest: *const crypto_hash.Digest) bool {
+    return present != std.mem.allEqual(u8, digest, 0);
+}
+
+fn remoteContextDigest(request: *const RemoteAttestationRequest, metadata_present: bool, metadata_digest: *const crypto_hash.Digest) crypto_hash.Digest {
+    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "schema", "zigos.remote-attestation-context.v2");
+    const request_digest = request.digest();
+    crypto_hash.updateBytes(&hasher, "request", &request_digest);
+    crypto_hash.updateBool(&hasher, "verifier-metadata-present", metadata_present);
+    if (metadata_present) crypto_hash.updateBytes(&hasher, "verifier-metadata", metadata_digest);
+    return crypto_hash.finalize(&hasher);
+}
+
 fn statementDigest(statement: Statement) crypto_hash.Digest {
     var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "schema", "zigos.attestation-statement.v2");
+    crypto_hash.updateBytes(&hasher, "request-context", &statement.request_context_digest);
     crypto_hash.updateEnum(&hasher, "device-kind", statement.device.kind);
     crypto_hash.updateInt(&hasher, "device-serial", statement.device.serial);
     crypto_hash.updateInt(&hasher, "generation", statement.generation);
@@ -1080,7 +1217,7 @@ test "attestation metadata stays compact" {
     try std.testing.expectEqual(u8, @FieldType(RemoteAttestationRequest, "revoked_root_generation_count"));
     try std.testing.expectEqual(u8, @FieldType(RemoteAttestationResponse, "policy_label_len"));
     try std.testing.expectEqual(u8, @FieldType(Service, "remote_nonce_history_count"));
-    try std.testing.expectEqual(@as(usize, 408), @sizeOf(Statement));
+    try std.testing.expectEqual(@as(usize, 440), @sizeOf(Statement));
     try std.testing.expectEqual(@as(usize, 344), @sizeOf(RemoteAttestationRequest));
     try std.testing.expectEqual(@as(usize, 616), @sizeOf(RemoteAttestationResponse));
     try std.testing.expectEqual(@as(usize, 696), @sizeOf(Service));
@@ -1165,7 +1302,7 @@ test "attestation service does not count hidden requests and detects tampering" 
 }
 
 test "attestation service can use a provisioned hardware-backed root for visible remote requests" {
-    const boot = try verifiedTestBoot(14, .bootloader_provided);
+    const boot = try verifiedTestBoot(14, .firmware_authenticated);
     const root_signer = signing.SignerIdentity{
         .label = "device-se",
         .seed = signing.seedFromByte(0x55),
@@ -1233,7 +1370,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
     try std.testing.expectEqualStrings("device-se", statement.rootLabelSlice());
     try std.testing.expectEqualStrings("device-se", statement.rootKeyIdSlice());
     try std.testing.expectEqual(@as(u64, 1), statement.root_key_generation);
-    try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, statement.root_provenance);
+    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, statement.root_provenance);
     try std.testing.expect(statement.manifest_verified);
 
     try std.testing.expect(!Service.verifyForBoot(statement, .{
@@ -1259,7 +1396,7 @@ test "attestation service can use a provisioned hardware-backed root for visible
 }
 
 test "attestation verifier rejects revoked root generations after rotation" {
-    const boot = try verifiedTestBoot(18, .bootloader_provided);
+    const boot = try verifiedTestBoot(18, .firmware_authenticated);
     var v1_provider = FakeTpmRootProvider.initGeneration(.{
         .label = "device-tpm-v1",
         .seed = signing.seedFromByte(0x5C),
@@ -1334,7 +1471,7 @@ test "attestation verifier rejects revoked root generations after rotation" {
 }
 
 test "attestation request response records bind verifier policy rotation and revocation" {
-    const boot = try verifiedTestBoot(19, .bootloader_provided);
+    const boot = try verifiedTestBoot(19, .firmware_authenticated);
     var v1_provider = FakeTpmRootProvider.initGeneration(.{
         .label = "device-tpm-v1",
         .seed = signing.seedFromByte(0x60),
@@ -1357,8 +1494,8 @@ test "attestation request response records bind verifier policy rotation and rev
         .minimum_root_generation = 1,
     });
     const v1_response = try service.respondToRemoteAttestationRequest(boot, v1_request);
-    const v1_request_digest = v1_request.digest();
-    try std.testing.expect(std.mem.eql(u8, &v1_response.request_digest, &v1_request_digest));
+    const v1_context = remoteContextDigest(&v1_request, false, &crypto_hash.zero_digest);
+    try std.testing.expectEqualSlices(u8, &v1_context, &v1_response.statement.request_context_digest);
     try std.testing.expectEqualStrings("sync-overlay-policy", v1_response.policyLabelSlice());
     try std.testing.expect(Service.verifyRemoteAttestationResponse(v1_response, v1_request, &boot, v1_identity));
     try std.testing.expectEqual(@as(usize, 1), service.visible_request_count);
@@ -1440,8 +1577,242 @@ test "attestation request response records bind verifier policy rotation and rev
     try std.testing.expectError(error.UserVisibilityRequired, service.respondToRemoteAttestationRequest(boot, hidden_request));
 }
 
+test "attestation response cannot be relabeled for another verifier policy" {
+    const boot = try verifiedTestBoot(29, .firmware_authenticated);
+    var provider = FakeTpmRootProvider.init(.{ .label = "device-tpm-policy", .seed = signing.seedFromByte(0x68) });
+    var service = Service.init(.{ .kind = .device, .serial = 59 });
+    try service.provisionRootProvider(provider.provider());
+    const identity = try provider.publicIdentity();
+    const request = try RemoteAttestationRequest.init(.{
+        .remote_party = "attest.example",
+        .nonce = "remote-nonce-0029",
+        .policy_label = "policy-a",
+        .expected_key_origin = .tpm,
+    });
+    const response = try service.respondToRemoteAttestationRequest(boot, request);
+    var changed = request;
+    changed.policy_label[7] = 'b';
+    var forged = response;
+    forged.policy_label[7] = 'b';
+    forged.statement.request_context_digest = remoteContextDigest(&changed, false, &crypto_hash.zero_digest);
+    try std.testing.expect(!Service.verifyRemoteAttestationResponse(forged, changed, &boot, identity));
+}
+
+test "attestation signatures bind every request restriction and actual verifier metadata" {
+    const boot = try verifiedTestBoot(30, .firmware_authenticated);
+    var provider = FakeTpmRootProvider.init(.{ .label = "device-context", .seed = signing.seedFromByte(0x69) });
+    var root = provider.provider();
+    root.verifier_metadata_digest_fn = struct {
+        fn digest(_: *anyopaque) ?crypto_hash.Digest {
+            return crypto_hash.digestFromByte(0x71);
+        }
+    }.digest;
+    var service = Service.init(.{ .kind = .device, .serial = 60 });
+    try service.provisionRootProvider(root);
+    const identity = try provider.publicIdentity();
+    const request = try RemoteAttestationRequest.init(.{
+        .remote_party = "attest.example",
+        .nonce = "remote-nonce-0030",
+        .policy_label = "policy-a",
+        .expected_key_origin = .tpm,
+    });
+    const response = try service.respondToRemoteAttestationRequest(boot, request);
+    try std.testing.expect(Service.verifyRemoteAttestationResponse(response, request, &boot, identity));
+
+    // Each restriction still admits the original key. Only the signed request
+    // context prevents an attacker from presenting it as a different request.
+    for (0..6) |variant| {
+        var changed = request;
+        var forged = response;
+        switch (variant) {
+            0 => {
+                changed.policy_label[7] = 'b';
+                forged.policy_label = changed.policy_label;
+            },
+            1 => {
+                changed.minimum_root_generation = 1;
+                forged.minimum_root_generation = 1;
+            },
+            2 => {
+                changed.revoked_root_generation_count = 1;
+                changed.revoked_root_generations[0] = 2;
+                forged.revoked_root_generation_count = 1;
+                forged.revoked_root_generations[0] = 2;
+            },
+            3 => changed.expected_key_origin = null,
+            4 => changed.root_key_id_len = @intCast(try native_util.copyTextExact(&changed.root_key_id, provider.label())),
+            5 => {
+                changed.attestation_verifier_metadata_digest_required = true;
+                changed.attestation_verifier_metadata_digest = response.attestation_verifier_metadata_digest;
+            },
+            else => unreachable,
+        }
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(forged, changed, &boot, identity));
+        forged.statement.request_context_digest = remoteContextDigest(&changed, forged.attestation_verifier_metadata_digest_present, &forged.attestation_verifier_metadata_digest);
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(forged, changed, &boot, identity));
+    }
+    for (0..2) |variant| {
+        var forged = response;
+        if (variant == 0) {
+            forged.attestation_verifier_metadata_digest[0] ^= 1;
+        } else {
+            forged.attestation_verifier_metadata_digest_present = false;
+            forged.attestation_verifier_metadata_digest = crypto_hash.zero_digest;
+        }
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(forged, request, &boot, identity));
+        forged.statement.request_context_digest = remoteContextDigest(&request, forged.attestation_verifier_metadata_digest_present, &forged.attestation_verifier_metadata_digest);
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(forged, request, &boot, identity));
+    }
+
+    var standalone_service = Service.init(service.device);
+    try standalone_service.provisionRootProvider(root);
+    var repackaged = response;
+    repackaged.statement = try standalone_service.attestWithProvisionedRoot(boot, request.remotePartySlice(), request.nonceSlice(), true);
+    try std.testing.expect(Service.verify(repackaged.statement));
+    try std.testing.expect(!Service.verifyRemoteAttestationResponse(repackaged, request, &boot, identity));
+    repackaged.statement.request_context_digest = response.statement.request_context_digest;
+    try std.testing.expect(!Service.verifyRemoteAttestationResponse(repackaged, request, &boot, identity));
+}
+
+test "attestation rejects malformed bounded records before hashing or signing" {
+    const boot = try verifiedTestBoot(31, .firmware_authenticated);
+    var provider = FakeTpmRootProvider.init(.{ .label = "device-bounds", .seed = signing.seedFromByte(0x6A) });
+    var service = Service.init(.{ .kind = .device, .serial = 61 });
+    try service.provisionRootProvider(provider.provider());
+    const identity = try provider.publicIdentity();
+    const request = try RemoteAttestationRequest.init(.{
+        .remote_party = "attest.example",
+        .nonce = "remote-nonce-0031",
+        .policy_label = "bounded-policy",
+    });
+    const response = try service.respondToRemoteAttestationRequest(boot, request);
+    inline for (.{ "remote_party", "nonce", "policy_label", "root_key_id" }) |field| {
+        for (@field(request, field).len + 1..256) |len| {
+            var bad = request;
+            @field(bad, field ++ "_len") = @intCast(len);
+            try std.testing.expectError(error.InvalidAttestationRequest, service.respondToRemoteAttestationRequest(boot, bad));
+            try std.testing.expect(!Service.verifyRemoteAttestationResponse(response, bad, &boot, identity));
+        }
+        var bad = request;
+        @field(bad, field)[@field(bad, field ++ "_len")] = 1;
+        try std.testing.expectError(error.InvalidAttestationRequest, service.respondToRemoteAttestationRequest(boot, bad));
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(response, bad, &boot, identity));
+    }
+    for (MAX_REVOKED_ROOT_GENERATIONS + 1..256) |count| {
+        var bad_request = request;
+        bad_request.revoked_root_generation_count = @intCast(count);
+        try std.testing.expectError(error.InvalidAttestationRequest, service.respondToRemoteAttestationRequest(boot, bad_request));
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(response, bad_request, &boot, identity));
+        var bad_response = response;
+        bad_response.revoked_root_generation_count = @intCast(count);
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(bad_response, request, &boot, identity));
+    }
+    inline for (.{ "remote_party", "nonce", "root_label", "root_key_id" }) |field| {
+        for (@field(response.statement, field).len + 1..256) |len| {
+            var bad = response;
+            @field(bad.statement, field ++ "_len") = @intCast(len);
+            try std.testing.expect(!Service.verify(bad.statement));
+            try std.testing.expect(!Service.verifyRemoteAttestationResponse(bad, request, &boot, identity));
+        }
+        var bad = response;
+        @field(bad.statement, field)[@field(bad.statement, field ++ "_len")] = 1;
+        try std.testing.expect(!Service.verify(bad.statement));
+    }
+    for (MAX_POLICY_LABEL_BYTES + 1..256) |len| {
+        var bad = response;
+        bad.policy_label_len = @intCast(len);
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(bad, request, &boot, identity));
+    }
+    for (0..4) |variant| {
+        var bad_request = request;
+        var bad_response = response;
+        switch (variant) {
+            0 => {
+                bad_request.revoked_root_generations[7] = 2;
+                bad_response.revoked_root_generations[7] = 2;
+            },
+            1 => {
+                bad_request.attestation_verifier_metadata_digest_required = true;
+                bad_response.attestation_verifier_metadata_digest_present = true;
+            },
+            2 => {
+                bad_request.attestation_verifier_metadata_digest[0] = 1;
+                bad_response.attestation_verifier_metadata_digest[0] = 1;
+            },
+            3 => {
+                bad_request.policy_label[63] = 1;
+                bad_response.policy_label[63] = 1;
+            },
+            else => unreachable,
+        }
+        try std.testing.expectError(error.InvalidAttestationRequest, service.respondToRemoteAttestationRequest(boot, bad_request));
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(bad_response, request, &boot, identity));
+    }
+    for (measured_boot.MAX_RECORDS + 1..256) |count| {
+        var bad = response;
+        bad.statement.record_count = @intCast(count);
+        try std.testing.expect(!Service.verify(bad.statement));
+    }
+    for (boot.records[0].label.len + 1..256) |len| {
+        var bad_boot = boot;
+        bad_boot.records[0].label_len = @intCast(len);
+        try std.testing.expect(!bad_boot.isInternallyConsistent());
+        try std.testing.expect(!Service.verifyRemoteAttestationResponse(response, request, &bad_boot, identity));
+    }
+    try std.testing.expectEqual(@as(usize, 1), provider.sign_count);
+    try std.testing.expectEqual(@as(usize, 1), service.visible_request_count);
+    try std.testing.expectEqual(@as(u8, 1), service.remote_nonce_history_count);
+}
+
+test "attestation signing and provisioning failures leave committed state unchanged" {
+    const boot = try verifiedTestBoot(32, .firmware_authenticated);
+    var provider = FakeTpmRootProvider.init(.{ .label = "device-retry", .seed = signing.seedFromByte(0x6B) });
+    var root = provider.provider();
+    root.sign_fn = struct {
+        fn sign(context: *anyopaque, digest: []const u8) !manifest.Signature {
+            const typed: *FakeTpmRootProvider = @ptrCast(@alignCast(context));
+            if (typed.sign_count == 0) {
+                typed.sign_count += 1;
+                return error.ProviderUnavailable;
+            }
+            return typed.sign(digest);
+        }
+    }.sign;
+    var service = Service.init(.{ .kind = .device, .serial = 62 });
+    try service.provisionRootProvider(root);
+    const request = try RemoteAttestationRequest.init(.{
+        .remote_party = "attest.example",
+        .nonce = "remote-nonce-0032",
+        .policy_label = "retry-policy",
+    });
+    const before = service;
+    try std.testing.expectError(error.ProviderUnavailable, service.respondToRemoteAttestationRequest(boot, request));
+    try std.testing.expectEqualDeep(before, service);
+    const response = try service.respondToRemoteAttestationRequest(boot, request);
+    try std.testing.expect(Service.verifyRemoteAttestationResponse(response, request, &boot, try provider.publicIdentity()));
+    try std.testing.expectError(error.RemoteNonceReplay, service.respondToRemoteAttestationRequest(boot, request));
+    try std.testing.expectEqual(@as(usize, 1), service.visible_request_count);
+
+    const provisioned = service;
+    var long_provider = FakeTpmRootProvider.init(.{ .label = "x" ** (MAX_ROOT_LABEL_BYTES + 1), .seed = signing.seedFromByte(0x6C) });
+    try std.testing.expectError(error.RootLabelTooLong, service.provisionRootProvider(long_provider.provider()));
+    try std.testing.expectEqualDeep(provisioned, service);
+    var bad_root = root;
+    bad_root.descriptor.key_id = "k" ** (MAX_ROOT_KEY_ID_BYTES + 1);
+    try std.testing.expectError(error.RootKeyIdTooLong, service.provisionRootProvider(bad_root));
+    try std.testing.expectEqualDeep(provisioned, service);
+    bad_root = root;
+    bad_root.verifier_metadata_digest_fn = struct {
+        fn digest(_: *anyopaque) ?crypto_hash.Digest {
+            return crypto_hash.zero_digest;
+        }
+    }.digest;
+    try std.testing.expectError(error.AttestationVerifierMetadataMissing, service.provisionRootProvider(bad_root));
+    try std.testing.expectEqualDeep(provisioned, service);
+}
+
 test "external attestation root provider signs through operational key handles" {
-    const boot = try verifiedTestBoot(20, .bootloader_provided);
+    const boot = try verifiedTestBoot(20, .firmware_authenticated);
     const external_signer = signing.SignerIdentity{
         .label = "device-hsm-root",
         .seed = signing.seedFromByte(0x62),
@@ -1700,24 +2071,26 @@ test "production attestation descriptors reject test-only operational names" {
     ));
 }
 
-test "attestation service rejects emulator measured roots for remote attestations" {
-    const boot = try verifiedTestBoot(17, .emulator_provided);
-    try std.testing.expect(boot.hasVerifiedRoot());
-    try std.testing.expect(!boot.isRemoteAttestable());
+test "attestation service rejects emulator and unauthenticated measured roots for remote attestations" {
+    for ([_]measured_boot.RootProvenance{ .emulator_provided, .unverified_boot }) |provenance| {
+        const boot = try verifiedTestBoot(17, provenance);
+        try std.testing.expect(boot.hasVerifiedRoot());
+        try std.testing.expect(!boot.isRemoteAttestable());
 
-    var service = Service.init(.{ .kind = .device, .serial = 40 });
-    var root_provider = FakeTpmRootProvider.init(.{
-        .label = "device-tpm",
-        .seed = signing.seedFromByte(0x5A),
-    });
-    try service.provisionRootProvider(root_provider.provider());
+        var service = Service.init(.{ .kind = .device, .serial = 40 });
+        var root_provider = FakeTpmRootProvider.init(.{
+            .label = "device-tpm",
+            .seed = signing.seedFromByte(0x5A),
+        });
+        try service.provisionRootProvider(root_provider.provider());
 
-    try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
-        boot,
-        "attest.example",
-        "remote-nonce-0006",
-        true,
-    ));
+        try std.testing.expectError(error.UnverifiedMeasuredRoot, service.attestWithProvisionedRoot(
+            boot,
+            "attest.example",
+            "remote-nonce-0006",
+            true,
+        ));
+    }
 }
 
 test "attestation service rejects provisioned remote attestations without a verified measured root" {
@@ -1787,7 +2160,7 @@ test "attestation service rejects anonymous root providers" {
 }
 
 test "attestation verification rejects measured state and statement tampering" {
-    const boot = try verifiedTestBoot(16, .bootloader_provided);
+    const boot = try verifiedTestBoot(16, .firmware_authenticated);
     const root_signer = signing.SignerIdentity{
         .label = "device-tpm",
         .seed = signing.seedFromByte(0x58),

@@ -163,6 +163,7 @@ pub const SurfacePresentRequest = struct {
     buffer_object_id: u64,
     buffer_offset: u32,
     buffer_bytes: u32,
+    text: ?*const abi.SurfaceText = null,
 };
 
 pub const DeviceDescribeRequest = struct {
@@ -463,6 +464,7 @@ pub const KernelPort = struct {
             self.callContext(request.header, request.presentation_capability_id, .{ .task = request.presenter_task_id }),
             request.presenter_task_id,
             &presentation,
+            request.text,
             now_ticks,
         );
     }

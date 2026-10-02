@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const transport_crypto = @import("../core/transport_crypto.zig");
 const attestation_service = @import("../platform/attestation_service.zig");
 const binary_cursor = @import("binary_cursor");
 const crypto_hash = @import("../core/crypto_hash.zig");
@@ -14,17 +15,6 @@ const kernel_memory = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/memory/memory.zig")
 else
     struct {};
-const intel_i225_hw = if (builtin.target.os.tag == .freestanding)
-    @import("../../kernel/drivers/intel_i225_hw.zig")
-else
-    struct {
-        pub fn activate() !void {}
-        pub fn prepare(_: anytype) !void {}
-        pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
-            return null;
-        }
-    };
-
 pub const ReceiveStatus = enum(u8) {
     empty = 0,
     frame = 1,
@@ -221,6 +211,8 @@ pub const MAX_NATIVE_PAYLOAD_BYTES: usize = 160;
 pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
 pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
 pub const RECEIVE_QUEUE_CAPACITY: usize = 32;
+const RESERVED_RECEIVE_CAPACITY: usize = 8;
+const ReceiveMask = std.meta.Int(.unsigned, RECEIVE_QUEUE_CAPACITY);
 pub const HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING = true;
 pub const RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const RECEIVE_RESULT_SIZE_CEILING_BYTES: usize = 4;
@@ -229,8 +221,8 @@ pub const SERVICE_IDENTITY_FRAME_SIZE_CEILING_BYTES: usize = 320;
 pub const LOCAL_DISCOVERY_CONNECTION_SIZE_CEILING_BYTES: usize = 192;
 pub const LOCAL_DISCOVERY_FRAME_SIZE_CEILING_BYTES: usize = 288;
 pub const QUEUED_RECEIVE_FRAME_SIZE_CEILING_BYTES: usize = 1_502;
-const SERVICE_IDENTITY_FRAME_MAGIC = "ZGNI";
-const DISCOVERY_FRAME_MAGIC = "ZGND";
+const SERVICE_IDENTITY_FRAME_MAGIC = "ZGN2";
+const DISCOVERY_FRAME_MAGIC = "ZGD2";
 const NativeFrameWriter = binary_cursor.Writer(Error, error.PayloadTooLarge);
 
 comptime {
@@ -245,7 +237,7 @@ comptime {
     }
 }
 
-pub const Error = error{
+pub const Error = transport_crypto.Error || error{
     EgressDenied,
     TransmitFailed,
     PayloadTooLarge,
@@ -280,6 +272,10 @@ pub const NativeServiceIdentityConnection = struct {
     identity_pinned: bool,
     egress_decision: network_policy.EgressDecision,
 
+    pub fn deinit(self: *NativeServiceIdentityConnection) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+    }
+
     pub fn serviceIdentitySlice(self: *const NativeServiceIdentityConnection) []const u8 {
         return self.service_identity[0..@as(usize, self.service_identity_len)];
     }
@@ -298,11 +294,9 @@ pub const NativeServiceIdentityFrameFlags = packed struct(u8) {
 
 pub const NativeServiceIdentityFrame = struct {
     connection_id: u64,
-    policy_id: u64,
-    capability_id: u64,
     payload_len: u8,
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
-    payload_digest: crypto_hash.Digest,
+    authentication: transport_crypto.Authentication,
     peer_root_digest: crypto_hash.Digest,
     flags: NativeServiceIdentityFrameFlags,
     attestation_request_digest: crypto_hash.Digest,
@@ -327,6 +321,10 @@ pub const NativeLocalDiscoveryConnection = struct {
     scoped_discovery: bool,
     egress_decision: network_policy.EgressDecision,
 
+    pub fn deinit(self: *NativeLocalDiscoveryConnection) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+    }
+
     pub fn discoveryClassSlice(self: *const NativeLocalDiscoveryConnection) []const u8 {
         return self.discovery_class[0..@as(usize, self.discovery_class_len)];
     }
@@ -334,11 +332,9 @@ pub const NativeLocalDiscoveryConnection = struct {
 
 pub const NativeLocalDiscoveryFrame = struct {
     connection_id: u64,
-    policy_id: u64,
-    capability_id: u64,
     probe_len: u8,
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
-    probe_digest: crypto_hash.Digest,
+    authentication: transport_crypto.Authentication,
     discovery_class_len: u8 = 0,
     discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
     encrypted: bool,
@@ -428,7 +424,7 @@ pub const NativeNetworkStack = struct {
             .egress_decision = decision,
         };
         connection.service_identity_len = @intCast(native_util.copyTextExact(&connection.service_identity, service_identity) catch return error.ServiceIdentityTooLong);
-        connection.key = nativeConnectionKey(&connection);
+        connection.key = try transport_crypto.freshKey(nativeConnectionContext(&connection));
         self.opened_connections += 1;
         return connection;
     }
@@ -453,12 +449,43 @@ pub const NativeNetworkStack = struct {
         source_device: principal.PrincipalId,
         target_device: principal.PrincipalId,
     ) Error!NativeServiceIdentityConnection {
+        if (!request.attestation_response.statement.device.eql(target_device)) {
+            self.attempted_connections +|= 1;
+            return self.denyOpen(.attestation_required);
+        }
         const evidence = network_policy.ConnectionEvidence.fromVerifiedRemoteAttestation(
             .{ .service_identity = request.service_identity },
             request.attestation_response,
             request.attestation_request,
             request.attested_boot,
             request.trusted_root,
+        ) orelse {
+            self.attempted_connections +|= 1;
+            return self.denyOpen(.attestation_required);
+        };
+        return self.openServiceIdentity(broker, .{
+            .task_id = request.task_id,
+            .principal_id = request.principal_id,
+            .capability_id = request.capability_id,
+            .policy_id = request.policy_id,
+            .evidence = evidence,
+            .now_ticks = request.now_ticks,
+        }, source_device, target_device);
+    }
+
+    pub fn openTpmServiceIdentity(
+        self: *NativeNetworkStack,
+        broker: *network_policy.EgressBroker,
+        request: network_policy.TpmServiceIdentityOpenRequest,
+        source_device: principal.PrincipalId,
+        target_device: principal.PrincipalId,
+    ) Error!NativeServiceIdentityConnection {
+        const evidence = network_policy.ConnectionEvidence.fromTpmAttestation(
+            .{ .service_identity = request.service_identity },
+            target_device,
+            request.pending,
+            request.response,
+            request.now_ms,
         ) orelse {
             self.attempted_connections +|= 1;
             return self.denyOpen(.attestation_required);
@@ -505,7 +532,7 @@ pub const NativeNetworkStack = struct {
             .egress_decision = decision,
         };
         connection.discovery_class_len = @intCast(native_util.copyTextExact(&connection.discovery_class, discovery_class) catch return error.DiscoveryClassTooLong);
-        connection.key = nativeDiscoveryKey(&connection);
+        connection.key = try transport_crypto.freshKey(nativeDiscoveryContext(&connection));
         self.opened_connections += 1;
         return connection;
     }
@@ -521,11 +548,9 @@ pub const NativeNetworkStack = struct {
 
         var frame = NativeServiceIdentityFrame{
             .connection_id = connection.id,
-            .policy_id = connection.policy_id,
-            .capability_id = connection.capability_id,
             .payload_len = @intCast(payload.len),
             .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
-            .payload_digest = nativePayloadDigest(connection, payload),
+            .authentication = undefined,
             .peer_root_digest = connection.peer_root_digest,
             .flags = .{
                 .encrypted = true,
@@ -540,7 +565,8 @@ pub const NativeNetworkStack = struct {
             .attestation_request_digest = connection.attestation_request_digest,
             .attestation_verifier_metadata_digest = connection.attestation_verifier_metadata_digest,
         };
-        applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
+        const context = nativeConnectionContext(connection);
+        frame.authentication = try transport_crypto.seal(frame.ciphertext[0..payload.len], payload, connection.key, &context);
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeNativeFrame(wire_frame[0..], connection, &frame);
@@ -591,17 +617,16 @@ pub const NativeNetworkStack = struct {
 
         var frame = NativeLocalDiscoveryFrame{
             .connection_id = connection.id,
-            .policy_id = connection.policy_id,
-            .capability_id = connection.capability_id,
             .probe_len = @intCast(payload.len),
             .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
-            .probe_digest = nativeDiscoveryDigest(connection, payload),
+            .authentication = undefined,
             .encrypted = true,
             .egress_allowed = true,
             .scoped_discovery = true,
         };
         frame.discovery_class_len = @intCast(native_util.copyTextExact(&frame.discovery_class, connection.discoveryClassSlice()) catch return error.DiscoveryClassTooLong);
-        applyModeledKeystream(&frame.ciphertext, payload, &connection.key);
+        const context = nativeDiscoveryContext(connection);
+        frame.authentication = try transport_crypto.seal(frame.ciphertext[0..payload.len], payload, connection.key, &context);
 
         var wire_frame: [MAX_NATIVE_FRAME_BYTES]u8 = undefined;
         const encoded = try encodeDiscoveryFrame(wire_frame[0..], connection, &frame);
@@ -677,8 +702,9 @@ comptime {
     }
 }
 var receive_queue: ReceiveQueueBacking = if (heap_backed_receive_queue) null else [_]QueuedReceiveFrame{.{}} ** RECEIVE_QUEUE_CAPACITY;
-var receive_queue_head: u8 = 0;
-var receive_queue_tail: u8 = 0;
+var receive_queue_order: [RECEIVE_QUEUE_CAPACITY]u8 = @splat(0);
+var receive_queue_occupied: ReceiveMask = 0;
+var receive_reserved_count: u8 = 0;
 var receive_queue_count: u8 = 0;
 
 pub const bounded_metadata_layout = .{
@@ -688,8 +714,7 @@ pub const bounded_metadata_layout = .{
     .heap_backs_receive_queue_on_freestanding = HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING,
     .uses_compact_active_frame_lengths = @TypeOf(last_active_driver_frame_len) == u16 and
         @TypeOf(last_active_driver_rx_frame_len) == u16,
-    .uses_compact_receive_queue_indices = @TypeOf(receive_queue_head) == u8 and
-        @TypeOf(receive_queue_tail) == u8 and
+    .uses_compact_receive_queue_indices = @TypeOf(receive_queue_order[0]) == u8 and
         @TypeOf(receive_queue_count) == u8,
     .receive_overflow_scratch_bytes = 0,
 };
@@ -701,7 +726,40 @@ pub const ReceiveServiceResult = struct {
     failed: bool = false,
 };
 
+var reserved_receive_prefix: ?[4]u8 = null;
+
+pub fn reserveReceivePrefix(prefix: ?[4]u8) void {
+    reserved_receive_prefix = prefix;
+    receive_reserved_count = 0;
+    const queue = receiveQueue() orelse return;
+    if (prefix == null) return;
+    for (receive_queue_order[0..receive_queue_count]) |index| {
+        if (reservedFrame(queue[index].bytes[0..queue[index].length])) receive_reserved_count += 1;
+    }
+    // Preserve the oldest packets in each class when a reservation starts.
+    // Neither stalled consumer can consume the other class's reserved slots.
+    var position: usize = receive_queue_count;
+    while (position != 0) {
+        position -= 1;
+        const frame = &queue[receive_queue_order[position]];
+        const excess = if (reservedFrame(frame.bytes[0..frame.length]))
+            receive_reserved_count > RESERVED_RECEIVE_CAPACITY
+        else
+            receive_queue_count - receive_reserved_count > RECEIVE_QUEUE_CAPACITY - RESERVED_RECEIVE_CAPACITY;
+        if (excess) {
+            removeQueuedFrame(queue, position);
+            active_driver_rx_drop_count += 1;
+        }
+    }
+}
+
+fn reservedFrame(frame: []const u8) bool {
+    const prefix = reserved_receive_prefix orelse return false;
+    return std.mem.startsWith(u8, frame, &prefix);
+}
+
 pub fn reset() void {
+    reserved_receive_prefix = null;
     active_device = null;
     active_service_id = 0;
     active_task_id = 0;
@@ -719,24 +777,6 @@ pub fn activateDevice(device: *const NetworkDevice, service_id: u64) bool {
 
 pub fn activateDeviceForTask(device: *const NetworkDevice, service_id: u64, task_id: u64) bool {
     if (service_id == 0) return false;
-    if (builtin.target.os.tag == .freestanding) {
-        const pci = @import("../../kernel/drivers/pci.zig");
-        if (pci.firstIntelI225Lm()) |dev| {
-            intel_i225_hw.prepare(dev) catch |err| switch (err) {
-                error.AlreadyPrepared => {},
-                else => return false,
-            };
-        }
-    }
-    if (intel_i225_hw.publishedBar() != null) {
-        intel_i225_hw.activate() catch return false;
-        if (builtin.target.os.tag == .freestanding) {
-            const console = @import("../../kernel/utils/console.zig");
-            console.print("ZIGOS:I225:HW:TX_QUEUE_OK\n");
-            console.print("ZIGOS:I225:HW:RX_QUEUE_OK\n");
-            console.print("ZIGOS:I225:HW:REMAP_MSI_OK\n");
-        }
-    }
     const queue = ensureReceiveQueue() orelse return false;
     resetReceiveQueue(queue);
     active_device = device;
@@ -760,6 +800,11 @@ pub fn deactivateDevice(service_id: u64) bool {
 
 pub fn hasActiveDevice() bool {
     return active_device != null;
+}
+
+pub fn activeMacAddress() ?[6]u8 {
+    const device = active_device orelse return null;
+    return device.getMacAddress();
 }
 
 pub fn activeTaskId() u64 {
@@ -817,15 +862,17 @@ fn ensureReceiveQueue() ?*ReceiveQueue {
 }
 
 fn resetReceiveQueue(queue: *ReceiveQueue) void {
-    receive_queue_head = 0;
-    receive_queue_tail = 0;
+    receive_queue_order = @splat(0);
+    receive_queue_occupied = 0;
+    receive_reserved_count = 0;
     receive_queue_count = 0;
     for (queue) |*frame| frame.length = 0;
 }
 
 fn releaseReceiveQueue() void {
-    receive_queue_head = 0;
-    receive_queue_tail = 0;
+    receive_queue_order = @splat(0);
+    receive_queue_occupied = 0;
+    receive_reserved_count = 0;
     receive_queue_count = 0;
     if (comptime heap_backed_receive_queue) {
         if (receive_queue) |queue| {
@@ -909,19 +956,65 @@ pub fn receiveActiveFrame(output: []u8) ReceiveResult {
         }
     }
 
-    const queue_head: usize = receive_queue_head;
-    const frame = &queue[queue_head];
-    defer {
-        frame.length = 0;
-        receive_queue_head = @intCast((queue_head + 1) % RECEIVE_QUEUE_CAPACITY);
-        receive_queue_count -= 1;
+    var position: usize = 0;
+    if (reserved_receive_prefix != null) {
+        // A reserved packet must not hide unrelated traffic from its reader.
+        for (receive_queue_order[0..receive_queue_count], 0..) |index, offset| {
+            const candidate = &queue[index];
+            if (!reservedFrame(candidate.bytes[0..candidate.length])) {
+                position = offset;
+                break;
+            }
+        } else return .{ .status = .empty };
     }
+    const frame = &queue[receive_queue_order[position]];
+    defer removeQueuedFrame(queue, position);
     if (frame.length > output.len) {
         active_driver_rx_drop_count += 1;
         return .{ .status = .dropped };
     }
     @memcpy(output[0..frame.length], frame.bytes[0..frame.length]);
     return .{ .status = .frame, .length = frame.length };
+}
+
+// Route a protocol out of the deferred queue without polling hardware or
+// moving unrelated packets. Only the compact order indexes move on removal.
+pub fn receiveQueuedFrameWithPrefix(prefix: []const u8, output: []u8) ReceiveResult {
+    const queue = receiveQueue() orelse return .{ .status = .empty };
+    if (prefix.len == 0) return .{ .status = .empty };
+    for (receive_queue_order[0..receive_queue_count], 0..) |index, position| {
+        const frame = &queue[index];
+        if (!std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) continue;
+        defer removeQueuedFrame(queue, position);
+        if (frame.length > output.len) {
+            active_driver_rx_drop_count += 1;
+            return .{ .status = .dropped };
+        }
+        @memcpy(output[0..frame.length], frame.bytes[0..frame.length]);
+        return .{ .status = .frame, .length = frame.length };
+    }
+    return .{ .status = .empty };
+}
+
+pub fn hasQueuedFrameWithPrefix(prefix: []const u8) bool {
+    const queue = receiveQueue() orelse return false;
+    if (prefix.len == 0) return false;
+    for (receive_queue_order[0..receive_queue_count]) |index| {
+        const frame = &queue[index];
+        if (std.mem.startsWith(u8, frame.bytes[0..frame.length], prefix)) return true;
+    }
+    return false;
+}
+
+fn removeQueuedFrame(queue: *ReceiveQueue, position: usize) void {
+    const index = receive_queue_order[position];
+    const frame = &queue[index];
+    if (reservedFrame(frame.bytes[0..frame.length])) receive_reserved_count -= 1;
+    frame.length = 0;
+    receive_queue_occupied &= ~(@as(ReceiveMask, 1) << @intCast(index));
+    std.mem.copyForwards(u8, receive_queue_order[position .. receive_queue_count - 1], receive_queue_order[position + 1 .. receive_queue_count]);
+    receive_queue_count -= 1;
+    receive_queue_order[receive_queue_count] = 0;
 }
 
 pub fn servicePendingReceiveFrames(budget: usize) ReceiveServiceResult {
@@ -938,7 +1031,7 @@ fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budg
     var service = ReceiveServiceResult{};
     while (service.polls < budget) {
         const queue_has_space = receive_queue_count < RECEIVE_QUEUE_CAPACITY;
-        const queue_tail: usize = receive_queue_tail;
+        const queue_tail: usize = if (queue_has_space) @ctz(~receive_queue_occupied) else 0;
         const output = if (queue_has_space)
             queue[queue_tail].bytes[0..]
         else
@@ -979,9 +1072,21 @@ fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budg
                     continue;
                 }
                 const frame = &queue[queue_tail];
+                const reserved = reservedFrame(frame.bytes[0..result.length]);
+                if (reserved_receive_prefix != null and (if (reserved)
+                    receive_reserved_count >= RESERVED_RECEIVE_CAPACITY
+                else
+                    receive_queue_count - receive_reserved_count >= RECEIVE_QUEUE_CAPACITY - RESERVED_RECEIVE_CAPACITY))
+                {
+                    active_driver_rx_drop_count += 1;
+                    service.dropped += 1;
+                    continue;
+                }
                 frame.length = result.length;
-                receive_queue_tail = @intCast((queue_tail + 1) % RECEIVE_QUEUE_CAPACITY);
+                receive_queue_order[receive_queue_count] = @intCast(queue_tail);
+                receive_queue_occupied |= @as(ReceiveMask, 1) << @intCast(queue_tail);
                 receive_queue_count += 1;
+                if (reserved) receive_reserved_count += 1;
                 active_driver_rx_count += 1;
                 last_active_driver_rx_frame_len = result.length;
                 @memcpy(last_active_driver_rx_frame[0..result.length], frame.bytes[0..result.length]);
@@ -992,8 +1097,9 @@ fn serviceReceiveFrames(device: *const NetworkDevice, queue: *ReceiveQueue, budg
     return service;
 }
 
-fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypto_hash.Digest {
+fn nativeConnectionContext(connection: *const NativeServiceIdentityConnection) crypto_hash.Digest {
     var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "protocol", SERVICE_IDENTITY_FRAME_MAGIC);
     crypto_hash.updateInt(&hasher, "connection", connection.id);
     crypto_hash.updateInt(&hasher, "policy", connection.policy_id);
     crypto_hash.updateInt(&hasher, "capability", connection.capability_id);
@@ -1016,29 +1122,15 @@ fn nativeConnectionKey(connection: *const NativeServiceIdentityConnection) crypt
     return crypto_hash.finalize(&hasher);
 }
 
-fn nativePayloadDigest(connection: *const NativeServiceIdentityConnection, payload: []const u8) crypto_hash.Digest {
+fn nativeDiscoveryContext(connection: *const NativeLocalDiscoveryConnection) crypto_hash.Digest {
     var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "key", &connection.key);
-    crypto_hash.updateBytes(&hasher, "payload", payload);
-    return crypto_hash.finalize(&hasher);
-}
-
-fn nativeDiscoveryKey(connection: *const NativeLocalDiscoveryConnection) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
+    crypto_hash.updateBytes(&hasher, "protocol", DISCOVERY_FRAME_MAGIC);
     crypto_hash.updateInt(&hasher, "connection", connection.id);
     crypto_hash.updateInt(&hasher, "policy", connection.policy_id);
     crypto_hash.updateInt(&hasher, "capability", connection.capability_id);
     updatePrincipal(&hasher, "source", connection.source_device);
     crypto_hash.updateBytes(&hasher, "source-mac", &connection.source_mac);
     crypto_hash.updateBytes(&hasher, "discovery-class", connection.discoveryClassSlice());
-    return crypto_hash.finalize(&hasher);
-}
-
-fn nativeDiscoveryDigest(connection: *const NativeLocalDiscoveryConnection, payload: []const u8) crypto_hash.Digest {
-    var hasher = crypto_hash.init();
-    crypto_hash.updateBytes(&hasher, "key", &connection.key);
-    crypto_hash.updateBytes(&hasher, "discovery-class", connection.discoveryClassSlice());
-    crypto_hash.updateBytes(&hasher, "payload", payload);
     return crypto_hash.finalize(&hasher);
 }
 
@@ -1051,12 +1143,12 @@ fn encodeNativeFrame(
         buffer,
         SERVICE_IDENTITY_FRAME_MAGIC,
         frame.connection_id,
-        frame.policy_id,
-        frame.capability_id,
+        connection.policy_id,
+        connection.capability_id,
         &connection.source_mac,
         connection.serviceIdentitySlice(),
         frame.ciphertextSlice(),
-        &frame.payload_digest,
+        &frame.authentication,
     );
 }
 
@@ -1069,12 +1161,12 @@ fn encodeDiscoveryFrame(
         buffer,
         DISCOVERY_FRAME_MAGIC,
         frame.connection_id,
-        frame.policy_id,
-        frame.capability_id,
+        connection.policy_id,
+        connection.capability_id,
         &connection.source_mac,
         connection.discoveryClassSlice(),
         frame.ciphertextSlice(),
-        &frame.probe_digest,
+        &frame.authentication,
     );
 }
 
@@ -1107,16 +1199,6 @@ fn encodeWireFrame(
     return buffer[0..writer.offset];
 }
 
-fn applyModeledKeystream(
-    ciphertext: *[MAX_NATIVE_PAYLOAD_BYTES]u8,
-    payload: []const u8,
-    key: *const crypto_hash.Digest,
-) void {
-    for (payload, 0..) |byte, index| {
-        ciphertext[index] = byte ^ key[index % key.len];
-    }
-}
-
 fn updatePrincipal(hasher: *crypto_hash.Hasher, tag: []const u8, value: principal.PrincipalId) void {
     const bytes = value.keyBytes();
     crypto_hash.updateBytes(hasher, tag, &bytes);
@@ -1135,7 +1217,7 @@ fn verifiedDriverPeerBoot(generation: u64) !measured_boot.BootRecord {
     try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .policy, "native-network-policy", "strict");
     try measured_boot.addMeasuredArtifact(&recorder, &artifact_manifest, .driver_set, "native-network-driver-set", "i225");
     var boot = recorder.finalize();
-    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .bootloader_provided);
+    try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
     return boot;
 }
 
@@ -1178,9 +1260,9 @@ test "network driver keeps bounded frame metadata compact" {
     try std.testing.expectEqual(u8, @FieldType(NativeLocalDiscoveryFrame, "discovery_class_len"));
     try std.testing.expectEqual(@as(usize, 4), @sizeOf(ReceiveResult));
     try std.testing.expectEqual(@as(usize, 320), @sizeOf(NativeServiceIdentityConnection));
-    try std.testing.expectEqual(@as(usize, 320), @sizeOf(NativeServiceIdentityFrame));
+    try std.testing.expectEqual(@as(usize, 312), @sizeOf(NativeServiceIdentityFrame));
     try std.testing.expectEqual(@as(usize, 192), @sizeOf(NativeLocalDiscoveryConnection));
-    try std.testing.expectEqual(@as(usize, 288), @sizeOf(NativeLocalDiscoveryFrame));
+    try std.testing.expectEqual(@as(usize, 280), @sizeOf(NativeLocalDiscoveryFrame));
     try std.testing.expectEqual(@as(usize, 1_502), bounded_metadata_layout.queued_receive_frame_size_bytes);
     try std.testing.expectEqual(@as(usize, 48_064), bounded_metadata_layout.receive_queue_size_bytes);
     try std.testing.expectEqual(@sizeOf(?*anyopaque), bounded_metadata_layout.freestanding_receive_queue_handle_size_bytes);
@@ -1414,6 +1496,51 @@ test "pending network work is budgeted into the deferred receive queue" {
     try std.testing.expectEqualStrings("frame-2", lastActiveDriverReceivedFrame());
 }
 
+test "deferred receive protocol routing preserves unrelated frames across slot reuse" {
+    const Harness = struct {
+        const frames = [_][]const u8{ "before", "ZGNPpeer", "between", "ZGNPoversized", "after" };
+        var next: usize = 0;
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+        fn pending() bool {
+            return next < frames.len;
+        }
+        fn receive(out: []u8) ReceiveResult {
+            if (!pending()) return .{ .status = .empty };
+            const bytes = frames[next];
+            next += 1;
+            if (out.len < bytes.len) return .{ .status = .dropped };
+            @memcpy(out[0..bytes.len], bytes);
+            return .{ .status = .frame, .length = @intCast(bytes.len) };
+        }
+    };
+    reset();
+    defer reset();
+    const device = NetworkDevice{ .send = Harness.send, .receive = Harness.receive, .workPending = Harness.pending, .getMacAddress = Harness.mac };
+    try std.testing.expect(activateDevice(&device, 10));
+    reserveReceivePrefix("ZGNP".*);
+    var out: [32]u8 = undefined;
+    for (0..40) |_| {
+        Harness.next = 0;
+        try std.testing.expectEqual(@as(usize, 5), servicePendingReceiveFrames(5).frames_queued);
+        try std.testing.expectEqualStrings("before", out[0..receiveActiveFrame(&out).length]);
+        // The generic reader passes a reserved head without taking its packet.
+        try std.testing.expectEqualStrings("between", out[0..receiveActiveFrame(&out).length]);
+        try std.testing.expect(hasQueuedFrameWithPrefix("ZGNP"));
+        const selected = receiveQueuedFrameWithPrefix("ZGNP", &out);
+        try std.testing.expectEqualStrings("ZGNPpeer", out[0..selected.length]);
+        try std.testing.expectEqualStrings("after", out[0..receiveActiveFrame(&out).length]);
+        try std.testing.expectEqual(ReceiveStatus.empty, receiveActiveFrame(&out).status);
+        try std.testing.expectEqual(ReceiveStatus.dropped, receiveQueuedFrameWithPrefix("ZGNP", out[0..1]).status);
+        try std.testing.expect(!hasQueuedFrameWithPrefix("ZGNP"));
+        try std.testing.expectEqual(@as(usize, 0), queuedReceiveFrameCount());
+    }
+}
+
 test "deferred receive service drains hardware when the software queue is full" {
     const Harness = struct {
         var remaining: usize = 0;
@@ -1556,7 +1683,7 @@ test "native network stack gates service identity packets on attested policy cap
     });
     const peer_attestation_response = try peer_attestation.respondToRemoteAttestationRequest(peer_boot, peer_attestation_request);
     const pinned_digest = peer_attestation_response.statement.root_digest;
-    const request_digest = peer_attestation_response.request_digest;
+    const request_digest = peer_attestation_request.digest();
     var wrong_digest = pinned_digest;
     wrong_digest[0] ^= 0xFF;
 
@@ -1665,6 +1792,23 @@ test "native network stack gates service identity packets on attested policy cap
 
     const target_mac = [_]u8{ 0x02, 0, 0, 0, 0, 9 };
     try stack.bindPeerLink(target, target_mac);
+    const other_target = principal.PrincipalId{ .kind = .device, .serial = target.serial + 1 };
+    try stack.bindPeerLink(other_target, .{ 0x02, 0, 0, 0, 0, 10 });
+    try std.testing.expectError(error.EgressDenied, stack.openVerifiedServiceIdentity(&broker, .{
+        .task_id = 70,
+        .principal_id = service_owner,
+        .capability_id = policy_capability.id,
+        .policy_id = policy.id,
+        .service_identity = "overlay.native.identity",
+        .attestation_response = peer_attestation_response,
+        .attestation_request = peer_attestation_request,
+        .attested_boot = &peer_boot,
+        .trusted_root = peer_attestation_identity,
+        .now_ticks = 10,
+    }, source, other_target));
+    try std.testing.expectEqual(network_policy.EgressDecisionReason.attestation_required, stack.last_denial_reason);
+    try std.testing.expectEqual(@as(usize, 0), stack.opened_connections);
+    try std.testing.expectEqual(@as(usize, 0), Harness.send_count);
     const connection = try stack.openVerifiedServiceIdentity(&broker, .{
         .task_id = 70,
         .principal_id = service_owner,
@@ -1690,6 +1834,14 @@ test "native network stack gates service identity packets on attested policy cap
 
     const frame = try stack.sendServiceIdentityFrame(&connection, "native payload");
     try std.testing.expectEqualSlices(u8, &target_mac, &Harness.last_destination);
+    var opened: ["native payload".len]u8 = undefined;
+    const context = nativeConnectionContext(&connection);
+    try transport_crypto.open(&opened, frame.ciphertextSlice(), frame.authentication, connection.key, &context);
+    try std.testing.expectEqualStrings("native payload", &opened);
+    var changed_context = context;
+    changed_context[0] ^= 1;
+    try std.testing.expectError(error.AuthenticationFailed, transport_crypto.open(&opened, frame.ciphertextSlice(), frame.authentication, connection.key, &changed_context));
+    try std.testing.expect(std.mem.allEqual(u8, &opened, 0));
     try std.testing.expect(frame.flags.encrypted);
     try std.testing.expect(frame.flags.egress_allowed);
     try std.testing.expect(frame.flags.attested);
@@ -1701,8 +1853,8 @@ test "native network stack gates service identity packets on attested policy cap
     try std.testing.expect(std.mem.eql(u8, &peer_attestation_metadata_digest, &frame.attestation_verifier_metadata_digest));
     try std.testing.expect(frame.flags.identity_pinned);
     try std.testing.expect(!std.mem.eql(u8, frame.ciphertextSlice(), "native payload"));
-    try std.testing.expectEqual(@as(usize, 6), stack.attempted_connections);
-    try std.testing.expectEqual(@as(usize, 4), stack.denied_before_transmit);
+    try std.testing.expectEqual(@as(usize, 7), stack.attempted_connections);
+    try std.testing.expectEqual(@as(usize, 5), stack.denied_before_transmit);
     try std.testing.expectEqual(@as(usize, 1), stack.opened_connections);
     try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
@@ -1831,4 +1983,111 @@ test "native network stack requires scoped local discovery before discovery broa
     try std.testing.expectEqual(@as(usize, 1), stack.transmitted_packets);
     try std.testing.expectEqual(@as(usize, 1), Harness.send_count);
     try std.testing.expect(Harness.last_frame_len > "who-has-printer".len);
+}
+
+test "deferred receive peer traffic reuses slots behind a stalled generic consumer" {
+    const Harness = struct {
+        var next: []const u8 = "";
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+        fn pending() bool {
+            return next.len != 0;
+        }
+        fn receive(out: []u8) ReceiveResult {
+            const frame = next;
+            next = "";
+            if (frame.len == 0) return .{ .status = .empty };
+            if (out.len < frame.len) return .{ .status = .dropped };
+            @memcpy(out[0..frame.len], frame);
+            return .{ .status = .frame, .length = @intCast(frame.len) };
+        }
+    };
+    reset();
+    defer reset();
+    const device = NetworkDevice{ .send = Harness.send, .receive = Harness.receive, .workPending = Harness.pending, .getMacAddress = Harness.mac };
+    try std.testing.expect(activateDevice(&device, 10));
+    reserveReceivePrefix("ZGNP".*);
+    Harness.next = "unrelated pending";
+    try std.testing.expectEqual(@as(usize, 1), servicePendingReceiveFrames(1).frames_queued);
+    var out: [32]u8 = undefined;
+    for (0..RECEIVE_QUEUE_CAPACITY * 3) |_| {
+        Harness.next = "ZGNPpeer";
+        try std.testing.expectEqual(@as(usize, 1), servicePendingReceiveFrames(1).frames_queued);
+        try std.testing.expectEqualStrings("ZGNPpeer", out[0..receiveQueuedFrameWithPrefix("ZGNP", &out).length]);
+    }
+    try std.testing.expectEqual(@as(usize, 1), queuedReceiveFrameCount());
+    try std.testing.expectEqualStrings("unrelated pending", out[0..receiveActiveFrame(&out).length]);
+}
+
+test "deferred receive reservations isolate capacity while preserving each traffic class order" {
+    const Harness = struct {
+        var next: []const u8 = "";
+        fn send(_: [6]u8, _: []const u8) bool {
+            return true;
+        }
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+        fn pending() bool {
+            return next.len != 0;
+        }
+        fn receive(out: []u8) ReceiveResult {
+            const frame = next;
+            next = "";
+            if (frame.len == 0) return .{ .status = .empty };
+            if (out.len < frame.len) return .{ .status = .dropped };
+            @memcpy(out[0..frame.len], frame);
+            return .{ .status = .frame, .length = @intCast(frame.len) };
+        }
+    };
+    reset();
+    defer reset();
+    const device = NetworkDevice{ .send = Harness.send, .receive = Harness.receive, .workPending = Harness.pending, .getMacAddress = Harness.mac };
+    try std.testing.expect(activateDevice(&device, 10));
+    var ordinary = [_]u8{ 'o', 't', 'h', 'e', 'r', 0 };
+    for (0..RECEIVE_QUEUE_CAPACITY) |i| {
+        ordinary[5] = @intCast(i);
+        Harness.next = &ordinary;
+        try std.testing.expectEqual(@as(usize, 1), servicePendingReceiveFrames(1).frames_queued);
+    }
+    reserveReceivePrefix("ZGNP".*);
+    const generic_capacity = RECEIVE_QUEUE_CAPACITY - RESERVED_RECEIVE_CAPACITY;
+    try std.testing.expectEqual(generic_capacity, queuedReceiveFrameCount());
+    var native = [_]u8{ 'Z', 'G', 'N', 'P', 0 };
+    for (0..RESERVED_RECEIVE_CAPACITY + 1) |i| {
+        native[4] = @intCast(i);
+        Harness.next = &native;
+        const result = servicePendingReceiveFrames(1);
+        try std.testing.expectEqual(@as(usize, if (i < RESERVED_RECEIVE_CAPACITY) 1 else 0), result.frames_queued);
+        try std.testing.expectEqual(@as(usize, if (i < RESERVED_RECEIVE_CAPACITY) 0 else 1), result.dropped);
+    }
+    var out: [32]u8 = undefined;
+    for (0..generic_capacity) |i| {
+        const result = receiveActiveFrame(&out);
+        try std.testing.expectEqual(@as(u16, 6), result.length);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), out[5]);
+    }
+    // Keep the reserved class stalled while unrelated traffic fills and drains.
+    for (0..RECEIVE_QUEUE_CAPACITY) |i| {
+        ordinary[5] = @intCast(i);
+        Harness.next = &ordinary;
+        try std.testing.expectEqual(@as(usize, if (i < generic_capacity) 1 else 0), servicePendingReceiveFrames(1).frames_queued);
+    }
+    for (0..generic_capacity) |i| {
+        const result = receiveActiveFrame(&out);
+        try std.testing.expectEqual(@as(u16, 6), result.length);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), out[5]);
+    }
+    try std.testing.expectEqual(ReceiveStatus.empty, receiveActiveFrame(&out).status);
+    reserveReceivePrefix(null);
+    for (0..RESERVED_RECEIVE_CAPACITY) |i| {
+        const result = receiveActiveFrame(&out);
+        try std.testing.expectEqual(@as(u16, 5), result.length);
+        try std.testing.expectEqual(@as(u8, @intCast(i)), out[4]);
+    }
+    try std.testing.expectEqual(@as(usize, 0), queuedReceiveFrameCount());
 }

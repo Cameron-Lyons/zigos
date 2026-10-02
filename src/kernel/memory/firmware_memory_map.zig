@@ -50,7 +50,7 @@ pub fn reserveLiveHandoffRanges(
     info_address: u32,
     info: handoff.Info,
 ) Error!void {
-    var runs: [4]frame_allocator.FrameRun = undefined;
+    var runs: [5]frame_allocator.FrameRun = undefined;
     var run_count: usize = 0;
 
     runs[run_count] = try liveRangeRun(
@@ -91,12 +91,38 @@ pub fn reserveLiveHandoffRanges(
         }
     }
 
+    if (info.boot_tpm) |tpm| {
+        runs[run_count] = try liveRangeRun(memory_bytes, page_size, std.math.cast(u32, tpm.log_address) orelse return error.InvalidHandoffRange, tpm.log_bytes);
+        run_count += 1;
+    }
+
     for (runs[0..run_count]) |run| {
         try allocator.validateReservation(run);
     }
     for (runs[0..run_count]) |run| {
         try allocator.reserve(run);
     }
+}
+
+pub fn reserveKernelRanges(
+    comptime memory_bytes: u64,
+    comptime page_size: u32,
+    allocator: *frame_allocator.Fixed(memory_bytes, page_size),
+    kernel_start: u64,
+    kernel_end: u64,
+    heap_start: u64,
+    heap_bytes: u64,
+) Error!void {
+    const low_reserved_bytes = 1024 * 1024;
+    const heap_end = std.math.add(u64, heap_start, heap_bytes) catch return error.InvalidHandoffRange;
+    if (kernel_start < low_reserved_bytes or kernel_end <= kernel_start or kernel_end > memory_bytes or
+        heap_start < low_reserved_bytes or heap_bytes == 0 or heap_end > memory_bytes or
+        kernel_start % page_size != 0 or kernel_end % page_size != 0 or
+        heap_start % page_size != 0 or heap_bytes % page_size != 0 or
+        (kernel_start < heap_end and heap_start < kernel_end)) return error.InvalidHandoffRange;
+    try allocator.reserve(.{ .base = 0, .count = low_reserved_bytes / page_size });
+    try allocator.reserve(.{ .base = kernel_start, .count = @intCast((kernel_end - kernel_start) / page_size) });
+    try allocator.reserve(.{ .base = heap_start, .count = @intCast(heap_bytes / page_size) });
 }
 
 fn fullPageRun(
@@ -212,6 +238,37 @@ test "firmware map opens only complete usable pages" {
     try std.testing.expectEqual(@as(u32, 2), allocator.stats().free);
 }
 
+test "kernel and EFI heap reservations preserve free gaps and firmware NVS" {
+    const mib = 1024 * 1024;
+    const memory_bytes = 128 * mib;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    var bytes: [48]u8 = undefined;
+    _ = appendEntry(&bytes, 0, 0, memory_bytes, 1);
+    _ = appendEntry(&bytes, 24, 8 * mib, mib, 4);
+    try initializeAllocator(memory_bytes, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24));
+    try reserveKernelRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, 16 * mib, 24 * mib, 64 * mib, 32 * mib);
+    try allocator.sealReservations();
+    for ([_]u64{ 0, mib - TEST_PAGE_SIZE, 8 * mib, 16 * mib, 24 * mib - TEST_PAGE_SIZE, 64 * mib, 96 * mib - TEST_PAGE_SIZE }) |address|
+        try std.testing.expect(allocator.isReserved(address));
+    for ([_]u64{ mib, 7 * mib, 9 * mib, 15 * mib, 24 * mib, 63 * mib, 96 * mib }) |address|
+        try std.testing.expect(!allocator.isReserved(address));
+    try std.testing.expectEqual(@as(u32, (1 + 1 + 8 + 32) * mib / TEST_PAGE_SIZE), allocator.stats().reserved);
+}
+
+test "kernel reservation rejects overlapping or overflowing EFI heap ranges atomically" {
+    const mib = 1024 * 1024;
+    const memory_bytes = 128 * mib;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    for ([_]u64{ 0, 16 * mib, 24 * mib - TEST_PAGE_SIZE, memory_bytes - TEST_PAGE_SIZE, std.math.maxInt(u64) }) |heap_base| {
+        try std.testing.expectError(error.InvalidHandoffRange, reserveKernelRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, 16 * mib, 24 * mib, heap_base, 32 * mib));
+        try std.testing.expectEqual(@as(u32, 0), allocator.stats().reserved);
+    }
+}
+
 test "firmware map opens usable frames above 4 GiB" {
     const high_frame_base: u64 = @as(u64, std.math.maxInt(u32)) + 1;
     const memory_bytes = high_frame_base + 4 * TEST_PAGE_SIZE;
@@ -314,6 +371,23 @@ test "live Multiboot information map and command-line pages stay reserved" {
     try std.testing.expect(allocator.isReserved(6 * TEST_PAGE_SIZE));
     try std.testing.expect(allocator.isReserved(7 * TEST_PAGE_SIZE));
     try std.testing.expectEqual(@as(u32, 5), allocator.stats().reserved);
+}
+
+test "copied TPM event log remains reserved and malformed extents fail before mutation" {
+    const memory_bytes = 2 * 1024 * 1024;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    var info = testInfo(1 << 6, 3 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, 0);
+    info.boot_tpm = .{ .log_address = 0x100000, .log_bytes = 2 * TEST_PAGE_SIZE + 1, .final_events = 2, .pcr11 = @splat(7) };
+    try reserveLiveHandoffRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, TEST_PAGE_SIZE, info);
+    for (0..3) |index| try std.testing.expect(allocator.isReserved(0x100000 + index * TEST_PAGE_SIZE));
+    try std.testing.expect(!allocator.isReserved(0x100000 - TEST_PAGE_SIZE));
+    try std.testing.expect(!allocator.isReserved(0x100000 + 3 * TEST_PAGE_SIZE));
+    allocator.reset();
+    info.boot_tpm.?.log_address = std.math.maxInt(u64);
+    try std.testing.expectError(error.InvalidHandoffRange, reserveLiveHandoffRanges(memory_bytes, TEST_PAGE_SIZE, &allocator, TEST_PAGE_SIZE, info));
+    try std.testing.expectEqual(@as(u32, 0), allocator.stats().reserved);
 }
 
 test "firmware framebuffer storage is reserved across touched pages" {

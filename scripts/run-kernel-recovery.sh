@@ -8,11 +8,19 @@ MARKER_TOOL="${ROOT_DIR}/src/print_native_smoke_markers.zig"
 
 KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
+RECOVERY_SECONDS="${RECOVERY_QEMU_SECONDS:-180}"
+case "$RECOVERY_SECONDS" in
+  ''|*[!0-9]*|0)
+    echo "RECOVERY_QEMU_SECONDS must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "$(dirname "$LOG_PATH")"
 rm -f "$LOG_PATH"
 
-QEMU_SERIAL_TARGET="file:$LOG_PATH" bash "$ROOT_DIR/scripts/run-headless-qemu.sh" "$KERNEL_PATH"
+QEMU_SERIAL_TARGET="file:$LOG_PATH" timeout --kill-after=5s "${RECOVERY_SECONDS}s" \
+  bash "$ROOT_DIR/scripts/run-headless-qemu.sh" "$KERNEL_PATH"
 
 if [ ! -s "$LOG_PATH" ]; then
   echo "Kernel recovery test failed: no serial output captured" >&2

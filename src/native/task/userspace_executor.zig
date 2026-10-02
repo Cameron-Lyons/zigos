@@ -399,6 +399,7 @@ const MappedImageRegions = struct {
     const Range = struct { start: usize = 0, size: usize = 0 };
     ranges: [task_runtime.MAX_EXECUTABLE_SEGMENTS]Range = [_]Range{.{}} ** task_runtime.MAX_EXECUTABLE_SEGMENTS,
     count: usize = 0,
+    stack: Range = .{},
 };
 
 const MappingEntry = struct {
@@ -759,7 +760,8 @@ pub const Executor = struct {
     }
 
     // Publish an opened document before the first instruction of a fresh app.
-    // Initializing here avoids retaining another binding in every mapping.
+    // Capture it immediately: a sibling may use the shared mailbox before this
+    // task's first dispatch.
     pub fn bindInitialDocument(
         self: *Executor,
         catalog: *userspace_loader.Catalog,
@@ -767,6 +769,7 @@ pub const Executor = struct {
         capability_table: *const capability.CapabilityTable,
         task_id: u64,
         binding: userspace_bootstrap_mailbox.DocumentBinding,
+        clipboard: userspace_bootstrap_mailbox.ClipboardBinding,
         now_ticks: u64,
     ) bool {
         if (builtin.target.os.tag != .freestanding) return false;
@@ -784,12 +787,89 @@ pub const Executor = struct {
         if (!image.elf_file.isPresent() or image.bootstrap_mailbox_address == 0) return false;
         self.init();
         const mapping = (self.ensureMaterialized(address_space, image) catch return false).entry;
-        if (mapping.resume_valid or mapping.mailbox_publication_cache.initialized) return false;
+        if (mapping.resume_valid or mapping.initial_mailbox_prepared or mapping.mailbox_publication_cache.initialized) return false;
         var update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks) orelse return false;
         update.document = binding;
-        freestanding.paging.switchToUserAddressSpace(&mapping.address_space.?);
-        defer freestanding.paging.switchToKernelAddressSpace();
-        writeBootstrapMailbox(update);
+        var mailbox = kernelPublishedMailbox(update, null);
+        if (clipboard.isValid()) {
+            if (!task.hasCapability(clipboard.endpoint_capability_id)) return false;
+            const transport = capability_table.requireUsable(clipboard.endpoint_capability_id, now_ticks) catch return false;
+            if (!transport.holder.eql(task.owner) or transport.scope.task_id != task_id or
+                transport.target.kind != .endpoint or !transport.rights.has(.endpoint_send) or !transport.rights.has(.endpoint_recv)) return false;
+            mailbox.auxiliary_kind = .clipboard;
+            mailbox.auxiliary = .{ .clipboard = clipboard };
+        }
+        freestanding.paging.writeOwnedUserRange(&mapping.address_space.?, update.address, std.mem.asBytes(&mailbox)) catch return false;
+        storeCapturedMailbox(mapping, mailbox);
+        mapping.initial_mailbox_prepared = true;
+        return true;
+    }
+
+    // The compositor can receive its launcher after bootstrap. Read the task's
+    // captured state when a sibling owns the shared mailbox, then capture the
+    // binding immediately so the next sibling cannot erase it.
+    pub fn bindLauncherChannel(self: *Executor, catalog: *userspace_loader.Catalog, runtime: *task_runtime.Runtime, capability_table: *const capability.CapabilityTable, task_id: u64, binding: userspace_bootstrap_mailbox.LauncherBinding, now_ticks: u64) bool {
+        return self.bindNativeChannel(catalog, runtime, capability_table, task_id, .{ .launcher = binding }, now_ticks);
+    }
+
+    pub fn bindIdentityChannel(self: *Executor, catalog: *userspace_loader.Catalog, runtime: *task_runtime.Runtime, capability_table: *const capability.CapabilityTable, task_id: u64, binding: userspace_bootstrap_mailbox.IdentityBinding, now_ticks: u64) bool {
+        return self.bindNativeChannel(catalog, runtime, capability_table, task_id, .{ .identity = binding }, now_ticks);
+    }
+
+    const NativeChannelBinding = union(enum) { launcher: userspace_bootstrap_mailbox.LauncherBinding, identity: userspace_bootstrap_mailbox.IdentityBinding };
+
+    fn bindNativeChannel(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *task_runtime.Runtime,
+        capability_table: *const capability.CapabilityTable,
+        task_id: u64,
+        binding: NativeChannelBinding,
+        now_ticks: u64,
+    ) bool {
+        if (builtin.target.os.tag != .freestanding) return false;
+        const transport = switch (binding) {
+            inline else => |value| blk: {
+                if (!value.isValid()) return false;
+                break :blk value.endpoint_capability_id;
+            },
+        };
+        if (self.active_task_id != 0 or self.bound_runtime != runtime) return false;
+        const task = runtime.find(task_id) orelse return false;
+        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable() or
+            !task.hasCapability(transport)) return false;
+        const granted = capability_table.requireUsable(transport, now_ticks) catch return false;
+        if (!granted.holder.eql(task.owner) or granted.scope.task_id != task_id or
+            granted.target.kind != .endpoint or !granted.rights.has(.endpoint_send) or
+            !granted.rights.has(.endpoint_recv)) return false;
+        const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
+        if (address_space.owner_task_id != task_id or address_space.image_id != task.launch.image_id) return false;
+        const image = catalog.findById(task.launch.image_id) orelse return false;
+        if (!image.elf_file.isPresent() or image.bootstrap_mailbox_address == 0) return false;
+        self.init();
+        const mapping = (self.ensureMaterialized(address_space, image) catch return false).entry;
+        var update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks) orelse return false;
+        update.preserve_runtime_state = mapping.resume_valid or mapping.initial_mailbox_prepared;
+        const preserved = preservedMailboxForUpdate(mapping, readUserspaceMailboxFromMapping(mapping, update.address), update);
+        if (update.preserve_runtime_state and preserved == null) return false;
+        var mailbox = kernelPublishedMailbox(update, preserved);
+        switch (binding) {
+            .launcher => |value| {
+                if (mailbox.ui_channel_kind == .document) return false;
+                mailbox.ui_channel_kind = .launcher;
+                mailbox.ui_channel = .{ .launcher = value };
+            },
+            .identity => |value| {
+                if (mailbox.auxiliary_kind == .clipboard) return false;
+                if (mailbox.auxiliary_kind == .identity) {
+                    if (capability_table.requireUsable(mailbox.auxiliary.identity.endpoint_capability_id, now_ticks)) |_| return false else |_| {}
+                }
+                mailbox.auxiliary_kind = .identity;
+                mailbox.auxiliary = .{ .identity = value };
+            },
+        }
+        freestanding.paging.writeOwnedUserRange(&mapping.address_space.?, update.address, std.mem.asBytes(&mailbox)) catch return false;
+        storeCapturedMailbox(mapping, mailbox);
         mapping.initial_mailbox_prepared = true;
         return true;
     }
@@ -1059,6 +1139,7 @@ pub const Executor = struct {
                         region.access,
                         dispatch_metadata.protectionKey(),
                     );
+                    entry.image_regions.?.stack = .{ .start = @intCast(mapped_base), .size = region.size_bytes };
                     const runtime = self.bound_runtime orelse return error.AddressSpaceOwnerInvalid;
                     const live = runtime.findAddressSpace(address_space.id) orelse return error.AddressSpaceOwnerInvalid;
                     if (!live.relocateStack(mapped_base, region.size_bytes)) return error.InitialContextInvalid;
@@ -1169,6 +1250,13 @@ pub const Executor = struct {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
         if (entry.address_space) |*space| {
+            if (entry.image_regions) |regions| {
+                const stack = regions.stack;
+                if (stack.size != 0 and !demand_paging.unregisterRegionForSpace(space, stack.start, stack.start + stack.size)) {
+                    freestanding.paging.releaseUserRange(space, stack.start, stack.size) catch
+                        native_util.impossibleByInvariant("invalid retired stack mapping range");
+                }
+            }
             const retain_shared = self.releaseSharedGroupSpace(space);
             if (!retain_shared) {
                 demand_paging.unregisterSpace(space);
@@ -1437,7 +1525,8 @@ fn kernelPublishedMailbox(
     mailbox.heartbeat_increment = update.heartbeat_increment;
     if (preserved == null) {
         mailbox.detail = update.detail;
-        mailbox.document = update.document;
+        mailbox.ui_channel_kind = if (update.document.isValid()) .document else .none;
+        mailbox.ui_channel = .{ .document = update.document };
     }
     return mailbox;
 }
@@ -2228,6 +2317,35 @@ test "mailbox snapshot ignores a sibling task identity" {
     }, 7));
 }
 
+test "prepared document survives a sibling dispatch before first launch" {
+    const binding = userspace_bootstrap_mailbox.DocumentBinding{
+        .endpoint_capability_id = 10,
+        .service_endpoint_id = 11,
+        .object_id = 12,
+        .version_id = 13,
+    };
+    var update = BootstrapMailboxUpdate{
+        .address = 0x4000,
+        .preserve_runtime_state = false,
+        .detail = @intFromEnum(userspace_bootstrap_mailbox.Detail.ui),
+        .heartbeat_increment = 1,
+        .authorities = .{ .bootstrap_capability_id = 101 },
+        .task_id = 1,
+        .ui_surface_id = 2,
+        .document = binding,
+    };
+    const prepared = kernelPublishedMailbox(update, null);
+    const sibling = userspace_bootstrap_mailbox.Mailbox{ .task_id = 2 };
+    update.document = .{};
+    update.preserve_runtime_state = true;
+    update.authorities.input_capability_id = 102;
+    const restored = kernelPublishedMailbox(update, preservedMailboxBytes(sibling, prepared, update));
+    try std.testing.expectEqualDeep(binding, restored.documentBinding());
+    try std.testing.expectEqual(@as(u64, 1), restored.task_id);
+    try std.testing.expectEqual(@as(u64, 102), restored.input_capability_id);
+    try std.testing.expectEqual(@as(u64, 0), restored.ui_state_revision);
+}
+
 test "shared-group stacks walk to the next free slot" {
     const preferred = userspace_layout.default_stack_top - userspace_layout.default_stack_size;
     try std.testing.expectEqual(preferred, uniqueStackBase(preferred, userspace_layout.default_stack_size, 0).?);
@@ -2267,7 +2385,8 @@ test "mailbox publication preserves resume state and resets first launch" {
         .last_counter = 41,
         .input_event_count = 12,
         .ui_state_revision = 15,
-        .document = .{ .endpoint_capability_id = 201, .service_endpoint_id = 202, .object_id = 203, .version_id = 204 },
+        .ui_channel_kind = .document,
+        .ui_channel = .{ .document = .{ .endpoint_capability_id = 201, .service_endpoint_id = 202, .object_id = 203, .version_id = 204 } },
     };
     const authorities = MailboxAuthorities{
         .bootstrap_capability_id = 101,
@@ -2295,8 +2414,8 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 9), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 12), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 15), mailbox.ui_state_revision);
-    try std.testing.expectEqual(@as(u64, 201), mailbox.document.endpoint_capability_id);
-    try std.testing.expectEqual(@as(u64, 204), mailbox.document.version_id);
+    try std.testing.expectEqual(@as(u64, 201), mailbox.documentBinding().endpoint_capability_id);
+    try std.testing.expectEqual(@as(u64, 204), mailbox.documentBinding().version_id);
 
     const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 11, 107, 108, authorities).?;
     writeBootstrapMailbox(first_launch);
@@ -2309,7 +2428,7 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u32, 11), mailbox.heartbeat_increment);
     try std.testing.expectEqual(@as(u64, 0), mailbox.input_event_count);
     try std.testing.expectEqual(@as(u64, 0), mailbox.ui_state_revision);
-    try std.testing.expectEqual(userspace_bootstrap_mailbox.DocumentBinding{}, mailbox.document);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.DocumentBinding{}, mailbox.documentBinding());
     try std.testing.expectEqual(@as(u64, 107), mailbox.task_id);
     try std.testing.expectEqual(@as(u64, 108), mailbox.ui_surface_id);
 

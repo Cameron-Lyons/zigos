@@ -327,6 +327,7 @@ pub const SecretVaultOperation = enum(u8) {
     export_raw,
     rotate,
     revoke,
+    retire,
 };
 
 pub const SecretVaultRequest = struct {

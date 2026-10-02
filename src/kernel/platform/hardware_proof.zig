@@ -484,6 +484,7 @@ pub fn tpmDiscovery() ?tpm2_crb.Discovery {
 }
 
 var facts = ProbeFacts{};
+var dmar_table_physical: u64 = 0;
 var captured_madt_table: []const u8 = &.{};
 var printed = PrintedMarkers{};
 
@@ -514,6 +515,13 @@ pub fn pciEcamAllocation() ?mcfg.Allocation {
 pub fn vtdSummary() ?dmar.Summary {
     if (!facts.vtdDiscoveryReady()) return null;
     return facts.dmar_summary;
+}
+
+/// Firmware support for DMA isolation is useful on virtual machines as well.
+/// Returning it does not assert the physical target's hardware proof.
+pub fn dmaIsolationTable() ?[]const u8 {
+    if (!facts.acpi_dmar or dmar_table_physical == 0) return null;
+    return mappedPhysicalTableBytes(dmar_table_physical, mmio_windows.acpi_entry.base);
 }
 
 pub fn realTargetDetected() bool {
@@ -756,6 +764,7 @@ pub fn recordGridCarbonIntensitySample(sample: GridCarbonIntensitySample) void {
 }
 
 fn captureAcpiEvidence() void {
+    dmar_table_physical = 0;
     tpm_discovery = null;
     var tpm_table_seen = false;
     const rsdp = capturedRsdp() orelse return;
@@ -795,10 +804,17 @@ fn captureAcpiEvidence() void {
         } else if (std.mem.eql(u8, header.signature[0..], dmar.DMAR_SIGNATURE)) {
             if (dmar_table_seen) {
                 found_dmar = null;
+                dmar_table_physical = 0;
                 continue;
             }
             dmar_table_seen = true;
-            found_dmar = dmar.parseDmar(table) catch continue;
+            found_dmar = dmar.parseDmar(table) catch |err| {
+                console.print("ZIGOS:DMAR:REJECTED ");
+                console.print(@errorName(err));
+                console.print("\n");
+                continue;
+            };
+            dmar_table_physical = table_address;
         }
     }
 

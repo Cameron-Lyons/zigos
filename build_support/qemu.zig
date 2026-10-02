@@ -143,6 +143,34 @@ pub fn addTpm2SealingQemuCommand(
     return command;
 }
 
+pub fn addTpm2OwnershipQemuCommand(
+    b: *std.Build,
+    kernel: shared.KernelArtifact,
+    userspace_images: userspace_build.ArtifactSet,
+) *std.Build.Step.Run {
+    return addTpm2ProfileQemuCommand(b, kernel, userspace_images, "ownership", "src/boot/cmdline-tpm-ownership.txt");
+}
+
+pub fn addTpm2QuoteQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, userspace_images: userspace_build.ArtifactSet) *std.Build.Step.Run {
+    return addTpm2ProfileQemuCommand(b, kernel, userspace_images, "quote", "src/boot/cmdline-tpm-quote.txt");
+}
+
+fn addTpm2ProfileQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, userspace_images: userspace_build.ArtifactSet, comptime mode: []const u8, cmdline: []const u8) *std.Build.Step.Run {
+    const image = kernel_build.addEfiImage(b, .ReleaseSmall, kernel.boot_payload, b.path(cmdline));
+    const iso = b.addSystemCommand(&.{"bash"});
+    iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
+    iso.addFileArg(image.getEmittedBin());
+    const iso_path = iso.addOutputFileArg("tpm-" ++ mode ++ ".iso");
+    _ = iso.addOutputDirectoryArg("tpm-" ++ mode ++ "-staging");
+    const command = b.addSystemCommand(&.{"bash"});
+    command.addFileArg(b.path("scripts/run-with-qemu-boot-iso.sh"));
+    command.addFileArg(iso_path);
+    command.addArgs(&.{ "scripts/run-tpm2-qemu.sh", kernel.output_path, mode });
+    command.step.dependOn(kernel.install_step);
+    command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
+    return command;
+}
+
 pub fn addNativeFaultSmokeCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
@@ -186,6 +214,7 @@ pub fn addStorageDurabilityQemuCommand(
         "build/storage-durability-qemu.log",
         "build/native-store-storage-durability.img",
     });
+    command.addArg(b.fmt("{d}", .{@import("../src/native/storage/volume/layout.zig").sector_size}));
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -244,13 +273,11 @@ pub fn addIsoCommand(
 ) *std.Build.Step.Run {
     const command = b.addSystemCommand(&.{"bash"});
     command.addFileArg(b.path("scripts/build-efi-iso.sh"));
-    command.addFileArg(kernel.output_file);
     command.addFileArg(efi_stub.getEmittedBin());
     command.addArgs(&.{
         output_path,
         staging_path,
     });
-    command.addFileArg(b.path("src/boot/cmdline.txt"));
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(&efi_stub.step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));

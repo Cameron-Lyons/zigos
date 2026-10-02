@@ -25,24 +25,27 @@ pub const KernelSteps = struct {
     recovery: *std.Build.Step,
 };
 
-pub fn addEfiStub(
+// Firmware can authenticate one PE image containing the exact kernel and command
+// line. Neither boot-volume files nor LoadedImage options can replace them.
+pub fn addEfiImage(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
+    kernel: std.Build.LazyPath,
+    cmdline: std.Build.LazyPath,
 ) *std.Build.Step.Compile {
-    const target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
-        .os_tag = .uefi,
-        .abi = .none,
+    const files = b.addWriteFiles();
+    _ = files.addCopyFile(kernel, "kernel.elf");
+    _ = files.addCopyFile(cmdline, "cmdline.txt");
+    const payload = files.add("payload.zig", "pub const kernel = @embedFile(\"kernel.elf\");\npub const cmdline = @embedFile(\"cmdline.txt\");\n");
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .uefi, .abi = .none });
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/boot/efi_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .red_zone = false,
     });
-    return b.addExecutable(.{
-        .name = "bootx64",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/boot/efi_stub.zig"),
-            .target = target,
-            .optimize = optimize,
-            .red_zone = false,
-        }),
-    });
+    module.addImport("boot_payload", b.createModule(.{ .root_source_file = payload, .target = target, .optimize = optimize }));
+    return b.addExecutable(.{ .name = "bootx64", .root_module = module });
 }
 
 pub fn addX86_64ArchitectureCompileCheck(
@@ -125,18 +128,16 @@ pub fn addX86_64KernelBootCheck(
     link.addFileArg(kernel_object.getEmittedBin());
     link.addFileArg(kernel_assembly.getEmittedBin());
 
-    const efi_stub = addNativeEfiStub(b, optimize);
+    const efi_stub = addEfiImage(b, optimize, linked_kernel, b.path("src/boot/cmdline-qemu.txt"));
     const validate_image = b.addSystemCommand(&.{"bash"});
     validate_image.addFileArg(b.path("scripts/check-efi-image.sh"));
     validate_image.addFileArg(efi_stub.getEmittedBin());
 
     const iso = b.addSystemCommand(&.{"bash"});
     iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
-    iso.addFileArg(linked_kernel);
     iso.addFileArg(efi_stub.getEmittedBin());
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
-    iso.addFileArg(b.path("src/boot/cmdline-qemu.txt"));
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -238,7 +239,7 @@ pub fn addX86_64LongModeEntryCheck(
     const iso_path = iso.addOutputFileArg("x86_64-long-mode-entry.iso");
     _ = iso.addOutputDirectoryArg("x86_64-long-mode-entry-staging");
     iso.addFileArg(b.path("src/boot/grub-long-mode.cfg"));
-    iso.addFileArg(addNativeEfiStub(b, optimize).getEmittedBin());
+    iso.addFileArg(addEfiImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt")).getEmittedBin());
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -566,48 +567,29 @@ pub fn addKernelArtifact(
     boot_link.addFileArg(kernel_object.getEmittedBin());
     boot_link.addFileArg(kernel_assembly.getEmittedBin());
 
-    const efi_stub = addNativeEfiStub(b, .ReleaseSmall);
+    const efi_stub = addEfiImage(b, .ReleaseSmall, boot_kernel, b.path("src/boot/cmdline-qemu.txt"));
     const validate_qemu_image = b.addSystemCommand(&.{"bash"});
     validate_qemu_image.addFileArg(b.path("scripts/check-efi-image.sh"));
     validate_qemu_image.addFileArg(efi_stub.getEmittedBin());
 
     const qemu_iso = b.addSystemCommand(&.{"bash"});
     qemu_iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
-    qemu_iso.addFileArg(boot_kernel);
     qemu_iso.addFileArg(efi_stub.getEmittedBin());
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
-    qemu_iso.addFileArg(b.path("src/boot/cmdline-qemu.txt"));
     qemu_iso.step.dependOn(&validate_qemu_image.step);
 
     const install = b.addInstallBinFile(linked_kernel, name);
     return .{
         .compile_step = kernel_object,
         .output_file = linked_kernel,
+        .boot_payload = boot_kernel,
         .install_step = &install.step,
         .output_path = b.getInstallPath(.bin, name),
         .kernel_role = kernel_role,
         .bootloader_source_path = "src/boot/efi_stub.zig",
         .qemu_boot_iso_path = qemu_iso_path,
     };
-}
-
-pub fn addNativeEfiStub(
-    b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    return b.addExecutable(.{
-        .name = "bootx64",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/boot/efi_stub.zig"),
-            .target = b.resolveTargetQuery(.{
-                .cpu_arch = .x86_64,
-                .os_tag = .uefi,
-                .abi = .none,
-            }),
-            .optimize = optimize,
-        }),
-    });
 }
 
 fn addKernelAssemblyObject(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
@@ -633,4 +615,5 @@ fn addKernelAssemblyFiles(
     kernel_module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
     kernel_module.addAssemblyFile(b.path("src/kernel/smp/ap_trampoline.S"));
     kernel_module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
+    kernel_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
 }

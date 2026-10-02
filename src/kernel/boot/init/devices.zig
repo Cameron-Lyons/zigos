@@ -67,6 +67,10 @@ pub fn init() void {
     if (hardware_proof.tpmDiscovery()) |discovery| {
         if (@import("../../platform/tpm2_hw.zig").initialize(discovery)) |_| {
             console.print("ZIGOS:TPM2:CRB_READY\n");
+            const measured = @import("../../platform/tpm_boot.zig").verify() catch
+                @panic("TPM boot measurement does not match the firmware event log");
+            console.print(if (measured) "ZIGOS:TPM2:BOOT_MEASUREMENT:VERIFIED\n" else "ZIGOS:TPM2:BOOT_MEASUREMENT:UNAVAILABLE\n");
+            if (measured) console.print("ZIGOS:TPM2:FINAL_EVENTS:VERIFIED\n");
         } else |err| {
             console.print("ZIGOS:TPM2:UNAVAILABLE ");
             console.print(@errorName(err));
@@ -153,6 +157,9 @@ fn capturePciInventory() void {
         if (pci.memoryBar0(dev)) |bar| {
             registerDeviceMmio(pciDeviceId(dev), bar.address, 0x1_0000);
         }
+        network_detected = true;
+    } else if (@import("../../drivers/virtio_net_hw.zig").firstDevice()) |dev| {
+        device_inventory.registerDetected(.network_adapter, pciDeviceId(dev), .virtio_net_inventory, false);
         network_detected = true;
     }
     if (pci.firstDeviceByClass(PCI_CLASS_GRAPHICS_ADAPTER)) |dev| {

@@ -1,27 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-KERNEL_PATH="${1:?kernel path required}"
-EFI_STUB_PATH="${2:?EFI stub path required}"
-OUTPUT_ISO="${3:?output iso path required}"
-STAGING_DIR="${4:?staging directory required}"
-CMDLINE_PATH="${5:-src/boot/cmdline.txt}"
+UNIFIED_EFI_PATH="${1:?unified EFI image path required}"
+OUTPUT_ISO="${2:?output iso path required}"
+STAGING_DIR="${3:?staging directory required}"
 
-if [ ! -f "$KERNEL_PATH" ]; then
-  echo "Kernel image not found: $KERNEL_PATH" >&2
-  exit 1
-fi
-if [ ! -f "$EFI_STUB_PATH" ]; then
-  echo "EFI stub not found: $EFI_STUB_PATH" >&2
-  exit 1
-fi
-if [ ! -f "$CMDLINE_PATH" ]; then
-  echo "EFI command line not found: $CMDLINE_PATH" >&2
+if [ ! -f "$UNIFIED_EFI_PATH" ]; then
+  echo "Unified EFI image not found: $UNIFIED_EFI_PATH" >&2
   exit 1
 fi
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
-bash "$SCRIPT_DIR/check-efi-image.sh" "$EFI_STUB_PATH"
+bash "$SCRIPT_DIR/check-efi-image.sh" "$UNIFIED_EFI_PATH"
 
 if ! command -v xorriso >/dev/null 2>&1; then
   echo "xorriso not found. Install xorriso." >&2
@@ -37,18 +27,14 @@ if ! command -v mcopy >/dev/null 2>&1; then
 fi
 
 rm -rf "$STAGING_DIR"
-mkdir -p "$STAGING_DIR/EFI/BOOT" "$STAGING_DIR/boot" "$(dirname "$OUTPUT_ISO")"
+mkdir -p "$STAGING_DIR/EFI/BOOT" "$(dirname "$OUTPUT_ISO")"
 
 ESP_IMAGE="$STAGING_DIR/esp.img"
 dd if=/dev/zero of="$ESP_IMAGE" bs=1M count=40 status=none
 mformat -i "$ESP_IMAGE" -v ZIGOS ::
-mmd -i "$ESP_IMAGE" ::/EFI ::/EFI/BOOT ::/boot
-mcopy -i "$ESP_IMAGE" "$EFI_STUB_PATH" ::/EFI/BOOT/BOOTX64.EFI
-mcopy -i "$ESP_IMAGE" "$KERNEL_PATH" ::/boot/kernel.elf
-mcopy -i "$ESP_IMAGE" "$CMDLINE_PATH" ::/boot/cmdline.txt
-cp "$EFI_STUB_PATH" "$STAGING_DIR/EFI/BOOT/BOOTX64.EFI"
-cp "$KERNEL_PATH" "$STAGING_DIR/boot/kernel.elf"
-cp "$CMDLINE_PATH" "$STAGING_DIR/boot/cmdline.txt"
+mmd -i "$ESP_IMAGE" ::/EFI ::/EFI/BOOT
+mcopy -i "$ESP_IMAGE" "$UNIFIED_EFI_PATH" ::/EFI/BOOT/BOOTX64.EFI
+cp "$UNIFIED_EFI_PATH" "$STAGING_DIR/EFI/BOOT/BOOTX64.EFI"
 
 xorriso -as mkisofs \
   -R -J \

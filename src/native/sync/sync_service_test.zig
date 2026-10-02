@@ -144,6 +144,37 @@ test "sync port requires service-scoped authority before device graph mutation" 
     try std.testing.expectEqualStrings("owner", root.labelSlice());
 }
 
+test "sync port capability does not grant another users device root authority" {
+    const service_owner = principal.PrincipalId{ .kind = .service, .serial = 850 };
+    const owner = principal.PrincipalId{ .kind = .user, .serial = 851 };
+    const other_owner = principal.PrincipalId{ .kind = .user, .serial = 852 };
+    const device = principal.PrincipalId{ .kind = .device, .serial = 853 };
+    const new_device = principal.PrincipalId{ .kind = .device, .serial = 854 };
+    const root_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0x85) };
+    const other_key = signing.SignerIdentity{ .label = "root", .seed = @splat(0x86) };
+    const device_key = signing.SignerIdentity{ .label = "device", .seed = @splat(0x87) };
+    var resident = ResidentState{};
+    var service = Service.initWithResidentState(8500, 8501, service_owner, &resident);
+    var capabilities = capability.CapabilityTable.init();
+    const access = try mintSyncServiceAuthority(&capabilities, &service, service_owner);
+    var port = sync_service.SyncPort.init(&service, &capabilities);
+    const authority = syncAuthority(&service, service_owner, access, 10);
+    _ = try port.ensureUserRoot(authority, owner, "owner", root_key);
+    _ = try port.ensureUserRoot(authority, other_owner, "other", other_key);
+    _ = try port.enrollTrustedDevice(authority, owner, device, "device", root_key, device_key, 1);
+    const before = resident.persisted_state.graph;
+    try std.testing.expectError(error.RootAuthorityMismatch, port.enrollTrustedDevice(authority, owner, new_device, "new", other_key, other_key, 2));
+    try std.testing.expectError(error.RootAuthorityMismatch, port.rotateDeviceKey(authority, owner, device, other_key, other_key, 2));
+    try std.testing.expectError(error.RootAuthorityMismatch, port.revokeTrustedDevice(authority, owner, device, other_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, port.enrollTrustedDevice(authority, other_owner, device, "device", other_key, device_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, port.rotateDeviceKey(authority, other_owner, device, other_key, other_key, 2));
+    try std.testing.expectError(error.DeviceOwnerMismatch, port.revokeTrustedDevice(authority, other_owner, device, other_key, 2));
+    try std.testing.expectEqualDeep(before, resident.persisted_state.graph);
+    // The same capability and the actual owner's key still authorize rotation.
+    const rotated = try port.rotateDeviceKey(authority, owner, device, root_key, other_key, 3);
+    try std.testing.expectEqual(@as(u32, 2), rotated.key_rotation_generation);
+}
+
 test "sync service configuration errors preserve live policy and overlay records" {
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_250 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 8_251 };
@@ -204,8 +235,8 @@ test "sync service persists platform-backed device key bindings across restart" 
         .label = "persistent-platform-laptop-v2",
         .seed = signing.seedFromByte(0x93),
     };
-    const boot = try verifiedSyncDeviceGraphBoot(9_340, .bootloader_provided);
-    const rotated_boot = try verifiedSyncDeviceGraphBoot(9_341, .bootloader_provided);
+    const boot = try verifiedSyncDeviceGraphBoot(9_340, .firmware_authenticated);
+    const rotated_boot = try verifiedSyncDeviceGraphBoot(9_341, .firmware_authenticated);
     const provider = device_graph.PlatformKeyBindingRequest{
         .root = try device_graph.PlatformDeviceRoot.fromBootRecord(laptop, .secure_enclave, "laptop-secure-enclave-key", &boot),
     };
@@ -228,7 +259,7 @@ test "sync service persists platform-backed device key bindings across restart" 
     _ = try port.ensureUserRoot(syncAuthority(&service, sync_owner, authority_capability, 1), user, "owner", user_signer);
     const enrolled = try port.enrollPlatformBackedDevice(syncAuthority(&service, sync_owner, authority_capability, 2), user, laptop, "laptop", user_signer, laptop_signer, provider, 2);
     try std.testing.expect(enrolled.usesPlatformBackedKey());
-    try std.testing.expect(enrolled.hasBootloaderBackedPlatformRoot());
+    try std.testing.expect(enrolled.hasFirmwareAuthenticatedPlatformRoot());
     try std.testing.expectEqual(device_graph.DeviceKeyOrigin.secure_enclave, enrolled.device_key_origin);
     try std.testing.expectEqualSlices(u8, boot.root_digest[0..], enrolled.platform_root_digest[0..]);
 
@@ -240,12 +271,12 @@ test "sync service persists platform-backed device key bindings across restart" 
     var restarted = try Service.initWithStorage(9_330, 9_331, sync_owner, &storage, &restarted_resident);
     const restored = restarted.findDeviceRecord(laptop).?;
     try std.testing.expect(restored.usesPlatformBackedKey());
-    try std.testing.expect(restored.hasBootloaderBackedPlatformRoot());
+    try std.testing.expect(restored.hasFirmwareAuthenticatedPlatformRoot());
     try std.testing.expectEqual(device_graph.DeviceKeyOrigin.tpm, restored.device_key_origin);
     try std.testing.expectEqualStrings("laptop-tpm-key", restored.platformKeyLabelSlice());
     try std.testing.expectEqualSlices(u8, rotated_digest[0..], restored.platform_key_digest[0..]);
     try std.testing.expectEqual(@as(u64, 9_341), restored.platform_root_generation);
-    try std.testing.expectEqual(measured_boot.RootProvenance.bootloader_provided, restored.platform_root_provenance);
+    try std.testing.expectEqual(measured_boot.RootProvenance.firmware_authenticated, restored.platform_root_provenance);
     try std.testing.expectEqualSlices(u8, rotated_boot.root_digest[0..], restored.platform_root_digest[0..]);
     try std.testing.expectEqual(@as(u32, 2), restored.key_rotation_generation);
     try std.testing.expect(!restored.isTrusted());
@@ -1059,7 +1090,9 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     var tampered = signed_frame;
     tampered.packet.ciphertext[0] ^= 0x01;
     try std.testing.expect(!sync_transport.verifySignedFrame(&tampered));
-    try std.testing.expectError(error.PacketAuthenticationFailed, sync_transport.decryptSignedFrame(&relay_session, &tampered, authenticated_buffer[0..]));
+    var rejected_buffer = [_]u8{0xa5} ** sync_transport.MAX_PACKET_BYTES;
+    try std.testing.expectError(error.PacketAuthenticationFailed, sync_transport.decryptSignedFrame(&relay_session, &tampered, rejected_buffer[0..]));
+    try std.testing.expect(std.mem.allEqual(u8, &rejected_buffer, 0));
 
     const delimiter = std.mem.indexOfScalar(u8, authenticated, '|') orelse return error.MissingPayloadDelimiter;
     const replicated_path = authenticated[0..delimiter];

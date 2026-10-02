@@ -91,3 +91,23 @@ runs:
         test -r /dev/kvm
         test -w /dev/kvm
         echo "KVM acceleration is available."
+
+    - name: Install isolated EFI authentication test tools
+      if: inputs.install-build-dependencies == 'true'
+      shell: bash
+      run: |
+        python3 -m venv build/efi-test-tools
+        build/efi-test-tools/bin/pip install --disable-pip-version-check virt-firmware==26.9 pefile==2024.8.26
+        echo "EFI_TEST_PYTHON=$PWD/build/efi-test-tools/bin/python" >> "$GITHUB_ENV"
+        echo "EFI_VARS_TOOL=$PWD/build/efi-test-tools/bin/virt-fw-vars" >> "$GITHUB_ENV"
+        for suffix in _4M ''; do
+          code="/usr/share/OVMF/OVMF_CODE${suffix}.secboot.fd"
+          vars="/usr/share/OVMF/OVMF_VARS${suffix}.fd"
+          if [[ -f "$code" && -f "$vars" ]]; then
+            echo "OVMF_SECURE_BOOT_CODE=$code" >> "$GITHUB_ENV"
+            echo "OVMF_SECURE_BOOT_VARS=$vars" >> "$GITHUB_ENV"
+            exit 0
+          fi
+        done
+        echo "Missing matching Secure Boot OVMF code and variables" >&2
+        exit 1

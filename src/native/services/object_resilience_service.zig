@@ -212,16 +212,14 @@ pub const Service = struct {
         }
         for (0..MAX_SNAPSHOTS) |offset| {
             const snapshot_index = (@as(usize, self.next_reusable_snapshot) + offset) % MAX_SNAPSHOTS;
+            if ((SnapshotId{ .value = self.snapshots[snapshot_index].id }).nextInSlot(snapshot_index) == null) continue;
             if (self.snapshots[snapshot_index].revoked) return snapshot_index;
         }
         return null;
     }
 
     fn nextSnapshotId(self: *const Service, snapshot_index: usize) u64 {
-        const current_generation = (SnapshotId{ .value = self.snapshots[snapshot_index].id }).generation();
-        const incremented = current_generation +% 1;
-        const generation = if (incremented == 0) 1 else incremented;
-        return SnapshotId.fromParts(snapshot_index, generation).value;
+        return (SnapshotId{ .value = self.snapshots[snapshot_index].id }).nextInSlot(snapshot_index).?.value;
     }
 };
 
@@ -547,11 +545,11 @@ test "object resilience rejects stale generational snapshot ids after reuse" {
     try std.testing.expectEqual(@as(u32, 2), (SnapshotId{ .value = replacement.id }).generation());
     try std.testing.expect(service.find(first_snapshot_id) == null);
 
-    const wrapped_from = SnapshotId.fromParts(0, std.math.maxInt(u32)).value;
-    replacement.id = wrapped_from;
+    const exhausted_id = SnapshotId.fromParts(0, indexed_arena.MAX_HANDLE_GENERATION).value;
+    replacement.id = exhausted_id;
     replacement.revoked = true;
     service.next_reusable_snapshot = 0;
-    const wrapped = try service.prepareBackup(&directory, subjects, .{
+    const request = PrepareBackupRequest{
         .subject = owner,
         .task_id = 1_002,
         .workspace_id = 11,
@@ -562,9 +560,22 @@ test "object resilience rejects stale generational snapshot ids after reuse" {
         .encrypted = true,
         .recovery_key_present = true,
         .now_ticks = 33,
-        .detail = "private wrapped object backup",
-    }, null);
-    try std.testing.expectEqual(@as(usize, 0), (SnapshotId{ .value = wrapped.id }).slotIndex());
-    try std.testing.expectEqual(@as(u32, 1), (SnapshotId{ .value = wrapped.id }).generation());
-    try std.testing.expect(service.find(wrapped_from) == null);
+        .detail = "private replacement object backup",
+    };
+    const before = service;
+    try std.testing.expectError(error.SnapshotTableFull, service.prepareBackup(&directory, subjects, request, null));
+    try std.testing.expectEqualDeep(before, service);
+    service.snapshots[1].revoked = true;
+    service.snapshots[1].id = SnapshotId.fromParts(1, indexed_arena.MAX_HANDLE_GENERATION - 1).value;
+    const last = try service.prepareBackup(&directory, subjects, request, null);
+    try std.testing.expectEqual(SnapshotId.fromParts(1, indexed_arena.MAX_HANDLE_GENERATION).value, last.id);
+    try std.testing.expectEqual(exhausted_id, service.snapshots[0].id);
+    try std.testing.expect(service.find(first_snapshot_id) == null);
+    for (&service.snapshots, 0..) |*snapshot, index| {
+        snapshot.id = SnapshotId.fromParts(index, indexed_arena.MAX_HANDLE_GENERATION).value;
+        snapshot.revoked = true;
+    }
+    const exhausted = service;
+    try std.testing.expectError(error.SnapshotTableFull, service.prepareBackup(&directory, subjects, request, null));
+    try std.testing.expectEqualDeep(exhausted, service);
 }

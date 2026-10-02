@@ -53,6 +53,7 @@ pub const SurfacePresentationReceiver = struct {
         context: *anyopaque,
         task: *const task_runtime.TaskRecord,
         presentation: *const abi.SurfacePresentation,
+        text: ?*const abi.SurfaceText,
     ) SurfacePresentStatus,
 };
 
@@ -760,6 +761,7 @@ pub const Kernel = struct {
         context: KernelCallContext,
         presenter_task_id: u64,
         presentation: *const abi.SurfacePresentation,
+        text: ?*const abi.SurfaceText,
         now_ticks: u64,
     ) Error!bool {
         const authorization = try self.authorizeSubjectTaskOperation(.surface_present, context, presenter_task_id, now_ticks, .{
@@ -769,8 +771,9 @@ pub const Kernel = struct {
         if (task.state != .active) return error.InvalidSurfacePresentation;
         if (task.ui_surface_id == null or task.ui_surface_id.? != presentation.surface_id) return error.ScopeViolation;
         if (!abi.isCanonicalSurfacePresentation(presentation)) return error.InvalidSurfacePresentation;
+        if (text) |content| if (!content.isCanonical()) return error.InvalidSurfacePresentation;
         const receiver = self.surface_presentation_receiver orelse return error.SurfacePresentationUnavailable;
-        return switch (receiver.present(receiver.context, task, presentation)) {
+        return switch (receiver.present(receiver.context, task, presentation, text)) {
             .accepted, .duplicate => true,
             .stale => error.StaleSurfacePresentation,
             .invalid_surface => error.InvalidSurfacePresentation,

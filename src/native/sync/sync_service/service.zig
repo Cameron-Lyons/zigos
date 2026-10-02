@@ -503,6 +503,10 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return self.stateConst().graph.findDeviceConst(device_id);
         }
 
+        pub fn deviceGraph(self: *const Self) *const device_graph.Graph {
+            return &self.stateConst().graph;
+        }
+
         pub fn createNetworkPolicy(self: *Self, request: network_policy.CreateRequest) Error!*network_policy.PolicyRecord {
             const record = try self.state().network_policies.create(request);
             self.resident().markDirty();
@@ -1276,15 +1280,17 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
         }
 
         fn allocateOverlaySessionSlot(self: *Self) ?OverlaySessionAllocation {
-            if (self.overlay_sessions.countInUse() < MAX_SERVICE_OVERLAY_SESSIONS) {
-                const handle = self.overlay_sessions.reserveHandleForOverwrite() orelse return null;
+            if (self.overlay_sessions.reserveHandleForOverwrite()) |handle| {
                 return .{
                     .slot = self.overlay_sessions.getByHandle(handle) orelse native_util.impossibleByInvariant("reserved overlay session handle resolves its slot"),
                     .session_id = handle.value,
                 };
             }
 
-            const slot_index = self.closed_overlay_sessions.head(overlay_model.closed_session_key);
+            var slot_index = self.closed_overlay_sessions.head(overlay_model.closed_session_key);
+            while (slot_index != indexed_arena.no_index and !self.overlay_sessions.canReplaceIndex(slot_index)) {
+                slot_index = self.closed_overlay_sessions.next(slot_index);
+            }
             if (slot_index == indexed_arena.no_index) return null;
             if (slot_index >= MAX_SERVICE_OVERLAY_SESSIONS) native_util.impossibleByInvariant("closed overlay session index points outside slots");
             _ = self.closed_overlay_sessions.remove(overlay_model.closed_session_key, slot_index);
@@ -2312,6 +2318,43 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             return &self.residentConst().persisted_state;
         }
     };
+}
+
+test "overlay session exhaustion skips closed slots without reviving their handles" {
+    const SmallService = ServiceWith(.{ .max_overlay_sessions = 3 });
+    var service = SmallService.init(9_890, 9_891, .{ .kind = .service, .serial = 9_890 });
+    service.overlay_sessions.slot_generations[0] = indexed_arena.MAX_HANDLE_GENERATION;
+    service.overlay_sessions.slot_generations[2] = indexed_arena.EXHAUSTED_HANDLE_GENERATION;
+    var old_ids: [2]u64 = undefined;
+    for (&old_ids) |*id| {
+        const allocation = service.allocateOverlaySessionSlot().?;
+        id.* = allocation.session_id;
+        allocation.slot.* = .{ .in_use = true, .session = std.mem.zeroes(OverlaySession) };
+        allocation.slot.session.session_id = id.*;
+        allocation.slot.session.state = .established;
+        service.active_overlay_session_count += 1;
+        try std.testing.expect(try service.closeOverlaySession(id.*, 1));
+    }
+    const replacement = service.allocateOverlaySessionSlot().?;
+    const replacement_handle = OverlaySessionHandle{ .value = replacement.session_id };
+    try std.testing.expectEqual(@as(usize, 1), replacement_handle.slotIndex());
+    replacement.slot.* = .{ .in_use = true, .session = std.mem.zeroes(OverlaySession) };
+    replacement.slot.session.session_id = replacement.session_id;
+    replacement.slot.session.state = .established;
+    service.active_overlay_session_count += 1;
+    try std.testing.expectEqual(OverlaySessionState.closed, service.findOverlaySession(old_ids[0]).?.state);
+    try std.testing.expect(service.findOverlaySession(old_ids[1]) == null);
+    try std.testing.expect(try service.closeOverlaySession(replacement.session_id, 2));
+    service.overlay_sessions.slot_generations[1] = indexed_arena.MAX_HANDLE_GENERATION;
+    replacement.slot.session.session_id = OverlaySessionHandle.fromParts(1, indexed_arena.MAX_HANDLE_GENERATION).value;
+    const before = service.overlay_sessions;
+    const closed_before = service.closed_overlay_sessions;
+    try std.testing.expect(service.allocateOverlaySessionSlot() == null);
+    try std.testing.expectEqualDeep(before, service.overlay_sessions);
+    try std.testing.expectEqualDeep(closed_before, service.closed_overlay_sessions);
+    service.overlay_sessions.reset();
+    service.closed_overlay_sessions.reset();
+    try std.testing.expect(service.allocateOverlaySessionSlot() == null);
 }
 
 test "durable transport frame identifiers advance only after queue admission" {

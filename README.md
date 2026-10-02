@@ -28,6 +28,18 @@ requests.
 - The native service layer under `src/native/` contains the current principal,
   capability, syscall, task runtime, session, driver, storage, sync, policy,
   platform, and demo proof code.
+- Shared handle arenas retire slots at generation exhaustion instead of wrapping
+  into stale authority. Arena resets and index rebuilds preserve retired slots;
+  endpoint table reset also preserves generation history. Replacement keeps the
+  last valid handle intact when it cannot advance, and callers skip exhausted
+  slots or return capacity errors. Task restore checks destinations before any
+  retirement or grant changes. The 64-bit handle layout and resident memory
+  ceilings are unchanged. The pasteboard, capture, network session, personal context,
+  backup, and media/print tables now use the same checked generation limit. They
+  preserve exhausted records and skip them during reuse, returning capacity
+  errors when no reusable slot remains. The media/print completion queue preserves order
+  while skipping exhausted jobs. Pasteboard revocation checks both the source
+  task and principal. These guarantees apply within each table or arena's lifetime.
 - The first daily-driver slice is Notes/docs: signed native package install,
   workspace and document open, local permission review, object-scoped sharing,
   local-first sync, update rollback, recovery, and package removal are exercised
@@ -44,12 +56,90 @@ requests.
   oversized documents, and text the current renderer cannot represent, while
   preserving an existing draft. Session opening now validates existing scoped
   authority, owns the channel's metadata, and publishes the opening binding
-  before the app's first instruction. A lazy four-channel pool services at most
+  before the app's first instruction. Workspace pickers and document channels hold
+  a storage-service vault lease and sealed-key fingerprint instead of a raw
+  signing seed. Each new save checks current signing policy, lease expiry,
+  revocation, service ownership, and key binding before publishing a version.
+  The vault signs bounded canonical metadata without exporting its key.
+  A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels
-  queued saves when either endpoint or task is retired. Boot verification drives
-  the Notes ELF through document load, modeled keyboard input, a durable save,
-  and channel teardown. Connecting this opener to the interactive launcher and
-  moving the storage core into its userspace service remain open.
+  queued saves when either endpoint or task is retired. Editors keep their text
+  and save state on each task's stack, and prepared bindings survive sibling
+  dispatches through the shared mailbox. Boot verification runs two Notes tasks
+  with distinct documents through modeled keyboard input, independent durable
+  saves, and continued editing after one task retires. Launch preparation keeps
+  the task off the run queue while permission review provisions scoped grants.
+  Session activation binds the document, creates its window, and provisions UI
+  authority before scheduling; failure retires the task and its resources and
+  restores focus. Retiring a task releases its demand-paged stack while sibling
+  tasks keep their shared page tables. Boot verification repeats failed
+  activation beyond the stack-slot limit and checks physical page reclamation.
+  The compositor provides a workspace document picker under supplied approved
+  grants. It lists four authorized UTF-8 paths per page, supports arrow-key
+  selection, Page Up/Down browsing, and Open/Cancel or Escape. The session pins
+  each row's path, object and version, rechecks authority before each outgoing
+  chunk and activation, and rejects old-page decisions. Complete pages publish
+  atomically; queue pressure retains one frame. Empty pages offer cancellation.
+  Native picker storage is lazy and capped at 2 KiB; client state stays within
+  512 bytes. The 256-byte mailbox and 528-byte surface snapshot remain unchanged.
+  Cold-boot and reboot verification browse pages through the compositor ELF,
+  choose a non-default row, and check the resulting Notes object, text and pixels.
+  Native ABI v17 copies canonical text snapshots from validated task memory;
+  the compositor owns each accepted revision and rejects conflicting updates.
+  The native boot path now maps the firmware framebuffer and draws document
+  text, cursors, unsaved state, and selected Open/Cancel controls. Later frames
+  write only changed cells. Notes shows save progress, confirmed durable saves,
+  retryable write failures, denied access, conflicting document changes, and
+  unavailable storage. Later edits invalidate the saved label; failed saves
+  retain the draft, and only an explicit retry resubmits a failed barrier.
+  Notes supports insertion, Backspace and Delete at the cursor, arrow movement
+  between characters and visible wrapped rows. Home/End reach the current visual
+  row, Ctrl+Home/End reach document boundaries, and Page Up/Down move by the
+  visible viewport with one row of overlap. Vertical movement remembers its
+  column across shorter rows. Shift extends selection
+  with these navigation keys, and Ctrl+A selects the document. Typing replaces
+  the highlighted range; Backspace and Delete remove it. Navigation and selection
+  preserve saved state; edits remain staged until Ctrl+Enter. Held document keys
+  repeat after 400 ms, then every 40 ms, with one repeat per service visit and
+  no burst after a stall. Release, focus changes, USB interruption, and lost task
+  authority cancel repeat. Shortcuts, permission controls, and trusted PIN entry
+  remain press-only. Repeat deadlines wake an otherwise idle desktop. The compositor
+  scrolls wrapped text to keep the cursor visible without retaining another
+  editor buffer. Ctrl+Z undoes edits and Ctrl+Shift+Z redoes them, restoring the
+  cursor and selection. Task-local history retains up to 32 edit groups and
+  1 KiB of changed text within a 1,920-byte budget. Typing groups break at spaces,
+  navigation, and saves; a new edit after undo discards the redo branch. Save
+  receipts track content revisions, so a delayed save cannot mark another draft
+  clean. Ctrl+C, Ctrl+X, and Ctrl+V transfer selected text between Notes editors
+  through native endpoints when document policy permits clipboard access. Each
+  transfer requires a newly delivered foreground keyboard gesture; focus changes,
+  suspension, expiry, and revoked document authority cancel pending transfers.
+  Cut removes text only after acknowledgement, and paste applies the complete
+  payload as one undoable edit. Transfers accept up to 512 bytes; copied content
+  expires after five minutes or when its source document authority is lost.
+  The editor and compositor share allocation-free wrapping, including an explicit
+  caret position at soft-wrap boundaries. Display geometry arrives with trusted
+  input without enlarging its 56-byte descriptor, and caret metadata keeps the
+  text snapshot at 528 bytes. Notes loads, edits, copies, saves, and reopens UTF-8
+  within the existing 512-byte document bound. Unicode 18 extended grapheme
+  clusters keep combining accents, emoji sequences, and CRLF together during
+  movement, selection, deletion, and wrapping. Tabs use four-column stops;
+  East Asian wide characters and emoji occupy two cells. Narrow and wide bitmap
+  glyphs and combining accents render through a pinned, licensed font
+  ([font notices](src/kernel/platform/fonts/README.md),
+  [Unicode notices](src/native/core/unicode_data/README.md)); damage
+  tracking compares complete cluster bytes. Complex-script shaping, bidi layout,
+  color emoji, and international input methods remain open. Unsupported shaped
+  clusters display a replacement glyph without changing their stored bytes.
+  The native text event accepts one UTF-8 scalar; the hardware keyboard currently
+  supplies the US ASCII layout. Selection,
+  clipboard failure feedback, and save feedback fit within the
+  unchanged 528-byte text snapshot. Boot verification reads back mapped device
+  pixels for the launcher, edited Notes text, selection and undo/redo results, save
+  progress, durable success, and a denied save after revocation. A production
+  launch flow with identity and permission provisioning, accelerated graphics,
+  complete international text support, physical display verification, and moving
+  storage into userspace remain open.
 - Early boot seeds the kernel CSPRNG with 256 bits from RDSEED64. The kernel
   checks instruction availability and success, bounds retries, rejects a stuck
   source, erases temporary seed buffers, and stops boot if seeding fails. Runtime
@@ -72,8 +162,19 @@ requests.
   authenticated responses are checked before decryption. Objects require 256-bit
   authorization supplied by the caller and remain bound to their TPM and parent.
   The client erases temporary material, flushes transient objects and sessions,
-  and returns zeroed key output on failure. It expects empty owner-hierarchy
-  authorization and does not enforce a PCR policy.
+  and returns zeroed key output on failure. Authenticated NV operations use the
+  same encrypted sessions, accept only full records up to 256 bytes, validate the
+  index public area and changing Name, and erase failed read output. Index reads
+  and writes require a separate caller authorization; no owner read/write, index
+  deletion, or implicit redefinition is exposed. Explicit bootstrap creates a
+  storage parent on an unowned TPM and persists it under caller-supplied owner
+  authorization. Enrollment pins its persistent handle and Name independently.
+  Normal identity unlock authenticates that parent through an encrypted salted
+  session without owner authorization; missing or changed parents fail closed.
+  Closing a client never flushes or evicts a persistent parent. Owner-authorization
+  changes encrypt the new value and authenticate the reply with it; NV definition
+  borrows explicit owner authorization only during provisioning. Administrator
+  secrets require independent recovery custody. No PCR policy is enforced.
   The secret store now retains authenticated encrypted blobs instead of digest-only
   placeholders. A TPM adapter wraps fresh data keys and protects up to 96 bytes
   per secret with XChaCha20-Poly1305, binding owner, label, and export policy.
@@ -90,15 +191,226 @@ requests.
   authenticates its metadata and creates no handles. Identity registration,
   assertions, and recovery now use private service-owned vault leases. Requests
   carry handles instead of credential seeds. Each vault operation checks current
-  vault policy, and assertions also recheck credential policy. Assertion signatures
-  bind counters and security claims, and recovery approvals bind the registered
-  threshold, replacement key, and credential generation. Origin validation
+  vault policy, and assertions also recheck credential policy. Import, generation,
+  rotation, lending and revocation preserve prior vault state when their supplied
+  audit backend fails. Unpublished material is erased without consuming a key ID;
+  both lease tables are checked before audit acceptance, including slot reuse.
+  Rotation prepares its replacement before revoking old leases. Export and signing
+  withhold results on audit failure. These are serialized service guarantees;
+  durable audit retention remains the audit backend and caller's responsibility.
+  Assertion signatures bind counters and security claims, and recovery approvals bind the registered
+  threshold, replacement key, and credential generation. Unlock signatures also
+  bind the current boot ID and a fresh service-owned session nonce; locking or
+  restarting the verifier invalidates old proofs even when relative clocks reset.
+  Proofs carry only the fixed Ed25519 signature and use the enrolled device key
+  for verification, keeping existing request-size limits intact. A trusted
+  authenticator can issue proofs through a private sealed device-key lease;
+  software-seed issuance is restricted to verification builds. A TPM PIN capsule
+  now seals a random 256-bit vault authorization under a 6–32 digit PIN. Its
+  domain-separated authorization binds the owner, device, and random salt; the
+  capsule stores no software PIN verifier. Unlock requires an independently
+  trusted capsule digest and checks its enrolled TPM parent Name before sending
+  PIN authorization. Failed unlocks erase the output. Explicit lockout-administrator
+  enrollment and rotation encrypt the new authorization and verify responses with
+  the new value. Persistent guessing limits require nonzero recovery intervals;
+  the default is eight attempts and one recovered attempt per powered hour.
+  The recovery administrator has a separate 24-hour retry interval. Ordinary PIN
+  attempts never reset these limits. QEMU verifies lockout across a VM/TPM restart,
+  explicit administrator recovery, and a lost authorization-change response.
+  The primitive requires trusted enrollment and separately retained administrator
+  authorization; it does not supply the first-user UI or an input trust path.
+  A canonical public enrollment record now binds the owner, device, PIN capsule,
+  persistent parent, catalog, NV index and key IDs under an independent digest.
+  Its 176-byte recovery package encrypts separate random owner, lockout and vault
+  authorizations with XChaCha20-Poly1305 and authenticates the entire enrollment
+  binding. It requires a separately retained random 256-bit recovery key, never
+  a PIN or password. Provisioning must commit the package and retain that key
+  before changing TPM authorization. Recovery authenticates the package before
+  hardware access, confirms the enrolled TPM, explicitly resets PIN lockout, and
+  follows the same authenticated catalog/device-key restoration as PIN unlock.
+  Signed proofs identify recovery-key verification; lock erases that state and
+  invalidates its leases and replay domain. The session retains no recovery key
+  or owner/lockout authorization. This restores access on the original TPM; it
+  cannot recover keys after that TPM is cleared or lost. Production boot binding
+  and independent recovery-material custody remain open.
+  A serialized provisioning service generates the three sealed catalog/root/device
+  signing keys and the owner/lockout/vault authorizations, then stages a signed
+  catalog and canonical recovery bundle. The caller must retain the bundle pin
+  and random recovery key independently before committing. Commit verifies both
+  objects and crosses one durable storage barrier before changing permanent TPM
+  state. A salted audit session authenticates hierarchy flags, allowing explicit
+  retries to select the retained new authorization after a lost successful reply
+  without probing with an old value. Parent identity and initial NV commitment
+  remain pinned; setup neither clears the TPM nor evicts existing parents.
+  Native setup now confirms the PIN twice, prepares on a guarded cooperative
+  worker, and makes the encrypted candidate durable before displaying its recovery
+  record. Four lines encode the independent bundle pin and random recovery key
+  in 128 base32 characters plus grouping. The user must save all four lines
+  outside the device, hide the display and re-enter the exact record before any
+  permanent TPM changes. Ctrl+R resumes interrupted setup using that record.
+  Input stays exclusive through completion and cancellation; no application
+  inbox, surface, clipboard or diagnostic receives the secret. The worker shares
+  the TPM lease, drains borrowed commands before teardown, and erases its private
+  state and 128 KiB stack. Cancelled preparation uses fresh object IDs on retry
+  to preserve any independently retained candidate. In-place identity and device
+  resets avoid a large temporary that exceeded the guarded worker stack in Debug.
+  Setup now commits a separate 48-byte public enrollment pin in TPM NV. Its
+  immutable definition binds the exact bundle and index before the first write;
+  only owner authorization can write it, and a persistent write lock completes
+  enrollment. Existing conflicting indexes fail preflight before other permanent
+  mutations. Retries compare completed data without another write or lock command.
+  Boot loading reads this TPM-held candidate, verifies the disk bundle, proves
+  possession of the enrolled parent, then authenticates the locked index through
+  a salted HMAC read before exposing enrollment to PIN entry. It rechecks disk
+  publication after hardware waits. Missing, incomplete or changed anchors require
+  explicit recovery with the externally retained record; ordinary boot never
+  provisions them. The local TPM transport and verified boot remain trusted.
+  Production boot now attaches one retained native identity owner after measured
+  boot and before surface presentation. Discovery runs without keyboard input on
+  the guarded worker. A missing anchor offers explicit setup; an incomplete one
+  requests the saved record. Failed or cancelled discovery stays locked, with
+  Enter to retry and Ctrl+R to resume from the independently retained record.
+  Setup completion rechecks the bundle and configured user, parent and NV indexes,
+  releases its worker stack and binds sign-in across a fresh neutral-input boundary.
+  PIN or recovery then restores the catalog and private session; lock and expiry
+  erase authority. Reset and failed boot drain workers before releasing storage.
+  Catalog and recovery-bundle publication recheck storage after TPM signing
+  yields, so another task's intervening write is preserved. Owner backing
+  initializes in place and is erased on destruction. Provisioning bundle v3
+  carries a compact policy signed by the sealed identity root. The TPM-pinned
+  bundle authenticates its issuer and user before policy attachment and sign-in.
+  The enrolled duration caps sessions, credential unlock age and private key
+  leases; hardware custody, local unlock, phishing resistance and denial of raw
+  export are mandatory. Boot configuration can shorten the enrolled duration.
+  Excessive session requests and tampered policy fail before TPM access. This
+  immutable enrollment baseline has no policy-update or legacy-format fallback.
+  No fixture signer is installed in production. The QEMU export fixture models independent
+  custody; physical persistence and user recovery-record custody remain unproven.
+  Applications can request one assertion through a native-approved, short-lived
+  endpoint channel. Trusted code selects the credential, canonical HTTPS origin,
+  relying party and exact application process; the application supplies only its
+  challenge. Four bounded channels share the existing guarded authentication
+  worker, with one poll per tick and explicit wake deadlines. They recheck the
+  live process, endpoint capabilities and current sign-in
+  session before work and every reply. Lock, expiry, restart or revocation cancels
+  pending work incrementally; teardown drains it before releasing backing stores.
+  The counter must reach disk and TPM NV before any assertion bytes are sent.
+  A userspace client reassembles bounded replies and exposes only a complete
+  canonical assertion; the relying party must verify it against its independently
+  registered key. Mailbox v11 retains the 256-byte layout and adds a tagged
+  identity binding. The ownership reboot proof drives the client in Ring3,
+  verifies its signed result and durable counter, and locks a second request
+  during TPM work. A native approval screen now shows the launch-authenticated
+  application ID, full relying party and origin, with Cancel selected initially.
+  Approval requires successful complete scanout and separate released gestures;
+  lock, timeout, input interruption and process replacement discard the decision.
+  The native origin owner must still authenticate the website before requesting
+  consent: signed application provenance does not prove website ownership.
+  Authenticated-origin acquisition, credential registration and recovery IPC,
+  and physical-hardware validation remain open.
+  Deadline and calibrated QEMU timer modes both derive ticks from elapsed TSC
+  time, so capability and worker deadlines advance with interrupts masked.
+  A bounded identity-session owner now connects PIN verification to authenticated
+  NV recovery, catalog restoration, enrolled-device key checks, and a fresh replay
+  nonce before activation. Lock synchronously invalidates both lease tables,
+  detaches the hardware provider, erases authorization and loaded secrets, and
+  clears credentials and device state without depending on TPM cleanup or disk
+  writes. Handle generations survive lock/reopen, so copied signing leases stay
+  invalid even when the same catalog is restored. Unlock proofs retain the PIN's
+  original verification time. Session operations lock on expiry or a backwards
+  service clock; the production owner services idle deadlines before userspace
+  dispatch. QEMU covers
+  rejected PINs, failed anchor/key/entropy checks,
+  stale proofs and handles, and durable counter recovery after locking with a
+  lost NV-write response. Coordination adds at most 4 KiB, borrows existing stores,
+  and reuses private credential leases for repeated assertions.
+  Native trusted authentication entry now intercepts hardware reports before task switching
+  or app inbox delivery. Entry and exit drain queued reports and wait for a fresh
+  key release; each keyboard retains its own held-key suppression. Ctrl+Alt+Delete
+  locks the attached identity session through this native path. The framebuffer
+  renders a separate masked prompt above all app content, and compositor reset
+  preserves its live attachment without checkpointing it. Ctrl+R switches between
+  PIN and recovery when an authenticated recovery package is attached. Recovery
+  accepts the full 128-character setup record when the owner attaches its
+  independent bundle pin, or a 56-character key for a separately enrolled
+  recovery package. Both use a domain-separated 24-bit typo checksum;
+  lowercase and printed four-character groups are accepted at the input boundary.
+  The checksum detects typing errors; package authentication verifies the key.
+  Mode changes erase partial input, discard the rest of the current report and
+  queued reports, and require a fresh key release. PINs remain bounded to 32
+  digits; entry storage is bounded to 128 bytes and erased after submission,
+  interruption, cancellation, or timeout.
+  Paste and application shortcuts cannot reach the prompt. Authentication and
+  secret-entry deadlines participate in the desktop wake schedule, with expiry
+  checked before userspace dispatch. QEMU connects modeled HID reports through
+  the normal router and framebuffer to the real TPM verifier, including rejected
+  PINs, lock/reopen, and expiry. PIN, recovery and credential assertion work share a lazy 128 KiB guarded,
+  supervisor-only NX stack. The worker yields at TPM command boundaries and device
+  waits so the native loop can service input, display and userspace tasks. The
+  transport's bounded begin/poll/cancel engine releases its lock on every entry;
+  nonwrapping command tokens reject stale polls and cancellation. Worker
+  cancellation finishes an active command so cleanup can identify created TPM
+  handles, permits only handle flushes afterward, and prevents late activation.
+  The prompt stays locked during cleanup. Actual time, current policy and the
+  pinned catalog are rechecked before success; private input and the complete worker
+  stack are erased on completion. Ordinary lock and Escape do not wait for TPM
+  cleanup. Exclusive teardown drains pending work before releasing borrowed
+  stores; owners can cancel and service it before detaching. Host tests cover
+  suspended buffers, cancellation, late results and stack-switch state. Virtual
+  TPM proofs check userspace dispatch while suspended, input and scanout between
+  polls, protected stack pages,
+  cancellation before and after catalog restore, resource cleanup, reopen and
+  expiry. Recovery decodes into the same private 32-byte worker buffer; malformed
+  codes, changed enrollment pins and unauthenticated packages issue no TPM commands. Ownership reboot
+  proofs exercise real TPM recovery through modeled HID input, masking, userspace
+  dispatch during device waits, cancellation, cleanup, reopen and expiry.
+  A new scheduler activation now receives its configured CPU budget even when
+  the previous interaction left partial credit. Duplicate wakes of a ready task
+  do not add credit, and explicit refills retain their exact amount. This prevents
+  a compositor from reading a new action and exhausting its leftover budget
+  before it can send the decision. Physical input validation remains open.
+  Origin validation
   accepts canonical HTTPS DNS origins
-  and rejects URL paths, user-info, and malformed ports. Production authorization
-  provisioning, durable identity/vault indexing, trusted unlock issuance, and
-  userspace request dispatch remain open.
+  and rejects URL paths, user-info, and malformed ports. A signed vault catalog
+  now checkpoints up to 16 sealed records and 16 credentials together, preserves
+  key IDs, export policy, assertion counters, recovery generations and revocations,
+  and restores them atomically without leases or unlock proofs. The durable
+  identity service returns assertions only after their counters reach disk and,
+  when attached, its external freshness anchor. Failed checkpoints block further
+  identity changes until an explicit flush succeeds; retries reuse the pending
+  version. A 136-byte authenticated TPM NV record binds the owner, catalog ID,
+  signing key, optional device-root pin, generation, and exact payload digest.
+  Restore reads these pins independently of the native volume and rejects both
+  older catalogs and different signed payloads at the same generation before
+  unsealing. Disk commits precede NV updates. A lost NV-write reply retains the
+  pending version; a fresh client can authenticate the committed record and finish
+  the retry without another NV write. This uses ordinary protected NV storage,
+  with serialized software enforcing generation advancement, not a hardware
+  monotonic counter. Enrollment is explicit, and missing or redefined indexes
+  never trigger automatic reprovisioning. Catalog v5 signs the preceding catalog's
+  SHA-256 digest. After an interrupted disk/NV commit, recovery accepts exactly
+  one signed successor whose predecessor digest matches the TPM pin, confirms
+  disk durability, and advances NV before restoring secrets. Unrelated histories,
+  skipped generations, unsigned version links, and older snapshots cannot authorize
+  recovery. Normal saves still use one NV write, with unchanged 136-byte anchors
+  and 112-byte checkpoint coordination state. First enrollment durably commits
+  the catalog, then binds its exact initial anchor and NV index into the immutable
+  SHA-256 `authPolicy` field at index definition. AUTHREAD/AUTHWRITE remain the
+  only data-access paths. After interruption, bounded inspection reconstructs an
+  untrusted candidate without unsealing keys. A successful HMAC operation using
+  that committed NV Name authenticates the candidate before restore. Recovery
+  writes only an unwritten index, checking WRITTEN in the same public-area snapshot
+  used for the command HMAC. An already committed enrollment is compared exactly
+  and never rewritten; a missing index requires explicit recovery. This closes
+  the definition/first-write crash gap without another object or normal-checkpoint
+  NV write. Production boot enrollment and recovery-material custody,
+  physical TPM persistence and trusted input validation, biometric verification,
+  production enrollment binding for desktop sign-in, and userspace
+  request dispatch remain open.
   `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
-  creation, recovery from the native disk after restarting the VM and swtpm,
+  interrupted initial enrollment, recovery from the native disk after restarting
+  the VM and swtpm, lost first-write replies, altered enrollment commitments,
+  a forged public WRITTEN status, missing-index refusal,
   repeated handle cleanup, bad authorization, private-blob tampering, response
   HMAC tampering, and refusal by a replacement TPM. The same guest test persists
   a vault-generated signing key, checks its public key after reboot, proves another
@@ -106,7 +418,57 @@ requests.
   label, and export policy, and verifies signing leases and 96-byte secret export.
   Cold and reboot cases also register an identity against that recovered key,
   verify a vault-backed assertion, and reject counter tampering, expired leases,
-  wrong service tasks, and revoked handles.
+  wrong service tasks, and revoked handles. It also signs document metadata
+  with the recovered sealed key and rejects signing after lease revocation.
+  The reboot restores three generated keys and a 96-byte exportable secret through
+  the primary catalog and the remote catalog signer plus current device key through
+  a separate catalog. Two rotations retire the predecessors and reuse a secret
+  slot with a new ID; reboot rejects the old IDs and restores no leases.
+  It also resumes an assertion counter after reboot and refuses a credential
+  revoked before shutdown. The cold boot saves an unlock proof; the reboot rejects
+  replay at matching relative ticks and rejects replacing its signed context with
+  the new session. Both catalog pins now live in authenticated NV records. The
+  gate checks wrong NV authorization, duplicate definition, encrypted traffic,
+  corrupt read/write response MACs, and reconciliation of an accepted write with
+  a lost reply. It restores the cold disk snapshot while retaining the newer TPM
+  state and requires rejection before vault restore. Another boot halts with
+  interrupts disabled after the disk commit but before NV_Write is sent. Restarting
+  both VM and TPM then completes that signed checkpoint, restores its credential
+  counter, and resumes assertions. Catalog format v5 includes the authenticated
+  device graph and predecessor digest and rejects older snapshots.
+  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-ownership-qemu-test` runs thirteen
+  disposable boots through native setup and the production provisioning service.
+  The first boot types and confirms a PIN through modeled HID, checks mismatch
+  and cancellation, reads the complete recovery record from native display cells,
+  hides it and requires exact re-entry. Later setup boots re-enter the retained
+  record to resume. The proof dispatches userspace during TPM waits and checks
+  private input, worker erasure and exclusive rendering. It loses accepted
+  responses for parent persistence, owner and lockout authorization, lockout
+  parameters, catalog NV definition and first write, and boot-pin definition,
+  first write and persistent locking, restarting the VM and TPM after each.
+  Completion reads both anchors without another NV write or lock command.
+  A forged hierarchy-state HMAC fails before administrator commands; empty owner
+  authorization cannot create parents or define indexes. A verification-only
+  custody key encrypts the generated recovery record and an independent compiled
+  signer pins that recovery fixture; neither key is supplied to production.
+  Ordinary reboot obtains enrollment from the locked TPM index and rejects
+  incomplete public state, damaged disk metadata and a corrupt read HMAC before
+  PIN entry. Both setup recovery and ordinary sign-in reject a replacement TPM.
+  Boot loading issues no owner commands, NV writes, locks or lockout resets.
+  After provisioning, a separate verification credential exercises PIN unlock,
+  durable assertion counters and recovery. The reboot exhausts all eight PIN
+  attempts, requires recovery-key authentication before administrator commands,
+  rejects damaged packages and changed enrollment, and verifies anchor tampering,
+  replay-entropy failure, replay rejection and expiry. Host crash tests withhold
+  TPM access after a failed disk barrier and keep the staged catalog and companion
+  record in one checkpoint. The ownership suite runs in release preflight.
+  The same retained owner now drives these setup proofs and reboot discovery,
+  sign-in, lock/reopen and cancellation during teardown. Production smoke without
+  a TPM requires an exclusive unavailable outcome before idle. Userspace identity
+  dispatch, policy updates and recovery-secret custody remain
+  open, along with physical TPM and input validation. Linking the shipped account
+  path adds about 240 KiB to the production payload; the ReleaseFast symbol budget
+  is 3,500, with identity proof modules explicitly excluded.
   Public test authorization exists only in verification kernels. Sealing follows the [TPM 2.0 Library specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/);
   hardware interfaces follow the [TCG PC Client TPM profile](https://trustedcomputinggroup.org/resource/pc-client-platform-tpm-profile-ptp-specification/)
   and [TCG ACPI specification](https://trustedcomputinggroup.org/resource/tcg-acpi-specification/).
@@ -122,15 +484,57 @@ requests.
   with payload bytes allocated on demand. Failed writes release newly allocated
   chunks before publishing an object or version. Storage still has an explicit
   finite quota; automatic history reclamation remains open.
-- Surface presentation uses a shared-buffer handle, revision, and readiness
-  fence through the userspace display service. The current display hardware
-  adapter records the scanout request; physical scanout and modesetting remain
-  open. The bounded text rasterizer and changed-cell renderer are host-tested
-  helpers and are not connected to this production presentation path.
+- Text surfaces use compositor-owned snapshots and the firmware framebuffer in
+  production, with writes limited to changed cells. The shared-buffer handle,
+  revision, and readiness-fence path still records modeled display requests;
+  accelerated scanout and modesetting remain open.
 - Local-first sync is modeled as core OS behavior: trusted device graph,
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
   two-node QEMU proof runs with separate native stores.
+  Device graph mutations verify the stored user-root signature, require the
+  matching root key, and check device ownership. A sync-service capability alone
+  cannot enroll, rotate, or revoke another user's devices. Enrollment retries
+  must match the current device key, label, and platform binding; key changes
+  use explicit rotation. Exhausted generations and rejected mutations leave the
+  graph unchanged. Sealed-key graph mutations checkpoint before publication.
+  Public enrollment lets a device prove possession and consent to an independently
+  pinned owner root while retaining its private key in its own vault. The authority
+  approves the public record and publishes a signed graph; import checks the local
+  key, preserves observed rotations and revocations, and checkpoints before use.
+  Public rotation binds consent from the current key to proof of its successor.
+  The device checkpoints both keys before sending the request; owner approval and
+  local import then commit the new generation. Stale and competing requests fail,
+  matching approval and import retries do not write again, and old channels retire
+  when the graph changes. The root certificate binds the exact predecessor consent
+  and successor proof. After durable import, retirement removes every old lease
+  and the current sealed record, preserving a slot generation in catalog v5.
+  Reused slots receive new IDs; catalog signers, credential keys, owner roots and
+  active device keys remain protected. Host tests cover 20 rotations, exhausted
+  generations and failures at both storage barriers without raising memory ceilings.
+  Historical encrypted checkpoints are retained; secure erasure and lost-key
+  recovery remain open.
+  Host tests join and rotate separate vaults and disks; the TPM cold/reboot proof
+  restores two device vaults and catalogs on the same guest TPM and rejects the
+  retired device key. Production approval, enrollment transport, trusted root-pin and authorization provisioning, interrupted first-enrollment recovery, and physical TPM validation remain open.
+  The two-node gate uses modern VirtIO PCI networking with bounded 32-entry
+  queues, separate DMA permissions, VT-d isolation and remapped MSI-X.
+  Both guests must transmit and receive encrypted native frames and observe
+  hardware interrupts; the harness saves wire captures beside the serial logs.
+  Physical I225-LM evidence and complete cross-node object replication remain
+  separate release requirements.
+  Native sync ABI v4 uses XChaCha20-Poly1305 with fresh random session keys
+  and nonces, authenticates task routing and sequence fields, and clears
+  plaintext on authentication failure. Independent verification nodes
+  now establish Noise XX channels with fresh X25519 keys certified by pinned
+  device identities. Both nodes decrypt confirmation traffic and reject packet
+  tampering and replay on the managed channel used for durable object transfer.
+  The two-node gate uses a bounded localhost relay to discard the first two final
+  confirmations, then requires an identical retransmission and a durable receipt.
+  The session manager exposes owned connection handles; unmanaged handshake
+  attachment and handoff entry points have been removed. Production identity
+  provisioning, peer discovery and authorization of inbound object operations
+  still need integration.
 - The driver model treats storage, network, USB controllers, GPU/display,
   media/print, input, and compositor-facing device policy as restartable
   userspace claims behind capability-scoped IOMMU DMA domains or brokered DMA
@@ -232,9 +636,14 @@ measures reuse and allocation under fragmentation, including exhaustion.
 - Focused hardware input crosses the native ABI as bounded semantic events.
   The compositor routes each event to one task, the session grants a dedicated
   task-scoped receive capability, and UI processes drain a fixed event budget
-  without sharing router memory or raw HID reports. Once that budget reaches an
-  empty queue, the process yields with an event-wait disposition and stays off
-  the ready queue until focused work wakes it. Each UI process keeps an
+  without sharing router memory or raw HID reports. Each decoded key receives a
+  distinct, increasing event number, including keys from the same HID report.
+  Source replacement resets report replay checks while preserving event ordering
+  for surviving tasks; exhausted event numbers stop delivery without wrapping.
+  The focused-input benchmark generates a new key transition on every iteration
+  and verifies delivery before counting the operation.
+  Once the queue is empty, the process yields with an event-wait disposition and
+  stays off the ready queue until focused work wakes it. Each UI process keeps an
   allocation-free model for editable text, focus, activation, recovery, and
   commits; Notes, Viewer, Capture, Permission Review, and the compositor select
   distinct state roles while the bootstrap mailbox exposes a compact snapshot.
@@ -245,6 +654,14 @@ measures reuse and allocation under fragmentation, including exhaustion.
   are validated before dequeue, and undersized outputs leave messages queued.
   A full endpoint queue returns a distinct `would_block` status so clients can
   retry backpressure without spinning on a disconnected peer.
+  Ring storage is explicitly cache-line aligned within its heap allocation.
+  Power-of-two capacities preserve FIFO order across sequence-counter rollover;
+  malformed geometry, impossible queue depths, and invalid record lengths are
+  rejected before access. Receive validates and copies one snapshot before
+  releasing the slot, preserving messages and moved capabilities on short
+  outputs. Ring replacement rejects overlapping live storage. The host
+  `ipc-ring-benchmark` target compares this receive path with separate peek/pop
+  calls and measures full-queue backpressure.
   The `endpoint_close` operation requires its own right, releases one channel
   and all authority to it, and wakes surviving peers. Clients drain queued
   replies before receiving `peer_closed`; closed connections cannot be rebound.
@@ -316,6 +733,7 @@ Use the pinned toolchain and repo entrypoints:
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
+- Python 3 for the two-node network fault relay and its tests
 - An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, PGE, PCID/INVPCID,
   x2APIC, XSAVE/XSAVES, CET IBT and shadow-stack support, FRED, LASS, LKGS,
   1 GiB pages, and a calibrated invariant TSC with deadline timers. Production
@@ -484,6 +902,137 @@ All generated optical media are UEFI-only and are rejected unless they contain a
 bootable x86-64 EFI El Torito image. The QEMU harness uses OVMF pflash firmware
 and exposes boot media through virtio-SCSI instead of a legacy disk controller;
 legacy BIOS boot is not a supported execution path.
+Each native EFI executable embeds its kernel ELF and command line. The loader
+never reads a replacement kernel or options from the boot volume or firmware
+load options. It validates the ELF layout, reserves every destination page,
+and passes SHA-256 measurements of the exact embedded payload to the kernel.
+The kernel loads at 32 MiB, above the low firmware allocations observed in OVMF.
+EFI allocates the 32 MiB early heap separately below the identity-map limit;
+the frame allocator preserves both exact ranges and keeps free gaps available.
+It no longer assumes that memory following the kernel is safe to overwrite.
+Recovery and benchmark VMs share the default 256 MiB QEMU memory setting so
+firmware has room for the explicitly reserved heap.
+Firmware authentication is recorded separately: SecureBoot must be one and
+SetupMode must be zero; AuditMode, if present, must be zero. Missing required
+state, malformed values, and read errors leave the boot unverified.
+Unsigned QEMU boots cannot claim an authenticated root or
+use it for runtime measured-state attestation. Runtime measurement snapshots and the embedded
+fixture-signed manifests check consistency; they do not establish release
+authority, prove TPM PCR values, or enforce rollback protection.
+
+When firmware provides TCG2 with an active SHA-256 bank, the loader extends
+PCR 11 with a versioned description of the exact kernel and command-line hashes
+and the firmware authentication state. It copies the event-log prefix through
+that event into reserved memory, capped at 256 KiB. After successful
+`ExitBootServices`, it appends the firmware's final events without allocation or
+firmware calls. Events already captured by an earlier log reader must match an
+exact suffix of the prefix and are not copied twice. Both firmware sources are
+bounded by their allocated memory descriptors; malformed counts, changed overlap,
+truncation and capacity overflow stop boot.
+The kernel replays PCR 11 and compares it with both the handoff and a live TPM
+read after CRB initialization. It also requires digest-authenticated firmware
+exit invocation and success events in the appended portion, retains failed-exit
+retries, and compares the complete PCR 5 replay with a live read. Handoff version 2
+rejects the former pre-exit scope without growing its 56-byte payload. QEMU gates
+require `FINAL_EVENTS:VERIFIED` alongside the boot-measurement checkpoint.
+Missing SHA-256 support, partial extensions, and mismatches stop that measured
+boot. Absence of the firmware protocol permits an unmeasured boot; it cannot
+produce either verified checkpoint.
+This local consistency check uses the [TCG2 firmware protocol](https://trustedcomputinggroup.org/resource/tcg-efi-protocol-specification/).
+Only PCR 5 and PCR 11 are verified here. This does not establish a remote trust
+policy, manufacturer identity, or physical-machine validation.
+
+The TPM client can create a restricted ECDSA P-256 attestation key under an
+independently enrolled storage parent. Its private scalar stays inside the TPM;
+the stored blob is encrypted and bound to that parent. Creation protects the
+caller authorization through the existing salted, encrypted HMAC session.
+Quotes require the separately pinned public key and qualified Name, a fresh
+32-byte challenge, and an expected SHA-256 PCR 11 value. The verifier checks the
+exact selection, digest, attestation type, challenge, signature, and bounded
+framing. Verifier-owned challenges expire within one minute, reject clock
+rollback, and can succeed only once. Invalid quotes publish no accepted result;
+client failures clear output and clean up known transient keys and sessions.
+`./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-quote-qemu-test` exercises real
+TPM commands, cold boot, recovered keys, replay, wrong authorization, substituted
+keys, damaged blobs/responses, and TPM replacement using disposable swtpm state.
+Its enrollment authority is a verification-only fixture. Operational attestation
+key enrollment, manufacturer/EK certification, release-policy approval of PCR
+values, and PCR-bound secret policies
+remain open; a valid signature alone does not establish those trust decisions.
+
+The attestation service now has a separate TPM response path. The verifier owns
+the enrolled device/key/generation and approved PCR value, generates a fresh
+32-byte nonce, and binds the complete request and PCR expectation into the
+quote's signed extraData. Responses contain only bounded TPM evidence. Acceptance
+is single-use, expires within one minute, and rejects clock rollback. Service
+failures erase the response and leave the challenge available for retry.
+Native driver and endpoint connection paths consume this evidence through egress
+capabilities, with separate pins for the enrollment and PCR 11 profile. A quote
+does not claim that arbitrary runtime measurement records are hardware measured.
+The cold/reboot QEMU proof authorizes an encrypted session through this path and
+rejects wrong policy context, PCR, peer, expiry and replay. Its approved PCR is a
+test fixture; deployed verifier policy, enrollment distribution and
+physical-machine validation remain open. Callers must cancel
+outstanding verifier challenges when their enrollment or approval policy changes.
+
+Managed peer connections can require TPM attestation before object transfer.
+The challenge binds the full Noise session hash; canonical records are at most
+402 bytes and use up to three encrypted datagrams. Cached ciphertext retries
+handle loss and reordering without reusing a nonce for new plaintext. The local
+owner supplies the trusted enrollment and PCR policy, retrieves quote work by
+connection handle, and completes the TPM operation outside packet dispatch.
+A completed challenge wakes that owner once. Stale, expired and revoked handles
+cannot complete a quote. Handshake, attestation and object traffic share the
+existing two-operation dispatch budget; packets allocate no connection state.
+Host tests cover fragment failures and durable transfer. The swtpm cold/reboot
+proof carries an actual quote between two Noise endpoints in one guest;
+attestation across independently enrolled machines still needs validation.
+
+A locally bound quote worker now retrieves pending challenges and publishes
+responses through those connection handles. It owns its TPM client and a private
+snapshot of the supplied credentials, executes on a guarded stack, yields at
+hardware waits, and polls at most once per tick. It rechecks the credential
+lease, enrollment, service policy and connection before delivery. Cancellation
+retains borrowed command buffers until cleanup finishes; late or rejected
+completion leaves visible-request and nonce history unchanged. PIN/recovery and
+quote workers serialize complete TPM operations through a shared lease, so a
+queued cancellation cannot disturb another worker's command or loaded objects.
+Reset and boot failure drain the worker before releasing its dependencies.
+The swtpm proof cancels before quoting and after evidence exists, rejects a
+completed delivery, then retries successfully with the same challenge. Native
+provisioning must supply the enrolled key, encrypted blob, parent pin and
+revocable authorization; the worker installs no default credentials.
+
+Remote attestation service signatures bind the complete verifier request and
+the provider's actual metadata digest through a domain-separated context.
+Changing policy, key restrictions, revocations, or metadata invalidates the
+signature, and standalone statements cannot be repackaged as remote responses.
+The response remains 616 bytes. Verification checks bounded lengths and canonical
+unused fields before hashing, then checks the signature once against the trusted
+root. Failed signing and provisioning leave committed service state unchanged.
+Verified service-identity connections also require the signed device identity to
+match the selected peer before opening a connection.
+
+`./scripts/zig.sh build unified-efi-qemu-test` checks firmware authorization of
+the complete EFI image, rejection of changes to either embedded payload, and
+immunity to external kernel and command-line files. Successful boots must pass the
+live TPM measurement check; a TPM without an active SHA-256 bank must be rejected
+before kernel entry. This proof uses the production kernel with embedded QEMU
+test options; release media retain the hardware CPU baseline. It needs `swtpm`
+and `swtpm_setup`, Secure Boot capable OVMF, and the Python packages
+`virt-firmware` (tested with 26.9) and `pefile`.
+Set `OVMF_SECURE_BOOT_CODE` and matching `OVMF_SECURE_BOOT_VARS` (or `OVMF_VARS`);
+`EFI_TEST_PYTHON` and `EFI_VARS_TOOL`
+can select tools installed in an isolated virtual environment. The test enrolls
+only disposable VM variables and never accesses host firmware. CI supplies the
+isolated tools, and release-security-preflight includes this gate. The production
+hardware proof requires Secure Boot enabled, a firmware-authenticated image,
+and a verified live TPM boot measurement.
+Release signing, signer enrollment, TPM measured-boot quotes, and anti-rollback
+policy remain separate production work. The firmware state and whole-image
+authentication rules follow the [UEFI boot manager](https://uefi.org/specs/UEFI/2.11/03_Boot_Manager.html)
+and [image validation specification](https://uefi.org/specs/UEFI/2.11/32_Secure_Boot_and_Driver_Signing.html).
+
 The installed benchmark ELF retains symbols for diagnostics, while its boot
 media contains a separately linked debug-stripped derivative so firmware never
 parses the suite's large non-loadable debug sections.
@@ -797,6 +1346,8 @@ QEMU proof runs are script-backed:
 
 - `scripts/run-zigos-native-smoke.sh`
 - `scripts/run-storage-durability-qemu.sh`
+- `scripts/run-sync-two-node-qemu.sh` (drops two final confirmations by default;
+  `SYNC_TWO_NODE_DROP_CONFIRMATIONS=0` runs without injected loss)
 - `scripts/run-kernel-recovery.sh`
 - `scripts/capture-kernel-benchmark.sh` (capture helper; `zig build benchmark` runs the strict gate)
 - `scripts/run-uefi-boot-test.sh`

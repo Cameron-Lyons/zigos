@@ -356,6 +356,7 @@ pub const operations = [_]Descriptor{
             .port_method_name = "surfacePresent",
         },
         .domain = .task,
+        .request_copy = .embedded_user_buffers,
         .required_right = .surface_present,
         .target_kind = .{ .fixed = .task },
         .scope_rule = .{ .task_scope_matches_request_task = true },

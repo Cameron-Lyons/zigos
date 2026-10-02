@@ -48,6 +48,7 @@ pub fn build(b: *std.Build) void {
     }
     const optimize = b.standardOptimizeOption(.{});
     benchmarks_build.addAllocatorBenchmarks(b);
+    benchmarks_build.addIpcBenchmark(b);
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
     const test_artifacts = tests_build.addTestArtifacts(b, optimize, userspace_images);
     const x86_64_architecture_compile_check = kernel_build.addX86_64ArchitectureCompileCheck(b, optimize);
@@ -68,7 +69,9 @@ pub fn build(b: *std.Build) void {
     kernel_role_options.addOption(
         usize,
         "maximum_production_symbol_count",
-        if (optimize == .ReleaseFast) 3200 else std.math.maxInt(usize),
+        // Production now links native enrollment, TPM PIN/recovery and catalog
+        // restoration. Retain a bounded symbol budget for that shipped path.
+        if (optimize == .ReleaseFast) 3500 else std.math.maxInt(usize),
     );
     kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .Debug);
     const kernel_role_check_module = b.createModule(.{
@@ -174,6 +177,16 @@ pub fn build(b: *std.Build) void {
     tpm2_sealing_step.dependOn(&tpm2_sealing_cmd.step);
     tpm2_sealing_step.dependOn(kernel_role_check_step);
 
+    const tpm2_ownership_cmd = qemu_build.addTpm2OwnershipQemuCommand(b, kernels.zigos_native_verification, userspace_images);
+    const tpm2_ownership_step = b.step("tpm2-ownership-qemu-test", "Verify persistent TPM parent recovery and PIN sessions under protected owner authorization across reboot");
+    tpm2_ownership_step.dependOn(&tpm2_ownership_cmd.step);
+    tpm2_ownership_step.dependOn(kernel_role_check_step);
+
+    const tpm2_quote_cmd = qemu_build.addTpm2QuoteQemuCommand(b, kernels.zigos_native_verification, userspace_images);
+    const tpm2_quote_step = b.step("tpm2-quote-qemu-test", "Verify pinned TPM attestation keys and nonce-bound PCR quotes across reboot and TPM replacement");
+    tpm2_quote_step.dependOn(&tpm2_quote_cmd.step);
+    tpm2_quote_step.dependOn(kernel_role_check_step);
+
     const zigos_native_smoke_test_cmd = qemu_build.addNativeSmokeCommand(
         b,
         kernels.zigos_native_verification,
@@ -272,7 +285,7 @@ pub fn build(b: *std.Build) void {
     verify_step.dependOn(x86_64_long_mode_entry_check);
     verify_step.dependOn(x86_64_kernel_core_boot_check);
 
-    const efi_stub = kernel_build.addEfiStub(b, optimize);
+    const efi_stub = kernel_build.addEfiImage(b, optimize, kernels.zigos_native.boot_payload, b.path("src/boot/cmdline.txt"));
     kernel_steps.kernel.dependOn(&efi_stub.step);
 
     const iso_cmd = qemu_build.addIsoCommand(
@@ -291,7 +304,7 @@ pub fn build(b: *std.Build) void {
         b,
         kernels.zigos_native_verification,
         userspace_images,
-        efi_stub,
+        kernel_build.addEfiImage(b, optimize, kernels.zigos_native_verification.boot_payload, b.path("src/boot/cmdline.txt")),
         "build/os-verification.iso",
         "build/iso-verification",
     );
@@ -309,6 +322,16 @@ pub fn build(b: *std.Build) void {
     const uefi_qemu_step = b.step("uefi-qemu-test", "Run the ISO through an OVMF UEFI boot preflight in QEMU");
     uefi_qemu_step.dependOn(&uefi_qemu_cmd.step);
     uefi_qemu_step.dependOn(kernel_role_check_step);
+
+    const unified_efi = kernel_build.addEfiImage(b, .ReleaseSmall, kernels.zigos_native.boot_payload, b.path("src/boot/cmdline-qemu.txt"));
+    const unified_efi_cmd = b.addSystemCommand(&.{ "bash", "scripts/run-unified-efi-qemu.sh" });
+    unified_efi_cmd.addFileArg(unified_efi.getEmittedBin());
+    unified_efi_cmd.addFileArg(kernels.zigos_native.boot_payload);
+    unified_efi_cmd.addFileArg(b.path("src/boot/cmdline-qemu.txt"));
+    unified_efi_cmd.addArg("build/unified-efi-qemu");
+    const unified_efi_step = b.step("unified-efi-qemu-test", "Verify firmware authentication of the embedded kernel and boot options");
+    unified_efi_step.dependOn(&unified_efi_cmd.step);
+    unified_efi_step.dependOn(kernel_role_check_step);
 
     const verification_uefi_qemu_cmd = qemu_build.addUefiQemuCommand(
         b,
@@ -436,7 +459,12 @@ pub fn build(b: *std.Build) void {
     release_security_preflight_step.dependOn(driver_restart_qemu_step);
     release_security_preflight_step.dependOn(recovery_qemu_step);
     release_security_preflight_step.dependOn(sync_two_node_qemu_step);
+    release_security_preflight_step.dependOn(tpm2_qemu_step);
+    release_security_preflight_step.dependOn(tpm2_sealing_step);
+    release_security_preflight_step.dependOn(tpm2_ownership_step);
+    release_security_preflight_step.dependOn(tpm2_quote_step);
     release_security_preflight_step.dependOn(uefi_qemu_step);
+    release_security_preflight_step.dependOn(unified_efi_step);
     release_security_preflight_step.dependOn(verification_uefi_qemu_step);
     release_sbom_cmd.step.dependOn(release_security_preflight_step);
     reproducible_build_cmd.step.dependOn(release_security_preflight_step);

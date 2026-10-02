@@ -2,7 +2,7 @@ const std = @import("std");
 const component_port = @import("../kernel_api/component_port.zig");
 const endpoint = @import("../kernel_api/endpoint.zig");
 const ids = @import("../core/ids.zig");
-const signing = @import("../core/signing.zig");
+const object_signer = @import("sealed_object_signer.zig");
 const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
 const ipc = @import("document_save_ipc.zig");
 const storage_service = @import("storage_service.zig");
@@ -14,18 +14,17 @@ pub const OpenRequest = struct {
     server_bootstrap_capability_id: u64,
     workspace_id: u64,
     path: []const u8,
-    signer: signing.SignerIdentity,
+    signer: object_signer.Signer,
 };
 
 // Initialize and retain in stable storage. The server borrows only this
-// channel's copies, never the caller's path, signer label, or StoragePort.
+// channel's path copy and the session-owned signing authority and StoragePort.
 pub const Channel = struct {
     server: ?ipc.Server = null,
     storage: storage_service.StoragePort = undefined,
     client_endpoint_id: u64 = 0,
     server_endpoint_id: u64 = 0,
     path: [workspace.MAX_ENTRY_PATH_BYTES]u8 = undefined,
-    signer_label: [workspace.MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8 = undefined,
 
     pub fn open(
         self: *Channel,
@@ -36,7 +35,6 @@ pub const Channel = struct {
     ) !mailbox.DocumentBinding {
         if (self.server != null) return error.DocumentAlreadyOpen;
         if (request.path.len > self.path.len) return error.PathTooLong;
-        if (request.signer.label.len == 0 or request.signer.label.len > self.signer_label.len) return error.InvalidSignerLabel;
         const task = kernel.kernel.runtime.find(request.authority.task_id) orelse return error.TaskNotFound;
         if (task.state != .active or !task.owner.eql(request.authority.principal) or
             !task.hasCapability(request.authority.capability_id)) return error.PermissionDenied;
@@ -49,6 +47,7 @@ pub const Channel = struct {
         const view = try self.storage.openEntry(authority, request.workspace_id, request.path, .read);
         if (view.object_type != .document) return error.NotDocument;
         try self.storage.requireDocumentWrite(authority, request.workspace_id, request.path, view.object_id.raw());
+        try request.signer.validateService(core.owner, core.task_id, now_ticks);
 
         const client = try kernel.endpointCreate(.{
             .header = component_port.makeHeader(.endpoint_create, task.id),
@@ -74,7 +73,6 @@ pub const Channel = struct {
         }, now_ticks);
 
         @memcpy(self.path[0..request.path.len], request.path);
-        @memcpy(self.signer_label[0..request.signer.label.len], request.signer.label);
         self.client_endpoint_id = client.endpoint.endpoint_id;
         self.server_endpoint_id = server.endpoint.endpoint_id;
         self.server = .{
@@ -87,7 +85,7 @@ pub const Channel = struct {
                 .workspace_id = request.workspace_id,
                 .path = self.path[0..request.path.len],
                 .object_id = view.object_id.raw(),
-                .signer = .{ .label = self.signer_label[0..request.signer.label.len], .seed = request.signer.seed },
+                .signer = request.signer,
             },
         };
         return .{
