@@ -566,12 +566,17 @@ fn validateReleaseArtifacts(
         const repro_source = try common.readFileAlloc(allocator, io, repro_checker, common.source_file_max_bytes);
         const required_repro_snippets = [_][]const u8{
             "command -v jj",
-            "jj -R \"$ROOT_DIR\" file list -r @",
+            "jj --ignore-working-copy -R \"$ROOT_DIR\" file list -r \"$commit_sha\"",
+            "jj --ignore-working-copy -R \"$ROOT_DIR\" file show -r \"$commit_sha\" \"$path\"",
             "repo_vcs=\"jj\"",
-            "jj -R \"$ROOT_DIR\" git remote list",
-            "repo_change_id=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
+            "jj --ignore-working-copy -R \"$ROOT_DIR\" git remote list",
+            "repo_change_id=\"$(jj --ignore-working-copy -R \"$ROOT_DIR\" log -r \"$commit_sha\" --no-graph",
             "commit_sha=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
-            "dirty_count=\"$(jj -R \"$ROOT_DIR\" diff -r @ --name-only",
+            "dirty_count=\"$(jj --ignore-working-copy -R \"$ROOT_DIR\" diff -r \"$commit_sha\" --name-only",
+            "\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph -T 'commit_id ++ \"\\n\"')\" != \"$commit_sha\"",
+            "Source revision changed while preparing reproducible builds",
+            "ZIG_LOCAL_CACHE_DIR=\"$tree/build/zig-cache\"",
+            "ZIG_GLOBAL_CACHE_DIR=\"$tree/build/zig-global-cache\"",
             "\"repo_vcs\": \"$repo_vcs\"",
             "\"repository\":",
             "\"repo_change_id\":",
@@ -586,7 +591,7 @@ fn validateReleaseArtifacts(
         };
         for (required_repro_snippets) |snippet| {
             if (std.mem.indexOf(u8, repro_source, snippet) == null) {
-                try common.addError(errors, allocator, "reproducible build checker must enforce Jujutsu provenance snippet: {s}", .{snippet});
+                try common.addError(errors, allocator, "reproducible build checker must enforce frozen-source and isolated-build snippet: {s}", .{snippet});
             }
         }
         try validateShellReleaseArtifactArray(allocator, errors, repro_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_BASE_TARGET_PATHS);
@@ -606,6 +611,9 @@ fn validateReleaseArtifacts(
         }
         if (std.mem.indexOf(u8, repro_source, "find \"$tree/zig-out/bin\"") != null) {
             try common.addError(errors, allocator, "reproducible build checker must not sweep the binary output directory into the production manifest", .{});
+        }
+        if (std.mem.indexOf(u8, repro_source, "cp -p \"$ROOT_DIR/$path\"") != null) {
+            try common.addError(errors, allocator, "reproducible build checker must export frozen revision contents instead of copying mutable workspace files", .{});
         }
     }
     const finalizer = try common.expectStringField(allocator, errors, root, "release artifacts", "release_manifest_finalizer") orelse "";

@@ -176,6 +176,8 @@ const Slot = struct {
     dispatch_request_configured: bool = false,
     require_accelerator: bool = false,
     pending_accelerator_claim_id: u64 = 0,
+    // With no claim id, a non-CPU engine retains a ready waiter whose claim
+    // could not be reserved or whose engine is online but policy denies it.
     pending_accelerator_engine: accelerator_scheduler.Engine = .cpu,
 
     comptime {
@@ -492,10 +494,13 @@ pub const Scheduler = struct {
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
         const slot = self.slots.get(task_id) orelse return false;
-        slot.dispatch_request = request;
-        slot.dispatch_request.class = task.resourceClass();
+        var configured_request = request;
+        configured_request.class = task.resourceClass();
+        if (require_accelerator and requestedAcceleratorEngine(configured_request) == .cpu) return false;
+        slot.dispatch_request = configured_request;
         slot.dispatch_request_configured = true;
         slot.require_accelerator = require_accelerator;
+        if (slot.pending_accelerator_claim_id == 0) slot.pending_accelerator_engine = .cpu;
         return true;
     }
 
@@ -548,7 +553,13 @@ pub const Scheduler = struct {
         const accounting = self.accountingForSlot(slot);
         accounting.last_wake_tick = now_ticks;
         accounting.wake_event_count += 1;
-        slot.deadline_tick = if (deadline_tick != 0) deadline_tick else deadlineFromNow(slot.resource_class, now_ticks);
+        const wake_deadline = if (deadline_tick != 0) deadline_tick else deadlineFromNow(slot.resource_class, now_ticks);
+        // Coalesced events can tighten a waiting activation's deadline, but
+        // cannot postpone its service indefinitely under sustained load.
+        slot.deadline_tick = if (already_ready and slot.deadline_tick != 0)
+            @min(slot.deadline_tick, wake_deadline)
+        else
+            wake_deadline;
         // A newly woken task starts an activation with its configured budget.
         // Leftover credit from a previous interaction must not strand this one
         // between reading input and publishing its reply. Coalesced wakes do
@@ -800,13 +811,14 @@ pub const Scheduler = struct {
                 self.queuePendingAcceleratorWake(
                     index,
                     slot,
-                    requested_engine,
-                    dispatch_request.shared_memory_bytes,
+                    dispatch_request,
                     now_ticks,
                 );
                 self.last_dispatch_tick = now_ticks;
                 return false;
             }
+
+            if (slot.pending_accelerator_claim_id == 0) slot.pending_accelerator_engine = .cpu;
 
             const dispatch_memory_bandwidth_units = memoryBandwidthUnitsFor(task);
             const missed_deadline = slot.deadline_tick != 0 and now_ticks > slot.deadline_tick;
@@ -998,6 +1010,9 @@ pub const Scheduler = struct {
             const request = self.dispatchRequestFor(slot, task);
             const decision = self.planTaskDispatch(request);
             if (decision.delayed) continue;
+            if (slot.pending_accelerator_claim_id == 0 and
+                slot.pending_accelerator_engine != .cpu and
+                self.dispatchRequiresUnavailableAccelerator(slot, decision)) continue;
             return .{ .slot_index = index, .task = task, .request = request, .decision = decision };
         }
         return null;
@@ -1317,21 +1332,31 @@ pub const Scheduler = struct {
         self: *Scheduler,
         slot_index: usize,
         slot: *Slot,
-        engine: accelerator_scheduler.Engine,
-        shared_memory_bytes: usize,
+        request: accelerator_scheduler.Request,
         now_ticks: u64,
     ) void {
         if (slot.pending_accelerator_claim_id != 0) return;
+        const engine = requestedAcceleratorEngine(request);
         if (engine == .cpu) return;
-        _ = self.enqueueAcceleratorClaimForSlot(.{
-            .task_id = slot.task_id,
-            .engine = engine,
-            .resource_class = slot.resource_class,
-            .requested_at_tick = now_ticks,
-            .deadline_tick = slot.deadline_tick,
-            .shared_memory_bytes = shared_memory_bytes,
-        }, slot);
-        self.unlinkReadyIndex(slot_index);
+        const has_alternative_engine = request.class == .media_export and request.wants_media_engine and request.wants_gpu;
+        if (!has_alternative_engine and !self.physicalEngineAvailable(engine)) {
+            if (self.enqueueAcceleratorClaimForSlot(.{
+                .task_id = slot.task_id,
+                .engine = engine,
+                .resource_class = slot.resource_class,
+                .requested_at_tick = now_ticks,
+                .deadline_tick = slot.deadline_tick,
+                .shared_memory_bytes = request.shared_memory_bytes,
+            }, slot) != null) {
+                self.unlinkReadyIndex(slot_index);
+                return;
+            }
+        }
+        // An unreserved or multi-engine wait needs a wake path for any usable
+        // engine. An already-online engine instead needs a policy change, so
+        // a grant/requeue loop would spin. Recheck eligibility without retries.
+        slot.pending_accelerator_engine = engine;
+        _ = self.enqueueReadyIndex(slot_index, slot.resource_class);
     }
 
     fn wakeAvailableAcceleratorClaims(self: *Scheduler, now_ticks: u64) void {
@@ -1743,10 +1768,12 @@ fn memoryBandwidthUnitsFor(task: *const task_runtime.TaskRecord) usize {
 }
 
 fn requestedAcceleratorEngine(request: accelerator_scheduler.Request) accelerator_scheduler.Engine {
-    if (request.wants_media_engine) return .media;
-    if (request.wants_npu) return .npu;
-    if (request.wants_gpu) return .gpu;
-    return .cpu;
+    return switch (request.class) {
+        .emergency_system_critical => .cpu,
+        .foreground_interactive => if (request.wants_gpu) .gpu else .cpu,
+        .media_export => if (request.wants_media_engine) .media else if (request.wants_gpu) .gpu else .cpu,
+        .background_light, .batch_compute => if (request.wants_npu) .npu else if (request.wants_gpu) .gpu else .cpu,
+    };
 }
 
 const resource_priority_order = [_]accelerator_scheduler.ResourceClass{
@@ -2490,6 +2517,27 @@ test "userspace scheduler gives new event activations a full budget without accu
     try std.testing.expectEqual(@as(u64, 7), slot.dispatch_count);
 }
 
+test "userspace scheduler coalesces wakes at the earliest ready deadline" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    const task = try createRunnableSchedulerTask(&runtime, 7, .background_light, "wake-deadline", "app.wake-deadline", null);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    const slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, 10_000, 0));
+    try std.testing.expectEqual(BACKGROUND_DEADLINE_DELTA_TICKS, slot.deadline_tick);
+    try std.testing.expect(scheduler.wakeTask(task.id, .timer, 11_000, 20_000));
+    try std.testing.expectEqual(@as(u64, 20_000), slot.deadline_tick);
+    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, 12_000, 80_000));
+    try std.testing.expectEqual(@as(u64, 20_000), slot.deadline_tick);
+    try std.testing.expect(scheduler.parkTaskUntilEvent(task.id));
+    try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 90_000, 0));
+    try std.testing.expectEqual(@as(u64, 90_000) + BACKGROUND_DEADLINE_DELTA_TICKS, slot.deadline_tick);
+}
+
 test "userspace scheduler separates accelerator claim queues from cpu ready queues" {
     var executor = userspace_executor.Executor{};
     var scheduler = Scheduler.init(&executor);
@@ -2688,6 +2736,209 @@ test "userspace scheduler stops accelerator claim ids at exhaustion" {
     }) == null);
     try std.testing.expectEqual(@as(u64, 0), scheduler.next_accelerator_claim_id);
     try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
+}
+
+test "userspace scheduler retains accelerator waiters when claim reservation fails" {
+    for ([_]bool{ false, true }) |fill_claim_table| {
+        var executor = userspace_executor.Executor{};
+        var scheduler = Scheduler.init(&executor);
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        scheduler.bind(&catalog, &runtime, &capabilities);
+        scheduler.configureResourceTelemetry(.{
+            .source = .hardware,
+            .observed_tick = 1,
+            .gpu_available = false,
+            .npu_available = false,
+            .media_available = false,
+            .hardware_evidence = completeTestHardwareEvidence(),
+        });
+        if (fill_claim_table) {
+            var claim_count: usize = 0;
+            while (claim_count < MAX_ACCELERATOR_CLAIMS) {
+                const filler = try createRunnableSchedulerTask(&runtime, @intCast(300 + claim_count), .background_light, "claim-filler", "app.claim-filler", null);
+                try std.testing.expect(scheduler.registerTask(filler.id));
+                try std.testing.expect(scheduler.parkTaskUntilEvent(filler.id));
+                for (engine_priority_order) |engine| {
+                    if (claim_count == MAX_ACCELERATOR_CLAIMS) break;
+                    try std.testing.expect(scheduler.enqueueAcceleratorClaim(.{
+                        .task_id = filler.id,
+                        .engine = engine,
+                        .resource_class = .background_light,
+                        .requested_at_tick = 1,
+                    }) != null);
+                    claim_count += 1;
+                }
+            }
+        } else {
+            scheduler.next_accelerator_claim_id = 0;
+        }
+        const waiter = try createRunnableSchedulerTask(&runtime, 8, .media_export, "claim-waiter", "app.claim-waiter", null);
+        const ordinary = try createRunnableSchedulerTask(&runtime, 9, .media_export, "claim-tail", "app.claim-tail", null);
+        try std.testing.expect(scheduler.registerTask(waiter.id));
+        try std.testing.expect(scheduler.configureTaskDispatchRequest(waiter.id, .{ .class = .media_export, .wants_gpu = true }, true));
+        try std.testing.expect(scheduler.registerTask(ordinary.id));
+        try std.testing.expect(scheduler.configureTaskDispatchRequest(ordinary.id, .{ .class = .media_export }, false));
+        _ = scheduler.runNext(1);
+        try std.testing.expect(scheduler.slots.getConst(waiter.id).?.queued_ready);
+        try std.testing.expectEqual(@as(u64, 0), scheduler.slots.getConst(waiter.id).?.pending_accelerator_claim_id);
+        try std.testing.expect(scheduler.hasDispatchableTasks(2));
+        _ = scheduler.runNext(2);
+        try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(ordinary.id).?.dispatch_count);
+        try std.testing.expect(!scheduler.hasDispatchableTasks(3));
+        for (3..8) |tick| _ = scheduler.runNext(tick);
+        try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(waiter.id).?.denied_dispatch_count);
+        scheduler.configureResourceTelemetry(.{
+            .source = .hardware,
+            .observed_tick = 8,
+            .gpu_available = true,
+            .npu_available = false,
+            .media_available = false,
+            .hardware_evidence = completeTestHardwareEvidence(),
+        });
+        try std.testing.expect(scheduler.hasDispatchableTasks(8));
+        _ = scheduler.runNext(8);
+        const stats = scheduler.taskDispatchStats(waiter.id).?;
+        try std.testing.expectEqual(@as(u64, 1), stats.dispatch_count);
+        try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, stats.last_dispatch_engine);
+    }
+}
+
+test "userspace scheduler rejects unsatisfiable accelerator requirements without changing configuration" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    const task = try createRunnableSchedulerTask(&runtime, 11, .media_export, "invalid-accelerator", "app.invalid-accelerator", null);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(scheduler.configureTaskDispatchRequest(task.id, .{ .class = .media_export, .wants_gpu = true }, true));
+    const slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expect(!scheduler.configureTaskDispatchRequest(task.id, .{ .class = .media_export }, true));
+    try std.testing.expect(!scheduler.configureTaskDispatchRequest(task.id, .{ .class = .media_export, .wants_npu = true }, true));
+    try std.testing.expect(slot.dispatch_request.wants_gpu);
+    try std.testing.expect(slot.require_accelerator);
+    try std.testing.expect(slot.queued_ready);
+    const service = try createRunnableSchedulerTask(&runtime, 12, .emergency_system_critical, "invalid-service-accelerator", "svc.invalid-accelerator", null);
+    try std.testing.expect(scheduler.registerTask(service.id));
+    try std.testing.expect(!scheduler.configureTaskDispatchRequest(service.id, .{ .class = .emergency_system_critical, .wants_gpu = true }, true));
+    try std.testing.expect(!scheduler.slots.getConst(service.id).?.dispatch_request_configured);
+    try std.testing.expect(!scheduler.slots.getConst(service.id).?.require_accelerator);
+}
+
+test "userspace scheduler waits on an engine supported by the actual task class" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    const task = try createRunnableSchedulerTask(&runtime, 13, .foreground_interactive, "class-accelerator", "app.class-accelerator", null);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(!scheduler.configureTaskDispatchRequest(task.id, .{ .class = .foreground_interactive, .wants_media_engine = true }, true));
+    try std.testing.expect(!scheduler.slots.getConst(task.id).?.dispatch_request_configured);
+    try std.testing.expect(scheduler.configureTaskDispatchRequest(task.id, .{
+        .class = .media_export,
+        .wants_media_engine = true,
+        .wants_gpu = true,
+    }, true));
+    try std.testing.expectEqual(accelerator_scheduler.ResourceClass.foreground_interactive, scheduler.slots.getConst(task.id).?.dispatch_request.class);
+    _ = scheduler.runNext(1);
+    try std.testing.expectEqual(@as(usize, 1), scheduler.acceleratorClaimQueueDepth(.gpu));
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
+}
+
+test "userspace scheduler wakes required media work when only its alternative GPU becomes available" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .gpu_available = false,
+        .npu_available = false,
+        .media_available = false,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    const task = try createRunnableSchedulerTask(&runtime, 14, .media_export, "alternative-accelerator", "app.alternative-accelerator", null);
+    try std.testing.expect(scheduler.registerTask(task.id));
+    try std.testing.expect(scheduler.configureTaskDispatchRequest(task.id, .{
+        .class = .media_export,
+        .wants_media_engine = true,
+        .wants_gpu = true,
+    }, true));
+    _ = scheduler.runNext(1);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.media));
+    try std.testing.expect(!scheduler.hasDispatchableTasks(2));
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 2,
+        .gpu_available = true,
+        .npu_available = false,
+        .media_available = false,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    try std.testing.expect(scheduler.hasDispatchableTasks(2));
+    _ = scheduler.runNext(2);
+    const stats = scheduler.taskDispatchStats(task.id).?;
+    try std.testing.expectEqual(@as(u64, 1), stats.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.gpu, stats.last_dispatch_engine);
+}
+
+test "userspace scheduler idles required accelerators denied by policy until policy or request changes" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .privacy_mode = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    const waiter = try createRunnableSchedulerTaskWithBudget(&runtime, 10, .background_light, "policy-waiter", "app.policy-waiter", null, DISPATCH_CPU_TICK_COST * 2);
+    try std.testing.expect(scheduler.registerTask(waiter.id));
+    try std.testing.expect(scheduler.configureTaskDispatchRequest(waiter.id, .{
+        .class = .background_light,
+        .wants_npu = true,
+        .privacy_sensitive = true,
+    }, true));
+    _ = scheduler.runNext(1);
+    try std.testing.expect(scheduler.slots.getConst(waiter.id).?.queued_ready);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.npu));
+    try std.testing.expect(!scheduler.hasDispatchableTasks(2));
+    for (2..8) |tick| _ = scheduler.runNext(tick);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(waiter.id).?.denied_dispatch_count);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 8,
+        .privacy_mode = false,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    try std.testing.expect(scheduler.hasDispatchableTasks(8));
+    _ = scheduler.runNext(8);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(waiter.id).?.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.npu, scheduler.taskDispatchStats(waiter.id).?.last_dispatch_engine);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 9,
+        .privacy_mode = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    _ = scheduler.runNext(9);
+    try std.testing.expect(!scheduler.hasDispatchableTasks(10));
+    try std.testing.expect(scheduler.configureTaskDispatchRequest(waiter.id, .{ .class = .background_light }, false));
+    try std.testing.expect(scheduler.hasDispatchableTasks(10));
+    _ = scheduler.runNext(10);
+    try std.testing.expectEqual(@as(u64, 2), scheduler.taskDispatchStats(waiter.id).?.dispatch_count);
+    try std.testing.expectEqual(accelerator_scheduler.Engine.cpu, scheduler.taskDispatchStats(waiter.id).?.last_dispatch_engine);
 }
 
 test "userspace scheduler grants expired high-priority accelerator claims before older batch claims" {
@@ -3337,6 +3588,44 @@ test "userspace scheduler sustained load gate bounds background and batch starva
     try std.testing.expectEqual(@as(u64, 0), background_stats.missed_deadline_count);
     try std.testing.expectEqual(@as(u64, 0), batch_stats.missed_deadline_count);
     try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_stats.last_dispatch_engine);
+}
+
+test "userspace scheduler bounds lower class starvation despite coalesced wakes" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .cpu_budget_ticks = DISPATCH_CPU_TICK_COST * 256,
+        .memory_bandwidth_units = 1024,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    const foreground = try createRunnableSchedulerTaskWithBudget(&runtime, 243, .foreground_interactive, "coalesced-foreground", "app.coalesced-foreground", 243, DISPATCH_CPU_TICK_COST * 160);
+    const background = try createRunnableSchedulerTask(&runtime, 244, .background_light, "coalesced-background", "app.coalesced-background", null);
+    const batch = try createRunnableSchedulerTask(&runtime, 245, .batch_compute, "coalesced-batch", "app.coalesced-batch", null);
+    try std.testing.expect(scheduler.registerTask(foreground.id));
+    try std.testing.expect(scheduler.registerTask(background.id));
+    try std.testing.expect(scheduler.registerTask(batch.id));
+    var first_background_dispatch_tick: u64 = 0;
+    var first_batch_dispatch_tick: u64 = 0;
+    var now_ticks: u64 = 1_000;
+    while (now_ticks <= BATCH_DEADLINE_DELTA_TICKS + 2_000) : (now_ticks += DISPATCH_CPU_TICK_COST) {
+        if (first_background_dispatch_tick == 0) try std.testing.expect(scheduler.wakeTask(background.id, .ipc_message, now_ticks, 0));
+        if (first_batch_dispatch_tick == 0) try std.testing.expect(scheduler.wakeTask(batch.id, .ipc_message, now_ticks, 0));
+        _ = scheduler.runNext(now_ticks);
+        const background_stats = scheduler.taskDispatchStats(background.id).?;
+        const batch_stats = scheduler.taskDispatchStats(batch.id).?;
+        if (first_background_dispatch_tick == 0 and background_stats.dispatch_count != 0) first_background_dispatch_tick = background_stats.last_dispatch_tick;
+        if (first_batch_dispatch_tick == 0 and batch_stats.dispatch_count != 0) first_batch_dispatch_tick = batch_stats.last_dispatch_tick;
+    }
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(background.id).?.dispatch_count);
+    try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(batch.id).?.dispatch_count);
+    try std.testing.expect(first_background_dispatch_tick <= BACKGROUND_DEADLINE_DELTA_TICKS);
+    try std.testing.expect(first_batch_dispatch_tick <= BATCH_DEADLINE_DELTA_TICKS + DISPATCH_CPU_TICK_COST);
 }
 
 test "userspace scheduler breaks expired lower-class ties by service debt" {

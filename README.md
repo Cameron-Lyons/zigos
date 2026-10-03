@@ -610,6 +610,12 @@ service loop drains one atomic pending-work latch and rechecks it before idle.
 Idle checks use the dispatcher's eligibility rules: policy-delayed work remains
 queued while the CPU sleeps, and runnable work can pass a delayed queue head.
 Service deadlines still arm a wake timer even when no task can run yet.
+Coalesced wakeups preserve the earliest queued deadline, so repeated events cannot
+postpone background or batch work indefinitely. Required accelerator tasks retain
+a bounded wait when claim reservation fails or policy denies an online engine;
+eligibility checks allow other work to pass and resume the waiter after telemetry
+or request changes without an idle retry loop. Credential approval records the
+actual event time through the same external-wake helper.
 Application processors are online for TLB maintenance and otherwise sleep.
 Concurrent userspace dispatch requires independent executor state and service
 ownership before it can use those processors.
@@ -852,7 +858,9 @@ Use the pinned toolchain and repo entrypoints:
   frames into a fixed 32-frame software queue, wakes the network task, and
   rechecks pending work with interrupts disabled before idle so receive events
   cannot be lost across the sleep boundary. Malformed
-  causes and eight consecutive no-progress interrupts fail closed. Queue
+  causes and eight consecutive no-progress interrupts fail closed. TX reclamation
+  and completed RX descriptors reset the no-progress streak even when polled
+  before their delayed MSI; dropped packets still prove descriptor progress. Queue
   enable and disable transitions use invariant-TSC elapsed deadlines.
   The halted xHCI controller owns a third requester domain containing only its
   command, event/transfer/ERST, DCBAA, scratchpad, Device Context, and Input
@@ -1180,13 +1188,13 @@ The most common build artifacts are:
 ./scripts/zig.sh build -Doptimize=fast userspace-production-images
 ./scripts/zig.sh build -Doptimize=fast kernel
 ./scripts/zig.sh build native-store-image
-./scripts/zig.sh build iso
+./scripts/zig.sh build -Doptimize=fast iso
 ```
 
 `kernel-zigos-native.elf` and `build/os.iso` are production artifacts. Synthetic
 driver crashes, negative isolation proofs, rollback fault matrices, and scripted
 desktop journeys live only in `kernel-zigos-native-verification.elf` and
-`build/os-verification.iso`. Production embeds 24 stripped userspace ELFs;
+`build/os-verification.iso`. Production embeds 8 stripped userspace ELFs;
 verification adds five proof or synthetic-journey images. Build and check that
 boundary with:
 
@@ -1194,6 +1202,14 @@ boundary with:
 ./scripts/zig.sh build kernel-role-check
 ./scripts/zig.sh build iso-verification
 ```
+
+The published `zig-out/bin/kernel-zigos-native.elf` is the exact ELF embedded
+in the production EFI image. It retains static symbols for the role gate while
+omitting non-loadable debug sections. The full diagnostic ELF is installed at
+`zig-out/kernel-debug/kernel-zigos-native.elf` under the same role gate; use it
+with `llvm-addr2line` for source locations, or a debugger for type information.
+Optimized EFI images
+omit host-specific debugging metadata before packaging or signing.
 
 The full target matrix lives in `CONTRIBUTING.md`, which is the source of truth
 for when to use focused checks such as `host-tests`, `spec-tests`,

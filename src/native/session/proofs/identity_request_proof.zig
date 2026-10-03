@@ -19,7 +19,7 @@ pub fn run(manager: anytype, owner: anytype, io: anytype, clock: anytype) !void 
     while (true) {
         try deadline(clock);
         const pending = owner.adapter.worker.state == .suspended;
-        if (pending and !dispatched_while_pending) _ = manager.userspaceSchedulerPtr().wakeTask(task_id, .external_event, 0, clock.now());
+        if (pending and !dispatched_while_pending) _ = manager.wakeUserspaceTask(task_id, clock.now());
         const before = manager.userspaceSchedulerPtr().taskDispatchStats(task_id).?.dispatch_count;
         _ = manager.runUserspaceScheduler(clock.now());
         if (pending and owner.adapter.worker.state == .suspended and manager.userspaceSchedulerPtr().taskDispatchStats(task_id).?.dispatch_count > before)
@@ -105,8 +105,11 @@ fn approve(manager: anytype, owner: anytype, task_id: u64, clock: anytype) !@imp
     input.sendInput(manager, 0x2b, 0, clock.now());
     input.sendInput(manager, 0, 0, clock.now());
     if (!owner.authentication.view.review.allow_selected or !owner.authentication.view.review.presented) return error.UnselectedIdentityConsent;
-    input.sendInput(manager, 0x28, 0, clock.now());
+    const approval_tick = clock.now();
+    input.sendInput(manager, 0x28, 0, approval_tick);
     if (owner.consent.kernel != null or owner.authentication.capturing() or manager.inputRouterPtr().queued_event_count != 0) return error.UnconsumedIdentityConsent;
+    const dispatch = manager.userspaceSchedulerPtr().taskDispatchStats(task_id) orelse return error.MissingApprovedIdentityTask;
+    if (!dispatch.queued_ready or dispatch.last_wake_tick != approval_tick) return error.InvalidIdentityApprovalWake;
     const mailbox = manager.runtime_context.userspace_executor.bootstrapMailboxSnapshot(manager.userspaceCatalogPtr(), manager.runtimePtr(), task_id) orelse return error.MissingIdentityMailbox;
     const binding = mailbox.identityBinding();
     if (!binding.isValid()) return error.MissingApprovedIdentityBinding;

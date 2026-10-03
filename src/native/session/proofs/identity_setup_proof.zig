@@ -204,7 +204,7 @@ fn service(manager: anytype, entry: *const setup.Entry, clock: identity_proof.Pr
 fn proveDispatch(manager: anytype, task_id: u64, entry: *const setup.Entry, clock: identity_proof.ProofClock) !void {
     const scheduler = manager.userspaceSchedulerPtr();
     const before = (scheduler.taskDispatchStats(task_id) orelse return error.MissingSetupPeerTask).dispatch_count;
-    _ = scheduler.wakeTask(task_id, .external_event, 0, clock.now());
+    _ = manager.wakeUserspaceTask(task_id, clock.now());
     for (0..manager.runtimePtr().taskSlotCapacity() * 8) |_| {
         _ = manager.runUserspaceScheduler(clock.now());
         if (scheduler.taskDispatchStats(task_id).?.dispatch_count > before) break;

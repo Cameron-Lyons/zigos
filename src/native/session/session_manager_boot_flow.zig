@@ -630,7 +630,7 @@ pub const SessionManager = struct {
                 .service_endpoint_id = binding.service_endpoint_id,
                 .credential_id = binding.credential_id,
             }, now_ticks)) {
-                _ = self.runtime_context.userspaceScheduler().?.wakeTask(approved.task_id, .external_event, 0, now_ticks);
+                _ = self.wakeUserspaceTask(approved.task_id, now_ticks);
             } else owner.revoke_credential(owner.context, approved.task_id, now_ticks);
         }
         self.input_router.synchronizeTrustedInput();

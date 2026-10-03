@@ -1,3 +1,4 @@
+const std = @import("std");
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
@@ -447,7 +448,7 @@ pub fn pollReceive(output: []u8) ReceiveResult {
     writeback = descriptor.header_or_writeback;
     defer recycleRxDescriptor(descriptor_index, descriptor);
 
-    const completion = i225_rx.decodeCompletion(writeback);
+    const completion = observeReceiveCompletion(writeback);
     const frame_len: usize = completion.length;
     if (!completion.validSingleBuffer() or frame_len < i225_frame.ETHERNET_HEADER_BYTES) {
         dropped_receive_frames +%= 1;
@@ -490,6 +491,7 @@ fn configureTransmitQueue(pending: *Controller) Error!void {
 fn reapTransmitCompletions() u32 {
     if (!controllerActive()) return 0;
     var reaped: u32 = 0;
+    defer if (reaped != 0) noteQueueProgress();
     while (controller.tx_queue.in_flight != 0) {
         const descriptor_index = controller.tx_queue.head;
         const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
@@ -503,6 +505,20 @@ fn reapTransmitCompletions() u32 {
         reaped += 1;
     }
     return reaped;
+}
+
+fn noteQueueProgress() void {
+    // DMA completions may be polled before their MSI arrives. They establish
+    // queue liveness even when no interrupt is pending in this service pass.
+    empty_interrupt_streak = 0;
+}
+
+fn observeReceiveCompletion(writeback: u64) i225_rx.Completion {
+    const completion = i225_rx.decodeCompletion(writeback);
+    // A completed descriptor will be recycled even when its packet is dropped;
+    // malformed packet data does not make that completion an empty interrupt.
+    if (completion.done) noteQueueProgress();
+    return completion;
 }
 
 fn serviceTransmitQueue(now_ticks: u64) bool {
@@ -684,4 +700,74 @@ fn publishDescriptor() void {
 
 fn acquireDescriptor() void {
     asm volatile ("lfence" ::: .{ .memory = true });
+}
+
+test "I225 polled transmit completions preserve liveness across delayed interrupts" {
+    const saved_state = controllerState();
+    const saved_controller: ?Controller = if (controllerPrepared()) controller else null;
+    const saved_completed = completed_transmit_frames;
+    const saved_streak = empty_interrupt_streak;
+    defer {
+        if (saved_controller) |previous| controller = previous;
+        publishControllerState(saved_state);
+        completed_transmit_frames = saved_completed;
+        empty_interrupt_streak = saved_streak;
+    }
+    var descriptors = std.mem.zeroes([i225_tx.DESCRIPTOR_COUNT]i225_tx.Descriptor);
+    controller = .{
+        .bar = 0,
+        .tx_descriptor = .{ .physical = 0x1000, .alias = @intFromPtr(&descriptors) },
+        .tx_buffer = .{},
+        .rx_descriptor = .{},
+        .rx_buffer = .{},
+        .mac = @splat(0),
+    };
+    publishControllerState(.active);
+    empty_interrupt_streak = i225_irq.EMPTY_INTERRUPT_LIMIT - 1;
+    for (0..i225_tx.DESCRIPTOR_COUNT * 2) |iteration| {
+        const index = try controller.tx_queue.reserve(iteration);
+        descriptors[index] = try i225_tx.submissionDescriptor(0x2000, 64);
+        const prior_streak = empty_interrupt_streak;
+        try std.testing.expectEqual(@as(u32, 0), reapTransmitCompletions());
+        try std.testing.expectEqual(prior_streak, empty_interrupt_streak);
+        descriptors[index].olinfo_status |= 1;
+        try std.testing.expectEqual(@as(u32, 1), reapTransmitCompletions());
+        try std.testing.expectEqual(@as(u8, 0), empty_interrupt_streak);
+        // The subsequent MSI has no remaining descriptor to reclaim. Each
+        // actual completion breaks the streak before this delayed interrupt.
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+        try std.testing.expect(!i225_irq.shouldContain(empty_interrupt_streak));
+        try std.testing.expectEqual(@as(u8, 1), empty_interrupt_streak);
+    }
+    try std.testing.expectEqual(saved_completed + i225_tx.DESCRIPTOR_COUNT * 2, completed_transmit_frames);
+    for (0..i225_irq.EMPTY_INTERRUPT_LIMIT - 1) |_| {
+        try std.testing.expectEqual(@as(u32, 0), reapTransmitCompletions());
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+    }
+    try std.testing.expect(i225_irq.shouldContain(empty_interrupt_streak));
+}
+
+test "I225 receive progress includes dropped descriptors before delayed interrupts" {
+    const saved_streak = empty_interrupt_streak;
+    defer empty_interrupt_streak = saved_streak;
+    empty_interrupt_streak = i225_irq.EMPTY_INTERRUPT_LIMIT - 1;
+    try std.testing.expect(!observeReceiveCompletion(@as(u64, 64) << 32).done);
+    try std.testing.expectEqual(i225_irq.EMPTY_INTERRUPT_LIMIT - 1, empty_interrupt_streak);
+
+    for (0..i225_rx.DESCRIPTOR_COUNT * 2) |iteration| {
+        const dropped = iteration % 2 != 0;
+        const writeback = @as(u64, if (dropped) 0x8000_0003 else 3) | (@as(u64, 64) << 32);
+        const completion = observeReceiveCompletion(writeback);
+        try std.testing.expect(completion.done);
+        try std.testing.expectEqual(!dropped, completion.validSingleBuffer());
+        try std.testing.expectEqual(@as(u8, 0), empty_interrupt_streak);
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+        try std.testing.expect(!i225_irq.shouldContain(empty_interrupt_streak));
+        try std.testing.expectEqual(@as(u8, 1), empty_interrupt_streak);
+    }
+    for (0..i225_irq.EMPTY_INTERRUPT_LIMIT - 1) |_| {
+        _ = observeReceiveCompletion(0);
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+    }
+    try std.testing.expect(i225_irq.shouldContain(empty_interrupt_streak));
 }

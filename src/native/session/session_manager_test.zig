@@ -108,6 +108,25 @@ test "session manager authentication deadlines wake and revoke without keyboard 
     try std.testing.expect(manager.nextServiceWake() == null);
 }
 
+test "session external wake records current time and rejects suspended tasks" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const task = session_manager.testing.findTask("network-service").?;
+    const scheduler = manager.userspaceSchedulerPtr();
+    try std.testing.expect(scheduler.parkTaskUntilEvent(task.id));
+
+    try std.testing.expect(manager.wakeUserspaceTask(task.id, 107));
+    const dispatch = scheduler.taskDispatchStats(task.id).?;
+    try std.testing.expect(dispatch.queued_ready);
+    try std.testing.expectEqual(@as(u64, 107), dispatch.last_wake_tick);
+
+    try std.testing.expect(try manager.runtimePtr().suspendTask(task.id, 108));
+    try std.testing.expect(!manager.wakeUserspaceTask(task.id, 109));
+    try std.testing.expectEqual(dispatch.wake_event_count, scheduler.taskDispatchStats(task.id).?.wake_event_count);
+}
+
 test "boot assembles core services without running explicit scenarios" {
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();

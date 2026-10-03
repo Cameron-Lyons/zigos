@@ -447,7 +447,7 @@ fn proveTrustedInput(manager: anytype, session: anytype, capsule: *const pin_mod
     if (!adapter.stack.?.guardsPresent()) return error.UnprotectedAuthenticationStack;
     const scheduler = manager.userspaceSchedulerPtr();
     const before = (scheduler.taskDispatchStats(previous_task_id) orelse return error.MissingAuthenticationPeerTask).dispatch_count;
-    _ = scheduler.wakeTask(previous_task_id, .external_event, 0, clock.now());
+    _ = manager.wakeUserspaceTask(previous_task_id, clock.now());
     for (0..manager.runtimePtr().taskSlotCapacity() * 8) |_| {
         _ = manager.runUserspaceScheduler(clock.now());
         if (scheduler.taskDispatchStats(previous_task_id).?.dispatch_count > before) break;

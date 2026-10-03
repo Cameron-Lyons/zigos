@@ -23,7 +23,7 @@ fn printStackTrace() void {
     var frame_pointer = @frameAddress();
     var depth: usize = 0;
 
-    printPanic("Return addresses (symbolize with llvm-addr2line -e <kernel.elf>):\n");
+    printPanic("Return addresses (symbolize with llvm-addr2line -e <full-debug-kernel.elf>):\n");
     while (depth < max_stack_frames) : (depth += 1) {
         if (frame_pointer < stack_walk_lowest_frame or frame_pointer >= stack_walk_highest_frame) break;
         if (frame_pointer % @alignOf(usize) != 0) break;

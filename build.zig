@@ -374,6 +374,7 @@ pub fn build(b: *std.Build) void {
         "scripts/check-reproducible-build.sh",
         "build/release-security",
     });
+    shared.addEfiIsoEpochArg(b, reproducible_build_cmd);
     const reproducible_build_step = b.step("reproducible-build-check", "Build release artifacts twice in isolated tracked-workspace copies and compare digests");
     reproducible_build_step.dependOn(&reproducible_build_cmd.step);
 

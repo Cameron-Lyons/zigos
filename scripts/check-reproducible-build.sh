@@ -4,6 +4,23 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${1:-build/release-security}"
+requested_epoch="${2-${SOURCE_DATE_EPOCH:-315532800}}"
+case "$requested_epoch" in
+  ''|*[!0-9]*)
+    printf 'SOURCE_DATE_EPOCH must contain nonnegative decimal seconds.\n' >&2
+    exit 2
+    ;;
+esac
+if [ "${#requested_epoch}" -gt 10 ]; then
+  printf "SOURCE_DATE_EPOCH exceeds FAT's maximum year 2107.\n" >&2
+  exit 2
+fi
+requested_epoch="$((10#$requested_epoch))"
+if [ "$requested_epoch" -gt 4354819199 ]; then
+  printf "SOURCE_DATE_EPOCH exceeds FAT's maximum year 2107.\n" >&2
+  exit 2
+fi
+export SOURCE_DATE_EPOCH="$requested_epoch"
 
 is_safe_relative_dir() {
   local candidate="${1:-}"
@@ -166,12 +183,23 @@ validate_release_catalog() {
 
 copy_workspace() {
   local dest="${1:?destination required}"
+  local file_type executable path
   mkdir -p "$dest"
-  jj -R "$ROOT_DIR" file list -r @ -T 'path ++ "\n"' |
-    while IFS= read -r path; do
+  jj --ignore-working-copy -R "$ROOT_DIR" file list -r "$commit_sha" \
+    -T 'file_type ++ "\t" ++ executable ++ "\t" ++ path ++ "\n"' |
+    while IFS=$'\t' read -r file_type executable path; do
       [ -n "$path" ] || continue
+      if [ "$file_type" != file ]; then
+        printf 'Reproducible source snapshot must contain regular files: %s (%s)\n' "$path" "$file_type" >&2
+        return 1
+      fi
       mkdir -p "$dest/$(dirname "$path")"
-      cp -p "$ROOT_DIR/$path" "$dest/$path"
+      jj --ignore-working-copy -R "$ROOT_DIR" file show -r "$commit_sha" "$path" > "$dest/$path"
+      if [ "$executable" = true ]; then
+        chmod 755 "$dest/$path"
+      else
+        chmod 644 "$dest/$path"
+      fi
     done
 }
 
@@ -217,7 +245,9 @@ build_copy() {
   local tree="${1:?tree required}"
   (
     cd "$tree"
-    ./scripts/zig.sh build -Doptimize=fast iso
+    ZIG_LOCAL_CACHE_DIR="$tree/build/zig-cache" \
+      ZIG_GLOBAL_CACHE_DIR="$tree/build/zig-global-cache" \
+      ./scripts/zig.sh build -Doptimize=fast iso
   )
 }
 
@@ -228,10 +258,22 @@ fi
 
 validate_release_catalog
 
+repo_vcs="jj"
+commit_sha="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')"
+repo_url="$(jj --ignore-working-copy -R "$ROOT_DIR" git remote list 2>/dev/null | awk '$1 == "origin" { print $2; found = 1; exit } END { exit found ? 0 : 1 }' || printf 'NOASSERTION')"
+repo_change_id="$(jj --ignore-working-copy -R "$ROOT_DIR" log -r "$commit_sha" --no-graph -T 'change_id ++ "\n"')"
+dirty_count="$(jj --ignore-working-copy -R "$ROOT_DIR" diff -r "$commit_sha" --name-only | wc -l | tr -d ' ')"
+
 first_tree="$WORK_PARENT/first"
 second_tree="$WORK_PARENT/second"
 copy_workspace "$first_tree"
-copy_workspace "$second_tree"
+mkdir -p "$second_tree"
+cp -Rp "$first_tree/." "$second_tree"
+
+if [ "$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')" != "$commit_sha" ]; then
+  printf 'Source revision changed while preparing reproducible builds; retry from a stable snapshot.\n' >&2
+  exit 1
+fi
 
 build_copy "$first_tree"
 build_copy "$second_tree"
@@ -242,11 +284,6 @@ write_digest_manifest "$first_tree" "$first_manifest"
 write_digest_manifest "$second_tree" "$second_manifest"
 
 created_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-repo_vcs="jj"
-repo_url="$(jj -R "$ROOT_DIR" git remote list 2>/dev/null | awk '$1 == "origin" { print $2; found = 1; exit } END { exit found ? 0 : 1 }' || printf 'NOASSERTION')"
-repo_change_id="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'change_id ++ "\n"')"
-commit_sha="$(jj -R "$ROOT_DIR" log -r @ --no-graph -T 'commit_id ++ "\n"')"
-dirty_count="$(jj -R "$ROOT_DIR" diff -r @ --name-only | wc -l | tr -d ' ')"
 zig_version="$("$ROOT_DIR/scripts/zig.sh" version 2>/dev/null || printf 'unknown')"
 
 if ! cmp -s "$first_manifest" "$second_manifest"; then

@@ -22,6 +22,7 @@ test "driver host tests import native driver modules" {
     // Reach the hardware module's pure tests without instantiating MMIO/VT-d
     // entry points in a hosted Debug executable.
     _ = @import("../../kernel/drivers/xhci_hw.zig").keyboardContinuityEpoch;
+    _ = @import("../../kernel/drivers/intel_i225_hw.zig").transmitCount;
     std.testing.refAllDecls(tpm2_crb_test);
     std.testing.refAllDecls(accelerator_driver_task);
     std.testing.refAllDecls(bootstrap_driver_port);

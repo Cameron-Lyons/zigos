@@ -11,6 +11,16 @@ Use the pinned toolchain and repo entrypoints:
   `-Dhost-test-target=<triple>` selects another hosted x86-64 target.
 - `zlint` and `actionlint` are optional for local focused runs, but CI requires
   both through `ZIGOS_REQUIRE_ZLINT=1` and `ZIGOS_REQUIRE_ACTIONLINT=1`.
+- EFI ISO generation normalizes FAT identity and all media timestamps in UTC.
+  `SOURCE_DATE_EPOCH` selects nonnegative decimal seconds through the end of 2107;
+  the default is 1980-01-01, and earlier values are clamped to 1980 for all media
+  dates. The pinned wrapper passes the epoch as a cached build input;
+  `-Dsource-date-epoch=<seconds>` overrides it. Keep the same epoch for both
+  builds when checking reproducibility.
+- The published production kernel and embedded EFI payload share one ELF with
+  static symbols retained and debug sections removed. Full source-line and type
+  information is installed at `zig-out/kernel-debug/kernel-zigos-native.elf`;
+  use that file with `llvm-addr2line` when diagnosing kernel return addresses.
 
 ## Verification Matrix
 
@@ -60,7 +70,7 @@ Use the pinned toolchain and repo entrypoints:
 
 | Command | Use it when |
 | --- | --- |
-| `./scripts/zig.sh build userspace-production-images` | You need the 24 shipped userspace images and production archive. |
+| `./scripts/zig.sh build userspace-production-images` | You need the eight shipped userspace images and production archive. |
 | `./scripts/zig.sh build userspace-verification-images` | You need the production images plus the five proof and synthetic-journey images. |
 | `./scripts/zig.sh build userspace-images` | You intentionally need both production and verification userspace sets. |
 | `./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance` | You set the signer environment and independently pinned verifier and need the generator-side eight-file portion of the exact 17-target release evidence. |
@@ -73,7 +83,7 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build native-store-image` | You need to build or preserve the native storage image used by run targets. |
 | `./scripts/zig.sh build iso` | You need a bootable ISO at `build/os.iso`. |
 | `./scripts/zig.sh build iso-verification` | You need bootable proof media at `build/os-verification.iso`. |
-| `./test_kernel.sh` | You want the release-fast smoke-test convenience wrapper. |
+| `./test_kernel.sh` | You want the optimized smoke-test convenience wrapper. |
 | `./scripts/zig.sh build clean` | You want to remove local build outputs and Zig caches. |
 | `./scripts/zig.sh build -Dclean-dry-run=true clean` | You want to inspect what `clean` would remove. |
 

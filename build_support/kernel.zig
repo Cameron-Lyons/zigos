@@ -42,6 +42,7 @@ pub fn addEfiImage(
         .root_source_file = b.path("src/boot/efi_stub.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .debug,
         .red_zone = false,
     });
     module.addImport("boot_payload", b.createModule(.{ .root_source_file = payload, .target = target, .optimize = optimize }));
@@ -142,6 +143,7 @@ pub fn addX86_64KernelBootCheck(
     iso.addFileArg(efi_stub.getEmittedBin());
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
+    shared.addEfiIsoEpochArg(b, iso);
     iso.step.dependOn(&validate_image.step);
 
     const run = b.addSystemCommand(&.{"bash"});
@@ -450,6 +452,7 @@ pub fn addKernelProfileSteps(
 pub fn gateArtifactInstalls(kernels: KernelArtifacts, validation_step: *std.Build.Step) void {
     inline for (@typeInfo(KernelArtifacts).@"struct".field_names) |field_name| {
         @field(kernels, field_name).install_step.dependOn(validation_step);
+        @field(kernels, field_name).debug_install_step.dependOn(validation_step);
     }
 }
 
@@ -584,14 +587,22 @@ pub fn addKernelArtifact(
     qemu_iso.addFileArg(efi_stub.getEmittedBin());
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
+    shared.addEfiIsoEpochArg(b, qemu_iso);
     qemu_iso.step.dependOn(&validate_qemu_image.step);
 
-    const install = b.addInstallBinFile(linked_kernel, name);
+    // Publish the same production ELF that firmware measures. Keep its complete
+    // DWARF separately for address-to-line diagnostics, with identical load
+    // segments and static symbol addresses.
+    const published_kernel = if (kernel_role == .production) boot_kernel else linked_kernel;
+    const install = b.addInstallBinFile(published_kernel, name);
+    const debug_install = b.addInstallFile(linked_kernel, b.fmt("kernel-debug/{s}", .{name}));
+    install.step.dependOn(&debug_install.step);
     return .{
         .compile_step = kernel_object,
-        .output_file = linked_kernel,
+        .output_file = published_kernel,
         .boot_payload = boot_kernel,
         .install_step = &install.step,
+        .debug_install_step = &debug_install.step,
         .output_path = b.graph.path(.install_bin, name),
         .kernel_role = kernel_role,
         .bootloader_source_path = "src/boot/efi_stub.zig",

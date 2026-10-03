@@ -150,6 +150,7 @@ fn addTpm2ProfileQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, users
     iso.addFileArg(image.getEmittedBin());
     const iso_path = iso.addOutputFileArg("tpm-" ++ mode ++ ".iso");
     _ = iso.addOutputDirectoryArg("tpm-" ++ mode ++ "-staging");
+    shared.addEfiIsoEpochArg(b, iso);
     const command = b.addSystemCommand(&.{"bash"});
     command.addFileArg(b.path("scripts/run-with-qemu-boot-iso.sh"));
     command.addFileArg(iso_path);
@@ -265,6 +266,7 @@ pub fn addIsoCommand(
         output_path,
         staging_path,
     });
+    shared.addEfiIsoEpochArg(b, command);
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(&efi_stub.step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
