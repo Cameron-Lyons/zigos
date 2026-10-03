@@ -930,7 +930,8 @@ Use the pinned toolchain and repo entrypoints:
   preserve only architected sticky controls while acknowledging RW1CS bits;
   connected USB2/USB3 ports receive bounded normal/warm resets as appropriate.
   A single cycle-tracked TRB producer submits Enable Slot, Address Device, Evaluate
-  Context, Configure Endpoint, and disconnect-time Disable Slot commands through doorbell zero. Address
+  Context, Configure Endpoint, Stop Endpoint, Reset Endpoint, and Disable Slot
+  commands through doorbell zero. Address
   Device uses the shared serialized Input Context to publish only Slot and endpoint-zero
   state, with a slot-private control ring and the negotiated root-port speed. The same
   serialized lifecycle then rings the slot's endpoint-zero doorbell for an eight-byte
@@ -955,8 +956,25 @@ Use the pinned toolchain and repo entrypoints:
   before the port is marked configured; no interrupt TD is posted early.
   Completion pointers, endpoint ids, residual lengths, and slot identities are
   validated before state advances, and DCBAA entries are linked or cleared only at the
-  specified completion boundary. Reset, command, and control-transfer waits keep the one-shot timer armed and
-  contain the controller after one second without progress. DMA faults, invalid
+  specified completion boundary. A disconnect notification clears published reports
+  and hides the old device, while retaining its slot, endpoints, and transfer
+  ownership. Retirement drains matching late completions without publishing input,
+  stops running endpoints, and requires each forced stopped Transfer Event before
+  its matching Stop Endpoint completion. An owned USB Transaction Error can
+  authenticate detachment through live port status before its notification arrives;
+  a halted endpoint then uses Reset Endpoint with transfer state preserved and
+  must reach Stopped before its transfer ownership is released. Endpoint command
+  choice follows validated events; stale context reads cannot trigger a reset.
+  A combined unplug and replug notification also retires the old device lifetime.
+  Only then may
+  Disable Slot release the DCBAA entry and permit a replacement attachment to
+  enumerate; a replacement that is not enabled receives a fresh port reset.
+  Other ports retain their transfers and can use report capacity released by
+  retirement. Reset, command, and control-transfer waits keep the one-shot timer
+  armed and contain the controller after one second without progress.
+  Retirement has a six-second
+  deadline set when retirement begins, which repeated notifications and
+  reconnects cannot extend. DMA faults, invalid
   port, command, or transfer events, unsupported event types, ERDP rejection, or an
   unexpected halted/error state quiesce the controller and revoke MSI plus bus
   mastering. Input-device authority still requires an interface-scoped HID
