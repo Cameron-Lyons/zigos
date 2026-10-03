@@ -153,7 +153,7 @@ requests.
   one device page. Bounds checks, monotonic deadlines, bounded cancellation,
   locality handoff, and a permanent failure latch constrain device faults.
   Unsupported start methods, RAM buffers, and FIFO devices remain unavailable.
-  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-qemu-test` requires swtpm
+  `./scripts/zig.sh build -Doptimize=fast tpm2-qemu-test` requires swtpm
   (or `SWTPM_BIN`) and checks a CRB cold boot and emulator restart, plus FIFO and
   absent-device boots. It uses disposable emulator state and a separate test
   disk. A sealing client now wraps 32-byte keys under an ECC P-256 storage
@@ -407,7 +407,7 @@ requests.
   physical TPM persistence and trusted input validation, biometric verification,
   production enrollment binding for desktop sign-in, and userspace
   request dispatch remain open.
-  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-sealing-qemu-test` verifies
+  `./scripts/zig.sh build -Doptimize=fast tpm2-sealing-qemu-test` verifies
   interrupted initial enrollment, recovery from the native disk after restarting
   the VM and swtpm, lost first-write replies, altered enrollment commitments,
   a forged public WRITTEN status, missing-index refusal,
@@ -436,7 +436,7 @@ requests.
   both VM and TPM then completes that signed checkpoint, restores its credential
   counter, and resumes assertions. Catalog format v5 includes the authenticated
   device graph and predecessor digest and rejects older snapshots.
-  `./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-ownership-qemu-test` runs thirteen
+  `./scripts/zig.sh build -Doptimize=fast tpm2-ownership-qemu-test` runs thirteen
   disposable boots through native setup and the production provisioning service.
   The first boot types and confirms a PIN through modeled HID, checks mismatch
   and cancellation, reads the complete recovery record from native display cells,
@@ -950,6 +950,14 @@ For ISO and full disk-image workflows, install the tools verified by
 `build.zig` and `./scripts/zig.sh` reject any Zig version other than the repo
 pin. Run Zig through `./scripts/zig.sh` so the repo can resolve `ZIG_BIN`, the
 active Zig, `mise`, or local fallback binaries in the right order.
+
+The current pin is Zig 0.17.0. The source uses array `@splat`, the current
+`std.lang` reflection and optimization APIs, and typed ELF program headers.
+Kernel and EFI byte helpers use logical `@bitCast` to preserve little-endian
+wire bytes on every target. Archive generation locks borrowed array-list
+elements while writing both archives. Build configuration remains cacheable
+under Zig 0.17's separate configuration and execution processes.
+
 The build accepts only the `x86_64-freestanding-none` target; 32-bit kernels and
 userspace images are not compatibility outputs.
 All generated optical media are UEFI-only and are rejected unless they contain a
@@ -1006,7 +1014,7 @@ exact selection, digest, attestation type, challenge, signature, and bounded
 framing. Verifier-owned challenges expire within one minute, reject clock
 rollback, and can succeed only once. Invalid quotes publish no accepted result;
 client failures clear output and clean up known transient keys and sessions.
-`./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-quote-qemu-test` exercises real
+`./scripts/zig.sh build -Doptimize=fast tpm2-quote-qemu-test` exercises real
 TPM commands, cold boot, recovered keys, replay, wrong authorization, substituted
 keys, damaged blobs/responses, and TPM replacement using disposable swtpm state.
 Its enrollment authority is a verification-only fixture. Operational attestation
@@ -1149,8 +1157,8 @@ The most common local gate is:
 The most common build artifacts are:
 
 ```bash
-./scripts/zig.sh build -Doptimize=ReleaseFast userspace-production-images
-./scripts/zig.sh build -Doptimize=ReleaseFast kernel
+./scripts/zig.sh build -Doptimize=fast userspace-production-images
+./scripts/zig.sh build -Doptimize=fast kernel
 ./scripts/zig.sh build native-store-image
 ./scripts/zig.sh build iso
 ```
@@ -1286,7 +1294,7 @@ export ZIGOS_RELEASE_HARDWARE_BACKED=true
 export ZIGOS_RELEASE_SEQUENCE='<strictly-increasing-sequence-for-this-new-candidate>'
 export ZIGOS_RELEASE_EXPIRES_AT='<future-unix-timestamp>'
 
-./scripts/zig.sh build -Doptimize=ReleaseFast \
+./scripts/zig.sh build -Doptimize=fast \
   -Drelease-trust-root=/absolute/independent/root-metadata.json \
   -Drelease-trust-root-sha256=<pinned-lowercase-sha256> \
   -Drelease-trust-policy=/absolute/independent/release-trust-policy.dsse.json \

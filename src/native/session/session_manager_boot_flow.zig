@@ -1139,7 +1139,7 @@ pub const SessionManager = struct {
             mailbox.ui_state_revision == surface.presentation.revision and
             mailbox.ui_presented_revision == surface.presentation.revision and
             mailbox.ui_presentation_failures == 0 and
-            mailbox.ui_last_presentation_status == @intFromEnum(abi.SyscallStatus.success);
+            mailbox.ui_last_presentation_status == @backingInt(abi.SyscallStatus.success);
     }
 
     fn printSurfacePresentationTelemetry(self: *SessionManager, task_id: u64) void {
@@ -1177,12 +1177,12 @@ pub const SessionManager = struct {
             "ZIGOS:USERSPACE:SURFACE_PRESENTATION:FAIL task={d} owner={d}:{d} authority={d} holder={d}:{d} target={d}:{d} rights={x} scope_task={d} capability={d} surface={d} stage={d} counter={d} service_ops={d} service_flags={d} state_revision={d} presented_revision={d} failures={d} status={d} dispatches={d} waits={d} queued={}\n",
             .{
                 task_id,
-                if (task) |record| @intFromEnum(record.owner.kind) else 0,
+                if (task) |record| @backingInt(record.owner.kind) else 0,
                 if (task) |record| record.owner.serial else 0,
                 mailbox.authority_capability_id,
-                if (authority) |granted| @intFromEnum(granted.holder.kind) else 0,
+                if (authority) |granted| @backingInt(granted.holder.kind) else 0,
                 if (authority) |granted| granted.holder.serial else 0,
-                if (authority) |granted| @intFromEnum(granted.target.kind) else 0,
+                if (authority) |granted| @backingInt(granted.target.kind) else 0,
                 if (authority) |granted| granted.target.id else 0,
                 if (authority) |granted| granted.rights.toBits() else 0,
                 if (authority) |granted| granted.scope.task_id orelse 0 else 0,

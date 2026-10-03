@@ -1229,7 +1229,7 @@ fn parseUtcSecond(value: []const u8) !i64 {
     {
         return error.InvalidUtcSecond;
     }
-    const month: std.time.epoch.Month = @enumFromInt(month_number);
+    const month: std.time.epoch.Month = @fromBackingInt(@intCast(month_number));
     const days_in_month = std.time.epoch.getDaysInMonth(year, month);
     if (day < 1 or day > days_in_month) return error.InvalidUtcSecond;
     var days: u64 = 0;
@@ -1237,7 +1237,7 @@ fn parseUtcSecond(value: []const u8) !i64 {
     while (current_year < year) : (current_year += 1) days += std.time.epoch.getDaysInYear(current_year);
     var current_month: u8 = 1;
     while (current_month < month_number) : (current_month += 1) {
-        days += std.time.epoch.getDaysInMonth(year, @enumFromInt(current_month));
+        days += std.time.epoch.getDaysInMonth(year, @fromBackingInt(@intCast(current_month)));
     }
     days += day - 1;
     const seconds = days * std.time.s_per_day + @as(u64, hour) * std.time.s_per_hour +
@@ -1287,7 +1287,7 @@ const fixture_now: i64 = 1_780_000_000;
 const fixture_jj_change_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const fixture_commit_id = "1111111111111111111111111111111111111111";
 const fixture_repository = "ssh://git@example.com/zigos.git";
-const fixture_zig_version = "0.16.0";
+const fixture_zig_version = "0.17.0";
 const fixture_profile_id = "zigos-production-v1";
 
 const Fixture = struct {
@@ -1842,9 +1842,9 @@ fn writeExactFixture(
     var artifacts = try root_dir.openDir(std.testing.io, "artifacts", .{});
     defer artifacts.close(std.testing.io);
 
-    const root_pair_a = try Ed25519.KeyPair.generateDeterministic([_]u8{0x11} ** Ed25519.KeyPair.seed_length);
-    const root_pair_b = try Ed25519.KeyPair.generateDeterministic([_]u8{0x22} ** Ed25519.KeyPair.seed_length);
-    const release_pair = try Ed25519.KeyPair.generateDeterministic([_]u8{0x33} ** Ed25519.KeyPair.seed_length);
+    const root_pair_a = try Ed25519.KeyPair.generateDeterministic(@splat(0x11));
+    const root_pair_b = try Ed25519.KeyPair.generateDeterministic(@splat(0x22));
+    const release_pair = try Ed25519.KeyPair.generateDeterministic(@splat(0x33));
     const root_public_a = root_pair_a.public_key.toBytes();
     const root_public_b = root_pair_b.public_key.toBytes();
     const release_public = release_pair.public_key.toBytes();

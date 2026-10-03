@@ -13,8 +13,8 @@ pub fn Table(comptime capacity: usize) type {
     const Index = SlotIndex(capacity);
     return struct {
         // Zero is reserved by every caller, so membership needs no extra state.
-        ids: [capacity]u64 = [_]u64{0} ** capacity,
-        slot_indices: [capacity]Index = [_]Index{0} ** capacity,
+        ids: [capacity]u64 = @as([capacity]u64, @splat(0)),
+        slot_indices: [capacity]Index = @as([capacity]Index, @splat(0)),
     };
 }
 

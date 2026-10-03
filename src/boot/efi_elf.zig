@@ -181,7 +181,7 @@ test "ELF64 parser rejects page overlap and accepts adjacent reservations" {
 }
 
 fn testImage() [256]u8 {
-    var bytes = [_]u8{0} ** 256;
+    var bytes = @as([256]u8, @splat(0));
     @memcpy(bytes[0..4], &EI_MAG);
     bytes[4] = ELFCLASS64;
     bytes[5] = ELFDATA2LSB;

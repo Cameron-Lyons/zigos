@@ -31,7 +31,7 @@ const BuiltArtifact = struct {
 pub fn addUserspaceArtifacts(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) ArtifactSet {
     std.debug.assert(target.result.cpu.arch == .x86_64);
     const step = b.step("userspace-images", "Build userspace image artifacts");
@@ -125,7 +125,7 @@ fn addArchiveGenerator(
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/generate_userspace_archive.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
         }),
     });
     archive_generator.root_module.addImport("native_archive_deps", native_archive_deps_module);
@@ -144,7 +144,7 @@ pub fn gateArtifactInstalls(artifacts: ArtifactSet, validation_step: *std.Build.
 fn addUserspaceArtifact(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     userspace_modules: native_modules.UserspaceRuntimeModules,
     spec: production_registry.BuildImageSpec,
 ) BuiltArtifact {
@@ -154,7 +154,7 @@ fn addUserspaceArtifact(
         optimize,
         userspace_modules,
         spec.image,
-        @intFromEnum(spec.service_kind),
+        @backingInt(spec.service_kind),
         spec.source_path,
         spec.artifact_name,
     );
@@ -168,7 +168,7 @@ fn addUserspaceArtifact(
 fn addUserspaceCompile(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     userspace_modules: native_modules.UserspaceRuntimeModules,
     spec: production_registry.ImageSpec,
     service_kind: u8,

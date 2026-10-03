@@ -543,16 +543,16 @@ fn assertPortWrapperShape(comptime descriptor: operation_metadata.Descriptor) vo
         .with_now_ticks => 3,
         .without_now_ticks => 2,
     };
-    if (method_info.params.len != expected_params) {
+    if (method_info.param_types.len != expected_params) {
         @compileError("KernelPort method has wrong arity for " ++ @tagName(descriptor.operation));
     }
-    if (method_info.params[0].type.? != *KernelPort) {
+    if (method_info.param_types[0].? != *KernelPort) {
         @compileError("KernelPort method has wrong receiver for " ++ @tagName(descriptor.operation));
     }
-    if (method_info.params[1].type.? != Request) {
+    if (method_info.param_types[1].? != Request) {
         @compileError("KernelPort method has wrong request type for " ++ @tagName(descriptor.operation));
     }
-    if (descriptor.binding.port_invocation == .with_now_ticks and method_info.params[2].type.? != u64) {
+    if (descriptor.binding.port_invocation == .with_now_ticks and method_info.param_types[2].? != u64) {
         @compileError("KernelPort method must accept now_ticks for " ++ @tagName(descriptor.operation));
     }
 }

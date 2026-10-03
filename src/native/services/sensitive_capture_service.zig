@@ -48,7 +48,7 @@ pub const CaptureKind = enum(u8) {
     }
 };
 
-const CAPTURE_KIND_COUNT: usize = @typeInfo(CaptureKind).@"enum".fields.len;
+const CAPTURE_KIND_COUNT: usize = @typeInfo(CaptureKind).@"enum".field_names.len;
 
 pub const StartRequest = struct {
     subject: principal.PrincipalId,
@@ -113,11 +113,11 @@ const Slot = struct {
 };
 
 pub const Service = struct {
-    slots: [MAX_SESSIONS]Slot = [_]Slot{.{}} ** MAX_SESSIONS,
+    slots: [MAX_SESSIONS]Slot = @as([MAX_SESSIONS]Slot, @splat(.{})),
     session_count: u8 = 0,
     next_reusable_slot: u8 = 0,
     active_session_count: u8 = 0,
-    privacy_indicator_counts: [CAPTURE_KIND_COUNT]u8 = [_]u8{0} ** CAPTURE_KIND_COUNT,
+    privacy_indicator_counts: [CAPTURE_KIND_COUNT]u8 = @as([CAPTURE_KIND_COUNT]u8, @splat(0)),
 
     comptime {
         if (@sizeOf(@This()) > SERVICE_SIZE_CEILING_BYTES) {
@@ -350,7 +350,7 @@ fn sessionSlotIndex(session_id: u64) ?usize {
 }
 
 fn captureKindIndex(kind: CaptureKind) usize {
-    return @intFromEnum(kind);
+    return @backingInt(kind);
 }
 
 fn sessionLiveAt(session: *const Session, now_ticks: u64) bool {

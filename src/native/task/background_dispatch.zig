@@ -63,7 +63,7 @@ pub const DispatchRecord = struct {
     id: u64,
     task_id: u64,
     background_task_id_len: u8 = 0,
-    background_task_id: [MAX_TASK_ID_BYTES]u8 = [_]u8{0} ** MAX_TASK_ID_BYTES,
+    background_task_id: [MAX_TASK_ID_BYTES]u8 = @as([MAX_TASK_ID_BYTES]u8, @splat(0)),
     trigger: manifest.BackgroundTrigger,
     expected_duration_seconds: u32,
     budget: manifest.BackgroundResourceBudget,
@@ -128,7 +128,7 @@ pub const Controller = struct {
     policy_subjects: policy_object.SubjectSet = .{},
     next_record_id: u64 = 1,
     active_count: u8 = 0,
-    records: [MAX_RECORDS]DispatchRecord = [_]DispatchRecord{zeroRecord()} ** MAX_RECORDS,
+    records: [MAX_RECORDS]DispatchRecord = @as([MAX_RECORDS]DispatchRecord, @splat(zeroRecord())),
     record_count: u8 = 0,
     next_reusable_slot: u8 = 0,
 
@@ -240,7 +240,7 @@ pub const Controller = struct {
         task_runtime.commitBackgroundWork(task, reservation);
         task.appendAudit(.{
             .kind = .background_dispatched,
-            .detail = @intFromEnum(trigger),
+            .detail = @backingInt(trigger),
             .tick = tick,
         });
         return decision;
@@ -277,7 +277,7 @@ pub const Controller = struct {
             expired_count += 1;
             task.appendAudit(.{
                 .kind = .background_expired,
-                .detail = @intFromEnum(record.trigger),
+                .detail = @backingInt(record.trigger),
                 .tick = now_tick,
             });
         }
@@ -898,8 +898,8 @@ test "background dispatch requires the launched bundle and explicit run rights" 
 test "background dispatch rejects overlong task ids without publishing records" {
     var runtime = task_runtime.Runtime.init();
     var controller = Controller.init();
-    const full_id = [_]u8{'a'} ** MAX_TASK_ID_BYTES;
-    const oversized_id = [_]u8{'b'} ** (MAX_TASK_ID_BYTES + 1);
+    const full_id = @as([MAX_TASK_ID_BYTES]u8, @splat('a'));
+    const oversized_id = @as([MAX_TASK_ID_BYTES + 1]u8, @splat('b'));
     const empty_bundle = testBundle(TEST_SAFE_BUNDLE_ID, "Safe", &.{}, &.{});
 
     const exact_record = try makeRecord(1, 404, &full_id, .sync_completion, null, .task_not_found, 31);

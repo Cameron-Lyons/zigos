@@ -567,7 +567,7 @@ test "NVMe kernel shim rejects direct data-plane transfer attempts" {
 
 test "NVMe userspace controller path writes reads and completes queue entries" {
     const cap = makeCapabilities(63, 0, true, 0, 0);
-    var image = [_]u8{0} ** (SECTOR_BYTES * 8);
+    var image = @as([SECTOR_BYTES * 8]u8, @splat(0));
     var namespaces = [_]Namespace{.{
         .id = 1,
         .sector_count = 8,
@@ -582,14 +582,14 @@ test "NVMe userspace controller path writes reads and completes queue entries" {
         SECTOR_BYTES,
     ));
     var controller = try Controller.initWithMmio(cap, namespaces[0..], 32, defaultAdminQueuePlan(), TEST_PRP1_ADDRESS, SECTOR_BYTES);
-    var write_buffer = [_]u8{0xA5} ** SECTOR_BYTES;
+    var write_buffer = @as([SECTOR_BYTES]u8, @splat(0xA5));
     @memcpy(write_buffer[0..4], "nvme");
     const write_completion = try controller.write(1, 3, write_buffer[0..]);
     try std.testing.expectEqual(CompletionStatus.success, write_completion.status);
     try std.testing.expectEqual(@as(u16, 1), write_completion.command_id);
     try std.testing.expectEqual(@as(u16, 1), write_completion.submission_tail);
 
-    var read_buffer = [_]u8{0} ** SECTOR_BYTES;
+    var read_buffer = @as([SECTOR_BYTES]u8, @splat(0));
     const read_completion = try controller.read(1, 3, read_buffer[0..]);
     try std.testing.expectEqual(@as(u16, 2), read_completion.command_id);
     try std.testing.expectEqual(@as(u16, 2), read_completion.completion_head);
@@ -626,14 +626,14 @@ test "NVMe userspace controller path writes reads and completes queue entries" {
 
 test "NVMe userspace controller path rejects bad namespace geometry" {
     const cap = makeCapabilities(63, 0, true, 0, 0);
-    var image = [_]u8{0} ** (SECTOR_BYTES * 2);
+    var image = @as([SECTOR_BYTES * 2]u8, @splat(0));
     var namespaces = [_]Namespace{.{
         .id = 7,
         .sector_count = 2,
         .image = image[0..],
     }};
     var controller = try Controller.init(cap, namespaces[0..], 16);
-    var buffer = [_]u8{0} ** SECTOR_BYTES;
+    var buffer = @as([SECTOR_BYTES]u8, @splat(0));
     try std.testing.expectError(error.NamespaceNotFound, controller.read(8, 0, buffer[0..]));
     try std.testing.expectError(error.TransferOutOfRange, controller.read(7, 2, buffer[0..]));
     try std.testing.expectError(error.BufferSizeInvalid, controller.write(7, 0, buffer[0..17]));

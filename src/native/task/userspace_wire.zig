@@ -72,7 +72,7 @@ test "userspace wire cursor round-trips fixed and variable fields" {
 
 test "userspace wire exact copy and fnv integer helpers are explicit" {
     const COPY_TEXT_TEST_BUFFER_BYTES: usize = 4;
-    var buffer = [_]u8{0} ** COPY_TEXT_TEST_BUFFER_BYTES;
+    var buffer = @as([COPY_TEXT_TEST_BUFFER_BYTES]u8, @splat(0));
     try std.testing.expectEqual(@as(usize, COPY_TEXT_TEST_BUFFER_BYTES), try copyTextExact(&buffer, "zigo"));
     try std.testing.expectError(error.DestinationTooSmall, copyTextExact(buffer[0..3], "zigo"));
 

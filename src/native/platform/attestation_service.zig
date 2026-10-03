@@ -575,18 +575,18 @@ pub const RemoteAttestationRequestInit = struct {
 
 pub const RemoteAttestationRequest = struct {
     remote_party_len: u8 = 0,
-    remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
+    remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = @as([MAX_REMOTE_PARTY_BYTES]u8, @splat(0)),
     nonce_len: u8 = 0,
-    nonce: [MAX_NONCE_BYTES]u8 = [_]u8{0} ** MAX_NONCE_BYTES,
+    nonce: [MAX_NONCE_BYTES]u8 = @as([MAX_NONCE_BYTES]u8, @splat(0)),
     policy_label_len: u8 = 0,
-    policy_label: [MAX_POLICY_LABEL_BYTES]u8 = [_]u8{0} ** MAX_POLICY_LABEL_BYTES,
+    policy_label: [MAX_POLICY_LABEL_BYTES]u8 = @as([MAX_POLICY_LABEL_BYTES]u8, @splat(0)),
     user_visible: bool = true,
     expected_key_origin: ?KeyOrigin = null,
     root_key_id_len: u8 = 0,
-    root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8 = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES,
+    root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8 = @as([MAX_ROOT_KEY_ID_BYTES]u8, @splat(0)),
     minimum_root_generation: u64 = 0,
     revoked_root_generation_count: u8 = 0,
-    revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = [_]u64{0} ** MAX_REVOKED_ROOT_GENERATIONS,
+    revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = @as([MAX_REVOKED_ROOT_GENERATIONS]u64, @splat(0)),
     attestation_verifier_metadata_digest_required: bool = false,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
 
@@ -674,10 +674,10 @@ pub const RemoteAttestationRequest = struct {
 
 pub const RemoteAttestationResponse = struct {
     policy_label_len: u8 = 0,
-    policy_label: [MAX_POLICY_LABEL_BYTES]u8 = [_]u8{0} ** MAX_POLICY_LABEL_BYTES,
+    policy_label: [MAX_POLICY_LABEL_BYTES]u8 = @as([MAX_POLICY_LABEL_BYTES]u8, @splat(0)),
     minimum_root_generation: u64 = 0,
     revoked_root_generation_count: u8 = 0,
-    revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = [_]u64{0} ** MAX_REVOKED_ROOT_GENERATIONS,
+    revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = @as([MAX_REVOKED_ROOT_GENERATIONS]u64, @splat(0)),
     attestation_verifier_metadata_digest_present: bool = false,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     statement: Statement,
@@ -731,20 +731,20 @@ pub const Service = struct {
     device: principal.PrincipalId,
     visible_request_count: usize = 0,
     last_remote_party_len: u8 = 0,
-    last_remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
+    last_remote_party: [MAX_REMOTE_PARTY_BYTES]u8 = @as([MAX_REMOTE_PARTY_BYTES]u8, @splat(0)),
     last_remote_nonce_len: u8 = 0,
-    last_remote_nonce: [MAX_NONCE_BYTES]u8 = [_]u8{0} ** MAX_NONCE_BYTES,
+    last_remote_nonce: [MAX_NONCE_BYTES]u8 = @as([MAX_NONCE_BYTES]u8, @splat(0)),
     remote_nonce_history_count: u8 = 0,
-    remote_nonce_history: [MAX_REMOTE_NONCE_HISTORY]crypto_hash.Digest = [_]crypto_hash.Digest{crypto_hash.zero_digest} ** MAX_REMOTE_NONCE_HISTORY,
+    remote_nonce_history: [MAX_REMOTE_NONCE_HISTORY]crypto_hash.Digest = @as([MAX_REMOTE_NONCE_HISTORY]crypto_hash.Digest, @splat(crypto_hash.zero_digest)),
     has_provisioned_root: bool = false,
     root_origin: KeyOrigin = .software,
     root_label_len: u8 = 0,
-    root_label: [MAX_ROOT_LABEL_BYTES]u8 = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
+    root_label: [MAX_ROOT_LABEL_BYTES]u8 = @as([MAX_ROOT_LABEL_BYTES]u8, @splat(0)),
     root_key_id_len: u8 = 0,
-    root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8 = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES,
+    root_key_id: [MAX_ROOT_KEY_ID_BYTES]u8 = @as([MAX_ROOT_KEY_ID_BYTES]u8, @splat(0)),
     root_key_generation: u64 = 0,
     revoked_root_generation_count: u8 = 0,
-    revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = [_]u64{0} ** MAX_REVOKED_ROOT_GENERATIONS,
+    revoked_root_generations: [MAX_REVOKED_ROOT_GENERATIONS]u64 = @as([MAX_REVOKED_ROOT_GENERATIONS]u64, @splat(0)),
     root_verifier_metadata_digest_present: bool = false,
     root_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     root_provider: ?RootProvider = null,
@@ -772,8 +772,8 @@ pub const Service = struct {
             return error.AttestationVerifierMetadataMissing;
         }
         if (verifier_metadata_digest) |digest| if (std.mem.allEqual(u8, &digest, 0)) return error.AttestationVerifierMetadataMissing;
-        var staged_label = [_]u8{0} ** MAX_ROOT_LABEL_BYTES;
-        var staged_key_id = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES;
+        var staged_label = @as([MAX_ROOT_LABEL_BYTES]u8, @splat(0));
+        var staged_key_id = @as([MAX_ROOT_KEY_ID_BYTES]u8, @splat(0));
         @memcpy(staged_label[0..label.len], label);
         @memcpy(staged_key_id[0..key_id.len], key_id);
         self.has_provisioned_root = true;
@@ -1046,14 +1046,14 @@ pub const Service = struct {
             .driver_count = @intCast(boot.countKind(.driver_set)),
             .user_visible = user_visible,
             .remote_party_len = 0,
-            .remote_party = [_]u8{0} ** MAX_REMOTE_PARTY_BYTES,
+            .remote_party = @as([MAX_REMOTE_PARTY_BYTES]u8, @splat(0)),
             .nonce_len = 0,
-            .nonce = [_]u8{0} ** MAX_NONCE_BYTES,
+            .nonce = @as([MAX_NONCE_BYTES]u8, @splat(0)),
             .key_origin = origin,
             .root_label_len = 0,
-            .root_label = [_]u8{0} ** MAX_ROOT_LABEL_BYTES,
+            .root_label = @as([MAX_ROOT_LABEL_BYTES]u8, @splat(0)),
             .root_key_id_len = 0,
-            .root_key_id = [_]u8{0} ** MAX_ROOT_KEY_ID_BYTES,
+            .root_key_id = @as([MAX_ROOT_KEY_ID_BYTES]u8, @splat(0)),
             .root_key_generation = root_key_generation,
             .root_digest = boot.root_digest,
             .root_provenance = boot.root_provenance,
@@ -1794,11 +1794,11 @@ test "attestation signing and provisioning failures leave committed state unchan
     try std.testing.expectEqual(@as(usize, 1), service.visible_request_count);
 
     const provisioned = service;
-    var long_provider = FakeTpmRootProvider.init(.{ .label = "x" ** (MAX_ROOT_LABEL_BYTES + 1), .seed = signing.seedFromByte(0x6C) });
+    var long_provider = FakeTpmRootProvider.init(.{ .label = &@as([MAX_ROOT_LABEL_BYTES + 1]u8, @splat('x')), .seed = signing.seedFromByte(0x6C) });
     try std.testing.expectError(error.RootLabelTooLong, service.provisionRootProvider(long_provider.provider()));
     try std.testing.expectEqualDeep(provisioned, service);
     var bad_root = root;
-    bad_root.descriptor.key_id = "k" ** (MAX_ROOT_KEY_ID_BYTES + 1);
+    bad_root.descriptor.key_id = &@as([MAX_ROOT_KEY_ID_BYTES + 1]u8, @splat('k'));
     try std.testing.expectError(error.RootKeyIdTooLong, service.provisionRootProvider(bad_root));
     try std.testing.expectEqualDeep(provisioned, service);
     bad_root = root;

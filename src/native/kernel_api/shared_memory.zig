@@ -175,7 +175,7 @@ pub const FreestandingMappingDescriptor = struct {
 pub const TaskRetirement = struct {
     revoked_owned_objects: u16 = 0,
     removed_peer_mappings: u16 = 0,
-    revoked_object_ids: [MAX_SHARED_MEMORY_OBJECTS]ids.SharedMemoryId = [_]ids.SharedMemoryId{ids.SharedMemoryId.zero} ** MAX_SHARED_MEMORY_OBJECTS,
+    revoked_object_ids: [MAX_SHARED_MEMORY_OBJECTS]ids.SharedMemoryId = @as([MAX_SHARED_MEMORY_OBJECTS]ids.SharedMemoryId, @splat(ids.SharedMemoryId.zero)),
 
     pub fn revokedObjectIds(self: *const TaskRetirement) []const ids.SharedMemoryId {
         return self.revoked_object_ids[0..self.revoked_owned_objects];
@@ -577,7 +577,7 @@ pub const Table = struct {
                 .attachment_generation = 1,
                 .compute_access = compute_access,
                 .attached_compute = ComputeAccess.empty(),
-                .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
+                .mapped_task_ids = @as([MAX_MAPPINGS_PER_OBJECT]ids.TaskId, @splat(ids.TaskId.zero)),
                 .mapping_count = 0,
                 .mmu_mapping_head = no_mmu_mapping,
                 .mmu_mapping_count = 0,
@@ -682,7 +682,7 @@ pub const Table = struct {
         object.attachment_generation += 1;
         object.attached_compute = ComputeAccess.empty();
         object.mapping_count = 0;
-        object.mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT;
+        object.mapped_task_ids = @as([MAX_MAPPINGS_PER_OBJECT]ids.TaskId, @splat(ids.TaskId.zero));
         const revoked_descriptor = descriptorForObject(object, true);
         if (!backing.arena.removeHandle(object_handle)) {
             native_util.impossibleByInvariant("revoked shared-memory handle remains live through teardown");
@@ -991,7 +991,7 @@ fn zeroObject() Object {
         .attachment_generation = 0,
         .compute_access = .{},
         .attached_compute = ComputeAccess.empty(),
-        .mapped_task_ids = [_]ids.TaskId{ids.TaskId.zero} ** MAX_MAPPINGS_PER_OBJECT,
+        .mapped_task_ids = @as([MAX_MAPPINGS_PER_OBJECT]ids.TaskId, @splat(ids.TaskId.zero)),
         .mapping_count = 0,
         .mmu_mapping_head = no_mmu_mapping,
         .mmu_mapping_count = 0,
@@ -1127,7 +1127,7 @@ fn descriptorFromMmuMapping(object: *const Object, mapping: *const MmuMapping) F
 }
 
 fn acceleratorDomainId(target: ComputeTarget) u64 {
-    return @as(u64, @intFromEnum(target)) + 1;
+    return @as(u64, @backingInt(target)) + 1;
 }
 
 fn computeTargetFromDomainId(domain_id: u64) ?ComputeTarget {
@@ -1510,7 +1510,7 @@ test "compact mmu revoke preserves a peer that reused a freed mapping slot" {
 
 test "freestanding mmu preserves duplicate mapping errors when full" {
     var table = Table.init();
-    var object_ids = [_]ids.SharedMemoryId{ids.SharedMemoryId.zero} ** MAX_SHARED_MEMORY_OBJECTS;
+    var object_ids = @as([MAX_SHARED_MEMORY_OBJECTS]ids.SharedMemoryId, @splat(ids.SharedMemoryId.zero));
     for (&object_ids, 0..) |*object_id, object_index| {
         const object = try table.create(ids.task(1_000 + object_index), PAGE_SIZE);
         object_id.* = object.id;

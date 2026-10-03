@@ -84,7 +84,7 @@ pub fn impossibleByInvariantError(message: []const u8, err: anyerror) noreturn {
 
 test "copyTextExact rejects undersized destinations and preserves exact lengths" {
     const COPY_TEXT_TEST_BUFFER_BYTES: usize = 4;
-    var buffer = [_]u8{0} ** COPY_TEXT_TEST_BUFFER_BYTES;
+    var buffer = @as([COPY_TEXT_TEST_BUFFER_BYTES]u8, @splat(0));
 
     try std.testing.expectEqual(@as(usize, COPY_TEXT_TEST_BUFFER_BYTES), try copyTextExact(&buffer, "zigo"));
     try std.testing.expectEqualStrings("zigo", &buffer);

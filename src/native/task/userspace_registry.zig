@@ -23,7 +23,7 @@ pub const FLAG_GP_PROOF_PROBE = userspace_flags.FLAG_GP_PROOF_PROBE;
 
 pub const DIRECT_SERVICE_CLASS_SLOTS = true;
 pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
-pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(contract.ServiceClass).len;
+pub const SERVICE_CLASS_COUNT: usize = @typeInfo(contract.ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = u8;
 pub const RUNTIME_IMAGE_DESCRIPTORS_EXCLUDE_BUILD_METADATA = true;
 pub const SINGLE_COMPONENT_BOOT_MANIFESTS_DERIVED_ON_REGISTRATION = true;
@@ -60,8 +60,8 @@ pub const AddressSpaceGroup = enum(u8) {
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
-    for (std.meta.fields(contract.ServiceClass), 0..) |field, class_index| {
-        if (field.value != class_index) {
+    for (@typeInfo(contract.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
+        if (field != class_index) {
             @compileError("service classes must remain dense for direct userspace registry lookup");
         }
     }
@@ -124,15 +124,15 @@ pub const ImageSpec = struct {
     }
 
     pub fn publisher(self: *const ImageSpec) Publisher {
-        return @enumFromInt(self.metadata.publisher);
+        return @fromBackingInt(@intCast(self.metadata.publisher));
     }
 
     pub fn updateChannel(self: *const ImageSpec) manifest.UpdateChannel {
-        return @enumFromInt(self.metadata.update_channel);
+        return @fromBackingInt(@intCast(self.metadata.update_channel));
     }
 
     pub fn componentClass(self: *const ImageSpec) ComponentClass {
-        return @enumFromInt(self.metadata.component_class);
+        return @fromBackingInt(@intCast(self.metadata.component_class));
     }
 
     pub fn roleTag(self: *const ImageSpec) u32 {
@@ -383,9 +383,9 @@ fn runtimeImageMetadata(
         .role_tag = @intCast(role_tag),
         .heartbeat_increment = @intCast(heartbeat_increment),
         .contract_flags = @intCast(contract_flags),
-        .update_channel = @intCast(@intFromEnum(update_channel)),
-        .component_class = @intCast(@intFromEnum(component_class)),
-        .publisher = @intCast(@intFromEnum(publisher)),
+        .update_channel = @intCast(@backingInt(update_channel)),
+        .component_class = @intCast(@backingInt(component_class)),
+        .publisher = @intCast(@backingInt(publisher)),
     };
 }
 
@@ -410,7 +410,7 @@ comptime {
     if (production_boot_image_specs.len != PRODUCTION_ADDRESS_SPACE_COUNT) {
         @compileError("production userspace catalog must contain one image per address space");
     }
-    if (std.meta.fields(AddressSpaceGroup).len != PRODUCTION_ADDRESS_SPACE_COUNT) {
+    if (@typeInfo(AddressSpaceGroup).@"enum".field_names.len != PRODUCTION_ADDRESS_SPACE_COUNT) {
         @compileError("production address-space groups must match the 2026 process count");
     }
     for (production_boot_image_specs) |spec| {
@@ -521,7 +521,7 @@ pub fn addressSpaceGroupForBundle(bundle_id: []const u8) ?AddressSpaceGroup {
 
 pub fn canonicalProductionBundleId(bundle_id: []const u8) []const u8 {
     const group = addressSpaceGroupForBundle(bundle_id) orelse return bundle_id;
-    return production_boot_image_specs[@intFromEnum(group)].bundleId();
+    return production_boot_image_specs[@backingInt(group)].bundleId();
 }
 
 fn standaloneAddressSpaceGroup(bundle_id: []const u8) ?AddressSpaceGroup {
@@ -619,7 +619,7 @@ fn buildBundleIndex(
 }
 
 fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const u8) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     for (specs) |spec| {
         if (std.mem.eql(u8, spec.bundleId(), bundle_id)) {
             native_util.impossibleByInvariant("boot bundle id index missed a registry spec");
@@ -629,17 +629,17 @@ fn debugAssertBundleIndexMissAbsent(specs: []const ImageSpec, bundle_id: []const
 
 fn buildServiceClassSlots() ServiceClassSlots {
     var slots = emptyServiceClassSlots();
-    inline for (std.meta.fields(contract.ServiceClass)) |field| {
-        const class: contract.ServiceClass = @enumFromInt(field.value);
+    inline for (@typeInfo(contract.ServiceClass).@"enum".field_values) |field| {
+        const class: contract.ServiceClass = @fromBackingInt(@intCast(field));
         if (addressSpaceGroupForServiceClass(class)) |group| {
-            setServiceClassSlot(&slots, class, @intFromEnum(group));
+            setServiceClassSlot(&slots, class, @backingInt(group));
         }
     }
     return slots;
 }
 
 fn emptyServiceClassSlots() ServiceClassSlots {
-    return [_]ServiceClassSlotIndex{NO_SERVICE_CLASS_SLOT} ** SERVICE_CLASS_COUNT;
+    return @as([SERVICE_CLASS_COUNT]ServiceClassSlotIndex, @splat(NO_SERVICE_CLASS_SLOT));
 }
 
 fn setServiceClassSlot(slots: *ServiceClassSlots, class: contract.ServiceClass, spec_index: usize) void {
@@ -650,7 +650,7 @@ fn setServiceClassSlot(slots: *ServiceClassSlots, class: contract.ServiceClass, 
 }
 
 fn serviceClassIndex(class: contract.ServiceClass) usize {
-    return @intFromEnum(class);
+    return @backingInt(class);
 }
 
 fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
@@ -786,13 +786,13 @@ test "production userspace registry contains exactly the production boot catalog
     try std.testing.expectEqualStrings("zigos.system.store", canonicalProductionBundleId("app.sync"));
     try std.testing.expectEqualStrings("zigos.system.privacy", canonicalProductionBundleId("app.capture"));
 
-    var occupied = [_]u16{0} ** PRODUCTION_ADDRESS_SPACE_COUNT;
+    var occupied = @as([PRODUCTION_ADDRESS_SPACE_COUNT]u16, @splat(0));
     for (production_build_image_specs) |spec| {
         const bundle_id = spec.image.bundleId();
         const group = addressSpaceGroupForBundle(bundle_id) orelse return error.MissingAddressSpaceGroup;
         const slot = imageSlotInGroup(bundle_id) orelse return error.MissingImageSlot;
         const bit: u16 = @as(u16, 1) << @as(u4, @intCast(slot));
-        const occupied_index = @intFromEnum(group);
+        const occupied_index = @backingInt(group);
         try std.testing.expect(occupied[occupied_index] & bit == 0);
         occupied[occupied_index] |= bit;
         try std.testing.expectEqual(userspace_layout.imageBaseForSlot(slot), imageBaseForBundle(bundle_id));

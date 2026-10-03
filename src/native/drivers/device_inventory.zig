@@ -139,12 +139,12 @@ fn isStablePciVendorDevice(device_id: u64, vendor_id: u16, pci_device_id: u16) b
     return stablePciVendor(device_id) == vendor_id and stablePciDevice(device_id) == pci_device_id;
 }
 
-const device_class_count = std.meta.fields(driver_service.DeviceClass).len;
+const device_class_count = @typeInfo(driver_service.DeviceClass).@"enum".field_names.len;
 
 fn defaultRecords() [device_class_count]DeviceRecord {
     var result: [device_class_count]DeviceRecord = undefined;
-    inline for (std.meta.fields(driver_service.DeviceClass)) |field| {
-        result[field.value] = defaultRecord(@enumFromInt(field.value));
+    inline for (@typeInfo(driver_service.DeviceClass).@"enum".field_values) |field| {
+        result[field] = defaultRecord(@fromBackingInt(@intCast(field)));
     }
     return result;
 }
@@ -160,7 +160,7 @@ fn defaultRecord(device_class: driver_service.DeviceClass) DeviceRecord {
 }
 
 fn recordForClassMut(device_class: driver_service.DeviceClass) *DeviceRecord {
-    return &records[@intFromEnum(device_class)];
+    return &records[@backingInt(device_class)];
 }
 
 test "device inventory starts absent until hardware is discovered" {

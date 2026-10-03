@@ -156,7 +156,7 @@ const BootedNetworkDataPlane = struct {
     };
 
     fn hardwareMacAddress() [6]u8 {
-        return network_bridge.mac() orelse [_]u8{0} ** 6;
+        return network_bridge.mac() orelse @as([6]u8, @splat(0));
     }
 
     fn activate(device_id: u64) ?*const bootstrap_driver_port.NetworkDevice {
@@ -203,7 +203,7 @@ else
     };
 
 const HostedStorageDataPlane = struct {
-    var image = [_]u8{0} ** booted_storage_image_bytes;
+    var image = @as([booted_storage_image_bytes]u8, @splat(0));
 
     fn reset() void {
         @memset(image[0..], 0);

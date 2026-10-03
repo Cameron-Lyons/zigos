@@ -78,7 +78,7 @@ fn allocationValid(allocation: Allocation) bool {
 }
 
 fn validMcfg() [TEST_TABLE_BYTES]u8 {
-    var table = [_]u8{0} ** TEST_TABLE_BYTES;
+    var table = @as([TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], MCFG_SIGNATURE);
     endian.writeU32Le(table[4..8], table.len);
     table[8] = 1;

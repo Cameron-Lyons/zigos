@@ -227,58 +227,58 @@ test "typed component ABI derives operation IDs, wire types, and validators from
     try std.testing.expect(registry.contract_hash != 0);
     try std.testing.expect(registry.operation(.service_register) != null);
     try validateInterface(Interface(.object_workspace));
-    try std.testing.expectEqual(@as(u16, 0x0102), @intFromEnum(OperationId.service_connect));
-    try std.testing.expectEqual(@as(u16, 0x0402), @intFromEnum(OperationId.network_open_session));
-    try std.testing.expectEqual(@as(u16, 0x0403), @intFromEnum(OperationId.network_record_transfer));
-    try std.testing.expectEqual(@as(u16, 0x0404), @intFromEnum(OperationId.network_revoke_session));
-    try std.testing.expectEqual(@as(u16, 0x0603), @intFromEnum(OperationId.package_rollback));
-    try std.testing.expectEqual(@as(u16, 0x0604), @intFromEnum(OperationId.package_remove));
-    try std.testing.expectEqual(@as(u16, 0x0702), @intFromEnum(OperationId.ai_run_local));
-    try std.testing.expectEqual(@as(u16, 0x0D02), @intFromEnum(OperationId.ai_model_attest));
-    try std.testing.expectEqual(@as(u16, 0x0801), @intFromEnum(OperationId.privacy_authorize_egress));
-    try std.testing.expectEqual(@as(u16, 0x0902), @intFromEnum(OperationId.diagnostics_share_remote));
-    try std.testing.expectEqual(@as(u16, 0x0A01), @intFromEnum(OperationId.consent_record));
-    try std.testing.expectEqual(@as(u16, 0x0B03), @intFromEnum(OperationId.permission_lease_expire));
-    try std.testing.expectEqual(@as(u16, 0x0C03), @intFromEnum(OperationId.data_delete_receipt));
-    try std.testing.expectEqual(@as(u16, 0x0E01), @intFromEnum(OperationId.identity_session_authorize));
-    try std.testing.expectEqual(@as(u16, 0x0E04), @intFromEnum(OperationId.identity_credential_register));
-    try std.testing.expectEqual(@as(u16, 0x0E05), @intFromEnum(OperationId.identity_credential_assert));
-    try std.testing.expectEqual(@as(u16, 0x0E06), @intFromEnum(OperationId.identity_credential_recover));
-    try std.testing.expectEqual(@as(u16, 0x0E07), @intFromEnum(OperationId.identity_credential_revoke));
-    try std.testing.expectEqual(@as(u16, 0x0F01), @intFromEnum(OperationId.agent_authorize));
-    try std.testing.expectEqual(@as(u16, 0x0F04), @intFromEnum(OperationId.agent_bind_session));
-    try std.testing.expectEqual(@as(u16, 0x1001), @intFromEnum(OperationId.accessibility_profile_get));
-    try std.testing.expectEqual(@as(u16, 0x1101), @intFromEnum(OperationId.background_authorize));
-    try std.testing.expectEqual(@as(u16, 0x1201), @intFromEnum(OperationId.pasteboard_offer));
-    try std.testing.expectEqual(@as(u16, 0x1202), @intFromEnum(OperationId.pasteboard_read));
-    try std.testing.expectEqual(@as(u16, 0x1203), @intFromEnum(OperationId.pasteboard_revoke));
-    try std.testing.expectEqual(@as(u16, 0x1301), @intFromEnum(OperationId.object_backup_prepare));
-    try std.testing.expectEqual(@as(u16, 0x1302), @intFromEnum(OperationId.object_restore_authorize));
-    try std.testing.expectEqual(@as(u16, 0x1303), @intFromEnum(OperationId.object_backup_revoke));
-    try std.testing.expectEqual(@as(u16, 0x1401), @intFromEnum(OperationId.index_upsert));
-    try std.testing.expectEqual(@as(u16, 0x1402), @intFromEnum(OperationId.index_query));
-    try std.testing.expectEqual(@as(u16, 0x1403), @intFromEnum(OperationId.semantic_index_query));
-    try std.testing.expectEqual(@as(u16, 0x1501), @intFromEnum(OperationId.sync_device_enroll));
-    try std.testing.expectEqual(@as(u16, 0x1502), @intFromEnum(OperationId.sync_workspace_replicate));
-    try std.testing.expectEqual(@as(u16, 0x1503), @intFromEnum(OperationId.sync_conflict_review));
-    try std.testing.expectEqual(@as(u16, 0x1504), @intFromEnum(OperationId.sync_conflict_resolve));
-    try std.testing.expectEqual(@as(u16, 0x1505), @intFromEnum(OperationId.sync_transport_frame));
-    try std.testing.expectEqual(@as(u16, 0x1601), @intFromEnum(OperationId.capture_start));
-    try std.testing.expectEqual(@as(u16, 0x1602), @intFromEnum(OperationId.capture_sample));
-    try std.testing.expectEqual(@as(u16, 0x1603), @intFromEnum(OperationId.capture_stop));
-    try std.testing.expectEqual(@as(u16, 0x1701), @intFromEnum(OperationId.secret_import));
-    try std.testing.expectEqual(@as(u16, 0x1702), @intFromEnum(OperationId.secret_lend));
-    try std.testing.expectEqual(@as(u16, 0x1703), @intFromEnum(OperationId.secret_rotate));
-    try std.testing.expectEqual(@as(u16, 0x1704), @intFromEnum(OperationId.secret_revoke));
-    try std.testing.expectEqual(@as(u16, 0x1801), @intFromEnum(OperationId.attention_post));
-    try std.testing.expectEqual(@as(u16, 0x1802), @intFromEnum(OperationId.attention_dismiss));
-    try std.testing.expectEqual(@as(u16, 0x1803), @intFromEnum(OperationId.attention_query));
-    try std.testing.expectEqual(@as(u16, 0x1901), @intFromEnum(OperationId.lifecycle_suspend));
-    try std.testing.expectEqual(@as(u16, 0x1902), @intFromEnum(OperationId.lifecycle_resume));
-    try std.testing.expectEqual(@as(u16, 0x1903), @intFromEnum(OperationId.lifecycle_terminate));
-    try std.testing.expectEqual(@as(u16, 0x1A01), @intFromEnum(OperationId.personal_context_lease));
-    try std.testing.expectEqual(@as(u16, 0x1A02), @intFromEnum(OperationId.personal_context_query));
-    try std.testing.expectEqual(@as(u16, 0x1A03), @intFromEnum(OperationId.personal_context_revoke));
+    try std.testing.expectEqual(@as(u16, 0x0102), @backingInt(OperationId.service_connect));
+    try std.testing.expectEqual(@as(u16, 0x0402), @backingInt(OperationId.network_open_session));
+    try std.testing.expectEqual(@as(u16, 0x0403), @backingInt(OperationId.network_record_transfer));
+    try std.testing.expectEqual(@as(u16, 0x0404), @backingInt(OperationId.network_revoke_session));
+    try std.testing.expectEqual(@as(u16, 0x0603), @backingInt(OperationId.package_rollback));
+    try std.testing.expectEqual(@as(u16, 0x0604), @backingInt(OperationId.package_remove));
+    try std.testing.expectEqual(@as(u16, 0x0702), @backingInt(OperationId.ai_run_local));
+    try std.testing.expectEqual(@as(u16, 0x0D02), @backingInt(OperationId.ai_model_attest));
+    try std.testing.expectEqual(@as(u16, 0x0801), @backingInt(OperationId.privacy_authorize_egress));
+    try std.testing.expectEqual(@as(u16, 0x0902), @backingInt(OperationId.diagnostics_share_remote));
+    try std.testing.expectEqual(@as(u16, 0x0A01), @backingInt(OperationId.consent_record));
+    try std.testing.expectEqual(@as(u16, 0x0B03), @backingInt(OperationId.permission_lease_expire));
+    try std.testing.expectEqual(@as(u16, 0x0C03), @backingInt(OperationId.data_delete_receipt));
+    try std.testing.expectEqual(@as(u16, 0x0E01), @backingInt(OperationId.identity_session_authorize));
+    try std.testing.expectEqual(@as(u16, 0x0E04), @backingInt(OperationId.identity_credential_register));
+    try std.testing.expectEqual(@as(u16, 0x0E05), @backingInt(OperationId.identity_credential_assert));
+    try std.testing.expectEqual(@as(u16, 0x0E06), @backingInt(OperationId.identity_credential_recover));
+    try std.testing.expectEqual(@as(u16, 0x0E07), @backingInt(OperationId.identity_credential_revoke));
+    try std.testing.expectEqual(@as(u16, 0x0F01), @backingInt(OperationId.agent_authorize));
+    try std.testing.expectEqual(@as(u16, 0x0F04), @backingInt(OperationId.agent_bind_session));
+    try std.testing.expectEqual(@as(u16, 0x1001), @backingInt(OperationId.accessibility_profile_get));
+    try std.testing.expectEqual(@as(u16, 0x1101), @backingInt(OperationId.background_authorize));
+    try std.testing.expectEqual(@as(u16, 0x1201), @backingInt(OperationId.pasteboard_offer));
+    try std.testing.expectEqual(@as(u16, 0x1202), @backingInt(OperationId.pasteboard_read));
+    try std.testing.expectEqual(@as(u16, 0x1203), @backingInt(OperationId.pasteboard_revoke));
+    try std.testing.expectEqual(@as(u16, 0x1301), @backingInt(OperationId.object_backup_prepare));
+    try std.testing.expectEqual(@as(u16, 0x1302), @backingInt(OperationId.object_restore_authorize));
+    try std.testing.expectEqual(@as(u16, 0x1303), @backingInt(OperationId.object_backup_revoke));
+    try std.testing.expectEqual(@as(u16, 0x1401), @backingInt(OperationId.index_upsert));
+    try std.testing.expectEqual(@as(u16, 0x1402), @backingInt(OperationId.index_query));
+    try std.testing.expectEqual(@as(u16, 0x1403), @backingInt(OperationId.semantic_index_query));
+    try std.testing.expectEqual(@as(u16, 0x1501), @backingInt(OperationId.sync_device_enroll));
+    try std.testing.expectEqual(@as(u16, 0x1502), @backingInt(OperationId.sync_workspace_replicate));
+    try std.testing.expectEqual(@as(u16, 0x1503), @backingInt(OperationId.sync_conflict_review));
+    try std.testing.expectEqual(@as(u16, 0x1504), @backingInt(OperationId.sync_conflict_resolve));
+    try std.testing.expectEqual(@as(u16, 0x1505), @backingInt(OperationId.sync_transport_frame));
+    try std.testing.expectEqual(@as(u16, 0x1601), @backingInt(OperationId.capture_start));
+    try std.testing.expectEqual(@as(u16, 0x1602), @backingInt(OperationId.capture_sample));
+    try std.testing.expectEqual(@as(u16, 0x1603), @backingInt(OperationId.capture_stop));
+    try std.testing.expectEqual(@as(u16, 0x1701), @backingInt(OperationId.secret_import));
+    try std.testing.expectEqual(@as(u16, 0x1702), @backingInt(OperationId.secret_lend));
+    try std.testing.expectEqual(@as(u16, 0x1703), @backingInt(OperationId.secret_rotate));
+    try std.testing.expectEqual(@as(u16, 0x1704), @backingInt(OperationId.secret_revoke));
+    try std.testing.expectEqual(@as(u16, 0x1801), @backingInt(OperationId.attention_post));
+    try std.testing.expectEqual(@as(u16, 0x1802), @backingInt(OperationId.attention_dismiss));
+    try std.testing.expectEqual(@as(u16, 0x1803), @backingInt(OperationId.attention_query));
+    try std.testing.expectEqual(@as(u16, 0x1901), @backingInt(OperationId.lifecycle_suspend));
+    try std.testing.expectEqual(@as(u16, 0x1902), @backingInt(OperationId.lifecycle_resume));
+    try std.testing.expectEqual(@as(u16, 0x1903), @backingInt(OperationId.lifecycle_terminate));
+    try std.testing.expectEqual(@as(u16, 0x1A01), @backingInt(OperationId.personal_context_lease));
+    try std.testing.expectEqual(@as(u16, 0x1A02), @backingInt(OperationId.personal_context_query));
+    try std.testing.expectEqual(@as(u16, 0x1A03), @backingInt(OperationId.personal_context_revoke));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionRequest), @sizeOf(Request(.service_connect)));
     try std.testing.expectEqual(@sizeOf(ServiceConnectionResponse), @sizeOf(Response(.service_connect)));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(WireHeader));
@@ -460,7 +460,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
 
     const interface_id = InterfaceId.service_registry;
     var header = WireHeader{
-        .operation = @intFromEnum(OperationId.service_connect),
+        .operation = @backingInt(OperationId.service_connect),
         .correlation_id = 1,
         .subject_task_id = 44,
     };
@@ -472,7 +472,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
         @sizeOf(ServiceConnectionResponse),
     );
     const wrong_interface_header = WireHeader{
-        .operation = @intFromEnum(OperationId.network_open_session),
+        .operation = @backingInt(OperationId.network_open_session),
         .correlation_id = 2,
         .subject_task_id = 44,
     };
@@ -518,7 +518,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     ));
 
     const package_header = WireHeader{
-        .operation = @intFromEnum(OperationId.package_rollback),
+        .operation = @backingInt(OperationId.package_rollback),
         .correlation_id = 902,
         .subject_task_id = 78,
     };
@@ -531,7 +531,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
 
     const ai_header = WireHeader{
-        .operation = @intFromEnum(OperationId.ai_run_local),
+        .operation = @backingInt(OperationId.ai_run_local),
         .correlation_id = 903,
         .subject_task_id = 79,
     };
@@ -544,7 +544,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
 
     const privacy_header = WireHeader{
-        .operation = @intFromEnum(OperationId.privacy_authorize_egress),
+        .operation = @backingInt(OperationId.privacy_authorize_egress),
         .correlation_id = 904,
         .subject_task_id = 80,
     };
@@ -557,7 +557,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
 
     const network_header = WireHeader{
-        .operation = @intFromEnum(OperationId.network_open_session),
+        .operation = @backingInt(OperationId.network_open_session),
         .correlation_id = 9041,
         .subject_task_id = 80,
     };
@@ -570,7 +570,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
 
     const diagnostics_header = WireHeader{
-        .operation = @intFromEnum(OperationId.diagnostics_share_remote),
+        .operation = @backingInt(OperationId.diagnostics_share_remote),
         .correlation_id = 905,
         .subject_task_id = 81,
     };
@@ -583,7 +583,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
 
     const consent_header = WireHeader{
-        .operation = @intFromEnum(OperationId.consent_record),
+        .operation = @backingInt(OperationId.consent_record),
         .correlation_id = 906,
         .subject_task_id = 82,
     };
@@ -596,7 +596,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
 
     const lease_header = WireHeader{
-        .operation = @intFromEnum(OperationId.permission_lease_expire),
+        .operation = @backingInt(OperationId.permission_lease_expire),
         .correlation_id = 907,
         .subject_task_id = 83,
     };
@@ -609,7 +609,7 @@ test "typed component ABI rejects incompatible interfaces and malformed messages
     );
 
     const identity_header = WireHeader{
-        .operation = @intFromEnum(OperationId.identity_session_authorize),
+        .operation = @backingInt(OperationId.identity_session_authorize),
         .correlation_id = 908,
         .subject_task_id = 84,
     };

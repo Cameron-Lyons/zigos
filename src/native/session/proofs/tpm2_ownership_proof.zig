@@ -36,7 +36,7 @@ const Record = struct {
         var bytes: [BYTES]u8 = undefined;
         var w = wire.Writer{ .bytes = &bytes };
         try w.put("ZGOwner4");
-        try w.int(u8, @intFromEnum(self.stage));
+        try w.int(u8, @backingInt(self.stage));
         try w.put(&self.nonce);
         try w.put(&self.ciphertext);
         try w.put(&self.tag);
@@ -196,7 +196,7 @@ pub fn run(manager: anytype, io: anytype) !void {
                 .boot_lock => "ZIGOS:TPM2:OWNER:BOOT_LOCK_INTERRUPTED\n",
                 else => unreachable,
             };
-            record.stage = @enumFromInt(@intFromEnum(record.stage) + 1);
+            record.stage = @fromBackingInt(@intCast(@backingInt(record.stage) + 1));
             try save(storage, record);
             halt(marker);
         }

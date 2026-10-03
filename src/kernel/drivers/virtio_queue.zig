@@ -154,7 +154,7 @@ test "virtio queues use submission ownership and ignore reserved TX completion l
 }
 
 test "virtio net bounds a single receive buffer and rejects unnegotiated offloads" {
-    var buffer = [_]u8{0} ** 72;
+    var buffer = @as([72]u8, @splat(0));
     buffer[10] = 1;
     try std.testing.expectEqual(@as(usize, 60), (try receivedFrame(&buffer)).len);
     for ([_]usize{ 0, 1 }) |index| {

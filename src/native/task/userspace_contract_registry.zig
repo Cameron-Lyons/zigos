@@ -51,7 +51,7 @@ fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
 }
 
 fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     for (contracts) |contract| {
         if (std.mem.eql(u8, contract.bundle_id, bundle_id)) {
             native_util.impossibleByInvariant("contract bundle id index missed a contract");

@@ -87,9 +87,9 @@ pub const Grant = struct {
     consumed: bool = false,
     revoked: bool = false,
     payload_len: u16 = 0,
-    payload: [MAX_PAYLOAD_BYTES]u8 = [_]u8{0} ** MAX_PAYLOAD_BYTES,
+    payload: [MAX_PAYLOAD_BYTES]u8 = @as([MAX_PAYLOAD_BYTES]u8, @splat(0)),
     purpose_len: u8 = 0,
-    purpose: [MAX_PURPOSE_BYTES]u8 = [_]u8{0} ** MAX_PURPOSE_BYTES,
+    purpose: [MAX_PURPOSE_BYTES]u8 = @as([MAX_PURPOSE_BYTES]u8, @splat(0)),
 
     pub fn payloadSlice(self: *const Grant) []const u8 {
         return self.payload[0..@as(usize, self.payload_len)];
@@ -101,7 +101,7 @@ pub const Grant = struct {
 };
 
 pub const Service = struct {
-    grants: [MAX_GRANTS]Grant = [_]Grant{.{}} ** MAX_GRANTS,
+    grants: [MAX_GRANTS]Grant = @as([MAX_GRANTS]Grant, @splat(.{})),
     grant_count: u8 = 0,
     next_reusable_grant: u8 = 0,
 
@@ -335,13 +335,13 @@ fn recordRevoke(ledger: ?*event_ledger.Ledger, request: RevokeRequest, allowed: 
 }
 
 fn copyPayloadInto(payload: []const u8) [MAX_PAYLOAD_BYTES]u8 {
-    var buffer: [MAX_PAYLOAD_BYTES]u8 = [_]u8{0} ** MAX_PAYLOAD_BYTES;
+    var buffer: [MAX_PAYLOAD_BYTES]u8 = @as([MAX_PAYLOAD_BYTES]u8, @splat(0));
     _ = copyText(&buffer, payload);
     return buffer;
 }
 
 fn copyPurposeInto(purpose: []const u8) [MAX_PURPOSE_BYTES]u8 {
-    var buffer: [MAX_PURPOSE_BYTES]u8 = [_]u8{0} ** MAX_PURPOSE_BYTES;
+    var buffer: [MAX_PURPOSE_BYTES]u8 = @as([MAX_PURPOSE_BYTES]u8, @splat(0));
     _ = copyText(&buffer, purpose);
     return buffer;
 }
@@ -372,7 +372,7 @@ test "secure pasteboard preserves exhausted grants without issuing zero or stale
     const last = try service.offer(request, null);
     try std.testing.expectEqual(TokenId.fromParts(7, indexed_arena.MAX_HANDLE_GENERATION).value, last.token_id);
     try std.testing.expect(service.find(TokenId.fromParts(7, 1).value) == null);
-    var output = [_]u8{0x55} ** MAX_PAYLOAD_BYTES;
+    var output = @as([MAX_PAYLOAD_BYTES]u8, @splat(0x55));
     var read_request = ReadRequest{
         .subject = request.destination,
         .destination_task_id = request.destination_task_id,
@@ -396,7 +396,7 @@ test "secure pasteboard rejects overlong purposes without issuing grants" {
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 7101 };
     const destination = principal.PrincipalId{ .kind = .app, .serial = 7102 };
-    const oversized_purpose = [_]u8{'p'} ** (MAX_PURPOSE_BYTES + 1);
+    const oversized_purpose = @as([MAX_PURPOSE_BYTES + 1]u8, @splat('p'));
 
     try std.testing.expectError(error.PurposeTooLong, service.offer(.{
         .subject = source,

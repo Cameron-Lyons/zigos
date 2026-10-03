@@ -134,13 +134,13 @@ pub const Router = struct {
     source: ?HardwareReportSource = null,
     compositor: ?*compositor_session.Session = null,
     compositor_task_id: u64 = 0,
-    keyboards: [MAX_KEYBOARDS]KeyboardSlot = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS,
+    keyboards: [MAX_KEYBOARDS]KeyboardSlot = @as([MAX_KEYBOARDS]KeyboardSlot, @splat(.{})),
     inboxes: InboxArena = InboxArena.init(),
     active_inbox_head: u8 = NO_INBOX_INDEX,
     active_inbox_tail: u8 = NO_INBOX_INDEX,
     wake_head: u8 = NO_INBOX_INDEX,
     wake_tail: u8 = NO_INBOX_INDEX,
-    event_slots: EventSlotBacking = if (heap_backed_event_slots) null else [_]EventSlot{.{}} ** MAX_QUEUED_EVENTS,
+    event_slots: EventSlotBacking = if (heap_backed_event_slots) null else @as([MAX_QUEUED_EVENTS]EventSlot, @splat(.{})),
     free_event_head: u8 = NO_EVENT_INDEX,
     event_pool_initialized: bool = false,
     queued_event_count: u8 = 0,
@@ -199,7 +199,7 @@ pub const Router = struct {
                 self.event_slots = null;
             }
         } else {
-            self.event_slots = [_]EventSlot{.{}} ** MAX_QUEUED_EVENTS;
+            self.event_slots = @as([MAX_QUEUED_EVENTS]EventSlot, @splat(.{}));
         }
         self.free_event_head = NO_EVENT_INDEX;
         self.event_pool_initialized = false;
@@ -214,7 +214,7 @@ pub const Router = struct {
         self.require_keyboard_neutral = false;
         self.source_epoch = if (source.continuity_epoch) |epoch| epoch() else null;
         self.last_report_sequence = 0;
-        self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
+        self.keyboards = @as([MAX_KEYBOARDS]KeyboardSlot, @splat(.{}));
     }
 
     pub fn clearHardwareSource(self: *Router) void {
@@ -224,7 +224,7 @@ pub const Router = struct {
         self.source = null;
         self.source_epoch = null;
         self.last_report_sequence = 0;
-        self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
+        self.keyboards = @as([MAX_KEYBOARDS]KeyboardSlot, @splat(.{}));
     }
 
     pub fn bindCompositor(
@@ -311,7 +311,7 @@ pub const Router = struct {
                 self.last_report_sequence = 0;
                 self.routing_epoch +|= 1;
                 self.dropAllInboxes();
-                self.keyboards = [_]KeyboardSlot{.{}} ** MAX_KEYBOARDS;
+                self.keyboards = @as([MAX_KEYBOARDS]KeyboardSlot, @splat(.{}));
                 self.require_keyboard_neutral = true;
                 self.drain_until_neutral = true;
                 self.released_since_boundary = false;
@@ -901,7 +901,7 @@ fn inputByte(kind: input_driver_task.EventKind) u8 {
 }
 
 const TestFeed = struct {
-    reports: [8]xhci.HardwareBootKeyboardReport = [_]xhci.HardwareBootKeyboardReport{.{}} ** 8,
+    reports: [8]xhci.HardwareBootKeyboardReport = @as([8]xhci.HardwareBootKeyboardReport, @splat(.{})),
     count: usize = 0,
     cursor: usize = 0,
 };
@@ -1324,7 +1324,7 @@ test "input router indexes inboxes and unlinks reused wake slots" {
 
 test "input router saturates its inbox arena and preserves the active chain across reuse" {
     var router = Router{};
-    var slot_indexes: [MAX_INBOXES]usize = [_]usize{0} ** MAX_INBOXES;
+    var slot_indexes: [MAX_INBOXES]usize = @as([MAX_INBOXES]usize, @splat(0));
     for (&slot_indexes, 0..) |*slot_index, task_offset| {
         slot_index.* = router.inboxForIndex(@intCast(task_offset + 1)).?;
     }
@@ -1342,7 +1342,7 @@ test "input router saturates its inbox arena and preserves the active chain acro
     try std.testing.expectEqual(@as(usize, MAX_INBOXES), router.inboxes.countInUse());
     try std.testing.expectEqual(@as(u8, @intCast(replacement_index)), router.active_inbox_tail);
 
-    var seen: [MAX_INBOXES]bool = [_]bool{false} ** MAX_INBOXES;
+    var seen: [MAX_INBOXES]bool = @as([MAX_INBOXES]bool, @splat(false));
     var previous = NO_INBOX_INDEX;
     var active_index: usize = router.active_inbox_head;
     var active_count: usize = 0;

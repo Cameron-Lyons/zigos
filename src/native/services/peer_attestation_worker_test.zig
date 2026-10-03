@@ -28,7 +28,7 @@ const Io = struct {
 };
 const Fixture = struct {
     challenge: attest.Challenge,
-    handle: connections.Handle = @enumFromInt(5),
+    handle: connections.Handle = @fromBackingInt(@intCast(5)),
     alive: bool = true,
     publications: usize = 0,
     releases: usize = 0,
@@ -113,7 +113,7 @@ test "peer attestation worker drains borrowed buffers through cancellation revoc
                 break :blk error.AttestationLeaseExpired;
             },
             3 => blk: {
-                f.owner.handle = @enumFromInt(9);
+                f.owner.handle = @fromBackingInt(@intCast(9));
                 break :blk error.StalePeerConnection;
             },
             4 => blk: {

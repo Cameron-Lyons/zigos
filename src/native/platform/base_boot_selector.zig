@@ -67,7 +67,7 @@ pub const Decision = struct {
 };
 
 pub const MemorySector = struct {
-    bytes: [sector_size]u8 = [_]u8{0} ** sector_size,
+    bytes: [sector_size]u8 = @as([sector_size]u8, @splat(0)),
     present: bool = false,
 
     pub fn init() MemorySector {
@@ -218,25 +218,25 @@ pub const Selector = struct {
     }
 
     pub fn persistToMemory(self: *const Selector, store: *MemorySector) Error!void {
-        var sector = [_]u8{0} ** sector_size;
+        var sector = @as([sector_size]u8, @splat(0));
         try self.encode(&sector);
         if (!store.write(&sector)) return error.SelectorWriteFailed;
     }
 
     pub fn loadFromMemory(self: *Selector, store: *const MemorySector) Error!void {
-        var sector = [_]u8{0} ** sector_size;
+        var sector = @as([sector_size]u8, @splat(0));
         if (!store.read(&sector)) return error.NoSelectorRecord;
         try self.decode(&sector);
     }
 
     pub fn persistToRootVolume(self: *const Selector) Error!void {
-        var sector = [_]u8{0} ** sector_size;
+        var sector = @as([sector_size]u8, @splat(0));
         try self.encode(&sector);
         if (!writeRootVolumeSector(&sector)) return error.SelectorWriteFailed;
     }
 
     pub fn loadFromRootVolume(self: *Selector) Error!void {
-        var sector = [_]u8{0} ** sector_size;
+        var sector = @as([sector_size]u8, @splat(0));
         if (!readRootVolumeSector(&sector)) return error.SelectorReadFailed;
         try self.decode(&sector);
     }
@@ -264,7 +264,7 @@ pub const Selector = struct {
         @memset(sector[0..], 0);
         @memcpy(sector[magic_offset..][0..magic.len], magic);
         std.mem.writeInt(u16, sector[version_offset..][0..@sizeOf(u16)], version, .little);
-        sector[state_offset] = @intFromEnum(self.state);
+        sector[state_offset] = @backingInt(self.state);
         sector[active_slot_offset] = if (self.active) |active| active.slot_index else empty_slot;
         sector[pending_slot_offset] = if (self.pending) |pending| pending.slot_index else empty_slot;
         sector[last_good_slot_offset] = self.last_good_slot;
@@ -282,9 +282,9 @@ pub const Selector = struct {
         if (std.mem.readInt(u16, sector[version_offset..][0..@sizeOf(u16)], .little) != version) return error.CorruptSelectorRecord;
 
         const decoded_state: State = switch (sector[state_offset]) {
-            @intFromEnum(State.empty) => .empty,
-            @intFromEnum(State.stable) => .stable,
-            @intFromEnum(State.pending) => .pending,
+            @backingInt(State.empty) => .empty,
+            @backingInt(State.stable) => .stable,
+            @backingInt(State.pending) => .pending,
             else => return error.CorruptSelectorRecord,
         };
         const decoded_active_slot = try decodeSlotByte(sector[active_slot_offset]);
@@ -402,7 +402,7 @@ fn decodeSelection(bytes: []const u8) Error!immutable_base.BootSelection {
     if (signer_len > immutable_base.MAX_LABEL_BYTES) return error.CorruptSelectorRecord;
 
     var measurement = crypto_hash.zero_digest;
-    var signer = [_]u8{0} ** immutable_base.MAX_LABEL_BYTES;
+    var signer = @as([immutable_base.MAX_LABEL_BYTES]u8, @splat(0));
     @memcpy(&measurement, bytes[40..72]);
     @memcpy(signer[0..signer_len], bytes[72..][0..signer_len]);
     return .{

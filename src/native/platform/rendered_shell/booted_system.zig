@@ -96,7 +96,7 @@ pub const BootedSystem = struct {
     hardware_text_dirty: bool = false,
     hardware_text_len: usize = 0,
     hardware_text: [humane_shell.MAX_SHELL_TEXT_INPUT_BYTES]u8 =
-        [_]u8{0} ** humane_shell.MAX_SHELL_TEXT_INPUT_BYTES,
+        @as([humane_shell.MAX_SHELL_TEXT_INPUT_BYTES]u8, @splat(0)),
 
     pub fn init(shell: *HumaneShell) BootedSystem {
         return .{ .shell = shell };

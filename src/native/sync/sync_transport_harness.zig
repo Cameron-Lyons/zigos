@@ -289,7 +289,7 @@ pub const BootedOverlayRelayService = struct {
     service_id: u64,
     task_id: u64,
     relay_domain_len: u8 = 0,
-    relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
+    relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
     relay: Relay = Relay.init(),
     accepted_packets: TelemetryCount = 0,
     delivered_packets: TelemetryCount = 0,
@@ -407,7 +407,7 @@ pub const TransportSession = struct {
     source_device: principal.PrincipalId,
     target_device: principal.PrincipalId,
     relay_domain_len: u8 = 0,
-    relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
+    relay_domain: [network_policy.MAX_TARGET_BYTES]u8 = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
     key: crypto_hash.Digest,
     egress_decision: network_policy.EgressDecision,
     trust_posture: SessionTrustPosture = .local_lab_only,
@@ -602,7 +602,7 @@ pub const Harness = struct {
             .source_serial = session.source_device.serial,
             .target_serial = session.target_device.serial,
             .ciphertext_len = @intCast(plaintext.len),
-            .ciphertext = [_]u8{0} ** MAX_PACKET_BYTES,
+            .ciphertext = @as([MAX_PACKET_BYTES]u8, @splat(0)),
             .authentication = undefined,
             .encrypted = true,
             .egress_allowed = session.egress_decision.allowed,
@@ -812,9 +812,9 @@ fn sessionContext(
     }
     crypto_hash.updateInt(&hasher, "policy", request.policy_id);
     crypto_hash.updateInt(&hasher, "capability", request.capability_id);
-    crypto_hash.updateInt(&hasher, "source-kind", @intFromEnum(source_device.kind));
+    crypto_hash.updateInt(&hasher, "source-kind", @backingInt(source_device.kind));
     crypto_hash.updateInt(&hasher, "source-serial", source_device.serial);
-    crypto_hash.updateInt(&hasher, "target-kind", @intFromEnum(target_device.kind));
+    crypto_hash.updateInt(&hasher, "target-kind", @backingInt(target_device.kind));
     crypto_hash.updateInt(&hasher, "target-serial", target_device.serial);
     crypto_hash.updateBytes(&hasher, "relay-domain", relay_domain);
     crypto_hash.updateInt(&hasher, "task", request.task_id);
@@ -1062,7 +1062,7 @@ test "encrypted transport harness only creates sessions after egress approval" {
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, relay_request, app, target, "relay.sync.example"));
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, relay_request, source, .{ .kind = .device, .serial = 0 }, "relay.sync.example"));
     try std.testing.expectError(error.EgressDenied, harness.openRelay(&broker, relay_request, source, source, "relay.sync.example"));
-    const long_relay_domain = [_]u8{'r'} ** (network_policy.MAX_TARGET_BYTES + 1);
+    const long_relay_domain = @as([network_policy.MAX_TARGET_BYTES + 1]u8, @splat('r'));
     try std.testing.expectError(error.RelayDomainTooLong, harness.openRelay(&broker, relay_request, source, target, &long_relay_domain));
 
     var wrapping_harness = Harness.init();
@@ -1503,13 +1503,13 @@ test "compact relay metadata preserves exact packet and domain capacities" {
     try std.testing.expect(@sizeOf(BootedOverlayRelayService) <= BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES);
     try std.testing.expectEqual(@as(usize, BOOTED_RELAY_SERVICE_SIZE_CEILING_BYTES), @sizeOf(BootedOverlayRelayService));
 
-    const packet_bytes = [_]u8{0xA5} ** MAX_PACKET_BYTES;
+    const packet_bytes = @as([MAX_PACKET_BYTES]u8, @splat(0xA5));
     var packet = std.mem.zeroes(EncryptedPacket);
     packet.ciphertext_len = @intCast(packet_bytes.len);
     @memcpy(&packet.ciphertext, &packet_bytes);
     try std.testing.expectEqualSlices(u8, &packet_bytes, packet.ciphertextSlice());
 
-    const relay_domain = [_]u8{'r'} ** network_policy.MAX_TARGET_BYTES;
+    const relay_domain = @as([network_policy.MAX_TARGET_BYTES]u8, @splat('r'));
     const service = try BootedOverlayRelayService.init(1, 2, &relay_domain);
     try std.testing.expectEqual(@as(u8, network_policy.MAX_TARGET_BYTES), service.relay_domain_len);
     try std.testing.expectEqualSlices(u8, &relay_domain, service.relayDomainSlice());

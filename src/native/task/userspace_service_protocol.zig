@@ -112,7 +112,7 @@ pub fn planFor(comptime kind: anytype) Plan {
 pub fn initialStateHash(kind: anytype) u64 {
     const service_kind = coerceKind(kind);
     var hash = userspace_wire.fnv1a64(STATE_HASH_NAMESPACE);
-    hash = userspace_wire.fnv1a64AppendByte(hash, @intFromEnum(service_kind));
+    hash = userspace_wire.fnv1a64AppendByte(hash, @backingInt(service_kind));
     return hash;
 }
 
@@ -130,7 +130,7 @@ pub fn encodeRequest(buffer: []u8, kind: anytype, op: Operation, ordinal: usize)
     var writer = Writer{ .buffer = buffer };
     try writer.writeU32(MAGIC);
     try writer.writeU16(WIRE_VERSION);
-    try writer.writeByte(@intFromEnum(service_kind));
+    try writer.writeByte(@backingInt(service_kind));
     try writer.writeByte(@intCast(ordinal));
     try writer.writeU16(op.code);
     try writer.writeU16(@intCast(op.name.len));
@@ -166,7 +166,7 @@ pub fn encodeResponse(buffer: []u8, request: Message, state_hash: u64) Error![]c
     var writer = Writer{ .buffer = buffer };
     try writer.writeU32(MAGIC);
     try writer.writeU16(WIRE_VERSION);
-    try writer.writeByte(@intFromEnum(request.kind));
+    try writer.writeByte(@backingInt(request.kind));
     try writer.writeByte(request.ordinal);
     try writer.writeU16(request.code);
     try writer.writeU16(@intCast(request.name.len));
@@ -213,7 +213,7 @@ pub fn requestMatchesOperation(request: Message, kind: anytype, op: Operation, o
 fn coerceKind(kind: anytype) ServiceKind {
     return switch (@typeInfo(@TypeOf(kind))) {
         .enum_literal => @as(ServiceKind, kind),
-        .@"enum" => @enumFromInt(@intFromEnum(kind)),
+        .@"enum" => @fromBackingInt(@intCast(@backingInt(kind))),
         else => @compileError("service kind must be an enum or enum literal"),
     };
 }
@@ -224,7 +224,7 @@ fn plan(comptime kind: ServiceKind, comptime endpoint_label: []const u8, comptim
         .kind = kind,
         .endpoint_label = endpoint_label,
         .operation_count = @intCast(ops.len),
-        .operations = [_]Operation{.{ .code = 0, .name = "", .value = 0 }} ** MAX_OPERATIONS,
+        .operations = @as([MAX_OPERATIONS]Operation, @splat(.{ .code = 0, .name = "", .value = 0 })),
     };
     inline for (ops, 0..) |op, index| {
         if (op.name.len > MAX_OPERATION_NAME_BYTES) @compileError("userspace service operation name too long");

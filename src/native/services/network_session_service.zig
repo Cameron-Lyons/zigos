@@ -100,7 +100,7 @@ pub const Error = network_policy.Error || event_ledger.Error || error{
 const SessionHandle = indexed_arena.GenerationalHandle("NetworkSession");
 
 pub const Service = struct {
-    sessions: [MAX_SESSIONS]SessionRecord = [_]SessionRecord{zeroSession()} ** MAX_SESSIONS,
+    sessions: [MAX_SESSIONS]SessionRecord = @as([MAX_SESSIONS]SessionRecord, @splat(zeroSession())),
     session_count: u8 = 0,
     next_reusable_session: u8 = 0,
 
@@ -423,7 +423,7 @@ fn zeroSession() SessionRecord {
         .matched_mode = .none,
         .sensitivity = .internal_data,
         .destination_len = 0,
-        .destination = [_]u8{0} ** MAX_DESTINATION_BYTES,
+        .destination = @as([MAX_DESTINATION_BYTES]u8, @splat(0)),
         .byte_limit = 0,
         .opened_at_ticks = 0,
         .expires_at_ticks = 0,
@@ -538,7 +538,7 @@ test "network session open validates destinations and uses direct generational h
     const subjects = policy_object.SubjectSet{ .user_id = 900 };
 
     var service = Service.init();
-    const oversized_destination = [_]u8{'a'} ** (MAX_DESTINATION_BYTES + 1);
+    const oversized_destination = @as([MAX_DESTINATION_BYTES + 1]u8, @splat('a'));
     try std.testing.expectError(error.DestinationTooLong, service.open(
         &network_policies,
         &capabilities,

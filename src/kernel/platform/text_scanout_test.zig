@@ -81,7 +81,7 @@ test "incremental scanout matches fresh rendering across text and style changes"
             const index = random.uintLessThan(usize, frame.columns * frame.rows);
             frame.cells[index] = .{
                 .character = random.intRangeAtMost(u8, ' ', '~'),
-                .style = @enumFromInt(random.uintLessThan(u3, 5)),
+                .style = @fromBackingInt(@intCast(random.uintLessThan(u3, 5))),
                 .cursor = random.boolean(),
                 .cursor_trailing = random.boolean(),
             };
@@ -94,7 +94,7 @@ test "incremental scanout matches fresh rendering across text and style changes"
 }
 
 test "scanout rejects invalid storage and frame dimensions before writing" {
-    var pixels = [_]u32{123} ** 4;
+    var pixels = @as([4]u32, @splat(123));
     try std.testing.expectError(error.BufferTooSmall, scanout.Renderer.init(testInfo(), &pixels));
     try std.testing.expectEqualSlices(u32, &.{ 123, 123, 123, 123 }, &pixels);
     try std.testing.expectError(error.InvalidFrame, scanout.Frame.init(std.math.maxInt(usize), 1));

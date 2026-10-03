@@ -44,7 +44,7 @@ pub fn acknowledge() void {
 
 pub fn icrValue(command: Icr) u64 {
     return @as(u64, command.vector) |
-        (@as(u64, @intFromEnum(command.delivery)) << 8) |
+        (@as(u64, @backingInt(command.delivery)) << 8) |
         (@as(u64, command.destination) << 32);
 }
 

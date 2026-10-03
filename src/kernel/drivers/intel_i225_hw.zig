@@ -172,7 +172,7 @@ const ControllerState = enum(u8) {
     active,
 };
 
-var controller_state: u8 = @intFromEnum(ControllerState.unprepared);
+var controller_state: u8 = @backingInt(ControllerState.unprepared);
 var controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var published_bar_physical: u64 = 0;
@@ -186,11 +186,11 @@ var pending_interrupt_causes: u32 = 0;
 var empty_interrupt_streak: u8 = 0;
 
 fn controllerState() ControllerState {
-    return @enumFromInt(@atomicLoad(u8, &controller_state, .acquire));
+    return @fromBackingInt(@intCast(@atomicLoad(u8, &controller_state, .acquire)));
 }
 
 fn publishControllerState(value: ControllerState) void {
-    @atomicStore(u8, &controller_state, @intFromEnum(value), .release);
+    @atomicStore(u8, &controller_state, @backingInt(value), .release);
 }
 
 fn controllerPrepared() bool {
@@ -338,7 +338,7 @@ pub fn publishedBar() ?struct { physical_base: u64, length: u64 } {
 }
 
 pub fn macAddress() [6]u8 {
-    if (!controllerPrepared()) return [_]u8{0} ** 6;
+    if (!controllerPrepared()) return @as([6]u8, @splat(0));
     return controller.mac;
 }
 

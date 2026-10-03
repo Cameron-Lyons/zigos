@@ -139,7 +139,7 @@ fn u32At(bytes: *const [256]u8, offset: usize) u32 {
 }
 
 fn fixture() [256]u8 {
-    var bytes = [_]u8{0} ** 256;
+    var bytes = @as([256]u8, @splat(0));
     std.mem.writeInt(u16, bytes[0..2], VENDOR, .little);
     std.mem.writeInt(u16, bytes[2..4], NET_DEVICE, .little);
     bytes[6] = 0x10;
@@ -162,7 +162,7 @@ fn fixture() [256]u8 {
 
 test "virtio pci validates modern regions and bounds queue notifications" {
     const bytes = fixture();
-    const bars = [_]Bar{.{ .address = 0x100000, .length = 4096 }} ** 6;
+    const bars = @as([6]Bar, @splat(.{ .address = 0x100000, .length = 4096 }));
     const layout = try parse(&bytes, &bars);
     try std.testing.expectEqual(@as(u64, 0x100000), layout.common.physical(&bars));
     try std.testing.expectEqual(@as(u32, 0x104), (try layout.notification(1)).offset);
@@ -172,7 +172,7 @@ test "virtio pci validates modern regions and bounds queue notifications" {
 }
 
 test "virtio pci rejects truncated cyclic and escaping capabilities" {
-    const bars = [_]Bar{.{ .address = 0x100000, .length = 4096 }} ** 6;
+    const bars = @as([6]Bar, @splat(.{ .address = 0x100000, .length = 4096 }));
     var bytes = fixture();
     bytes[0x91] = 0x40;
     try std.testing.expectError(error.MalformedCapabilities, parse(&bytes, &bars));

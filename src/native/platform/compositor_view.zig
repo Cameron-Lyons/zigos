@@ -139,7 +139,7 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: *const @import("t
     frame.fillRow(2, .selected);
     frame.put(1, 2, if (recovering) "Recover Zigos" else "Unlock Zigos", .selected);
     frame.put(0, 4, if (recovering) "Enter your recovery key" else "Enter your device PIN", .body);
-    const mask = "*" ** @import("trusted_auth_entry.zig").MAX_ENTRY_BYTES;
+    const mask = &@as([@import("trusted_auth_entry.zig").MAX_ENTRY_BYTES]u8, @splat('*'));
     const count = @min(authentication.characters, mask.len);
     var offset: usize = 0;
     var row: usize = 6;
@@ -202,18 +202,18 @@ test "desktop view shows complete credential targets and acknowledges only suffi
     var session = compositor.Session.init();
     defer session.deinit();
     var authentication = @import("trusted_auth_entry.zig").View{};
-    authentication.review = try @import("trusted_credential_review.zig").Review.init("a" ** 64, "r" ** 64, "o" ** 95 ++ "z", 100);
+    authentication.review = try @import("trusted_credential_review.zig").Review.init(&@as([64]u8, @splat('a')), &@as([64]u8, @splat('r')), &@as([95]u8, @splat('o')) ++ "z", 100);
     var trusted = @import("trusted_identity_entry.zig").View{ .authentication = &authentication };
     session.trusted_view = &trusted;
     var frame = try scanout.Frame.init(40, 20);
     render(&frame, &session, null);
-    try expectText(&frame, 0, 5, "a" ** 40);
-    try expectText(&frame, 0, 6, "a" ** 24);
-    try expectText(&frame, 0, 9, "r" ** 40);
-    try expectText(&frame, 0, 10, "r" ** 24);
-    try expectText(&frame, 0, 13, "o" ** 40);
-    try expectText(&frame, 0, 14, "o" ** 40);
-    try expectText(&frame, 0, 15, "o" ** 15 ++ "z");
+    try expectText(&frame, 0, 5, &@as([40]u8, @splat('a')));
+    try expectText(&frame, 0, 6, &@as([24]u8, @splat('a')));
+    try expectText(&frame, 0, 9, &@as([40]u8, @splat('r')));
+    try expectText(&frame, 0, 10, &@as([24]u8, @splat('r')));
+    try expectText(&frame, 0, 13, &@as([40]u8, @splat('o')));
+    try expectText(&frame, 0, 14, &@as([40]u8, @splat('o')));
+    try expectText(&frame, 0, 15, &@as([15]u8, @splat('o')) ++ "z");
     try expectText(&frame, 0, 17, " Cancel ");
     try std.testing.expect(!authentication.review.presented);
     trusted.presented(40, 20, true);
@@ -257,7 +257,7 @@ fn renderSetup(frame: *scanout.Frame, setup: *const @import("trusted_setup_entry
         .unavailable => "Setup is unavailable.",
         .record_recovery => unreachable,
     }, .body);
-    const mask = "*" ** @import("../services/identity_recovery_record.zig").CODE_BYTES;
+    const mask = &@as([@import("../services/identity_recovery_record.zig").CODE_BYTES]u8, @splat('*'));
     const count = @min(setup.characters, mask.len);
     var offset: usize = 0;
     var row: usize = 6;
@@ -303,9 +303,9 @@ test "desktop view confines recovery export to the native setup screen" {
     setup.status = .confirm_recovery;
     setup.characters = 128;
     render(&frame, &session, app);
-    try expectText(&frame, 0, 6, "*" ** 60);
-    try expectText(&frame, 0, 7, "*" ** 60);
-    try expectText(&frame, 0, 8, "*" ** 8);
+    try expectText(&frame, 0, 6, &@as([60]u8, @splat('*')));
+    try expectText(&frame, 0, 7, &@as([60]u8, @splat('*')));
+    try expectText(&frame, 0, 8, &@as([8]u8, @splat('*')));
     for (frame.cells[9 * frame.columns ..][0..frame.columns]) |cell| try std.testing.expectEqual(scanout.Cell{}, cell);
     setup.status = .committing;
     setup.characters = 0;
@@ -335,7 +335,7 @@ test "desktop view gives trusted authentication exclusive masked chrome" {
     authentication.characters = 56;
     render(&frame, &session, app);
     try expectText(&frame, 1, 2, "Recover Zigos");
-    try expectText(&frame, 0, 6, "*" ** 56);
+    try expectText(&frame, 0, 6, &@as([56]u8, @splat('*')));
     try expectText(&frame, 0, 8, "Recovering...");
     authentication.status = .invalid_code;
     authentication.characters = 0;
@@ -504,7 +504,7 @@ test "desktop selection highlights both directions across newlines and clears on
 test "desktop row window keeps Unicode selection and cursor after repeated scrolling" {
     const std = @import("std");
     const line = "界e\u{301}\tZ\r\n";
-    const text = line ** 30 ++ "tail";
+    const text = @as([line.len * 30]u8, @bitCast(@as([30][line.len]u8, @splat(line.*)))) ++ "tail";
     var frame = try scanout.Frame.init(20, 10);
     drawText(&frame, 5, text, text.len, text.len - 4 - line.len + 3);
     const first = frame.cells[5 * frame.columns ..][0..frame.columns];

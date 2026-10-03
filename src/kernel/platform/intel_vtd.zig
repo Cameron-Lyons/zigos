@@ -231,13 +231,13 @@ pub const FaultRecord = struct {
 var enabled = false;
 var interrupt_remapping_enabled = false;
 var fault_monitoring_enabled = false;
-var protected_requester_ids: [MAX_DMA_DOMAINS]u16 = [_]u16{0} ** MAX_DMA_DOMAINS;
+var protected_requester_ids: [MAX_DMA_DOMAINS]u16 = @as([MAX_DMA_DOMAINS]u16, @splat(0));
 var protected_requester_count: usize = 0;
 var active_units: [dmar.MAX_REMAPPING_UNITS]ActiveUnit = undefined;
 var active_table_memory = DmaAddress{};
 var active_unit_count: u8 = 0;
 var blocked_dma_proof: ?FaultRecord = null;
-var deferred_faults: [MAX_DMA_DOMAINS]?FaultRecord = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
+var deferred_faults: [MAX_DMA_DOMAINS]?FaultRecord = @as([MAX_DMA_DOMAINS]?FaultRecord, @splat(null));
 
 pub fn dmaIsolationEnabled() bool {
     return enabled;
@@ -370,7 +370,7 @@ fn enforceValidatedDevices(summary: *const dmar.Summary, domains: []const DmaDom
     interrupt_remapping_enabled = true;
     fault_monitoring_enabled = true;
     blocked_dma_proof = null;
-    deferred_faults = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
+    deferred_faults = @as([MAX_DMA_DOMAINS]?FaultRecord, @splat(null));
     enabled = true;
 }
 
@@ -416,8 +416,8 @@ fn validateWindows(windows: []const DmaWindow) Error!void {
 }
 
 fn chooseAddressWidth(sagaw: u8) ?AddressWidth {
-    if ((sagaw & (@as(u8, 1) << @intFromEnum(AddressWidth.bits39))) != 0) return .bits39;
-    if ((sagaw & (@as(u8, 1) << @intFromEnum(AddressWidth.bits48))) != 0) return .bits48;
+    if ((sagaw & (@as(u8, 1) << @backingInt(AddressWidth.bits39))) != 0) return .bits39;
+    if ((sagaw & (@as(u8, 1) << @backingInt(AddressWidth.bits48))) != 0) return .bits48;
     return null;
 }
 
@@ -527,7 +527,7 @@ const TableBuilder = struct {
     table_base: u32,
     address_width: AddressWidth,
     next_page: u32 = FIRST_DYNAMIC_TABLE_PAGE,
-    context_pages: [256]u8 = [_]u8{0} ** 256,
+    context_pages: [256]u8 = @as([256]u8, @splat(0)),
 
     fn allocatePage(self: *TableBuilder) Error!u32 {
         if (self.next_page >= TABLE_PAGE_COUNT) return error.TableAllocationFailed;
@@ -559,7 +559,7 @@ const TableBuilder = struct {
         );
         self.tables.*[context_page][context_index] = second_stage_root | PRESENT;
         self.tables.*[context_page][context_index + 1] = (@as(u64, domain_id) << 8) |
-            @intFromEnum(self.address_width);
+            @backingInt(self.address_width);
 
         if (l4_page) |page| {
             self.tables.*[page][0] = tablePagePhysical(self.table_base, l3_page) |
@@ -877,7 +877,7 @@ fn parseFaultRecord(unit_index: u8, low: u64, high: u64) FaultRecord {
         .unit_index = unit_index,
         .source_id = @truncate(high),
         .reason = @truncate(high >> 32),
-        .request_type = @enumFromInt((t1 << 1) | t2),
+        .request_type = @fromBackingInt(@intCast((t1 << 1) | t2)),
         .info = low & ADDRESS_MASK,
     };
 }
@@ -1069,7 +1069,7 @@ test "VT-d tables expose only the NVMe requester and exact DMA pages" {
     const context_index = (@as(usize, device_info.device) * 8 + device_info.function) * 2;
     const l3_page = tablePageIndex(table_base, tables[context_page][context_index]);
     try std.testing.expectEqual(
-        (@as(u64, FIRST_DOMAIN_ID) << 8) | @intFromEnum(AddressWidth.bits39),
+        (@as(u64, FIRST_DOMAIN_ID) << 8) | @backingInt(AddressWidth.bits39),
         tables[context_page][context_index + 1],
     );
     try std.testing.expectEqual(@as(u64, 0), tables[context_page][0]);
@@ -1140,11 +1140,11 @@ test "VT-d domains isolate NVMe and I225 requesters with multi-page windows" {
     const nvme_context_index = (@as(usize, syntheticNvme().device) * 8 + syntheticNvme().function) * 2;
     const i225_context_index = (@as(usize, syntheticI225().device) * 8 + syntheticI225().function) * 2;
     try std.testing.expectEqual(
-        (@as(u64, FIRST_DOMAIN_ID) << 8) | @intFromEnum(AddressWidth.bits39),
+        (@as(u64, FIRST_DOMAIN_ID) << 8) | @backingInt(AddressWidth.bits39),
         tables[nvme_context_page][nvme_context_index + 1],
     );
     try std.testing.expectEqual(
-        (@as(u64, FIRST_DOMAIN_ID + 1) << 8) | @intFromEnum(AddressWidth.bits39),
+        (@as(u64, FIRST_DOMAIN_ID + 1) << 8) | @backingInt(AddressWidth.bits39),
         tables[i225_context_page][i225_context_index + 1],
     );
 
@@ -1192,7 +1192,7 @@ test "VT-d tables isolate storage network and xHCI requesters" {
     const xhci_context_index = (@as(usize, syntheticXhci().device) * 8 +
         syntheticXhci().function) * 2;
     try std.testing.expectEqual(
-        (@as(u64, FIRST_DOMAIN_ID + 2) << 8) | @intFromEnum(AddressWidth.bits48),
+        (@as(u64, FIRST_DOMAIN_ID + 2) << 8) | @backingInt(AddressWidth.bits48),
         tables[xhci_context_page][xhci_context_index + 1],
     );
     const xhci_l4 = tablePageIndex(
@@ -1238,11 +1238,11 @@ test "VT-d fault routing retains a record for the owning requester" {
         requesterId(syntheticXhci()),
     };
     protected_requester_count = 3;
-    deferred_faults = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
+    deferred_faults = @as([MAX_DMA_DOMAINS]?FaultRecord, @splat(null));
     defer {
-        protected_requester_ids = [_]u16{0} ** MAX_DMA_DOMAINS;
+        protected_requester_ids = @as([MAX_DMA_DOMAINS]u16, @splat(0));
         protected_requester_count = 0;
-        deferred_faults = [_]?FaultRecord{null} ** MAX_DMA_DOMAINS;
+        deferred_faults = @as([MAX_DMA_DOMAINS]?FaultRecord, @splat(null));
     }
     const network_fault = FaultRecord{
         .unit_index = 0,

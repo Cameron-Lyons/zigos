@@ -459,7 +459,7 @@ pub const Kernel = struct {
         output: []capability.Capability,
         first_task: ?*task_runtime.TaskRecord,
     ) Error![]capability.Capability {
-        var runtime_tasks = [_]?*task_runtime.TaskRecord{null} ** capability.MAX_GRANT_PLAN_ENTRIES;
+        var runtime_tasks = @as([capability.MAX_GRANT_PLAN_ENTRIES]?*task_runtime.TaskRecord, @splat(null));
         runtime_tasks[0] = first_task;
         try self.validateRuntimeGrantPlan(plan, &runtime_tasks);
         const minted = try self.capability_table.applyGrantPlan(plan, output);
@@ -710,7 +710,7 @@ pub const Kernel = struct {
         const task = try self.taskForAuthorizedRequest(authorization, task_id);
         return .{
             .task_id = task.id,
-            .state = @intFromEnum(task.state),
+            .state = @backingInt(task.state),
             .capability_count = @intCast(task.capability_count),
             .endpoint_count = self.endpoint_table.activeForTask(ids.task(task_id)),
             .flags = taskFlags(task),
@@ -1601,8 +1601,8 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_ZERO_AMBIENT_AUTHORITY));
     try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
     try std.testing.expect(abi.taskFlagsHas(service_task_desc.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
-    try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.emergency_system_critical)), abi.taskFlagsResourceClass(service_task_desc.flags));
-    try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(app_task_desc.flags));
+    try std.testing.expectEqual(@as(u8, @backingInt(accelerator_scheduler.ResourceClass.emergency_system_critical)), abi.taskFlagsResourceClass(service_task_desc.flags));
+    try std.testing.expectEqual(@as(u8, @backingInt(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(app_task_desc.flags));
 
     const service_endpoint = try kernel.endpointCreate(testContext(.endpoint_create, authority_capability.id, .{ .task = service_task_desc.task_id }), service_task_desc.task_id, "zigos.object.workspace", .{
         .local_only = true,
@@ -1673,7 +1673,7 @@ test "native kernel creates tasks endpoints and shared memory without owning ser
     const accounting = try kernel.accountingQuery(testContext(.accounting_query, authority_capability.id, .{ .task = app_task_desc.task_id }), app_task_desc.task_id, 10);
     try std.testing.expectEqual(@as(u16, 2), resources.endpoint_count);
     try std.testing.expect(accounting.audit_event_count >= 1);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(resources.flags));
+    try std.testing.expectEqual(@as(u8, @backingInt(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(resources.flags));
 
     var self_resource_context = testContext(.resource_query, authority_capability.id, .{ .task = session_task.id });
     self_resource_context.caller_task_id = session_task.id;

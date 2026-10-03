@@ -122,11 +122,11 @@ pub fn available() bool {
 
 const HardwareIo = struct {
     pub fn read(_: *HardwareIo, reg: crb.Reg) u32 {
-        const ptr: *volatile u32 = @ptrFromInt(windows.tpm_crb.base + @intFromEnum(reg));
+        const ptr: *volatile u32 = @ptrFromInt(windows.tpm_crb.base + @backingInt(reg));
         return ptr.*;
     }
     pub fn write(_: *HardwareIo, reg: crb.Reg, value: u32) void {
-        const ptr: *volatile u32 = @ptrFromInt(windows.tpm_crb.base + @intFromEnum(reg));
+        const ptr: *volatile u32 = @ptrFromInt(windows.tpm_crb.base + @backingInt(reg));
         asm volatile ("" ::: .{ .memory = true });
         ptr.* = value;
         asm volatile ("" ::: .{ .memory = true });

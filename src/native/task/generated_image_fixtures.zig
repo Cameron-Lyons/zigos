@@ -82,7 +82,7 @@ pub fn expectReaderRejectsInvalidGeneratedRecords() !void {
     missing_bytes.data.chunk_pool = &.{};
     missing_bytes.data.chunk_indices = &.{};
     missing_bytes.file_size_bytes = 0;
-    missing_bytes.file_sha256 = [_]u8{0} ** 32;
+    missing_bytes.file_sha256 = @as([32]u8, @splat(0));
     try std.testing.expectError(error.GeneratedImageMissingBytes, validateArtifact(missing_bytes));
 
     var digest_mismatch = archive_index.artifacts[0];

@@ -29,13 +29,13 @@ const SpaceSlot = struct {
     space_id: usize = 0,
     occupied: bool = false,
     region_count: u8 = 0,
-    regions: [MAX_REGIONS]Region = [_]Region{.{}} ** MAX_REGIONS,
+    regions: [MAX_REGIONS]Region = @as([MAX_REGIONS]Region, @splat(.{})),
 };
 
-var spaces: [MAX_ADDRESS_SPACES]SpaceSlot = [_]SpaceSlot{.{}} ** MAX_ADDRESS_SPACES;
+var spaces: [MAX_ADDRESS_SPACES]SpaceSlot = @as([MAX_ADDRESS_SPACES]SpaceSlot, @splat(.{}));
 
 pub fn reset() void {
-    spaces = [_]SpaceSlot{.{}} ** MAX_ADDRESS_SPACES;
+    spaces = @as([MAX_ADDRESS_SPACES]SpaceSlot, @splat(.{}));
 }
 
 pub fn register(region: Region) bool {

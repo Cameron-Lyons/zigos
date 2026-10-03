@@ -292,7 +292,7 @@ fn proveQuoteWorker(manager: anytype, io: anytype, parent: tpm.PersistentParent,
         reject_delivery: bool = false,
         fn next(context: *anyopaque, _: u64, _: usize) ?connections.Handle {
             const self: *@This() = @ptrCast(@alignCast(context));
-            return if (self.prover.needsQuote()) @enumFromInt(1) else null;
+            return if (self.prover.needsQuote()) @fromBackingInt(@intCast(1)) else null;
         }
         fn get(context: *anyopaque, _: connections.Handle, now: u64) ?attestation.tpm.Challenge {
             const self: *@This() = @ptrCast(@alignCast(context));
@@ -331,7 +331,7 @@ fn proveQuoteWorker(manager: anytype, io: anytype, parent: tpm.PersistentParent,
     for (0..4) |attempt| {
         context.reject_delivery = attempt == 2;
         io.last_command = 0;
-        try worker.start(owner, @enumFromInt(1), now);
+        try worker.start(owner, @fromBackingInt(@intCast(1)), now);
         const dispatch_before = (scheduler.taskDispatchStats(task_id) orelse return error.MissingQuotePeerTask).dispatch_count;
         _ = scheduler.wakeTask(task_id, .external_event, 0, now);
         const deadline = clock.afterMilliseconds(20_000);

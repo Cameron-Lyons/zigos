@@ -495,7 +495,7 @@ test "humane permission rendering handles maximum unsigned values" {
     try std.testing.expectEqual(expected.len, used);
     try std.testing.expectEqualStrings(expected, exact_buffer[0..used]);
 
-    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    var undersized_backing = @as([expected.len]u8, @splat(0xa5));
     used = 0;
     try std.testing.expectError(
         error.NoSpaceLeft,
@@ -584,7 +584,7 @@ test "humane background activity and revocation receipts are user readable" {
         .id = 1,
         .task_id = 44,
         .background_task_id_len = 4,
-        .background_task_id = [_]u8{ 's', 'y', 'n', 'c' } ++ [_]u8{0} ** (background_dispatch.MAX_TASK_ID_BYTES - 4),
+        .background_task_id = [_]u8{ 's', 'y', 'n', 'c' } ++ @as([background_dispatch.MAX_TASK_ID_BYTES - 4]u8, @splat(0)),
         .trigger = .sync_completion,
         .expected_duration_seconds = 40,
         .budget = .{ .cpu_time_ticks = 1100, .memory_bytes = units.kibibytes(96) },

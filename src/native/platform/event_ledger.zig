@@ -223,7 +223,7 @@ pub const Event = struct {
     denial_reason: abi.DenialReason = .none,
     detail_protected: bool = false,
     detail_len: u16 = 0,
-    detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
+    detail: [MAX_DETAIL_BYTES]u8 = @as([MAX_DETAIL_BYTES]u8, @splat(0)),
 
     comptime {
         if (@sizeOf(@This()) > EVENT_SIZE_CEILING_BYTES) {
@@ -292,7 +292,7 @@ fn eventSlotSequence(slot: *const EventSlot) u64 {
 }
 
 const EventArena = indexed_arena.IndexedArena(EventSlot, MAX_EVENTS, MAX_EVENTS * 2, eventSlotSequence);
-const event_kind_count = std.meta.fields(EventKind).len;
+const event_kind_count = @typeInfo(EventKind).@"enum".field_names.len;
 const KindEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, event_kind_count, event_kind_count * 2);
 const SubjectEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
 const TaskEventIndex = indexed_arena.MultimapIndex(MAX_EVENTS, MAX_EVENTS, MAX_EVENTS * 2);
@@ -575,7 +575,7 @@ pub const Ledger = struct {
             .subject = notification.source,
             .task_id = notification.task_id,
             .related_id = notification.id,
-            .detail_code = @intFromEnum(notification.reason),
+            .detail_code = @backingInt(notification.reason),
             .allowed = !notification.suppressed,
             .detail = notification.detailSlice(),
         });
@@ -593,7 +593,7 @@ pub const Ledger = struct {
             .task_id = flow.task_id,
             .workspace_id = flow.workspace_id,
             .related_id = flow.id,
-            .detail_code = @intFromEnum(flow.kind),
+            .detail_code = @backingInt(flow.kind),
             .permission_kind = if (flow.kind == .review_permission_request) flow.permission_kind else null,
             .allowed = flow.approved,
             .detail = flow.detailSlice(),
@@ -610,7 +610,7 @@ pub const Ledger = struct {
         tick: u64,
         detail: []const u8,
     ) Error!void {
-        var code: u32 = @intFromEnum(operation);
+        var code: u32 = @backingInt(operation);
         if (checkpoint_present) code |= @as(u32, 1) << @as(u5, 31);
         try self.append(.{
             .kind = .task_lifecycle,
@@ -723,7 +723,7 @@ pub const Ledger = struct {
             .tick = tick,
             .subject = subject,
             .related_id = slot_index,
-            .detail_code = @intFromEnum(failure),
+            .detail_code = @backingInt(failure),
             .allowed = !rolled_back,
             .detail = detail,
         });
@@ -778,7 +778,7 @@ pub const Ledger = struct {
             .tick = tick,
             .subject = subject,
             .related_id = policy_id,
-            .detail_code = @intFromEnum(action),
+            .detail_code = @backingInt(action),
             .allowed = action != .revoked,
             .detail = detail,
         });
@@ -850,7 +850,7 @@ pub const Ledger = struct {
             .subject = subject,
             .task_id = task_id,
             .related_id = remote_bytes,
-            .detail_code = @intFromEnum(sensitivity),
+            .detail_code = @backingInt(sensitivity),
             .allowed = allowed,
             .detail_protected = manifest.isSensitive(sensitivity),
             .detail = detail,
@@ -892,7 +892,7 @@ pub const Ledger = struct {
             .subject = subject,
             .task_id = task_id,
             .related_id = export_bytes,
-            .detail_code = @intFromEnum(sensitivity),
+            .detail_code = @backingInt(sensitivity),
             .allowed = allowed,
             .detail_protected = manifest.isSensitive(sensitivity),
             .detail = detail,
@@ -960,7 +960,7 @@ pub const Ledger = struct {
             .subject = subject,
             .task_id = task_id,
             .related_id = lease_ticks,
-            .detail_code = @intFromEnum(action),
+            .detail_code = @backingInt(action),
             .permission_kind = permission_kind,
             .allowed = action != .expired,
             .detail_protected = protected,
@@ -983,7 +983,7 @@ pub const Ledger = struct {
             .subject = subject,
             .task_id = task_id,
             .related_id = receipt_id,
-            .detail_code = @intFromEnum(action),
+            .detail_code = @backingInt(action),
             .allowed = action != .revoked,
             .detail_protected = true,
             .detail = detail,
@@ -1141,8 +1141,8 @@ pub const Ledger = struct {
         tick: u64,
         detail: []const u8,
     ) Error!void {
-        var code: u32 = @intFromEnum(reason);
-        code |= @as(u32, @intFromEnum(class)) << @as(u5, 8);
+        var code: u32 = @backingInt(reason);
+        code |= @as(u32, @backingInt(class)) << @as(u5, 8);
         if (degraded) code |= @as(u32, 1) << @as(u5, 29);
         if (observed_telemetry) code |= @as(u32, 1) << @as(u5, 30);
         if (hardware_evidence) code |= @as(u32, 1) << @as(u5, 31);
@@ -1172,8 +1172,8 @@ pub const Ledger = struct {
         tick: u64,
         detail: []const u8,
     ) Error!void {
-        var code: u32 = @intFromEnum(action);
-        code |= @as(u32, @intFromEnum(reason)) << @as(u5, 8);
+        var code: u32 = @backingInt(action);
+        code |= @as(u32, @backingInt(reason)) << @as(u5, 8);
         if (attested) code |= @as(u32, 1) << @as(u5, 29);
         if (identity_pinned) code |= @as(u32, 1) << @as(u5, 30);
         if (private_data) code |= @as(u32, 1) << @as(u5, 31);
@@ -1510,11 +1510,11 @@ pub const Ledger = struct {
                 .retention_policy => summary.retention_policy_events += 1,
                 .permission_lease => {
                     summary.permission_lease_events += 1;
-                    if (event.detail_code == @intFromEnum(PermissionLeaseAction.expired)) summary.permission_lease_expirations += 1;
+                    if (event.detail_code == @backingInt(PermissionLeaseAction.expired)) summary.permission_lease_expirations += 1;
                 },
                 .consent_receipt => {
                     summary.consent_receipt_events += 1;
-                    if (event.detail_code == @intFromEnum(ConsentReceiptAction.revoked)) summary.consent_receipt_revocations += 1;
+                    if (event.detail_code == @backingInt(ConsentReceiptAction.revoked)) summary.consent_receipt_revocations += 1;
                 },
                 .agent_delegation => {
                     summary.agent_delegation_events += 1;
@@ -1742,9 +1742,9 @@ pub const Ledger = struct {
         var prompt_count: usize = 0;
         var object_grant_count: usize = 0;
         var egress_route_count: usize = 0;
-        var grant_ids: [MAX_EVENTS]u64 = [_]u64{0} ** MAX_EVENTS;
+        var grant_ids: [MAX_EVENTS]u64 = @as([MAX_EVENTS]u64, @splat(0));
         var grant_id_count: usize = 0;
-        var revocation_ids: [MAX_EVENTS]u64 = [_]u64{0} ** MAX_EVENTS;
+        var revocation_ids: [MAX_EVENTS]u64 = @as([MAX_EVENTS]u64, @splat(0));
         var revocation_id_count: usize = 0;
         var latest_object_capability: u64 = 0;
         var latest_egress_capability: u64 = 0;
@@ -2229,17 +2229,17 @@ const PersistentEventRecord = extern struct {
     service_class: u8 = 0,
     permission_kind: u8 = permission_kind_none,
     flags: u8 = 0,
-    _reserved: [PERSISTENT_EVENT_RESERVED_BYTES]u8 = [_]u8{0} ** PERSISTENT_EVENT_RESERVED_BYTES,
-    detail: [MAX_PERSISTED_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_PERSISTED_DETAIL_BYTES,
+    _reserved: [PERSISTENT_EVENT_RESERVED_BYTES]u8 = @as([PERSISTENT_EVENT_RESERVED_BYTES]u8, @splat(0)),
+    detail: [MAX_PERSISTED_DETAIL_BYTES]u8 = @as([MAX_PERSISTED_DETAIL_BYTES]u8, @splat(0)),
 
     fn fromEvent(event: *const Event) PersistentEventRecord {
         var record = PersistentEventRecord{
             .sequence = event.sequence,
-            .kind = @intFromEnum(event.kind),
-            .subject_kind = @intFromEnum(event.subject.kind),
-            .service_class = @intFromEnum(event.service_class),
-            .permission_kind = if (event.permission_kind) |permission_kind| @intFromEnum(permission_kind) else permission_kind_none,
-            .denial_reason = @intFromEnum(event.denial_reason),
+            .kind = @backingInt(event.kind),
+            .subject_kind = @backingInt(event.subject.kind),
+            .service_class = @backingInt(event.service_class),
+            .permission_kind = if (event.permission_kind) |permission_kind| @backingInt(permission_kind) else permission_kind_none,
+            .denial_reason = @backingInt(event.denial_reason),
             .tick = event.tick,
             .subject_serial = event.subject.serial,
             .task_id = event.task_id,
@@ -2368,12 +2368,12 @@ fn resourceGovernanceHardwareEvidence(code: u32) bool {
 }
 
 fn kindKey(kind: EventKind) u64 {
-    return @as(u64, @intFromEnum(kind)) + 1;
+    return @as(u64, @backingInt(kind)) + 1;
 }
 
 fn subjectKey(subject: principal.PrincipalId) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(subject.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(subject.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, subject.serial);
     return indexed_arena.nonZeroKey(hash);
 }

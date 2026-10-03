@@ -1516,7 +1516,7 @@ test "booted rendered system runs input loop compositor prompts task switching r
     const rejected_edit = system.dispatchInput(.{
         .kind = .text_input,
         .tick = 24,
-        .text = &([_]u8{'x'} ** (humane_shell.MAX_SHELL_TEXT_INPUT_BYTES + 1)),
+        .text = &(@as([humane_shell.MAX_SHELL_TEXT_INPUT_BYTES + 1]u8, @splat('x'))),
     });
     try std.testing.expect(!rejected_edit.accepted);
     try std.testing.expectEqual(HumaneShellStatus.invalid_request, rejected_edit.status);

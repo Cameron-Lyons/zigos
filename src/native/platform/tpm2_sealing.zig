@@ -155,12 +155,20 @@ pub const Client = struct {
     command: [MAX_PACKET_BYTES]u8 = @splat(0),
     response: [MAX_PACKET_BYTES]u8 = @splat(0),
 
+    // Validate callers before entering protocol bodies. Classify propagated
+    // failures only after their secret wiping and transient-handle cleanup.
     // Explicit bootstrap on an unowned TPM only. Never fall back here when an
     // enrolled persistent parent is missing or changed.
     pub fn createEnrollmentParent(self: *Client, io: anytype) !void {
         if (self.parent != 0) return error.AlreadyInitialized;
         if (self.failed) return error.Failed;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.createEnrollmentParentProtocol(io) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn createEnrollmentParentProtocol(self: *Client, io: anytype) !void {
         defer self.wipeBuffers();
         var w = wire.Writer{ .bytes = &self.command };
         try w.begin(0x8002, CREATE_PRIMARY);
@@ -212,7 +220,13 @@ pub const Client = struct {
         try enrolled.validate();
         if (self.parent != 0) return error.AlreadyInitialized;
         if (self.failed) return error.Failed;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.openPersistentProtocol(io, enrolled) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn openPersistentProtocol(self: *Client, io: anytype, enrolled: PersistentParent) !void {
         defer self.wipeBuffers();
         const public = try self.readParentPublic(io, enrolled.handle);
         if (!std.mem.eql(u8, &public.name, &enrolled.name)) return error.PersistentParentChanged;
@@ -252,7 +266,13 @@ pub const Client = struct {
     }
 
     fn makePersistent(self: *Client, io: anytype, handle: u32, owner_auth: ?*const Key) !void {
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.makePersistentProtocol(io, handle, owner_auth) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn makePersistentProtocol(self: *Client, io: anytype, handle: u32, owner_auth: ?*const Key) !void {
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
@@ -279,7 +299,13 @@ pub const Client = struct {
         out.* = .{};
         errdefer out.* = .{};
         try self.ready(auth);
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.sealProtocol(io, key, auth, out) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn sealProtocol(self: *Client, io: anytype, key: *const Key, auth: *const Key, out: *Blob) !void {
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
@@ -322,7 +348,13 @@ pub const Client = struct {
         };
         const private = fields.private;
         const public = fields.public;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.unsealProtocol(io, private, public, auth, out) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn unsealProtocol(self: *Client, io: anytype, private: []const u8, public: []const u8, auth: *const Key, out: *Key) !void {
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
         var parameters: [MAX_BLOB_BYTES]u8 = undefined;
@@ -360,7 +392,13 @@ pub const Client = struct {
         out.* = .{};
         errdefer out.* = .{};
         try self.ready(auth);
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.createAttestationKeyProtocol(io, auth, out) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn createAttestationKeyProtocol(self: *Client, io: anytype, auth: *const Key, out: *Blob) !quote.Identity {
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
@@ -409,7 +447,13 @@ pub const Client = struct {
             return if (err == error.WrongDevice) error.WrongDevice else error.InvalidBlob;
         const identity = try quote.Identity.fromPublic(fields.public, &self.parent_name);
         if (!std.meta.eql(identity, enrolled.*)) return error.AttestationKeyChanged;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.quoteAttestationProtocol(io, fields, identity, auth, enrolled, nonce, expected_pcr, out) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn quoteAttestationProtocol(self: *Client, io: anytype, fields: BlobFields, identity: quote.Identity, auth: *const Key, enrolled: *const quote.Identity, nonce: *const Key, expected_pcr: *const Key, out: *quote.Evidence) !void {
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
         var parameters: [MAX_BLOB_BYTES]u8 = undefined;
@@ -448,7 +492,13 @@ pub const Client = struct {
         try self.ready(auth);
         try space.validate();
         if (space.binding == .discover) return error.InvalidNvSpace;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.nvDefineProtocol(io, space, auth, owner_auth) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn nvDefineProtocol(self: *Client, io: anytype, space: NvSpace, auth: *const Key, owner_auth: ?*const Key) !void {
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
@@ -478,7 +528,13 @@ pub const Client = struct {
         try self.ready(auth);
         try space.validate();
         if (out.len != space.size) return error.InvalidNvSpace;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.nvReadProtocol(io, space, auth, out) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn nvReadProtocol(self: *Client, io: anytype, space: NvSpace, auth: *const Key, out: []u8) !void {
         defer self.wipeBuffers();
         const public = try self.nvPublic(io, space);
         if (!public.written) return error.NvUninitialized;
@@ -509,7 +565,13 @@ pub const Client = struct {
     pub fn hierarchyState(self: *Client, io: anytype) !HierarchyState {
         if (self.parent == 0) return error.NotInitialized;
         if (self.failed) return error.Failed;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.hierarchyStateProtocol(io) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn hierarchyStateProtocol(self: *Client, io: anytype) !HierarchyState {
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
@@ -543,7 +605,13 @@ pub const Client = struct {
     fn changeHierarchyAuthorization(self: *Client, io: anytype, hierarchy: u32, current: ?*const Key, next: *const Key) !void {
         try self.ready(next);
         try optionalAuthorization(current);
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.changeHierarchyAuthorizationProtocol(io, hierarchy, current, next) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn changeHierarchyAuthorizationProtocol(self: *Client, io: anytype, hierarchy: u32, current: ?*const Key, next: *const Key) !void {
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
@@ -576,7 +644,13 @@ pub const Client = struct {
 
     fn lockoutCommand(self: *Client, io: anytype, auth: *const Key, code: u32, parameters: []u8) !void {
         try self.ready(auth);
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.lockoutCommandProtocol(io, auth, code, parameters) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn lockoutCommandProtocol(self: *Client, io: anytype, auth: *const Key, code: u32, parameters: []u8) !void {
         defer self.wipeBuffers();
         var session = try self.startSession(io);
         defer self.retireSession(io, &session);
@@ -597,7 +671,13 @@ pub const Client = struct {
         try self.ready(auth);
         try space.validate();
         if (data.len != space.size) return error.InvalidNvSpace;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.writeNvProtocol(io, space, auth, data, initial_only) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn writeNvProtocol(self: *Client, io: anytype, space: NvSpace, auth: *const Key, data: []const u8, initial_only: bool) !void {
         defer self.wipeBuffers();
         // WRITTEN changes the index Name on its first write. Never cache it.
         const public = try self.nvPublic(io, space);
@@ -621,7 +701,13 @@ pub const Client = struct {
     pub fn bootPinCandidate(self: *Client, io: anytype, index: u32) !boot_pin.Pin {
         try boot_pin.validateIndex(index);
         if (self.failed) return error.Failed;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.bootPinCandidateProtocol(io, index) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn bootPinCandidateProtocol(self: *Client, io: anytype, index: u32) !boot_pin.Pin {
         defer self.wipeBuffers();
         const public = try boot_pin.parsePublic(try self.readNvPublic(io, index), index);
         try public.requireComplete();
@@ -651,7 +737,13 @@ pub const Client = struct {
         const bytes = try expected.encode();
         if (self.parent == 0) return error.NotInitialized;
         if (self.failed) return error.Failed;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.verifyBootPinProtocol(io, index, bytes) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn verifyBootPinProtocol(self: *Client, io: anytype, index: u32, bytes: [boot_pin.BYTES]u8) !void {
         defer self.wipeBuffers();
         const public = try boot_pin.parsePublic(try self.readNvPublic(io, index), index);
         try public.requireComplete();
@@ -666,7 +758,13 @@ pub const Client = struct {
         try boot_pin.validateIndex(index);
         const bytes = try expected.encode();
         if (self.failed) return error.Failed;
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.checkBootPinEnrollmentProtocol(io, index, bytes) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn checkBootPinEnrollmentProtocol(self: *Client, io: anytype, index: u32, bytes: [boot_pin.BYTES]u8) !void {
         defer self.wipeBuffers();
         if (self.readNvPublic(io, index)) |raw| {
             const public = try boot_pin.parsePublic(raw, index);
@@ -684,7 +782,13 @@ pub const Client = struct {
         const bytes = try expected.encode();
         const binding = boot_pin.commitment(index, &bytes);
         try self.ready(owner_auth);
-        errdefer |err| self.rejectProtocolFailure(err);
+        return self.enrollBootPinProtocol(io, index, expected, owner_auth, bytes, binding) catch |err| {
+            self.rejectProtocolFailure(err);
+            return err;
+        };
+    }
+
+    fn enrollBootPinProtocol(self: *Client, io: anytype, index: u32, expected: boot_pin.Pin, owner_auth: *const Key, bytes: [boot_pin.BYTES]u8, binding: Key) !void {
         defer self.wipeBuffers();
         // Only exact handle absence permits definition. Malformed public data
         // never becomes permission to create or replace an index.
@@ -1508,4 +1612,107 @@ test "TPM exchange bounds retries and rejects other failures without resubmissio
         try std.testing.expectEqual(@as(usize, 1), io.calls);
         try std.testing.expectEqual(io.transport_failure, client.failed);
     }
+}
+
+test "TPM protocol rejection retires acquired handles before failing the client and clears outputs" {
+    const Operation = enum { parent, seal };
+    const Io = struct {
+        client: *Client,
+        flushes: usize = 0,
+
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 0);
+            out[out.len - 1] = 1;
+        }
+
+        pub fn execute(self: *@This(), command: []const u8, response: []u8, _: u32) ![]u8 {
+            var w = wire.Writer{ .bytes = response };
+            switch (std.mem.readInt(u32, command[6..10], .big)) {
+                CREATE_PRIMARY => {
+                    try w.begin(0x8002, 0);
+                    try w.int(u32, 0x8000_0042);
+                    try w.int(u32, 0);
+                    // Missing password authorization follows a known handle.
+                },
+                START_SESSION => {
+                    try w.begin(0x8001, 0);
+                    try w.int(u32, 0x0200_0042);
+                    try w.sized("invalid nonce");
+                },
+                FLUSH => {
+                    // Protocol classification must not prevent handle retirement.
+                    try std.testing.expect(!self.client.failed);
+                    try std.testing.expectEqual(@as(u32, if (self.client.parent == 0x8000_0042) 0x8000_0042 else 0x0200_0042), std.mem.readInt(u32, command[10..14], .big));
+                    self.flushes += 1;
+                    try w.begin(0x8001, 0);
+                },
+                else => return error.UnexpectedHardwareAccess,
+            }
+            return w.finish();
+        }
+    };
+    const point = std.crypto.ecc.P256.basePoint.affineCoordinates();
+    const auth: Key = @splat(7);
+    for ([_]Operation{ .parent, .seal }) |operation| {
+        var client = Client{
+            .parent = if (operation == .seal) 0x8100_0042 else 0,
+            .parent_x = point.x.toBytes(.big),
+            .parent_y = point.y.toBytes(.big),
+            .command = @splat(0xaa),
+            .response = @splat(0xaa),
+        };
+        var io = Io{ .client = &client };
+        var output = Blob{ .bytes = @splat(0xaa), .len = 16 };
+        const result = switch (operation) {
+            .parent => client.createEnrollmentParent(&io),
+            .seal => client.seal(&io, &auth, &auth, &output),
+        };
+        try std.testing.expectError(error.InvalidResponse, result);
+        try std.testing.expect(client.failed);
+        try std.testing.expectEqual(@as(usize, 1), io.flushes);
+        try std.testing.expect(std.mem.allEqual(u8, &client.command, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &client.response, 0));
+        if (operation == .parent) {
+            try std.testing.expectEqual(@as(u32, 0), client.parent);
+        } else {
+            try std.testing.expectEqualDeep(Blob{}, output);
+        }
+    }
+}
+
+test "TPM operation authorization errors remain recoverable after buffer and output wiping" {
+    const Io = struct {
+        calls: usize = 0,
+
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 0);
+            out[out.len - 1] = 1;
+        }
+
+        pub fn execute(self: *@This(), command: []const u8, response: []u8, _: u32) ![]u8 {
+            try std.testing.expectEqual(START_SESSION, std.mem.readInt(u32, command[6..10], .big));
+            self.calls += 1;
+            var w = wire.Writer{ .bytes = response };
+            try w.begin(0x8001, 0x98e); // TPM_RC_AUTH_FAIL must not poison the client.
+            return w.finish();
+        }
+    };
+    const point = std.crypto.ecc.P256.basePoint.affineCoordinates();
+    var client = Client{
+        .parent = 0x8100_0042,
+        .parent_x = point.x.toBytes(.big),
+        .parent_y = point.y.toBytes(.big),
+    };
+    var io = Io{};
+    const auth: Key = @splat(7);
+    for (0..2) |_| {
+        var output = Blob{ .bytes = @splat(0xaa), .len = 16 };
+        try std.testing.expectError(error.TpmError, client.seal(&io, &auth, &auth, &output));
+        try std.testing.expect(!client.failed);
+        try std.testing.expectEqual(@as(u32, 0x98e), client.last_tpm_error);
+        try std.testing.expectEqualDeep(Blob{}, output);
+        try std.testing.expect(std.mem.allEqual(u8, &client.command, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &client.response, 0));
+    }
+    try std.testing.expectEqual(@as(usize, 2), io.calls);
 }

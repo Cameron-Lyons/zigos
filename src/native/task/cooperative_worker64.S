@@ -1,10 +1,18 @@
 // SysV AMD64 call boundary: integer callee saves and FP control state survive.
 // https://gitlab.com/x86-psABIs/x86-64-ABI/-/blob/master/x86-64-ABI/low-level-sys-info.tex
 // Supervisor shadow stacks are not enabled by this kernel. IBT stays enabled.
+#if defined(__APPLE__)
+#define ZIGOS_WORKER_SYMBOL(name) _##name
+#else
+#define ZIGOS_WORKER_SYMBOL(name) name
+#endif
+
 .text
-.globl zigos_worker_swap
+.globl ZIGOS_WORKER_SYMBOL(zigos_worker_swap)
+#if !defined(__APPLE__)
 .type zigos_worker_swap,@function
-zigos_worker_swap:
+#endif
+ZIGOS_WORKER_SYMBOL(zigos_worker_swap):
     endbr64
     pushq %rbp
     pushq %rbx
@@ -27,15 +35,21 @@ zigos_worker_swap:
     popq %rbx
     popq %rbp
     ret
+#if !defined(__APPLE__)
 .size zigos_worker_swap, .-zigos_worker_swap
+#endif
 
-.globl zigos_worker_bootstrap
+.globl ZIGOS_WORKER_SYMBOL(zigos_worker_bootstrap)
+#if !defined(__APPLE__)
 .type zigos_worker_bootstrap,@function
-zigos_worker_bootstrap:
+#endif
+ZIGOS_WORKER_SYMBOL(zigos_worker_bootstrap):
     endbr64
     // Initial synthetic return leaves rsp aligned before this ordinary call.
     movq %r12, %rdi
     call *%r13
     ud2
+#if !defined(__APPLE__)
 .size zigos_worker_bootstrap, .-zigos_worker_bootstrap
 .section .note.GNU-stack,"",@progbits
+#endif

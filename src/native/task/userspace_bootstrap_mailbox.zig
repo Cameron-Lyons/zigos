@@ -165,17 +165,17 @@ pub const Auxiliary = extern union { service: ServiceTelemetry, clipboard: Clipb
 
 pub const Mailbox = extern struct {
     version: u16 = VERSION,
-    stage: u8 = @intFromEnum(Stage.boot),
-    detail: u8 = @intFromEnum(Detail.unknown),
+    stage: u8 = @backingInt(Stage.boot),
+    detail: u8 = @backingInt(Detail.unknown),
     fault_code: u8 = 0,
     ui_channel_kind: UiChannelKind = .none,
     auxiliary_kind: AuxiliaryKind = .none,
-    _reserved0: [MAILBOX_RESERVED_BYTES]u8 = [_]u8{0} ** MAILBOX_RESERVED_BYTES,
+    _reserved0: [MAILBOX_RESERVED_BYTES]u8 = @as([MAILBOX_RESERVED_BYTES]u8, @splat(0)),
     authority_capability_id: u64 = 0,
     task_id: u64 = 0,
     service_id: u64 = 0,
     resource_mask: u32 = 0,
-    service_kind: u8 = @intFromEnum(ServiceKind.generic),
+    service_kind: u8 = @backingInt(ServiceKind.generic),
     service_ready: u8 = 0,
     service_operation_count: u16 = 0,
     auxiliary: Auxiliary = .{ .service = .{} },
@@ -190,8 +190,8 @@ pub const Mailbox = extern struct {
     last_input_text: u8 = 0,
     last_input_port_id: u8 = 0,
     last_input_slot_id: u8 = 0,
-    _reserved2: [4]u8 = [_]u8{0} ** 4,
-    ui_model_kind: u8 = @intFromEnum(UiModelKind.none),
+    _reserved2: [4]u8 = @as([4]u8, @splat(0)),
+    ui_model_kind: u8 = @backingInt(UiModelKind.none),
     ui_state_flags: u8 = 0,
     ui_focus_index: u16 = 0,
     ui_text_length: u16 = 0,
@@ -205,7 +205,7 @@ pub const Mailbox = extern struct {
     ui_presented_revision: u64 = 0,
     ui_presentation_failures: u32 = 0,
     ui_last_presentation_status: u32 = PRESENTATION_STATUS_NOT_ATTEMPTED,
-    ui_text_digest: [32]u8 = [_]u8{0} ** 32,
+    ui_text_digest: [32]u8 = @as([32]u8, @splat(0)),
     ui_channel: UiChannel = .{ .document = .{} },
 
     pub fn documentBinding(self: Mailbox) DocumentBinding {
@@ -249,19 +249,19 @@ pub fn classifyDetail(component_class: u8, contract_flags: u32) Detail {
 }
 
 pub fn packCounter(stage: Stage, detail: Detail, pulse: u16) u32 {
-    return (@as(u32, @intFromEnum(stage)) << 24) |
-        (@as(u32, @intFromEnum(detail)) << 16) |
+    return (@as(u32, @backingInt(stage)) << 24) |
+        (@as(u32, @backingInt(detail)) << 16) |
         @as(u32, pulse);
 }
 
 pub fn stageFromCounter(counter: u32) Stage {
-    return @enumFromInt(@as(u8, @truncate(counter >> 24)));
+    return @fromBackingInt(@intCast(@as(u8, @truncate(counter >> 24))));
 }
 
 test "mailbox counter encoding preserves stage and detail" {
     const counter = packCounter(.steady, .network, 42);
     try @import("std").testing.expectEqual(Stage.steady, stageFromCounter(counter));
-    try @import("std").testing.expectEqual(@as(u8, @intFromEnum(Detail.network)), @as(u8, @truncate(counter >> 16)));
+    try @import("std").testing.expectEqual(@as(u8, @backingInt(Detail.network)), @as(u8, @truncate(counter >> 16)));
     try @import("std").testing.expectEqual(@as(u16, 42), @as(u16, @truncate(counter)));
 }
 
@@ -274,7 +274,7 @@ test "userspace yield dispositions reject unknown scheduler requests" {
 test "mailbox records userspace service readiness separately from generic heartbeat" {
     var mailbox = Mailbox{};
     mailbox.auxiliary_kind = .service;
-    mailbox.service_kind = @intFromEnum(ServiceKind.storage);
+    mailbox.service_kind = @backingInt(ServiceKind.storage);
     mailbox.service_ready = 1;
     mailbox.service_operation_count = 3;
     mailbox.auxiliary.service.state_hash = 0xA5;
@@ -289,7 +289,7 @@ test "mailbox records userspace service readiness separately from generic heartb
         .all_operations_completed = true,
     });
 
-    try @import("std").testing.expectEqual(ServiceKind.storage, @as(ServiceKind, @enumFromInt(mailbox.service_kind)));
+    try @import("std").testing.expectEqual(ServiceKind.storage, @as(ServiceKind, @fromBackingInt(@intCast(mailbox.service_kind))));
     try @import("std").testing.expectEqual(@as(u8, 1), mailbox.service_ready);
     try @import("std").testing.expectEqual(@as(u16, 3), mailbox.service_operation_count);
     try @import("std").testing.expectEqual(@as(u64, 0xA5), mailbox.auxiliary.service.state_hash);
@@ -320,7 +320,7 @@ test "mailbox isolates identity authority from clipboard and service telemetry" 
     try std.testing.expect(!state.clipboardBinding().isValid());
     state.auxiliary.identity._reserved = 1;
     try std.testing.expect(!state.identityBinding().isValid());
-    state.auxiliary_kind = @enumFromInt(255);
+    state.auxiliary_kind = @fromBackingInt(@intCast(255));
     try std.testing.expect(!state.identityBinding().isValid());
     try std.testing.expectEqual(@as(usize, ABI_SIZE_BYTES), @sizeOf(Mailbox));
 }
@@ -342,7 +342,7 @@ test "mailbox UI channels cannot reinterpret another channel's authority" {
     var state = Mailbox{ .ui_channel_kind = .launcher, .ui_channel = .{ .launcher = .{ .endpoint_capability_id = 1, .service_endpoint_id = 2 } } };
     try std.testing.expect(state.launcherBinding().isValid());
     try std.testing.expectEqual(DocumentBinding{}, state.documentBinding());
-    state.ui_channel_kind = @enumFromInt(255);
+    state.ui_channel_kind = @fromBackingInt(@intCast(255));
     try std.testing.expectEqual(LauncherBinding{}, state.launcherBinding());
     try std.testing.expectEqual(DocumentBinding{}, state.documentBinding());
 }

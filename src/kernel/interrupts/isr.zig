@@ -208,8 +208,8 @@ const external_handler_vectors = [_]u8{
 };
 const HANDLER_STORAGE_SIZE_CEILING_BYTES: usize = 320;
 
-var exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler = [_]?InterruptHandler{null} ** EXCEPTION_VECTOR_COUNT;
-var external_handlers: [external_handler_vectors.len]?InterruptHandler = [_]?InterruptHandler{null} ** external_handler_vectors.len;
+var exception_handlers: [EXCEPTION_VECTOR_COUNT]?InterruptHandler = @as([EXCEPTION_VECTOR_COUNT]?InterruptHandler, @splat(null));
+var external_handlers: [external_handler_vectors.len]?InterruptHandler = @as([external_handler_vectors.len]?InterruptHandler, @splat(null));
 
 fn externalHandlerIndex(vector: usize) ?usize {
     inline for (external_handler_vectors, 0..) |registered_vector, index| {

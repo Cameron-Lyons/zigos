@@ -42,7 +42,7 @@ pub const NetworkDevice = struct {
     getMacAddress: *const fn () [6]u8,
 };
 
-pub const BROADCAST_MAC: [6]u8 = [_]u8{0xFF} ** 6;
+pub const BROADCAST_MAC: [6]u8 = @as([6]u8, @splat(0xFF));
 pub const MAX_PEER_LINKS: usize = 32;
 pub const COMPACT_BOUNDED_METADATA = true;
 pub const COMPACT_NETWORK_TELEMETRY = true;
@@ -58,7 +58,7 @@ const PeerLinkIndex = indexed_arena.UniqueIndex(PEER_LINK_INDEX_CAPACITY);
 
 const PeerLink = struct {
     device: principal.PrincipalId = .{ .kind = .device, .serial = 0 },
-    mac: [6]u8 = [_]u8{0} ** 6,
+    mac: [6]u8 = @as([6]u8, @splat(0)),
 };
 
 pub const PeerLinkError = error{
@@ -70,7 +70,7 @@ pub const PeerLinkError = error{
 };
 
 const PeerLinkDirectoryState = struct {
-    links: [MAX_PEER_LINKS]PeerLink = [_]PeerLink{.{}} ** MAX_PEER_LINKS,
+    links: [MAX_PEER_LINKS]PeerLink = @as([MAX_PEER_LINKS]PeerLink, @splat(.{})),
     link_count: usize = 0,
     device_index: PeerLinkIndex = PeerLinkIndex.init(),
     mac_index: PeerLinkIndex = PeerLinkIndex.init(),
@@ -212,7 +212,7 @@ pub const MAX_NATIVE_FRAME_BYTES: usize = 256;
 pub const MAX_RECEIVE_FRAME_BYTES: usize = 1500;
 pub const RECEIVE_QUEUE_CAPACITY: usize = 32;
 const RESERVED_RECEIVE_CAPACITY: usize = 8;
-const ReceiveMask = std.meta.Int(.unsigned, RECEIVE_QUEUE_CAPACITY);
+const ReceiveMask = @Int(.unsigned, RECEIVE_QUEUE_CAPACITY);
 pub const HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING = true;
 pub const RECEIVE_QUEUE_HANDLE_SIZE_CEILING_BYTES: usize = 8;
 pub const RECEIVE_RESULT_SIZE_CEILING_BYTES: usize = 4;
@@ -257,7 +257,7 @@ pub const NativeServiceIdentityConnection = struct {
     source_mac: [6]u8,
     target_mac: [6]u8,
     service_identity_len: u8 = 0,
-    service_identity: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
+    service_identity: [network_policy.MAX_TARGET_BYTES]u8 = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
     peer_root_digest: crypto_hash.Digest,
     attestation_request_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     attestation_verifier_metadata_digest: crypto_hash.Digest = crypto_hash.zero_digest,
@@ -316,7 +316,7 @@ pub const NativeLocalDiscoveryConnection = struct {
     source_device: principal.PrincipalId,
     source_mac: [6]u8,
     discovery_class_len: u8 = 0,
-    discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
+    discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
     key: crypto_hash.Digest,
     scoped_discovery: bool,
     egress_decision: network_policy.EgressDecision,
@@ -336,7 +336,7 @@ pub const NativeLocalDiscoveryFrame = struct {
     ciphertext: [MAX_NATIVE_PAYLOAD_BYTES]u8,
     authentication: transport_crypto.Authentication,
     discovery_class_len: u8 = 0,
-    discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
+    discovery_class: [network_policy.MAX_TARGET_BYTES]u8 = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
     encrypted: bool,
     egress_allowed: bool,
     scoped_discovery: bool,
@@ -549,7 +549,7 @@ pub const NativeNetworkStack = struct {
         var frame = NativeServiceIdentityFrame{
             .connection_id = connection.id,
             .payload_len = @intCast(payload.len),
-            .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
+            .ciphertext = @as([MAX_NATIVE_PAYLOAD_BYTES]u8, @splat(0)),
             .authentication = undefined,
             .peer_root_digest = connection.peer_root_digest,
             .flags = .{
@@ -618,7 +618,7 @@ pub const NativeNetworkStack = struct {
         var frame = NativeLocalDiscoveryFrame{
             .connection_id = connection.id,
             .probe_len = @intCast(payload.len),
-            .ciphertext = [_]u8{0} ** MAX_NATIVE_PAYLOAD_BYTES,
+            .ciphertext = @as([MAX_NATIVE_PAYLOAD_BYTES]u8, @splat(0)),
             .authentication = undefined,
             .encrypted = true,
             .egress_allowed = true,
@@ -680,15 +680,15 @@ var active_egress_capability_id: u64 = 0;
 var active_network_policy_id: u64 = 0;
 var active_driver_tx_count: usize = 0;
 var last_active_driver_frame_len: u16 = 0;
-var last_active_driver_frame: [MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_NATIVE_FRAME_BYTES;
+var last_active_driver_frame: [MAX_NATIVE_FRAME_BYTES]u8 = @as([MAX_NATIVE_FRAME_BYTES]u8, @splat(0));
 var active_driver_rx_count: usize = 0;
 var active_driver_rx_drop_count: usize = 0;
 var active_driver_rx_failure_count: usize = 0;
 var last_active_driver_rx_frame_len: u16 = 0;
-var last_active_driver_rx_frame: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES;
+var last_active_driver_rx_frame: [MAX_RECEIVE_FRAME_BYTES]u8 = @as([MAX_RECEIVE_FRAME_BYTES]u8, @splat(0));
 const QueuedReceiveFrame = struct {
     length: u16 = 0,
-    bytes: [MAX_RECEIVE_FRAME_BYTES]u8 = [_]u8{0} ** MAX_RECEIVE_FRAME_BYTES,
+    bytes: [MAX_RECEIVE_FRAME_BYTES]u8 = @as([MAX_RECEIVE_FRAME_BYTES]u8, @splat(0)),
 };
 const ReceiveQueue = [RECEIVE_QUEUE_CAPACITY]QueuedReceiveFrame;
 const heap_backed_receive_queue = builtin.target.os.tag == .freestanding and HEAP_BACKED_RECEIVE_QUEUE_ON_FREESTANDING;
@@ -701,7 +701,7 @@ comptime {
         @compileError("heap-backed network receive queue exceeds its handle size ceiling");
     }
 }
-var receive_queue: ReceiveQueueBacking = if (heap_backed_receive_queue) null else [_]QueuedReceiveFrame{.{}} ** RECEIVE_QUEUE_CAPACITY;
+var receive_queue: ReceiveQueueBacking = if (heap_backed_receive_queue) null else @as([RECEIVE_QUEUE_CAPACITY]QueuedReceiveFrame, @splat(.{}));
 var receive_queue_order: [RECEIVE_QUEUE_CAPACITY]u8 = @splat(0);
 var receive_queue_occupied: ReceiveMask = 0;
 var receive_reserved_count: u8 = 0;
@@ -1235,7 +1235,7 @@ test "peer link directory binds stable unicast routes and rejects ambiguity" {
     try std.testing.expect(directory.resolve(.{ .kind = .service, .serial = first_device.serial }) == null);
 
     try std.testing.expectError(error.InvalidPeerDevice, directory.bind(.{ .kind = .service, .serial = 3 }, second_mac));
-    try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, [_]u8{0} ** 6));
+    try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, @as([6]u8, @splat(0))));
     try std.testing.expectError(error.InvalidPeerAddress, directory.bind(second_device, .{ 0x01, 0, 0, 0, 0, 2 }));
     try std.testing.expectError(error.PeerAddressConflict, directory.bind(first_device, second_mac));
     try std.testing.expectError(error.PeerAddressConflict, directory.bind(second_device, first_mac));
@@ -1331,7 +1331,7 @@ test "network driver data plane is brokered by explicit egress capability" {
     };
     try std.testing.expect(activateDevice(&device, 7));
     const peer_mac = Harness.expected_destination;
-    try std.testing.expect(!sendActiveFrame([_]u8{0} ** 6, "frame"));
+    try std.testing.expect(!sendActiveFrame(@as([6]u8, @splat(0)), "frame"));
     try std.testing.expect(!sendActiveFrame(peer_mac, "frame"));
     setEgressBroker(Harness.broker);
     try std.testing.expect(!sendActiveFrame(peer_mac, "frame"));
@@ -1592,7 +1592,7 @@ test "native network stack gates service identity packets on attested policy cap
     const Harness = struct {
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
-        var last_destination: [6]u8 = [_]u8{0} ** 6;
+        var last_destination: [6]u8 = @as([6]u8, @splat(0));
 
         fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
@@ -1608,7 +1608,7 @@ test "native network stack gates service identity packets on attested policy cap
 
     Harness.send_count = 0;
     Harness.last_frame_len = 0;
-    Harness.last_destination = [_]u8{0} ** 6;
+    Harness.last_destination = @as([6]u8, @splat(0));
     reset();
     defer reset();
 
@@ -1872,7 +1872,7 @@ test "native network stack requires scoped local discovery before discovery broa
     const Harness = struct {
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
-        var last_destination: [6]u8 = [_]u8{0} ** 6;
+        var last_destination: [6]u8 = @as([6]u8, @splat(0));
 
         fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
@@ -1888,7 +1888,7 @@ test "native network stack requires scoped local discovery before discovery broa
 
     Harness.send_count = 0;
     Harness.last_frame_len = 0;
-    Harness.last_destination = [_]u8{0} ** 6;
+    Harness.last_destination = @as([6]u8, @splat(0));
     reset();
     defer reset();
 

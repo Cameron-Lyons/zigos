@@ -41,11 +41,11 @@ pub const DenialExplanation = struct {
     target_id: u64 = 0,
     target_kind: ?capability.CapabilityTargetKind = null,
     operation_len: u8 = 0,
-    operation: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    operation: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     required_authority_len: u8 = 0,
-    required_authority: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    required_authority: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     blocking_policy_len: u8 = 0,
-    blocking_policy: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    blocking_policy: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     user_action_available: bool = false,
     retry_safe: bool = false,
     fingerprint: u64 = 0,
@@ -96,9 +96,9 @@ pub const ProvenanceRecord = struct {
     target_kind: ?capability.CapabilityTargetKind = null,
     tick: u64 = 0,
     operation_len: u8 = 0,
-    operation: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    operation: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     detail_len: u8 = 0,
-    detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
+    detail: [MAX_DETAIL_BYTES]u8 = @as([MAX_DETAIL_BYTES]u8, @splat(0)),
     source_identity_fingerprint: u64 = 0,
     release_transparency_sequence: u64 = 0,
     release_transparency_root_fingerprint: u64 = 0,
@@ -465,11 +465,11 @@ pub fn authorityGraphEdge(
 
 pub fn denialFingerprint(explanation: DenialExplanation) u64 {
     var hash = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @intFromEnum(explanation.reason));
+    hash = native_util.fnv1a64AppendU16LittleEndian(hash, @backingInt(explanation.reason));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, explanation.subject_task_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, explanation.capability_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, explanation.target_id);
-    hash = native_util.fnv1a64AppendByte(hash, if (explanation.target_kind) |kind| @intFromEnum(kind) else 0xFF);
+    hash = native_util.fnv1a64AppendByte(hash, if (explanation.target_kind) |kind| @backingInt(kind) else 0xFF);
     hash = native_util.fnv1a64WithSeed(hash, explanation.operationSlice());
     hash = native_util.fnv1a64WithSeed(hash, explanation.requiredAuthoritySlice());
     hash = native_util.fnv1a64WithSeed(hash, explanation.blockingPolicySlice());
@@ -478,15 +478,15 @@ pub fn denialFingerprint(explanation: DenialExplanation) u64 {
 
 pub fn provenanceFingerprint(record: ProvenanceRecord) u64 {
     var hash = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.kind));
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.decision));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(record.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(record.decision));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.parent_trace_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.task_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.artifact_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.service_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.capability_id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.target_id);
-    hash = native_util.fnv1a64AppendByte(hash, if (record.target_kind) |kind| @intFromEnum(kind) else 0xFF);
+    hash = native_util.fnv1a64AppendByte(hash, if (record.target_kind) |kind| @backingInt(kind) else 0xFF);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.tick);
     hash = native_util.fnv1a64WithSeed(hash, record.operationSlice());
     hash = native_util.fnv1a64WithSeed(hash, record.detailSlice());

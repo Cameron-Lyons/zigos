@@ -585,7 +585,7 @@ test "renderToBuffer preserves the exact permission review text" {
     var exact_buffer: [expected.len]u8 = undefined;
     try std.testing.expectEqualStrings(expected, try renderToBuffer(&exact_buffer, &session));
 
-    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    var undersized_backing = @as([expected.len]u8, @splat(0xa5));
     try std.testing.expectError(
         error.NoSpaceLeft,
         renderToBuffer(undersized_backing[0 .. expected.len - 1], &session),
@@ -603,7 +603,7 @@ test "permission review renders maximum unsigned values in exact buffers" {
     try std.testing.expectEqual(expected.len, used);
     try std.testing.expectEqualStrings(expected, exact_buffer[0..used]);
 
-    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    var undersized_backing = @as([expected.len]u8, @splat(0xa5));
     used = 0;
     try std.testing.expectError(
         error.NoSpaceLeft,

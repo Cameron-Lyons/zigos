@@ -146,7 +146,7 @@ pub const ObjectType = enum(u8) {
     model_artifact,
     event_stream,
 };
-const OBJECT_TYPE_COUNT: usize = @typeInfo(ObjectType).@"enum".fields.len;
+const OBJECT_TYPE_COUNT: usize = @typeInfo(ObjectType).@"enum".field_names.len;
 
 pub const BlobAddress = crypto_hash.Digest;
 pub const ChunkAddress = crypto_hash.Digest;
@@ -155,9 +155,9 @@ pub const VersionAddress = crypto_hash.Digest;
 pub const SignedMetadata = struct {
     signature: manifest.Signature = .{},
     label_len: u8 = 0,
-    label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
+    label: [MAX_METADATA_LABEL_BYTES]u8 = @as([MAX_METADATA_LABEL_BYTES]u8, @splat(0)),
     content_type_len: u8 = 0,
-    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = @as([MAX_CONTENT_TYPE_BYTES]u8, @splat(0)),
     created_at_ticks: u64 = 0,
 
     pub fn init(
@@ -244,9 +244,9 @@ pub const ObjectQueryResult = struct {
     snapshot_count: u16 = 0,
     updated_at_ticks: u64 = 0,
     label_len: u8 = 0,
-    label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
+    label: [MAX_METADATA_LABEL_BYTES]u8 = @as([MAX_METADATA_LABEL_BYTES]u8, @splat(0)),
     content_type_len: u8 = 0,
-    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = @as([MAX_CONTENT_TYPE_BYTES]u8, @splat(0)),
 
     pub fn labelSlice(self: *const ObjectQueryResult) []const u8 {
         return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
@@ -272,9 +272,9 @@ pub const ObjectHistoryEntry = struct {
     payload_len: u32 = 0,
     created_at_ticks: u64 = 0,
     label_len: u8 = 0,
-    label: [MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** MAX_METADATA_LABEL_BYTES,
+    label: [MAX_METADATA_LABEL_BYTES]u8 = @as([MAX_METADATA_LABEL_BYTES]u8, @splat(0)),
     content_type_len: u8 = 0,
-    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = @as([MAX_CONTENT_TYPE_BYTES]u8, @splat(0)),
 
     pub fn labelSlice(self: *const ObjectHistoryEntry) []const u8 {
         return self.label[0..@min(@as(usize, self.label_len), self.label.len)];
@@ -553,7 +553,7 @@ const VersionSlot = struct {
     version: VersionRecord = .{
         .id = ids.VersionId.zero,
         .object_id = ids.ObjectId.zero,
-        .parent_version_ids = [_]ids.VersionId{ids.VersionId.zero} ** MAX_VERSION_PARENTS,
+        .parent_version_ids = @as([MAX_VERSION_PARENTS]ids.VersionId, @splat(ids.VersionId.zero)),
         .object_type = .blob,
         .metadata = .{},
         .blob_slot_index = 0,
@@ -577,7 +577,7 @@ const VersionSlot = struct {
 pub const BlobSlot = struct {
     blob: BlobRecord = .{
         .address = crypto_hash.zero_digest,
-        .chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS,
+        .chunk_slot_indexes = @as([MAX_BLOB_CHUNKS]BlobChunkSlotIndex, @splat(0)),
         .state = .{},
     },
 
@@ -600,7 +600,7 @@ pub const ChunkSlot = struct {
     chunk: ChunkRecord = .{
         .address = crypto_hash.zero_digest,
         .state = .{},
-        .payload = if (heap_backed_chunk_payloads) null else [_]u8{0} ** MAX_CHUNK_BYTES,
+        .payload = if (heap_backed_chunk_payloads) null else @as([MAX_CHUNK_BYTES]u8, @splat(0)),
     },
 
     pub inline fn arenaInUse(self: *const ChunkSlot) bool {
@@ -653,10 +653,10 @@ fn ObjectTypeIndexWith(comptime capacity: usize) type {
         const SlotIndex = indexed_arena.ReusableIndex(capacity);
         const no_slot = indexed_arena.reusableNoIndex(capacity);
 
-        heads: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{no_slot} ** OBJECT_TYPE_COUNT,
-        tails: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{no_slot} ** OBJECT_TYPE_COUNT,
-        counts: [OBJECT_TYPE_COUNT]SlotIndex = [_]SlotIndex{0} ** OBJECT_TYPE_COUNT,
-        next_by_slot: [capacity]SlotIndex = [_]SlotIndex{no_slot} ** capacity,
+        heads: [OBJECT_TYPE_COUNT]SlotIndex = @as([OBJECT_TYPE_COUNT]SlotIndex, @splat(no_slot)),
+        tails: [OBJECT_TYPE_COUNT]SlotIndex = @as([OBJECT_TYPE_COUNT]SlotIndex, @splat(no_slot)),
+        counts: [OBJECT_TYPE_COUNT]SlotIndex = @as([OBJECT_TYPE_COUNT]SlotIndex, @splat(0)),
+        next_by_slot: [capacity]SlotIndex = @as([capacity]SlotIndex, @splat(no_slot)),
 
         pub fn init() Self {
             return .{};
@@ -701,7 +701,7 @@ fn ObjectTypeIndexWith(comptime capacity: usize) type {
 }
 
 fn objectTypeBucket(object_type: ObjectType) usize {
-    return @intFromEnum(object_type);
+    return @backingInt(object_type);
 }
 
 pub fn StoreWith(comptime config: StoreConfig) type {
@@ -909,7 +909,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 return error.ParentMismatch;
             }
 
-            var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
+            var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
             const chunk_count = try buildChunkRefs(request.payload, &chunk_refs);
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             const blob_address = blobManifestAddressFromMerkleRoot(request.payload.len, chunk_count, merkle_root);
@@ -1387,7 +1387,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
         pub fn putBlob(self: *Self, address: BlobAddress, payload: []const u8) Error!usize {
             if (payload.len > MAX_PAYLOAD_BYTES) return error.PayloadTooLarge;
-            var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
+            var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
             const chunk_count = try buildChunkRefs(payload, &chunk_refs);
             const merkle_root = computeBlobMerkleRoot(chunk_refs[0..chunk_count]);
             const computed_address = blobManifestAddressFromMerkleRoot(payload.len, chunk_count, merkle_root);
@@ -1420,7 +1420,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
                 self.chunkSlotAt(created_index).chunk.releasePayload();
                 std.debug.assert(self.chunks.removeIndex(created_index));
             };
-            var chunk_slot_indexes = [_]BlobChunkSlotIndex{0} ** MAX_BLOB_CHUNKS;
+            var chunk_slot_indexes = @as([MAX_BLOB_CHUNKS]BlobChunkSlotIndex, @splat(0));
             for (chunk_refs[0..chunk_count], 0..) |chunk_ref, chunk_index| {
                 const start = chunk_index * MAX_CHUNK_BYTES;
                 const end = @min(start + MAX_CHUNK_BYTES, payload.len);
@@ -1479,7 +1479,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
 
             if (slot.blob.manifestVerified()) return &slot.blob;
 
-            var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
+            var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
             const live_chunk_refs = try self.copyBlobChunkRefs(&slot.blob, &chunk_refs);
             if (!chunkRefsMatchPayloadLen(slot.blob.payloadLen(), live_chunk_refs)) return error.CorruptBlob;
             if (!std.mem.eql(u8, &computeBlobManifestAddress(slot.blob.payloadLen(), live_chunk_refs), &slot.blob.address)) {
@@ -1641,7 +1641,7 @@ pub fn chunkRefsMatchPayloadLen(payload_len: usize, chunk_refs: []const ChunkRef
 }
 
 pub fn computeBlobAddress(payload: []const u8) BlobAddress {
-    var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
+    var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
     const chunk_count = buildChunkRefs(payload, &chunk_refs) catch return crypto_hash.zero_digest;
     return computeBlobManifestAddress(payload.len, chunk_refs[0..chunk_count]);
 }
@@ -1671,7 +1671,7 @@ pub fn computeBlobMerkleRoot(chunk_refs: []const ChunkRef) BlobAddress {
         return crypto_hash.finalize(&empty_hasher);
     }
 
-    var level = [_]BlobAddress{crypto_hash.zero_digest} ** MAX_BLOB_CHUNKS;
+    var level = @as([MAX_BLOB_CHUNKS]BlobAddress, @splat(crypto_hash.zero_digest));
     var level_count = chunk_refs.len;
     for (chunk_refs, 0..) |chunk_ref, index| {
         var hasher = crypto_hash.init();
@@ -1735,7 +1735,7 @@ fn computeVersionAddress(
 }
 
 fn versionParents(previous_version_id: ids.VersionId) [MAX_VERSION_PARENTS]ids.VersionId {
-    var parents = [_]ids.VersionId{ids.VersionId.zero} ** MAX_VERSION_PARENTS;
+    var parents = @as([MAX_VERSION_PARENTS]ids.VersionId, @splat(ids.VersionId.zero));
     if (!previous_version_id.isZero()) {
         parents[0] = previous_version_id;
     }
@@ -1785,7 +1785,7 @@ fn metadataMessage(
 ) error{NoSpaceLeft}![]const u8 {
     var writer = BinaryWriter{ .buffer = buffer };
     try writer.writeBytes("zigos.object.metadata");
-    try writer.writeByte(@intFromEnum(object_type));
+    try writer.writeByte(@backingInt(object_type));
     try writeLengthPrefixed(&writer, metadata.labelSlice());
     try writeLengthPrefixed(&writer, metadata.contentTypeSlice());
     try writer.writeU64(metadata.created_at_ticks);
@@ -1846,5 +1846,5 @@ test "store reset scrubs live records before retaining arena capacity" {
     try std.testing.expect(object_slot.object.id.isZero());
     try std.testing.expectEqual(@as(u8, 0), version_slot.version.metadata.label_len);
     try std.testing.expectEqual(@as(u16, 0), blob_slot.blob.refCount());
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 6), chunk_slot.chunk.payload[0..6]);
+    try std.testing.expectEqualSlices(u8, &(@as([6]u8, @splat(0))), chunk_slot.chunk.payload[0..6]);
 }

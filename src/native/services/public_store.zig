@@ -107,16 +107,16 @@ pub const Error = error{
 pub const TrustedPublisherRecord = struct {
     revoked: bool = false,
     publisher: []const u8 = "",
-    public_key: signing.PublicKey = [_]u8{0} ** signing.PUBLIC_KEY_BYTES,
+    public_key: signing.PublicKey = @as([signing.PUBLIC_KEY_BYTES]u8, @splat(0)),
 };
 
 pub const Channel = struct {
     source_identity: []const u8,
     update_channel: manifest.UpdateChannel,
-    releases: [MAX_RELEASES_PER_CHANNEL]Release = [_]Release{emptyRelease()} ** MAX_RELEASES_PER_CHANNEL,
+    releases: [MAX_RELEASES_PER_CHANNEL]Release = @as([MAX_RELEASES_PER_CHANNEL]Release, @splat(emptyRelease())),
     release_count: u8 = 0,
     transparency_root: crypto_hash.Digest = crypto_hash.zero_digest,
-    trusted_publishers: [MAX_TRUSTED_PUBLISHERS_PER_CHANNEL]TrustedPublisherRecord = [_]TrustedPublisherRecord{.{}} ** MAX_TRUSTED_PUBLISHERS_PER_CHANNEL,
+    trusted_publishers: [MAX_TRUSTED_PUBLISHERS_PER_CHANNEL]TrustedPublisherRecord = @as([MAX_TRUSTED_PUBLISHERS_PER_CHANNEL]TrustedPublisherRecord, @splat(.{})),
     trusted_publisher_count: u8 = 0,
 
     comptime {
@@ -819,17 +819,17 @@ test "public store fills dense publisher trust without duplicating reactivated e
     };
     var channel = Channel.init("store:zigos/public", .stable);
     for (publishers, 0..) |publisher, index| {
-        const public_key = [_]u8{@intCast(index + 1)} ** signing.PUBLIC_KEY_BYTES;
+        const public_key = @as([signing.PUBLIC_KEY_BYTES]u8, @splat(@intCast(index + 1)));
         try channel.trustPublisher(publisher, public_key);
     }
     try std.testing.expectEqual(@as(usize, MAX_TRUSTED_PUBLISHERS_PER_CHANNEL), channel.trustedPublisherCount());
 
-    const first_key = [_]u8{1} ** signing.PUBLIC_KEY_BYTES;
+    const first_key = @as([signing.PUBLIC_KEY_BYTES]u8, @splat(1));
     try channel.revokePublisher(publishers[0], first_key);
     try channel.trustPublisher(publishers[0], first_key);
     try std.testing.expectEqual(@as(usize, MAX_TRUSTED_PUBLISHERS_PER_CHANNEL), channel.trustedPublisherCount());
     try std.testing.expect(!channel.findTrustedPublisherConst(publishers[0], first_key).?.revoked);
 
-    const overflow_key = [_]u8{0xff} ** signing.PUBLIC_KEY_BYTES;
+    const overflow_key = @as([signing.PUBLIC_KEY_BYTES]u8, @splat(0xff));
     try std.testing.expectError(error.StoreTrustedPublisherTableFull, channel.trustPublisher("publisher-overflow", overflow_key));
 }

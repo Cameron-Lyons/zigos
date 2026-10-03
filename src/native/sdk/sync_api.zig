@@ -55,8 +55,8 @@ pub const LocalFirstWorkspace = struct {
     personal_e2ee: bool = true,
     prefix_count: u8 = 0,
     prefixes: [sync_service.MAX_SELECTIVE_PREFIXES][sync_service.MAX_PREFIX_BYTES]u8 =
-        [_][sync_service.MAX_PREFIX_BYTES]u8{[_]u8{0} ** sync_service.MAX_PREFIX_BYTES} ** sync_service.MAX_SELECTIVE_PREFIXES,
-    prefix_lens: [sync_service.MAX_SELECTIVE_PREFIXES]u8 = [_]u8{0} ** sync_service.MAX_SELECTIVE_PREFIXES,
+        @as([sync_service.MAX_SELECTIVE_PREFIXES][sync_service.MAX_PREFIX_BYTES]u8, @splat(@as([sync_service.MAX_PREFIX_BYTES]u8, @splat(0)))),
+    prefix_lens: [sync_service.MAX_SELECTIVE_PREFIXES]u8 = @as([sync_service.MAX_SELECTIVE_PREFIXES]u8, @splat(0)),
 
     comptime {
         if (@sizeOf(@This()) > LOCAL_FIRST_WORKSPACE_SIZE_CEILING_BYTES) {

@@ -7,9 +7,9 @@ pub fn taskDescriptor(task: *const task_runtime.TaskRecord) abi.TaskDescriptor {
     return .{
         .task_id = task.id,
         .owner_serial = task.owner.serial,
-        .owner_kind = @intFromEnum(task.owner.kind),
-        .component_class = @intFromEnum(task.component_class),
-        .state = @intFromEnum(task.state),
+        .owner_kind = @backingInt(task.owner.kind),
+        .component_class = @backingInt(task.component_class),
+        .state = @backingInt(task.state),
         .flags = taskFlags(task),
         .ui_surface_id = task.ui_surface_id orelse 0,
     };
@@ -22,7 +22,7 @@ pub fn taskFlags(task: *const task_runtime.TaskRecord) u16 {
     if (task.background_allowed) flags |= abi.TASK_FLAG_BACKGROUND_ALLOWED;
     if (task.runsAsUserspaceProcess()) flags |= abi.TASK_FLAG_USERSPACE_PROCESS;
     if (task.hasLoadedExecutable()) flags |= abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED;
-    flags |= @as(u16, @intFromEnum(task.resourceClass())) << abi.TASK_RESOURCE_CLASS_SHIFT;
+    flags |= @as(u16, @backingInt(task.resourceClass())) << abi.TASK_RESOURCE_CLASS_SHIFT;
     return flags;
 }
 
@@ -57,7 +57,7 @@ pub fn deviceDescriptor(descriptor: device_broker.ControllerDescriptor) abi.Devi
     return .{
         .device_id = descriptor.device_id,
         .mmio_window_count = descriptor.mmio_window_count,
-        ._reserved = [_]u8{0} ** abi.DEVICE_DESCRIPTOR_RESERVED_BYTES,
+        ._reserved = @as([abi.DEVICE_DESCRIPTOR_RESERVED_BYTES]u8, @splat(0)),
     };
 }
 
@@ -69,6 +69,6 @@ pub fn mmioWindowDescriptor(window: device_broker.MmioWindow) abi.DeviceMmioWind
         .base = window.base,
         .length = window.length,
         .flags = flags,
-        ._reserved = [_]u8{0} ** abi.DEVICE_MMIO_WINDOW_RESERVED_BYTES,
+        ._reserved = @as([abi.DEVICE_MMIO_WINDOW_RESERVED_BYTES]u8, @splat(0)),
     };
 }

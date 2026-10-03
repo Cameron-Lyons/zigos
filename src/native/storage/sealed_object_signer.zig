@@ -52,7 +52,7 @@ test "document signing lease preserves canonical metadata and binds its sealed k
     const handle = fixture.service.findHandle(signer.key.handle_id).?;
     const secret = fixture.service.store.describeSecret(handle.secret_id).?;
     try std.testing.expect(!secret.resident_material and !secret.exportable);
-    const excessive = [_]u8{0} ** (secrets.MAX_SIGNING_MESSAGE_BYTES + 1);
+    const excessive = @as([secrets.MAX_SIGNING_MESSAGE_BYTES + 1]u8, @splat(0));
     try std.testing.expectError(error.InvalidSigningMessage, fixture.service.signMessage(&fixture.policies, fixture.authority.subjects, .{ .holder = fixture.authority.holder, .task_id = fixture.authority.task_id, .handle_id = signer.key.handle_id, .now_ticks = 10 }, &excessive, null));
     try std.testing.expectError(error.InvalidSigningMessage, fixture.service.signMessage(&fixture.policies, fixture.authority.subjects, .{ .holder = fixture.authority.holder, .task_id = fixture.authority.task_id, .handle_id = signer.key.handle_id, .now_ticks = 10 }, "", null));
     var wrong = signer;

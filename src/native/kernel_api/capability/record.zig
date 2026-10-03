@@ -68,11 +68,11 @@ pub const Capability = struct {
 fn computeCapabilityTraceId(record: Capability) u64 {
     var hash = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.holder.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(record.holder.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.holder.serial);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.issuer.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(record.issuer.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.issuer.serial);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(record.target.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(record.target.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.target.id);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.rights.toBits());
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, record.scope.task_id orelse 0);

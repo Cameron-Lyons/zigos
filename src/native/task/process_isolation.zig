@@ -152,7 +152,7 @@ fn auditDenied(caller: *task_runtime.TaskRecord, request: Request, capability_id
     caller.appendAudit(.{
         .kind = .policy_denied,
         .capability_id = capability_id,
-        .detail = (@as(u32, @intFromEnum(reason)) << 8) | @as(u32, @intFromEnum(request.operation)),
+        .detail = (@as(u32, @backingInt(reason)) << 8) | @as(u32, @backingInt(request.operation)),
         .tick = request.now_ticks,
     });
 }
@@ -168,7 +168,7 @@ fn privacyIndicatorActive(request: Request) bool {
 }
 
 fn allowedAuditDetail(request: Request) u32 {
-    return (@as(u32, @truncate(request.privacy_indicator_id)) << 8) | @as(u32, @intFromEnum(request.operation));
+    return (@as(u32, @truncate(request.privacy_indicator_id)) << 8) | @as(u32, @backingInt(request.operation));
 }
 
 fn requiredTargetTaskId(request: Request) Error!u64 {
@@ -333,7 +333,7 @@ test "process isolation denies memory injection window clipboard and hook bypass
             .user_visible = true,
             .privacy_indicator_id = 44,
             .privacy_indicator_expires_at_ticks = 100,
-            .now_ticks = 20 + @intFromEnum(operation),
+            .now_ticks = 20 + @backingInt(operation),
         });
         try std.testing.expect(decision.allowed);
         try std.testing.expectEqual(victim.id, decision.target_task_id);
@@ -423,5 +423,5 @@ test "process isolation denies memory injection window clipboard and hook bypass
 
     const latest = attacker.latestAuditEvent().?;
     try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, latest.kind);
-    try std.testing.expectEqual((@as(u32, 55) << 8) | @as(u32, @intFromEnum(Operation.register_global_hook)), latest.detail);
+    try std.testing.expectEqual((@as(u32, 55) << 8) | @as(u32, @backingInt(Operation.register_global_hook)), latest.detail);
 }

@@ -264,7 +264,7 @@ fn encode(store: *const secrets.Store, identities: *const identity.Store, device
             !secret.hardware_backed or !secret.hardware_provider_used or secret.resident_material or
             !secret.sealed_digest_present) return error.InvalidVaultCatalog;
         const blob = secret.sealedBlob() orelse return error.InvalidVaultCatalog;
-        try writer.writeByte(@intFromEnum(secret.owner.kind));
+        try writer.writeByte(@backingInt(secret.owner.kind));
         try writer.writeU64(secret.owner.serial);
         try writer.writeByte(secret.label_len);
         try writer.writeBytes(secret.labelSlice());
@@ -398,7 +398,7 @@ test "vault catalog persists sealed IDs and restores no leases after a crash" {
     var identities = identity.Store.init();
     var fixture = SigningFixture{};
     const signer = try prepare(&fixture, &device.service);
-    const portable = [_]u8{0x27} ** secrets.MAX_VALUE_BYTES;
+    const portable = @as([secrets.MAX_VALUE_BYTES]u8, @splat(0x27));
     _ = try fixture.service.store.importSecret(test_owner, "portable", &portable, true, true);
     var scratch: [MAX_BYTES]u8 = undefined;
     var session = Session{};
@@ -696,9 +696,9 @@ test "vault catalog round trips the full vault with maximum envelopes across sto
     const signer = try prepare(&fixture, &device.service);
     const provider = @import("../../tests/fixtures/secret_provider.zig").maximumEnvelopeProvider();
     fixture.service.attachHardwareProvider(provider);
-    const value = [_]u8{0x23} ** secrets.MAX_VALUE_BYTES;
+    const value = @as([secrets.MAX_VALUE_BYTES]u8, @splat(0x23));
     for (1..secrets.MAX_SECRETS) |i| {
-        var name = [_]u8{'k'} ** secrets.MAX_LABEL_BYTES;
+        var name = @as([secrets.MAX_LABEL_BYTES]u8, @splat('k'));
         name[0] = @intCast('A' + i);
         _ = try fixture.service.store.importSecret(test_owner, &name, &value, true, false);
     }

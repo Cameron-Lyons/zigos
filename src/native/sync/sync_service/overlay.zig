@@ -57,11 +57,11 @@ pub const OverlaySession = struct {
     last_activity_tick: u64 = 0,
     keepalive_count: u16 = 0,
     service_identity_len: u8 = 0,
-    service_identity: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    service_identity: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     relay_domain_len: u8 = 0,
-    relay_domain: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    relay_domain: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     private_service_len: u8 = 0,
-    private_service: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    private_service: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
 
     pub fn serviceIdentitySlice(self: *const OverlaySession) []const u8 {
         return self.service_identity[0..@as(usize, self.service_identity_len)];
@@ -110,11 +110,11 @@ pub const OverlayRelayFrameResult = struct {
     delivered_len: usize,
     packet_digest: crypto_hash.Digest,
     service_identity_len: u8 = 0,
-    service_identity: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    service_identity: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     relay_domain_len: u8 = 0,
-    relay_domain: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    relay_domain: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     private_service_len: u8 = 0,
-    private_service: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    private_service: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
 
     pub fn serviceIdentitySlice(self: *const OverlayRelayFrameResult) []const u8 {
         return self.service_identity[0..@as(usize, self.service_identity_len)];
@@ -160,7 +160,7 @@ pub const OverlaySessionSlot = struct {
 pub const closed_session_key: u64 = 1;
 
 test "compact overlay session metadata preserves exact label capacities" {
-    const full_label = [_]u8{'o'} ** MAX_LABEL_BYTES;
+    const full_label = @as([MAX_LABEL_BYTES]u8, @splat('o'));
     var session = std.mem.zeroes(OverlaySession);
     session.service_identity_len = @intCast(full_label.len);
     session.relay_domain_len = @intCast(full_label.len);

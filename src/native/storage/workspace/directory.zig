@@ -88,7 +88,7 @@ const ShareGrantPrincipalIndexSlot = struct {
 
 pub const ShareGrantPrincipalIndex = struct {
     slots: [SHARE_GRANT_INDEX_CAPACITY]ShareGrantPrincipalIndexSlot =
-        [_]ShareGrantPrincipalIndexSlot{ShareGrantPrincipalIndexSlot{}} ** SHARE_GRANT_INDEX_CAPACITY,
+        @as([SHARE_GRANT_INDEX_CAPACITY]ShareGrantPrincipalIndexSlot, @splat(ShareGrantPrincipalIndexSlot{})),
 
     pub fn init() ShareGrantPrincipalIndex {
         return .{};
@@ -142,7 +142,7 @@ pub const ShareGrantPrincipalIndex = struct {
 };
 
 pub const Entry = struct {
-    path: [MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** MAX_ENTRY_PATH_BYTES,
+    path: [MAX_ENTRY_PATH_BYTES]u8 = @as([MAX_ENTRY_PATH_BYTES]u8, @splat(0)),
     object_id: ids.ObjectId = ids.ObjectId.zero,
     version_id: ids.VersionId = ids.VersionId.zero,
     path_len: WorkspacePathLength = 0,
@@ -179,8 +179,8 @@ const WorkspaceLeafHashes = [MAX_WORKSPACE_ENTRIES]SnapshotRootAddress;
 const WorkspacePathSlots = [ENTRY_INDEX_CAPACITY]EntryIndexSlot;
 const WorkspaceObjectSlots = [ENTRY_OBJECT_INDEX_CAPACITY]EntryObjectIndexSlot;
 const WorkspaceEntryState = struct {
-    entries: WorkspaceEntries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
-    leaf_hashes: WorkspaceLeafHashes = [_]SnapshotRootAddress{workspace_merkle.zeroRootAddress()} ** MAX_WORKSPACE_ENTRIES,
+    entries: WorkspaceEntries = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{})),
+    leaf_hashes: WorkspaceLeafHashes = @as([MAX_WORKSPACE_ENTRIES]SnapshotRootAddress, @splat(workspace_merkle.zeroRootAddress())),
     path_slots: WorkspacePathSlots = workspace_index.emptyEntryIndexTable(ENTRY_INDEX_CAPACITY),
     object_slots: WorkspaceObjectSlots = workspace_index.emptyEntryObjectIndexTable(ENTRY_OBJECT_INDEX_CAPACITY),
 };
@@ -239,7 +239,7 @@ pub const ShareGrant = struct {
     principal_id: principal.PrincipalId,
     scope_object_id: ids.ObjectId = ids.ObjectId.zero,
     expires_at_ticks: u64 = 0,
-    scope_path: [MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** MAX_ENTRY_PATH_BYTES,
+    scope_path: [MAX_ENTRY_PATH_BYTES]u8 = @as([MAX_ENTRY_PATH_BYTES]u8, @splat(0)),
     can_read: bool = true,
     can_write: bool = false,
     can_admin: bool = false,
@@ -330,8 +330,8 @@ pub const ExportPackage = struct {
     label: [MAX_WORKSPACE_LABEL_BYTES]u8,
     root_address: SnapshotRootAddress,
     signature: manifest.Signature = .{},
-    signature_format_storage: [MAX_EXPORT_SIGNATURE_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_EXPORT_SIGNATURE_FORMAT_BYTES,
-    signature_signer_storage: [MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8 = [_]u8{0} ** MAX_EXPORT_SIGNATURE_SIGNER_BYTES,
+    signature_format_storage: [MAX_EXPORT_SIGNATURE_FORMAT_BYTES]u8 = @as([MAX_EXPORT_SIGNATURE_FORMAT_BYTES]u8, @splat(0)),
+    signature_signer_storage: [MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8 = @as([MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8, @splat(0)),
     entries: [MAX_WORKSPACE_ENTRIES]Entry,
 
     comptime {
@@ -426,14 +426,14 @@ pub const WorkspacePathIndex = struct {
 };
 
 pub const WorkspaceMutationLog = struct {
-    backing: MutationBacking = if (heap_backed_mutation_logs) null else [_]EntryMutation{EntryMutation{}} ** MAX_WORKSPACE_ENTRY_MUTATIONS,
+    backing: MutationBacking = if (heap_backed_mutation_logs) null else @as([MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation, @splat(EntryMutation{})),
 
     pub fn ensureBacking(self: *WorkspaceMutationLog) error{NoSpaceLeft}!void {
         if (comptime heap_backed_mutation_logs) {
             if (self.backing != null) return;
             const allocation = kernel_memory.kmalloc(@sizeOf(MutationEntries)) orelse return error.NoSpaceLeft;
             const backing: *MutationEntries = @ptrCast(@alignCast(allocation));
-            backing.* = [_]EntryMutation{EntryMutation{}} ** MAX_WORKSPACE_ENTRY_MUTATIONS;
+            backing.* = @as([MAX_WORKSPACE_ENTRY_MUTATIONS]EntryMutation, @splat(EntryMutation{}));
             self.backing = backing;
         }
     }
@@ -468,9 +468,9 @@ pub const WorkspaceMutationLog = struct {
 };
 
 const WorkspaceShareTableData = struct {
-    share_grants: [MAX_SHARE_GRANTS]ShareGrant = [_]ShareGrant{ShareGrant{
+    share_grants: [MAX_SHARE_GRANTS]ShareGrant = @as([MAX_SHARE_GRANTS]ShareGrant, @splat(ShareGrant{
         .principal_id = .{ .kind = .service, .serial = 0 },
-    }} ** MAX_SHARE_GRANTS,
+    })),
     share_grant_principal_index: ShareGrantPrincipalIndex = ShareGrantPrincipalIndex.init(),
 };
 pub const HEAP_BACKED_WORKSPACE_SHARE_TABLES_ON_FREESTANDING = true;
@@ -538,14 +538,14 @@ pub const WorkspaceStagingState = struct {
 };
 
 pub const RecoverableDeleteLog = struct {
-    backing: RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) null else [_]Entry{Entry{}} ** MAX_RECOVERABLE_DELETES,
+    backing: RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) null else @as([MAX_RECOVERABLE_DELETES]Entry, @splat(Entry{})),
 
     pub fn ensureBacking(self: *RecoverableDeleteLog) error{NoSpaceLeft}!void {
         if (comptime heap_backed_recoverable_delete_logs) {
             if (self.backing != null) return;
             const allocation = kernel_memory.kmalloc(@sizeOf(RecoverableDeleteEntries)) orelse return error.NoSpaceLeft;
             const backing: *RecoverableDeleteEntries = @ptrCast(@alignCast(allocation));
-            backing.* = [_]Entry{Entry{}} ** MAX_RECOVERABLE_DELETES;
+            backing.* = @as([MAX_RECOVERABLE_DELETES]Entry, @splat(Entry{}));
             self.backing = backing;
         }
     }
@@ -751,7 +751,7 @@ fn workspaceLabelKey(label: []const u8) u64 {
 
 fn workspaceOwnerLabelKey(owner: principal.PrincipalId, label: []const u8) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(owner.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(owner.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, owner.serial);
     hash = native_util.fnv1a64WithSeed(hash, label);
     return indexed_arena.nonZeroKey(hash);
@@ -766,7 +766,7 @@ fn snapshotLabelKey(workspace_id: ids.WorkspaceId, label: []const u8) u64 {
 
 pub fn shareGrantPrincipalKey(principal_id: principal.PrincipalId) u64 {
     var hash: u64 = 0x5753_4752_414e_5401;
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(principal_id.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(principal_id.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, principal_id.serial);
     return indexed_arena.nonZeroKey(hash);
 }
@@ -866,7 +866,7 @@ pub const Directory = struct {
     }
 
     pub fn createRef(self: *Directory, request: *const CreateRequest) Error!*WorkspaceRecord {
-        var label: [MAX_WORKSPACE_LABEL_BYTES]u8 = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES;
+        var label: [MAX_WORKSPACE_LABEL_BYTES]u8 = @as([MAX_WORKSPACE_LABEL_BYTES]u8, @splat(0));
         const label_len = native_util.copyTextExact(&label, request.label) catch return error.LabelTooLong;
         if (self.workspaceCount() >= MAX_WORKSPACES) return error.WorkspaceTableFull;
         if (self.next_workspace_id == 0) return error.WorkspaceIdExhausted;
@@ -1121,7 +1121,7 @@ pub const Directory = struct {
     ) Error!*SnapshotRecord {
         if (identity.label.len == 0) return error.UnsignedSnapshot;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
-        var label_copy: [MAX_WORKSPACE_LABEL_BYTES]u8 = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES;
+        var label_copy: [MAX_WORKSPACE_LABEL_BYTES]u8 = @as([MAX_WORKSPACE_LABEL_BYTES]u8, @splat(0));
         const label_len = native_util.copyTextExact(&label_copy, label) catch return error.LabelTooLong;
         if (self.snapshotCount() >= MAX_SNAPSHOTS) return error.SnapshotTableFull;
         if (self.next_snapshot_id == 0) return error.SnapshotIdExhausted;
@@ -1153,7 +1153,7 @@ pub const Directory = struct {
         if (workspace.staging.transaction_open) return error.TransactionAlreadyOpen;
         const snapshot_record = self.findSnapshot(snapshot_id) orelse return error.SnapshotNotFound;
         if (!snapshot_record.workspace_id.eql(workspace_id)) return error.SnapshotNotFound;
-        var materialized_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        var materialized_entries: [MAX_WORKSPACE_ENTRIES]Entry = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{}));
         const snapshot_entries = if (snapshot_record.generation == workspace.generation)
             workspace.path_index.entriesConst(workspace.counts.entry_count)
         else blk: {
@@ -1207,7 +1207,7 @@ pub const Directory = struct {
         const snapshot_record = self.findSnapshot(snapshot_id) orelse return error.SnapshotNotFound;
         if (!snapshot_record.workspace_id.eql(workspace_id)) return error.SnapshotNotFound;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
-        var materialized_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+        var materialized_entries: [MAX_WORKSPACE_ENTRIES]Entry = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{}));
         const snapshot_entries = if (snapshot_record.generation == workspace.generation)
             workspace.path_index.entriesConst(workspace.counts.entry_count)
         else blk: {
@@ -1387,7 +1387,7 @@ fn zeroWorkspace() WorkspaceRecord {
         .id = ids.WorkspaceId.zero,
         .owner = .{ .kind = .service, .serial = 0 },
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES,
+        .label = @as([MAX_WORKSPACE_LABEL_BYTES]u8, @splat(0)),
         .generation = 0,
         .counts = .{},
         .path_index = .{},
@@ -1417,7 +1417,7 @@ fn zeroSnapshot() SnapshotRecord {
         .workspace_id = ids.WorkspaceId.zero,
         .generation = 0,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES,
+        .label = @as([MAX_WORKSPACE_LABEL_BYTES]u8, @splat(0)),
         .root_address = workspace_merkle.zeroRootAddress(),
         .signature = .{},
         .entry_count = 0,
@@ -1434,15 +1434,15 @@ fn zeroExportPackage() ExportPackage {
         .snapshot_id = ids.SnapshotId.zero,
         .generation = 0,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_WORKSPACE_LABEL_BYTES,
+        .label = @as([MAX_WORKSPACE_LABEL_BYTES]u8, @splat(0)),
         .root_address = workspace_merkle.zeroRootAddress(),
         .signature = .{},
         .signature_format_len = 0,
-        .signature_format_storage = [_]u8{0} ** MAX_EXPORT_SIGNATURE_FORMAT_BYTES,
+        .signature_format_storage = @as([MAX_EXPORT_SIGNATURE_FORMAT_BYTES]u8, @splat(0)),
         .signature_signer_len = 0,
-        .signature_signer_storage = [_]u8{0} ** MAX_EXPORT_SIGNATURE_SIGNER_BYTES,
+        .signature_signer_storage = @as([MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8, @splat(0)),
         .entry_count = 0,
-        .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+        .entries = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{})),
     };
 }
 
@@ -1875,7 +1875,7 @@ fn seedWorkspaceEntries(workspace: *WorkspaceRecord, source_entries: []const Ent
 }
 
 fn compactMutationLogToCurrentEntries(workspace: *WorkspaceRecord) Error!void {
-    var current_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+    var current_entries: [MAX_WORKSPACE_ENTRIES]Entry = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{}));
     const count = workspace.counts.entry_count;
     copyEntries(current_entries[0..count], workspace.path_index.entriesConst(count));
 
@@ -1904,7 +1904,7 @@ fn materializeEntriesAtGeneration(
 }
 
 fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []const Entry) Error!void {
-    var target_entries: [MAX_WORKSPACE_ENTRIES]Entry = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES;
+    var target_entries: [MAX_WORKSPACE_ENTRIES]Entry = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{}));
     var target_count: usize = 0;
     for (source_entries) |entry| {
         if (isDeleteTombstone(entry)) continue;
@@ -2202,7 +2202,7 @@ test "workspace entries and derived indexes share on-demand freestanding backing
 }
 
 fn debugIndexChecksEnabled() bool {
-    return builtin.mode == .Debug;
+    return builtin.mode == .debug;
 }
 
 test "workspace sharing uses capacity-sized indexed backing" {

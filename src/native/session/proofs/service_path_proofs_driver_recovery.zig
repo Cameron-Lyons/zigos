@@ -20,7 +20,7 @@ const recovery_storage_sector_count = storage_restart_probe_lba + 4;
 const recovery_storage_bytes: usize = @as(usize, @intCast(recovery_storage_sector_count)) * storage_volume.sector_size;
 
 const RecoveryStorage = struct {
-    var image = [_]u8{0} ** recovery_storage_bytes;
+    var image = @as([recovery_storage_bytes]u8, @splat(0));
 
     fn reset() void {
         @memset(image[0..], 0);

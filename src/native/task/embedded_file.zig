@@ -204,7 +204,7 @@ test "chunked embedded files preserve logical bytes across shared chunks" {
     try std.testing.expectEqual(u32, ByteLength);
     try std.testing.expectEqual(ByteLength, @FieldType(File, "byte_len"));
     try std.testing.expectEqual(FILE_SIZE_CEILING_BYTES, @sizeOf(File));
-    const chunk_pool = ([_]u8{'a'} ** CHUNK_SIZE_BYTES) ++ ([_]u8{'A'} ** CHUNK_SIZE_BYTES);
+    const chunk_pool = (@as([CHUNK_SIZE_BYTES]u8, @splat('a'))) ++ (@as([CHUNK_SIZE_BYTES]u8, @splat('A')));
     const chunk_indices = [_]ChunkIndex{ 0, 1, 0 };
     const byte_len = CHUNK_SIZE_BYTES * 2 + 2;
     const file = File.fromChunks(byte_len, &chunk_pool, &chunk_indices);
@@ -225,7 +225,7 @@ test "chunked embedded files preserve logical bytes across shared chunks" {
 }
 
 test "chunked embedded files reject invalid index layouts" {
-    const chunk_pool = [_]u8{0} ** CHUNK_SIZE_BYTES;
+    const chunk_pool = @as([CHUNK_SIZE_BYTES]u8, @splat(0));
     const missing_index = [_]ChunkIndex{0};
     const out_of_range = [_]ChunkIndex{ 0, 1 };
     try std.testing.expect(!File.fromChunks(CHUNK_SIZE_BYTES + 1, &chunk_pool, &missing_index).isValid());

@@ -316,7 +316,7 @@ pub const USES_PER_CPU_FRAME_CACHE = true;
 const FRAME_CACHE_CPUS = @import("../cpu_identity.zig").MAX_CPUS;
 const FRAME_CACHE_DEPTH: u8 = 16;
 var general_frame_cache: [FRAME_CACHE_CPUS][FRAME_CACHE_DEPTH]frame_allocator.PhysicalAddress = undefined;
-var general_frame_cache_len: [FRAME_CACHE_CPUS]u8 = [_]u8{0} ** FRAME_CACHE_CPUS;
+var general_frame_cache_len: [FRAME_CACHE_CPUS]u8 = @as([FRAME_CACHE_CPUS]u8, @splat(0));
 var general_frame_cache_total: u8 = 0;
 
 fn frameCacheCpu() u8 {

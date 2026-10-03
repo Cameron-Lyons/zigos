@@ -276,7 +276,7 @@ fn fuzzElfImageMetadata(input: []const u8) void {
 }
 
 fn fuzzStorageVolumeImage(input: []const u8) void {
-    var image = [_]u8{0} ** storage_volume.image_bytes;
+    var image = @as([storage_volume.image_bytes]u8, @splat(0));
     @memcpy(image[0..@min(image.len, input.len)], input[0..@min(image.len, input.len)]);
     var volume = storage_volume.Volume.init();
     var store = object_store.Store.init();
@@ -289,12 +289,12 @@ fn fuzzSyncRecord(input: []const u8) void {
 }
 
 fn fuzzCapabilityMessage(input: []const u8) void {
-    const kind_fields = std.meta.fields(capability.CapabilityTargetKind);
-    const right_fields = std.meta.fields(capability.CapabilityRight);
+    const kind_fields = @typeInfo(capability.CapabilityTargetKind).@"enum".field_values;
+    const right_fields = @typeInfo(capability.CapabilityRight).@"enum".field_values;
     const kind_value: u8 = if (input.len > 0) input[0] else 0;
     const right_value: u8 = if (input.len > 1) input[1] else 0;
-    const kind: capability.CapabilityTargetKind = @enumFromInt(kind_value % kind_fields.len);
-    const right: capability.CapabilityRight = @enumFromInt(right_value % right_fields.len);
+    const kind: capability.CapabilityTargetKind = @fromBackingInt(@intCast(kind_value % kind_fields.len));
+    const right: capability.CapabilityRight = @fromBackingInt(@intCast(right_value % right_fields.len));
     const rights = capability.CapabilityRights.single(right).retarget(kind);
     _ = rights.has(right);
     _ = rights.containsAll(rights);
@@ -577,7 +577,7 @@ fn validateReleaseArtifacts(
             "\"repo_change_id\":",
             "\"dirty_workspace_file_count\":",
             "\"optimize_mode\": \"ReleaseFast\"",
-            "-Doptimize=ReleaseFast",
+            "-Doptimize=fast",
             "REQUIRED_RELEASE_ARTIFACTS",
             "PRODUCTION_USERSPACE_ARTIFACTS",
             "is_forbidden_release_artifact",

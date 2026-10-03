@@ -57,9 +57,9 @@ pub const DocumentRecord = struct {
     workspace_id: u64 = 0,
     object_id: u64 = 0,
     version_id: u64 = 0,
-    metadata: u64 = @as(u64, @intFromEnum(manifest.DataSensitivity.internal_data)) << DOCUMENT_SENSITIVITY_SHIFT,
-    title: [MAX_TITLE_BYTES]u8 = [_]u8{0} ** MAX_TITLE_BYTES,
-    body: [MAX_BODY_BYTES]u8 = [_]u8{0} ** MAX_BODY_BYTES,
+    metadata: u64 = @as(u64, @backingInt(manifest.DataSensitivity.internal_data)) << DOCUMENT_SENSITIVITY_SHIFT,
+    title: [MAX_TITLE_BYTES]u8 = @as([MAX_TITLE_BYTES]u8, @splat(0)),
+    body: [MAX_BODY_BYTES]u8 = @as([MAX_BODY_BYTES]u8, @splat(0)),
 
     pub fn titleSlice(self: *const DocumentRecord) []const u8 {
         return self.title[0..self.titleLength()];
@@ -70,7 +70,7 @@ pub const DocumentRecord = struct {
     }
 
     pub fn sensitivity(self: *const DocumentRecord) manifest.DataSensitivity {
-        return @enumFromInt((self.metadata >> DOCUMENT_SENSITIVITY_SHIFT) & DOCUMENT_SENSITIVITY_MASK);
+        return @fromBackingInt(@intCast((self.metadata >> DOCUMENT_SENSITIVITY_SHIFT) & DOCUMENT_SENSITIVITY_MASK));
     }
 
     pub fn titleFingerprint(self: *const DocumentRecord) u64 {
@@ -95,7 +95,7 @@ pub const DocumentRecord = struct {
         if (title_length > DOCUMENT_TITLE_LENGTH_MASK or body_length > DOCUMENT_BODY_LENGTH_MASK) {
             native_util.impossibleByInvariant("indexed document lengths fit packed metadata");
         }
-        const sensitivity_value = @intFromEnum(data_sensitivity);
+        const sensitivity_value = @backingInt(data_sensitivity);
         if (sensitivity_value > DOCUMENT_SENSITIVITY_MASK) {
             native_util.impossibleByInvariant("indexed document sensitivity fits packed metadata");
         }
@@ -113,8 +113,8 @@ comptime {
     if (MAX_TITLE_BYTES > DOCUMENT_TITLE_LENGTH_MASK or MAX_BODY_BYTES > DOCUMENT_BODY_LENGTH_MASK) {
         @compileError("indexed document text capacity no longer fits packed metadata");
     }
-    for (std.meta.fields(manifest.DataSensitivity)) |field| {
-        if (field.value > DOCUMENT_SENSITIVITY_MASK) {
+    for (@typeInfo(manifest.DataSensitivity).@"enum".field_values) |field| {
+        if (field > DOCUMENT_SENSITIVITY_MASK) {
             @compileError("data sensitivity no longer fits indexed document metadata");
         }
     }
@@ -137,7 +137,7 @@ pub const SemanticQueryRequest = struct {
 
 pub const Service = struct {
     generation: u64 = 1,
-    documents: [MAX_DOCUMENTS]DocumentRecord = [_]DocumentRecord{.{}} ** MAX_DOCUMENTS,
+    documents: [MAX_DOCUMENTS]DocumentRecord = @as([MAX_DOCUMENTS]DocumentRecord, @splat(.{})),
     document_count: u8 = 0,
 
     comptime {
@@ -362,7 +362,7 @@ fn workspacePermitted(permitted_workspaces: []const u64, workspace_id: u64) bool
 }
 
 fn maxSensitivity(left: manifest.DataSensitivity, right: manifest.DataSensitivity) manifest.DataSensitivity {
-    return if (@intFromEnum(right) > @intFromEnum(left)) right else left;
+    return if (@backingInt(right) > @backingInt(left)) right else left;
 }
 
 fn makeDocument(
@@ -434,7 +434,7 @@ test "indexing service remains permission aware and updates ranked results" {
     const mixed_case_results = service.query(&workspace_one, "AlPhA", &results_buffer);
     try std.testing.expectEqual(@as(usize, 2), mixed_case_results.len);
     try std.testing.expectEqual(@as(u64, 100), mixed_case_results[0].object_id);
-    const oversized_query = [_]u8{'a'} ** (MAX_BODY_BYTES + 1);
+    const oversized_query = @as([MAX_BODY_BYTES + 1]u8, @splat('a'));
     try std.testing.expectEqual(@as(usize, 0), service.query(&workspace_one, &oversized_query, &results_buffer).len);
     const duplicate_workspace_scope = [_]u64{ 1, 1 };
     const deduped_results = service.query(&duplicate_workspace_scope, "alpha", &results_buffer);
@@ -453,8 +453,8 @@ test "indexing service remains permission aware and updates ranked results" {
 
 test "indexing service rejects overlong document text without partial updates" {
     var service = Service.init();
-    const oversized_title = [_]u8{'t'} ** (MAX_TITLE_BYTES + 1);
-    const oversized_body = [_]u8{'b'} ** (MAX_BODY_BYTES + 1);
+    const oversized_title = @as([MAX_TITLE_BYTES + 1]u8, @splat('t'));
+    const oversized_body = @as([MAX_BODY_BYTES + 1]u8, @splat('b'));
 
     try std.testing.expectError(error.TitleTooLong, service.upsert(1, 100, 1, oversized_title[0..], "body"));
     try std.testing.expectEqual(@as(usize, 0), service.documentCount());
@@ -581,8 +581,8 @@ test "indexing service caches compact title fingerprints without growing records
     try std.testing.expectEqual(hashTitle("Updated Title"), updated_fingerprint);
     try std.testing.expect(updated_fingerprint != original_fingerprint);
 
-    const max_title = [_]u8{'t'} ** MAX_TITLE_BYTES;
-    const max_body = [_]u8{'b'} ** MAX_BODY_BYTES;
+    const max_title = @as([MAX_TITLE_BYTES]u8, @splat('t'));
+    const max_body = @as([MAX_BODY_BYTES]u8, @splat('b'));
     try service.upsertClassified(2, 200, 1, &max_title, &max_body, .secret_user_data);
     const maximum = service.findSlot(2, 200).?;
     try std.testing.expectEqual(MAX_TITLE_BYTES, maximum.titleSlice().len);

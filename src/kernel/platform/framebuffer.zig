@@ -286,7 +286,7 @@ test "framebuffer scanout proof requires nonblank expected pixels" {
         .buffer_bytes = testLinearBufferBytes(64, 16),
     });
     const expected_pixel: u32 = 0x00FF_00FF;
-    var scanline = [_]u8{0} ** (64 * @as(usize, FRAMEBUFFER_32BPP_BYTES));
+    var scanline = @as([64 * @as(usize, FRAMEBUFFER_32BPP_BYTES)]u8, @splat(0));
     std.mem.writeInt(u32, scanline[0..4], expected_pixel, .little);
 
     const proof = try proveScanout(info, scanline[0..], expected_pixel);
@@ -312,7 +312,7 @@ test "framebuffer scanout proof requires nonblank expected pixels" {
     missing_display_scanout.hardware_scanout.display_scanout_observations = 0;
     try std.testing.expect(!missing_display_scanout.productionHardwareVerified());
 
-    var blank = [_]u8{0} ** (64 * @as(usize, FRAMEBUFFER_32BPP_BYTES));
+    var blank = @as([64 * @as(usize, FRAMEBUFFER_32BPP_BYTES)]u8, @splat(0));
     try std.testing.expectError(error.BlankScanout, proveScanout(info, blank[0..], expected_pixel));
     std.mem.writeInt(u32, blank[0..4], 0x0000_00FF, .little);
     try std.testing.expectError(error.ExpectedPixelMissing, proveScanout(info, blank[0..], expected_pixel));

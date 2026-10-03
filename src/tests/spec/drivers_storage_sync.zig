@@ -86,7 +86,7 @@ pub fn publishedDriversActivateScopedTransports() !void {
     device_inventory.reset();
     defer device_inventory.reset();
 
-    var image = [_]u8{0} ** storage_volume.image_bytes;
+    var image = @as([storage_volume.image_bytes]u8, @splat(0));
     FakeNetworkDevice.activation_count = 0;
     FakeBackend.activation_count = 0;
     FakeBackend.image = &image;

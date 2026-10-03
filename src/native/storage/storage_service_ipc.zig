@@ -113,8 +113,8 @@ pub fn encodeCreateWorkspaceRequest(
     var writer = RequestWriter{ .buffer = buffer };
     try writer.writeU32(MAGIC);
     try writer.writeU16(WIRE_VERSION);
-    try writer.writeU16(@intFromEnum(Operation.create_workspace));
-    try writer.writeU16(@intFromEnum(owner.kind));
+    try writer.writeU16(@backingInt(Operation.create_workspace));
+    try writer.writeU16(@backingInt(owner.kind));
     try writer.writeU16(@intCast(label.len));
     try writer.writeU64(owner.serial);
     try writer.writeBytes(label);
@@ -150,9 +150,9 @@ pub fn encodeCreateWorkspaceResponse(buffer: []u8, result: CreateWorkspaceResult
     var writer = ResponseWriter{ .buffer = buffer };
     try writer.writeU32(MAGIC);
     try writer.writeU16(WIRE_VERSION);
-    try writer.writeU16(@intFromEnum(Operation.create_workspace));
-    try writer.writeU16(@intFromEnum(result.status));
-    try writer.writeU16(@intFromEnum(result.denial_reason));
+    try writer.writeU16(@backingInt(Operation.create_workspace));
+    try writer.writeU16(@backingInt(result.status));
+    try writer.writeU16(@backingInt(result.denial_reason));
     try writer.writeU64(result.workspace_id);
     try writer.writeU32(result.generation);
     return buffer[0..writer.offset];

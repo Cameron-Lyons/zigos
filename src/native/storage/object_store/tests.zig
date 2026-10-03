@@ -61,7 +61,7 @@ test "failed chunk allocation rolls back a new blob and unpublished object" {
         _ = try store.putChunk(computeChunkAddress(&payload), &payload);
     }
     const signer = signing.SignerIdentity{ .label = "allocation-rollback", .seed = signing.seedFromByte(0xE2) };
-    var payload = [_]u8{'a'} ** (MAX_CHUNK_BYTES + 1);
+    var payload = @as([MAX_CHUNK_BYTES + 1]u8, @splat('a'));
     payload[MAX_CHUNK_BYTES] = 'b';
     const metadata = try signMetadata(signer, "failed", "text/plain", .document, &payload, 1);
     try std.testing.expectError(error.InvalidObjectId, store.putVersion(.{
@@ -470,7 +470,7 @@ test "object store streams page-sized chunks into Merkle-addressed blob manifest
     try std.testing.expectEqual(@as(usize, 4), blob.chunkCount());
     try std.testing.expectEqual(PAGE_SIZE_BYTES, store.blobChunk(blob, 0).?.payloadLen());
     try std.testing.expectEqual(@as(usize, 17), store.blobChunk(blob, 3).?.payloadLen());
-    var chunk_refs = [_]ChunkRef{ChunkRef{}} ** MAX_BLOB_CHUNKS;
+    var chunk_refs = @as([MAX_BLOB_CHUNKS]ChunkRef, @splat(ChunkRef{}));
     const live_chunk_refs = try store.copyBlobChunkRefs(blob, &chunk_refs);
     const chunk_count = live_chunk_refs.len;
     try std.testing.expect(object_store.chunkRefsMatchPayloadLen(blob.payloadLen(), live_chunk_refs));
@@ -572,7 +572,7 @@ test "offset chunk cursors retain whole-manifest corruption checks" {
     var store = Store.init();
     defer store.reset();
     const signer = signing.SignerIdentity{ .label = "cursor-corruption", .seed = signing.seedFromByte(0x49) };
-    var bytes = [_]u8{'a'} ** (MAX_CHUNK_BYTES + 1);
+    var bytes = @as([MAX_CHUNK_BYTES + 1]u8, @splat('a'));
     bytes[MAX_CHUNK_BYTES] = 'b';
     const result = try store.putLocallySignedVersion(.{
         .object_type = .blob,
@@ -600,7 +600,7 @@ test "inline payload reads are bounded independently from object capacity" {
         .seed = signing.seedFromByte(0x48),
     };
 
-    const inline_payload = [_]u8{0x31} ** MAX_INLINE_PAYLOAD_BYTES;
+    const inline_payload = @as([MAX_INLINE_PAYLOAD_BYTES]u8, @splat(0x31));
     const inline_result = try store.putVersion(.{
         .preferred_object_id = ids.object(915),
         .object_type = .document,
@@ -614,7 +614,7 @@ test "inline payload reads are bounded independently from object capacity" {
     const inline_chunk = store.blobChunk(inline_blob, 0).?;
     try std.testing.expect(inline_chunk.chunkSlice().ptr == inline_read.ptr);
 
-    const streamed_payload = [_]u8{0x32} ** (MAX_INLINE_PAYLOAD_BYTES + 1);
+    const streamed_payload = @as([MAX_INLINE_PAYLOAD_BYTES + 1]u8, @splat(0x32));
     const streamed_result = try store.putVersion(.{
         .preferred_object_id = ids.object(916),
         .object_type = .model_artifact,

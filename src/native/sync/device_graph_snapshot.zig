@@ -139,7 +139,7 @@ fn writeDevice(writer: *Writer, device: *const graph_mod.DeviceRecord) Error!voi
     try writer.writeU64(device.principal_id.serial);
     try writeText(writer, device.labelSlice());
     try writer.writeU64(device.overlay_id);
-    try writer.writeByte(@intFromEnum(device.status));
+    try writer.writeByte(@backingInt(device.status));
     try writer.writeU32(device.trust_generation);
     try writer.writeU32(device.key_rotation_generation);
     try writeSignature(writer, device.device_signature);
@@ -148,12 +148,12 @@ fn writeDevice(writer: *Writer, device: *const graph_mod.DeviceRecord) Error!voi
     try writeSignature(writer, device.revocation_signature);
     try writer.writeU64(device.last_rotated_at_ticks);
     try writer.writeU64(device.revoked_at_ticks);
-    try writer.writeByte(@intFromEnum(device.device_key_origin));
+    try writer.writeByte(@backingInt(device.device_key_origin));
     try writer.writeByte(@intFromBool(device.platform_key_bound));
     try writeText(writer, device.platformKeyLabelSlice());
     try writer.writeBytes(&device.platform_key_digest);
     try writer.writeU64(device.platform_root_generation);
-    try writer.writeByte(@intFromEnum(device.platform_root_provenance));
+    try writer.writeByte(@backingInt(device.platform_root_provenance));
     try writer.writeBytes(&device.platform_root_digest);
 }
 

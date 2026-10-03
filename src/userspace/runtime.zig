@@ -157,12 +157,12 @@ const freestanding_syscall = if (builtin.target.os.tag == .freestanding)
             bytes_written: u32,
             denial_reason: abi.DenialReason,
         } {
-            var outcome = Outcome{ .status = @intFromEnum(abi.SyscallStatus.internal_error), .bytes_written = 0, .denial_reason = 0 };
-            _ = syscall3_asm(@intFromEnum(opcode), request_addr, response_addr, response_len, &outcome);
+            var outcome = Outcome{ .status = @backingInt(abi.SyscallStatus.internal_error), .bytes_written = 0, .denial_reason = 0 };
+            _ = syscall3_asm(@backingInt(opcode), request_addr, response_addr, response_len, &outcome);
             return .{
-                .status = @enumFromInt(outcome.status),
+                .status = @fromBackingInt(@intCast(outcome.status)),
                 .bytes_written = outcome.bytes_written,
-                .denial_reason = @enumFromInt(outcome.denial_reason),
+                .denial_reason = @fromBackingInt(@intCast(outcome.denial_reason)),
             };
         }
     }
@@ -180,7 +180,7 @@ else
         }
     };
 
-pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+pub fn panic(msg: []const u8, _: ?*std.lang.StackTrace, _: ?usize) noreturn {
     const detail = bootstrapDetail();
     signalFault(detail, faultCode(msg));
 }
@@ -282,7 +282,7 @@ fn runStartupQueries(detail: mailbox.Detail) void {
 fn publishServiceReady(comptime service_kind: ServiceKind, detail: mailbox.Detail) void {
     var failure_code: u8 = 0x21;
     const proof = runServiceStartupIpc(service_kind, &failure_code) orelse signalFault(detail, failure_code);
-    zigos_userspace_bootstrap.service_kind = @intFromEnum(service_kind);
+    zigos_userspace_bootstrap.service_kind = @backingInt(service_kind);
     zigos_userspace_bootstrap.auxiliary_kind = .service;
     zigos_userspace_bootstrap.service_ready = 1;
     zigos_userspace_bootstrap.service_operation_count = proof.operation_count;
@@ -425,7 +425,7 @@ fn runMmuIsolationProbe(detail: mailbox.Detail) noreturn {
     if (pointer_probe_status == .invalid_request_pointer) {
         publishState(.syscall_ready, detail, mailbox.PROOF_SYSCALL_POINTER_DENIED_PULSE);
     } else {
-        signalFault(detail, @truncate(@intFromEnum(pointer_probe_status)));
+        signalFault(detail, @truncate(@backingInt(pointer_probe_status)));
     }
 
     const foreign_shared_memory: *volatile u8 = @ptrFromInt(@as(usize, mailbox.FOREIGN_SHARED_MEMORY_PROBE_ADDR));
@@ -523,9 +523,9 @@ fn endpointCreate(
     );
     if (result.status != .success) {
         failure_code.* = if (result.status == .denied)
-            0x90 | @as(u8, @truncate(@intFromEnum(result.denial_reason)))
+            0x90 | @as(u8, @truncate(@backingInt(result.denial_reason)))
         else
-            0x80 | @as(u8, @truncate(@intFromEnum(result.status)));
+            0x80 | @as(u8, @truncate(@backingInt(result.status)));
         return null;
     }
     if (response.endpoint.endpoint_id == 0 or response.capability_id == 0) return null;
@@ -682,7 +682,7 @@ fn applyInputEvent(
 }
 
 fn publishUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.State) void {
-    state.ui_model_kind = @intFromEnum(surface.model);
+    state.ui_model_kind = @backingInt(surface.model);
     state.ui_state_flags = @bitCast(surface.flags);
     state.ui_focus_index = surface.focus_index;
     state.ui_text_length = surface.text_length;
@@ -706,7 +706,7 @@ fn presentUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
         presentation,
         &text,
     );
-    state.ui_last_presentation_status = @intFromEnum(outcome.status);
+    state.ui_last_presentation_status = @backingInt(outcome.status);
     if (!outcome.accepted) {
         state.ui_presentation_failures +|= 1;
         return false;
@@ -784,8 +784,8 @@ fn publishStateWithDisposition(
     disposition: mailbox.YieldDisposition,
 ) void {
     const counter = mailbox.packCounter(stage, detail, pulse);
-    zigos_userspace_bootstrap.stage = @intFromEnum(stage);
-    zigos_userspace_bootstrap.detail = @intFromEnum(detail);
+    zigos_userspace_bootstrap.stage = @backingInt(stage);
+    zigos_userspace_bootstrap.detail = @backingInt(detail);
     zigos_userspace_bootstrap.last_counter = counter;
     _ = yieldCounter(counter, disposition, zigos_userspace_bootstrap.ui_state_revision);
 }
@@ -804,7 +804,7 @@ fn yieldCounter(value: u32, disposition: mailbox.YieldDisposition, ui_revision: 
 
 fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
     return freestanding_syscall.call(
-        @enumFromInt(request.header.operation),
+        @fromBackingInt(@intCast(request.header.operation)),
         @intFromPtr(request),
         @intFromPtr(response),
         @sizeOf(@TypeOf(response.*)),
@@ -812,7 +812,7 @@ fn trapCall(request: anytype, response: anytype) abi.SyscallStatus {
 }
 
 fn trapCallNoResponse(request: anytype) abi.SyscallStatus {
-    return freestanding_syscall.call(@enumFromInt(request.header.operation), @intFromPtr(request), 0, 0).status;
+    return freestanding_syscall.call(@fromBackingInt(@intCast(request.header.operation)), @intFromPtr(request), 0, 0).status;
 }
 
 fn makeHeader(operation: abi.NativeOperation, subject_task_id: u64) abi.RequestHeader {
@@ -953,7 +953,7 @@ test "hosted UI presentation records unavailable transport without acknowledging
     try std.testing.expect(!presentUiState(&state, &surface));
     try std.testing.expectEqual(@as(u64, 0), state.ui_presented_revision);
     try std.testing.expectEqual(@as(u32, 1), state.ui_presentation_failures);
-    try std.testing.expectEqual(@intFromEnum(abi.SyscallStatus.unavailable), state.ui_last_presentation_status);
+    try std.testing.expectEqual(@backingInt(abi.SyscallStatus.unavailable), state.ui_last_presentation_status);
 }
 
 test "userspace service startup plans expose domain-specific endpoint operations" {
@@ -963,7 +963,7 @@ test "userspace service startup plans expose domain-specific endpoint operations
     const compositor = service_protocol.planFor(.compositor);
     const sync = service_protocol.planFor(.sync);
 
-    try std.testing.expectEqual(@as(u8, @intFromEnum(ServiceKind.storage)), @as(u8, @intFromEnum(storage.kind)));
+    try std.testing.expectEqual(@as(u8, @backingInt(ServiceKind.storage)), @as(u8, @backingInt(storage.kind)));
     try std.testing.expectEqual(@as(u8, 4), storage.operation_count);
     try std.testing.expectEqual(@as(u8, 3), network.operation_count);
     try std.testing.expectEqual(@as(u8, 4), package.operation_count);

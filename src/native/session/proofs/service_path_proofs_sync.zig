@@ -923,8 +923,8 @@ fn encodeSyncFrame(buffer: []u8, frame: sync_service.TransportFrame) ![]const u8
     try writer.writeU64(frame.version_id);
     try writer.writeU64(frame.source_device.serial);
     try writer.writeU64(frame.target_device.serial);
-    try writer.writeByte(@intFromEnum(frame.transport));
-    try writer.writeByte(@intFromEnum(frame.semantic));
+    try writer.writeByte(@backingInt(frame.transport));
+    try writer.writeByte(@backingInt(frame.semantic));
     try writer.writeByte(@intFromBool(frame.encrypted));
     try writer.writeU32(frame.workspace_generation);
     try writer.writeByte(@intCast(path.len));
@@ -944,8 +944,8 @@ fn decodeSyncFrame(payload: []const u8, path_buffer: *[workspace.MAX_ENTRY_PATH_
     const version_id = try reader.readU64();
     const source_serial = try reader.readU64();
     const target_serial = try reader.readU64();
-    const transport: sync_service.TransportMode = @enumFromInt(try reader.readByte());
-    const semantic: sync_service.SyncSemantic = @enumFromInt(try reader.readByte());
+    const transport: sync_service.TransportMode = @fromBackingInt(@intCast(try reader.readByte()));
+    const semantic: sync_service.SyncSemantic = @fromBackingInt(@intCast(try reader.readByte()));
     const encrypted = (try reader.readByte()) != 0;
     const workspace_generation = try reader.readU32();
     const path_len = try reader.readByte();

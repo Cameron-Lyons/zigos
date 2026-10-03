@@ -4,10 +4,10 @@ pub const Hasher = std.crypto.hash.sha2.Sha256;
 pub const digest_bytes: usize = 32;
 pub const hex_digest_bytes: usize = digest_bytes * 2;
 pub const Digest = [digest_bytes]u8;
-pub const zero_digest: Digest = [_]u8{0} ** digest_bytes;
+pub const zero_digest: Digest = @as([digest_bytes]u8, @splat(0));
 
 pub fn digestFromByte(byte: u8) Digest {
-    return [_]u8{byte} ** digest_bytes;
+    return @as([digest_bytes]u8, @splat(byte));
 }
 
 pub fn init() Hasher {
@@ -33,7 +33,7 @@ pub fn updateBool(hasher: *Hasher, tag: []const u8, value: bool) void {
 
 pub fn updateEnum(hasher: *Hasher, tag: []const u8, value: anytype) void {
     updateTag(hasher, tag);
-    updateU64(hasher, @intCast(@intFromEnum(value)));
+    updateU64(hasher, @intCast(@backingInt(value)));
 }
 
 pub fn updateInt(hasher: *Hasher, tag: []const u8, value: anytype) void {

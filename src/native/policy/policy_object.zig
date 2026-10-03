@@ -993,18 +993,18 @@ fn zeroPolicy() PolicyObject {
         .subject_id = 0,
         .issuer = .{ .kind = .policy_authority, .serial = 0 },
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .install_source_mode = .any_signed,
         .allowed_install_source_count = 0,
-        .allowed_install_sources = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
-        .allowed_install_source_lens = [_]u8{0} ** MAX_ALLOW_LIST,
+        .allowed_install_sources = @as([MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
+        .allowed_install_source_lens = @as([MAX_ALLOW_LIST]u8, @splat(0)),
         .network_egress_mode = .inherit,
         .allowed_network_destination_count = 0,
-        .allowed_network_destinations = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
-        .allowed_network_destination_lens = [_]u8{0} ** MAX_ALLOW_LIST,
+        .allowed_network_destinations = @as([MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
+        .allowed_network_destination_lens = @as([MAX_ALLOW_LIST]u8, @splat(0)),
         .allowed_sync_destination_count = 0,
-        .allowed_sync_destinations = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_ALLOW_LIST,
-        .allowed_sync_destination_lens = [_]u8{0} ** MAX_ALLOW_LIST,
+        .allowed_sync_destinations = @as([MAX_ALLOW_LIST][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
+        .allowed_sync_destination_lens = @as([MAX_ALLOW_LIST]u8, @splat(0)),
         .removable_storage_allowed = false,
         .screen_capture_allowed = false,
         .clipboard_allowed = false,
@@ -1117,7 +1117,7 @@ fn policyScopeKey(scope: Scope, subject_id: u64) u64 {
     const subject_id_offset = @sizeOf(Scope);
     const policy_scope_key_bytes = subject_id_offset + @sizeOf(u64);
     var bytes: [policy_scope_key_bytes]u8 = undefined;
-    bytes[0] = @intFromEnum(scope);
+    bytes[0] = @backingInt(scope);
     std.mem.writeInt(u64, bytes[subject_id_offset..][0..@sizeOf(u64)], subject_id, .little);
     return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.policy_scope_key, &bytes));
 }
@@ -2190,7 +2190,7 @@ test "policy directory gates sensitive permission retention and leases" {
 
 test "policy objects reject oversized lists and refuse authorization after tampering" {
     var directory = Directory.init();
-    const oversized_label = [_]u8{'x'} ** (MAX_LABEL_BYTES + 1);
+    const oversized_label = @as([MAX_LABEL_BYTES + 1]u8, @splat('x'));
     try std.testing.expectError(error.LabelTooLong, directory.create(.{
         .scope = .user,
         .subject_id = 5,
@@ -2237,8 +2237,8 @@ test "policy objects reject oversized lists and refuse authorization after tampe
 }
 
 test "compact policy metadata preserves exact label and allow-list capacities" {
-    const full_label = [_]u8{'p'} ** MAX_LABEL_BYTES;
-    const full_allow_list = [_][]const u8{&full_label} ** MAX_ALLOW_LIST;
+    const full_label = @as([MAX_LABEL_BYTES]u8, @splat('p'));
+    const full_allow_list = @as([MAX_ALLOW_LIST][]const u8, @splat(&full_label));
     var directory = Directory.init();
     const policy = try directory.create(.{
         .scope = .organization,

@@ -1090,7 +1090,7 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     var tampered = signed_frame;
     tampered.packet.ciphertext[0] ^= 0x01;
     try std.testing.expect(!sync_transport.verifySignedFrame(&tampered));
-    var rejected_buffer = [_]u8{0xa5} ** sync_transport.MAX_PACKET_BYTES;
+    var rejected_buffer = @as([sync_transport.MAX_PACKET_BYTES]u8, @splat(0xa5));
     try std.testing.expectError(error.PacketAuthenticationFailed, sync_transport.decryptSignedFrame(&relay_session, &tampered, rejected_buffer[0..]));
     try std.testing.expect(std.mem.allEqual(u8, &rejected_buffer, 0));
 
@@ -1290,7 +1290,7 @@ test "sync service replicates payloads to peer storage through booted relay fall
         .label = "peer-sync-db-contract",
         .seed = signing.seedFromByte(0xA5),
     };
-    const media_payload = [_]u8{0x4d} ** PEER_SYNC_MEDIA_PAYLOAD_BYTES;
+    const media_payload = @as([PEER_SYNC_MEDIA_PAYLOAD_BYTES]u8, @splat(0x4d));
     const secret_payload = "enc:peer-secret";
     const database_payload = "txn:insert-note";
 

@@ -64,7 +64,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
     @memset(out, 0);
     put(u32, out[0..], MAGIC);
     out[4] = VERSION;
-    out[5] = @intFromEnum(frame.body);
+    out[5] = @backingInt(frame.body);
     put(u64, out[8..], frame.request_id);
     const length: usize = switch (frame.body) {
         .begin => |begin| blk: {
@@ -85,7 +85,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
         .commit => 16,
         .receipt => |receipt| blk: {
             if (!canonicalReceipt(receipt)) return error.MalformedFrame;
-            put(u16, out[16..], @intFromEnum(receipt.status));
+            put(u16, out[16..], @backingInt(receipt.status));
             put(u64, out[20..], receipt.object_id);
             put(u64, out[28..], receipt.previous_version_id);
             put(u64, out[36..], receipt.version_id);

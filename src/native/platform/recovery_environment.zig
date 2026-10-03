@@ -620,7 +620,7 @@ test "recovery environment audits break-glass recovery authorization" {
         .reason = "disk repair",
         .actions = &.{.restore_workspace_snapshot},
     }, 31));
-    const oversized_reason = [_]u8{'r'} ** (MAX_BREAK_GLASS_REASON_BYTES + 1);
+    const oversized_reason = @as([MAX_BREAK_GLASS_REASON_BYTES + 1]u8, @splat('r'));
     try std.testing.expectError(error.BreakGlassReasonTooLong, recovery.enterBreakGlassRecoveryMode(&ledger, .{
         .profile = .recovery,
         .requester = storage_owner,

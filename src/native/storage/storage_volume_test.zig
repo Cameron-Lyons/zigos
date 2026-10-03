@@ -202,8 +202,8 @@ test "storage backend barrier failures preserve dirty state and withhold the new
 }
 
 const LogRecordStats = struct {
-    counts: [9]usize = [_]usize{0} ** 9,
-    bytes: [9]usize = [_]usize{0} ** 9,
+    counts: [9]usize = @as([9]usize, @splat(0)),
+    bytes: [9]usize = @as([9]usize, @splat(0)),
 };
 
 fn latestLogRecordStats(image: []const u8) !LogRecordStats {
@@ -257,8 +257,8 @@ test "storage deltas persist shared chunks once across committed versions and di
     const checkpoint_bytes = try storage_volume.testing.latestImageLogBytes(image);
     _ = try volume.saveToImage(image, &store, &workspaces);
     const shared = try latestLogRecordStats(image);
-    try std.testing.expectEqual(@as(usize, 0), shared.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
-    try std.testing.expectEqual(@as(usize, 1), shared.counts[@intFromEnum(volume_log.RecordKind.blob_state)]);
+    try std.testing.expectEqual(@as(usize, 0), shared.counts[@backingInt(volume_log.RecordKind.chunk_state)]);
+    try std.testing.expectEqual(@as(usize, 1), shared.counts[@backingInt(volume_log.RecordKind.blob_state)]);
     try std.testing.expectEqual(@as(u16, 6), try storage_volume.testing.latestImageLogRecordCount(image));
     // Two revisions of 12 KiB content require less than one KiB of new metadata.
     try std.testing.expect((try storage_volume.testing.latestImageLogBytes(image)) - checkpoint_bytes < 1024);
@@ -277,10 +277,10 @@ test "storage deltas persist shared chunks once across committed versions and di
     });
     _ = try volume.saveToImage(image, &loaded_store, &loaded_workspaces);
     const changed = try latestLogRecordStats(image);
-    try std.testing.expectEqual(@as(usize, 1), changed.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
+    try std.testing.expectEqual(@as(usize, 1), changed.counts[@backingInt(volume_log.RecordKind.chunk_state)]);
     try std.testing.expectEqual(
         volume_log.recordHeaderLen() + @sizeOf(object_store.ChunkAddress) + @sizeOf(u16) + object_store.MAX_CHUNK_BYTES,
-        changed.bytes[@intFromEnum(volume_log.RecordKind.chunk_state)],
+        changed.bytes[@backingInt(volume_log.RecordKind.chunk_state)],
     );
     try std.testing.expectEqual(@as(u16, 11), try storage_volume.testing.latestImageLogRecordCount(image));
     volume.reset();
@@ -337,7 +337,7 @@ test "storage delta chunk reuse survives failed barriers retries and power loss"
         // One changed page plus metadata touches two data blocks and one root.
         try std.testing.expectEqual(@as(usize, 3 * storage_volume.sector_size), WriteBackBackend.written_bytes);
         const stats = try latestLogRecordStats(durable);
-        try std.testing.expectEqual(@as(usize, 1), stats.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
+        try std.testing.expectEqual(@as(usize, 1), stats.counts[@backingInt(volume_log.RecordKind.chunk_state)]);
         WriteBackBackend.powerLoss();
         reboot.reset();
         reboot_store.reset();
@@ -375,11 +375,11 @@ test "storage delta deduplicates new shared chunks between distinct blobs in one
     });
     _ = try volume.saveToImage(image, &store, &workspaces);
     const stats = try latestLogRecordStats(image);
-    try std.testing.expectEqual(@as(usize, 3), stats.counts[@intFromEnum(volume_log.RecordKind.chunk_state)]);
-    try std.testing.expectEqual(@as(usize, 2), stats.counts[@intFromEnum(volume_log.RecordKind.blob_state)]);
+    try std.testing.expectEqual(@as(usize, 3), stats.counts[@backingInt(volume_log.RecordKind.chunk_state)]);
+    try std.testing.expectEqual(@as(usize, 2), stats.counts[@backingInt(volume_log.RecordKind.blob_state)]);
     try std.testing.expectEqual(
         @as(usize, 3) * (volume_log.recordHeaderLen() + @sizeOf(object_store.ChunkAddress) + @sizeOf(u16) + object_store.MAX_CHUNK_BYTES),
-        stats.bytes[@intFromEnum(volume_log.RecordKind.chunk_state)],
+        stats.bytes[@backingInt(volume_log.RecordKind.chunk_state)],
     );
     try std.testing.expectEqual(@as(u16, 11), try storage_volume.testing.latestImageLogRecordCount(image));
     var loaded_store = object_store.Store.init();

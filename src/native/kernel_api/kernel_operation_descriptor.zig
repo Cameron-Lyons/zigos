@@ -16,9 +16,9 @@ pub const declarationFor = operation_metadata.declarationFor;
 pub const autoGrantFor = operation_metadata.autoGrantFor;
 
 test "kernel operation descriptors are projected from shared native operation metadata" {
-    try std.testing.expectEqual(std.meta.fields(abi.NativeOperation).len, operations.len);
-    inline for (std.meta.fields(abi.NativeOperation)) |field| {
-        const operation: abi.NativeOperation = @enumFromInt(field.value);
+    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, operations.len);
+    inline for (@typeInfo(abi.NativeOperation).@"enum".field_values) |field| {
+        const operation: abi.NativeOperation = @fromBackingInt(@intCast(field));
         const declaration = declarationFor(operation);
         const metadata = operation_metadata.declarationFor(operation);
         try std.testing.expectEqual(operation, declaration.operation);

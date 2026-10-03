@@ -27,7 +27,7 @@ pub const Record = struct {
         std.mem.writeInt(u64, bytes[8..16], self.checkpoint.object_id, .little);
         std.mem.writeInt(u64, bytes[16..24], self.checkpoint.owner.serial, .little);
         std.mem.writeInt(u64, bytes[24..32], self.checkpoint.generation, .little);
-        bytes[32] = @intFromEnum(self.checkpoint.owner.kind);
+        bytes[32] = @backingInt(self.checkpoint.owner.kind);
         bytes[33] = @intFromBool(self.device_root_pin != null);
         @memcpy(bytes[40..72], &self.checkpoint.public_key);
         if (self.device_root_pin) |pin| {

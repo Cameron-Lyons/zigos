@@ -282,8 +282,8 @@ pub fn parseSignatureFormat(name: []const u8) SignatureFormat {
 
 pub const Signature = struct {
     signer: []const u8 = "",
-    public_key: [MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_PUBLIC_KEY_BYTES,
-    value: [MAX_SIGNATURE_VALUE_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_VALUE_BYTES,
+    public_key: [MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8 = @as([MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8, @splat(0)),
+    value: [MAX_SIGNATURE_VALUE_BYTES]u8 = @as([MAX_SIGNATURE_VALUE_BYTES]u8, @splat(0)),
     public_key_len: u8 = 0,
     value_len: u8 = 0,
     format: SignatureFormat = .ed25519,

@@ -19,7 +19,7 @@ pub const Error = error{
 };
 
 pub const Allocator = struct {
-    used: [WORD_COUNT]u32 = [_]u32{0} ** WORD_COUNT,
+    used: [WORD_COUNT]u32 = @as([WORD_COUNT]u32, @splat(0)),
     next_hint: Identifier = 1,
     allocated_count: Identifier = 0,
 

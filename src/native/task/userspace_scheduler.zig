@@ -30,8 +30,8 @@ else
     };
 
 const DISPATCH_CPU_TICK_COST: u64 = 1_000;
-pub const RESOURCE_CLASS_COUNT: usize = std.meta.fields(accelerator_scheduler.ResourceClass).len;
-pub const ENGINE_COUNT: usize = std.meta.fields(accelerator_scheduler.Engine).len;
+pub const RESOURCE_CLASS_COUNT: usize = @typeInfo(accelerator_scheduler.ResourceClass).@"enum".field_names.len;
+pub const ENGINE_COUNT: usize = @typeInfo(accelerator_scheduler.Engine).@"enum".field_names.len;
 pub const UNIFIED_RUNQUEUE = true;
 pub const MAX_ACCELERATOR_CLAIMS: usize = task_runtime.MAX_TASKS;
 const EMERGENCY_DEADLINE_DELTA_TICKS: u64 = 1_000;
@@ -271,18 +271,18 @@ pub const Scheduler = struct {
     endpoint_table_ptr: ?*const endpoint.Table = null,
     slots: SchedulerSlotArena = SchedulerSlotArena.init(),
     dispatch_accounting: ?*DispatchAccountingStorage = null,
-    ready_heads: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
-    ready_tails: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** RESOURCE_CLASS_COUNT,
-    ready_counts: [RESOURCE_CLASS_COUNT]QueueSlotIndex = [_]QueueSlotIndex{0} ** RESOURCE_CLASS_COUNT,
+    ready_heads: [RESOURCE_CLASS_COUNT]QueueSlotIndex = @as([RESOURCE_CLASS_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
+    ready_tails: [RESOURCE_CLASS_COUNT]QueueSlotIndex = @as([RESOURCE_CLASS_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
+    ready_counts: [RESOURCE_CLASS_COUNT]QueueSlotIndex = @as([RESOURCE_CLASS_COUNT]QueueSlotIndex, @splat(0)),
     ready_task_count: QueueSlotIndex = 0,
     accelerator_claim_backing: AcceleratorClaimBackingStorage = if (heap_backed_accelerator_claims) null else AcceleratorClaimBacking.init(),
-    accelerator_claim_heads: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
-    accelerator_claim_tails: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
-    accelerator_deadline_heads: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
-    accelerator_deadline_tails: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{QUEUE_NO_INDEX} ** ENGINE_COUNT,
-    accelerator_claim_counts: [ENGINE_COUNT]QueueSlotIndex = [_]QueueSlotIndex{0} ** ENGINE_COUNT,
-    engine_dispatch_counts: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
-    engine_denial_counts: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
+    accelerator_claim_heads: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
+    accelerator_claim_tails: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
+    accelerator_deadline_heads: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
+    accelerator_deadline_tails: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(QUEUE_NO_INDEX)),
+    accelerator_claim_counts: [ENGINE_COUNT]QueueSlotIndex = @as([ENGINE_COUNT]QueueSlotIndex, @splat(0)),
+    engine_dispatch_counts: [ENGINE_COUNT]u64 = @as([ENGINE_COUNT]u64, @splat(0)),
+    engine_denial_counts: [ENGINE_COUNT]u64 = @as([ENGINE_COUNT]u64, @splat(0)),
     next_accelerator_claim_id: u64 = 1,
     resource_state: accelerator_scheduler.SystemState = .{},
     resource_telemetry_source: accelerator_scheduler.TelemetrySource = .synthetic,
@@ -661,7 +661,7 @@ pub const Scheduler = struct {
         request: AcceleratorClaimRequest,
         task_slot: *Slot,
     ) ?u64 {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             std.debug.assert(self.initialized);
             std.debug.assert(request.engine != .cpu);
             std.debug.assert(task_slot.in_use and task_slot.task_id == request.task_id);
@@ -1602,7 +1602,7 @@ pub const Scheduler = struct {
     }
 
     fn removeAcceleratorClaimsForTask(self: *Scheduler, task_id: u64, task_slot: *Slot) void {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             std.debug.assert(task_slot.in_use and task_slot.task_id == task_id);
         }
         const backing = self.acceleratorClaimBacking() orelse return;

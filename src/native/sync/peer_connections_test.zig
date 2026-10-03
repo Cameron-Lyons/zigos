@@ -204,7 +204,7 @@ test "peer connections reject duplicates and stale handles across slot reuse and
     f.owners.deinit(&f.handshakes, &f.sessions);
     const third = try f.owners.open(&f.handshakes, &f.sessions, request);
     try std.testing.expect(third != second and f.owners.status(second) == null);
-    try std.testing.expect(f.owners.status(@enumFromInt(0)) == null);
+    try std.testing.expect(f.owners.status(@fromBackingInt(@intCast(0))) == null);
 }
 
 test "peer connections bound all local allocations and retire exhausted generations" {

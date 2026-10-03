@@ -115,7 +115,7 @@ fn buildBundleIndex() id_index.Table(BUNDLE_INDEX_CAPACITY) {
 }
 
 fn debugAssertBundleIndexMissAbsent(bundle_id: []const u8) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     for (verification_boot_image_specs) |spec| {
         if (std.mem.eql(u8, spec.bundleId(), bundle_id)) {
             native_util.impossibleByInvariant("verification boot bundle id index missed a registry spec");

@@ -199,23 +199,23 @@ const DmaProgramSlot = struct {
     bus_master_dma_enabled: bool = false,
     program_generation: u64 = 0,
     window_count: DmaWindowCount = 0,
-    windows: [MAX_DMA_WINDOWS]DmaWindow = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
+    windows: [MAX_DMA_WINDOWS]DmaWindow = @as([MAX_DMA_WINDOWS]DmaWindow, @splat(zeroDmaWindow())),
     iommu_program: IommuProgramEvidence = zeroIommuProgramEvidence(),
     last_fault: ?IommuFaultEvidence = null,
     fault_count: u64 = 0,
 };
 
 const ControllerArena = struct {
-    slots: [MAX_DEVICES]ControllerSlot = [_]ControllerSlot{ControllerSlot{}} ** MAX_DEVICES,
+    slots: [MAX_DEVICES]ControllerSlot = @as([MAX_DEVICES]ControllerSlot, @splat(ControllerSlot{})),
     primary_index: indexed_arena.UniqueIndex(MAX_DEVICES * 2) = indexed_arena.UniqueIndex(MAX_DEVICES * 2).init(),
-    slot_keys: [MAX_DEVICES]u64 = [_]u64{0} ** MAX_DEVICES,
-    free_next: [MAX_DEVICES]?ControllerIndex = [_]?ControllerIndex{null} ** MAX_DEVICES,
+    slot_keys: [MAX_DEVICES]u64 = @as([MAX_DEVICES]u64, @splat(0)),
+    free_next: [MAX_DEVICES]?ControllerIndex = @as([MAX_DEVICES]?ControllerIndex, @splat(null)),
     free_head: ?ControllerIndex = null,
     next_unclaimed_index: ControllerCount = 0,
     used_count: ControllerCount = 0,
-    unpublished_next: [MAX_DEVICES]?ControllerIndex = [_]?ControllerIndex{null} ** MAX_DEVICES,
-    unpublished_prev: [MAX_DEVICES]?ControllerIndex = [_]?ControllerIndex{null} ** MAX_DEVICES,
-    unpublished_queued: [MAX_DEVICES]bool = [_]bool{false} ** MAX_DEVICES,
+    unpublished_next: [MAX_DEVICES]?ControllerIndex = @as([MAX_DEVICES]?ControllerIndex, @splat(null)),
+    unpublished_prev: [MAX_DEVICES]?ControllerIndex = @as([MAX_DEVICES]?ControllerIndex, @splat(null)),
+    unpublished_queued: [MAX_DEVICES]bool = @as([MAX_DEVICES]bool, @splat(false)),
     unpublished_head: ?ControllerIndex = null,
     unpublished_tail: ?ControllerIndex = null,
     unpublished_count: ControllerCount = 0,
@@ -229,14 +229,14 @@ const ControllerArena = struct {
             resetControllerSlot(slot);
         }
         self.primary_index.reset();
-        self.slot_keys = [_]u64{0} ** MAX_DEVICES;
-        self.free_next = [_]?ControllerIndex{null} ** MAX_DEVICES;
+        self.slot_keys = @as([MAX_DEVICES]u64, @splat(0));
+        self.free_next = @as([MAX_DEVICES]?ControllerIndex, @splat(null));
         self.free_head = null;
         self.next_unclaimed_index = 0;
         self.used_count = 0;
-        self.unpublished_next = [_]?ControllerIndex{null} ** MAX_DEVICES;
-        self.unpublished_prev = [_]?ControllerIndex{null} ** MAX_DEVICES;
-        self.unpublished_queued = [_]bool{false} ** MAX_DEVICES;
+        self.unpublished_next = @as([MAX_DEVICES]?ControllerIndex, @splat(null));
+        self.unpublished_prev = @as([MAX_DEVICES]?ControllerIndex, @splat(null));
+        self.unpublished_queued = @as([MAX_DEVICES]bool, @splat(false));
         self.unpublished_head = null;
         self.unpublished_tail = null;
         self.unpublished_count = 0;
@@ -426,11 +426,11 @@ comptime {
 
 const MmioWindowSet = struct {
     count: u8 = 0,
-    windows: [MAX_DEVICE_MMIO_WINDOWS]MmioWindow = [_]MmioWindow{zeroMmioWindow()} ** MAX_DEVICE_MMIO_WINDOWS,
+    windows: [MAX_DEVICE_MMIO_WINDOWS]MmioWindow = @as([MAX_DEVICE_MMIO_WINDOWS]MmioWindow, @splat(zeroMmioWindow())),
 };
 
 const MmioBacking = struct {
-    slots: [MAX_DEVICES]MmioWindowSet = [_]MmioWindowSet{.{}} ** MAX_DEVICES,
+    slots: [MAX_DEVICES]MmioWindowSet = @as([MAX_DEVICES]MmioWindowSet, @splat(.{})),
 };
 
 const heap_backed_mmio_windows = builtin.target.os.tag == .freestanding;
@@ -660,7 +660,7 @@ pub fn programDmaIsolation(request: DmaProgramRequest) Error!DmaIsolationStatus 
         .bus_master_dma_enabled = request.bus_master_dma_enabled,
         .program_generation = program_generation,
         .window_count = @intCast(request.windows.len),
-        .windows = [_]DmaWindow{zeroDmaWindow()} ** MAX_DMA_WINDOWS,
+        .windows = @as([MAX_DMA_WINDOWS]DmaWindow, @splat(zeroDmaWindow())),
         .iommu_program = iommu_program,
         .last_fault = null,
         .fault_count = 0,

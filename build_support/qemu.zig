@@ -72,10 +72,7 @@ pub fn addNativeRunSteps(
     userspace_images: userspace_build.ArtifactSet,
     native_store: NativeStoreImage,
 ) NativeRunSteps {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/qemu-harness.sh",
-        "native-store",
-        kernel.output_path,
+    const command = addKernelBootCommand(b, kernel, "scripts/qemu-harness.sh", &.{"native-store"}, &.{
         shared.native_store_image_path,
         "stdio",
     });
@@ -103,14 +100,12 @@ pub fn addNativeSmokeCommand(
     store_path: []const u8,
     mode: NativeSmokeMode,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/run-zigos-native-smoke.sh",
-        kernel.output_path,
+    const command = addKernelBootCommand(b, kernel, "scripts/run-zigos-native-smoke.sh", &.{}, &.{
         log_path,
         store_path,
     });
     command.addArg(mode.arg() orelse "full");
-    command.addArg(b.getInstallPath(.bin, ""));
+    command.addDirectoryArg(b.graph.path(.install_bin, ""));
     command.addArg(kernel.bootloader_source_path);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
@@ -121,10 +116,7 @@ pub fn addTpm2QemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/run-tpm2-qemu.sh",
-        kernel.output_path,
-    });
+    const command = addKernelBootCommand(b, kernel, "scripts/run-tpm2-qemu.sh", &.{}, &.{});
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -134,11 +126,7 @@ pub fn addTpm2SealingQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/run-tpm2-qemu.sh",
-        kernel.output_path,
-        "sealing",
-    });
+    const command = addKernelBootCommand(b, kernel, "scripts/run-tpm2-qemu.sh", &.{}, &.{"sealing"});
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
 }
@@ -156,7 +144,7 @@ pub fn addTpm2QuoteQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, use
 }
 
 fn addTpm2ProfileQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, userspace_images: userspace_build.ArtifactSet, comptime mode: []const u8, cmdline: []const u8) *std.Build.Step.Run {
-    const image = kernel_build.addEfiImage(b, .ReleaseSmall, kernel.boot_payload, b.path(cmdline));
+    const image = kernel_build.addEfiImage(b, .small, kernel.boot_payload, b.path(cmdline));
     const iso = b.addSystemCommand(&.{"bash"});
     iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
     iso.addFileArg(image.getEmittedBin());
@@ -165,7 +153,9 @@ fn addTpm2ProfileQemuCommand(b: *std.Build, kernel: shared.KernelArtifact, users
     const command = b.addSystemCommand(&.{"bash"});
     command.addFileArg(b.path("scripts/run-with-qemu-boot-iso.sh"));
     command.addFileArg(iso_path);
-    command.addArgs(&.{ "scripts/run-tpm2-qemu.sh", kernel.output_path, mode });
+    command.addFileArg(b.path("scripts/run-tpm2-qemu.sh"));
+    command.addFileArg(kernel.output_path);
+    command.addArg(mode);
     command.step.dependOn(kernel.install_step);
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
     return command;
@@ -194,9 +184,7 @@ pub fn addRecoveryQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/run-kernel-recovery.sh",
-        kernel.output_path,
+    const command = addKernelBootCommand(b, kernel, "scripts/run-kernel-recovery.sh", &.{}, &.{
         "build/kernel-recovery.log",
     });
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
@@ -208,9 +196,7 @@ pub fn addStorageDurabilityQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/run-storage-durability-qemu.sh",
-        kernel.output_path,
+    const command = addKernelBootCommand(b, kernel, "scripts/run-storage-durability-qemu.sh", &.{}, &.{
         "build/storage-durability-qemu.log",
         "build/native-store-storage-durability.img",
     });
@@ -224,9 +210,7 @@ pub fn addSyncTwoNodeQemuCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/run-sync-two-node-qemu.sh",
-        kernel.output_path,
+    const command = addKernelBootCommand(b, kernel, "scripts/run-sync-two-node-qemu.sh", &.{}, &.{
         "build/sync-two-node-qemu.log",
         "build/native-store-sync-node-a.img",
         "build/native-store-sync-node-b.img",
@@ -240,9 +224,7 @@ pub fn addBenchmarkCommand(
     kernel: shared.KernelArtifact,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step.Run {
-    const command = addKernelBootCommand(b, kernel, &.{
-        "scripts/capture-kernel-benchmark.sh",
-        kernel.output_path,
+    const command = addKernelBootCommand(b, kernel, "scripts/capture-kernel-benchmark.sh", &.{}, &.{
         "build/kernel-benchmark.log",
         "build/kernel-benchmark-summary.md",
     });
@@ -253,11 +235,16 @@ pub fn addBenchmarkCommand(
 fn addKernelBootCommand(
     b: *std.Build,
     kernel: shared.KernelArtifact,
+    script: []const u8,
+    prefix_args: []const []const u8,
     args: []const []const u8,
 ) *std.Build.Step.Run {
     const command = b.addSystemCommand(&.{"bash"});
     command.addFileArg(b.path("scripts/run-with-qemu-boot-iso.sh"));
     command.addFileArg(kernel.qemu_boot_iso_path);
+    command.addFileArg(b.path(script));
+    command.addArgs(prefix_args);
+    command.addFileArg(kernel.output_path);
     command.addArgs(args);
     command.step.dependOn(kernel.install_step);
     return command;

@@ -935,7 +935,7 @@ test "indexed frame allocation matches a linear ownership model under churn" {
             return null;
         }
     };
-    var states = [_]State{.reserved} ** frames;
+    var states = @as([frames]State, @splat(.reserved));
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
     try allocator.reserve(.{ .base = 0, .count = frames });

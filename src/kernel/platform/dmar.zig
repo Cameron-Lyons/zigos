@@ -90,7 +90,7 @@ pub const Summary = struct {
     dma_control_platform_opt_in: bool,
     dma_remapping_opt_out: bool,
     remapping_units: [MAX_REMAPPING_UNITS]RemappingUnit =
-        [_]RemappingUnit{.{}} ** MAX_REMAPPING_UNITS,
+        @as([MAX_REMAPPING_UNITS]RemappingUnit, @splat(.{})),
     remapping_unit_count: u8 = 0,
     reserved_memory_region_count: u32 = 0,
     reserved_memory_with_non_pci_scope_count: u32 = 0,
@@ -421,7 +421,7 @@ fn allZero(bytes: []const u8) bool {
 const TEST_TABLE_BYTES: usize = 120;
 
 fn validDmar() [TEST_TABLE_BYTES]u8 {
-    var table = [_]u8{0} ** TEST_TABLE_BYTES;
+    var table = @as([TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], DMAR_SIGNATURE);
     endian.writeU32Le(table[4..8], table.len);
     table[8] = 1;
@@ -637,13 +637,13 @@ test "DMAR parser rejects malformed device scopes and reserved memory regions" {
 }
 
 test "DMAR parser validates ATS capability scopes" {
-    var all_ports = [_]u8{0} ** ATSR_MIN_BYTES;
+    var all_ports = @as([ATSR_MIN_BYTES]u8, @splat(0));
     endian.writeU16Le(all_ports[0..2], ATSR_TYPE);
     endian.writeU16Le(all_ports[2..4], all_ports.len);
     all_ports[4] = ATSR_FLAG_ALL_PORTS;
     try std.testing.expectEqual(@as(u16, 0), try validateAtsCapability(all_ports[0..]));
 
-    var bridge = [_]u8{0} ** (ATSR_MIN_BYTES + DEVICE_SCOPE_MIN_BYTES);
+    var bridge = @as([ATSR_MIN_BYTES + DEVICE_SCOPE_MIN_BYTES]u8, @splat(0));
     endian.writeU16Le(bridge[0..2], ATSR_TYPE);
     endian.writeU16Le(bridge[2..4], bridge.len);
     bridge[8] = DEVICE_SCOPE_TYPE_PCI_SUB_HIERARCHY;

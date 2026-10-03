@@ -27,9 +27,9 @@ const response_flag_package_removed: u16 = 0x0100;
 pub fn encodeRequest(buffer: []u8, request: humane_shell.HumaneShellRequest) Error![]const u8 {
     var writer = RequestWriter{ .buffer = buffer };
     try writer.writeBytes(&REQUEST_MAGIC);
-    try writer.writeByte(@intFromEnum(request.operation));
-    try writer.writeByte(@intFromEnum(request.control));
-    try writer.writeByte(@intFromEnum(request.keyboard));
+    try writer.writeByte(@backingInt(request.operation));
+    try writer.writeByte(@backingInt(request.control));
+    try writer.writeByte(@backingInt(request.keyboard));
     try writer.writeU64(request.tick);
     try writeText(&writer, request.text);
     return buffer[0..writer.offset];
@@ -56,11 +56,11 @@ pub fn decodeRequest(payload: []const u8) Error!humane_shell.HumaneShellRequest 
 pub fn encodeResponse(buffer: []u8, response: humane_shell.HumaneShellResponse) Error![]const u8 {
     var writer = ResponseWriter{ .buffer = buffer };
     try writer.writeBytes(&RESPONSE_MAGIC);
-    try writer.writeByte(@intFromEnum(response.operation));
-    try writer.writeByte(@intFromEnum(response.control));
-    try writer.writeByte(@intFromEnum(response.status));
+    try writer.writeByte(@backingInt(response.operation));
+    try writer.writeByte(@backingInt(response.control));
+    try writer.writeByte(@backingInt(response.status));
     try writer.writeU16(responseFlags(response));
-    try writer.writeByte(@intFromEnum(response.focused_control));
+    try writer.writeByte(@backingInt(response.focused_control));
     try writer.writeU64(response.task_id);
     try writer.writeU64(response.active_window_id);
     try writer.writeU64(response.snapshot_id);

@@ -53,7 +53,7 @@ pub const DOUBLE_FAULT_STACK_TOTAL_BYTES: usize = DOUBLE_FAULT_STACK_GUARD_BYTES
 pub const DOUBLE_FAULT_STACK_ALIGNMENT: usize = DOUBLE_FAULT_STACK_GUARD_BYTES;
 pub const DoubleFaultStackStorage = [DOUBLE_FAULT_STACK_TOTAL_BYTES]u8;
 
-var gdt: [7]u64 align(8) = [_]u64{0} ** 7;
+var gdt: [7]u64 align(8) = @as([7]u64, @splat(0));
 var gdt_ptr: GdtPtr = undefined;
 var tss: Tss align(16) = .{};
 var double_fault_stack: ?*align(DOUBLE_FAULT_STACK_ALIGNMENT) DoubleFaultStackStorage = null;

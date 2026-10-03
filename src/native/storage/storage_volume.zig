@@ -124,7 +124,7 @@ pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 
 pub const Volume = struct {
     io_log_buffer: IoLogWorkspace = if (heap_backed_io_workspace) null else undefined,
-    sector_buffer: [sector_size]u8 = [_]u8{0} ** sector_size,
+    sector_buffer: [sector_size]u8 = @as([sector_size]u8, @splat(0)),
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
     attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = volume_backend.unattachedRead,
@@ -132,7 +132,7 @@ pub const Volume = struct {
     attached_backend_flush: *const fn () callconv(.c) bool = volume_backend.unattachedFlush,
     attached_backend_kind: volume_backend.AttachedBackendKind = .none,
     signer_text_len: u16 = 0,
-    signer_text_pool: SignerTextPoolBacking = if (heap_backed_signer_text_pool) null else [_]u8{0} ** SIGNER_TEXT_POOL_BYTES,
+    signer_text_pool: SignerTextPoolBacking = if (heap_backed_signer_text_pool) null else @as([SIGNER_TEXT_POOL_BYTES]u8, @splat(0)),
     workspace_state_hashes: WorkspaceStateHashCache = .{},
     live_index_generation: u64 = 0,
     live_index_root_checksum: u64 = 0,
@@ -568,7 +568,7 @@ fn loadLatestValidImageRoot(
     store: *object_store.Store,
     workspaces: *workspace.Directory,
 ) Error!u64 {
-    var roots: [volume_layout.root_sector_count]?LoadedRoot = [_]?LoadedRoot{null} ** volume_layout.root_sector_count;
+    var roots: [volume_layout.root_sector_count]?LoadedRoot = @as([volume_layout.root_sector_count]?LoadedRoot, @splat(null));
     var root_count: usize = 0;
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
@@ -596,7 +596,7 @@ fn loadLatestValidBackendRoot(
     store: *object_store.Store,
     workspaces: *workspace.Directory,
 ) Error!bool {
-    var roots: [volume_layout.root_sector_count]?LoadedRoot = [_]?LoadedRoot{null} ** volume_layout.root_sector_count;
+    var roots: [volume_layout.root_sector_count]?LoadedRoot = @as([volume_layout.root_sector_count]?LoadedRoot, @splat(null));
     var root_count: usize = 0;
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
@@ -755,8 +755,8 @@ fn flushWrites(writer: anytype) Error!void {
 }
 
 const WorkspaceStateHashCache = struct {
-    ids: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
-    hashes: [workspace.MAX_WORKSPACES]u64 = [_]u64{0} ** workspace.MAX_WORKSPACES,
+    ids: [workspace.MAX_WORKSPACES]u64 = @as([workspace.MAX_WORKSPACES]u64, @splat(0)),
+    hashes: [workspace.MAX_WORKSPACES]u64 = @as([workspace.MAX_WORKSPACES]u64, @splat(0)),
     count: usize = 0,
 
     fn getOrCompute(self: *WorkspaceStateHashCache, record: *const workspace.WorkspaceRecord) Error!u64 {
@@ -1066,7 +1066,7 @@ fn appendSnapshotRecord(writer: *CursorWriter, record: *const workspace.Snapshot
 
 fn encodeObjectBody(writer: *CursorWriter, record: *const object_store.ObjectRecord) Error!void {
     try writer.writeU64(record.id.raw());
-    try writer.writeByte(@intFromEnum(record.object_type));
+    try writer.writeByte(@backingInt(record.object_type));
     try writer.writeU64(record.latest_version_id.raw());
     try writer.writeU16(record.version_count);
 }
@@ -1080,7 +1080,7 @@ fn encodeVersionBody(writer: *CursorWriter, store: *const object_store.Store, re
     while (parent_index < object_store.MAX_VERSION_PARENTS) : (parent_index += 1) {
         try writer.writeU64(record.parent_version_ids[parent_index].raw());
     }
-    try writer.writeByte(@intFromEnum(record.object_type));
+    try writer.writeByte(@backingInt(record.object_type));
     try writer.writeBytes(&blob.address);
     try writer.writeBytes(&version_address);
     try writeMetadata(writer, record.metadata);
@@ -1215,8 +1215,8 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     const ref_count = try reader.readU16();
     if (payload_len > object_store.MAX_PAYLOAD_BYTES or ref_count > object_store.MAX_VERSIONS) return error.CorruptImage;
     const chunk_count = object_store.chunkCountForPayloadLen(payload_len);
-    var chunk_refs = [_]object_store.ChunkRef{object_store.ChunkRef{}} ** object_store.MAX_BLOB_CHUNKS;
-    var chunk_slot_indexes = [_]object_store.BlobChunkSlotIndex{0} ** object_store.MAX_BLOB_CHUNKS;
+    var chunk_refs = @as([object_store.MAX_BLOB_CHUNKS]object_store.ChunkRef, @splat(object_store.ChunkRef{}));
+    var chunk_slot_indexes = @as([object_store.MAX_BLOB_CHUNKS]object_store.BlobChunkSlotIndex, @splat(0));
     var chunk_index: usize = 0;
     while (chunk_index < chunk_count) : (chunk_index += 1) {
         try reader.readBytes(&chunk_refs[chunk_index].address);
@@ -1245,7 +1245,7 @@ fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void 
     try reader.readBytes(&address);
     const payload_len: usize = @intCast(try reader.readU16());
     if (payload_len > object_store.MAX_CHUNK_BYTES) return error.CorruptImage;
-    var bytes: [object_store.MAX_CHUNK_BYTES]u8 = [_]u8{0} ** object_store.MAX_CHUNK_BYTES;
+    var bytes: [object_store.MAX_CHUNK_BYTES]u8 = @as([object_store.MAX_CHUNK_BYTES]u8, @splat(0));
     try reader.readBytes(bytes[0..payload_len]);
     _ = store.putChunk(address, bytes[0..payload_len]) catch return error.CorruptImage;
 }
@@ -1493,7 +1493,7 @@ fn deserializeState(
         try reader.readBytes(&address);
         const payload_len: usize = @intCast(try reader.readU16());
         if (payload_len > object_store.MAX_CHUNK_BYTES) return error.CorruptImage;
-        var bytes: [object_store.MAX_CHUNK_BYTES]u8 = [_]u8{0} ** object_store.MAX_CHUNK_BYTES;
+        var bytes: [object_store.MAX_CHUNK_BYTES]u8 = @as([object_store.MAX_CHUNK_BYTES]u8, @splat(0));
         try reader.readBytes(bytes[0..payload_len]);
         _ = store.putChunk(address, bytes[0..payload_len]) catch return error.CorruptImage;
     }
@@ -1693,7 +1693,7 @@ fn readTextInto(reader: *CursorReader, buffer: []u8, out_len: anytype) Error!voi
 }
 
 fn writePrincipal(writer: *CursorWriter, principal_id: principal.PrincipalId) Error!void {
-    try writer.writeByte(@intFromEnum(principal_id.kind));
+    try writer.writeByte(@backingInt(principal_id.kind));
     try writer.writeU64(principal_id.serial);
 }
 
@@ -1708,7 +1708,7 @@ fn writeEntry(writer: *CursorWriter, entry: workspace.Entry) Error!void {
     try writeText(writer, entry.pathSlice());
     try writer.writeU64(entry.object_id.raw());
     try writer.writeU64(entry.version_id.raw());
-    try writer.writeByte(@intFromEnum(entry.object_type));
+    try writer.writeByte(@backingInt(entry.object_type));
 }
 
 fn readEntry(reader: *CursorReader) Error!workspace.Entry {
@@ -1722,53 +1722,53 @@ fn readEntry(reader: *CursorReader) Error!workspace.Entry {
 
 fn parseObjectType(value: u8) Error!object_store.ObjectType {
     return switch (value) {
-        @intFromEnum(object_store.ObjectType.blob) => .blob,
-        @intFromEnum(object_store.ObjectType.document) => .document,
-        @intFromEnum(object_store.ObjectType.collection) => .collection,
-        @intFromEnum(object_store.ObjectType.secret) => .secret,
-        @intFromEnum(object_store.ObjectType.media_asset) => .media_asset,
-        @intFromEnum(object_store.ObjectType.model_artifact) => .model_artifact,
-        @intFromEnum(object_store.ObjectType.event_stream) => .event_stream,
+        @backingInt(object_store.ObjectType.blob) => .blob,
+        @backingInt(object_store.ObjectType.document) => .document,
+        @backingInt(object_store.ObjectType.collection) => .collection,
+        @backingInt(object_store.ObjectType.secret) => .secret,
+        @backingInt(object_store.ObjectType.media_asset) => .media_asset,
+        @backingInt(object_store.ObjectType.model_artifact) => .model_artifact,
+        @backingInt(object_store.ObjectType.event_stream) => .event_stream,
         else => error.CorruptImage,
     };
 }
 
 fn parsePrincipalKind(value: u8) Error!principal.PrincipalKind {
     return switch (value) {
-        @intFromEnum(principal.PrincipalKind.user) => .user,
-        @intFromEnum(principal.PrincipalKind.team) => .team,
-        @intFromEnum(principal.PrincipalKind.device) => .device,
-        @intFromEnum(principal.PrincipalKind.app) => .app,
-        @intFromEnum(principal.PrincipalKind.service) => .service,
-        @intFromEnum(principal.PrincipalKind.policy_authority) => .policy_authority,
+        @backingInt(principal.PrincipalKind.user) => .user,
+        @backingInt(principal.PrincipalKind.team) => .team,
+        @backingInt(principal.PrincipalKind.device) => .device,
+        @backingInt(principal.PrincipalKind.app) => .app,
+        @backingInt(principal.PrincipalKind.service) => .service,
+        @backingInt(principal.PrincipalKind.policy_authority) => .policy_authority,
         else => error.CorruptImage,
     };
 }
 
 fn parseShareNetworkScope(value: u8) Error!workspace.ShareNetworkScope {
     return switch (value) {
-        @intFromEnum(workspace.ShareNetworkScope.local_only) => .local_only,
-        @intFromEnum(workspace.ShareNetworkScope.trusted_overlay) => .trusted_overlay,
-        @intFromEnum(workspace.ShareNetworkScope.relay_assisted) => .relay_assisted,
-        @intFromEnum(workspace.ShareNetworkScope.unrestricted) => .unrestricted,
+        @backingInt(workspace.ShareNetworkScope.local_only) => .local_only,
+        @backingInt(workspace.ShareNetworkScope.trusted_overlay) => .trusted_overlay,
+        @backingInt(workspace.ShareNetworkScope.relay_assisted) => .relay_assisted,
+        @backingInt(workspace.ShareNetworkScope.unrestricted) => .unrestricted,
         else => error.CorruptImage,
     };
 }
 
 fn parseResharePolicy(value: u8) Error!workspace.ResharePolicy {
     return switch (value) {
-        @intFromEnum(workspace.ResharePolicy.owner_only) => .owner_only,
-        @intFromEnum(workspace.ResharePolicy.admin_only) => .admin_only,
-        @intFromEnum(workspace.ResharePolicy.grantee_allowed) => .grantee_allowed,
+        @backingInt(workspace.ResharePolicy.owner_only) => .owner_only,
+        @backingInt(workspace.ResharePolicy.admin_only) => .admin_only,
+        @backingInt(workspace.ResharePolicy.grantee_allowed) => .grantee_allowed,
         else => error.CorruptImage,
     };
 }
 
 fn parseAuditVisibility(value: u8) Error!workspace.AuditVisibility {
     return switch (value) {
-        @intFromEnum(workspace.AuditVisibility.owner_only) => .owner_only,
-        @intFromEnum(workspace.AuditVisibility.shared_participants) => .shared_participants,
-        @intFromEnum(workspace.AuditVisibility.organization_policy) => .organization_policy,
+        @backingInt(workspace.AuditVisibility.owner_only) => .owner_only,
+        @backingInt(workspace.AuditVisibility.shared_participants) => .shared_participants,
+        @backingInt(workspace.AuditVisibility.organization_policy) => .organization_policy,
         else => error.CorruptImage,
     };
 }
@@ -1781,9 +1781,9 @@ fn writeShareGrant(writer: *CursorWriter, grant: workspace.ShareGrant) Error!voi
     if (grant.can_export) flags |= share_grant_flag_export;
     if (grant.can_admin) flags |= share_grant_flag_admin;
     try writer.writeByte(flags);
-    try writer.writeByte(@intFromEnum(grant.network_scope));
-    try writer.writeByte(@intFromEnum(grant.reshare_policy));
-    try writer.writeByte(@intFromEnum(grant.audit_visibility));
+    try writer.writeByte(@backingInt(grant.network_scope));
+    try writer.writeByte(@backingInt(grant.reshare_policy));
+    try writer.writeByte(@backingInt(grant.audit_visibility));
     try writer.writeU64(grant.expires_at_ticks);
     try writer.writeU64(grant.scope_object_id.raw());
     try writeText(writer, grant.scopePathSlice());
@@ -2070,7 +2070,7 @@ test "storage volume interns repeated signer labels within a bounded pool" {
     var overflowed = false;
     const attempts = SIGNER_TEXT_POOL_BYTES / (max_signer_bytes + 1) + 2;
     for (0..attempts) |index| {
-        var signer = [_]u8{'s'} ** max_signer_bytes;
+        var signer = @as([max_signer_bytes]u8, @splat('s'));
         std.mem.writeInt(u32, signer[0..@sizeOf(u32)], @intCast(index), .little);
         _ = volume.internSigner(&signer) catch |err| {
             try std.testing.expect(err == error.InvalidSignatureEncoding);

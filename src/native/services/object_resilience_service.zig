@@ -74,7 +74,7 @@ pub const Snapshot = struct {
 };
 
 pub const Service = struct {
-    snapshots: [MAX_SNAPSHOTS]Snapshot = [_]Snapshot{.{}} ** MAX_SNAPSHOTS,
+    snapshots: [MAX_SNAPSHOTS]Snapshot = @as([MAX_SNAPSHOTS]Snapshot, @splat(.{})),
     snapshot_count: u8 = 0,
     next_reusable_snapshot: u8 = 0,
 

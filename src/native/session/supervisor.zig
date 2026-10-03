@@ -28,7 +28,7 @@ pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const SERVICE_RECORD_SIZE_CEILING_BYTES: usize = 40;
 pub const SUPERVISOR_SIZE_CEILING_BYTES: usize = 3_368;
 const SERVICE_INDEX_CAPACITY: usize = MAX_SERVICES * 2;
-pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(contract.ServiceClass).len;
+pub const SERVICE_CLASS_COUNT: usize = @typeInfo(contract.ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = indexed_arena.ReusableIndex(MAX_SERVICES);
 const NO_SERVICE_CLASS_SLOT = indexed_arena.reusableNoIndex(MAX_SERVICES);
 
@@ -36,8 +36,8 @@ comptime {
     if (MAX_DIAGNOSTICS > std.math.maxInt(u8)) {
         @compileError("supervisor diagnostic ring metadata exceeds u8 capacity");
     }
-    for (std.meta.fields(contract.ServiceClass), 0..) |field, class_index| {
-        if (field.value != class_index) {
+    for (@typeInfo(contract.ServiceClass).@"enum".field_values, 0..) |field, class_index| {
+        if (field != class_index) {
             @compileError("service classes must remain dense for direct supervisor lookup");
         }
     }
@@ -153,8 +153,8 @@ pub const supervisor_indexing = .{
 
 pub const Supervisor = struct {
     service_arena: ServiceArena = ServiceArena.init(),
-    service_class_slots: [SERVICE_CLASS_COUNT]ServiceClassSlotIndex = [_]ServiceClassSlotIndex{NO_SERVICE_CLASS_SLOT} ** SERVICE_CLASS_COUNT,
-    diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS,
+    service_class_slots: [SERVICE_CLASS_COUNT]ServiceClassSlotIndex = @as([SERVICE_CLASS_COUNT]ServiceClassSlotIndex, @splat(NO_SERVICE_CLASS_SLOT)),
+    diagnostics: DiagnosticBacking = if (heap_backed_actionable_diagnostics) null else @as([MAX_DIAGNOSTICS]DiagnosticEvent, @splat(zeroDiagnostic())),
     diagnostic_count: u8 = 0,
     next_diagnostic_slot: u8 = 0,
 
@@ -182,7 +182,7 @@ pub const Supervisor = struct {
                 self.diagnostics = null;
             }
         } else {
-            self.diagnostics = [_]DiagnosticEvent{zeroDiagnostic()} ** MAX_DIAGNOSTICS;
+            self.diagnostics = @as([MAX_DIAGNOSTICS]DiagnosticEvent, @splat(zeroDiagnostic()));
         }
         self.diagnostic_count = 0;
         self.next_diagnostic_slot = 0;
@@ -520,7 +520,7 @@ fn serviceSlotId(slot: *const ServiceSlot) u64 {
 }
 
 fn serviceClassIndex(class: contract.ServiceClass) usize {
-    return @intFromEnum(class);
+    return @backingInt(class);
 }
 
 fn zeroService() ServiceRecord {

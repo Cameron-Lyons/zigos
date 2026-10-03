@@ -13,7 +13,7 @@ pub fn maximumEnvelopeProvider() sealing.Provider {
 
 fn sealMaximumEnvelope(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {
     // Fill the wrapped-key capacity to exercise multi-page ciphertext catalogs.
-    const wrapped = [_]u8{0x55} ** @import("../../native/platform/tpm2_sealing.zig").MAX_BLOB_BYTES;
+    const wrapped = @as([@import("../../native/platform/tpm2_sealing.zig").MAX_BLOB_BYTES]u8, @splat(0x55));
     try sealing.encrypt(raw, &key, @splat(0x26), binding, &wrapped, out);
 }
 fn seal(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {

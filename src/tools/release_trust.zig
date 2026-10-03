@@ -700,7 +700,7 @@ const TestKey = struct {
     key_id: [sha256_hex_len]u8,
 
     fn init(seed_byte: u8) !TestKey {
-        const key_pair = try Ed25519.KeyPair.generateDeterministic([_]u8{seed_byte} ** Ed25519.KeyPair.seed_length);
+        const key_pair = try Ed25519.KeyPair.generateDeterministic(@splat(seed_byte));
         const public_key = key_pair.public_key.toBytes();
         var public_key_hex: [Ed25519.PublicKey.encoded_length * 2]u8 = undefined;
         encodeHexLower(&public_key, &public_key_hex);
@@ -845,7 +845,7 @@ fn testManifestJson(
 ) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"policyVersion\":7,\"profileId\":\"native-release-v1\",\"releaseSequence\":42,\"issuedAt\":300,\"expiresAt\":2000,\"source\":{{\"repository\":\"https://example.invalid/zigos\",\"changeId\":\"change-1\",\"commitId\":\"0123456789abcdef\"}},\"build\":{{\"zigVersion\":\"0.16.0\",\"target\":\"x86_64-freestanding\",\"optimizeMode\":\"ReleaseFast\",\"builderId\":\"release-builder\"}},\"targets\":{s},\"evidence\":{s}}}",
+        "{{\"policyVersion\":7,\"profileId\":\"native-release-v1\",\"releaseSequence\":42,\"issuedAt\":300,\"expiresAt\":2000,\"source\":{{\"repository\":\"https://example.invalid/zigos\",\"changeId\":\"change-1\",\"commitId\":\"0123456789abcdef\"}},\"build\":{{\"zigVersion\":\"0.17.0\",\"target\":\"x86_64-freestanding\",\"optimizeMode\":\"ReleaseFast\",\"builderId\":\"release-builder\"}},\"targets\":{s},\"evidence\":{s}}}",
         .{ target_records, evidence_records },
     );
 }
@@ -1183,7 +1183,7 @@ test "release signature verification precedes manifest payload parsing" {
 
 test "root digest is checked before strict JSON parsing" {
     const allocator = std.testing.allocator;
-    var incorrect_digest = [_]u8{'0'} ** sha256_hex_len;
+    var incorrect_digest: [sha256_hex_len]u8 = @splat('0');
     try std.testing.expectError(
         error.RootDigestMismatch,
         verifyRootMetadata(allocator, "{not-json", &incorrect_digest, test_now),

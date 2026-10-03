@@ -174,7 +174,7 @@ pub const Controller = struct {
     nsid: u32 = 1,
     lba_bytes: u32 = SECTOR_BYTES,
     namespace_sectors: u64 = 0,
-    io_prp_lists: [IO_PIPELINE_DEPTH]DmaAddress = [_]DmaAddress{.{}} ** IO_PIPELINE_DEPTH,
+    io_prp_lists: [IO_PIPELINE_DEPTH]DmaAddress = @as([IO_PIPELINE_DEPTH]DmaAddress, @splat(.{})),
 
     fn reg32(self: *const Controller, offset: usize) u32 {
         return @as(*volatile u32, @ptrFromInt(self.bar + offset)).*;
@@ -399,14 +399,14 @@ pub fn createIoQueues(self: *Controller, frames: DmaFrames) Error!void {
     zeroFrame(cq.alias);
     zeroFrame(sq.alias);
 
-    var create_cq = [_]u32{0} ** 16;
+    var create_cq = @as([16]u32, @splat(0));
     create_cq[0] = ADMIN_OPC_CREATE_IO_CQ;
     create_cq[6] = cq.physical;
     create_cq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
     create_cq[11] = nvme_interrupt.createCompletionQueueControl();
     try submit(self, &self.admin, &create_cq);
 
-    var create_sq = [_]u32{0} ** 16;
+    var create_sq = @as([16]u32, @splat(0));
     create_sq[0] = ADMIN_OPC_CREATE_IO_SQ;
     create_sq[6] = sq.physical;
     create_sq[10] = ((IO_QUEUE_ENTRIES - 1) << 16) | IO_QUEUE_ID;
@@ -445,7 +445,7 @@ fn submitIoCommand(
     }
 
     if (lba > self.namespace_sectors or self.namespace_sectors - lba < sector_count) return error.LbaOutOfRange;
-    var cmd = [_]u32{0} ** 16;
+    var cmd = @as([16]u32, @splat(0));
     cmd[0] = opcode;
     cmd[1] = self.nsid;
     cmd[6] = @truncate(prp.buffer_address);
@@ -465,7 +465,7 @@ fn waitForIoCommand(self: *Controller, command: OutstandingCommand) Error!void {
 
 pub fn flush(self: *Controller) Error!void {
     if (!self.io_ready) return error.NamespaceMissing;
-    var command = [_]u32{0} ** 16;
+    var command = @as([16]u32, @splat(0));
     command[0] = NVM_OPC_FLUSH;
     command[1] = self.nsid;
     try submit(self, &self.io, &command);
@@ -488,7 +488,7 @@ var active_controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
 var published_bar_physical: u64 = 0;
-var bounce: [IO_PIPELINE_DEPTH]DmaAddress = [_]DmaAddress{.{}} ** IO_PIPELINE_DEPTH;
+var bounce: [IO_PIPELINE_DEPTH]DmaAddress = @as([IO_PIPELINE_DEPTH]DmaAddress, @splat(.{}));
 var io_interrupts_active: bool = false;
 var completion_interrupt_count: u64 = 0;
 
@@ -553,7 +553,7 @@ pub fn completionInterruptCount() u64 {
 
 fn identifyNamespace(self: *Controller, buffer: DmaAddress) Error!void {
     zeroFrame(buffer.alias);
-    var cmd = [_]u32{0} ** 16;
+    var cmd = @as([16]u32, @splat(0));
     cmd[0] = ADMIN_OPC_IDENTIFY;
     cmd[1] = self.nsid;
     cmd[6] = buffer.physical;
@@ -593,7 +593,7 @@ fn issueFaultProbe(self: *Controller, guard_phys: u32) void {
 }
 
 fn faultProbeCommand(nsid: u32, guard_phys: u32) [16]u32 {
-    var command = [_]u32{0} ** 16;
+    var command = @as([16]u32, @splat(0));
     command[0] = ADMIN_OPC_IDENTIFY;
     command[1] = nsid;
     command[6] = guard_phys;
@@ -809,7 +809,7 @@ pub fn backendFlush() callconv(.c) bool {
 fn handleBackendError(err: anyerror) void {
     if (!backendErrorRequiresContainment(err) or !active_present) return;
     active_present = false;
-    bounce = [_]DmaAddress{.{}} ** IO_PIPELINE_DEPTH;
+    bounce = @as([IO_PIPELINE_DEPTH]DmaAddress, @splat(.{}));
     publishInterruptsActive(false);
     pci.disableMsi(active_device) catch {};
     active_controller.writeReg32(REG_CC, active_controller.reg32(REG_CC) & ~CC_EN);

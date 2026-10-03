@@ -294,7 +294,7 @@ test "clipboard client assembles split UTF-8 and rejects malformed final text at
         const event = testEvent(&state, abi.InputByte.paste);
         client.start(test_binding, &state, event);
         _ = client.step(&state, &transport);
-        var bytes = ("a" ** 67 ++ "界e\u{301}👩‍💻").*;
+        var bytes = (&@as([67]u8, @splat('a')) ++ "界e\u{301}👩‍💻").*;
         if (malformed) bytes[bytes.len - 1] = 0xff;
         var offset: usize = 0;
         while (offset < bytes.len) {

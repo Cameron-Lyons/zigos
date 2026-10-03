@@ -40,13 +40,13 @@ const SPAN_LOOKUP_SLOTS: usize = MAX_SPANS * 2;
 
 const Magazine = struct {
     len: u8 = 0,
-    slots: [MAGAZINE_DEPTH]SpanId = .{NO_SPAN} ** MAGAZINE_DEPTH,
+    slots: [MAGAZINE_DEPTH]SpanId = @splat(NO_SPAN),
 };
 
 const CpuHeap = struct {
     recent_span: SpanId = NO_SPAN,
     recent_payload: usize = 0,
-    classes: [CLASS_COUNT]Magazine = [_]Magazine{.{}} ** CLASS_COUNT,
+    classes: [CLASS_COUNT]Magazine = @as([CLASS_COUNT]Magazine, @splat(.{})),
 };
 
 const CpuHeapSlot = struct {
@@ -68,13 +68,13 @@ var payload_bytes: usize = 0;
 var early_claimed_bytes: usize = 0;
 var is_initialized = false;
 var allocator_lock = spin.Lock.init();
-var spans: [MAX_SPANS]Span = [_]Span{.{}} ** MAX_SPANS;
+var spans: [MAX_SPANS]Span = @as([MAX_SPANS]Span, @splat(.{}));
 var span_used: SpanId = 0;
 var recycled: SpanId = NO_SPAN;
 var address_head: SpanId = NO_SPAN;
-var class_heads: [CLASS_COUNT]SpanId = .{NO_SPAN} ** CLASS_COUNT;
-var cpu_heaps: [MAGAZINE_CPUS]CpuHeapSlot = [_]CpuHeapSlot{.{}} ** MAGAZINE_CPUS;
-var span_lookup: [SPAN_LOOKUP_SLOTS]SpanId = .{NO_SPAN} ** SPAN_LOOKUP_SLOTS;
+var class_heads: [CLASS_COUNT]SpanId = @splat(NO_SPAN);
+var cpu_heaps: [MAGAZINE_CPUS]CpuHeapSlot = @as([MAGAZINE_CPUS]CpuHeapSlot, @splat(.{}));
+var span_lookup: [SPAN_LOOKUP_SLOTS]SpanId = @splat(NO_SPAN);
 
 pub const metadata_layout = .{
     .span_capacity = MAX_SPANS,
@@ -190,13 +190,13 @@ pub fn initHostArena(arena: []u8) error{ TooSmall, TooLarge }!void {
 }
 
 fn resetArena() void {
-    spans = [_]Span{.{}} ** MAX_SPANS;
+    spans = @as([MAX_SPANS]Span, @splat(.{}));
     span_used = 0;
     recycled = NO_SPAN;
     address_head = NO_SPAN;
-    class_heads = .{NO_SPAN} ** CLASS_COUNT;
-    cpu_heaps = [_]CpuHeapSlot{.{}} ** MAGAZINE_CPUS;
-    span_lookup = .{NO_SPAN} ** SPAN_LOOKUP_SLOTS;
+    class_heads = @splat(NO_SPAN);
+    cpu_heaps = @as([MAGAZINE_CPUS]CpuHeapSlot, @splat(.{}));
+    span_lookup = @splat(NO_SPAN);
 
     const initial = createSpan(0, @intCast(payload_bytes)) orelse @panic("kernel heap span table is exhausted");
     address_head = initial;

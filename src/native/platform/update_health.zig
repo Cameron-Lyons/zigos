@@ -54,7 +54,7 @@ const boot_witness_reserved_bytes: usize = 3;
 const BootWitness = extern struct {
     magic: u32 = boot_witness_magic,
     slot_index: u8 = 0,
-    _reserved: [boot_witness_reserved_bytes]u8 = [_]u8{0} ** boot_witness_reserved_bytes,
+    _reserved: [boot_witness_reserved_bytes]u8 = @as([boot_witness_reserved_bytes]u8, @splat(0)),
     activation_generation: u64 = 0,
     tick: u64 = 0,
 };
@@ -456,7 +456,7 @@ test "update health validates boot core storage network and ui checks and record
     const update_event = ledger.latestKind(.update_transition).?;
     try std.testing.expect(update_event.allowed);
     try std.testing.expectEqual(@as(u64, 0), update_event.related_id);
-    try std.testing.expectEqual(@as(u32, @intFromEnum(immutable_base.HealthFailure.none)), update_event.detail_code);
+    try std.testing.expectEqual(@as(u32, @backingInt(immutable_base.HealthFailure.none)), update_event.detail_code);
     try std.testing.expect(std.mem.indexOf(u8, update_event.detailSlice(), "boot=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, update_event.detailSlice(), "failure=none") != null);
 

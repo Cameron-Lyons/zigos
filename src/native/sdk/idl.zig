@@ -116,7 +116,7 @@ pub const Cardinality = enum(u8) {
 pub const TypeRef = struct {
     kind: TypeKind = .void,
     name_len: u8 = 0,
-    name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    name: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
 
     pub fn nameSlice(self: *const TypeRef) []const u8 {
         return self.name[0..@as(usize, self.name_len)];
@@ -125,7 +125,7 @@ pub const TypeRef = struct {
 
 pub const Field = struct {
     name_len: u8 = 0,
-    name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    name: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
     type_ref: TypeRef = .{},
     cardinality: Cardinality = .required,
 
@@ -136,7 +136,7 @@ pub const Field = struct {
 
 pub const Record = struct {
     name_len: u8 = 0,
-    name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    name: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
     field_start: u8 = 0,
     field_count: u8 = 0,
 
@@ -165,7 +165,7 @@ pub const SyncSemantic = enum(u8) {
 pub const PermissionDecl = struct {
     kind: manifest.PermissionKind = .object_access,
     resource_len: u8 = 0,
-    resource: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
+    resource: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     required: bool = true,
     local_only: bool = true,
 
@@ -176,10 +176,10 @@ pub const PermissionDecl = struct {
 
 pub const ObjectDecl = struct {
     name_len: u8 = 0,
-    name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    name: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
     kind: ObjectKind = .document,
     path_len: u8 = 0,
-    path: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
+    path: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     signed: bool = true,
     versioned: bool = true,
     sync: bool = true,
@@ -195,7 +195,7 @@ pub const ObjectDecl = struct {
 
 pub const SyncDecl = struct {
     prefix_len: u8 = 0,
-    prefix: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
+    prefix: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     semantic: SyncSemantic = .mergeable_crdt,
     local_first: bool = true,
     e2ee: bool = true,
@@ -207,13 +207,13 @@ pub const SyncDecl = struct {
 
 pub const Operation = struct {
     name_len: u8 = 0,
-    name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    name: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
     request_size: u32 = 0,
     response_size: u32 = 0,
     request_type_len: u8 = 0,
-    request_type: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    request_type: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
     response_type_len: u8 = 0,
-    response_type: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    response_type: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
 
     pub fn nameSlice(self: *const Operation) []const u8 {
         return self.name[0..@as(usize, self.name_len)];
@@ -234,7 +234,7 @@ pub const Operation = struct {
 
 pub const Interface = struct {
     name_len: u8 = 0,
-    name: [MAX_NAME_BYTES]u8 = [_]u8{0} ** MAX_NAME_BYTES,
+    name: [MAX_NAME_BYTES]u8 = @as([MAX_NAME_BYTES]u8, @splat(0)),
     version_major: u16 = 1,
     version_minor: u16 = 0,
     operation_start: u8 = 0,
@@ -261,13 +261,13 @@ pub const Document = struct {
     permission_count: u8 = 0,
     object_count: u8 = 0,
     sync_count: u8 = 0,
-    interfaces: [MAX_INTERFACES]Interface = [_]Interface{.{}} ** MAX_INTERFACES,
-    operations: [MAX_OPERATIONS]Operation = [_]Operation{.{}} ** MAX_OPERATIONS,
-    records: [MAX_RECORDS]Record = [_]Record{.{}} ** MAX_RECORDS,
-    fields: [MAX_FIELDS]Field = [_]Field{.{}} ** MAX_FIELDS,
-    permissions: [MAX_DECLARATIONS]PermissionDecl = [_]PermissionDecl{.{}} ** MAX_DECLARATIONS,
-    objects: [MAX_DECLARATIONS]ObjectDecl = [_]ObjectDecl{.{}} ** MAX_DECLARATIONS,
-    syncs: [MAX_DECLARATIONS]SyncDecl = [_]SyncDecl{.{}} ** MAX_DECLARATIONS,
+    interfaces: [MAX_INTERFACES]Interface = @as([MAX_INTERFACES]Interface, @splat(.{})),
+    operations: [MAX_OPERATIONS]Operation = @as([MAX_OPERATIONS]Operation, @splat(.{})),
+    records: [MAX_RECORDS]Record = @as([MAX_RECORDS]Record, @splat(.{})),
+    fields: [MAX_FIELDS]Field = @as([MAX_FIELDS]Field, @splat(.{})),
+    permissions: [MAX_DECLARATIONS]PermissionDecl = @as([MAX_DECLARATIONS]PermissionDecl, @splat(.{})),
+    objects: [MAX_DECLARATIONS]ObjectDecl = @as([MAX_DECLARATIONS]ObjectDecl, @splat(.{})),
+    syncs: [MAX_DECLARATIONS]SyncDecl = @as([MAX_DECLARATIONS]SyncDecl, @splat(.{})),
 
     pub fn interfaceAt(self: *const Document, index: usize) *const Interface {
         return &self.interfaces[index];
@@ -318,7 +318,7 @@ pub const Document = struct {
 
 pub const GeneratedSource = struct {
     len: u16 = 0,
-    buffer: [MAX_GENERATED_BYTES]u8 = [_]u8{0} ** MAX_GENERATED_BYTES,
+    buffer: [MAX_GENERATED_BYTES]u8 = @as([MAX_GENERATED_BYTES]u8, @splat(0)),
 
     pub fn slice(self: *const GeneratedSource) []const u8 {
         return self.buffer[0..@as(usize, self.len)];
@@ -747,22 +747,22 @@ fn parseCardinality(text: []const u8) Error!Cardinality {
 }
 
 fn parsePermissionKind(text: []const u8) Error!manifest.PermissionKind {
-    inline for (@typeInfo(manifest.PermissionKind).@"enum".fields) |field| {
-        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(manifest.PermissionKind).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, text, name)) return @field(manifest.PermissionKind, name);
     }
     return error.UnknownPermissionKind;
 }
 
 fn parseObjectKind(text: []const u8) Error!ObjectKind {
-    inline for (@typeInfo(ObjectKind).@"enum".fields) |field| {
-        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(ObjectKind).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, text, name)) return @field(ObjectKind, name);
     }
     return error.UnknownObjectKind;
 }
 
 fn parseSyncSemantic(text: []const u8) Error!SyncSemantic {
-    inline for (@typeInfo(SyncSemantic).@"enum".fields) |field| {
-        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(SyncSemantic).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, text, name)) return @field(SyncSemantic, name);
     }
     return error.UnknownSyncSemantic;
 }

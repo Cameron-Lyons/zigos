@@ -18,7 +18,7 @@ pub const Record = extern struct {
     payload_len: u16 = 0,
     move_attached: u8 = 0,
     _pad: [3]u8 = .{ 0, 0, 0 },
-    bytes: [PAYLOAD_BYTES]u8 = [_]u8{0} ** PAYLOAD_BYTES,
+    bytes: [PAYLOAD_BYTES]u8 = @as([PAYLOAD_BYTES]u8, @splat(0)),
 };
 
 pub const Error = error{

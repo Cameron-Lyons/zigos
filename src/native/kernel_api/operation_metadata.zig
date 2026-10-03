@@ -422,9 +422,9 @@ pub fn autoGrantFor(comptime operation: abi.NativeOperation, comptime kind: Auto
 }
 
 test "native operation metadata covers every operation once" {
-    try std.testing.expectEqual(std.meta.fields(abi.NativeOperation).len, operations.len);
-    inline for (std.meta.fields(abi.NativeOperation)) |field| {
-        const operation: abi.NativeOperation = @enumFromInt(field.value);
+    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, operations.len);
+    inline for (@typeInfo(abi.NativeOperation).@"enum".field_values) |field| {
+        const operation: abi.NativeOperation = @fromBackingInt(@intCast(field));
         const declaration = declarationFor(operation);
         try std.testing.expectEqual(operation, declaration.operation);
         try std.testing.expect(declaration.binding.request_type_name.len != 0);

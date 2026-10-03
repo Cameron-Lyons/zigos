@@ -25,7 +25,7 @@ pub const Queue = struct {
     head: u32 = 0,
     tail: u32 = 0,
     in_flight: u32 = 0,
-    submitted_at_ticks: [DESCRIPTOR_COUNT]u64 = [_]u64{0} ** DESCRIPTOR_COUNT,
+    submitted_at_ticks: [DESCRIPTOR_COUNT]u64 = @as([DESCRIPTOR_COUNT]u64, @splat(0)),
 
     pub fn reserve(self: *Queue, now_ticks: u64) error{RingFull}!u32 {
         if (self.in_flight == CAPACITY) return error.RingFull;

@@ -189,8 +189,8 @@ pub fn MultimapIndex(
         };
 
         bucket_index: BucketIndex = BucketIndex.init(),
-        buckets: [bucket_capacity]Bucket = [_]Bucket{Bucket{}} ** bucket_capacity,
-        links: [link_capacity]Link = [_]Link{Link{}} ** link_capacity,
+        buckets: [bucket_capacity]Bucket = @as([bucket_capacity]Bucket, @splat(Bucket{})),
+        links: [link_capacity]Link = @as([link_capacity]Link, @splat(Link{})),
         free_bucket_head: CompactIndex = compact_no_index,
         next_unclaimed_bucket: CompactIndex = 0,
 
@@ -469,15 +469,15 @@ pub fn IndexedArenaWithKeyOptions(
             }
         }
 
-        slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
+        slots: [capacity]Slot = @as([capacity]Slot, @splat(Slot{})),
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
-        slot_keys: [key_capacity]Key = [_]Key{ids.zero(Key)} ** key_capacity,
-        free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
+        slot_keys: [key_capacity]Key = @as([key_capacity]Key, @splat(ids.zero(Key))),
+        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(free_no_index)),
         free_head: FreeIndex = free_no_index,
         next_unclaimed_index: Count = 0,
         used_count: Count = 0,
         dirty_count: Count = 0,
-        dirty_ids: [dirty_capacity]Key = [_]Key{ids.zero(Key)} ** dirty_capacity,
+        dirty_ids: [dirty_capacity]Key = @as([dirty_capacity]Key, @splat(ids.zero(Key))),
         dirty_id_index: DirtyIdIndex = .{},
 
         pub fn init() Self {
@@ -986,9 +986,9 @@ pub fn GenerationalArena(
         pub const Handle = GenerationalHandle(display_name);
         pub const slot_capacity = capacity;
 
-        slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
-        slot_generations: [capacity]u32 = [_]u32{0} ** capacity,
-        free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
+        slots: [capacity]Slot = @as([capacity]Slot, @splat(Slot{})),
+        slot_generations: [capacity]u32 = @as([capacity]u32, @splat(0)),
+        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(free_no_index)),
         free_head: FreeIndex = free_no_index,
         next_unclaimed_index: Count = 0,
         used_count: Count = 0,
@@ -1300,14 +1300,14 @@ pub fn PagedIndexedArenaWithKeyOptions(
         }
 
         const Page = struct {
-            slots: [page_size]Slot = [_]Slot{Slot{}} ** page_size,
+            slots: [page_size]Slot = @as([page_size]Slot, @splat(Slot{})),
         };
 
-        pages: [page_count]Page = [_]Page{Page{}} ** page_count,
+        pages: [page_count]Page = @as([page_count]Page, @splat(Page{})),
         primary_index: UniqueIndex(index_capacity) = UniqueIndex(index_capacity).init(),
-        slot_keys: [key_capacity]Key = [_]Key{ids.zero(Key)} ** key_capacity,
-        slot_generations: [generation_capacity]u32 = [_]u32{0} ** generation_capacity,
-        free_next: [capacity]FreeIndex = [_]FreeIndex{free_no_index} ** capacity,
+        slot_keys: [key_capacity]Key = @as([key_capacity]Key, @splat(ids.zero(Key))),
+        slot_generations: [generation_capacity]u32 = @as([generation_capacity]u32, @splat(0)),
+        free_next: [capacity]FreeIndex = @as([capacity]FreeIndex, @splat(free_no_index)),
         free_head: FreeIndex = free_no_index,
         next_unclaimed_index: Count = 0,
         used_count: Count = 0,
@@ -1434,7 +1434,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
         /// builds avoid rereading its payload membership flag.
         pub inline fn handleForClaimedIndex(self: *const Self, slot_index: usize) Handle {
             if (comptime !options.track_generations) @compileError("this paged indexed arena does not track generational handles");
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 std.debug.assert(slot_index < capacity);
                 std.debug.assert(slotInUse(self.slotAtConst(slot_index)));
             }
@@ -1494,8 +1494,8 @@ pub fn PagedIndexedArenaWithKeyOptions(
                 }
             }
             self.primary_index.reset();
-            if (comptime options.store_keys) self.slot_keys = [_]Key{ids.zero(Key)} ** capacity;
-            self.free_next = [_]FreeIndex{free_no_index} ** capacity;
+            if (comptime options.store_keys) self.slot_keys = @as([capacity]Key, @splat(ids.zero(Key)));
+            self.free_next = @as([capacity]FreeIndex, @splat(free_no_index));
             self.free_head = free_no_index;
             self.next_unclaimed_index = @intCast(capacity);
             self.used_count = 0;
@@ -1625,7 +1625,7 @@ pub fn PagedIndexedArenaWithKeyOptions(
 }
 
 fn debugScanFallbackEnabled() bool {
-    return builtin.mode == .Debug;
+    return builtin.mode == .debug;
 }
 
 const TestRecord = struct {
@@ -2184,12 +2184,12 @@ test "multimap index matches an insertion-order model under churn" {
     const bucket_capacity = 4;
     const model_key_count = 6;
     const ModelIndex = MultimapIndex(slot_count, bucket_capacity, 8);
-    const empty_order = [_][slot_count]usize{[_]usize{0} ** slot_count} ** model_key_count;
+    const empty_order = @as([model_key_count][slot_count]usize, @splat(@as([slot_count]usize, @splat(0))));
 
     var index = ModelIndex.init();
-    var model_slot_keys = [_]u64{0} ** slot_count;
+    var model_slot_keys = @as([slot_count]u64, @splat(0));
     var model_order = empty_order;
-    var model_counts = [_]usize{0} ** model_key_count;
+    var model_counts = @as([model_key_count]usize, @splat(0));
     var random_state: u64 = 0x6d75_6c74_696d_6170;
 
     var operation_index: usize = 0;
@@ -2201,9 +2201,9 @@ test "multimap index matches an insertion-order model under churn" {
 
         if (operation_index != 0 and operation_index % 257 == 0) {
             index.reset();
-            model_slot_keys = [_]u64{0} ** slot_count;
+            model_slot_keys = @as([slot_count]u64, @splat(0));
             model_order = empty_order;
-            model_counts = [_]usize{0} ** model_key_count;
+            model_counts = @as([model_key_count]usize, @splat(0));
         } else if (random_state & 1 == 0) {
             var active_bucket_count: usize = 0;
             for (model_counts) |count| {

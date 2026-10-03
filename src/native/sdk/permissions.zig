@@ -30,7 +30,7 @@ pub const ReviewPlan = struct {
     grant_count: u8 = 0,
     node_count: u8 = 0,
     grants: [permission_review.MAX_REVIEW_DECISIONS]UserGrant =
-        [_]UserGrant{.{ .kind = .object_access }} ** permission_review.MAX_REVIEW_DECISIONS,
+        @as([permission_review.MAX_REVIEW_DECISIONS]UserGrant, @splat(.{ .kind = .object_access })),
     nodes: [MAX_REVIEW_NODES]ui.Node = undefined,
 
     pub fn grantSlice(self: *const ReviewPlan) []const UserGrant {
@@ -54,7 +54,7 @@ pub const Harness = struct {
     task_id: u64,
     bundle: *const manifest.BundleManifest,
     commands: [permission_review.MAX_REVIEW_DECISIONS]ReviewCommand =
-        [_]ReviewCommand{.{ .allow = true }} ** permission_review.MAX_REVIEW_DECISIONS,
+        @as([permission_review.MAX_REVIEW_DECISIONS]ReviewCommand, @splat(.{ .allow = true })),
 
     pub fn init(task_id: u64, bundle: *const manifest.BundleManifest) Harness {
         var harness = Harness{
@@ -140,11 +140,11 @@ pub fn buildReviewPlan(
     bundle: *const manifest.BundleManifest,
     commands: []const ReviewCommand,
 ) !ReviewPlan {
-    var decisions = [_]ReviewDecision{.{
+    var decisions = @as([permission_review.MAX_REVIEW_DECISIONS]ReviewDecision, @splat(.{
         .kind = .object_access,
         .resource = "",
         .allow = false,
-    }} ** permission_review.MAX_REVIEW_DECISIONS;
+    }));
     var decision_count: usize = 0;
     for (bundle.requested_permissions, 0..) |request, index| {
         if (decision_count >= decisions.len) return error.TooManyPermissions;

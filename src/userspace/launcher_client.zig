@@ -281,7 +281,7 @@ test "launcher client assembles pages atomically and freezes selection while bro
     var mock = Mock{};
     var client = Client{};
     var surface = State.init("zigos.system.display");
-    const text = "a" ** 62 ++ "\n文書\nc.md\nd.md";
+    const text = &@as([62]u8, @splat('a')) ++ "\n文書\nc.md\nd.md";
     mock.deliver(&client, &surface, .{ .token = 1, .body = .{ .page = .{ .window_id = 9, .count = 4, .text_length = text.len, .previous = false, .next = true } } });
     const revision = surface.revision;
     var offset: usize = 0;
@@ -376,7 +376,7 @@ test "launcher client rejects malformed assemblies and supports empty page cance
     var mock = Mock{};
     var client = Client{};
     var surface = State.init("zigos.system.display");
-    const labels = "a" ** 96 ++ "\n" ++ "b" ** 96 ++ "\n" ++ "c" ** 96 ++ "\n" ++ "d" ** 96;
+    const labels = &@as([96]u8, @splat('a')) ++ "\n" ++ &@as([96]u8, @splat('b')) ++ "\n" ++ &@as([96]u8, @splat('c')) ++ "\n" ++ &@as([96]u8, @splat('d'));
     mock.deliver(&client, &surface, .{ .token = 1, .body = .{ .page = .{ .window_id = 9, .count = 4, .text_length = labels.len, .previous = false, .next = true } } });
     var offset: usize = 0;
     while (offset < labels.len) {

@@ -217,7 +217,7 @@ build_copy() {
   local tree="${1:?tree required}"
   (
     cd "$tree"
-    ./scripts/zig.sh build -Doptimize=ReleaseFast iso
+    ./scripts/zig.sh build -Doptimize=fast iso
   )
 }
 

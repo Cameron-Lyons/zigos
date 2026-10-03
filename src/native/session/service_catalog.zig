@@ -46,13 +46,13 @@ pub const ServiceClass = enum(u8) {
 
 pub const DIRECT_SERVICE_CLASS_SLOTS = true;
 pub const SERVICE_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
-pub const SERVICE_CLASS_COUNT: usize = std.meta.fields(ServiceClass).len;
+pub const SERVICE_CLASS_COUNT: usize = @typeInfo(ServiceClass).@"enum".field_names.len;
 pub const ServiceClassSlotIndex = u8;
 const NO_SERVICE_CLASS_SLOT = std.math.maxInt(ServiceClassSlotIndex);
 
 comptime {
-    for (std.meta.fields(ServiceClass), 0..) |field, class_index| {
-        if (field.value != class_index) {
+    for (@typeInfo(ServiceClass).@"enum".field_values, 0..) |field, class_index| {
+        if (field != class_index) {
             @compileError("service classes must remain dense for direct catalog lookup");
         }
     }
@@ -258,9 +258,9 @@ pub const kernel_tcb = [_]KernelTcbComponent{
 };
 
 fn catalogInterface(comptime class: ServiceClass) manifest.InterfaceDecl {
-    inline for (@typeInfo(component_abi_schema.ServiceBinding).@"enum".fields) |field| {
-        if (std.mem.eql(u8, field.name, @tagName(class))) {
-            return component_abi_schema.interfaceForService(@enumFromInt(field.value));
+    inline for (@typeInfo(component_abi_schema.ServiceBinding).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, name, @tagName(class))) {
+            return component_abi_schema.interfaceForService(@field(component_abi_schema.ServiceBinding, name));
         }
     }
     @compileError("service catalog class is missing a component ABI service binding");
@@ -868,7 +868,7 @@ pub const default_services = blk: {
 pub const ordered_service_contracts = blk: {
     const count = kernelBootstrapCount();
     var derived: [count]ServiceContract = undefined;
-    var used = [_]bool{false} ** catalog.len;
+    var used = @as([catalog.len]bool, @splat(false));
     var count_out: usize = 0;
     while (count_out < count) {
         var progressed = false;
@@ -1096,7 +1096,7 @@ fn buildPublishedNativeClassSlots() ServiceClassSlots {
 }
 
 fn emptyServiceClassSlots() ServiceClassSlots {
-    return [_]ServiceClassSlotIndex{NO_SERVICE_CLASS_SLOT} ** SERVICE_CLASS_COUNT;
+    return @as([SERVICE_CLASS_COUNT]ServiceClassSlotIndex, @splat(NO_SERVICE_CLASS_SLOT));
 }
 
 fn setServiceClassSlot(
@@ -1112,7 +1112,7 @@ fn setServiceClassSlot(
 }
 
 fn serviceClassIndex(class: ServiceClass) usize {
-    return @intFromEnum(class);
+    return @backingInt(class);
 }
 
 fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
@@ -1120,7 +1120,7 @@ fn publicServiceClassSlot(slot: ServiceClassSlotIndex) ?usize {
 }
 
 fn debugAssertCatalogClassIndexMissAbsent(class: ServiceClass) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     for (catalog) |entry| {
         if (entry.class == class) {
             native_util.impossibleByInvariant("service catalog class index missed an entry");
@@ -1129,7 +1129,7 @@ fn debugAssertCatalogClassIndexMissAbsent(class: ServiceClass) void {
 }
 
 fn debugAssertServiceContractClassIndexMissAbsent(class: ServiceClass) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     for (ordered_service_contracts) |entry| {
         if (entry.class == class) {
             native_util.impossibleByInvariant("service contract class index missed an entry");
@@ -1138,7 +1138,7 @@ fn debugAssertServiceContractClassIndexMissAbsent(class: ServiceClass) void {
 }
 
 fn debugAssertPublishedNativeClassIndexMissAbsent(class: ServiceClass) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     for (ordered_published_native_service_contracts) |entry| {
         if (entry.class == class) {
             native_util.impossibleByInvariant("published native service class index missed an entry");

@@ -332,7 +332,7 @@ test "document editor bounds dispatches retains backpressured frames and parks a
     var surface = State.init("app.notes");
     var transport = TestTransport{};
     try openTestEditor(&editor, &surface, &transport);
-    const full = [_]u8{'x'} ** protocol.MAX_DOCUMENT_BYTES;
+    const full = @as([protocol.MAX_DOCUMENT_BYTES]u8, @splat('x'));
     setTestText(&surface, &full);
     editor.requestSave(test_binding, &surface);
     try std.testing.expectEqual(abi.DocumentSaveState.saving, surface.save_state);
@@ -448,7 +448,7 @@ test "document editor publishes a complete load before allowing queued input" {
     var editor = Editor{};
     var surface = State.init("app.notes");
     var transport = TestTransport{};
-    const text = [_]u8{'x'} ** 80;
+    const text = @as([80]u8, @splat('x'));
     try std.testing.expect(!editor.canEdit(test_binding, &surface));
     try std.testing.expect(surface.flags.loading);
     try std.testing.expect(!editor.step(test_binding, &surface, &transport));

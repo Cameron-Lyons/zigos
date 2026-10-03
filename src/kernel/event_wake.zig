@@ -30,7 +30,7 @@ pub const Pending = packed struct(u8) {
 var pending_bits: u8 = 0;
 
 pub fn raise(kind: Kind) void {
-    const bit = @as(u8, 1) << @intFromEnum(kind);
+    const bit = @as(u8, 1) << @backingInt(kind);
     _ = @atomicRmw(u8, &pending_bits, .Or, bit, .release);
 }
 

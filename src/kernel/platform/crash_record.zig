@@ -49,13 +49,13 @@ pub const RedactionMetadata = struct {
 pub const Record = extern struct {
     magic: u32 = MAGIC,
     version: u16 = VERSION,
-    kind: u8 = @intFromEnum(CrashKind.unknown),
+    kind: u8 = @backingInt(CrashKind.unknown),
     reason_len: u8 = 0,
     boot_id: u64 = 0,
     tick: u64 = 0,
     instruction_pointer: u64 = 0,
     stack_pointer: u64 = 0,
-    reason: [MAX_REASON_BYTES]u8 = [_]u8{0} ** MAX_REASON_BYTES,
+    reason: [MAX_REASON_BYTES]u8 = @as([MAX_REASON_BYTES]u8, @splat(0)),
     checksum: u32 = 0,
 };
 
@@ -131,7 +131,7 @@ pub fn init(
 ) Error!Record {
     if (reason.len > MAX_REASON_BYTES) return error.ReasonTooLong;
     var record = Record{
-        .kind = @intFromEnum(kind),
+        .kind = @backingInt(kind),
         .reason_len = @intCast(reason.len),
         .boot_id = boot_id,
         .tick = tick,
@@ -359,6 +359,6 @@ test "crash record rejects tampering" {
 }
 
 test "crash record bounds reason text" {
-    const long_reason = [_]u8{'x'} ** (MAX_REASON_BYTES + 1);
+    const long_reason = @as([MAX_REASON_BYTES + 1]u8, @splat('x'));
     try std.testing.expectError(error.ReasonTooLong, init(.panic, 1, 2, 3, 4, long_reason[0..]));
 }

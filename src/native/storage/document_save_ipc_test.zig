@@ -235,7 +235,7 @@ test "document IPC loads bounded immutable versions and empty documents before s
 }
 
 test "document IPC rejects a version change or revoked read midway through loading" {
-    const full = [_]u8{'a'} ** protocol.MAX_DOCUMENT_BYTES;
+    const full = @as([protocol.MAX_DOCUMENT_BYTES]u8, @splat('a'));
     for ([_]bool{ false, true }) |revoke| {
         const fixture = try Fixture.init();
         defer fixture.deinit();
@@ -309,7 +309,7 @@ test "document IPC loads read-only shares but refuses hidden reads and oversized
         .network_scope = .local_only,
     }).withObjectScope(ids.object(900), durable.path));
     var other_editor = @import("document_save.zig").Session{};
-    const oversized = [_]u8{'x'} ** (protocol.MAX_DOCUMENT_BYTES + 1);
+    const oversized = @as([protocol.MAX_DOCUMENT_BYTES + 1]u8, @splat('x'));
     const saved = try other_editor.saveForVerification(&fixture.device.service, .{
         .workspace_id = fixture.device.workspace_id,
         .path = durable.path,

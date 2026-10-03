@@ -43,9 +43,9 @@ pub const Event = struct {
     tick: u64 = 0,
     accepted: bool = false,
     label_len: u8 = 0,
-    label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    label: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     detail_len: u8 = 0,
-    detail: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    detail: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     source_identity_fingerprint: u64 = 0,
     release_transparency_sequence: u64 = 0,
     release_transparency_root_fingerprint: u64 = 0,
@@ -82,7 +82,7 @@ pub const Error = typed_component_abi.Error || error{
 
 pub const Session = struct {
     event_count: u8 = 0,
-    events: [MAX_EVENTS]Event = [_]Event{.{}} ** MAX_EVENTS,
+    events: [MAX_EVENTS]Event = @as([MAX_EVENTS]Event, @splat(.{})),
 
     pub fn init() Session {
         return .{};
@@ -261,7 +261,7 @@ test "debugger keeps bounded event metadata compact" {
 test "debugger records ABI checks and exports a redaction-safe trace" {
     var session = Session.init();
     const header = typed_component_abi.WireHeader{
-        .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
+        .operation = @backingInt(typed_component_abi.OperationId.package_rollback),
         .correlation_id = 7,
         .subject_task_id = 9,
     };

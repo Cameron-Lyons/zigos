@@ -205,7 +205,7 @@ pub fn Worker(comptime Io: type) type {
             const self: *Self = @ptrCast(@alignCast(context));
             if (self.handle == null) {
                 const handle = owner.next_fn(owner.context, self.credentials.enrollment.device.serial, self.cursor) orelse return false;
-                self.cursor = (@as(usize, @intCast(@intFromEnum(handle) & 3)) + 1) % connections.MAX_CONNECTIONS;
+                self.cursor = (@as(usize, @intCast(@backingInt(handle) & 3)) + 1) % connections.MAX_CONNECTIONS;
                 self.start(owner, handle, now) catch |err| {
                     self.last_failure = err;
                     owner.release_fn(owner.context, handle);

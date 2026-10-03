@@ -40,7 +40,7 @@ pub const RootState = struct {
     compacted_generation: u64 = 0,
     workspace_summary_count: u8 = 0,
     workspace_summaries: [workspace.MAX_WORKSPACES]WorkspaceSummary =
-        [_]WorkspaceSummary{WorkspaceSummary{}} ** workspace.MAX_WORKSPACES,
+        @as([workspace.MAX_WORKSPACES]WorkspaceSummary, @splat(WorkspaceSummary{})),
 
     comptime {
         if (@sizeOf(@This()) > ROOT_STATE_SIZE_CEILING_BYTES) {

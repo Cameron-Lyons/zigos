@@ -455,7 +455,7 @@ const runtime_markers = [_][]const u8{
 };
 
 comptime {
-    if (runtime_markers.len != std.meta.fields(RuntimeMarker).len) {
+    if (runtime_markers.len != @typeInfo(RuntimeMarker).@"enum".field_names.len) {
         @compileError("runtime marker table and index enum must stay aligned");
     }
 }
@@ -474,7 +474,7 @@ const PrintedMarkers = struct {
 };
 
 fn runtimeMarkerBit(marker: RuntimeMarker) u32 {
-    return @as(u32, 1) << @intFromEnum(marker);
+    return @as(u32, 1) << @backingInt(marker);
 }
 
 var tpm_discovery: ?tpm2_crb.Discovery = null;
@@ -890,7 +890,7 @@ fn mapAcpiPages(physical_base: usize, virtual_base: usize, page_count: usize) vo
 fn printNewMarkers() void {
     if (!facts.real_target_sku) return;
     for (runtime_markers, 0..) |text, index| {
-        const marker: RuntimeMarker = @enumFromInt(index);
+        const marker: RuntimeMarker = @fromBackingInt(@intCast(index));
         if (printed.contains(marker) or !runtimeMarkerReady(marker)) continue;
         printMarker(text);
         printed.insert(marker);
@@ -1238,7 +1238,7 @@ test "hardware proof records GOP framebuffer only from verified scanout proof" {
         .buffer_bytes = 64 * 16 * 4,
     });
     const expected_pixel: u32 = 0x00FF_00FF;
-    var scanline = [_]u8{0} ** (64 * 4);
+    var scanline = @as([64 * 4]u8, @splat(0));
     std.mem.writeInt(u32, scanline[0..4], expected_pixel, .little);
     const modeled_proof = try framebuffer.proveScanout(info, scanline[0..], expected_pixel);
     const hardware_proof = framebuffer.withHardwareScanoutEvidence(modeled_proof, .{
@@ -1318,7 +1318,7 @@ test "hardware proof records xHCI input only from enumerated boot keyboard evide
 
 test "hardware proof records NVMe block cycles only from verified write read proof" {
     const cap = nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) };
-    var image = [_]u8{0} ** (nvme.SECTOR_BYTES * 4);
+    var image = @as([nvme.SECTOR_BYTES * 4]u8, @splat(0));
     var namespaces = [_]nvme.Namespace{.{
         .id = 1,
         .sector_count = 4,

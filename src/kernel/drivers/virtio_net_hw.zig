@@ -56,7 +56,7 @@ const Controller = struct {
     rx: Queue,
     tx: Queue,
     windows: [4]vtd.DmaWindow,
-    submitted_ticks: [virtqueue.CAPACITY]u64 = [_]u64{0} ** virtqueue.CAPACITY,
+    submitted_ticks: [virtqueue.CAPACITY]u64 = @as([virtqueue.CAPACITY]u64, @splat(0)),
 };
 
 var controller: Controller = undefined;
@@ -324,7 +324,7 @@ pub fn interruptCount() u32 {
 }
 
 pub fn macAddress() [6]u8 {
-    return if (prepared) controller.mac else [_]u8{0} ** 6;
+    return if (prepared) controller.mac else @as([6]u8, @splat(0));
 }
 
 fn reg(comptime T: type, address: usize) *volatile T {

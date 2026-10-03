@@ -28,7 +28,7 @@ pub const Claim = struct {
 };
 
 const Handoff = struct {
-    claims: [MAX_CLAIMS]Claim = [_]Claim{.{}} ** MAX_CLAIMS,
+    claims: [MAX_CLAIMS]Claim = @as([MAX_CLAIMS]Claim, @splat(.{})),
     used_count: u8 = 0,
 
     comptime {
