@@ -108,10 +108,26 @@ pub fn resolve(fault_address: u64, write: bool) bool {
 }
 
 pub fn resolveAndMap(space: anytype, fault_address: u64, write: bool) bool {
+    return resolveFault(space, fault_address, 0x4 | @as(u32, if (write) 0x2 else 0));
+}
+
+pub fn resolveFault(space: anytype, fault_address: u64, error_code: u32) bool {
+    if (!resolvableFault(error_code)) return false;
+    const present = (error_code & 0x1) != 0;
+    const write = (error_code & 0x2) != 0;
     const region = regionForSpaceId(spaceIdOf(space), fault_address) orelse return false;
     if (write and !region.writable and region.kind != .object_cow) return false;
+    if (present and region.kind != .object_cow) return false;
     if (comptime builtin.target.os.tag != .freestanding) return true;
-    return mapOnePage(space, region, fault_address, write);
+    return resolveRegionFault(@import("paging64.zig"), space, region, fault_address, write, present);
+}
+
+fn resolvableFault(error_code: u32) bool {
+    // Demand paging resolves user data faults only. Reserved PTE bits, NX,
+    // protection keys, shadow stacks, and other protection failures retain
+    // their ordinary fault containment path.
+    if ((error_code & 0x4) == 0 or (error_code & ~@as(u32, 0x7)) != 0) return false;
+    return (error_code & 0x1) == 0 or (error_code & 0x2) != 0;
 }
 
 pub fn regionOverlapsSpace(space: anytype, virt_start: u64, virt_end_exclusive: u64) bool {
@@ -202,9 +218,19 @@ fn regionForSpaceId(space_id: usize, fault_address: u64) ?*Region {
     return null;
 }
 
-fn mapOnePage(space: anytype, region: *const Region, fault_address: u64, write: bool) bool {
-    const paging = @import("paging64.zig");
+fn resolveRegionFault(
+    comptime paging: type,
+    space: anytype,
+    region: *const Region,
+    fault_address: u64,
+    write: bool,
+    present: bool,
+) bool {
     const page_start = fault_address & ~@as(u64, 0xFFF);
+    if (present) {
+        if (!write or region.kind != .object_cow) return false;
+        return paging.promoteOwnedUserPageForWrite(space, @intCast(page_start)) catch false;
+    }
     const writable = region.writable or (write and region.kind == .object_cow);
     const permissions = paging.UserPermissions{
         .writable = writable,
@@ -235,7 +261,13 @@ fn mapOnePage(space: anytype, region: *const Region, fault_address: u64, write: 
         },
         .object_cow => {
             paging.mapOwnedUserRange(space, @intCast(page_start), 0x1000, permissions) catch |err| switch (err) {
-                error.AlreadyMapped => {},
+                error.AlreadyMapped => {
+                    // The source snapshot was copied when this private page
+                    // was first materialized. Repeated faults must not recopy
+                    // over changes made by the task.
+                    if (write) _ = paging.promoteOwnedUserPageForWrite(space, @intCast(page_start)) catch return false;
+                    return true;
+                },
                 else => return false,
             };
             if (region.physical_base != 0) {
@@ -402,4 +434,99 @@ test "retiring one shared-space region preserves siblings and reuses capacity" {
     }
     for (0..3) |index| try std.testing.expect(unregisterRegionForSpace(&space, base + index * 0x1000, base + (index + 1) * 0x1000));
     try std.testing.expect(findSpace(spaceIdOf(&space)) == null);
+}
+
+test "demand faults resolve private-copy writes but preserve protection failures" {
+    reset();
+    defer reset();
+    var space: u8 = 1;
+    try std.testing.expect(registerForSpace(&space, .{
+        .virt_start = 0x7000_0000,
+        .virt_end_exclusive = 0x7000_1000,
+        .kind = .object_cow,
+        .physical_base = 0x2000,
+    }));
+    try std.testing.expect(resolveFault(&space, 0x7000_0004, 0x4));
+    try std.testing.expect(resolveFault(&space, 0x7000_0004, 0x6));
+    try std.testing.expect(resolveFault(&space, 0x7000_0004, 0x7));
+    for ([_]u32{ 0, 2, 3, 5, 0xF, 0x14, 0x16, 0x27, 0x47, 0x8007 }) |error_code| {
+        try std.testing.expect(!resolveFault(&space, 0x7000_0004, error_code));
+    }
+    try std.testing.expect(registerForSpace(&space, .{
+        .virt_start = 0x7000_1000,
+        .virt_end_exclusive = 0x7000_2000,
+        .kind = .anonymous_zero,
+        .writable = false,
+    }));
+    try std.testing.expect(resolveFault(&space, 0x7000_1000, 0x4));
+    try std.testing.expect(!resolveFault(&space, 0x7000_1000, 0x6));
+    try std.testing.expect(!resolveFault(&space, 0x7000_1000, 0x7));
+    try std.testing.expect(!resolveFault(&space, 0x7000_3000, 0x7));
+}
+
+test "private-copy read then write promotes without copying over task changes" {
+    const Model = struct {
+        present: bool = false,
+        writable: bool = false,
+        source: u8 = 7,
+        private: u8 = 0,
+        copies: usize = 0,
+        allocations: usize = 0,
+        promotions: usize = 0,
+    };
+    const Paging = struct {
+        pub const UserPermissions = struct {
+            writable: bool,
+            executable: bool,
+            write_through: bool,
+            cache_disabled: bool,
+            protection_key: u4,
+        };
+
+        pub fn mapOwnedUserRange(model: *Model, _: usize, _: usize, permissions: UserPermissions) error{ AlreadyMapped, OutOfMemory }!void {
+            if (model.present) return error.AlreadyMapped;
+            model.present = true;
+            model.writable = permissions.writable;
+            model.allocations += 1;
+        }
+
+        pub fn mapBorrowedPhysicalUserRange(_: *Model, _: usize, _: u64, _: usize, _: UserPermissions) error{ AlreadyMapped, UnexpectedMapping }!void {
+            return error.UnexpectedMapping;
+        }
+
+        pub fn copyOwnedUserPageFromPhysical(model: *Model, _: usize, _: u64) error{}!void {
+            model.private = model.source;
+            model.copies += 1;
+        }
+
+        pub fn promoteOwnedUserPageForWrite(model: *Model, _: usize) error{PageNotOwned}!bool {
+            if (!model.present) return error.PageNotOwned;
+            if (model.writable) return false;
+            model.writable = true;
+            model.promotions += 1;
+            return true;
+        }
+    };
+    const region = Region{
+        .virt_start = 0x7000_0000,
+        .virt_end_exclusive = 0x7000_1000,
+        .kind = .object_cow,
+        .physical_base = 0x2000,
+    };
+    var model = Model{};
+    try std.testing.expect(resolveRegionFault(Paging, &model, &region, 0x7000_0004, false, false));
+    try std.testing.expect(!model.writable);
+    try std.testing.expectEqual(@as(u8, 7), model.private);
+    model.source = 9;
+    try std.testing.expect(resolveRegionFault(Paging, &model, &region, 0x7000_0004, true, true));
+    try std.testing.expect(model.writable);
+    try std.testing.expectEqual(@as(u8, 7), model.private);
+    model.private = 42;
+    try std.testing.expect(resolveRegionFault(Paging, &model, &region, 0x7000_0004, false, false));
+    try std.testing.expect(resolveRegionFault(Paging, &model, &region, 0x7000_0004, true, false));
+    try std.testing.expectEqual(@as(u8, 42), model.private);
+    try std.testing.expectEqual(@as(usize, 1), model.allocations);
+    try std.testing.expectEqual(@as(usize, 1), model.copies);
+    try std.testing.expectEqual(@as(usize, 1), model.promotions);
+    try std.testing.expect(!resolveRegionFault(Paging, &model, &region, 0x7000_0004, true, true));
 }

@@ -673,6 +673,7 @@ pub const Error = error{
     SnapshotNotFound,
     SnapshotTableFull,
     TransactionAlreadyOpen,
+    InvalidEntry,
     InvalidSignature,
     LabelTooLong,
     NoSpaceLeft,
@@ -680,6 +681,7 @@ pub const Error = error{
     SignatureSignerTooLong,
     UnsignedExport,
     UnsignedSnapshot,
+    WorkspaceGenerationExhausted,
     WorkspaceIdExhausted,
     WorkspaceNotFound,
     WorkspaceTableFull,
@@ -972,12 +974,14 @@ pub const Directory = struct {
         object_type: object_store.ObjectType,
     ) Error!void {
         if (path.len > MAX_ENTRY_PATH_BYTES) return error.PathTooLong;
+        if (object_id.isZero() or version_id.isZero()) return error.InvalidEntry;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
         if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
 
         if (findStagedEntryIndex(workspace, path)) |index| {
             const staged_entry = stagedEntryAt(workspace, index);
             if (isDeleteTombstone(staged_entry.*)) {
+                if (workspace.staging.staged_effective_entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
                 workspace.staging.staged_effective_entry_count += 1;
             }
             staged_entry.* = try Entry.init(path, object_id, version_id, object_type);
@@ -1121,6 +1125,7 @@ pub const Directory = struct {
     ) Error!*SnapshotRecord {
         if (identity.label.len == 0) return error.UnsignedSnapshot;
         const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        if (workspace.generation == NO_SNAPSHOT_GENERATION) return error.WorkspaceGenerationExhausted;
         var label_copy: [MAX_WORKSPACE_LABEL_BYTES]u8 = @as([MAX_WORKSPACE_LABEL_BYTES]u8, @splat(0));
         const label_len = native_util.copyTextExact(&label_copy, label) catch return error.LabelTooLong;
         if (self.snapshotCount() >= MAX_SNAPSHOTS) return error.SnapshotTableFull;
@@ -1182,13 +1187,14 @@ pub const Directory = struct {
             if (!std.mem.eql(u8, entry.pathSlice(), path)) continue;
             if (workspace.counts.entry_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
             if (workspace.counts.entry_mutation_count >= MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
+            const next_generation = try nextWorkspaceGeneration(workspace);
             try workspace.path_index.ensureEntryBacking();
 
-            workspace.generation += 1;
-            try appendEntryMutation(workspace, workspace.generation, entry);
+            try appendEntryMutation(workspace, next_generation, entry);
             const insert_index = try insertSortedEntry(workspace.path_index.entries(), &workspace.counts.entry_count, entry);
             indexInsertedEntry(workspace, insert_index);
             refreshIndexedWorkspaceRoot(workspace);
+            workspace.generation = next_generation;
             self.markWorkspaceDirty(workspace_id);
             return true;
         }
@@ -1239,6 +1245,7 @@ pub const Directory = struct {
         if (!exportPackageSignature(package).isPresent()) return error.UnsignedExport;
         if (package.entry_count > MAX_WORKSPACE_ENTRIES) return error.InvalidSignature;
         if (!verifyExportPackage(package)) return error.InvalidSignature;
+        if (package.generation == NO_SNAPSHOT_GENERATION) return error.WorkspaceGenerationExhausted;
         const workspace = try self.create(.{
             .owner = owner,
             .label = label,
@@ -1788,12 +1795,12 @@ fn removeEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, index: us
 
 fn insertSortedEntry(entries: *[MAX_WORKSPACE_ENTRIES]Entry, count: anytype, entry: Entry) Error!usize {
     const active_count: usize = @intCast(count.*);
-    if (active_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
     const insert_index = lowerBoundEntry(entries[0..active_count], entry.pathSlice());
     if (insert_index < active_count and compareEntryPath(entries[insert_index].pathSlice(), entry.pathSlice()) == .eq) {
         entries[insert_index] = entry;
         return insert_index;
     }
+    if (active_count >= MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
 
     std.mem.copyBackwards(Entry, entries[insert_index + 1 .. active_count + 1], entries[insert_index..active_count]);
     entries[insert_index] = entry;
@@ -1889,21 +1896,33 @@ fn materializeEntriesAtGeneration(
 ) Error!usize {
     clearEntries(out);
     var out_count: usize = 0;
-    for (workspace.mutation_log.entriesConst()[0..workspace.counts.entry_mutation_count]) |mutation| {
-        if (mutation.generation > generation) continue;
+    const mutations = workspace.mutation_log.entriesConst()[0..workspace.counts.entry_mutation_count];
+    var batch_start: usize = 0;
+    while (batch_start < mutations.len) {
+        const batch_generation = mutations[batch_start].generation;
+        var batch_end = batch_start + 1;
+        while (batch_end < mutations.len and mutations[batch_end].generation == batch_generation) : (batch_end += 1) {}
+        const batch = mutations[batch_start..batch_end];
+        batch_start = batch_end;
+        if (batch_generation > generation) continue;
 
-        if (isDeleteTombstone(mutation.entry)) {
+        // A generation publishes one complete transaction. Its sorted log may
+        // put additions before deletions even when the final directory fits.
+        for (batch) |mutation| {
+            if (!isDeleteTombstone(mutation.entry)) continue;
             const index = findEntryIndex(out[0..out_count], mutation.entry.pathSlice()) orelse return error.EntryNotFound;
             removeEntry(out, &out_count, index);
-            continue;
         }
-
-        _ = try insertSortedEntry(out, &out_count, mutation.entry);
+        for (batch) |mutation| {
+            if (isDeleteTombstone(mutation.entry)) continue;
+            _ = try insertSortedEntry(out, &out_count, mutation.entry);
+        }
     }
     return out_count;
 }
 
 fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []const Entry) Error!void {
+    const next_generation = try nextWorkspaceGeneration(workspace);
     var target_entries: [MAX_WORKSPACE_ENTRIES]Entry = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{}));
     var target_count: usize = 0;
     for (source_entries) |entry| {
@@ -1952,44 +1971,39 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
     if (deletion_needed) try workspace.recoverable_deletes.ensureBacking();
     if (target_count != 0) try workspace.path_index.ensureEntryBacking();
 
-    const next_generation = workspace.generation + 1;
     current_index = 0;
     target_index = 0;
-    const entries = if (workspace.counts.entry_count != 0 or target_count != 0) workspace.path_index.entries() else null;
+    // Record the delta against the stable current directory, then publish the
+    // materialized target in one copy. A full directory needs no spare slot.
     while (current_index < workspace.counts.entry_count or target_index < target_count) {
         if (current_index >= workspace.counts.entry_count) {
             const target_entry = target_entries[target_index];
-            _ = try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
             try appendEntryMutation(workspace, next_generation, target_entry);
-            current_index += 1;
             target_index += 1;
             continue;
         }
         if (target_index >= target_count) {
-            const deleted_entry = entries.?[current_index];
+            const deleted_entry = current_entries[current_index];
             appendDeleted(workspace, deleted_entry);
             try appendEntryMutation(workspace, next_generation, try deleteTombstone(deleted_entry.pathSlice()));
-            removeEntry(entries.?, &workspace.counts.entry_count, current_index);
+            current_index += 1;
             continue;
         }
 
-        const current_entry = entries.?[current_index];
+        const current_entry = current_entries[current_index];
         const target_entry = target_entries[target_index];
         switch (compareEntryPath(current_entry.pathSlice(), target_entry.pathSlice())) {
             .lt => {
                 appendDeleted(workspace, current_entry);
                 try appendEntryMutation(workspace, next_generation, try deleteTombstone(current_entry.pathSlice()));
-                removeEntry(entries.?, &workspace.counts.entry_count, current_index);
+                current_index += 1;
             },
             .gt => {
-                _ = try insertSortedEntry(entries.?, &workspace.counts.entry_count, target_entry);
                 try appendEntryMutation(workspace, next_generation, target_entry);
-                current_index += 1;
                 target_index += 1;
             },
             .eq => {
                 if (!entryContentEql(current_entry, target_entry)) {
-                    entries.?[current_index] = target_entry;
                     try appendEntryMutation(workspace, next_generation, target_entry);
                 }
                 current_index += 1;
@@ -1997,6 +2011,12 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
             },
         }
     }
+    if (current_entries.len != 0 or target_count != 0) {
+        const entries = workspace.path_index.entries();
+        copyEntries(entries[0..target_count], target_entries[0..target_count]);
+        @memset(entries[target_count..], Entry{});
+    }
+    workspace.counts.entry_count = @intCast(target_count);
     workspace.generation = next_generation;
     rebuildWorkspaceEntryIndex(workspace);
 }
@@ -2104,41 +2124,78 @@ fn refreshIndexedWorkspaceRoot(workspace: *WorkspaceRecord) void {
 
 fn applyTransactionDelta(workspace: *WorkspaceRecord) Error!void {
     debugAssertEntriesSorted(workspace.path_index.entriesConst(workspace.counts.entry_count));
+    const next_generation = try nextWorkspaceGeneration(workspace);
     if (workspace.counts.entry_mutation_count + @as(usize, workspace.staging.staged_entry_count) > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
-    if (workspace.staging.staged_effective_entry_count != 0) try workspace.path_index.ensureEntryBacking();
-    const next_generation = workspace.generation + 1;
+    if (workspace.staging.staged_effective_entry_count > MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
     const staged_entry_start = workspace.counts.entry_mutation_count;
     const staged_entry_count: usize = workspace.staging.staged_entry_count;
     const mutations = workspace.mutation_log.entries();
-    for (mutations[staged_entry_start .. staged_entry_start + staged_entry_count]) |mutation| {
+    const staged_mutations = mutations[staged_entry_start .. staged_entry_start + staged_entry_count];
+    var has_deletions = false;
+    for (staged_mutations) |mutation| {
         if (!isDeleteTombstone(mutation.entry)) continue;
-        try workspace.recoverable_deletes.ensureBacking();
-        break;
+        if (findWorkspaceEntryIndex(workspace, mutation.entry.pathSlice()) == null) return error.EntryNotFound;
+        has_deletions = true;
     }
+    if (workspace.staging.staged_effective_entry_count != 0) try workspace.path_index.ensureEntryBacking();
+    if (has_deletions) try workspace.recoverable_deletes.ensureBacking();
     const entries = if (workspace.counts.entry_count != 0 or workspace.staging.staged_effective_entry_count != 0)
         workspace.path_index.entries()
     else
         null;
-    for (0..staged_entry_count) |staged_index| {
-        const staged_entry = mutations[staged_entry_start + staged_index].entry;
-        if (isDeleteTombstone(staged_entry)) {
-            const existing_index = findEntryIndex(entries.?[0..workspace.counts.entry_count], staged_entry.pathSlice()) orelse return error.EntryNotFound;
-            appendDeleted(workspace, entries.?[existing_index]);
-            unindexRemovedEntry(workspace, existing_index);
-            try appendEntryMutation(workspace, next_generation, staged_entry);
-            continue;
-        }
-
+    // Free slots before publishing additions. Keep the staged log untouched
+    // until all entries are applied, so neither pass overwrites unread work.
+    for (staged_mutations) |mutation| {
+        const staged_entry = mutation.entry;
+        if (!isDeleteTombstone(staged_entry)) continue;
+        const existing_index = findEntryIndex(entries.?[0..workspace.counts.entry_count], staged_entry.pathSlice()) orelse
+            native_util.impossibleByInvariant("preflighted workspace deletion remains present");
+        appendDeleted(workspace, entries.?[existing_index]);
+        unindexRemovedEntry(workspace, existing_index);
+    }
+    for (staged_mutations) |mutation| {
+        const staged_entry = mutation.entry;
+        if (isDeleteTombstone(staged_entry)) continue;
         if (findEntryIndex(entries.?[0..workspace.counts.entry_count], staged_entry.pathSlice())) |existing_index| {
             updateIndexedEntry(workspace, existing_index, staged_entry);
         } else {
-            const insert_index = try insertSortedEntry(entries.?, &workspace.counts.entry_count, staged_entry);
+            const insert_index = insertSortedEntry(entries.?, &workspace.counts.entry_count, staged_entry) catch
+                native_util.impossibleByInvariant("preflighted workspace transaction fits entry capacity");
             indexInsertedEntry(workspace, insert_index);
         }
-        try appendEntryMutation(workspace, next_generation, staged_entry);
     }
+    for (staged_mutations) |*mutation| mutation.generation = next_generation;
+    workspace.counts.entry_mutation_count = @intCast(staged_entry_start + staged_entry_count);
     workspace.generation = next_generation;
     if (workspace.staging.staged_entry_count != 0) refreshIndexedWorkspaceRoot(workspace);
+}
+
+fn nextWorkspaceGeneration(workspace: *const WorkspaceRecord) Error!u32 {
+    // The all-ones value represents no snapshot and cannot be published as a
+    // generation without losing the oldest-snapshot compaction guard.
+    if (workspace.generation >= NO_SNAPSHOT_GENERATION - 1) return error.WorkspaceGenerationExhausted;
+    return workspace.generation + 1;
+}
+
+test "workspace imports and snapshots reject the reserved generation before publication" {
+    const signer = signing.SignerIdentity{
+        .label = "reserved-generation-key",
+        .seed = signing.seedFromByte(0x6B),
+    };
+    var package = emptyExportPackage();
+    package.generation = NO_SNAPSHOT_GENERATION;
+    package.root_address = workspaceRootAddress(package.entries[0..0]);
+    try signExportPackage(&package, signer);
+    var directory = Directory.init();
+    try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.importWorkspaceFromPackage(.{ .kind = .user, .serial = 1 }, "reserved-import", &package, 1));
+    try std.testing.expectEqual(@as(usize, 0), directory.workspaceCount());
+    try std.testing.expectEqual(@as(u64, 1), directory.next_workspace_id);
+
+    const workspace = try directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "reserved-snapshot" });
+    workspace.generation = NO_SNAPSHOT_GENERATION;
+    try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.snapshot(workspace.id, "reserved", signer));
+    try std.testing.expectEqual(@as(usize, 0), directory.snapshotCount());
+    try std.testing.expectEqual(@as(u64, 1), directory.next_snapshot_id);
 }
 
 fn discardTransactionState(workspace: *WorkspaceRecord) void {

@@ -344,6 +344,154 @@ test "compact workspace indexes cover every entry slot at capacity" {
     );
 }
 
+test "full workspace replacements and snapshot replay respect transaction capacity" {
+    var directory = Directory.init();
+    const workspace = try createFullWorkspace(&directory, "replacement-capacity");
+    const signer = signing.SignerIdentity{
+        .label = "replacement-snapshot-key",
+        .seed = signing.seedFromByte(0x69),
+    };
+    const baseline = try directory.snapshot(workspace.id, "baseline", signer);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "m-095");
+    try directory.stagePut(workspace.id, "a-first", ids.object(200), ids.version(200), .document);
+    try std.testing.expectEqual(@as(u32, 2), try directory.commit(workspace.id, 2));
+    try std.testing.expectEqual(MAX_WORKSPACE_ENTRIES, (try directory.entries(workspace.id)).len);
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "m-095"));
+    try std.testing.expectEqual(ids.object(200), (try directory.resolve(workspace.id, "a-first")).object_id);
+    const replaced = try directory.snapshot(workspace.id, "replaced", signer);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "a-first");
+    try directory.stagePut(workspace.id, "z-last", ids.object(201), ids.version(201), .document);
+    try directory.stagePut(workspace.id, "m-050", ids.object(51), ids.version(500), .document);
+    try std.testing.expectEqual(@as(u32, 3), try directory.commit(workspace.id, 3));
+    const updated = try directory.snapshot(workspace.id, "updated", signer);
+    try std.testing.expectEqual(@as(u32, 4), try directory.restore(workspace.id, baseline.id, 4));
+    try std.testing.expectEqual(MAX_WORKSPACE_ENTRIES, (try directory.entries(workspace.id)).len);
+    try std.testing.expectEqual(ids.object(96), (try directory.resolve(workspace.id, "m-095")).object_id);
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "z-last"));
+
+    var package = workspace_model.emptyExportPackage();
+    try directory.exportSnapshotInto(workspace.id, replaced.id, signer, &package);
+    try std.testing.expectEqual(MAX_WORKSPACE_ENTRIES, package.entry_count);
+    try std.testing.expectEqualStrings("a-first", package.entries[0].pathSlice());
+    try std.testing.expectEqual(ids.object(200), package.entries[0].object_id);
+    try std.testing.expectEqual(replaced.root_address, package.root_address);
+    try directory.exportSnapshotInto(workspace.id, updated.id, signer, &package);
+    try std.testing.expectEqual(ids.version(500), package.entries[50].version_id);
+    try std.testing.expectEqual(updated.root_address, package.root_address);
+    try std.testing.expectEqual(workspaceRootAddress(try directory.entries(workspace.id)), workspace.rootAddress());
+}
+
+test "reviving a staged deletion rejects overflow without changing the transaction" {
+    var directory = Directory.init();
+    const workspace = try createFullWorkspace(&directory, "revival-capacity");
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "m-095");
+    try directory.stagePut(workspace.id, "a-first", ids.object(200), ids.version(200), .document);
+    const before = workspace.*;
+    try std.testing.expectError(error.EntryTableFull, directory.stagePut(workspace.id, "m-095", ids.object(96), ids.version(96), .document));
+    try std.testing.expectEqualDeep(before, workspace.*);
+
+    _ = try directory.commit(workspace.id, 2);
+    try std.testing.expectEqual(MAX_WORKSPACE_ENTRIES, (try directory.entries(workspace.id)).len);
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, "m-095"));
+    try std.testing.expectEqual(ids.object(200), (try directory.resolve(workspace.id, "a-first")).object_id);
+}
+
+test "workspace commit preflights invalid deletions before publishing any change" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 14 },
+        .label = "atomic-commit",
+    });
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "a-first", ids.object(1), ids.version(1), .document);
+    _ = try directory.commit(workspace.id, 1);
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "a-first");
+    try directory.stagePut(workspace.id, "z-missing", ids.object(2), ids.version(2), .blob);
+    // Model a malformed staged record directly; stagePut rejects tombstones.
+    const malformed = &workspace.mutation_log.entries()[workspace.counts.entry_mutation_count + 1].entry;
+    malformed.object_id = ids.ObjectId.zero;
+    malformed.version_id = ids.VersionId.zero;
+    const before = workspace.*;
+    try std.testing.expectError(error.EntryNotFound, directory.commit(workspace.id, 2));
+    try std.testing.expectEqualDeep(before, workspace.*);
+    try directory.abortTransaction(workspace.id);
+    try std.testing.expectEqual(ids.object(1), (try directory.resolve(workspace.id, "a-first")).object_id);
+}
+
+test "workspace puts reject zero object and version identifiers without changing staging" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 16 },
+        .label = "valid-entry-identifiers",
+    });
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "note", ids.object(1), ids.version(1), .document);
+    const before = workspace.*;
+    try std.testing.expectError(error.InvalidEntry, directory.stagePut(workspace.id, "note", ids.ObjectId.zero, ids.VersionId.zero, .blob));
+    try std.testing.expectError(error.InvalidEntry, directory.stagePut(workspace.id, "note", ids.ObjectId.zero, ids.version(1), .document));
+    try std.testing.expectError(error.InvalidEntry, directory.stagePut(workspace.id, "new-note", ids.object(1), ids.VersionId.zero, .document));
+    try std.testing.expectEqualDeep(before, workspace.*);
+    try directory.stageDelete(workspace.id, "note");
+    try std.testing.expectEqual(@as(usize, 0), workspace.staging.staged_effective_entry_count);
+    _ = try directory.commit(workspace.id, 1);
+    try std.testing.expectEqual(@as(usize, 0), (try directory.entries(workspace.id)).len);
+}
+
+test "workspace generation exhaustion leaves commits restore and recovery unchanged" {
+    var directory = Directory.init();
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 15 },
+        .label = "generation-exhaustion",
+    });
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "note", ids.object(1), ids.version(1), .document);
+    _ = try directory.commit(workspace.id, 1);
+    const signer = signing.SignerIdentity{
+        .label = "generation-snapshot-key",
+        .seed = signing.seedFromByte(0x6A),
+    };
+    const baseline = try directory.snapshot(workspace.id, "baseline", signer);
+    workspace.generation = std.math.maxInt(u32) - 2;
+    try directory.beginTransaction(workspace.id);
+    try directory.stageDelete(workspace.id, "note");
+    try std.testing.expectEqual(std.math.maxInt(u32) - 1, try directory.commit(workspace.id, 2));
+
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, "new-note", ids.object(2), ids.version(2), .document);
+    const staged_before = workspace.*;
+    try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.commit(workspace.id, 3));
+    try std.testing.expectEqualDeep(staged_before, workspace.*);
+    try directory.abortTransaction(workspace.id);
+
+    const before = workspace.*;
+    try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.recoverDeleted(workspace.id, "note", 4));
+    try std.testing.expectEqualDeep(before, workspace.*);
+    try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.restore(workspace.id, baseline.id, 5));
+    try std.testing.expectEqualDeep(before, workspace.*);
+}
+
+fn createFullWorkspace(directory: *Directory, label: []const u8) !*workspace_model.WorkspaceRecord {
+    const workspace = try directory.create(.{
+        .owner = .{ .kind = .user, .serial = 13 },
+        .label = label,
+    });
+    try directory.beginTransaction(workspace.id);
+    for (0..MAX_WORKSPACE_ENTRIES) |entry_index| {
+        var path_buffer: [16]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buffer, "m-{d:0>3}", .{entry_index});
+        try directory.stagePut(workspace.id, path, ids.object(entry_index + 1), ids.version(entry_index + 1), .document);
+    }
+    _ = try directory.commit(workspace.id, 1);
+    return workspace;
+}
+
 test "structural workspace commits scrub the full inactive Merkle tail" {
     var directory = Directory.init();
     const workspace = try directory.create(.{

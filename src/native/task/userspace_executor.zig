@@ -1929,12 +1929,8 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     const faulting_address = x86.readCr2();
     const error_code = std.math.cast(u32, frame.err_code) orelse
         native_util.impossibleByInvariant("userspace page-fault code exceeds its ABI width");
-    const not_present = (error_code & 0x1) == 0;
-    const write_fault = (error_code & 0x2) != 0;
-    if (not_present) {
-        if (mapping.address_space) |*space| {
-            if (demand_paging.resolveAndMap(space, faulting_address, write_fault)) return;
-        }
+    if (mapping.address_space) |*space| {
+        if (demand_paging.resolveFault(space, faulting_address, error_code)) return;
     }
     @call(.never_inline, recordUserPageFault, .{
         executor,
@@ -2057,7 +2053,7 @@ fn mapZeroedRegion(
         .virt_start = virtual_address,
         .virt_end_exclusive = region_end,
         .writable = access.write,
-        .kind = if (access.write) .anonymous_zero else .object_cow,
+        .kind = .anonymous_zero,
         .protection_key = protection_key,
     })) return error.OutOfMemory;
 }

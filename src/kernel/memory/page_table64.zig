@@ -52,6 +52,10 @@ pub fn owner(entry: Entry) u3 {
     return @truncate((entry & OWNER_MASK) >> OWNER_SHIFT);
 }
 
+pub fn withOwner(entry: Entry, entry_owner: u3) Entry {
+    return (entry & ~OWNER_MASK) | (@as(u64, entry_owner) << OWNER_SHIFT);
+}
+
 pub fn address(entry: Entry) usize {
     return @intCast(entry & ADDRESS_MASK);
 }
@@ -86,6 +90,10 @@ test "four-level entry preserves address flags and software owner" {
     try std.testing.expect((entry & WRITABLE) != 0);
     try std.testing.expect((entry & USER) != 0);
     try std.testing.expect(!isExecutable(entry));
+    const retired = withOwner(entry & ~PRESENT, 4);
+    try std.testing.expectEqual(@as(u3, 4), owner(retired));
+    try std.testing.expectEqual(address(entry), address(retired));
+    try std.testing.expectEqual(entry & ~OWNER_MASK & ~PRESENT, retired & ~OWNER_MASK);
 }
 
 test "protection keys occupy PTE bits 62:59" {

@@ -338,6 +338,56 @@ fn FixedWithReservationCapacity(
             return run;
         }
 
+        pub fn allocateAlignedBetween(
+            self: *Self,
+            count: u32,
+            alignment_frames: u32,
+            inclusive_start: PhysicalAddress,
+            exclusive_end: PhysicalAddress,
+        ) ?FrameRun {
+            if (alignment_frames == 0 or !std.math.isPowerOfTwo(alignment_frames)) return null;
+            if (alignment_frames == 1) return self.allocateBetween(count, inclusive_start, exclusive_end);
+            if (!self.ensureReservationsSealed()) return null;
+
+            const lower_bytes = @min(inclusive_start, memory_bytes);
+            const upper_bytes = @min(exclusive_end, memory_bytes);
+            const lower_frame_value = lower_bytes / page_size + @intFromBool(lower_bytes % page_size != 0);
+            const upper_frame_value = upper_bytes / page_size;
+            if (lower_frame_value >= upper_frame_value) return null;
+            const lower_frame: u32 = @intCast(lower_frame_value);
+            const upper_frame: u32 = @intCast(upper_frame_value);
+            if (count == 0 or count > upper_frame - lower_frame) return null;
+
+            const search_start = if (self.search_frame_hint >= lower_frame and self.search_frame_hint < upper_frame)
+                self.search_frame_hint
+            else
+                lower_frame;
+            const start = self.findAlignedRun(search_start, upper_frame, count, alignment_frames) orelse
+                (if (search_start == lower_frame) null else self.findAlignedRun(lower_frame, upper_frame, count, alignment_frames)) orelse return null;
+
+            _ = self.mutateRange(start, count, true, false);
+            self.allocated_count += count;
+            self.cacheKnownUnreservedRange(start, start + count);
+            self.search_frame_hint = if (start + count == frame_count) 0 else start + count;
+            return .{ .base = @as(PhysicalAddress, start) * page_size, .count = count };
+        }
+
+        pub fn allocateAlignedBetweenWithCursor(
+            self: *Self,
+            count: u32,
+            alignment_frames: u32,
+            inclusive_start: PhysicalAddress,
+            exclusive_end: PhysicalAddress,
+            cursor: *AllocationCursor,
+        ) ?FrameRun {
+            const shared_hint = self.search_frame_hint;
+            self.search_frame_hint = cursor.next_frame;
+            const run = self.allocateAlignedBetween(count, alignment_frames, inclusive_start, exclusive_end);
+            cursor.next_frame = self.search_frame_hint;
+            self.search_frame_hint = shared_hint;
+            return run;
+        }
+
         pub fn release(self: *Self, run: FrameRun) Error!void {
             if (run.count == 1) return self.releaseFrame(run.base);
             const start = try validateRun(run);
@@ -405,6 +455,24 @@ fn FixedWithReservationCapacity(
                 return error.OutOfRange;
             }
             return start;
+        }
+
+        fn findAlignedRun(self: *const Self, start: u32, end: u32, count: u32, alignment_frames: u32) ?u32 {
+            var search_start = alignedFrame(start, alignment_frames) orelse return null;
+            while (true) {
+                const candidate = self.findRun(search_start, end, count) orelse return null;
+                const aligned = alignedFrame(candidate, alignment_frames) orelse return null;
+                if (candidate == aligned) return candidate;
+                // Discard only impossible start positions; existing bitmap-word
+                // scans still skip occupied physical regions without claiming
+                // or trimming any temporary allocation.
+                search_start = aligned;
+            }
+        }
+
+        fn alignedFrame(frame: u32, alignment_frames: u32) ?u32 {
+            const padded = std.math.add(u32, frame, alignment_frames - 1) catch return null;
+            return padded & ~(alignment_frames - 1);
         }
 
         fn findRun(self: *const Self, start: u32, end: u32, count: u32) ?u32 {
@@ -1245,6 +1313,89 @@ test "contiguous allocation consumes complete free bitmap words" {
     try allocator.release(run);
     try std.testing.expectEqual(@as(u32, 0), allocator.stats().allocated);
     try std.testing.expectEqual(run, allocator.allocate(64).?);
+}
+
+test "aligned contiguous allocation skips fragmented candidates and a nonaligned hint" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(4096 * page_size, page_size);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 0, .count = 1 });
+    try allocator.reserve(.{ .base = 700 * page_size, .count = 1 });
+    try allocator.reserve(.{ .base = 1100 * page_size, .count = 1 });
+    _ = allocator.allocate(2).?;
+    try std.testing.expectEqual(@as(u32, 3), allocator.search_frame_hint);
+
+    const before = allocator.stats();
+    const run = allocator.allocateAlignedBetween(512, 512, 0, 4096 * page_size).?;
+    try std.testing.expectEqual(@as(u64, 1536 * page_size), run.base);
+    try std.testing.expectEqual(@as(u32, 512), run.count);
+    try std.testing.expectEqual(@as(u64, 0), run.base % (512 * page_size));
+    try std.testing.expectEqual(before.allocated + 512, allocator.stats().allocated);
+    try std.testing.expect(!allocator.isAllocated(701 * page_size));
+    try std.testing.expect(!allocator.isAllocated(1101 * page_size));
+    try allocator.release(run);
+    try std.testing.expectEqual(before, allocator.stats());
+    try std.testing.expectEqual(run, allocator.allocateAlignedBetween(512, 512, 0, 4096 * page_size).?);
+}
+
+test "aligned contiguous allocation wraps independent cursors and preserves physical limits" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(64 * page_size, page_size);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    allocator.search_frame_hint = 48;
+    var cursor = AllocationCursor{ .next_frame = 27 };
+    const run = allocator.allocateAlignedBetweenWithCursor(8, 8, 3 * page_size + 1, 35 * page_size - 1, &cursor).?;
+    try std.testing.expectEqual(@as(u64, 8 * page_size), run.base);
+    try std.testing.expectEqual(@as(u32, 16), cursor.next_frame);
+    try std.testing.expectEqual(@as(u32, 48), allocator.search_frame_hint);
+
+    const before = allocator.stats();
+    const hint = allocator.search_frame_hint;
+    for ([_]u32{ 0, 3, 0x8000_0000 }) |alignment| {
+        try std.testing.expect(allocator.allocateAlignedBetween(8, alignment, page_size, 64 * page_size) == null);
+    }
+    try std.testing.expect(allocator.allocateAlignedBetween(8, 8, 17 * page_size, 31 * page_size) == null);
+    try std.testing.expectEqual(before, allocator.stats());
+    try std.testing.expectEqual(hint, allocator.search_frame_hint);
+    try std.testing.expectEqual(@as(?u32, null), Allocator.alignedFrame(std.math.maxInt(u32), 2));
+    try std.testing.expectEqual(@as(?u32, 0xFFFF_FFFE), Allocator.alignedFrame(0xFFFF_FFFD, 2));
+}
+
+test "aligned bitmap search matches exhaustive small fragmented spaces" {
+    const page_size: u32 = 4096;
+    const Allocator = Fixed(8 * page_size, page_size);
+    for (0..256) |unavailable| {
+        for ([_]u32{ 2, 4, 8 }) |alignment| {
+            for (1..9) |count_value| {
+                var storage: Allocator.Storage = undefined;
+                var allocator = Allocator.init(&storage);
+                for (0..8) |frame| {
+                    if ((unavailable & (@as(usize, 1) << @intCast(frame))) != 0) {
+                        try allocator.reserve(.{ .base = frame * page_size, .count = 1 });
+                    }
+                }
+                allocator.search_frame_hint = 3;
+                const count: u32 = @intCast(count_value);
+                var expected: ?u32 = null;
+                for ([_][2]u32{ .{ 3, 8 }, .{ 0, 8 } }) |bounds| {
+                    var candidate = bounds[0];
+                    while (candidate < bounds[1] and count <= bounds[1] - candidate) : (candidate += 1) {
+                        if (candidate % alignment != 0) continue;
+                        const mask = ((@as(usize, 1) << @intCast(count)) - 1) << @intCast(candidate);
+                        if (unavailable & mask != 0) continue;
+                        expected = candidate;
+                        break;
+                    }
+                    if (expected != null) break;
+                }
+                const actual = allocator.allocateAlignedBetween(count, alignment, 0, 8 * page_size);
+                try std.testing.expectEqual(expected, if (actual) |run| @as(?u32, @intCast(run.base / page_size)) else null);
+                try std.testing.expectEqual(if (actual != null) count else @as(u32, 0), allocator.stats().allocated);
+            }
+        }
+    }
 }
 
 test "fragmented bitmap rejects unavailable contiguous runs" {

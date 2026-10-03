@@ -10,6 +10,14 @@ source "$ROOT_DIR/scripts/qemu-harness.sh"
 KERNEL_PATH="${1:?kernel path required}"
 LOG_PATH="${2:?serial log path required}"
 SUMMARY_PATH="${3:-}"
+BENCHMARK_SECONDS="${ZIGOS_BENCHMARK_SECONDS:-300}"
+
+case "$BENCHMARK_SECONDS" in
+  ''|*[!0-9]*|0*)
+    echo "ZIGOS_BENCHMARK_SECONDS must be a positive integer" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "$(dirname "$LOG_PATH")"
 rm -f "$LOG_PATH"
@@ -17,7 +25,20 @@ if [ -n "$SUMMARY_PATH" ]; then
   rm -f "$SUMMARY_PATH"
 fi
 
-QEMU_SERIAL_TARGET="file:$LOG_PATH" bash "$ROOT_DIR/scripts/run-headless-qemu.sh" "$KERNEL_PATH"
+capture_status=0
+QEMU_SERIAL_TARGET="file:$LOG_PATH" timeout --kill-after=5s "${BENCHMARK_SECONDS}s" \
+  bash "$ROOT_DIR/scripts/run-headless-qemu.sh" "$KERNEL_PATH" || capture_status=$?
+if [ "$capture_status" -ne 0 ]; then
+  if [ "$capture_status" -eq 124 ] || [ "$capture_status" -eq 137 ]; then
+    echo "Kernel benchmark capture failed: timed out after ${BENCHMARK_SECONDS}s" >&2
+  else
+    echo "Kernel benchmark capture failed: QEMU exited with status $capture_status" >&2
+  fi
+  if [ -s "$LOG_PATH" ]; then
+    cat "$LOG_PATH" >&2
+  fi
+  exit 1
+fi
 
 if [ ! -s "$LOG_PATH" ]; then
   echo "Kernel benchmark capture failed: no serial output captured" >&2

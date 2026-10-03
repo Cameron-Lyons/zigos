@@ -159,7 +159,7 @@ pub fn shootdownPcid(pcid: u16) void {
 
     const deadline = tsc_clock.afterMilliseconds(100);
     while (@atomicLoad(u32, &tlb_ack_count, .acquire) < online_count) {
-        if (deadline.expired()) break;
+        if (deadline.expired()) @panic("remote TLB shootdown timed out");
         spin.hint();
     }
 }

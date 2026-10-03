@@ -622,6 +622,18 @@ reading a privileged MSR on each lookup. RDPID is required for every boot;
 its architectural contract is documented in the
 [Intel instruction reference](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf).
 
+Interrupt nesting uses one cache-line-isolated counter per logical CPU, so an
+application processor's TLB interrupt cannot change the runtime owner's context.
+Range retirement clears all affected mappings, invalidates the address space
+once, and only then returns private frames to the allocator. A missing remote
+acknowledgement stops the kernel before those frames can be reused. Object-backed
+private pages retain their first materialized snapshot; the first write promotes
+that owned page without recopying over task changes. Read-only zero mappings and
+hardware protection faults retain their access restrictions.
+The 2 MiB image-page path requests physically aligned runs independently of the
+ordinary frame cursor. Fragmentation that leaves only unaligned runs falls back
+to 4 KiB leaves, preserving the mapping without encoding an invalid huge page.
+
 Native ID indexes mix all 64 bits, including handle generations, and close
 probe chains after deletion. Zero marks an empty bucket, removing tombstones,
 membership bytes, and whole-table rebuilds. Endpoint readiness counts nonempty
@@ -638,6 +650,14 @@ Workspace path and object indexes close affected probe chains after deletion,
 so repeated directory edits leave no tombstones. Object sync positions a
 verified chunk cursor at each transport range rather than visiting every
 preceding payload page; version and manifest validation still precede access.
+Workspace commits and snapshot replay apply each generation's deletions before
+additions, allowing a full directory to replace paths in any lexical order.
+Restore records its delta against stable entries and publishes the prepared
+target in one copy. Matched Zig 0.17 `fast` host measurements of a 64-entry
+signed-package restore with its normal mutation history reduced the median from
+85.56 to 78.97 microseconds (7.7%), with identical entries, indexes, roots, and
+checksums. Timings include signature verification and exclude fixture preparation
+and result checks.
 
 Text scanout compares visible cell metadata and grapheme bytes independently
 of pool offsets, so recomposing an unchanged Unicode frame causes no pixel

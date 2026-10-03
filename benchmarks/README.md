@@ -1,9 +1,11 @@
 # Kernel benchmarks
 
-Run `./scripts/zig.sh build -Doptimize=ReleaseFast benchmark`. The checker
+Run `./scripts/zig.sh build -Doptimize=fast benchmark`. The checker
 requires complete results and quality checks under every accelerator. KVM
 also enforces cycle ceilings and baseline regression limits; TCG timing is
 informational. Baselines use the slowest of three consecutive KVM runs.
+Capture stops after 300 seconds; set `ZIGOS_BENCHMARK_SECONDS` to a positive
+integer to change that limit. A timeout fails the run and retains its serial log.
 
 The secret-store cases fill and reset a bounded 16-record store in batches.
 Each operation imports one record, lends and describes a handle, then either
@@ -70,7 +72,7 @@ readiness or message results fail the run.
 by a second row scan with one visible-window pass over 512-byte ASCII and
 Unicode documents. Cases place the caret at the head, middle, and end. Before
 timing, every case verifies identical caret locations, first visible rows,
-and row contents. Both paths run in the same ReleaseFast build and report the
+and row contents. Both paths run in the same `fast` build and report the
 median of five samples. These host benchmarks supplement booted validation.
 
 The text-layout case locates, moves, and relocates the caret in a full 512-byte
