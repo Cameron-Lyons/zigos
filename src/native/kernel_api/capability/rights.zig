@@ -60,7 +60,7 @@ pub const CapabilityRight = enum(u8) {
     notification_post,
 
     pub inline fn mask(self: CapabilityRight) u64 {
-        return @as(u64, 1) << @intCast(@intFromEnum(self));
+        return @as(u64, 1) << @intCast(@backingInt(self));
     }
 };
 
@@ -69,7 +69,7 @@ pub const DIRECT_RIGHT_MASKS = true;
 pub const first_product_right: CapabilityRight = .object_read;
 
 pub fn isKernelRight(right: CapabilityRight) bool {
-    return @intFromEnum(right) < @intFromEnum(first_product_right);
+    return @backingInt(right) < @backingInt(first_product_right);
 }
 
 pub inline fn bitsContainRight(bits: u64, right: CapabilityRight) bool {
@@ -274,8 +274,8 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
         var bits = RightsBits{};
         switch (self) {
             inline else => |payload| {
-                inline for (@typeInfo(@TypeOf(payload)).@"struct".fields) |field| {
-                    @field(bits, field.name) = @field(payload, field.name);
+                inline for (@typeInfo(@TypeOf(payload)).@"struct".field_names) |field| {
+                    @field(bits, field) = @field(payload, field);
                 }
             },
         }
@@ -299,8 +299,8 @@ pub const CapabilityRights = union(CapabilityTargetKind) {
 
     fn projectRights(comptime T: type, bits: RightsBits) T {
         var out = T{};
-        inline for (@typeInfo(T).@"struct".fields) |field| {
-            @field(out, field.name) = @field(bits, field.name);
+        inline for (@typeInfo(T).@"struct".field_names) |field| {
+            @field(out, field) = @field(bits, field);
         }
         return out;
     }

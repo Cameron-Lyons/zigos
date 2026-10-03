@@ -47,7 +47,7 @@ comptime {
     if (MAX_RECORD_PATH_BYTES > workspace.MAX_ENTRY_PATH_BYTES) {
         @compileError("sync record paths exceed workspace path capacity");
     }
-    if (@intFromEnum(principal.PrincipalKind.policy_authority) >= 10) {
+    if (@backingInt(principal.PrincipalKind.policy_authority) >= 10) {
         @compileError("sync record principal kinds exceed their decimal path field");
     }
 }
@@ -71,9 +71,9 @@ const Envelope = struct {
 
 pub const PathSet = struct {
     paths: [workspace.MAX_WORKSPACE_ENTRIES][MAX_RECORD_PATH_BYTES]u8 =
-        [_][MAX_RECORD_PATH_BYTES]u8{[_]u8{0} ** MAX_RECORD_PATH_BYTES} ** workspace.MAX_WORKSPACE_ENTRIES,
-    lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = [_]u8{0} ** workspace.MAX_WORKSPACE_ENTRIES,
-    fingerprints: [workspace.MAX_WORKSPACE_ENTRIES]u32 = [_]u32{0} ** workspace.MAX_WORKSPACE_ENTRIES,
+        @as([workspace.MAX_WORKSPACE_ENTRIES][MAX_RECORD_PATH_BYTES]u8, @splat(@as([MAX_RECORD_PATH_BYTES]u8, @splat(0)))),
+    lens: [workspace.MAX_WORKSPACE_ENTRIES]u8 = @as([workspace.MAX_WORKSPACE_ENTRIES]u8, @splat(0)),
+    fingerprints: [workspace.MAX_WORKSPACE_ENTRIES]u32 = @as([workspace.MAX_WORKSPACE_ENTRIES]u32, @splat(0)),
     count: u8 = 0,
 
     fn add(self: *PathSet, path: []const u8) Error!void {
@@ -108,7 +108,7 @@ pub const PathSet = struct {
 };
 
 pub const StalePathIndexes = struct {
-    indexes: [workspace.MAX_WORKSPACE_ENTRIES]StalePathIndex = [_]StalePathIndex{0} ** workspace.MAX_WORKSPACE_ENTRIES,
+    indexes: [workspace.MAX_WORKSPACE_ENTRIES]StalePathIndex = @as([workspace.MAX_WORKSPACE_ENTRIES]StalePathIndex, @splat(0)),
     count: u8 = 0,
 
     fn add(self: *StalePathIndexes, entry_index: usize) Error!void {
@@ -440,7 +440,7 @@ fn encodeDevice(buffer: []u8, device: *const device_graph.DeviceRecord) Error![]
     try writePrincipal(&writer, device.owner);
     try writeText(&writer, device.labelSlice());
     try writer.writeU64(device.overlay_id);
-    try writer.writeByte(@intFromEnum(device.status));
+    try writer.writeByte(@backingInt(device.status));
     try writer.writeU32(device.trust_generation);
     try writer.writeU32(device.key_rotation_generation);
     try writeSignature(&writer, device.device_signature);
@@ -449,13 +449,13 @@ fn encodeDevice(buffer: []u8, device: *const device_graph.DeviceRecord) Error![]
     try writeSignature(&writer, device.revocation_signature);
     try writer.writeU64(device.last_rotated_at_ticks);
     try writer.writeU64(device.revoked_at_ticks);
-    try writer.writeByte(@intFromEnum(device.device_key_origin));
+    try writer.writeByte(@backingInt(device.device_key_origin));
     try writer.writeByte(@intFromBool(device.platform_key_bound));
     try writeText(&writer, device.platformKeyLabelSlice());
     if (device.platform_key_bound) {
         try writer.writeBytes(&device.platform_key_digest);
         try writer.writeU64(device.platform_root_generation);
-        try writer.writeByte(@intFromEnum(device.platform_root_provenance));
+        try writer.writeByte(@backingInt(device.platform_root_provenance));
         try writer.writeBytes(&device.platform_root_digest);
     }
     return buffer[0..writer.offset];
@@ -468,7 +468,7 @@ fn encodeNetworkPolicy(buffer: []u8, policy: *const network_policy.PolicyRecord)
     try writePrincipal(&writer, policy.owner);
     try writer.writeU64(policy.workspace_id orelse 0);
     try writeText(&writer, policy.labelSlice());
-    try writer.writeByte(@intFromEnum(policy.mode));
+    try writer.writeByte(@backingInt(policy.mode));
     try writeText(&writer, policy.targetSlice());
     try writer.writeByte(@intFromBool(policy.explicit_internet_grant));
     try writer.writeByte(@intFromBool(policy.require_remote_attestation));
@@ -522,7 +522,7 @@ fn encodeConflict(buffer: []u8, conflict: *const state_support.ConflictRecord) E
     try writeText(&writer, conflict.pathSlice());
     try writer.writeU64(conflict.local_version_id);
     try writer.writeU64(conflict.remote_version_id);
-    try writer.writeByte(@intFromEnum(conflict.semantic));
+    try writer.writeByte(@backingInt(conflict.semantic));
     return buffer[0..writer.offset];
 }
 
@@ -560,7 +560,7 @@ fn encodeTransportFrame(
 ) Error![]const u8 {
     var writer = CursorWriter{ .buffer = buffer };
     try writeEnvelope(&writer, .transport_frame);
-    try writer.writeByte(@intFromEnum(queue_kind));
+    try writer.writeByte(@backingInt(queue_kind));
     try writer.writeU16(slot.duplicate_count);
     try writer.writeU64(slot.next_frame_id_after_publish);
     try writeTransportFrame(&writer, &slot.frame);
@@ -578,7 +578,7 @@ fn decodeUserRoot(resident: *state_support.ResidentState, reader: *CursorReader)
     var root = device_graph.UserRootRecord{
         .principal_id = try readPrincipal(reader),
         .label_len = 0,
-        .label = [_]u8{0} ** device_graph.MAX_LABEL_BYTES,
+        .label = @as([device_graph.MAX_LABEL_BYTES]u8, @splat(0)),
         .root_signature = .{},
     };
     try readTextInto(reader, &root.label, &root.label_len);
@@ -623,10 +623,10 @@ fn decodeNetworkPolicy(resident: *state_support.ResidentState, reader: *CursorRe
         .owner = try readPrincipal(reader),
         .workspace_id = null,
         .label_len = 0,
-        .label = [_]u8{0} ** network_policy.MAX_LABEL_BYTES,
+        .label = @as([network_policy.MAX_LABEL_BYTES]u8, @splat(0)),
         .mode = .none,
         .target_len = 0,
-        .target = [_]u8{0} ** network_policy.MAX_TARGET_BYTES,
+        .target = @as([network_policy.MAX_TARGET_BYTES]u8, @splat(0)),
         .explicit_internet_grant = false,
         .require_remote_attestation = false,
         .pinned_root_digest_present = false,
@@ -776,8 +776,8 @@ fn writeTransportFrame(writer: *CursorWriter, frame: *const state_support.Transp
     try writer.writeU64(frame.version_id);
     try writePrincipal(writer, frame.source_device);
     try writePrincipal(writer, frame.target_device);
-    try writer.writeByte(@intFromEnum(frame.transport));
-    try writer.writeByte(@intFromEnum(frame.semantic));
+    try writer.writeByte(@backingInt(frame.transport));
+    try writer.writeByte(@backingInt(frame.semantic));
     try writer.writeByte(@intFromBool(frame.encrypted));
     try writer.writeU32(frame.workspace_generation);
     try writeText(writer, frame.pathSlice());
@@ -803,7 +803,7 @@ fn readTransportFrame(reader: *CursorReader) Error!state_support.TransportFrame 
 fn writeEnvelope(writer: *CursorWriter, kind: RecordKind) Error!void {
     try writer.writeBytes(record_magic);
     try writer.writeU16(record_version);
-    try writer.writeByte(@intFromEnum(kind));
+    try writer.writeByte(@backingInt(kind));
 }
 
 fn readEnvelope(reader: *CursorReader) Error!Envelope {
@@ -819,7 +819,7 @@ fn readEnvelope(reader: *CursorReader) Error!Envelope {
 }
 
 fn writePrincipal(writer: *CursorWriter, id: principal.PrincipalId) Error!void {
-    try writer.writeByte(@intFromEnum(id.kind));
+    try writer.writeByte(@backingInt(id.kind));
     try writer.writeU64(id.serial);
 }
 
@@ -923,7 +923,7 @@ fn idPath(buffer: []u8, comptime tag: []const u8, id: u64) Error![]const u8 {
 }
 
 fn principalPath(buffer: []u8, comptime tag: []const u8, id: principal.PrincipalId) Error![]const u8 {
-    return std.fmt.bufPrint(buffer, "{s}{s}/{d}-{d}", .{ record_prefix, tag, @intFromEnum(id.kind), id.serial }) catch error.PathTooLong;
+    return std.fmt.bufPrint(buffer, "{s}{s}/{d}-{d}", .{ record_prefix, tag, @backingInt(id.kind), id.serial }) catch error.PathTooLong;
 }
 
 fn devicePathWithHash(
@@ -937,7 +937,7 @@ fn devicePathWithHash(
         record_prefix,
         tag,
         workspace_id,
-        @intFromEnum(device.kind),
+        @backingInt(device.kind),
         device.serial,
         path_hash,
     }) catch error.PathTooLong;
@@ -1120,10 +1120,10 @@ test "persistence path sets retain full capacity with compact metadata" {
     try std.testing.expectError(error.StateTooLarge, paths.add(&[_]u8{'q'}));
 
     var boundary_paths = PathSet{};
-    const max_path = [_]u8{'x'} ** MAX_RECORD_PATH_BYTES;
+    const max_path = @as([MAX_RECORD_PATH_BYTES]u8, @splat('x'));
     try boundary_paths.add(&max_path);
     try std.testing.expect(boundary_paths.contains(&max_path));
-    const overlong_path = [_]u8{'x'} ** (MAX_RECORD_PATH_BYTES + 1);
+    const overlong_path = @as([MAX_RECORD_PATH_BYTES + 1]u8, @splat('x'));
     try std.testing.expectError(error.PathTooLong, boundary_paths.add(&overlong_path));
     try std.testing.expect(!boundary_paths.contains(&overlong_path));
 

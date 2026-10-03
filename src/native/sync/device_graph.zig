@@ -72,7 +72,7 @@ pub const PlatformDeviceRoot = struct {
             .root_provenance = boot.root_provenance,
             .root_digest = boot.root_digest,
             .label_len = 0,
-            .label = [_]u8{0} ** MAX_LABEL_BYTES,
+            .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         };
         root.label_len = @intCast(native_util.copyTextExact(&root.label, label) catch return error.LabelTooLong);
         return root;
@@ -233,7 +233,7 @@ pub const DeviceRecord = struct {
     device_key_origin: DeviceKeyOrigin = .software,
     platform_key_bound: bool = false,
     platform_key_label_len: u8 = 0,
-    platform_key_label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    platform_key_label: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     platform_key_digest: crypto_hash.Digest = crypto_hash.zero_digest,
     platform_root_generation: u64 = 0,
     platform_root_provenance: measured_boot.RootProvenance = .synthetic_host,
@@ -801,7 +801,7 @@ fn zeroUserRoot() UserRootRecord {
     return .{
         .principal_id = .{ .kind = .service, .serial = 0 },
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .root_signature = .{},
     };
 }
@@ -811,7 +811,7 @@ fn zeroDevice() DeviceRecord {
         .principal_id = .{ .kind = .device, .serial = 0 },
         .owner = .{ .kind = .user, .serial = 0 },
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .overlay_id = 0,
         .status = .trusted,
         .trust_generation = 1,
@@ -825,7 +825,7 @@ fn zeroDevice() DeviceRecord {
         .device_key_origin = .software,
         .platform_key_bound = false,
         .platform_key_label_len = 0,
-        .platform_key_label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .platform_key_label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .platform_key_digest = crypto_hash.zero_digest,
         .platform_root_generation = 0,
         .platform_root_provenance = .synthetic_host,
@@ -906,7 +906,7 @@ fn buildPlatformKeyBinding(
     var binding = ResolvedPlatformKeyBinding{
         .origin = request.root.origin,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .digest = platformKeyBindingDigest(device_principal, request.root.origin, request.root.labelSlice(), &public_key, &sealed_digest),
         .root_generation = request.root.boot_generation,
         .root_provenance = request.root.root_provenance,
@@ -1068,7 +1068,7 @@ fn appendHex(buffer: []u8, offset: usize, bytes: []const u8) error{NoSpaceLeft}!
 fn deriveOverlayId(device_principal: principal.PrincipalId, label: []const u8) u64 {
     var hash = native_util.fnv1a64AppendByte(
         0xCBF29CE484222325,
-        @as(u8, @intCast(@intFromEnum(device_principal.kind))),
+        @as(u8, @intCast(@backingInt(device_principal.kind))),
     );
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_principal.serial);
     hash = native_util.fnv1a64WithSeed(hash, label);
@@ -1265,7 +1265,7 @@ test "device graph roots user principals and manages enrollment rotation and rev
 }
 
 test "compact device graph metadata preserves exact label capacities" {
-    const full_label = [_]u8{'d'} ** MAX_LABEL_BYTES;
+    const full_label = @as([MAX_LABEL_BYTES]u8, @splat('d'));
     const user = principal.PrincipalId{ .kind = .user, .serial = 21 };
     const device = principal.PrincipalId{ .kind = .device, .serial = 22 };
     const user_identity = signing.SignerIdentity{

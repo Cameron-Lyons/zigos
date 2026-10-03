@@ -19,15 +19,23 @@ pub fn addWireModules(b: *std.Build) WireModules {
 
 pub fn addHostWireModules(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) WireModules {
-    return addWireModulesFor(b, b.graph.host, optimize);
+    return addTargetWireModules(b, b.graph.host, optimize);
+}
+
+pub fn addTargetWireModules(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) WireModules {
+    return addWireModulesFor(b, target, optimize);
 }
 
 fn addWireModulesFor(
     b: *std.Build,
     target: ?std.Build.ResolvedTarget,
-    optimize: ?std.builtin.OptimizeMode,
+    optimize: ?std.lang.Optimize,
 ) WireModules {
     const binary_cursor = b.createModule(.{
         .root_source_file = b.path("src/native/core/binary_cursor.zig"),
@@ -49,14 +57,14 @@ fn addWireModulesFor(
 pub fn addUserspaceRuntimeModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) UserspaceRuntimeModules {
     return addUserspaceRuntimeModulesFor(b, null, null, target, optimize);
 }
 
 pub fn addUserspaceRuntimeHostTestModules(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) UserspaceRuntimeModules {
     return addUserspaceRuntimeModulesFor(b, b.graph.host, optimize, b.graph.host, optimize);
 }
@@ -64,9 +72,9 @@ pub fn addUserspaceRuntimeHostTestModules(
 fn addUserspaceRuntimeModulesFor(
     b: *std.Build,
     support_target: ?std.Build.ResolvedTarget,
-    support_optimize: ?std.builtin.OptimizeMode,
+    support_optimize: ?std.lang.Optimize,
     runtime_target: std.Build.ResolvedTarget,
-    runtime_optimize: std.builtin.OptimizeMode,
+    runtime_optimize: std.lang.Optimize,
 ) UserspaceRuntimeModules {
     const wire = addWireModulesFor(b, support_target, support_optimize);
     const abi = b.createModule(.{
@@ -99,7 +107,7 @@ fn addServiceProtocolModule(
     b: *std.Build,
     wire: WireModules,
     target: ?std.Build.ResolvedTarget,
-    optimize: ?std.builtin.OptimizeMode,
+    optimize: ?std.lang.Optimize,
 ) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path("src/native/task/userspace_service_protocol.zig"),

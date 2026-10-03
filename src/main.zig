@@ -84,9 +84,9 @@ export fn kernel_main() void {
 export fn syscall_handler(context: *anyopaque) callconv(.c) void {
     const frame: *isr.Registers = @ptrCast(@alignCast(context));
     const port = currentKernelPort() orelse {
-        frame.eax = @intFromEnum(abi.SyscallStatus.unavailable);
+        frame.eax = @backingInt(abi.SyscallStatus.unavailable);
         frame.edx = 0;
-        frame.r10 = @intFromEnum(abi.DenialReason.none);
+        frame.r10 = @backingInt(abi.DenialReason.none);
         return;
     };
     const caller_task_id = blk: {
@@ -104,9 +104,9 @@ export fn syscall_handler(context: *anyopaque) callconv(.c) void {
         frame.esi,
         frame.edx,
     );
-    frame.eax = @intFromEnum(result.status);
+    frame.eax = @backingInt(result.status);
     frame.edx = result.bytes_written;
-    frame.r10 = @intFromEnum(result.denial_reason);
+    frame.r10 = @backingInt(result.denial_reason);
 }
 
 fn currentKernelPort() ?*component_port.KernelPort {

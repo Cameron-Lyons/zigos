@@ -86,8 +86,8 @@ pub const Error = error{
 pub const JobId = indexed_arena.GenerationalHandle("MediaPrintJob");
 
 pub const Service = struct {
-    jobs: [MAX_JOBS]JobRecord = [_]JobRecord{zeroJob()} ** MAX_JOBS,
-    completed_job_slots: [MAX_JOBS]u8 = [_]u8{0} ** MAX_JOBS,
+    jobs: [MAX_JOBS]JobRecord = @as([MAX_JOBS]JobRecord, @splat(zeroJob())),
+    completed_job_slots: [MAX_JOBS]u8 = @as([MAX_JOBS]u8, @splat(0)),
     job_count: u8 = 0,
     completed_job_head: u8 = 0,
     completed_job_count: u8 = 0,
@@ -327,9 +327,9 @@ fn zeroJob() JobRecord {
         .claim_id = null,
         .notification_id = null,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .printer_identity_len = 0,
-        .printer_identity = [_]u8{0} ** MAX_LABEL_BYTES,
+        .printer_identity = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     };
 }
 
@@ -388,8 +388,8 @@ test "media print service rejects remote printing and hidden jobs stay silent" {
     var notifications = notification_center.Center.init();
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 13 };
-    const too_long_label = [_]u8{'x'} ** (MAX_LABEL_BYTES + 1);
-    const too_long_printer = [_]u8{'p'} ** (MAX_LABEL_BYTES + 1);
+    const too_long_label = @as([MAX_LABEL_BYTES + 1]u8, @splat('x'));
+    const too_long_printer = @as([MAX_LABEL_BYTES + 1]u8, @splat('p'));
 
     try std.testing.expectError(error.PrinterRequiresLocalOnly, service.submit(.{
         .kind = .print_document,
@@ -477,7 +477,7 @@ test "media print service retains recent completions and recycles the oldest com
     var service = Service.init();
     const source = principal.PrincipalId{ .kind = .app, .serial = 14 };
 
-    var job_ids: [MAX_JOBS]u64 = [_]u64{0} ** MAX_JOBS;
+    var job_ids: [MAX_JOBS]u64 = @as([MAX_JOBS]u64, @splat(0));
     var job_index: usize = 0;
     while (job_index < MAX_JOBS) : (job_index += 1) {
         const job = try service.submit(.{

@@ -45,8 +45,8 @@ const RequestReader = binary_cursor.Reader(anyerror, error.MalformedRequest);
 pub fn encodeRequest(buffer: []u8, request: TaskShellRequest) ![]const u8 {
     var writer = RequestWriter{ .buffer = buffer };
     try writer.writeBytes(&TASK_SHELL_MAGIC_REQUEST);
-    try writer.writeByte(@intFromEnum(request.operation));
-    try writer.writeByte(@intFromEnum(request.control));
+    try writer.writeByte(@backingInt(request.operation));
+    try writer.writeByte(@backingInt(request.control));
     try writer.writeU64(request.tick);
     return buffer[0..writer.offset];
 }
@@ -68,9 +68,9 @@ pub fn decodeRequest(payload: []const u8) !TaskShellRequest {
 pub fn encodeResponse(buffer: []u8, response: TaskShellResponse) ![]const u8 {
     var writer = ResponseWriter{ .buffer = buffer };
     try writer.writeBytes(&TASK_SHELL_MAGIC_RESPONSE);
-    try writer.writeByte(@intFromEnum(response.operation));
-    try writer.writeByte(@intFromEnum(response.control));
-    try writer.writeByte(@intFromEnum(response.status));
+    try writer.writeByte(@backingInt(response.operation));
+    try writer.writeByte(@backingInt(response.control));
+    try writer.writeByte(@backingInt(response.status));
     try writer.writeByte(if (response.recovered) 1 else 0);
     try writer.writeU64(response.task_id);
     try writer.writeU64(response.active_window_id);

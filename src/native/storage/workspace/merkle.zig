@@ -50,6 +50,6 @@ fn entryLeafAddress(entry: anytype) RootAddress {
     crypto_hash.updateBytes(&hasher, "path", entry.pathSlice());
     crypto_hash.updateInt(&hasher, "object-id", entry.object_id.raw());
     crypto_hash.updateInt(&hasher, "version-id", entry.version_id.raw());
-    crypto_hash.updateInt(&hasher, "object-type", @intFromEnum(entry.object_type));
+    crypto_hash.updateInt(&hasher, "object-type", @backingInt(entry.object_type));
     return crypto_hash.finalize(&hasher);
 }

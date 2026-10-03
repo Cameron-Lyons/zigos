@@ -351,7 +351,7 @@ fn driverServiceClassKey(service_id: u64, device_class: DeviceClass) u64 {
     const key_bytes = class_offset + @sizeOf(DeviceClass);
     var bytes: [key_bytes]u8 = undefined;
     std.mem.writeInt(u64, bytes[0..@sizeOf(u64)], service_id, .little);
-    bytes[class_offset] = @intFromEnum(device_class);
+    bytes[class_offset] = @backingInt(device_class);
     return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.driver_service_class_key, &bytes));
 }
 
@@ -363,13 +363,13 @@ fn driverBindingKey(device_class: DeviceClass, device_id: u64) u64 {
     const device_id_offset = @sizeOf(DeviceClass);
     const driver_binding_key_bytes = device_id_offset + @sizeOf(u64);
     var bytes: [driver_binding_key_bytes]u8 = undefined;
-    bytes[0] = @intFromEnum(device_class);
+    bytes[0] = @backingInt(device_class);
     std.mem.writeInt(u64, bytes[device_id_offset..][0..@sizeOf(u64)], device_id, .little);
     return indexed_arena.nonZeroKey(std.hash.Wyhash.hash(hash_seeds.driver_binding_key, &bytes));
 }
 
 fn driverClassKey(device_class: DeviceClass) u64 {
-    return @as(u64, @intFromEnum(device_class)) + 1;
+    return @as(u64, @backingInt(device_class)) + 1;
 }
 
 pub fn allowedRightsFor(device_class: DeviceClass) capability.CapabilityRights {
@@ -545,7 +545,7 @@ fn zeroDriver() DriverRecord {
         .bootstrap_transport = .none,
         .dma_domain_id = 0,
         .dma_protection = .iommu_enforced,
-        .signer_fingerprint = [_]u8{0} ** SIGNER_FINGERPRINT_BYTES,
+        .signer_fingerprint = @as([SIGNER_FINGERPRINT_BYTES]u8, @splat(0)),
     };
 }
 

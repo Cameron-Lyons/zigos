@@ -215,7 +215,7 @@ fn testInfo(flags: u32, mmap_addr: u32, mmap_length: u32, cmdline_addr: u32) han
         .framebuffer_height = 0,
         .framebuffer_bpp = 0,
         .framebuffer_type = 0,
-        .framebuffer_rgb = [_]u8{0} ** 6,
+        .framebuffer_rgb = @as([6]u8, @splat(0)),
         .info_bytes = 8,
         .cmdline_length = if (cmdline_addr == 0) 0 else 512,
         .mmap_entry_size = 24,
@@ -226,7 +226,7 @@ test "firmware map opens only complete usable pages" {
     const Allocator = frame_allocator.Fixed(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE);
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
-    var bytes = [_]u8{0} ** 24;
+    var bytes = @as([24]u8, @splat(0));
     _ = appendEntry(&bytes, 0, TEST_PAGE_SIZE / 2, 3 * TEST_PAGE_SIZE, 1);
 
     try initializeAllocator(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24));
@@ -275,7 +275,7 @@ test "firmware map opens usable frames above 4 GiB" {
     const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
-    var bytes = [_]u8{0} ** 24;
+    var bytes = @as([24]u8, @splat(0));
     _ = appendEntry(&bytes, 0, high_frame_base, 2 * TEST_PAGE_SIZE, 1);
 
     try initializeAllocator(memory_bytes, TEST_PAGE_SIZE, &allocator, handoff.multiboot2MemoryMap(&bytes, 24));
@@ -286,11 +286,11 @@ test "firmware map opens usable frames above 4 GiB" {
 
 test "non-usable pages win over usable pages in either descriptor order" {
     const Allocator = frame_allocator.Fixed(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE);
-    var usable_first = [_]u8{0} ** 48;
+    var usable_first = @as([48]u8, @splat(0));
     var offset = appendEntry(&usable_first, 0, 0, 6 * TEST_PAGE_SIZE, 1);
     _ = appendEntry(&usable_first, offset, 2 * TEST_PAGE_SIZE + 100, 200, 2);
 
-    var reserved_first = [_]u8{0} ** 48;
+    var reserved_first = @as([48]u8, @splat(0));
     offset = appendEntry(&reserved_first, 0, 2 * TEST_PAGE_SIZE + 100, 200, 2);
     _ = appendEntry(&reserved_first, offset, 0, 6 * TEST_PAGE_SIZE, 1);
 
@@ -309,7 +309,7 @@ test "non-usable pages win over usable pages in either descriptor order" {
 
 test "non-usable page ceilings and aperture clipping are conservative" {
     const Allocator = frame_allocator.Fixed(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE);
-    var bytes = [_]u8{0} ** 72;
+    var bytes = @as([72]u8, @splat(0));
     var offset = appendEntry(&bytes, 0, 1, 8 * TEST_PAGE_SIZE, 1);
     offset = appendEntry(&bytes, offset, TEST_PAGE_SIZE - 1, 2, 2);
     _ = appendEntry(&bytes, offset, 8 * TEST_PAGE_SIZE - 1, 2, 4);
@@ -329,7 +329,7 @@ test "malformed or overflowing firmware maps leave the aperture closed" {
     const Allocator = frame_allocator.Fixed(8 * TEST_PAGE_SIZE, TEST_PAGE_SIZE);
     var storage: Allocator.Storage = undefined;
     var allocator = Allocator.init(&storage);
-    var bytes = [_]u8{0} ** 24;
+    var bytes = @as([24]u8, @splat(0));
     _ = appendEntry(&bytes, 0, std.math.maxInt(u64) - 1, 4, 1);
 
     try std.testing.expectError(

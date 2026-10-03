@@ -50,7 +50,7 @@ export fn zigosNetworkBootstrapReceive(output_ptr: [*]u8, output_capacity: usize
     output_len.* = 0;
     const result = if (virtio.attached()) virtio.pollReceive(output_ptr[0..output_capacity]) else intel_nic.pollReceive(output_ptr[0..output_capacity]);
     output_len.* = result.length;
-    return @intFromEnum(result.status);
+    return @backingInt(result.status);
 }
 
 export fn zigosNetworkBootstrapWorkPending() callconv(.c) bool {

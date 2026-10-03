@@ -20,7 +20,7 @@ pub const EntryMode = union(enum) {
 
 pub fn Main(comptime mode: EntryMode) type {
     return struct {
-        pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, addr: ?usize) noreturn {
+        pub fn panic(msg: []const u8, trace: ?*std.lang.StackTrace, addr: ?usize) noreturn {
             runtime.panic(msg, trace, addr);
         }
 

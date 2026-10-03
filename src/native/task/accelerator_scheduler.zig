@@ -360,7 +360,7 @@ pub const Decision = struct {
 };
 
 pub const MAX_ENGINE_CLAIMS: usize = 16;
-const ENGINE_COUNT: usize = std.meta.fields(Engine).len;
+const ENGINE_COUNT: usize = @typeInfo(Engine).@"enum".field_names.len;
 const CLAIM_INDEX_CAPACITY: usize = MAX_ENGINE_CLAIMS * 2;
 
 pub const EngineAvailability = struct {
@@ -479,10 +479,10 @@ pub const Controller = struct {
     next_claim_id: u64 = 1,
     claims: ClaimArena = ClaimArena.init(),
     claim_task_index: ClaimTaskIndex = ClaimTaskIndex.init(),
-    active_engine_claims: [ENGINE_COUNT]u64 = [_]u64{0} ** ENGINE_COUNT,
+    active_engine_claims: [ENGINE_COUNT]u64 = @as([ENGINE_COUNT]u64, @splat(0)),
     active_claim_count: u16 = 0,
     brokered_engine_queues_required: bool = false,
-    brokered_engine_queues: [ENGINE_COUNT]BrokeredEngineQueue = [_]BrokeredEngineQueue{.{}} ** ENGINE_COUNT,
+    brokered_engine_queues: [ENGINE_COUNT]BrokeredEngineQueue = @as([ENGINE_COUNT]BrokeredEngineQueue, @splat(.{})),
 
     pub fn init() Controller {
         return .{};

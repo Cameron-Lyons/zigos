@@ -323,7 +323,7 @@ fn parseEntry(entry_type: EntryType, entry: []const u8, summary: *Summary) void 
 }
 
 fn validMadt() [MADT_TEST_TABLE_BYTES]u8 {
-    var table = [_]u8{0} ** MADT_TEST_TABLE_BYTES;
+    var table = @as([MADT_TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], MADT_SIGNATURE);
     writeU32Le(table[4..8], table.len);
     table[8] = 5;
@@ -332,30 +332,30 @@ fn validMadt() [MADT_TEST_TABLE_BYTES]u8 {
     writeU32Le(table[MADT_LOCAL_APIC_ADDRESS_OFFSET..][0..4], 0xFEE0_0000);
     writeU32Le(table[MADT_FLAGS_OFFSET..][0..4], MADT_PC_AT_COMPATIBLE_FLAG);
 
-    table[44] = @intFromEnum(EntryType.processor_local_apic);
+    table[44] = @backingInt(EntryType.processor_local_apic);
     table[45] = MADT_LOCAL_APIC_MIN_BYTES;
     table[46] = 0;
     table[47] = 1;
     writeU32Le(table[48..52], MADT_PROCESSOR_ENABLED_FLAG);
 
-    table[52] = @intFromEnum(EntryType.io_apic);
+    table[52] = @backingInt(EntryType.io_apic);
     table[53] = MADT_IO_APIC_MIN_BYTES;
     table[54] = 2;
     writeU32Le(table[56..60], 0xFEC0_0000);
     writeU32Le(table[60..64], 0);
 
-    table[64] = @intFromEnum(EntryType.interrupt_source_override);
+    table[64] = @backingInt(EntryType.interrupt_source_override);
     table[65] = MADT_ISO_MIN_BYTES;
     table[66] = 0;
     table[67] = 0;
     writeU32Le(table[68..72], 2);
     table[72] = 0x0D;
 
-    table[74] = @intFromEnum(EntryType.local_apic_address_override);
+    table[74] = @backingInt(EntryType.local_apic_address_override);
     table[75] = MADT_LOCAL_APIC_ADDRESS_OVERRIDE_MIN_BYTES;
     writeU64Le(table[78..86], 0x0000_0000_FEE0_0000);
 
-    table[86] = @intFromEnum(EntryType.local_apic_nmi);
+    table[86] = @backingInt(EntryType.local_apic_nmi);
     table[87] = MADT_ENTRY_HEADER_BYTES;
 
     finishChecksum(table[0..], 9, table.len);

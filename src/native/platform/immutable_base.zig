@@ -112,7 +112,7 @@ pub const Manager = struct {
     pending_slot: u8 = empty_slot,
     activation_generation: u64 = 0,
     rollback_generation: u64 = 0,
-    slots: [MAX_SYSTEM_IMAGES]SystemImage = [_]SystemImage{zeroImage()} ** MAX_SYSTEM_IMAGES,
+    slots: [MAX_SYSTEM_IMAGES]SystemImage = @as([MAX_SYSTEM_IMAGES]SystemImage, @splat(zeroImage())),
 
     pub fn init(
         storage: *storage_service.Service,
@@ -344,7 +344,7 @@ pub const Manager = struct {
         self.pending_slot = empty_slot;
         self.activation_generation = 0;
         self.rollback_generation = 0;
-        self.slots = [_]SystemImage{zeroImage()} ** MAX_SYSTEM_IMAGES;
+        self.slots = @as([MAX_SYSTEM_IMAGES]SystemImage, @splat(zeroImage()));
 
         var reader = BinaryReader{ .buffer = payload };
         const domain = try reader.readSlice("zigos.immutable-base.state".len);
@@ -407,13 +407,13 @@ fn zeroImage() SystemImage {
     return .{
         .slot_index = empty_slot,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .object_id = 0,
         .version_id = 0,
         .read_only = false,
         .activation_generation = 0,
         .signer_len = 0,
-        .signer = [_]u8{0} ** MAX_LABEL_BYTES,
+        .signer = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .measurement = crypto_hash.zero_digest,
     };
 }

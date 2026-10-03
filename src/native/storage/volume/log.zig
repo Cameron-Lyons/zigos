@@ -36,7 +36,7 @@ pub fn appendRecordPayload(writer: anytype, kind: RecordKind, payload: []const u
 
 pub fn beginRecord(writer: anytype, kind: RecordKind) Error!usize {
     const header_offset = writer.offset;
-    try writer.writeByte(@intFromEnum(kind));
+    try writer.writeByte(@backingInt(kind));
     try writer.writeU32(0);
     try writer.writeU64(0);
     return header_offset;
@@ -66,14 +66,14 @@ pub fn readRecordHeader(reader: anytype) Error!RecordHeader {
 
 fn parseRecordKind(value: u8) Error!RecordKind {
     return switch (value) {
-        @intFromEnum(RecordKind.checkpoint) => .checkpoint,
-        @intFromEnum(RecordKind.object_state) => .object_state,
-        @intFromEnum(RecordKind.version_state) => .version_state,
-        @intFromEnum(RecordKind.workspace_state) => .workspace_state,
-        @intFromEnum(RecordKind.snapshot_state) => .snapshot_state,
-        @intFromEnum(RecordKind.blob_state) => .blob_state,
-        @intFromEnum(RecordKind.chunk_state) => .chunk_state,
-        @intFromEnum(RecordKind.segment_boundary) => .segment_boundary,
+        @backingInt(RecordKind.checkpoint) => .checkpoint,
+        @backingInt(RecordKind.object_state) => .object_state,
+        @backingInt(RecordKind.version_state) => .version_state,
+        @backingInt(RecordKind.workspace_state) => .workspace_state,
+        @backingInt(RecordKind.snapshot_state) => .snapshot_state,
+        @backingInt(RecordKind.blob_state) => .blob_state,
+        @backingInt(RecordKind.chunk_state) => .chunk_state,
+        @backingInt(RecordKind.segment_boundary) => .segment_boundary,
         else => error.CorruptImage,
     };
 }

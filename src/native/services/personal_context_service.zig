@@ -160,7 +160,7 @@ pub const PACK_FLAG_ENCRYPTED_INDEX: u16 = 0x0004;
 
 pub const Service = struct {
     next_receipt_id: u64 = 1,
-    leases: [MAX_CONTEXT_LEASES]ContextLease = [_]ContextLease{.{}} ** MAX_CONTEXT_LEASES,
+    leases: [MAX_CONTEXT_LEASES]ContextLease = @as([MAX_CONTEXT_LEASES]ContextLease, @splat(.{})),
     lease_count: u8 = 0,
     next_reusable_lease: u8 = 0,
 
@@ -602,7 +602,7 @@ fn maxPackSensitivity(packs: []const ContextPack) manifest.DataSensitivity {
 }
 
 fn sensitivityExceeds(actual: manifest.DataSensitivity, limit: manifest.DataSensitivity) bool {
-    return @intFromEnum(actual) > @intFromEnum(limit);
+    return @backingInt(actual) > @backingInt(limit);
 }
 
 fn privacyFlagsFromLease(lease: ContextLease) u16 {

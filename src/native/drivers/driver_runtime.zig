@@ -20,13 +20,13 @@ pub const ACTIVATION_CLASS_HASH_PROBES_PER_QUERY: u8 = 0;
 pub const ACTIVATION_RECORD_SIZE_CEILING_BYTES: usize = 32;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = 864;
 const SERVICE_INDEX_CAPACITY: usize = MAX_ACTIVATIONS * 2;
-pub const ACTIVATION_CLASS_COUNT: usize = std.meta.fields(driver_service.DeviceClass).len;
+pub const ACTIVATION_CLASS_COUNT: usize = @typeInfo(driver_service.DeviceClass).@"enum".field_names.len;
 pub const ActivationClassSlotIndex = indexed_arena.ReusableIndex(MAX_ACTIVATIONS);
 const NO_ACTIVATION_CLASS_SLOT = indexed_arena.reusableNoIndex(MAX_ACTIVATIONS);
 
 comptime {
-    for (std.meta.fields(driver_service.DeviceClass), 0..) |field, class_index| {
-        if (field.value != class_index) {
+    for (@typeInfo(driver_service.DeviceClass).@"enum".field_values, 0..) |field, class_index| {
+        if (field != class_index) {
             @compileError("driver device classes must remain dense for direct activation lookup");
         }
     }
@@ -91,7 +91,7 @@ const ActivationServiceIndex = indexed_arena.MultimapIndex(MAX_ACTIVATIONS, MAX_
 pub const Runtime = struct {
     kernel_port: ?*component_port.KernelPort = null,
     arena: ActivationArena = ActivationArena.init(),
-    class_slots: [ACTIVATION_CLASS_COUNT]ActivationClassSlotIndex = [_]ActivationClassSlotIndex{NO_ACTIVATION_CLASS_SLOT} ** ACTIVATION_CLASS_COUNT,
+    class_slots: [ACTIVATION_CLASS_COUNT]ActivationClassSlotIndex = @as([ACTIVATION_CLASS_COUNT]ActivationClassSlotIndex, @splat(NO_ACTIVATION_CLASS_SLOT)),
     service_index: ActivationServiceIndex = ActivationServiceIndex.init(),
 
     pub fn init() Runtime {
@@ -280,11 +280,11 @@ fn recordPublishedActivation(record: *ActivationRecord, mode: ActivationMode) vo
 }
 
 fn deviceClassKey(device_class: driver_service.DeviceClass) u64 {
-    return @as(u64, @intFromEnum(device_class)) + 1;
+    return @as(u64, @backingInt(device_class)) + 1;
 }
 
 fn activationClassIndex(device_class: driver_service.DeviceClass) usize {
-    return @intFromEnum(device_class);
+    return @backingInt(device_class);
 }
 
 fn zeroActivation() ActivationRecord {
@@ -574,7 +574,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
     storage_volume.clearAttachedBackend();
     defer storage_volume.clearAttachedBackend();
 
-    var image = [_]u8{0} ** storage_volume.image_bytes;
+    var image = @as([storage_volume.image_bytes]u8, @splat(0));
     FakeBackend.image = &image;
     FakeBackend.activation_count = 0;
 
@@ -617,7 +617,7 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
     try std.testing.expectEqual(@as(usize, 1), FakeBackend.activation_count);
     try std.testing.expect(storage_volume.hasProductionStorageBackend());
 
-    var before_restart = [_]u8{0x44} ** storage_volume.sector_size;
+    var before_restart = @as([storage_volume.sector_size]u8, @splat(0x44));
     const before_label = "before-restart";
     @memcpy(before_restart[0..before_label.len], before_label);
     try std.testing.expect(bootstrap_driver_port.activeStorageWrite(service_id, 4, before_restart[0..]));
@@ -631,11 +631,11 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
     try std.testing.expectEqual(@as(u32, 2), driver.restart_generation);
     try std.testing.expectEqual(driver.restart_generation, restarted.activation_generation);
 
-    var readback = [_]u8{0} ** storage_volume.sector_size;
+    var readback = @as([storage_volume.sector_size]u8, @splat(0));
     try std.testing.expect(bootstrap_driver_port.activeStorageRead(service_id, 4, readback[0..]));
     try std.testing.expect(std.mem.eql(u8, before_restart[0..], readback[0..]));
 
-    var after_restart = [_]u8{0x55} ** storage_volume.sector_size;
+    var after_restart = @as([storage_volume.sector_size]u8, @splat(0x55));
     const after_label = "after-restart";
     @memcpy(after_restart[0..after_label.len], after_label);
     try std.testing.expect(bootstrap_driver_port.activeStorageWrite(service_id, 4, after_restart[0..]));
@@ -679,7 +679,7 @@ test "runtime deactivates only the requested driver class for shared services" {
         .bootstrap_transport = .none,
         .dma_domain_id = 391,
         .dma_protection = .iommu_enforced,
-        .signer_fingerprint = [_]u8{0} ** driver_service.SIGNER_FINGERPRINT_BYTES,
+        .signer_fingerprint = @as([driver_service.SIGNER_FINGERPRINT_BYTES]u8, @splat(0)),
     };
     const input_driver = driver_service.DriverRecord{
         .service_id = service_id,
@@ -691,7 +691,7 @@ test "runtime deactivates only the requested driver class for shared services" {
         .bootstrap_transport = .none,
         .dma_domain_id = 392,
         .dma_protection = .iommu_enforced,
-        .signer_fingerprint = [_]u8{0} ** driver_service.SIGNER_FINGERPRINT_BYTES,
+        .signer_fingerprint = @as([driver_service.SIGNER_FINGERPRINT_BYTES]u8, @splat(0)),
     };
 
     var runtime = Runtime.init();

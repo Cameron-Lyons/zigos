@@ -14,7 +14,7 @@ const heap_backed = builtin.target.os.tag == .freestanding;
 const Backing = if (heap_backed) ?*Channels else Channels;
 
 pub const Sessions = struct {
-    backing: Backing = if (heap_backed) null else [_]channel.Channel{.{}} ** MAX_CHANNELS,
+    backing: Backing = if (heap_backed) null else @as([MAX_CHANNELS]channel.Channel, @splat(.{})),
     cursor: u8 = 0,
 
     fn channels(self: *Sessions) ?*Channels {

@@ -768,7 +768,7 @@ test "clipboard session preserves old content on incomplete uploads and erases i
 test "clipboard session validates complete UTF-8 across chunk boundaries before publishing" {
     const f = try TestFixture.init();
     defer f.deinit();
-    const text = "a" ** 67 ++ "界e\u{301}👩‍💻";
+    const text = &@as([67]u8, @splat('a')) ++ "界e\u{301}👩‍💻";
     _ = try f.copy(0, text);
     try std.testing.expectEqualStrings(text, f.clipboard.state().?.item.bytes[0..text.len]);
     for ([_][]const u8{ "\xc0\xaf", "\xed\xa0\x80", "\xe2\x82", "\xc2\x85" }) |bad| {

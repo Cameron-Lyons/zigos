@@ -70,7 +70,7 @@ fn buildSyscallTable() [syscall_abi.operations.len]SyscallDescriptor {
 const syscall_table = buildSyscallTable();
 const opcode_index = buildOpcodeIndex();
 const native_opcode_base: u16 = abi.opcode(.task_create);
-const native_opcode_count: usize = std.meta.fields(abi.NativeOperation).len;
+const native_opcode_count: usize = @typeInfo(abi.NativeOperation).@"enum".field_names.len;
 const missing_opcode_index = std.math.maxInt(usize);
 
 pub fn dispatch(
@@ -146,7 +146,7 @@ fn syscallDescriptorFor(operation: abi.NativeOperation) ?*const SyscallDescripto
 }
 
 fn buildOpcodeIndex() [native_opcode_count]usize {
-    var index = [_]usize{missing_opcode_index} ** native_opcode_count;
+    var index = @as([native_opcode_count]usize, @splat(missing_opcode_index));
     for (syscall_table, 0..) |descriptor, table_index| {
         const offset = abi.opcode(descriptor.operation) - native_opcode_base;
         index[offset] = table_index;
@@ -155,10 +155,10 @@ fn buildOpcodeIndex() [native_opcode_count]usize {
 }
 
 test "syscall descriptor table covers every native operation with ABI metadata" {
-    try std.testing.expectEqual(std.meta.fields(abi.NativeOperation).len, syscall_table.len);
+    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, syscall_table.len);
 
-    inline for (std.meta.fields(abi.NativeOperation)) |field| {
-        const operation: abi.NativeOperation = @enumFromInt(field.value);
+    inline for (@typeInfo(abi.NativeOperation).@"enum".field_values) |field| {
+        const operation: abi.NativeOperation = @fromBackingInt(@intCast(field));
         const descriptor = syscallDescriptorFor(operation) orelse return error.MissingSyscallDescriptor;
         try std.testing.expectEqual(operation, descriptor.operation);
         try std.testing.expect(descriptor.request_size >= @sizeOf(abi.RequestHeader));
@@ -331,10 +331,10 @@ test "syscall surface dispatches typed task creation requests" {
 
     try std.testing.expectEqual(debug_contract.ProvenanceKind.none, result.provenance.kind);
     try std.testing.expect(response.task_id != 0);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(task_runtime.ComponentClass.app_component)), response.component_class);
+    try std.testing.expectEqual(@as(u16, @backingInt(task_runtime.ComponentClass.app_component)), response.component_class);
     try std.testing.expect(abi.taskFlagsHas(response.flags, abi.TASK_FLAG_USERSPACE_PROCESS));
     try std.testing.expect(abi.taskFlagsHas(response.flags, abi.TASK_FLAG_EXECUTABLE_IMAGE_MAPPED));
-    try std.testing.expectEqual(@as(u8, @intFromEnum(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(response.flags));
+    try std.testing.expectEqual(@as(u8, @backingInt(accelerator_scheduler.ResourceClass.batch_compute)), abi.taskFlagsResourceClass(response.flags));
     const created_task = test_kernel.runtime.find(response.task_id).?;
     try std.testing.expectEqualStrings("app.example.syscall", created_task.launchBundleIdSlice());
     try std.testing.expectEqualStrings("store://release/app.example.syscall/1", created_task.launchSourceIdentitySlice());
@@ -1240,7 +1240,7 @@ test "syscall surface validates and bounds embedded user buffers" {
     );
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, bad_source.status);
 
-    const oversized_source = [_]u8{'x'} ** (task_runtime.MAX_TASK_SOURCE_IDENTITY_BYTES + 1);
+    const oversized_source = @as([task_runtime.MAX_TASK_SOURCE_IDENTITY_BYTES + 1]u8, @splat('x'));
     var oversized_source_request = bad_source_request;
     oversized_source_request.request.launch.source_identity = &oversized_source;
     const oversized_identity = dispatchRequest(
@@ -1253,7 +1253,7 @@ test "syscall surface validates and bounds embedded user buffers" {
     );
     try std.testing.expectEqual(abi.SyscallStatus.invalid_request_pointer, oversized_identity.status);
 
-    const oversized_payload = [_]u8{0xAB} ** (endpoint.MAX_MESSAGE_BYTES + 1);
+    const oversized_payload = @as([endpoint.MAX_MESSAGE_BYTES + 1]u8, @splat(0xAB));
     const send_request = component_port.EndpointSendRequest{
         .header = component_port.makeHeader(.endpoint_send, test_kernel.session_task_id),
         .endpoint_capability_id = test_kernel.authority_capability_id,

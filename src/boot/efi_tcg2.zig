@@ -149,7 +149,7 @@ test "TCG2 firmware log bounds reject free device missing and overflowing memory
         .number_of_pages = 128,
         .attribute = @bitCast(@as(u64, 0)),
     };
-    const map = uefi.tables.MemoryMapSlice{ .ptr = @ptrCast(&descriptor), .info = .{ .key = @enumFromInt(0), .descriptor_size = @sizeOf(uefi.tables.MemoryDescriptor), .descriptor_version = 1, .len = 1 } };
+    const map = uefi.tables.MemoryMapSlice{ .ptr = @ptrCast(&descriptor), .info = .{ .key = @fromBackingInt(@intCast(0)), .descriptor_size = @sizeOf(uefi.tables.MemoryDescriptor), .descriptor_version = 1, .len = 1 } };
     try std.testing.expectEqual(@as(usize, log.MAX_BYTES), try allocatedBytes(map, descriptor.physical_start));
     try std.testing.expectEqual(@as(usize, 1), try allocatedBytes(map, descriptor.physical_start + 128 * 4096 - 1));
     for ([_]u64{ 0, descriptor.physical_start - 1, descriptor.physical_start + 128 * 4096 }) |address|

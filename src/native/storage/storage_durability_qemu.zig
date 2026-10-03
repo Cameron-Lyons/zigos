@@ -188,7 +188,7 @@ fn entryAbsent(storage: *storage_service.Service, workspace_id: u64, path: []con
 }
 
 fn loadPhase() Phase {
-    var sector = [_]u8{0} ** proof_sector_size;
+    var sector = @as([proof_sector_size]u8, @splat(0));
     if (!readProofSector(&sector)) return .empty;
     if (!std.mem.eql(u8, sector[0..proof_magic.len], proof_magic)) return .empty;
     if (std.mem.readInt(u16, sector[proof_version_offset..][0..@sizeOf(u16)], .little) != proof_version) return .empty;
@@ -196,18 +196,18 @@ fn loadPhase() Phase {
     const actual = native_util.fnv1a64(sector[0..proof_checksum_offset]);
     if (expected != actual) return .empty;
     return switch (sector[proof_phase_offset]) {
-        @intFromEnum(Phase.baseline_checkpointed) => .baseline_checkpointed,
-        @intFromEnum(Phase.dirty_write_staged) => .dirty_write_staged,
-        @intFromEnum(Phase.final_checkpointed) => .final_checkpointed,
+        @backingInt(Phase.baseline_checkpointed) => .baseline_checkpointed,
+        @backingInt(Phase.dirty_write_staged) => .dirty_write_staged,
+        @backingInt(Phase.final_checkpointed) => .final_checkpointed,
         else => .empty,
     };
 }
 
 fn storePhase(phase: Phase) bool {
-    var sector = [_]u8{0} ** proof_sector_size;
+    var sector = @as([proof_sector_size]u8, @splat(0));
     @memcpy(sector[0..proof_magic.len], proof_magic);
     std.mem.writeInt(u16, sector[proof_version_offset..][0..@sizeOf(u16)], proof_version, .little);
-    sector[proof_phase_offset] = @intFromEnum(phase);
+    sector[proof_phase_offset] = @backingInt(phase);
     std.mem.writeInt(u64, sector[proof_checksum_offset..][0..8], native_util.fnv1a64(sector[0..proof_checksum_offset]), .little);
     return writeProofSector(&sector);
 }

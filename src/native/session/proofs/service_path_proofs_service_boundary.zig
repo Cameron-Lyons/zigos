@@ -56,7 +56,7 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
             .owner_task_id = binding.owner_task_id,
             .endpoint_id = binding.endpoint_id,
         }));
-        try expectRootKernelCallerDenied(kernel_port, binding.endpoint_capability_id, binding.owner_task_id, 170 + @intFromEnum(entry.class));
+        try expectRootKernelCallerDenied(kernel_port, binding.endpoint_capability_id, binding.owner_task_id, 170 + @backingInt(entry.class));
     }
 
     const driver_expectations = [_]struct {
@@ -87,7 +87,7 @@ pub fn proveBootedUserspaceServiceOwnershipAndKernelBoundary(
         try std.testing.expectError(error.KernelDeviceDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelDeviceDataPlane(.{
             .service_id = driver.service_id,
             .device_id = driver.device_id,
-            .device_class = @intFromEnum(driver.device_class),
+            .device_class = @backingInt(driver.device_class),
         }));
 
         const activation = driver_runtime.findByClass(expectation.device_class) orelse return error.MissingBootedDriverBinding;

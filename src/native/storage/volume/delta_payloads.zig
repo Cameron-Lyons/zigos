@@ -7,8 +7,8 @@ const volume_errors = @import("errors.zig");
 // bounded set for each append, so failed writes, recovery, and compaction never
 // leave a speculative durability receipt behind.
 pub const Tracker = struct {
-    chunks: std.StaticBitSet(object_store.MAX_CHUNKS) = .initEmpty(),
-    blobs: std.StaticBitSet(object_store.MAX_BLOBS) = .initEmpty(),
+    chunks: std.bit_set.Static(object_store.MAX_CHUNKS) = .empty,
+    blobs: std.bit_set.Static(object_store.MAX_BLOBS) = .empty,
 
     pub fn init(store: *const object_store.Store, version_watermark: u64) volume_errors.Error!Tracker {
         var tracker = Tracker{};
@@ -23,7 +23,7 @@ pub const Tracker = struct {
         }
         // Existing blobs still need their current refcounts persisted when a
         // new version references them; emit each affected manifest once.
-        tracker.blobs = .initEmpty();
+        tracker.blobs = .empty;
         return tracker;
     }
 

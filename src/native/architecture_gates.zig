@@ -79,17 +79,17 @@ pub const native_2026 = .{
     .userspace_gop_dataplane = contract_2026.floor.userspace_gop_dataplane,
     .eight_address_spaces = contract_2026.floor.eight_address_spaces,
     .checkpoint_only_cold_load = contract_2026.floor.checkpoint_only_cold_load,
-    .generated_syscall_idl = generated_from_typed_idl and generated_syscall_operations == @typeInfo(abi.NativeOperation).@"enum".fields.len,
+    .generated_syscall_idl = generated_from_typed_idl and generated_syscall_operations == @typeInfo(abi.NativeOperation).@"enum".field_names.len,
 };
 
 test "2026 architecture checklist is generated from typed flags" {
     const std = @import("std");
     try std.testing.expect(generated_from_typed_idl);
-    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".fields.len, generated_syscall_operations);
-    inline for (std.meta.fields(@TypeOf(native_2026))) |field| {
-        try std.testing.expect(@field(native_2026, field.name));
+    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, generated_syscall_operations);
+    inline for (@typeInfo(@TypeOf(native_2026)).@"struct".field_names) |field| {
+        try std.testing.expect(@field(native_2026, field));
     }
-    inline for (std.meta.fields(contract_2026.Floor)) |field| {
-        try std.testing.expect(@field(contract_2026.floor, field.name));
+    inline for (@typeInfo(contract_2026.Floor).@"struct".field_names) |field| {
+        try std.testing.expect(@field(contract_2026.floor, field));
     }
 }

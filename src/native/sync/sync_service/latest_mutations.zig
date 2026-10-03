@@ -22,7 +22,7 @@ const Slot = struct {
 };
 
 pub const Index = struct {
-    slots: [capacity]Slot = [_]Slot{Slot{}} ** capacity,
+    slots: [capacity]Slot = @as([capacity]Slot, @splat(Slot{})),
 
     pub fn put(self: *Index, changes: []const workspace.EntryMutation, mutation_index: usize) void {
         const entry = &changes[mutation_index].entry;

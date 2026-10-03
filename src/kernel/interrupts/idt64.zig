@@ -17,7 +17,7 @@ pub const IdtPtr = extern struct {
     base: usize align(1),
 };
 
-pub var idt: [IDT_ENTRIES]IdtEntry align(16) = [_]IdtEntry{.{}} ** IDT_ENTRIES;
+pub var idt: [IDT_ENTRIES]IdtEntry align(16) = @as([IDT_ENTRIES]IdtEntry, @splat(.{}));
 
 pub fn setGate(n: u8, handler: *const fn () callconv(.c) void, selector: u16, type_attr: u8) void {
     setIstGate(n, handler, selector, type_attr, 0);

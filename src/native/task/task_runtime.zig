@@ -250,7 +250,7 @@ const validateUserspaceImage = model.validateUserspaceImage;
 const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
 const TEST_MINIMAL_MEMORY_BYTES: usize = 256;
 const TEST_MINIMAL_SHARED_MEMORY_BYTES: usize = 512;
-const TASK_STATE_COUNT: usize = @typeInfo(TaskState).@"enum".fields.len;
+const TASK_STATE_COUNT: usize = @typeInfo(TaskState).@"enum".field_names.len;
 const TASK_LABEL_INDEX_CAPACITY: usize = MAX_TASKS * 2;
 const TaskInitialComponentLabelIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_LABEL_INDEX_CAPACITY);
 const heap_backed_task_cold = builtin.target.os.tag == .freestanding;
@@ -288,9 +288,9 @@ pub const Runtime = struct {
     tasks: TaskArena = TaskArena.init(),
     task_owner_index: TaskOwnerIndex = TaskOwnerIndex.init(),
     task_initial_component_label_index: TaskInitialComponentLabelIndex = TaskInitialComponentLabelIndex.init(),
-    task_state_counts: [TASK_STATE_COUNT]TaskStateCount = [_]TaskStateCount{0} ** TASK_STATE_COUNT,
+    task_state_counts: [TASK_STATE_COUNT]TaskStateCount = @as([TASK_STATE_COUNT]TaskStateCount, @splat(0)),
     task_lifecycle_generation: u64 = 1,
-    task_cold: TaskColdBacking = if (heap_backed_task_cold) null else [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
+    task_cold: TaskColdBacking = if (heap_backed_task_cold) null else @as([MAX_TASKS]TaskColdRecord, @splat(zeroTaskCold())),
     address_spaces: AddressSpaceBacking = if (heap_backed_address_spaces) null else model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
     task_retirement_sink: ?TaskRetirementSink = null,
@@ -430,12 +430,12 @@ pub const Runtime = struct {
 
     pub fn reset(self: *Runtime) void {
         const retirements = self.captureAddressSpaceRetirements(.runtime_reset);
-        self.retireUnretainedTasks(std.StaticBitSet(MAX_TASKS).initEmpty());
+        self.retireUnretainedTasks(std.bit_set.Static(MAX_TASKS).empty);
         // Issuance cursors belong to this runtime's lifetime, not its task set.
         self.tasks.reset();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
-        self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
+        self.task_state_counts = @as([TASK_STATE_COUNT]TaskStateCount, @splat(0));
         self.releaseTaskColdRecords();
         self.releaseAddressSpaceArena();
         self.advanceTaskLifecycleGeneration();
@@ -486,9 +486,9 @@ pub const Runtime = struct {
         // Keep surviving authority in its current cold slot. A dense snapshot
         // can reorder tasks; copying by snapshot index would overwrite peers.
         var destinations: [MAX_TASKS]u8 = undefined;
-        var retained = std.StaticBitSet(MAX_TASKS).initEmpty();
-        var occupied = std.StaticBitSet(MAX_TASKS).initEmpty();
-        var exhausted_destinations = std.StaticBitSet(MAX_TASKS).initEmpty();
+        var retained: std.bit_set.Static(MAX_TASKS) = .empty;
+        var occupied: std.bit_set.Static(MAX_TASKS) = .empty;
+        var exhausted_destinations: std.bit_set.Static(MAX_TASKS) = .empty;
         for (state.tasks[0..state.task_count], 0..) |*slot, index| {
             const current = self.findConst(slot.task.id) orelse continue;
             if (!sameTaskIncarnation(current, &slot.task)) continue;
@@ -573,11 +573,11 @@ pub const Runtime = struct {
         self.tasks.resetRetainingPayloads();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
-        self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
+        self.task_state_counts = @as([TASK_STATE_COUNT]TaskStateCount, @splat(0));
         if (self.addressSpaceArena()) |address_spaces| address_spaces.resetRetainingPayloads();
     }
 
-    fn retireUnretainedTasks(self: *Runtime, retained: std.StaticBitSet(MAX_TASKS)) void {
+    fn retireUnretainedTasks(self: *Runtime, retained: std.bit_set.Static(MAX_TASKS)) void {
         for (0..self.tasks.claimedCount()) |index| {
             const slot = self.tasks.slotAt(index);
             if (!slot.in_use or retained.isSet(index) or slot.task.state == .terminated) continue;
@@ -601,7 +601,7 @@ pub const Runtime = struct {
         try self.tasks.rebuildPrimaryIndex();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
-        self.task_state_counts = [_]TaskStateCount{0} ** TASK_STATE_COUNT;
+        self.task_state_counts = @as([TASK_STATE_COUNT]TaskStateCount, @splat(0));
         if (self.addressSpaceArena()) |address_spaces| address_spaces.rebuildPrimaryIndex();
 
         var slot_index: usize = 0;
@@ -740,7 +740,7 @@ pub const Runtime = struct {
 
     pub inline fn taskHandleForResolved(self: *const Runtime, task: *const TaskRecord) TaskHandle {
         const handle = self.tasks.handleForClaimedIndex(task.arena_slot_index);
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             const slot = self.tasks.getConstByHandle(handle).?;
             std.debug.assert(slot.in_use and &slot.task == task and slot.task.id == task.id);
         }
@@ -998,7 +998,7 @@ pub const Runtime = struct {
         task.execution_component_count += 1;
         task.appendAudit(.{
             .kind = .component_attached,
-            .detail = @intFromEnum(record.substrate),
+            .detail = @backingInt(record.substrate),
             .tick = tick,
         });
         self.advanceNextComponentIdFrom(record.id);
@@ -1128,7 +1128,7 @@ pub const Runtime = struct {
         reason_fingerprint: u64,
         redacted: bool,
     ) void {
-        if (builtin.mode == .Debug) _ = self.taskHandleForResolved(task);
+        if (builtin.mode == .debug) _ = self.taskHandleForResolved(task);
         appendProvenanceToTask(task, debug_contract.crashReportProvenance(
             task.id,
             service_id,
@@ -1182,7 +1182,7 @@ pub const Runtime = struct {
         task: *TaskRecord,
         tick: u64,
     ) bool {
-        if (builtin.mode == .Debug) _ = self.taskHandleForResolved(task);
+        if (builtin.mode == .debug) _ = self.taskHandleForResolved(task);
         const slot_index: usize = task.arena_slot_index;
         if (task.state == .terminated) return false;
         const retired_address_space_id = task.address_space_id;
@@ -1339,11 +1339,11 @@ fn nextComponentIdAfter(component_id: u64) u64 {
 }
 
 fn debugIndexChecksEnabled() bool {
-    return builtin.mode == .Debug;
+    return builtin.mode == .debug;
 }
 
 fn taskStateIndex(state: TaskState) usize {
-    return @intFromEnum(state);
+    return @backingInt(state);
 }
 
 fn taskInitialComponentLabelKey(label: []const u8) u64 {
@@ -1373,7 +1373,7 @@ fn appendProvenanceToTask(task: *TaskRecord, event: ProvenanceRecord) void {
 fn clearTerminatedTaskResources(task: *TaskRecord) void {
     const cold = taskCold(task);
     cold.execution_components = std.mem.zeroes(@TypeOf(cold.execution_components));
-    cold.capability_ids = [_]u64{0} ** MAX_TASK_CAPABILITIES;
+    cold.capability_ids = @as([MAX_TASK_CAPABILITIES]u64, @splat(0));
     cold.capability_generation = 1;
 }
 

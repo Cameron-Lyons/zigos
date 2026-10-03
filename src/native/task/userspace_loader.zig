@@ -31,14 +31,14 @@ const SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES: usize = userspace_bootstrap_mailbox.AB
 const SYNTHETIC_ELF_SEGMENT_ALIGNMENT: u32 = 0x1000;
 const SYNTHETIC_ELF_SECTION_NAMES = "\x00.shstrtab\x00.zigos_userspace_bootstrap\x00";
 const SYNTHETIC_ELF_SECTION_COUNT: usize = 3;
-const SYNTHETIC_ELF_SEGMENTS_OFFSET: usize = @sizeOf(std.elf.Elf64_Ehdr) +
-    SYNTHETIC_ELF_PROGRAM_HEADERS * @sizeOf(std.elf.Elf64_Phdr);
+const SYNTHETIC_ELF_SEGMENTS_OFFSET: usize = @sizeOf(std.elf.Elf64.Ehdr) +
+    SYNTHETIC_ELF_PROGRAM_HEADERS * @sizeOf(std.elf.Elf64.Phdr);
 const SYNTHETIC_ELF_SECTION_NAMES_OFFSET: usize = SYNTHETIC_ELF_SEGMENTS_OFFSET +
     SYNTHETIC_ELF_PROGRAM_HEADERS * SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES;
 const SYNTHETIC_ELF_SECTION_HEADERS_OFFSET: usize =
     (SYNTHETIC_ELF_SECTION_NAMES_OFFSET + SYNTHETIC_ELF_SECTION_NAMES.len + 3) & ~@as(usize, 3);
 const SYNTHETIC_ELF_BYTES: usize = SYNTHETIC_ELF_SECTION_HEADERS_OFFSET +
-    SYNTHETIC_ELF_SECTION_COUNT * @sizeOf(std.elf.Elf64_Shdr);
+    SYNTHETIC_ELF_SECTION_COUNT * @sizeOf(std.elf.Elf64.Shdr);
 const TEST_TASK_MEMORY_BYTES: usize = units.kibibytes(4);
 const TEST_TASK_SHARED_MEMORY_BYTES: usize = units.kibibytes(2);
 const copyTextExact = native_util.copyTextExact;
@@ -476,15 +476,15 @@ fn zeroImage() ImageRecord {
         .executable_image = .{},
         .elf_file = .{},
         .bundle_id_len = 0,
-        .bundle_id = [_]u8{0} ** MAX_BUNDLE_ID_BYTES,
+        .bundle_id = @as([MAX_BUNDLE_ID_BYTES]u8, @splat(0)),
         .display_name_len = 0,
-        .display_name = [_]u8{0} ** MAX_DISPLAY_NAME_BYTES,
+        .display_name = @as([MAX_DISPLAY_NAME_BYTES]u8, @splat(0)),
         .publisher_len = 0,
-        .publisher = [_]u8{0} ** MAX_PUBLISHER_BYTES,
+        .publisher = @as([MAX_PUBLISHER_BYTES]u8, @splat(0)),
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .entry_len = 0,
-        .entry = [_]u8{0} ** MAX_ENTRY_BYTES,
+        .entry = @as([MAX_ENTRY_BYTES]u8, @splat(0)),
     };
 }
 
@@ -580,42 +580,42 @@ fn arrayFieldLen(comptime T: type, comptime field_name: []const u8) usize {
 }
 
 pub fn makeSyntheticElf64ForTest(entry_point: u32, phnum: u16, loadable_segments: u16) [SYNTHETIC_ELF_BYTES]u8 {
-    var bytes = [_]u8{0} ** SYNTHETIC_ELF_BYTES;
+    var bytes = @as([SYNTHETIC_ELF_BYTES]u8, @splat(0));
     bytes[0] = 0x7F;
     bytes[1] = 'E';
     bytes[2] = 'L';
     bytes[3] = 'F';
-    bytes[std.elf.EI_CLASS] = std.elf.ELFCLASS64;
-    bytes[std.elf.EI_DATA] = std.elf.ELFDATA2LSB;
-    bytes[std.elf.EI_VERSION] = 1;
+    bytes[std.elf.EI.CLASS] = @backingInt(std.elf.CLASS.@"64");
+    bytes[std.elf.EI.DATA] = @backingInt(std.elf.DATA.@"2LSB");
+    bytes[std.elf.EI.VERSION] = 1;
 
-    std.mem.writeInt(u16, bytes[16..18], @intFromEnum(std.elf.ET.EXEC), .little);
-    std.mem.writeInt(u16, bytes[18..20], @intFromEnum(std.elf.EM.X86_64), .little);
+    std.mem.writeInt(u16, bytes[16..18], @backingInt(std.elf.ET.EXEC), .little);
+    std.mem.writeInt(u16, bytes[18..20], @backingInt(std.elf.EM.X86_64), .little);
     std.mem.writeInt(u32, bytes[20..24], 1, .little);
     std.mem.writeInt(u64, bytes[24..32], entry_point, .little);
-    std.mem.writeInt(u64, bytes[32..40], @sizeOf(std.elf.Elf64_Ehdr), .little);
+    std.mem.writeInt(u64, bytes[32..40], @sizeOf(std.elf.Elf64.Ehdr), .little);
     std.mem.writeInt(u64, bytes[40..48], SYNTHETIC_ELF_SECTION_HEADERS_OFFSET, .little);
-    std.mem.writeInt(u16, bytes[52..54], @sizeOf(std.elf.Elf64_Ehdr), .little);
-    std.mem.writeInt(u16, bytes[54..56], @sizeOf(std.elf.Elf64_Phdr), .little);
+    std.mem.writeInt(u16, bytes[52..54], @sizeOf(std.elf.Elf64.Ehdr), .little);
+    std.mem.writeInt(u16, bytes[54..56], @sizeOf(std.elf.Elf64.Phdr), .little);
     std.mem.writeInt(u16, bytes[56..58], phnum, .little);
-    std.mem.writeInt(u16, bytes[58..60], @sizeOf(std.elf.Elf64_Shdr), .little);
+    std.mem.writeInt(u16, bytes[58..60], @sizeOf(std.elf.Elf64.Shdr), .little);
     std.mem.writeInt(u16, bytes[60..62], SYNTHETIC_ELF_SECTION_COUNT, .little);
     std.mem.writeInt(u16, bytes[62..64], 1, .little);
 
     var index: usize = 0;
     while (index < phnum) : (index += 1) {
-        const program_offset = @sizeOf(std.elf.Elf64_Ehdr) + index * @sizeOf(std.elf.Elf64_Phdr);
-        const p_type: u32 = if (index < loadable_segments) std.elf.PT_LOAD else 0;
-        std.mem.writeInt(u32, bytes[program_offset..][0..4], p_type, .little);
-        if (p_type == std.elf.PT_LOAD) {
+        const program_offset = @sizeOf(std.elf.Elf64.Ehdr) + index * @sizeOf(std.elf.Elf64.Phdr);
+        const p_type: std.elf.PT = if (index < loadable_segments) .LOAD else .NULL;
+        std.mem.writeInt(u32, bytes[program_offset..][0..4], @backingInt(p_type), .little);
+        if (p_type == .LOAD) {
             const file_offset = SYNTHETIC_ELF_SEGMENTS_OFFSET + index * SYNTHETIC_ELF_SEGMENT_MEMORY_BYTES;
             const virtual_address = entry_point + @as(u32, @intCast(index)) * SYNTHETIC_ELF_SEGMENT_ALIGNMENT;
-            const flags: u32 = if (index == 0)
-                std.elf.PF_R | std.elf.PF_X
+            const flags: std.elf.PF = if (index == 0)
+                .{ .R = true, .X = true }
             else
-                std.elf.PF_R | std.elf.PF_W;
+                .{ .R = true, .W = true };
 
-            std.mem.writeInt(u32, bytes[program_offset + 4 ..][0..4], flags, .little);
+            std.mem.writeInt(u32, bytes[program_offset + 4 ..][0..4], @bitCast(flags), .little);
             std.mem.writeInt(u64, bytes[program_offset + 8 ..][0..8], file_offset, .little);
             std.mem.writeInt(u64, bytes[program_offset + 16 ..][0..8], virtual_address, .little);
             std.mem.writeInt(u64, bytes[program_offset + 32 ..][0..8], SYNTHETIC_ELF_SEGMENT_FILE_BYTES, .little);
@@ -631,7 +631,7 @@ pub fn makeSyntheticElf64ForTest(entry_point: u32, phnum: u16, loadable_segments
         SYNTHETIC_ELF_SECTION_NAMES,
     );
 
-    const string_table_header = SYNTHETIC_ELF_SECTION_HEADERS_OFFSET + @sizeOf(std.elf.Elf64_Shdr);
+    const string_table_header = SYNTHETIC_ELF_SECTION_HEADERS_OFFSET + @sizeOf(std.elf.Elf64.Shdr);
     writeSyntheticSectionHeader(
         &bytes,
         string_table_header,
@@ -643,7 +643,7 @@ pub fn makeSyntheticElf64ForTest(entry_point: u32, phnum: u16, loadable_segments
         SYNTHETIC_ELF_SECTION_NAMES.len,
         1,
     );
-    const mailbox_header = string_table_header + @sizeOf(std.elf.Elf64_Shdr);
+    const mailbox_header = string_table_header + @sizeOf(std.elf.Elf64.Shdr);
     writeSyntheticSectionHeader(
         &bytes,
         mailbox_header,
@@ -881,13 +881,19 @@ test "embedded elf inspection records entry points loadable segments and measure
     const bytes = makeSyntheticElf64ForTest(0x4000_1000, 3, 2);
     const info = try elf_image_inspector.inspect(&bytes);
 
+    try std.testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 5, 0, 0, 0 }, bytes[64..72]);
     try std.testing.expectEqual(@as(u64, 0x4000_1000), info.entry_point);
     try std.testing.expectEqual(@as(u16, 2), info.loadable_segment_count);
     try std.testing.expectEqual(bytes.len, info.byte_len);
     try std.testing.expect(!std.mem.eql(u8, &info.file_sha256, &crypto_hash.zero_digest));
     try std.testing.expectEqual(@as(usize, 2), info.executable_image.segment_count);
     try std.testing.expectEqual(@as(u64, 0x4000_1000), info.executable_image.segments[0].virtual_address);
+    try std.testing.expect(info.executable_image.segments[0].access.read);
+    try std.testing.expect(!info.executable_image.segments[0].access.write);
     try std.testing.expect(info.executable_image.segments[0].access.execute);
+    try std.testing.expect(info.executable_image.segments[1].access.read);
+    try std.testing.expect(info.executable_image.segments[1].access.write);
+    try std.testing.expect(!info.executable_image.segments[1].access.execute);
 }
 
 test "embedded elf inspection rejects malformed section extents and mailbox flags" {
@@ -896,7 +902,7 @@ test "embedded elf inspection rejects malformed section extents and mailbox flag
     try std.testing.expectError(error.InvalidSectionHeaderTable, elf_image_inspector.inspect(&invalid_table));
 
     var invalid_mailbox = makeSyntheticElf64ForTest(0x4000_1000, 3, 2);
-    const mailbox_header = SYNTHETIC_ELF_SECTION_HEADERS_OFFSET + 2 * @sizeOf(std.elf.Elf64_Shdr);
+    const mailbox_header = SYNTHETIC_ELF_SECTION_HEADERS_OFFSET + 2 * @sizeOf(std.elf.Elf64.Shdr);
     std.mem.writeInt(u64, invalid_mailbox[mailbox_header + 8 ..][0..8], 0x2, .little);
     try std.testing.expectError(error.InvalidBootstrapMailboxSection, elf_image_inspector.inspect(&invalid_mailbox));
 
@@ -1083,10 +1089,10 @@ test "catalog rejects generated artifact metadata that no longer matches embedde
 
 test "catalog preserves exact-limit identity and component labels without truncation" {
     var catalog = Catalog.init();
-    const bundle_id = [_]u8{'b'} ** MAX_BUNDLE_ID_BYTES;
-    const display_name = [_]u8{'d'} ** MAX_DISPLAY_NAME_BYTES;
-    const entry = [_]u8{'e'} ** MAX_ENTRY_BYTES;
-    const label = [_]u8{'l'} ** MAX_LABEL_BYTES;
+    const bundle_id = @as([MAX_BUNDLE_ID_BYTES]u8, @splat('b'));
+    const display_name = @as([MAX_DISPLAY_NAME_BYTES]u8, @splat('d'));
+    const entry = @as([MAX_ENTRY_BYTES]u8, @splat('e'));
+    const label = @as([MAX_LABEL_BYTES]u8, @splat('l'));
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
@@ -1276,7 +1282,7 @@ test "catalog rejects unsigned bundles and missing declared components for users
         },
     }));
 
-    const long_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+    const long_label = @as([MAX_LABEL_BYTES + 1]u8, @splat('l'));
     try std.testing.expectError(error.InitialComponentLabelTooLong, catalog.register(.{
         .bundle = blk: {
             var bundle = manifest.BundleManifest{

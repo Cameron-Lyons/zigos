@@ -78,7 +78,7 @@ pub const floor: Floor = .{
 test "2026 contract floor is generated from typed flags" {
     const std = @import("std");
     try std.testing.expect(generated_from_typed_idl);
-    inline for (std.meta.fields(Floor)) |field| {
-        try std.testing.expect(@field(floor, field.name));
+    inline for (@typeInfo(Floor).@"struct".field_names) |field| {
+        try std.testing.expect(@field(floor, field));
     }
 }

@@ -330,7 +330,7 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
             .user_visible = true,
             .privacy_indicator_id = 901,
             .privacy_indicator_expires_at_ticks = 120,
-            .now_ticks = 94 + @intFromEnum(operation),
+            .now_ticks = 94 + @backingInt(operation),
         });
         try std.testing.expect(decision.allowed);
         try std.testing.expectEqual(data_target.id, decision.target_task_id);
@@ -431,7 +431,7 @@ pub fn proveBootedProcessIsolationVisibleEntitlementGates(
 
     const latest = caller.latestAuditEvent() orelse return error.MissingProcessIsolationAudit;
     try std.testing.expectEqual(task_runtime.AuditEventKind.policy_allowed, latest.kind);
-    try std.testing.expectEqual((@as(u32, 904) << 8) | @as(u32, @intFromEnum(process_isolation.Operation.register_global_hook)), latest.detail);
+    try std.testing.expectEqual((@as(u32, 904) << 8) | @as(u32, @backingInt(process_isolation.Operation.register_global_hook)), latest.detail);
 }
 
 fn mintProcessControlCapability(

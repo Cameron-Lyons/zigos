@@ -1537,8 +1537,8 @@ test "secret vault failed rotation leaves old and unrelated authority unchanged"
         var handles: [3]VaultHandle = undefined;
         for (&handles, 0..) |*handle, i| handle.* = (try service.lendHandle(&policies, .{}, .{ .owner = owner, .holder = holder, .task_id = 1, .secret_id = if (i == 2) sibling else old, .expires_at_ticks = 100, .now_ticks = 1, .allow_raw_export = true }, null)).*;
         var request = RotateRequest{ .owner = owner, .task_id = 1, .old_secret_id = old, .label = "replacement", .raw = "new private", .hardware_backed = false, .exportable = true, .now_ticks = 2 };
-        const oversized = [_]u8{0x51} ** (secure_secret_store.MAX_VALUE_BYTES + 1);
-        const long_label = [_]u8{'x'} ** (secure_secret_store.MAX_LABEL_BYTES + 1);
+        const oversized = @as([secure_secret_store.MAX_VALUE_BYTES + 1]u8, @splat(0x51));
+        const long_label = @as([secure_secret_store.MAX_LABEL_BYTES + 1]u8, @splat('x'));
         switch (mode) {
             0 => {}, // Audit failure after preparing a valid replacement.
             1 => request.raw = &oversized,
@@ -1673,7 +1673,7 @@ test "secret vault audit failure withholds exported bytes and signatures" {
     const policies = policy_object.Directory.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 950 };
     const holder = principal.PrincipalId{ .kind = .service, .serial = 951 };
-    const seed = [_]u8{0x53} ** 32;
+    const seed = @as([32]u8, @splat(0x53));
     const exportable = (try service.store.importSecret(owner, "exportable", "private", true, true)).id;
     const signer = (try service.store.importSecret(owner, "signer", &seed, true, false)).id;
     const export_handle = (try service.lendHandle(&policies, .{}, .{ .owner = owner, .holder = holder, .task_id = 1, .secret_id = exportable, .expires_at_ticks = 100, .now_ticks = 1, .allow_raw_export = true }, null)).*;

@@ -67,7 +67,7 @@ pub fn header(
 ) Error!WireHeader {
     _ = try operation(key, operation_id);
     return .{
-        .operation = @intFromEnum(operation_id),
+        .operation = @backingInt(operation_id),
         .correlation_id = correlation_id,
         .subject_task_id = subject_task_id,
     };

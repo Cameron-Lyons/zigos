@@ -136,9 +136,9 @@ pub const OffboardResult = struct {
 
 pub const StoredComponent = struct {
     id_len: u8 = 0,
-    id: [MAX_COMPONENT_ID_BYTES]u8 = [_]u8{0} ** MAX_COMPONENT_ID_BYTES,
+    id: [MAX_COMPONENT_ID_BYTES]u8 = @as([MAX_COMPONENT_ID_BYTES]u8, @splat(0)),
     entry_len: u8 = 0,
-    entry: [MAX_COMPONENT_ENTRY_BYTES]u8 = [_]u8{0} ** MAX_COMPONENT_ENTRY_BYTES,
+    entry: [MAX_COMPONENT_ENTRY_BYTES]u8 = @as([MAX_COMPONENT_ENTRY_BYTES]u8, @splat(0)),
 
     pub fn idSlice(self: *const StoredComponent) []const u8 {
         return self.id[0..self.id_len];
@@ -151,9 +151,9 @@ pub const StoredComponent = struct {
 
 pub const StoredAsset = struct {
     path_len: u8 = 0,
-    path: [MAX_ASSET_PATH_BYTES]u8 = [_]u8{0} ** MAX_ASSET_PATH_BYTES,
+    path: [MAX_ASSET_PATH_BYTES]u8 = @as([MAX_ASSET_PATH_BYTES]u8, @splat(0)),
     content_type_len: u8 = 0,
-    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** MAX_CONTENT_TYPE_BYTES,
+    content_type: [MAX_CONTENT_TYPE_BYTES]u8 = @as([MAX_CONTENT_TYPE_BYTES]u8, @splat(0)),
 
     pub fn pathSlice(self: *const StoredAsset) []const u8 {
         return self.path[0..self.path_len];
@@ -201,7 +201,7 @@ pub const PackageLaunchProvenance = struct {
 
 pub const StoredInterface = struct {
     name_len: u8 = 0,
-    name: [MAX_INTERFACE_NAME_BYTES]u8 = [_]u8{0} ** MAX_INTERFACE_NAME_BYTES,
+    name: [MAX_INTERFACE_NAME_BYTES]u8 = @as([MAX_INTERFACE_NAME_BYTES]u8, @splat(0)),
     version_major: u16 = 1,
     version_minor: u16 = 0,
 
@@ -211,7 +211,7 @@ pub const StoredInterface = struct {
 };
 
 pub const PermissionTextRef = struct {
-    bytes: [3]u8 = [_]u8{0} ** 3,
+    bytes: [3]u8 = @as([3]u8, @splat(0)),
 
     pub fn init(offset: u16, len: u8) PermissionTextRef {
         return .{ .bytes = .{
@@ -284,7 +284,7 @@ pub const StoredPermission = struct {
 
 pub const StoredBackgroundTask = struct {
     id_len: u8 = 0,
-    id: [MAX_BACKGROUND_TASK_ID_BYTES]u8 = [_]u8{0} ** MAX_BACKGROUND_TASK_ID_BYTES,
+    id: [MAX_BACKGROUND_TASK_ID_BYTES]u8 = @as([MAX_BACKGROUND_TASK_ID_BYTES]u8, @splat(0)),
     trigger: manifest.BackgroundTrigger = .user_approved_scheduled_job,
     expected_duration_seconds: u32 = 0,
     budget: manifest.BackgroundResourceBudget = .{},
@@ -298,11 +298,11 @@ pub const StoredBackgroundTask = struct {
 
 pub const StoredAiMetadata = struct {
     model_family_len: u8 = 0,
-    model_family: [MAX_MODEL_FAMILY_BYTES]u8 = [_]u8{0} ** MAX_MODEL_FAMILY_BYTES,
+    model_family: [MAX_MODEL_FAMILY_BYTES]u8 = @as([MAX_MODEL_FAMILY_BYTES]u8, @splat(0)),
     model_digest_len: u8 = 0,
-    model_digest: [MAX_MODEL_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_MODEL_DIGEST_BYTES,
+    model_digest: [MAX_MODEL_DIGEST_BYTES]u8 = @as([MAX_MODEL_DIGEST_BYTES]u8, @splat(0)),
     model_source_identity_len: u8 = 0,
-    model_source_identity: [MAX_MODEL_SOURCE_BYTES]u8 = [_]u8{0} ** MAX_MODEL_SOURCE_BYTES,
+    model_source_identity: [MAX_MODEL_SOURCE_BYTES]u8 = @as([MAX_MODEL_SOURCE_BYTES]u8, @splat(0)),
     locality: manifest.AiLocality = .inherit_task,
     offline_required: bool = false,
     private_context: bool = false,
@@ -329,7 +329,7 @@ pub const StoredDataRights = struct {
     deletion_supported: bool = false,
     deletion_receipt_required: bool = false,
     export_format_len: u8 = 0,
-    export_format: [MAX_DATA_RIGHTS_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_DATA_RIGHTS_FORMAT_BYTES,
+    export_format: [MAX_DATA_RIGHTS_FORMAT_BYTES]u8 = @as([MAX_DATA_RIGHTS_FORMAT_BYTES]u8, @splat(0)),
 
     pub fn exportFormatSlice(self: *const StoredDataRights) []const u8 {
         return self.export_format[0..self.export_format_len];
@@ -338,15 +338,15 @@ pub const StoredDataRights = struct {
 
 pub const StoredSupplyChain = struct {
     sbom_digest_len: u8 = 0,
-    sbom_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    sbom_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = @as([MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8, @splat(0)),
     source_archive_digest_len: u8 = 0,
-    source_archive_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    source_archive_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = @as([MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8, @splat(0)),
     build_recipe_digest_len: u8 = 0,
-    build_recipe_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    build_recipe_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = @as([MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8, @splat(0)),
     vulnerability_scan_digest_len: u8 = 0,
-    vulnerability_scan_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SUPPLY_CHAIN_DIGEST_BYTES,
+    vulnerability_scan_digest: [MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8 = @as([MAX_SUPPLY_CHAIN_DIGEST_BYTES]u8, @splat(0)),
     build_provenance_identity_len: u8 = 0,
-    build_provenance_identity: [MAX_BUILD_PROVENANCE_IDENTITY_BYTES]u8 = [_]u8{0} ** MAX_BUILD_PROVENANCE_IDENTITY_BYTES,
+    build_provenance_identity: [MAX_BUILD_PROVENANCE_IDENTITY_BYTES]u8 = @as([MAX_BUILD_PROVENANCE_IDENTITY_BYTES]u8, @splat(0)),
     reproducible_build: bool = false,
     trusted_builder: bool = false,
 
@@ -374,7 +374,7 @@ pub const StoredSupplyChain = struct {
 pub const StoredAgentDelegation = struct {
     enabled: bool = false,
     purpose_len: u8 = 0,
-    purpose: [MAX_AGENT_PURPOSE_BYTES]u8 = [_]u8{0} ** MAX_AGENT_PURPOSE_BYTES,
+    purpose: [MAX_AGENT_PURPOSE_BYTES]u8 = @as([MAX_AGENT_PURPOSE_BYTES]u8, @splat(0)),
     max_autonomous_actions: u16 = 0,
     max_remote_calls: u16 = 0,
     user_confirmation_required: bool = true,
@@ -396,7 +396,7 @@ pub const StoredAccessibility = struct {
     supports_reduced_motion: bool = false,
     supports_high_contrast: bool = false,
     profile_notes_len: u8 = 0,
-    profile_notes: [MAX_ACCESSIBILITY_PROFILE_BYTES]u8 = [_]u8{0} ** MAX_ACCESSIBILITY_PROFILE_BYTES,
+    profile_notes: [MAX_ACCESSIBILITY_PROFILE_BYTES]u8 = @as([MAX_ACCESSIBILITY_PROFILE_BYTES]u8, @splat(0)),
 
     pub fn profileNotesSlice(self: *const StoredAccessibility) []const u8 {
         return self.profile_notes[0..self.profile_notes_len];
@@ -411,7 +411,7 @@ pub const StoredObjectResilience = struct {
     device_trust_required: bool = false,
     max_restore_age_days: u16 = 0,
     backup_format_len: u8 = 0,
-    backup_format: [MAX_OBJECT_BACKUP_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_OBJECT_BACKUP_FORMAT_BYTES,
+    backup_format: [MAX_OBJECT_BACKUP_FORMAT_BYTES]u8 = @as([MAX_OBJECT_BACKUP_FORMAT_BYTES]u8, @splat(0)),
 
     pub fn backupFormatSlice(self: *const StoredObjectResilience) []const u8 {
         return self.backup_format[0..self.backup_format_len];
@@ -425,7 +425,7 @@ pub const StoredSemanticIndex = struct {
     redacted_snippets: bool = false,
     max_query_bytes: usize = 0,
     model_digest_len: u8 = 0,
-    model_digest: [MAX_SEMANTIC_MODEL_DIGEST_BYTES]u8 = [_]u8{0} ** MAX_SEMANTIC_MODEL_DIGEST_BYTES,
+    model_digest: [MAX_SEMANTIC_MODEL_DIGEST_BYTES]u8 = @as([MAX_SEMANTIC_MODEL_DIGEST_BYTES]u8, @splat(0)),
 
     pub fn modelDigestSlice(self: *const StoredSemanticIndex) []const u8 {
         return self.model_digest[0..self.model_digest_len];
@@ -434,13 +434,13 @@ pub const StoredSemanticIndex = struct {
 
 pub const StoredSignature = struct {
     format_len: u8 = 0,
-    format: [MAX_SIGNATURE_FORMAT_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_FORMAT_BYTES,
+    format: [MAX_SIGNATURE_FORMAT_BYTES]u8 = @as([MAX_SIGNATURE_FORMAT_BYTES]u8, @splat(0)),
     signer_len: u8 = 0,
-    signer: [MAX_SIGNATURE_SIGNER_BYTES]u8 = [_]u8{0} ** MAX_SIGNATURE_SIGNER_BYTES,
+    signer: [MAX_SIGNATURE_SIGNER_BYTES]u8 = @as([MAX_SIGNATURE_SIGNER_BYTES]u8, @splat(0)),
     public_key_len: u8 = 0,
-    public_key: [manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8 = [_]u8{0} ** manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES,
+    public_key: [manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8 = @as([manifest.MAX_SIGNATURE_PUBLIC_KEY_BYTES]u8, @splat(0)),
     value_len: u8 = 0,
-    value: [manifest.MAX_SIGNATURE_VALUE_BYTES]u8 = [_]u8{0} ** manifest.MAX_SIGNATURE_VALUE_BYTES,
+    value: [manifest.MAX_SIGNATURE_VALUE_BYTES]u8 = @as([manifest.MAX_SIGNATURE_VALUE_BYTES]u8, @splat(0)),
 
     pub fn formatSlice(self: *const StoredSignature) []const u8 {
         return self.format[0..self.format_len];
@@ -482,11 +482,11 @@ pub const ResolvedManifest = struct {
 pub const BundleRevision = struct {
     revision_id: u64 = 0,
     display_name_len: u8 = 0,
-    display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    display_name: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     publisher_len: u8 = 0,
-    publisher: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    publisher: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     source_identity_len: u8 = 0,
-    source_identity: [MAX_INSTALL_SOURCE_BYTES]u8 = [_]u8{0} ** MAX_INSTALL_SOURCE_BYTES,
+    source_identity: [MAX_INSTALL_SOURCE_BYTES]u8 = @as([MAX_INSTALL_SOURCE_BYTES]u8, @splat(0)),
     version_major: u16 = 0,
     version_minor: u16 = 0,
     channel: manifest.UpdateChannel = .stable,
@@ -494,19 +494,19 @@ pub const BundleRevision = struct {
     release_transparency: ReleaseTransparencyEvidence = .{},
     schema_version: u32 = 0,
     component_count: u8 = 0,
-    components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent = [_]StoredComponent{zeroStoredComponent()} ** MAX_COMPONENTS_PER_BUNDLE,
+    components: [MAX_COMPONENTS_PER_BUNDLE]StoredComponent = @as([MAX_COMPONENTS_PER_BUNDLE]StoredComponent, @splat(zeroStoredComponent())),
     asset_count: u8 = 0,
-    assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset = [_]StoredAsset{zeroStoredAsset()} ** MAX_ASSETS_PER_BUNDLE,
+    assets: [MAX_ASSETS_PER_BUNDLE]StoredAsset = @as([MAX_ASSETS_PER_BUNDLE]StoredAsset, @splat(zeroStoredAsset())),
     provided_interface_count: u8 = 0,
-    provided_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
+    provided_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface = @as([MAX_INTERFACES_PER_BUNDLE]StoredInterface, @splat(zeroStoredInterface())),
     consumed_interface_count: u8 = 0,
-    consumed_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface = [_]StoredInterface{zeroStoredInterface()} ** MAX_INTERFACES_PER_BUNDLE,
+    consumed_interfaces: [MAX_INTERFACES_PER_BUNDLE]StoredInterface = @as([MAX_INTERFACES_PER_BUNDLE]StoredInterface, @splat(zeroStoredInterface())),
     requested_permission_count: u8 = 0,
     permission_text_len: u16 = 0,
-    permission_text: [MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8 = [_]u8{0} ** MAX_PERMISSION_TEXT_BYTES_PER_REVISION,
-    requested_permissions: [MAX_PERMISSIONS_PER_BUNDLE]StoredPermission = [_]StoredPermission{zeroStoredPermission()} ** MAX_PERMISSIONS_PER_BUNDLE,
+    permission_text: [MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8 = @as([MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8, @splat(0)),
+    requested_permissions: [MAX_PERMISSIONS_PER_BUNDLE]StoredPermission = @as([MAX_PERMISSIONS_PER_BUNDLE]StoredPermission, @splat(zeroStoredPermission())),
     background_task_count: u8 = 0,
-    background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask = [_]StoredBackgroundTask{zeroStoredBackgroundTask()} ** MAX_BACKGROUND_TASKS_PER_BUNDLE,
+    background_tasks: [MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask = @as([MAX_BACKGROUND_TASKS_PER_BUNDLE]StoredBackgroundTask, @splat(zeroStoredBackgroundTask())),
     ai_metadata: StoredAiMetadata = zeroStoredAiMetadata(),
     data_rights: StoredDataRights = zeroStoredDataRights(),
     supply_chain: StoredSupplyChain = zeroStoredSupplyChain(),
@@ -625,7 +625,7 @@ test "permission text references preserve the full pooled offset range" {
     const text_ref = PermissionTextRef.init(0xabcd, 3);
     try std.testing.expectEqualSlices(u8, &.{ 0xcd, 0xab, 3 }, &text_ref.bytes);
 
-    var text = [_]u8{0} ** 0xabd0;
+    var text = @as([0xabd0]u8, @splat(0));
     @memcpy(text[0xabcd..0xabd0], "end");
     try std.testing.expectEqualStrings("end", text_ref.slice(&text));
 }
@@ -656,10 +656,10 @@ test "package results use compact bounded metadata" {
 pub fn zeroBundle() InstalledBundle {
     return .{
         .bundle_id_len = 0,
-        .bundle_id = [_]u8{0} ** MAX_LABEL_BYTES,
+        .bundle_id = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .active_revision_slot = 0,
         .rollback_revision_slot = null,
-        .revisions = [_]BundleRevision{zeroBundleRevision()} ** MAX_REVISIONS_PER_BUNDLE,
+        .revisions = @as([MAX_REVISIONS_PER_BUNDLE]BundleRevision, @splat(zeroBundleRevision())),
     };
 }
 

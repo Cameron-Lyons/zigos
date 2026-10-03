@@ -66,7 +66,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Kernel Build
-      command: ./scripts/zig.sh build -Doptimize=ReleaseFast kernel
+      command: ./scripts/zig.sh build -Doptimize=fast kernel
       install-build-dependencies: false
 
   spec-conformance:
@@ -74,7 +74,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Spec Conformance
-      command: ./scripts/zig.sh build -Doptimize=ReleaseFast spec-conformance
+      command: ./scripts/zig.sh build -Doptimize=fast spec-conformance
 
   host-tests:
     needs: zig-toolchain
@@ -89,7 +89,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Native Smoke
-      command: ./scripts/zig.sh build -Doptimize=ReleaseFast zigos-native-smoke-test
+      command: ./scripts/zig.sh build -Doptimize=fast zigos-native-smoke-test
       timeout-minutes: 30
 
   long-mode-entry:
@@ -97,7 +97,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: x86-64 Boot Path
-      command: ./scripts/zig.sh build -Doptimize=ReleaseFast x86_64-long-mode-entry-check x86_64-userspace-launch-check
+      command: ./scripts/zig.sh build -Doptimize=fast x86_64-long-mode-entry-check x86_64-userspace-launch-check
       timeout-minutes: 30
 
   tpm-quotes:
@@ -105,7 +105,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: TPM Quotes
-      command: TPM2_QEMU_SECONDS=180 ./scripts/zig.sh build -Doptimize=ReleaseFast tpm2-quote-qemu-test
+      command: TPM2_QEMU_SECONDS=180 ./scripts/zig.sh build -Doptimize=fast tpm2-quote-qemu-test
       timeout-minutes: 20
 
   benchmark:
@@ -113,7 +113,7 @@ jobs:
     uses: ./.github/workflows/run-zig-summary-command.yml
     with:
       job-name: Native Benchmarks
-      command: QEMU_ACCELERATOR=kvm ./scripts/zig.sh build -Doptimize=ReleaseFast benchmark
+      command: QEMU_ACCELERATOR=kvm ./scripts/zig.sh build -Doptimize=fast benchmark
       log-path: build/kernel-benchmark.log
       summary-path: build/kernel-benchmark-summary.md
       artifact-name: kernel-benchmark
@@ -124,5 +124,5 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Production and Verification ISO Build
-      command: ./scripts/zig.sh build -Doptimize=ReleaseFast iso iso-verification
+      command: ./scripts/zig.sh build -Doptimize=fast iso iso-verification
       timeout-minutes: 20

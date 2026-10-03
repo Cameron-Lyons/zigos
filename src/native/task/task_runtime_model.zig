@@ -133,7 +133,7 @@ pub const ExecutableImageSpec = struct {
     file_size_bytes: UserImageByteLength = 0,
     file_sha256: crypto_hash.Digest = crypto_hash.zero_digest,
     segment_count: u8 = 0,
-    segments: [MAX_EXECUTABLE_SEGMENTS]ExecutableSegmentSpec = [_]ExecutableSegmentSpec{ExecutableSegmentSpec{}} ** MAX_EXECUTABLE_SEGMENTS,
+    segments: [MAX_EXECUTABLE_SEGMENTS]ExecutableSegmentSpec = @as([MAX_EXECUTABLE_SEGMENTS]ExecutableSegmentSpec, @splat(ExecutableSegmentSpec{})),
 
     pub fn isPresent(self: *const ExecutableImageSpec) bool {
         return self.entry_point != 0 and self.segment_count != 0;
@@ -307,8 +307,8 @@ pub const TaskProvenanceRecord = struct {
     release_transparency_root_fingerprint: u64 = 0,
     release_transparency_log_head_fingerprint: u64 = 0,
     denial_fingerprint: u64 = 0,
-    operation: [debug_contract.MAX_LABEL_BYTES]u8 = [_]u8{0} ** debug_contract.MAX_LABEL_BYTES,
-    detail: [debug_contract.MAX_DETAIL_BYTES]u8 = [_]u8{0} ** debug_contract.MAX_DETAIL_BYTES,
+    operation: [debug_contract.MAX_LABEL_BYTES]u8 = @as([debug_contract.MAX_LABEL_BYTES]u8, @splat(0)),
+    detail: [debug_contract.MAX_DETAIL_BYTES]u8 = @as([debug_contract.MAX_DETAIL_BYTES]u8, @splat(0)),
     kind: debug_contract.ProvenanceKind = .none,
     decision: debug_contract.Decision = .allowed,
     target_kind: ?capability.CapabilityTargetKind = null,
@@ -466,15 +466,15 @@ pub const TaskCreateRequest = struct {
 pub const CSPACE_SLOT_EMPTY: u8 = 0xFF;
 
 pub const TaskColdRecord = struct {
-    execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = [_]ExecutionComponentRecord{zeroExecutionComponent()} ** MAX_TASK_COMPONENTS,
-    capability_ids: [MAX_TASK_CAPABILITIES]u64 = [_]u64{0} ** MAX_TASK_CAPABILITIES,
+    execution_components: [MAX_TASK_COMPONENTS]ExecutionComponentRecord = @as([MAX_TASK_COMPONENTS]ExecutionComponentRecord, @splat(zeroExecutionComponent())),
+    capability_ids: [MAX_TASK_CAPABILITIES]u64 = @as([MAX_TASK_CAPABILITIES]u64, @splat(0)),
     /// Userspace name for each dense capability. Stable across revoke of a different capability.
-    stable_slot_of_dense: [MAX_TASK_CAPABILITIES]u8 = [_]u8{CSPACE_SLOT_EMPTY} ** MAX_TASK_CAPABILITIES,
+    stable_slot_of_dense: [MAX_TASK_CAPABILITIES]u8 = @as([MAX_TASK_CAPABILITIES]u8, @splat(CSPACE_SLOT_EMPTY)),
     /// Dense index for each userspace cspace slot. Empty slots stay `CSPACE_SLOT_EMPTY`.
-    dense_of_stable: [MAX_TASK_CAPABILITIES]u8 = [_]u8{CSPACE_SLOT_EMPTY} ** MAX_TASK_CAPABILITIES,
+    dense_of_stable: [MAX_TASK_CAPABILITIES]u8 = @as([MAX_TASK_CAPABILITIES]u8, @splat(CSPACE_SLOT_EMPTY)),
     capability_generation: u64 = 1,
-    audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = [_]AuditEvent{AuditEvent{ .kind = .created }} ** MAX_AUDIT_EVENTS,
-    provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord = [_]TaskProvenanceRecord{TaskProvenanceRecord{}} ** MAX_TASK_PROVENANCE_EVENTS,
+    audit_trail: [MAX_AUDIT_EVENTS]AuditEvent = @as([MAX_AUDIT_EVENTS]AuditEvent, @splat(AuditEvent{ .kind = .created })),
+    provenance_trail: [MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord = @as([MAX_TASK_PROVENANCE_EVENTS]TaskProvenanceRecord, @splat(TaskProvenanceRecord{})),
 };
 
 pub const TaskRecord = struct {
@@ -615,7 +615,7 @@ pub const TaskHandle = TaskArena.Handle;
 pub const TaskOwnerIndex = indexed_arena.MultimapIndex(MAX_TASKS, MAX_TASKS, TASK_OWNER_INDEX_CAPACITY);
 
 pub fn taskOwnerIndexKey(owner: principal.PrincipalId) u64 {
-    const kind_bits = @as(u64, @intFromEnum(owner.kind)) + 1;
+    const kind_bits = @as(u64, @backingInt(owner.kind)) + 1;
     return indexed_arena.nonZeroKey((owner.serial *% 0x100) ^ kind_bits);
 }
 
@@ -637,10 +637,10 @@ pub const Snapshot = struct {
     next_namespace_id: u64 = 1,
     next_component_id: u64 = 1,
     task_count: u16 = 0,
-    tasks: [MAX_TASKS]TaskSlot = [_]TaskSlot{TaskSlot{}} ** MAX_TASKS,
-    task_cold: [MAX_TASKS]TaskColdRecord = [_]TaskColdRecord{zeroTaskCold()} ** MAX_TASKS,
+    tasks: [MAX_TASKS]TaskSlot = @as([MAX_TASKS]TaskSlot, @splat(TaskSlot{})),
+    task_cold: [MAX_TASKS]TaskColdRecord = @as([MAX_TASKS]TaskColdRecord, @splat(zeroTaskCold())),
     address_space_count: u16 = 0,
-    address_spaces: [MAX_TASKS]AddressSpaceSlot = [_]AddressSpaceSlot{AddressSpaceSlot{}} ** MAX_TASKS,
+    address_spaces: [MAX_TASKS]AddressSpaceSlot = @as([MAX_TASKS]AddressSpaceSlot, @splat(AddressSpaceSlot{})),
 };
 
 test "task runtime uses capacity-sized resident metadata" {

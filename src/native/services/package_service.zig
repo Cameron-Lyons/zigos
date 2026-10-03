@@ -1485,7 +1485,7 @@ test "package service rejects stale update metadata publisher drift and channel 
         .source_identity = "store:zigos",
         .data_schema_version = 0,
     }, null));
-    const oversized_source = [_]u8{'s'} ** (MAX_INSTALL_SOURCE_BYTES + 1);
+    const oversized_source = @as([MAX_INSTALL_SOURCE_BYTES + 1]u8, @splat('s'));
     try std.testing.expectError(error.InstallSourceTooLong, service.install(.{
         .bundle = v1,
         .source_identity = oversized_source[0..],
@@ -1843,7 +1843,7 @@ test "package service rejects oversized manifests instead of truncating stored m
         .seed = signing.seedFromByte(0x36),
     };
     try trustTestPublisher(&service, signer_identity, "Example Software");
-    const long_bundle_id = [_]u8{'b'} ** (MAX_LABEL_BYTES + 1);
+    const long_bundle_id = @as([MAX_LABEL_BYTES + 1]u8, @splat('b'));
     const interfaces = [_]manifest.InterfaceDecl{
         .{ .name = "zigos.workspace.document" },
         .{ .name = "zigos.object.workspace" },
@@ -2431,7 +2431,7 @@ test "package revisions pool permission text and preserve rollback values" {
 
     const recycled_revision = bundle.activeRevision();
     const recycled_permission_text_len: usize = recycled_revision.permission_text_len;
-    const zero_permission_text = [_]u8{0} ** MAX_PERMISSION_TEXT_BYTES_PER_REVISION;
+    const zero_permission_text = @as([MAX_PERMISSION_TEXT_BYTES_PER_REVISION]u8, @splat(0));
     try std.testing.expect(recycled_permission_text_len < previous_permission_text_len);
     try std.testing.expectEqualSlices(
         u8,
@@ -2443,9 +2443,9 @@ test "package revisions pool permission text and preserve rollback values" {
 }
 
 test "package permission text storage enforces individual and revision budgets" {
-    const full_resource = [_]u8{'r'} ** MAX_PERMISSION_RESOURCE_BYTES;
-    const full_reason = [_]u8{'q'} ** model.MAX_PERMISSION_REASON_BYTES;
-    var resources = [_][MAX_PERMISSION_RESOURCE_BYTES]u8{full_resource} ** 7;
+    const full_resource = @as([MAX_PERMISSION_RESOURCE_BYTES]u8, @splat('r'));
+    const full_reason = @as([model.MAX_PERMISSION_REASON_BYTES]u8, @splat('q'));
+    var resources = @as([7][MAX_PERMISSION_RESOURCE_BYTES]u8, @splat(full_resource));
     var permissions: [resources.len]manifest.PermissionRequest = undefined;
     for (&permissions, 0..) |*permission, index| {
         resources[index][0] = @intCast(index + 1);
@@ -2477,7 +2477,7 @@ test "package permission text storage enforces individual and revision budgets" 
     );
     try std.testing.expectEqual(@as(u8, 0), bundle.revisionCount());
 
-    const oversized_resource = [_]u8{'r'} ** (MAX_PERMISSION_RESOURCE_BYTES + 1);
+    const oversized_resource = @as([MAX_PERMISSION_RESOURCE_BYTES + 1]u8, @splat('r'));
     const oversized_permission = [_]manifest.PermissionRequest{.{
         .kind = .object_access,
         .resource = oversized_resource[0..],

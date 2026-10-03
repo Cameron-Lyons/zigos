@@ -257,7 +257,7 @@ pub const interface_specs = [_]InterfaceSpec{
 pub const INTERFACE_COUNT: usize = interface_specs.len;
 pub const DIRECT_INTERFACE_INDEX = true;
 pub const TOTAL_INTERFACE_ID_MAP = true;
-const FIRST_INTERFACE_ID: u16 = @intFromEnum(interface_specs[0].id);
+const FIRST_INTERFACE_ID: u16 = @backingInt(interface_specs[0].id);
 
 const OperationSpec = struct {
     id: OperationId,
@@ -428,7 +428,7 @@ pub const InterfaceContract = struct {
     operations: [MAX_OPERATIONS_PER_INTERFACE]OperationDecl,
 
     pub fn operation(self: *const InterfaceContract, operation_id: OperationId) ?OperationDecl {
-        const ordinal = @intFromEnum(operation_id) & 0x00FF;
+        const ordinal = @backingInt(operation_id) & 0x00FF;
         if (ordinal == 0) return null;
         const operation_index: usize = @intCast(ordinal - 1);
         if (operation_index >= @as(usize, self.operation_count)) return null;
@@ -516,7 +516,7 @@ pub fn contractForId(interface_id: InterfaceId) *const InterfaceContract {
 }
 
 pub fn interfaceIndexForId(interface_id: InterfaceId) usize {
-    return @intCast(@intFromEnum(interface_id) - FIRST_INTERFACE_ID);
+    return @intCast(@backingInt(interface_id) - FIRST_INTERFACE_ID);
 }
 
 pub fn interfaceIdForDecl(interface: manifest.InterfaceDecl) ?InterfaceId {
@@ -548,7 +548,7 @@ pub fn validateMessage(
     if (header.abi_version != VERSION) return error.UnsupportedAbiVersion;
     if (header.subject_task_id == 0) return error.SubjectTaskRequired;
     const iface_contract = contractForId(interface_id);
-    if (header.operation != @intFromEnum(operation_id)) return error.UnknownOperation;
+    if (header.operation != @backingInt(operation_id)) return error.UnknownOperation;
     const operation_decl = iface_contract.operation(operation_id) orelse return error.UnknownOperation;
     if (operation_decl.request_size != actual_request_len) return error.InvalidRequestLength;
     if (operation_decl.response_size != actual_response_len) return error.InvalidResponseLength;
@@ -631,12 +631,12 @@ fn buildServiceCatalogBindings() [service_binding_specs.len]ServiceCatalogBindin
 
 fn buildContracts() [interface_specs.len]InterfaceContract {
     @setEvalBranchQuota(65536);
-    if (interface_specs.len != std.meta.fields(InterfaceId).len) {
+    if (interface_specs.len != @typeInfo(InterfaceId).@"enum".field_names.len) {
         @compileError("every component interface id must have one schema contract");
     }
     var result: [interface_specs.len]InterfaceContract = undefined;
     inline for (interface_specs, 0..) |spec, index| {
-        if (@as(usize, @intFromEnum(spec.id)) != @as(usize, FIRST_INTERFACE_ID) + index) {
+        if (@as(usize, @backingInt(spec.id)) != @as(usize, FIRST_INTERFACE_ID) + index) {
             @compileError("component interface ids must remain contiguous for direct indexing");
         }
         result[index] = buildContract(spec);
@@ -654,14 +654,14 @@ fn buildContract(comptime spec: InterfaceSpec) InterfaceContract {
         },
         .contract_hash = hashContract(spec),
         .operation_count = 0,
-        .operations = [_]OperationDecl{emptyOperation()} ** MAX_OPERATIONS_PER_INTERFACE,
+        .operations = @as([MAX_OPERATIONS_PER_INTERFACE]OperationDecl, @splat(emptyOperation())),
     };
     comptime var expected_ordinal: u16 = 1;
     comptime var operation_prefix: ?u16 = null;
     inline for (operation_specs) |operation_spec| {
         _ = interfaceSpec(operation_spec.interface);
         if (operation_spec.interface == spec.key) {
-            const raw_id = @intFromEnum(operation_spec.id);
+            const raw_id = @backingInt(operation_spec.id);
             if ((raw_id & 0x00FF) != expected_ordinal) {
                 @compileError("component ABI operation ids must remain contiguous within each interface");
             }

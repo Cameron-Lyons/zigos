@@ -113,7 +113,7 @@ pub const Notification = struct {
     suppression_policy: SuppressionPolicy = .allow_repeat,
     suppressed: bool = false,
     detail_len: u8 = 0,
-    detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
+    detail: [MAX_DETAIL_BYTES]u8 = @as([MAX_DETAIL_BYTES]u8, @splat(0)),
 
     pub fn detailSlice(self: *const Notification) []const u8 {
         return self.detail[0..@as(usize, self.detail_len)];
@@ -168,7 +168,7 @@ comptime {
 
 pub const Center = struct {
     next_notification_sequence: u64 = 1,
-    notifications: [MAX_NOTIFICATIONS]Notification = [_]Notification{.{}} ** MAX_NOTIFICATIONS,
+    notifications: [MAX_NOTIFICATIONS]Notification = @as([MAX_NOTIFICATIONS]Notification, @splat(.{})),
     permanent_attention_counts: AttentionCounts = .{},
     notification_count: u8 = 0,
     visible_notification_count: u8 = 0,
@@ -664,7 +664,7 @@ test "notification center reclaims suppressed slots when the table is full" {
     var center = Center.init();
     const source = principal.PrincipalId{ .kind = .service, .serial = 11 };
 
-    var notification_ids: [MAX_NOTIFICATIONS]u64 = [_]u64{0} ** MAX_NOTIFICATIONS;
+    var notification_ids: [MAX_NOTIFICATIONS]u64 = @as([MAX_NOTIFICATIONS]u64, @splat(0));
     for (0..MAX_NOTIFICATIONS) |index| {
         const notification = try center.post(.{
             .source = source,

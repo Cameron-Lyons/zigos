@@ -7,7 +7,7 @@ const maximum_production_boot_payload_size = kernel_role_options.maximum_product
 const maximum_production_symbol_count = kernel_role_options.maximum_production_symbol_count;
 
 const elf_header_size: usize = @sizeOf(elf.Elf32_Ehdr);
-const program_header_size: usize = @sizeOf(elf.Elf32_Phdr);
+const program_header_size: usize = @sizeOf(elf.Elf32.Phdr);
 const section_header_size: usize = @sizeOf(elf.Elf32_Shdr);
 const symbol_size: usize = @sizeOf(elf.Elf32_Sym);
 
@@ -803,27 +803,27 @@ fn parseProgramHeader(
     const offset = std.math.add(usize, table.offset, delta) catch return error.IntegerOverflow;
     return switch (table.elf_class) {
         .elf32 => header: {
-            const raw = try readStruct(elf.Elf32_Phdr, bytes, offset);
+            const raw = try readStruct(elf.Elf32.Phdr, bytes, offset);
             break :header .{
-                .segment_type = raw.p_type,
-                .offset = raw.p_offset,
-                .virtual_address = raw.p_vaddr,
-                .file_size = raw.p_filesz,
-                .memory_size = raw.p_memsz,
-                .flags = raw.p_flags,
-                .alignment = raw.p_align,
+                .segment_type = @backingInt(raw.type),
+                .offset = raw.offset,
+                .virtual_address = raw.vaddr,
+                .file_size = raw.filesz,
+                .memory_size = raw.memsz,
+                .flags = @bitCast(raw.flags),
+                .alignment = raw.@"align",
             };
         },
         .elf64 => header: {
-            const raw = try readStruct(elf.Elf64_Phdr, bytes, offset);
+            const raw = try readStruct(elf.Elf64.Phdr, bytes, offset);
             break :header .{
-                .segment_type = raw.p_type,
-                .offset = raw.p_offset,
-                .virtual_address = raw.p_vaddr,
-                .file_size = raw.p_filesz,
-                .memory_size = raw.p_memsz,
-                .flags = raw.p_flags,
-                .alignment = raw.p_align,
+                .segment_type = @backingInt(raw.type),
+                .offset = raw.offset,
+                .virtual_address = raw.vaddr,
+                .file_size = raw.filesz,
+                .memory_size = raw.memsz,
+                .flags = @bitCast(raw.flags),
+                .alignment = raw.@"align",
             };
         },
     };
@@ -838,8 +838,8 @@ fn elfHeaderSize(elf_class: ElfClass) usize {
 
 fn programHeaderSize(elf_class: ElfClass) usize {
     return switch (elf_class) {
-        .elf32 => @sizeOf(elf.Elf32_Phdr),
-        .elf64 => @sizeOf(elf.Elf64_Phdr),
+        .elf32 => @sizeOf(elf.Elf32.Phdr),
+        .elf64 => @sizeOf(elf.Elf64.Phdr),
     };
 }
 
@@ -1469,7 +1469,7 @@ test "role validation rejects leaked and undersized proof kernels" {
 }
 
 test "CLI parsing requires exact role-specific userspace artifact counts" {
-    var args = [_][]const u8{"artifact"} ** expected_cli_arg_count;
+    var args: [expected_cli_arg_count][]const u8 = @splat("artifact");
     args[0] = "check-kernel-roles";
     args[1] = "production-kernel.elf";
     args[2] = "verification-kernel.elf";
@@ -1484,7 +1484,7 @@ test "CLI parsing requires exact role-specific userspace artifact counts" {
     try std.testing.expectEqualStrings("verification-kernel.elf", parsed.verification_kernel_path);
 
     try std.testing.expectError(error.InvalidArgumentCount, parseCliInputs(args[0 .. args.len - 1]));
-    var extra_args = [_][]const u8{"artifact"} ** (expected_cli_arg_count + 1);
+    var extra_args: [expected_cli_arg_count + 1][]const u8 = @splat("artifact");
     try std.testing.expectError(error.InvalidArgumentCount, parseCliInputs(&extra_args));
 
     args[3] = verification_userspace_marker;
@@ -1600,7 +1600,7 @@ test "verification userspace validation requires exact identities and MMU positi
 }
 
 test "userspace ELF analysis scans loaded identities and executable probe sentinels" {
-    var storage = [_]u8{0} ** 2048;
+    var storage: [2048]u8 = @splat(0);
     const bytes = buildTestElf(&storage);
 
     const non_executable = try analyzeUserspaceElf(bytes);
@@ -1663,7 +1663,7 @@ test "userspace ELF analysis scans loaded identities and executable probe sentin
 }
 
 test "userspace ELF analysis rejects page-padded file layouts" {
-    var storage = [_]u8{0} ** 8192;
+    var storage: [8192]u8 = @splat(0);
     const compact = buildTestElf(&storage);
     const header = try parseHeader(compact);
     const programs = try resolveProgramTable(compact, header);
@@ -1680,7 +1680,7 @@ test "userspace ELF analysis rejects page-padded file layouts" {
 }
 
 test "ELF parser reads loaded state, defined symbols, and workload signatures" {
-    var storage = [_]u8{0} ** 2048;
+    var storage: [2048]u8 = @splat(0);
     const bytes = buildTestElf(&storage);
     const analysis = try analyzeElf(bytes);
     try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
@@ -1777,7 +1777,7 @@ test "kernel ELF section policy rejects unknown and incorrectly flagged sections
 }
 
 test "ELF64 parser reads the same loaded-state and symbol contract" {
-    var storage = [_]u8{0} ** 4096;
+    var storage: [4096]u8 = @splat(0);
     const bytes = buildTestElf64(&storage);
     const analysis = try analyzeElf(bytes);
     try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
@@ -1930,7 +1930,7 @@ fn buildTestElf64(storage: []u8) []u8 {
     const program_count: usize = 2;
     const section_count: usize = 6;
     const program_table_offset = @sizeOf(elf.Elf64_Ehdr);
-    const section_table_offset = program_table_offset + program_count * @sizeOf(elf.Elf64_Phdr);
+    const section_table_offset = program_table_offset + program_count * @sizeOf(elf.Elf64.Phdr);
     const section_names = "\x00.shstrtab\x00.data\x00.bss\x00.strtab\x00.symtab\x00";
     const symbol_names = "\x00native.session.proofs.runtime_negative_proofs.fixture\x00native.session.booted_evidence.runProduction\x00";
     const section_names_offset = section_table_offset + section_count * @sizeOf(elf.Elf64_Shdr);
@@ -1952,32 +1952,32 @@ fn buildTestElf64(storage: []u8) []u8 {
     header.e_phoff = program_table_offset;
     header.e_shoff = section_table_offset;
     header.e_ehsize = @sizeOf(elf.Elf64_Ehdr);
-    header.e_phentsize = @sizeOf(elf.Elf64_Phdr);
+    header.e_phentsize = @sizeOf(elf.Elf64.Phdr);
     header.e_phnum = program_count;
     header.e_shentsize = @sizeOf(elf.Elf64_Shdr);
     header.e_shnum = section_count;
     header.e_shstrndx = 1;
     writeStruct(elf.Elf64_Ehdr, storage, 0, header);
 
-    writeStruct(elf.Elf64_Phdr, storage, program_table_offset, .{
-        .p_type = pt_load,
-        .p_flags = 4,
-        .p_offset = 0,
-        .p_vaddr = 0,
-        .p_paddr = 0,
-        .p_filesz = file_size,
-        .p_memsz = file_size,
-        .p_align = 1,
+    writeStruct(elf.Elf64.Phdr, storage, program_table_offset, .{
+        .type = .LOAD,
+        .flags = .{ .R = true },
+        .offset = 0,
+        .vaddr = 0,
+        .paddr = 0,
+        .filesz = file_size,
+        .memsz = file_size,
+        .@"align" = 1,
     });
-    writeStruct(elf.Elf64_Phdr, storage, program_table_offset + @sizeOf(elf.Elf64_Phdr), .{
-        .p_type = pt_load,
-        .p_flags = 4 | pf_write,
-        .p_offset = data_offset,
-        .p_vaddr = 0x2000,
-        .p_paddr = 0x2000,
-        .p_filesz = 16,
-        .p_memsz = 48,
-        .p_align = 1,
+    writeStruct(elf.Elf64.Phdr, storage, program_table_offset + @sizeOf(elf.Elf64.Phdr), .{
+        .type = .LOAD,
+        .flags = .{ .R = true, .W = true },
+        .offset = data_offset,
+        .vaddr = 0x2000,
+        .paddr = 0x2000,
+        .filesz = 16,
+        .memsz = 48,
+        .@"align" = 1,
     });
 
     writeStruct(elf.Elf64_Shdr, storage, section_table_offset + @sizeOf(elf.Elf64_Shdr), .{

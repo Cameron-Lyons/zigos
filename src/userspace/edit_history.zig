@@ -30,8 +30,8 @@ pub const Change = struct {
 // complete edits are retired under either budget. Revision identities survive
 // eviction and branching so delayed save receipts cannot bless another edit.
 pub const History = struct {
-    edits: [MAX_EDITS]Edit = [_]Edit{std.mem.zeroes(Edit)} ** MAX_EDITS,
-    bytes: [BYTE_CAPACITY]u8 = [_]u8{0} ** BYTE_CAPACITY,
+    edits: [MAX_EDITS]Edit = @as([MAX_EDITS]Edit, @splat(std.mem.zeroes(Edit))),
+    bytes: [BYTE_CAPACITY]u8 = @as([BYTE_CAPACITY]u8, @splat(0)),
     base_revision: u64 = 0,
     next_revision: u64 = 1,
     saved_revision: ?u64 = 0,
@@ -178,8 +178,8 @@ test "edit history evicts complete records under both budgets and never reuses b
     try std.testing.expect(std.mem.allEqual(u8, history.bytes[history.byte_length..], 0));
 
     history = .{};
-    const full_a = [_]u8{'a'} ** 512;
-    const full_b = [_]u8{'b'} ** 512;
+    const full_a = @as([512]u8, @splat('a'));
+    const full_b = @as([512]u8, @splat('b'));
     history.remember(0, &full_a, &full_b, 512, 0, false, false);
     history.remember(0, &full_b, "c", 512, 0, false, false);
     try std.testing.expectEqual(@as(u8, 1), history.length);

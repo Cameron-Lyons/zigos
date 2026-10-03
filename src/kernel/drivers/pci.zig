@@ -117,7 +117,7 @@ pub fn probeMemoryBars(dev: PCIDevice) error{ UnsafeBarProbe, InvalidBar }![6]Ba
     // Upper status bits are write-one-to-clear, so always write zero there.
     writeConfigUnlocked(dev.bus, dev.device, dev.function, 4, command & ~@as(u16, 3));
     defer writeConfigUnlocked(dev.bus, dev.device, dev.function, 4, command);
-    var bars = [_]BarAperture{.{}} ** 6;
+    var bars = @as([6]BarAperture, @splat(.{}));
     var index: u16 = 0;
     while (index < 6) : (index += 1) {
         const offset: u16 = 0x10 + index * 4;
@@ -434,8 +434,8 @@ fn buildBootInventory() void {
     boot_inventory_valid = false;
     const inventory = ensureBootInventory() orelse return;
 
-    var visited = [_]bool{false} ** PCI_MAX_BUS_COUNT;
-    var queue = [_]u8{0} ** PCI_MAX_BUS_COUNT;
+    var visited = @as([PCI_MAX_BUS_COUNT]bool, @splat(false));
+    var queue = @as([PCI_MAX_BUS_COUNT]u8, @splat(0));
     var queue_head: usize = 0;
     var queue_tail: usize = 1;
     visited[0] = true;

@@ -13,11 +13,11 @@ pub const UPDATES_OBJECT_INDEX_INCREMENTALLY = true;
 pub const REMOVES_INDEX_ENTRIES_WITHOUT_TOMBSTONES = true;
 
 pub fn emptyEntryIndexTable(comptime capacity: usize) [capacity]EntryIndexSlot {
-    return [_]EntryIndexSlot{no_entry_slot} ** capacity;
+    return @as([capacity]EntryIndexSlot, @splat(no_entry_slot));
 }
 
 pub fn emptyEntryObjectIndexTable(comptime capacity: usize) [capacity]EntryObjectIndexSlot {
-    return [_]EntryObjectIndexSlot{no_entry_slot} ** capacity;
+    return @as([capacity]EntryObjectIndexSlot, @splat(no_entry_slot));
 }
 
 pub fn isLiveEntrySlot(slot: EntrySlotIndex) bool {

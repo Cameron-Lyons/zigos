@@ -32,18 +32,18 @@ pub fn addHostBenchmarks(b: *std.Build) void {
         const module = b.createModule(.{
             .root_source_file = b.path(benchmark.source),
             .target = b.graph.host,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
         const imported_module = b.createModule(.{
             .root_source_file = b.path(benchmark.import_source),
             .target = b.graph.host,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         });
         for (benchmark.imports) |dependency| {
             imported_module.addImport(dependency.name, b.createModule(.{
                 .root_source_file = b.path(dependency.source),
                 .target = b.graph.host,
-                .optimize = .ReleaseFast,
+                .optimize = .fast,
             }));
         }
         module.addImport(benchmark.import_name, imported_module);
@@ -57,7 +57,7 @@ pub fn addHostBenchmarks(b: *std.Build) void {
 
 pub fn addBenchmarkGate(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     benchmark_command: *std.Build.Step.Run,
 ) BenchmarkGate {
     const checker = b.addExecutable(.{
@@ -91,7 +91,7 @@ pub fn addBenchmarkGate(
 
 fn benchmarkGateModule(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("tools/check_kernel_benchmarks.zig"),

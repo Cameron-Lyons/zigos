@@ -593,7 +593,7 @@ test "bootstrap scenario world wires storage sync recovery and policy flows expl
     const journey_task = session_manager.testing.findTask("notes-task").?;
     var saw_recovery_flow = false;
     for (task_flows) |event| {
-        if (event.detail_code == @intFromEnum(native_ux.FlowKind.recover_system)) {
+        if (event.detail_code == @backingInt(native_ux.FlowKind.recover_system)) {
             saw_recovery_flow = true;
             try std.testing.expectEqual(journey_task.id, event.task_id);
             try std.testing.expectEqualStrings("recovery-environment", event.detailSlice());

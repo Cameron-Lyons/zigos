@@ -224,14 +224,14 @@ comptime {
     if (MAX_LABEL_BYTES > std.math.maxInt(u8)) {
         @compileError("permission denial labels exceed compact length metadata");
     }
-    for (std.meta.fields(manifest.PermissionKind)) |field| {
-        const kind: manifest.PermissionKind = @enumFromInt(field.value);
+    for (@typeInfo(manifest.PermissionKind).@"enum".field_values) |field| {
+        const kind: manifest.PermissionKind = @fromBackingInt(@intCast(field));
         if (capabilityLabel(kind).len > MAX_LABEL_BYTES) {
             @compileError("permission capability label exceeds its compact ceiling");
         }
     }
-    for (std.meta.fields(abi.DenialReason)) |field| {
-        const reason: abi.DenialReason = @enumFromInt(field.value);
+    for (@typeInfo(abi.DenialReason).@"enum".field_values) |field| {
+        const reason: abi.DenialReason = @fromBackingInt(@intCast(field));
         if (policyLabel(reason).len > MAX_LABEL_BYTES) {
             @compileError("permission policy label exceeds its compact ceiling");
         }
@@ -288,7 +288,7 @@ test "permission denial rendering respects exact buffer bounds" {
         try renderToBuffer(&exact_buffer, denied),
     );
 
-    var undersized_backing = [_]u8{0xa5} ** expected.len;
+    var undersized_backing = @as([expected.len]u8, @splat(0xa5));
     try std.testing.expectError(
         error.NoSpaceLeft,
         renderToBuffer(undersized_backing[0 .. expected.len - 1], denied),

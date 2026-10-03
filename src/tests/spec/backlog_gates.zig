@@ -71,8 +71,8 @@ pub fn networkTransportHardeningGate() !void {
         var last_frame_len: usize = 0;
         var expected_network_policy_id: u64 = 0;
         var expected_egress_capability_id: u64 = 0;
-        var last_destination: [6]u8 = [_]u8{0} ** 6;
-        var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
+        var last_destination: [6]u8 = @as([6]u8, @splat(0));
+        var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = @as([network_driver_task.MAX_NATIVE_FRAME_BYTES]u8, @splat(0));
 
         fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
@@ -96,7 +96,7 @@ pub fn networkTransportHardeningGate() !void {
 
     Driver.send_count = 0;
     Driver.last_frame_len = 0;
-    Driver.last_destination = [_]u8{0} ** 6;
+    Driver.last_destination = @as([6]u8, @splat(0));
     Driver.expected_network_policy_id = 0;
     Driver.expected_egress_capability_id = 0;
     network_driver_task.reset();
@@ -225,7 +225,7 @@ pub fn componentAbiDepthGate() !void {
     try std.testing.expectEqualStrings("zigos.package.install", typed_component_abi.interfaceForService(.package_install_update).name);
 
     var header = typed_component_abi.WireHeader{
-        .operation = @intFromEnum(typed_component_abi.OperationId.service_connect),
+        .operation = @backingInt(typed_component_abi.OperationId.service_connect),
         .correlation_id = 901,
         .subject_task_id = 77,
     };
@@ -255,7 +255,7 @@ pub fn componentAbiDepthGate() !void {
     ));
 
     const rollback_header = typed_component_abi.WireHeader{
-        .operation = @intFromEnum(typed_component_abi.OperationId.package_rollback),
+        .operation = @backingInt(typed_component_abi.OperationId.package_rollback),
         .correlation_id = 902,
         .subject_task_id = 78,
     };
@@ -390,7 +390,7 @@ pub fn firstHardwareTargetGate() !void {
         .bar0 = 0,
         .bar1 = 0,
     }));
-    var mmap = [_]u8{0} ** XHCI_CAPABILITY_MMAP_BYTES;
+    var mmap = @as([XHCI_CAPABILITY_MMAP_BYTES]u8, @splat(0));
     mmap[2] = 0x10;
     mmap[10] = 0x20;
     mmap[16] = 1;
@@ -453,7 +453,7 @@ pub fn firstHardwareTargetGate() !void {
     var hardware_xhci_missing_context = hardware_xhci_input_proof;
     hardware_xhci_missing_context.mmio.endpoint_context_writes = 0;
     try std.testing.expect(!hardware_xhci_missing_context.verified());
-    var hardware_nvme_image = [_]u8{0} ** (kernel_nvme.SECTOR_BYTES * 4);
+    var hardware_nvme_image = @as([kernel_nvme.SECTOR_BYTES * 4]u8, @splat(0));
     var hardware_nvme_namespaces = [_]kernel_nvme.Namespace{.{
         .id = 1,
         .sector_count = 4,
@@ -522,7 +522,7 @@ pub fn firstHardwareTargetGate() !void {
         .buffer_bytes = 64 * 16 * 4,
     });
     const framebuffer_expected_pixel: u32 = 0x00FF_00FF;
-    var framebuffer_scanline = [_]u8{0} ** (64 * 4);
+    var framebuffer_scanline = @as([64 * 4]u8, @splat(0));
     std.mem.writeInt(u32, framebuffer_scanline[0..4], framebuffer_expected_pixel, .little);
     const modeled_framebuffer_scanout_proof = try kernel_framebuffer.proveScanout(
         framebuffer_info,
@@ -1074,7 +1074,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .rx_ring_address = 0x1000,
         .tx_ring_address = 0x2000,
     }, .{ 0x02, 0x15, 0xF2, 0, 0, 7 }, intel_i225.defaultPhyLinkState(), intel_i225.defaultPacketBufferPlan());
-    var tx_frame = [_]u8{0xC1} ** intel_i225.MIN_ETHERNET_FRAME_BYTES;
+    var tx_frame = @as([intel_i225.MIN_ETHERNET_FRAME_BYTES]u8, @splat(0xC1));
     @memcpy(tx_frame[6..12], &i225_adapter.mac_address);
     const tx_completion = try i225_adapter.transmit(tx_frame[0..]);
     try std.testing.expect(tx_completion.descriptor_done);
@@ -1148,7 +1148,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     const input_report = try hid_controller.pollHidReport();
     try std.testing.expectEqual(@as(u8, 0x02), input_report.modifiers());
     try std.testing.expectEqual(@as(u8, 0x04), input_report.keySlots()[0]);
-    try std.testing.expectError(error.BadSignature, kernel_fadt.parseFadt(&[_]u8{0} ** kernel_fadt.MIN_FADT_PM_LENGTH));
+    try std.testing.expectError(error.BadSignature, kernel_fadt.parseFadt(&@as([kernel_fadt.MIN_FADT_PM_LENGTH]u8, @splat(0))));
     const suspend_firmware = kernel_fadt.FixedAcpiDescription{
         .revision = 6,
         .dsdt_address = 0x00AB_C000,
@@ -1178,9 +1178,9 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .version_id = 0xB00B,
         .activation_generation = 12,
         .rollback_generation = 4,
-        .measurement = [_]u8{0x5A} ** 32,
+        .measurement = @as([32]u8, @splat(0x5A)),
         .signer_len = 0,
-        .signer = [_]u8{0} ** immutable_base.MAX_LABEL_BYTES,
+        .signer = @as([immutable_base.MAX_LABEL_BYTES]u8, @splat(0)),
     };
     const staged_rollback = base_boot_selector.Decision{
         .active_slot = 0,
@@ -1219,7 +1219,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         .sector_count = 1,
     }));
     const nvme_capabilities = kernel_nvme.ControllerCapabilities{ .raw = (@as(u64, 63) | (@as(u64, 1) << 37)) };
-    var nvme_image = [_]u8{0} ** (kernel_nvme.SECTOR_BYTES * 4);
+    var nvme_image = @as([kernel_nvme.SECTOR_BYTES * 4]u8, @splat(0));
     var namespaces = [_]kernel_nvme.Namespace{.{
         .id = 1,
         .sector_count = 4,
@@ -1233,10 +1233,10 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
         kernel_nvme.defaultProofPrp1Address(),
         kernel_nvme.SECTOR_BYTES,
     );
-    var nvme_write = [_]u8{0x91} ** kernel_nvme.SECTOR_BYTES;
+    var nvme_write = @as([kernel_nvme.SECTOR_BYTES]u8, @splat(0x91));
     @memcpy(nvme_write[0..4], "NVMe");
     _ = try nvme_controller.write(1, 2, nvme_write[0..]);
-    var nvme_read = [_]u8{0} ** kernel_nvme.SECTOR_BYTES;
+    var nvme_read = @as([kernel_nvme.SECTOR_BYTES]u8, @splat(0));
     const nvme_completion = try nvme_controller.read(1, 2, nvme_read[0..]);
     try std.testing.expectEqual(@as(u16, 2), nvme_completion.command_id);
     try std.testing.expect(std.mem.eql(u8, nvme_write[0..], nvme_read[0..]));
@@ -1270,7 +1270,7 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expectError(error.KernelDeviceDataPlaneDisabled, kernel_data_plane_boundary.rejectKernelDeviceDataPlane(.{
         .service_id = 811,
         .device_id = 0x1F001,
-        .device_class = @intFromEnum(driver_service.DeviceClass.storage_controller),
+        .device_class = @backingInt(driver_service.DeviceClass.storage_controller),
     }));
     const excluded_subsystems = [_]kernel_data_plane_boundary.SubsystemPublicationRequest{
         .{ .kind = .windowing, .service_id = 831, .owner_task_id = 841, .endpoint_id = 851 },
@@ -1768,8 +1768,8 @@ test "backlog gates enforce UX rendering" {
 }
 
 fn expectAllMetadataTrue(metadata: anytype) !void {
-    inline for (std.meta.fields(@TypeOf(metadata))) |field| {
-        const value = @field(metadata, field.name);
+    inline for (@typeInfo(@TypeOf(metadata)).@"struct".field_names) |field| {
+        const value = @field(metadata, field);
         switch (@typeInfo(@TypeOf(value))) {
             .bool => try std.testing.expect(value),
             .@"struct" => try expectAllMetadataTrue(value),

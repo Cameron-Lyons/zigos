@@ -785,7 +785,7 @@ test "storage service reloads authoritative state from the attached volume after
     checkpoint_store.resetPersistent();
     defer checkpoint_store.resetPersistent();
 
-    var image = [_]u8{0} ** storage_volume.image_bytes;
+    var image = @as([storage_volume.image_bytes]u8, @splat(0));
     FakeStorageVolumeBackend.attach(&image);
     defer storage_volume.clearAttachedBackend();
 
@@ -918,8 +918,8 @@ test "storage service refreshes checkpoint backend after device republish" {
     checkpoint_store.resetPersistent();
     defer checkpoint_store.resetPersistent();
 
-    var first_image = [_]u8{0} ** storage_volume.image_bytes;
-    var second_image = [_]u8{0} ** storage_volume.image_bytes;
+    var first_image = @as([storage_volume.image_bytes]u8, @splat(0));
+    var second_image = @as([storage_volume.image_bytes]u8, @splat(0));
     RepublishedBackend.attachFirst(&first_image);
     defer storage_volume.clearAttachedBackend();
 
@@ -960,7 +960,7 @@ test "storage service coalesces checkpoint writes across an explicit batch" {
     checkpoint_store.resetPersistent();
     defer checkpoint_store.resetPersistent();
 
-    var image = [_]u8{0} ** storage_volume.image_bytes;
+    var image = @as([storage_volume.image_bytes]u8, @splat(0));
     FakeStorageVolumeBackend.attach(&image);
     defer storage_volume.clearAttachedBackend();
 
@@ -1049,7 +1049,7 @@ test "storage service retries transient checkpoint writes and durability barrier
     checkpoint_store.resetPersistent();
     defer checkpoint_store.resetPersistent();
 
-    var image = [_]u8{0} ** storage_volume.image_bytes;
+    var image = @as([storage_volume.image_bytes]u8, @splat(0));
     TransientCheckpointBackend.attach(&image, 1, 0);
     defer storage_volume.clearAttachedBackend();
 

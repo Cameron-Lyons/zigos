@@ -131,7 +131,7 @@ pub const ArtifactManifest = struct {
         return .{
             .generation = generation,
             .entry_count = 0,
-            .entries = [_]ArtifactManifestEntry{zeroRecord()} ** MAX_MANIFEST_ENTRIES,
+            .entries = @as([MAX_MANIFEST_ENTRIES]ArtifactManifestEntry, @splat(zeroRecord())),
         };
     }
 
@@ -144,7 +144,7 @@ pub const ArtifactManifest = struct {
         self.entries[self.entry_count] = .{
             .kind = kind,
             .label_len = 0,
-            .label = [_]u8{0} ** MAX_LABEL_BYTES,
+            .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
             .digest = digest,
         };
         self.entries[self.entry_count].label_len = @intCast(copyText(&self.entries[self.entry_count].label, label));
@@ -206,7 +206,7 @@ pub const BuildArtifactManifest = struct {
         return .{
             .generation = generation,
             .entry_count = 0,
-            .entries = [_]BuildArtifactEntry{zeroBuildArtifactEntry()} ** MAX_BUILD_ARTIFACTS,
+            .entries = @as([MAX_BUILD_ARTIFACTS]BuildArtifactEntry, @splat(zeroBuildArtifactEntry())),
             .signature = .{},
         };
     }
@@ -312,7 +312,7 @@ pub const MeasurementSnapshot = struct {
         var handoff = MeasurementSnapshot{
             .generation = boot.generation,
             .record_count = boot.record_count,
-            .records = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS,
+            .records = @as([MAX_RECORDS]MeasurementRecord, @splat(zeroRecord())),
             .root_digest = boot.root_digest,
         };
         @memcpy(handoff.records[0..boot.record_count], boot.records[0..boot.record_count]);
@@ -336,17 +336,17 @@ pub const BootSummary = struct {
         var summary = BootSummary{
             .generation = boot.generation,
             .record_count = @intCast(boot.record_count),
-            .kind_counts = [_]u16{0} ** MEASUREMENT_KIND_COUNT,
+            .kind_counts = @as([MEASUREMENT_KIND_COUNT]u16, @splat(0)),
             .root_digest = boot.root_digest,
         };
         for (boot.records[0..boot.record_count]) |record| {
-            summary.kind_counts[@intFromEnum(record.kind)] += 1;
+            summary.kind_counts[@backingInt(record.kind)] += 1;
         }
         return summary;
     }
 
     pub fn countKind(self: *const BootSummary, kind: MeasurementKind) u16 {
-        return self.kind_counts[@intFromEnum(kind)];
+        return self.kind_counts[@backingInt(kind)];
     }
 
     pub fn matchesRecord(self: *const BootSummary, boot: *const BootRecord) bool {
@@ -389,7 +389,7 @@ pub const Error = error{
 
 pub const Recorder = struct {
     generation: u64 = 0,
-    records: [MAX_RECORDS]MeasurementRecord = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS,
+    records: [MAX_RECORDS]MeasurementRecord = @as([MAX_RECORDS]MeasurementRecord, @splat(zeroRecord())),
     record_count: u8 = 0,
 
     pub fn init() Recorder {
@@ -399,7 +399,7 @@ pub const Recorder = struct {
     pub fn begin(self: *Recorder, generation: u64) void {
         self.generation = generation;
         self.record_count = 0;
-        self.records = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS;
+        self.records = @as([MAX_RECORDS]MeasurementRecord, @splat(zeroRecord()));
     }
 
     pub fn add(self: *Recorder, kind: MeasurementKind, label: []const u8, payload: []const u8) Error!void {
@@ -411,7 +411,7 @@ pub const Recorder = struct {
         self.records[self.record_count] = .{
             .kind = kind,
             .label_len = 0,
-            .label = [_]u8{0} ** MAX_LABEL_BYTES,
+            .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
             .digest = digest,
         };
         self.records[self.record_count].label_len = @intCast(copyText(&self.records[self.record_count].label, label));
@@ -630,7 +630,7 @@ pub fn bootRecordMatchesManifest(boot: *const BootRecord, artifact_manifest: *co
     if (artifact_manifest.entry_count > MAX_MANIFEST_ENTRIES) return false;
     if (boot.generation != artifact_manifest.generation) return false;
     if (boot.record_count != artifact_manifest.entry_count) return false;
-    var matched = [_]bool{false} ** MAX_MANIFEST_ENTRIES;
+    var matched = @as([MAX_MANIFEST_ENTRIES]bool, @splat(false));
     for (boot.records[0..boot.record_count]) |record| {
         var found = false;
         for (artifact_manifest.entries[0..artifact_manifest.entry_count], 0..) |entry, index| {
@@ -771,7 +771,7 @@ fn zeroRecord() MeasurementRecord {
     return .{
         .kind = .kernel,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .digest = crypto_hash.zero_digest,
     };
 }
@@ -780,7 +780,7 @@ fn zeroBuildArtifactEntry() BuildArtifactEntry {
     return .{
         .kind = .bootloader_source,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .digest = crypto_hash.zero_digest,
     };
 }
@@ -822,7 +822,7 @@ fn criticalServiceMeasurementPayload(
     std.mem.writeInt(u64, payload[32..40], image.id, .little);
     std.mem.writeInt(u64, payload[40..48], image.entry_point, .little);
     std.mem.writeInt(u64, payload[48..56], @intCast(image.byte_len), .little);
-    std.mem.writeInt(u16, payload[56..58], @intFromEnum(service.class), .little);
+    std.mem.writeInt(u16, payload[56..58], @backingInt(service.class), .little);
     std.mem.writeInt(u32, payload[58..62], image.contract_flags, .little);
     std.mem.writeInt(u16, payload[62..64], image.component_abi_version, .little);
     return payload[0..];
@@ -952,7 +952,7 @@ fn decodeSummary(payload: []const u8) Error!BootSummary {
     var summary = BootSummary{
         .generation = try reader.readU64(),
         .record_count = try reader.readU16(),
-        .kind_counts = [_]u16{0} ** MEASUREMENT_KIND_COUNT,
+        .kind_counts = @as([MEASUREMENT_KIND_COUNT]u16, @splat(0)),
         .root_digest = crypto_hash.zero_digest,
     };
     if (summary.record_count > MAX_RECORDS) return error.CorruptState;
@@ -1210,7 +1210,7 @@ test "signed artifact manifests bind required boot artifact classes before activ
     var boot = BootRecord{
         .generation = artifact_manifest.generation,
         .record_count = artifact_manifest.entry_count,
-        .records = [_]MeasurementRecord{zeroRecord()} ** MAX_RECORDS,
+        .records = @as([MAX_RECORDS]MeasurementRecord, @splat(zeroRecord())),
         .root_digest = crypto_hash.zero_digest,
     };
     @memcpy(boot.records[0..artifact_manifest.entry_count], artifact_manifest.entries[0..artifact_manifest.entry_count]);

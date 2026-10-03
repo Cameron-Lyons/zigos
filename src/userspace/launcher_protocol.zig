@@ -25,7 +25,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
     @memset(out, 0);
     std.mem.writeInt(u32, out[0..4], MAGIC, .little);
     out[4] = 2;
-    out[5] = @intFromEnum(frame.body);
+    out[5] = @backingInt(frame.body);
     std.mem.writeInt(u64, out[8..16], frame.token, .little);
     const length: usize = switch (frame.body) {
         .cancel => 16,
@@ -55,7 +55,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
         },
         .result => |result| blk: {
             if (!validResult(result)) return error.MalformedFrame;
-            out[16] = @intFromEnum(result.status);
+            out[16] = @backingInt(result.status);
             std.mem.writeInt(u64, out[24..32], result.task_id, .little);
             std.mem.writeInt(u64, out[32..40], result.window_id, .little);
             break :blk 40;
@@ -182,7 +182,7 @@ test "launcher protocol accepts only canonical bounded frames" {
     try std.testing.expectError(error.MalformedFrame, encode(&bytes, .{ .token = 1, .body = .{ .open = 4 } }));
     try std.testing.expectError(error.MalformedFrame, encode(&bytes, .{ .token = 1, .body = .{ .text = .{ .offset = MAX_PAGE_TEXT_BYTES, .bytes = "a" } } }));
     try std.testing.expect(validPageText("Notes\n文書", 2));
-    try std.testing.expect(validPageText("a" ** MAX_LABEL_BYTES, 1));
+    try std.testing.expect(validPageText(&@as([MAX_LABEL_BYTES]u8, @splat('a')), 1));
     try std.testing.expect(!validPageText("a\nb", 1));
     try std.testing.expect(!validPageText("a\n", 2));
     try std.testing.expect(!validPageText("a\r", 1));

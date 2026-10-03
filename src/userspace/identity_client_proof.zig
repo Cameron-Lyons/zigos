@@ -43,7 +43,7 @@ pub const Probe = struct {
         }
         const progress = self.client.step(transport);
         if (self.client.phase == .failed) {
-            mailbox.ui_interaction_hash = @intFromEnum(self.client.failure.?);
+            mailbox.ui_interaction_hash = @backingInt(self.client.failure.?);
             mailbox.ui_commit_count = 2;
         }
         if (self.client.result() != null) {

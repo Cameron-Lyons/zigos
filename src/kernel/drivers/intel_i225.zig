@@ -206,9 +206,9 @@ pub const SoftwareAdapter = struct {
     tx_tail: u32 = 0,
     rx_head: u32 = 0,
     last_tx_len: usize = 0,
-    last_tx_frame: [MAX_ETHERNET_FRAME_BYTES]u8 = [_]u8{0} ** MAX_ETHERNET_FRAME_BYTES,
+    last_tx_frame: [MAX_ETHERNET_FRAME_BYTES]u8 = @as([MAX_ETHERNET_FRAME_BYTES]u8, @splat(0)),
     pending_rx_len: usize = 0,
-    pending_rx_frame: [MAX_ETHERNET_FRAME_BYTES]u8 = [_]u8{0} ** MAX_ETHERNET_FRAME_BYTES,
+    pending_rx_frame: [MAX_ETHERNET_FRAME_BYTES]u8 = @as([MAX_ETHERNET_FRAME_BYTES]u8, @splat(0)),
     mmio: ?MmioState = null,
 
     pub fn init(ring_plan: RingPlan, mac_address: [6]u8) Error!SoftwareAdapter {
@@ -591,7 +591,7 @@ test "Intel I225-LM software adapter transmits and receives descriptor-backed fr
         .rx_ring_address = TEST_RX_RING_ADDRESS,
         .tx_ring_address = TEST_TX_RING_ADDRESS,
     }, .{ 0x02, 0x15, 0xF2, 0, 0, 1 }, defaultPhyLinkState(), defaultPacketBufferPlan());
-    var tx_frame = [_]u8{0xAB} ** MIN_ETHERNET_FRAME_BYTES;
+    var tx_frame = @as([MIN_ETHERNET_FRAME_BYTES]u8, @splat(0xAB));
     const broadcast = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
     @memcpy(tx_frame[0..6], broadcast[0..]);
     @memcpy(tx_frame[6..12], &adapter.mac_address);
@@ -602,10 +602,10 @@ test "Intel I225-LM software adapter transmits and receives descriptor-backed fr
     try std.testing.expectEqual(@as(u32, 1), adapter.tx_tail);
     try std.testing.expect(std.mem.eql(u8, tx_frame[0..], adapter.lastTransmitSlice()));
 
-    var rx_frame = [_]u8{0xCD} ** MIN_ETHERNET_FRAME_BYTES;
+    var rx_frame = @as([MIN_ETHERNET_FRAME_BYTES]u8, @splat(0xCD));
     @memcpy(rx_frame[0..6], &adapter.mac_address);
     try adapter.injectReceivedFrame(rx_frame[0..]);
-    var rx_buffer = [_]u8{0} ** MAX_ETHERNET_FRAME_BYTES;
+    var rx_buffer = @as([MAX_ETHERNET_FRAME_BYTES]u8, @splat(0));
     const rx = try adapter.receive(rx_buffer[0..]);
     try std.testing.expectEqual(@as(u32, 0), rx.descriptor_index);
     try std.testing.expect(rx.checksum_valid);
@@ -653,13 +653,13 @@ test "Intel I225-LM software adapter rejects invalid frame flow" {
         .rx_ring_address = TEST_RX_RING_ADDRESS,
         .tx_ring_address = TEST_TX_RING_ADDRESS,
     }, .{ 0x02, 0x15, 0xF2, 0, 0, 2 });
-    var too_small = [_]u8{0} ** (MIN_ETHERNET_FRAME_BYTES - 1);
+    var too_small = @as([MIN_ETHERNET_FRAME_BYTES - 1]u8, @splat(0));
     try std.testing.expectError(error.FrameTooSmall, adapter.transmit(too_small[0..]));
-    var frame = [_]u8{0xEE} ** MIN_ETHERNET_FRAME_BYTES;
+    var frame = @as([MIN_ETHERNET_FRAME_BYTES]u8, @splat(0xEE));
     try adapter.injectReceivedFrame(frame[0..]);
-    var short_buffer = [_]u8{0} ** (MIN_ETHERNET_FRAME_BYTES - 1);
+    var short_buffer = @as([MIN_ETHERNET_FRAME_BYTES - 1]u8, @splat(0));
     try std.testing.expectError(error.BufferTooSmall, adapter.receive(short_buffer[0..]));
-    var buffer = [_]u8{0} ** MIN_ETHERNET_FRAME_BYTES;
+    var buffer = @as([MIN_ETHERNET_FRAME_BYTES]u8, @splat(0));
     _ = try adapter.receive(buffer[0..]);
     try std.testing.expectError(error.RxRingEmpty, adapter.receive(buffer[0..]));
     try std.testing.expectError(error.ProofCycleCountInvalid, adapter.proveFrameCycles(0));

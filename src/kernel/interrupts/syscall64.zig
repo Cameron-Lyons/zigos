@@ -30,7 +30,7 @@ const SYSCALL_RFLAGS_MASK = RFLAGS_TRAP |
 extern fn zigos_syscall_entry() callconv(.c) void;
 extern var stack_top: u8;
 
-var cpu_states: [cpu_identity.MAX_CPUS]CpuState align(64) = [_]CpuState{.{}} ** cpu_identity.MAX_CPUS;
+var cpu_states: [cpu_identity.MAX_CPUS]CpuState align(64) = @as([cpu_identity.MAX_CPUS]CpuState, @splat(.{}));
 
 pub fn init() void {
     bindCpu(0, @intFromPtr(&stack_top));

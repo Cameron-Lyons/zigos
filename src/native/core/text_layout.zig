@@ -308,10 +308,12 @@ test "text layout word scan finds the first newline without reading past the sli
 test "visible text windows match independent caret lookup and row traversal" {
     const guard = Row{ .start = std.math.maxInt(usize), .end = std.math.maxInt(usize), .next = std.math.maxInt(usize), .soft = false };
     for ([_][]const u8{
-        "",                                              "\n", "\n\n", "abc", "abc\n", "abcdefghij\nxy\n",
+        "", "\n", "\n\n", "abc", "abc\n", "abcdefghij\nxy\n",
         "Ae\u{301}界Z\r\n\t猫\u{2028}x\u{2029}",
         "👩‍💻🇺🇸☃\u{fe0f}\tक्‍ष\r\nend",
-        "abcd\nefgh\nijkl\nmnop\nqrst\nuvwx\nyz\n" ** 3,
+        "abcd\nefgh\nijkl\nmnop\nqrst\nuvwx\nyz\n" ++
+            "abcd\nefgh\nijkl\nmnop\nqrst\nuvwx\nyz\n" ++
+            "abcd\nefgh\nijkl\nmnop\nqrst\nuvwx\nyz\n",
     }) |text| {
         for ([_]usize{ 0, 1, 2, 4, 5, 20 }) |columns| {
             const layout = Layout{ .text = text, .columns = columns };

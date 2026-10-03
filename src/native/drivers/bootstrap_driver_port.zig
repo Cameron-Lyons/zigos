@@ -119,7 +119,7 @@ pub const DeviceDataPlanePublication = struct {
     device_class: driver_service.DeviceClass = .graphics_adapter,
     device_id: u64,
     publisher_len: u8 = 0,
-    publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
+    publisher: [MAX_PUBLISHER_BYTES]u8 = @as([MAX_PUBLISHER_BYTES]u8, @splat(0)),
     kernel_bootstrap: bool = true,
     active_service_id: u64 = 0,
 
@@ -141,7 +141,7 @@ pub const Error = error{
 pub const NetworkPublication = struct {
     device_id: u64,
     publisher_len: u8 = 0,
-    publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
+    publisher: [MAX_PUBLISHER_BYTES]u8 = @as([MAX_PUBLISHER_BYTES]u8, @splat(0)),
     network_device: ?*const NetworkDevice = null,
     activator: ?NetworkActivator = null,
     kernel_bootstrap: bool = true,
@@ -161,7 +161,7 @@ pub const NetworkPublication = struct {
 pub const StoragePublication = struct {
     device_id: u64,
     publisher_len: u8 = 0,
-    publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
+    publisher: [MAX_PUBLISHER_BYTES]u8 = @as([MAX_PUBLISHER_BYTES]u8, @splat(0)),
     backend: ?storage_volume.Backend = null,
     controller_session: ?StorageControllerSession = null,
     activator: ?StorageActivator = null,
@@ -181,12 +181,12 @@ pub const StoragePublication = struct {
 
 var published_network: ?NetworkPublication = null;
 var published_storage: ?StoragePublication = null;
-var published_device_planes = [_]?DeviceDataPlanePublication{null} ** device_class_count;
+var published_device_planes = @as([device_class_count]?DeviceDataPlanePublication, @splat(null));
 
 pub fn reset() void {
     published_network = null;
     published_storage = null;
-    published_device_planes = [_]?DeviceDataPlanePublication{null} ** device_class_count;
+    published_device_planes = @as([device_class_count]?DeviceDataPlanePublication, @splat(null));
     owned_storage_device_id = 0;
     owned_storage_task_id = 0;
     owned_storage_generation = 0;
@@ -737,10 +737,10 @@ fn supportsGenericDeviceDataPlane(device_class: driver_service.DeviceClass) bool
     };
 }
 
-const device_class_count = std.meta.fields(driver_service.DeviceClass).len;
+const device_class_count = @typeInfo(driver_service.DeviceClass).@"enum".field_names.len;
 
 fn deviceClassIndex(device_class: driver_service.DeviceClass) usize {
-    return @intFromEnum(device_class);
+    return @backingInt(device_class);
 }
 
 test "bootstrap driver publications use compact bounded metadata" {
@@ -999,8 +999,8 @@ test "refresh and active I/O keep owned submits after the kernel data plane is s
     try std.testing.expect(dataplane_handoff.claimed(device_id));
     try std.testing.expect(!dataplane_handoff.allowsKernelRuntimeIo(device_id));
 
-    var payload = [_]u8{0x11} ** storage_volume.sector_size;
-    var readback = [_]u8{0} ** storage_volume.sector_size;
+    var payload = @as([storage_volume.sector_size]u8, @splat(0x11));
+    var readback = @as([storage_volume.sector_size]u8, @splat(0));
     try std.testing.expect(activeStorageWrite(service_id, 3, payload[0..]));
     try std.testing.expect(activeStorageRead(service_id, 3, readback[0..]));
     try std.testing.expect(activeStorageFlush(service_id));
@@ -1085,7 +1085,7 @@ test "active nvme controller sessions reject stale broker generations" {
     const dma_domain_id: u64 = 0xD512;
 
     const Backing = struct {
-        var bytes = [_]u8{0} ** (storage_volume.sector_size * 8);
+        var bytes = @as([storage_volume.sector_size * 8]u8, @splat(0));
 
         fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
             const offset = std.math.mul(usize, @intCast(start_lba), storage_volume.sector_size) catch return false;
@@ -1169,7 +1169,7 @@ test "active nvme controller sessions reject stale broker generations" {
         &kernel_port,
     ));
 
-    var before_revoke = [_]u8{0x61} ** storage_volume.sector_size;
+    var before_revoke = @as([storage_volume.sector_size]u8, @splat(0x61));
     const label = "before-broker-revoke";
     @memcpy(before_revoke[0..label.len], label);
     try std.testing.expect(activeStorageWrite(service_id, 6, before_revoke[0..]));
@@ -1179,7 +1179,7 @@ test "active nvme controller sessions reject stale broker generations" {
     try std.testing.expect(device_broker.revokePciController(device_id));
     try std.testing.expect(!device_broker.brokeredDmaBufferStillValid(stale_session.brokered_dma_buffer));
 
-    var readback = [_]u8{0} ** storage_volume.sector_size;
+    var readback = @as([storage_volume.sector_size]u8, @splat(0));
     try std.testing.expect(!activeStorageRead(service_id, 6, readback[0..]));
     try std.testing.expect(device_broker.publishPciController(device_id));
     try std.testing.expect(!storageSessionIsCurrent(&stale_session));
@@ -1238,7 +1238,7 @@ test "kernel bootstrap cannot publish peripheral device data-plane transports di
         .compositor_policy,
     };
     for (peripheral_classes) |device_class| {
-        try std.testing.expect(!(try publishDeviceDataPlane(device_class, @as(u64, 0x9000) + @intFromEnum(device_class), "kernel-device", true)));
+        try std.testing.expect(!(try publishDeviceDataPlane(device_class, @as(u64, 0x9000) + @backingInt(device_class), "kernel-device", true)));
         try std.testing.expect(deviceDataPlanePublication(device_class) == null);
     }
 

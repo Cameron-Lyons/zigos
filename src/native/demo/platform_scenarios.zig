@@ -264,7 +264,7 @@ pub fn run(
                 "{s}:{d}:{d}",
                 .{
                     contract.serviceName(service_record.class),
-                    @intFromEnum(service_record.state),
+                    @backingInt(service_record.state),
                     service_record.restart_count,
                 },
             ) catch |err| native_util.bootProofFailure("platform scenarios", err);

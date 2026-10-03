@@ -620,12 +620,12 @@ pub const Feature = enum(u16) {
 pub const uses_single_requirement_enum = true;
 pub const generated_from_typed_idl = true;
 
-pub const feature_count = std.meta.fields(Feature).len;
+pub const feature_count = @typeInfo(Feature).@"enum".field_names.len;
 
 pub const Checklist = FeatureChecklist(Feature);
 
 fn FeatureChecklist(comptime FeatureEnum: type) type {
-    const count = std.meta.fields(FeatureEnum).len;
+    const count = @typeInfo(FeatureEnum).@"enum".field_names.len;
     return struct {
         const Self = @This();
 
@@ -644,7 +644,7 @@ fn FeatureChecklist(comptime FeatureEnum: type) type {
         }
 
         pub fn satisfied(self: Self, feature: FeatureEnum) bool {
-            return self.satisfied_features[@intFromEnum(feature)];
+            return self.satisfied_features[@backingInt(feature)];
         }
     };
 }
@@ -652,7 +652,7 @@ fn FeatureChecklist(comptime FeatureEnum: type) type {
 pub const uses_u16_feature_width = @typeInfo(Feature).@"enum".tag_type == u16;
 
 pub fn currentRepositoryContract() Checklist {
-    var features = [_]bool{false} ** feature_count;
+    var features = @as([feature_count]bool, @splat(false));
     fillBaseContract(&features);
     fillExtraContract(&features);
     fillThirdContract(&features);
@@ -716,26 +716,26 @@ pub const currentRepositoryTwentyFifthContract = currentRepositoryExtraContract;
 
 fn fillBaseContract(features: *[feature_count]bool) void {
     const default_ai = manifest.AiMetadata{};
-    features[@intFromEnum(Feature.native_only_apps)] = manifest.requiresApplicationPackaging("app.notes");
-    features[@intFromEnum(Feature.no_compatibility_namespace)] = !manifest.isApplicationBundle("compat.posix") and validationFailsWith(.{
+    features[@backingInt(Feature.native_only_apps)] = manifest.requiresApplicationPackaging("app.notes");
+    features[@backingInt(Feature.no_compatibility_namespace)] = !manifest.isApplicationBundle("compat.posix") and validationFailsWith(.{
         .bundle_id = "compat.posix",
         .display_name = "Compat POSIX",
         .publisher = "zigos.dev",
     }, error.CompatibilityNamespaceUnsupported);
-    features[@intFromEnum(Feature.typed_component_services)] = contractPresent("zigos.service.registry");
-    features[@intFromEnum(Feature.explicit_capability_grants)] = true;
-    features[@intFromEnum(Feature.object_native_storage)] = true;
-    features[@intFromEnum(Feature.local_first_sync)] = true;
-    features[@intFromEnum(Feature.policy_gated_egress)] = true;
-    features[@intFromEnum(Feature.device_bound_identity)] = true;
-    features[@intFromEnum(Feature.measured_boot_attestation)] = true;
-    features[@intFromEnum(Feature.signed_reversible_updates)] = true;
-    features[@intFromEnum(Feature.recovery_key_lifecycle)] = true;
-    features[@intFromEnum(Feature.restartable_userspace_drivers)] = true;
-    features[@intFromEnum(Feature.redacted_diagnostics)] = true;
-    features[@intFromEnum(Feature.private_local_ai)] = !default_ai.training_allowed and default_ai.locality == .inherit_task;
-    features[@intFromEnum(Feature.typed_ai_inference_service)] = contractPresent("zigos.ai.inference");
-    features[@intFromEnum(Feature.carbon_aware_scheduling)] = carbonAwareSchedulingBackedByPlanner();
+    features[@backingInt(Feature.typed_component_services)] = contractPresent("zigos.service.registry");
+    features[@backingInt(Feature.explicit_capability_grants)] = true;
+    features[@backingInt(Feature.object_native_storage)] = true;
+    features[@backingInt(Feature.local_first_sync)] = true;
+    features[@backingInt(Feature.policy_gated_egress)] = true;
+    features[@backingInt(Feature.device_bound_identity)] = true;
+    features[@backingInt(Feature.measured_boot_attestation)] = true;
+    features[@backingInt(Feature.signed_reversible_updates)] = true;
+    features[@backingInt(Feature.recovery_key_lifecycle)] = true;
+    features[@backingInt(Feature.restartable_userspace_drivers)] = true;
+    features[@backingInt(Feature.redacted_diagnostics)] = true;
+    features[@backingInt(Feature.private_local_ai)] = !default_ai.training_allowed and default_ai.locality == .inherit_task;
+    features[@backingInt(Feature.typed_ai_inference_service)] = contractPresent("zigos.ai.inference");
+    features[@backingInt(Feature.carbon_aware_scheduling)] = carbonAwareSchedulingBackedByPlanner();
 }
 
 fn carbonAwareSchedulingBackedByPlanner() bool {
@@ -821,9 +821,9 @@ fn fillExtraContract(features: *[feature_count]bool) void {
         \\native object workspace:notes
     );
 
-    features[@intFromEnum(Feature.permission_sensitivity_labels)] = default_permission.sensitivity == .internal_data and manifest.isSensitive(.private_user_data);
-    features[@intFromEnum(Feature.user_visible_permission_reasons)] = reasoned_permission.user_visible_reason.len != 0;
-    features[@intFromEnum(Feature.secret_permissions_local_only)] = validationFailsWith(.{
+    features[@backingInt(Feature.permission_sensitivity_labels)] = default_permission.sensitivity == .internal_data and manifest.isSensitive(.private_user_data);
+    features[@backingInt(Feature.user_visible_permission_reasons)] = reasoned_permission.user_visible_reason.len != 0;
+    features[@backingInt(Feature.secret_permissions_local_only)] = validationFailsWith(.{
         .bundle_id = "app.secret-camera",
         .display_name = "Secret Camera",
         .publisher = "zigos.dev",
@@ -834,7 +834,7 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .sensitivity = .secret_user_data,
         }},
     }, error.SecretPermissionMustStayLocal);
-    features[@intFromEnum(Feature.sensitive_remote_egress_intent)] = validationFailsWith(.{
+    features[@backingInt(Feature.sensitive_remote_egress_intent)] = validationFailsWith(.{
         .bundle_id = "zigos.private-egress",
         .display_name = "Private Egress",
         .publisher = "zigos.dev",
@@ -845,9 +845,9 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .sensitivity = .private_user_data,
         }},
     }, error.SensitiveRemoteEgressRequiresIntent);
-    features[@intFromEnum(Feature.permission_digest_covers_privacy)] = !std.mem.eql(u8, &reason_digest_a, &reason_digest_b);
-    features[@intFromEnum(Feature.package_preserves_permission_privacy)] = @hasField(package_model.StoredPermission, "sensitivity") and @hasField(package_model.StoredPermission, "user_visible_reason");
-    features[@intFromEnum(Feature.dangerous_permission_lint_reason)] = manifest_linter.lint(.{
+    features[@backingInt(Feature.permission_digest_covers_privacy)] = !std.mem.eql(u8, &reason_digest_a, &reason_digest_b);
+    features[@backingInt(Feature.package_preserves_permission_privacy)] = @hasField(package_model.StoredPermission, "sensitivity") and @hasField(package_model.StoredPermission, "user_visible_reason");
+    features[@backingInt(Feature.dangerous_permission_lint_reason)] = manifest_linter.lint(.{
         .bundle_id = "app.camera",
         .display_name = "Camera",
         .publisher = "zigos.dev",
@@ -859,25 +859,25 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .sensitivity = .private_user_data,
         }},
     }).count(.warning) != 0;
-    features[@intFromEnum(Feature.typed_privacy_budget_service)] = contractPresent("zigos.privacy.budget");
-    features[@intFromEnum(Feature.typed_diagnostics_export_service)] = contractPresent("zigos.diagnostics.export");
-    features[@intFromEnum(Feature.privacy_budget_policy)] = @hasField(policy_object.SensitiveEgressRequest, "remote_bytes");
-    features[@intFromEnum(Feature.camera_policy_gate)] = @hasField(policy_object.CreateRequest, "camera_allowed");
-    features[@intFromEnum(Feature.microphone_policy_gate)] = @hasField(policy_object.CreateRequest, "microphone_allowed");
-    features[@intFromEnum(Feature.location_policy_gate)] = @hasField(policy_object.CreateRequest, "location_allowed");
-    features[@intFromEnum(Feature.contacts_policy_gate)] = @hasField(policy_object.CreateRequest, "contacts_allowed");
-    features[@intFromEnum(Feature.sensor_policy_gate)] = @hasField(policy_object.CreateRequest, "sensors_allowed");
-    features[@intFromEnum(Feature.clipboard_policy_gate)] = @hasField(policy_object.CreateRequest, "clipboard_allowed");
-    features[@intFromEnum(Feature.peer_ipc_policy_gate)] = @hasField(policy_object.CreateRequest, "peer_ipc_allowed");
-    features[@intFromEnum(Feature.private_egress_budget_policy)] = @hasField(policy_object.CreateRequest, "max_remote_private_egress_bytes");
-    features[@intFromEnum(Feature.data_egress_ledger)] = event_ledger.EventKind.data_egress == .data_egress;
-    features[@intFromEnum(Feature.privacy_budget_ledger)] = event_ledger.EventKind.privacy_budget == .privacy_budget;
-    features[@intFromEnum(Feature.diagnostics_private_egress_summary)] = @hasField(event_ledger.DiagnosticSummary, "private_egress_denials");
-    features[@intFromEnum(Feature.remote_diagnostics_consent)] = true;
-    features[@intFromEnum(Feature.process_hidden_observability_denied)] = processHiddenObservabilityDeniedCheck();
-    features[@intFromEnum(Feature.process_continuous_observability_scope)] = processContinuousObservabilityScopeCheck();
-    features[@intFromEnum(Feature.ai_context_budget_policy)] = @hasField(policy_object.CreateRequest, "max_ai_context_bytes");
-    features[@intFromEnum(Feature.ai_training_audit_manifest)] = validationFailsWith(.{
+    features[@backingInt(Feature.typed_privacy_budget_service)] = contractPresent("zigos.privacy.budget");
+    features[@backingInt(Feature.typed_diagnostics_export_service)] = contractPresent("zigos.diagnostics.export");
+    features[@backingInt(Feature.privacy_budget_policy)] = @hasField(policy_object.SensitiveEgressRequest, "remote_bytes");
+    features[@backingInt(Feature.camera_policy_gate)] = @hasField(policy_object.CreateRequest, "camera_allowed");
+    features[@backingInt(Feature.microphone_policy_gate)] = @hasField(policy_object.CreateRequest, "microphone_allowed");
+    features[@backingInt(Feature.location_policy_gate)] = @hasField(policy_object.CreateRequest, "location_allowed");
+    features[@backingInt(Feature.contacts_policy_gate)] = @hasField(policy_object.CreateRequest, "contacts_allowed");
+    features[@backingInt(Feature.sensor_policy_gate)] = @hasField(policy_object.CreateRequest, "sensors_allowed");
+    features[@backingInt(Feature.clipboard_policy_gate)] = @hasField(policy_object.CreateRequest, "clipboard_allowed");
+    features[@backingInt(Feature.peer_ipc_policy_gate)] = @hasField(policy_object.CreateRequest, "peer_ipc_allowed");
+    features[@backingInt(Feature.private_egress_budget_policy)] = @hasField(policy_object.CreateRequest, "max_remote_private_egress_bytes");
+    features[@backingInt(Feature.data_egress_ledger)] = event_ledger.EventKind.data_egress == .data_egress;
+    features[@backingInt(Feature.privacy_budget_ledger)] = event_ledger.EventKind.privacy_budget == .privacy_budget;
+    features[@backingInt(Feature.diagnostics_private_egress_summary)] = @hasField(event_ledger.DiagnosticSummary, "private_egress_denials");
+    features[@backingInt(Feature.remote_diagnostics_consent)] = true;
+    features[@backingInt(Feature.process_hidden_observability_denied)] = processHiddenObservabilityDeniedCheck();
+    features[@backingInt(Feature.process_continuous_observability_scope)] = processContinuousObservabilityScopeCheck();
+    features[@backingInt(Feature.ai_context_budget_policy)] = @hasField(policy_object.CreateRequest, "max_ai_context_bytes");
+    features[@backingInt(Feature.ai_training_audit_manifest)] = validationFailsWith(.{
         .bundle_id = "app.training-ai",
         .display_name = "Training AI",
         .publisher = "zigos.dev",
@@ -885,7 +885,7 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .training_allowed = true,
         },
     }, error.AiTrainingRequiresAudit);
-    features[@intFromEnum(Feature.offline_ai_local_model_manifest)] = validationFailsWith(.{
+    features[@backingInt(Feature.offline_ai_local_model_manifest)] = validationFailsWith(.{
         .bundle_id = "app.offline-ai",
         .display_name = "Offline AI",
         .publisher = "zigos.dev",
@@ -893,10 +893,10 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .offline_required = true,
         },
     }, error.OfflineAiRequiresLocalModel);
-    features[@intFromEnum(Feature.private_ai_diagnostics_redaction)] = @hasField(event_ledger.DiagnosticSummary, "ai_remote_denials");
-    features[@intFromEnum(Feature.compatibility_lint_rejection)] = compat_report.hasErrors();
-    features[@intFromEnum(Feature.native_registry_privacy_discovery)] = typed_component_abi.interfaceId(.privacy_budget) == .privacy_budget;
-    features[@intFromEnum(Feature.no_secret_remote_permissions)] = validationFailsWith(.{
+    features[@backingInt(Feature.private_ai_diagnostics_redaction)] = @hasField(event_ledger.DiagnosticSummary, "ai_remote_denials");
+    features[@backingInt(Feature.compatibility_lint_rejection)] = compat_report.hasErrors();
+    features[@backingInt(Feature.native_registry_privacy_discovery)] = typed_component_abi.interfaceId(.privacy_budget) == .privacy_budget;
+    features[@backingInt(Feature.no_secret_remote_permissions)] = validationFailsWith(.{
         .bundle_id = "app.secret-egress",
         .display_name = "Secret Egress",
         .publisher = "zigos.dev",
@@ -907,7 +907,7 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .sensitivity = .secret_user_data,
         }},
     }, error.SecretPermissionMustStayLocal);
-    features[@intFromEnum(Feature.sensitive_permission_reason_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.sensitive_permission_reason_validation)] = validationFailsWith(.{
         .bundle_id = "app.private-camera",
         .display_name = "Private Camera",
         .publisher = "zigos.dev",
@@ -919,8 +919,8 @@ fn fillExtraContract(features: *[feature_count]bool) void {
             .sensitivity = .private_user_data,
         }},
     }, error.SensitivePermissionRequiresReason);
-    features[@intFromEnum(Feature.typed_diagnostics_share_validation)] = contractOperationPresent("zigos.diagnostics.export", .diagnostics_share_remote);
-    features[@intFromEnum(Feature.local_first_sensitive_defaults)] = !manifest.isSensitive(default_permission.sensitivity) and default_permission.local_only;
+    features[@backingInt(Feature.typed_diagnostics_share_validation)] = contractOperationPresent("zigos.diagnostics.export", .diagnostics_share_remote);
+    features[@backingInt(Feature.local_first_sensitive_defaults)] = !manifest.isSensitive(default_permission.sensitivity) and default_permission.local_only;
 }
 
 fn processContractTask(
@@ -1122,9 +1122,9 @@ fn fillThirdContract(features: *[feature_count]bool) void {
         }},
     });
 
-    features[@intFromEnum(Feature.permission_purpose_labels)] = @hasField(manifest.PermissionRequest, "purpose") and @intFromEnum(manifest.PermissionPurpose.document_editing) != 0;
-    features[@intFromEnum(Feature.permission_retention_days)] = @hasField(manifest.PermissionRequest, "retention_days");
-    features[@intFromEnum(Feature.sensitive_purpose_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.permission_purpose_labels)] = @hasField(manifest.PermissionRequest, "purpose") and @backingInt(manifest.PermissionPurpose.document_editing) != 0;
+    features[@backingInt(Feature.permission_retention_days)] = @hasField(manifest.PermissionRequest, "retention_days");
+    features[@backingInt(Feature.sensitive_purpose_validation)] = validationFailsWith(.{
         .bundle_id = "zigos.private-relay",
         .display_name = "Private Relay",
         .publisher = "zigos.dev",
@@ -1137,7 +1137,7 @@ fn fillThirdContract(features: *[feature_count]bool) void {
             .egress_intent = .{ .kind = .call_service, .service = "private.relay" },
         }},
     }, error.SensitivePermissionRequiresPurpose);
-    features[@intFromEnum(Feature.sensitive_retention_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.sensitive_retention_validation)] = validationFailsWith(.{
         .bundle_id = "zigos.private-relay",
         .display_name = "Private Relay",
         .publisher = "zigos.dev",
@@ -1150,7 +1150,7 @@ fn fillThirdContract(features: *[feature_count]bool) void {
             .egress_intent = .{ .kind = .call_service, .service = "private.relay" },
         }},
     }, error.SensitivePermissionRequiresRetention);
-    features[@intFromEnum(Feature.sensitive_retention_ceiling)] = validationFailsWith(.{
+    features[@backingInt(Feature.sensitive_retention_ceiling)] = validationFailsWith(.{
         .bundle_id = "zigos.private-relay",
         .display_name = "Private Relay",
         .publisher = "zigos.dev",
@@ -1164,7 +1164,7 @@ fn fillThirdContract(features: *[feature_count]bool) void {
             .egress_intent = .{ .kind = .call_service, .service = "private.relay" },
         }},
     }, error.SensitiveRetentionTooLong);
-    features[@intFromEnum(Feature.secret_retention_ceiling)] = validationFailsWith(.{
+    features[@backingInt(Feature.secret_retention_ceiling)] = validationFailsWith(.{
         .bundle_id = "zigos.secret-vault",
         .display_name = "Secret Vault",
         .publisher = "zigos.dev",
@@ -1178,7 +1178,7 @@ fn fillThirdContract(features: *[feature_count]bool) void {
             .retention_days = 31,
         }},
     }, error.SecretRetentionTooLong);
-    features[@intFromEnum(Feature.sensitive_lease_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.sensitive_lease_validation)] = validationFailsWith(.{
         .bundle_id = "app.camera",
         .display_name = "Camera",
         .publisher = "zigos.dev",
@@ -1193,31 +1193,31 @@ fn fillThirdContract(features: *[feature_count]bool) void {
             .retention_days = 1,
         }},
     }, error.SensitivePermissionRequiresLease);
-    features[@intFromEnum(Feature.package_preserves_permission_purpose)] = @hasField(package_model.StoredPermission, "purpose");
-    features[@intFromEnum(Feature.package_preserves_permission_retention)] = @hasField(package_model.StoredPermission, "retention_days");
-    features[@intFromEnum(Feature.permission_digest_covers_purpose)] = !std.mem.eql(u8, &purpose_digest_a, &purpose_digest_b);
-    features[@intFromEnum(Feature.permission_digest_covers_retention)] = !std.mem.eql(u8, &purpose_digest_a, &retention_digest_b);
-    features[@intFromEnum(Feature.linter_purpose_guidance)] = lifecycle_lint.count(.warning) != 0;
-    features[@intFromEnum(Feature.linter_retention_guidance)] = lifecycle_lint.count(.warning) >= 2;
-    features[@intFromEnum(Feature.linter_lease_guidance)] = lifecycle_lint.count(.warning) >= 3;
-    features[@intFromEnum(Feature.policy_sensitive_retention_cap)] = @hasField(policy_object.CreateRequest, "max_sensitive_retention_days");
-    features[@intFromEnum(Feature.policy_permission_lease_cap)] = @hasField(policy_object.CreateRequest, "max_permission_lease_ticks");
-    features[@intFromEnum(Feature.policy_requires_sensitive_lease)] = @hasField(policy_object.CreateRequest, "require_sensitive_permission_lease");
-    features[@intFromEnum(Feature.permission_use_policy_request)] = @hasField(policy_object.PermissionUseRequest, "lease_ticks");
-    features[@intFromEnum(Feature.retention_policy_ledger)] = event_ledger.EventKind.retention_policy == .retention_policy;
-    features[@intFromEnum(Feature.permission_lease_ledger)] = event_ledger.EventKind.permission_lease == .permission_lease;
-    features[@intFromEnum(Feature.permission_lease_expiration_summary)] = @hasField(event_ledger.DiagnosticSummary, "permission_lease_expirations");
-    features[@intFromEnum(Feature.consent_receipt_ledger)] = event_ledger.EventKind.consent_receipt == .consent_receipt;
-    features[@intFromEnum(Feature.consent_revocation_summary)] = @hasField(event_ledger.DiagnosticSummary, "consent_receipt_revocations");
-    features[@intFromEnum(Feature.typed_consent_receipts_service)] = contractPresent("zigos.consent.receipts");
-    features[@intFromEnum(Feature.typed_permission_lease_service)] = contractPresent("zigos.permission.lease");
-    features[@intFromEnum(Feature.consent_record_wire_validation)] = contractOperationPresent("zigos.consent.receipts", .consent_record);
-    features[@intFromEnum(Feature.permission_lease_expire_wire_validation)] = contractOperationPresent("zigos.permission.lease", .permission_lease_expire);
-    features[@intFromEnum(Feature.native_registry_consent_discovery)] = typed_component_abi.interfaceId(.consent_receipts) == .consent_receipts;
-    features[@intFromEnum(Feature.native_registry_lease_discovery)] = typed_component_abi.interfaceId(.permission_lease) == .permission_lease;
-    features[@intFromEnum(Feature.retention_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "retention_policy_events");
-    features[@intFromEnum(Feature.lease_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "permission_lease_events");
-    features[@intFromEnum(Feature.consent_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "consent_receipt_events");
+    features[@backingInt(Feature.package_preserves_permission_purpose)] = @hasField(package_model.StoredPermission, "purpose");
+    features[@backingInt(Feature.package_preserves_permission_retention)] = @hasField(package_model.StoredPermission, "retention_days");
+    features[@backingInt(Feature.permission_digest_covers_purpose)] = !std.mem.eql(u8, &purpose_digest_a, &purpose_digest_b);
+    features[@backingInt(Feature.permission_digest_covers_retention)] = !std.mem.eql(u8, &purpose_digest_a, &retention_digest_b);
+    features[@backingInt(Feature.linter_purpose_guidance)] = lifecycle_lint.count(.warning) != 0;
+    features[@backingInt(Feature.linter_retention_guidance)] = lifecycle_lint.count(.warning) >= 2;
+    features[@backingInt(Feature.linter_lease_guidance)] = lifecycle_lint.count(.warning) >= 3;
+    features[@backingInt(Feature.policy_sensitive_retention_cap)] = @hasField(policy_object.CreateRequest, "max_sensitive_retention_days");
+    features[@backingInt(Feature.policy_permission_lease_cap)] = @hasField(policy_object.CreateRequest, "max_permission_lease_ticks");
+    features[@backingInt(Feature.policy_requires_sensitive_lease)] = @hasField(policy_object.CreateRequest, "require_sensitive_permission_lease");
+    features[@backingInt(Feature.permission_use_policy_request)] = @hasField(policy_object.PermissionUseRequest, "lease_ticks");
+    features[@backingInt(Feature.retention_policy_ledger)] = event_ledger.EventKind.retention_policy == .retention_policy;
+    features[@backingInt(Feature.permission_lease_ledger)] = event_ledger.EventKind.permission_lease == .permission_lease;
+    features[@backingInt(Feature.permission_lease_expiration_summary)] = @hasField(event_ledger.DiagnosticSummary, "permission_lease_expirations");
+    features[@backingInt(Feature.consent_receipt_ledger)] = event_ledger.EventKind.consent_receipt == .consent_receipt;
+    features[@backingInt(Feature.consent_revocation_summary)] = @hasField(event_ledger.DiagnosticSummary, "consent_receipt_revocations");
+    features[@backingInt(Feature.typed_consent_receipts_service)] = contractPresent("zigos.consent.receipts");
+    features[@backingInt(Feature.typed_permission_lease_service)] = contractPresent("zigos.permission.lease");
+    features[@backingInt(Feature.consent_record_wire_validation)] = contractOperationPresent("zigos.consent.receipts", .consent_record);
+    features[@backingInt(Feature.permission_lease_expire_wire_validation)] = contractOperationPresent("zigos.permission.lease", .permission_lease_expire);
+    features[@backingInt(Feature.native_registry_consent_discovery)] = typed_component_abi.interfaceId(.consent_receipts) == .consent_receipts;
+    features[@backingInt(Feature.native_registry_lease_discovery)] = typed_component_abi.interfaceId(.permission_lease) == .permission_lease;
+    features[@backingInt(Feature.retention_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "retention_policy_events");
+    features[@backingInt(Feature.lease_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "permission_lease_events");
+    features[@backingInt(Feature.consent_diagnostics_redacted)] = @hasField(event_ledger.DiagnosticSummary, "consent_receipt_events");
 }
 
 fn fillFourthContract(features: *[feature_count]bool) void {
@@ -1253,14 +1253,14 @@ fn fillFourthContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(data_rights_a);
     const digest_b = package_digest.digestBundle(data_rights_b);
 
-    features[@intFromEnum(Feature.data_rights_manifest)] = @hasField(manifest.BundleManifest, "data_rights") and @hasField(manifest.DataRightsDecl, "portable_export");
-    features[@intFromEnum(Feature.private_object_data_rights_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.data_rights_manifest)] = @hasField(manifest.BundleManifest, "data_rights") and @hasField(manifest.DataRightsDecl, "portable_export");
+    features[@backingInt(Feature.private_object_data_rights_validation)] = validationFailsWith(.{
         .bundle_id = "app.private-notes",
         .display_name = "Private Notes",
         .publisher = "zigos.dev",
         .requested_permissions = &private_object_requests,
     }, error.DataRightsExportMissing);
-    features[@intFromEnum(Feature.deletion_receipt_manifest_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.deletion_receipt_manifest_validation)] = validationFailsWith(.{
         .bundle_id = "app.private-notes",
         .display_name = "Private Notes",
         .publisher = "zigos.dev",
@@ -1271,23 +1271,23 @@ fn fillFourthContract(features: *[feature_count]bool) void {
             .export_format = "application/zigos-object-archive",
         },
     }, error.DataDeletionReceiptRequired);
-    features[@intFromEnum(Feature.data_rights_digest_covers_export_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@intFromEnum(Feature.package_preserves_data_rights)] = @hasField(package_model.BundleRevision, "data_rights") and @hasField(package_model.ResolvedManifest, "data_rights");
-    features[@intFromEnum(Feature.typed_data_rights_service)] = contractPresent("zigos.data.rights");
-    features[@intFromEnum(Feature.data_export_prepare_operation)] = contractOperationPresent("zigos.data.rights", .data_export_prepare);
-    features[@intFromEnum(Feature.data_delete_request_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_request);
-    features[@intFromEnum(Feature.data_delete_receipt_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_receipt);
-    features[@intFromEnum(Feature.native_registry_data_rights_discovery)] = typed_component_abi.interfaceId(.data_rights) == .data_rights;
-    features[@intFromEnum(Feature.policy_data_export_gate)] = @hasField(policy_object.CreateRequest, "data_export_allowed");
-    features[@intFromEnum(Feature.policy_data_delete_gate)] = @hasField(policy_object.CreateRequest, "data_deletion_allowed");
-    features[@intFromEnum(Feature.policy_export_byte_budget)] = @hasField(policy_object.CreateRequest, "max_data_export_bytes");
-    features[@intFromEnum(Feature.policy_deletion_receipt_required)] = @hasField(policy_object.CreateRequest, "require_data_deletion_receipt");
-    features[@intFromEnum(Feature.policy_data_rights_request)] = @hasField(policy_object.DataRightsRequest, "deletion_receipt_present");
-    features[@intFromEnum(Feature.data_export_ledger)] = event_ledger.EventKind.data_export == .data_export;
-    features[@intFromEnum(Feature.data_deletion_ledger)] = event_ledger.EventKind.data_deletion == .data_deletion;
-    features[@intFromEnum(Feature.data_rights_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "data_export_events");
-    features[@intFromEnum(Feature.data_export_redaction)] = @hasField(event_ledger.DiagnosticSummary, "data_export_denials");
-    features[@intFromEnum(Feature.data_deletion_receipt_summary)] = @hasField(event_ledger.DiagnosticSummary, "data_deletion_receipts");
+    features[@backingInt(Feature.data_rights_digest_covers_export_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@backingInt(Feature.package_preserves_data_rights)] = @hasField(package_model.BundleRevision, "data_rights") and @hasField(package_model.ResolvedManifest, "data_rights");
+    features[@backingInt(Feature.typed_data_rights_service)] = contractPresent("zigos.data.rights");
+    features[@backingInt(Feature.data_export_prepare_operation)] = contractOperationPresent("zigos.data.rights", .data_export_prepare);
+    features[@backingInt(Feature.data_delete_request_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_request);
+    features[@backingInt(Feature.data_delete_receipt_operation)] = contractOperationPresent("zigos.data.rights", .data_delete_receipt);
+    features[@backingInt(Feature.native_registry_data_rights_discovery)] = typed_component_abi.interfaceId(.data_rights) == .data_rights;
+    features[@backingInt(Feature.policy_data_export_gate)] = @hasField(policy_object.CreateRequest, "data_export_allowed");
+    features[@backingInt(Feature.policy_data_delete_gate)] = @hasField(policy_object.CreateRequest, "data_deletion_allowed");
+    features[@backingInt(Feature.policy_export_byte_budget)] = @hasField(policy_object.CreateRequest, "max_data_export_bytes");
+    features[@backingInt(Feature.policy_deletion_receipt_required)] = @hasField(policy_object.CreateRequest, "require_data_deletion_receipt");
+    features[@backingInt(Feature.policy_data_rights_request)] = @hasField(policy_object.DataRightsRequest, "deletion_receipt_present");
+    features[@backingInt(Feature.data_export_ledger)] = event_ledger.EventKind.data_export == .data_export;
+    features[@backingInt(Feature.data_deletion_ledger)] = event_ledger.EventKind.data_deletion == .data_deletion;
+    features[@backingInt(Feature.data_rights_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "data_export_events");
+    features[@backingInt(Feature.data_export_redaction)] = @hasField(event_ledger.DiagnosticSummary, "data_export_denials");
+    features[@backingInt(Feature.data_deletion_receipt_summary)] = @hasField(event_ledger.DiagnosticSummary, "data_deletion_receipts");
 }
 
 fn fillFifthContract(features: *[feature_count]bool) void {
@@ -1314,9 +1314,9 @@ fn fillFifthContract(features: *[feature_count]bool) void {
     const digest_v1 = package_digest.digestBundle(measured_local_ai);
     const digest_v2 = package_digest.digestBundle(measured_local_ai_v2);
 
-    features[@intFromEnum(Feature.ai_model_digest_manifest)] = @hasField(manifest.AiMetadata, "model_digest");
-    features[@intFromEnum(Feature.ai_model_source_manifest)] = @hasField(manifest.AiMetadata, "model_source_identity");
-    features[@intFromEnum(Feature.local_ai_digest_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.ai_model_digest_manifest)] = @hasField(manifest.AiMetadata, "model_digest");
+    features[@backingInt(Feature.ai_model_source_manifest)] = @hasField(manifest.AiMetadata, "model_source_identity");
+    features[@backingInt(Feature.local_ai_digest_validation)] = validationFailsWith(.{
         .bundle_id = "app.local-ai",
         .display_name = "Local AI",
         .publisher = "zigos.dev",
@@ -1325,7 +1325,7 @@ fn fillFifthContract(features: *[feature_count]bool) void {
             .locality = .local_only,
         },
     }, error.AiModelDigestMissing);
-    features[@intFromEnum(Feature.local_ai_source_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.local_ai_source_validation)] = validationFailsWith(.{
         .bundle_id = "app.local-ai",
         .display_name = "Local AI",
         .publisher = "zigos.dev",
@@ -1335,7 +1335,7 @@ fn fillFifthContract(features: *[feature_count]bool) void {
             .locality = .local_only,
         },
     }, error.AiModelSourceMissing);
-    features[@intFromEnum(Feature.private_ai_locality_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.private_ai_locality_validation)] = validationFailsWith(.{
         .bundle_id = "app.remote-private-ai",
         .display_name = "Remote Private AI",
         .publisher = "zigos.dev",
@@ -1345,46 +1345,46 @@ fn fillFifthContract(features: *[feature_count]bool) void {
             .private_context = true,
         },
     }, error.PrivateAiRequiresLocalModel);
-    features[@intFromEnum(Feature.ai_digest_covers_model_provenance)] = !std.mem.eql(u8, &digest_v1, &digest_v2);
-    features[@intFromEnum(Feature.package_preserves_model_digest)] = @hasField(package_model.StoredAiMetadata, "model_digest");
-    features[@intFromEnum(Feature.package_preserves_model_source)] = @hasField(package_model.StoredAiMetadata, "model_source_identity");
-    features[@intFromEnum(Feature.typed_ai_model_registry_service)] = contractPresent("zigos.ai.model.registry");
-    features[@intFromEnum(Feature.ai_model_register_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_register);
-    features[@intFromEnum(Feature.ai_model_attest_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_attest);
-    features[@intFromEnum(Feature.ai_model_revoke_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_revoke);
-    features[@intFromEnum(Feature.native_registry_ai_model_discovery)] = typed_component_abi.interfaceId(.ai_model_registry) == .ai_model_registry;
-    features[@intFromEnum(Feature.policy_ai_model_measurement_gate)] = @hasField(policy_object.CreateRequest, "require_ai_model_measurement");
-    features[@intFromEnum(Feature.policy_ai_model_source_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_ai_model_source");
-    features[@intFromEnum(Feature.policy_ai_model_age_gate)] = @hasField(policy_object.CreateRequest, "max_ai_model_age_days");
-    features[@intFromEnum(Feature.ai_use_provenance_request)] = @hasField(policy_object.AiUseRequest, "local_model_measured") and @hasField(policy_object.AiUseRequest, "model_source_trusted");
-    features[@intFromEnum(Feature.ai_model_attestation_ledger)] = event_ledger.EventKind.ai_model_attestation == .ai_model_attestation;
-    features[@intFromEnum(Feature.ai_model_attestation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_attestations");
-    features[@intFromEnum(Feature.ai_model_rejection_summary)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_rejections");
+    features[@backingInt(Feature.ai_digest_covers_model_provenance)] = !std.mem.eql(u8, &digest_v1, &digest_v2);
+    features[@backingInt(Feature.package_preserves_model_digest)] = @hasField(package_model.StoredAiMetadata, "model_digest");
+    features[@backingInt(Feature.package_preserves_model_source)] = @hasField(package_model.StoredAiMetadata, "model_source_identity");
+    features[@backingInt(Feature.typed_ai_model_registry_service)] = contractPresent("zigos.ai.model.registry");
+    features[@backingInt(Feature.ai_model_register_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_register);
+    features[@backingInt(Feature.ai_model_attest_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_attest);
+    features[@backingInt(Feature.ai_model_revoke_operation)] = contractOperationPresent("zigos.ai.model.registry", .ai_model_revoke);
+    features[@backingInt(Feature.native_registry_ai_model_discovery)] = typed_component_abi.interfaceId(.ai_model_registry) == .ai_model_registry;
+    features[@backingInt(Feature.policy_ai_model_measurement_gate)] = @hasField(policy_object.CreateRequest, "require_ai_model_measurement");
+    features[@backingInt(Feature.policy_ai_model_source_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_ai_model_source");
+    features[@backingInt(Feature.policy_ai_model_age_gate)] = @hasField(policy_object.CreateRequest, "max_ai_model_age_days");
+    features[@backingInt(Feature.ai_use_provenance_request)] = @hasField(policy_object.AiUseRequest, "local_model_measured") and @hasField(policy_object.AiUseRequest, "model_source_trusted");
+    features[@backingInt(Feature.ai_model_attestation_ledger)] = event_ledger.EventKind.ai_model_attestation == .ai_model_attestation;
+    features[@backingInt(Feature.ai_model_attestation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_attestations");
+    features[@backingInt(Feature.ai_model_rejection_summary)] = @hasField(event_ledger.DiagnosticSummary, "ai_model_rejections");
 }
 
 fn fillSixthContract(features: *[feature_count]bool) void {
-    features[@intFromEnum(Feature.credential_assertion_hardware_backed)] = @hasField(os_identity.Assertion, "hardware_backed_credential");
-    features[@intFromEnum(Feature.credential_assertion_platform_device)] = @hasField(os_identity.Assertion, "device_platform_backed");
-    features[@intFromEnum(Feature.credential_assertion_primary_device)] = @hasField(os_identity.Assertion, "primary_device_assertion");
-    features[@intFromEnum(Feature.credential_assertion_trust_generation)] = @hasField(os_identity.Assertion, "device_trust_generation");
-    features[@intFromEnum(Feature.credential_assertion_unlock_age)] = @hasField(os_identity.Assertion, "unlock_age_ticks");
-    features[@intFromEnum(Feature.policy_hardware_session_gate)] = @hasField(policy_object.CreateRequest, "require_hardware_backed_session");
-    features[@intFromEnum(Feature.policy_platform_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_platform_backed_device_session");
-    features[@intFromEnum(Feature.policy_primary_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_primary_device_session");
-    features[@intFromEnum(Feature.policy_unlock_age_gate)] = @hasField(policy_object.CreateRequest, "max_session_unlock_age_ticks");
-    features[@intFromEnum(Feature.session_trust_request)] = @hasField(policy_object.SessionTrustRequest, "hardware_backed_credential") and
+    features[@backingInt(Feature.credential_assertion_hardware_backed)] = @hasField(os_identity.Assertion, "hardware_backed_credential");
+    features[@backingInt(Feature.credential_assertion_platform_device)] = @hasField(os_identity.Assertion, "device_platform_backed");
+    features[@backingInt(Feature.credential_assertion_primary_device)] = @hasField(os_identity.Assertion, "primary_device_assertion");
+    features[@backingInt(Feature.credential_assertion_trust_generation)] = @hasField(os_identity.Assertion, "device_trust_generation");
+    features[@backingInt(Feature.credential_assertion_unlock_age)] = @hasField(os_identity.Assertion, "unlock_age_ticks");
+    features[@backingInt(Feature.policy_hardware_session_gate)] = @hasField(policy_object.CreateRequest, "require_hardware_backed_session");
+    features[@backingInt(Feature.policy_platform_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_platform_backed_device_session");
+    features[@backingInt(Feature.policy_primary_device_session_gate)] = @hasField(policy_object.CreateRequest, "require_primary_device_session");
+    features[@backingInt(Feature.policy_unlock_age_gate)] = @hasField(policy_object.CreateRequest, "max_session_unlock_age_ticks");
+    features[@backingInt(Feature.session_trust_request)] = @hasField(policy_object.SessionTrustRequest, "hardware_backed_credential") and
         @hasField(policy_object.SessionTrustRequest, "unlock_age_ticks") and
         @hasDecl(policy_object.Directory, "sessionTrustDecision");
-    features[@intFromEnum(Feature.typed_identity_session_service)] = contractPresent("zigos.identity.session");
-    features[@intFromEnum(Feature.identity_session_authorize_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_authorize);
-    features[@intFromEnum(Feature.identity_session_step_up_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_step_up);
-    features[@intFromEnum(Feature.identity_session_revoke_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_revoke);
-    features[@intFromEnum(Feature.native_registry_identity_session_discovery)] = typed_component_abi.interfaceId(.identity_session) == .identity_session;
-    features[@intFromEnum(Feature.session_posture_ledger)] = event_ledger.EventKind.session_posture == .session_posture and @hasDecl(event_ledger.Ledger, "recordSessionPosture");
-    features[@intFromEnum(Feature.session_posture_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_events");
-    features[@intFromEnum(Feature.session_posture_denial_summary)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_denials");
-    features[@intFromEnum(Feature.identity_session_redaction)] = sessionPostureRedactionCheck();
-    features[@intFromEnum(Feature.policy_digest_covers_session_gates)] = @hasField(policy_object.PolicyObject, "require_hardware_backed_session") and
+    features[@backingInt(Feature.typed_identity_session_service)] = contractPresent("zigos.identity.session");
+    features[@backingInt(Feature.identity_session_authorize_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_authorize);
+    features[@backingInt(Feature.identity_session_step_up_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_step_up);
+    features[@backingInt(Feature.identity_session_revoke_operation)] = contractOperationPresent("zigos.identity.session", .identity_session_revoke);
+    features[@backingInt(Feature.native_registry_identity_session_discovery)] = typed_component_abi.interfaceId(.identity_session) == .identity_session;
+    features[@backingInt(Feature.session_posture_ledger)] = event_ledger.EventKind.session_posture == .session_posture and @hasDecl(event_ledger.Ledger, "recordSessionPosture");
+    features[@backingInt(Feature.session_posture_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_events");
+    features[@backingInt(Feature.session_posture_denial_summary)] = @hasField(event_ledger.DiagnosticSummary, "session_posture_denials");
+    features[@backingInt(Feature.identity_session_redaction)] = sessionPostureRedactionCheck();
+    features[@backingInt(Feature.policy_digest_covers_session_gates)] = @hasField(policy_object.PolicyObject, "require_hardware_backed_session") and
         @hasField(policy_object.PolicyObject, "require_platform_backed_device_session") and
         @hasField(policy_object.PolicyObject, "require_primary_device_session") and
         @hasField(policy_object.PolicyObject, "max_session_unlock_age_ticks");
@@ -1449,13 +1449,13 @@ fn fillSeventhContract(features: *[feature_count]bool) void {
     const digest_builder_b = package_digest.digestBundle(builder_b);
     const digest_sbom_b = package_digest.digestBundle(sbom_b);
 
-    features[@intFromEnum(Feature.supply_chain_manifest)] = @hasField(manifest.BundleManifest, "supply_chain");
-    features[@intFromEnum(Feature.sbom_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "sbom_digest");
-    features[@intFromEnum(Feature.source_archive_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "source_archive_digest");
-    features[@intFromEnum(Feature.build_recipe_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "build_recipe_digest");
-    features[@intFromEnum(Feature.vulnerability_scan_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "vulnerability_scan_digest");
-    features[@intFromEnum(Feature.builder_identity_manifest)] = @hasField(manifest.SupplyChainDecl, "build_provenance_identity");
-    features[@intFromEnum(Feature.reproducible_build_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.supply_chain_manifest)] = @hasField(manifest.BundleManifest, "supply_chain");
+    features[@backingInt(Feature.sbom_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "sbom_digest");
+    features[@backingInt(Feature.source_archive_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "source_archive_digest");
+    features[@backingInt(Feature.build_recipe_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "build_recipe_digest");
+    features[@backingInt(Feature.vulnerability_scan_digest_manifest)] = @hasField(manifest.SupplyChainDecl, "vulnerability_scan_digest");
+    features[@backingInt(Feature.builder_identity_manifest)] = @hasField(manifest.SupplyChainDecl, "build_provenance_identity");
+    features[@backingInt(Feature.reproducible_build_validation)] = validationFailsWith(.{
         .bundle_id = "app.repro",
         .display_name = "Repro",
         .publisher = "zigos.dev",
@@ -1464,7 +1464,7 @@ fn fillSeventhContract(features: *[feature_count]bool) void {
             .build_recipe_digest = "sha256:recipe",
         },
     }, error.ReproducibleBuildRequiresSourceArchive);
-    features[@intFromEnum(Feature.trusted_builder_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.trusted_builder_validation)] = validationFailsWith(.{
         .bundle_id = "app.builder",
         .display_name = "Builder",
         .publisher = "zigos.dev",
@@ -1472,20 +1472,20 @@ fn fillSeventhContract(features: *[feature_count]bool) void {
             .trusted_builder = true,
         },
     }, error.TrustedBuilderRequiresIdentity);
-    features[@intFromEnum(Feature.supply_chain_digest_covers_sbom)] = !std.mem.eql(u8, &digest_a, &digest_sbom_b);
-    features[@intFromEnum(Feature.supply_chain_digest_covers_builder)] = !std.mem.eql(u8, &digest_a, &digest_builder_b);
-    features[@intFromEnum(Feature.package_preserves_supply_chain)] = @hasField(package_model.BundleRevision, "supply_chain");
-    features[@intFromEnum(Feature.package_resolves_supply_chain)] = @hasField(package_model.ResolvedManifest, "supply_chain");
-    features[@intFromEnum(Feature.policy_package_sbom_gate)] = @hasField(policy_object.CreateRequest, "require_package_sbom");
-    features[@intFromEnum(Feature.policy_package_reproducible_gate)] = @hasField(policy_object.CreateRequest, "require_reproducible_package_build");
-    features[@intFromEnum(Feature.policy_package_builder_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_package_builder");
-    features[@intFromEnum(Feature.policy_vulnerability_scan_gate)] = @hasField(policy_object.CreateRequest, "require_vulnerability_scan");
-    features[@intFromEnum(Feature.package_provenance_request)] = @hasField(policy_object.PackageProvenanceRequest, "reproducible_build");
-    features[@intFromEnum(Feature.package_provenance_policy_decision)] = @hasDecl(policy_object.Directory, "packageProvenanceDecision");
-    features[@intFromEnum(Feature.package_install_provenance_error)] = packageProvenanceInstallErrorPresent();
-    features[@intFromEnum(Feature.install_source_policy_still_present)] = @hasField(policy_object.CreateRequest, "install_source_mode") and
+    features[@backingInt(Feature.supply_chain_digest_covers_sbom)] = !std.mem.eql(u8, &digest_a, &digest_sbom_b);
+    features[@backingInt(Feature.supply_chain_digest_covers_builder)] = !std.mem.eql(u8, &digest_a, &digest_builder_b);
+    features[@backingInt(Feature.package_preserves_supply_chain)] = @hasField(package_model.BundleRevision, "supply_chain");
+    features[@backingInt(Feature.package_resolves_supply_chain)] = @hasField(package_model.ResolvedManifest, "supply_chain");
+    features[@backingInt(Feature.policy_package_sbom_gate)] = @hasField(policy_object.CreateRequest, "require_package_sbom");
+    features[@backingInt(Feature.policy_package_reproducible_gate)] = @hasField(policy_object.CreateRequest, "require_reproducible_package_build");
+    features[@backingInt(Feature.policy_package_builder_gate)] = @hasField(policy_object.CreateRequest, "require_trusted_package_builder");
+    features[@backingInt(Feature.policy_vulnerability_scan_gate)] = @hasField(policy_object.CreateRequest, "require_vulnerability_scan");
+    features[@backingInt(Feature.package_provenance_request)] = @hasField(policy_object.PackageProvenanceRequest, "reproducible_build");
+    features[@backingInt(Feature.package_provenance_policy_decision)] = @hasDecl(policy_object.Directory, "packageProvenanceDecision");
+    features[@backingInt(Feature.package_install_provenance_error)] = packageProvenanceInstallErrorPresent();
+    features[@backingInt(Feature.install_source_policy_still_present)] = @hasField(policy_object.CreateRequest, "install_source_mode") and
         @hasDecl(policy_object.Directory, "installSourceDecision");
-    features[@intFromEnum(Feature.package_active_revision_mutation_gate)] =
+    features[@backingInt(Feature.package_active_revision_mutation_gate)] =
         packageActiveRevisionMutationGate() and
         @hasDecl(package_service, "RollbackRequest") and
         @hasDecl(package_service, "RemoveRequest") and
@@ -1608,8 +1608,8 @@ fn fillEighthContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(base_agent);
     const digest_b = package_digest.digestBundle(purpose_b);
 
-    features[@intFromEnum(Feature.agent_delegation_manifest)] = @hasField(manifest.BundleManifest, "agent_delegation") and @hasField(manifest.AgentDelegationDecl, "max_autonomous_actions");
-    features[@intFromEnum(Feature.agent_purpose_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.agent_delegation_manifest)] = @hasField(manifest.BundleManifest, "agent_delegation") and @hasField(manifest.AgentDelegationDecl, "max_autonomous_actions");
+    features[@backingInt(Feature.agent_purpose_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent",
         .display_name = "Agent",
         .publisher = "zigos.dev",
@@ -1618,7 +1618,7 @@ fn fillEighthContract(features: *[feature_count]bool) void {
             .max_autonomous_actions = 4,
         },
     }, error.AgentDelegationPurposeMissing);
-    features[@intFromEnum(Feature.agent_action_budget_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.agent_action_budget_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent",
         .display_name = "Agent",
         .publisher = "zigos.dev",
@@ -1627,7 +1627,7 @@ fn fillEighthContract(features: *[feature_count]bool) void {
             .purpose = "Organize private notes locally",
         },
     }, error.AgentDelegationActionBudgetMissing);
-    features[@intFromEnum(Feature.agent_remote_confirmation_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.agent_remote_confirmation_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent",
         .display_name = "Agent",
         .publisher = "zigos.dev",
@@ -1639,51 +1639,51 @@ fn fillEighthContract(features: *[feature_count]bool) void {
             .user_confirmation_required = false,
         },
     }, error.AgentDelegationNeedsConfirmation);
-    features[@intFromEnum(Feature.agent_digest_covers_purpose)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@intFromEnum(Feature.package_preserves_agent_delegation)] = @hasField(package_model.BundleRevision, "agent_delegation");
-    features[@intFromEnum(Feature.package_resolves_agent_delegation)] = @hasField(package_model.ResolvedManifest, "agent_delegation");
-    features[@intFromEnum(Feature.policy_agent_allowed_gate)] = @hasField(policy_object.CreateRequest, "agent_delegation_allowed");
-    features[@intFromEnum(Feature.policy_agent_action_budget)] = @hasField(policy_object.CreateRequest, "max_agent_actions_per_session");
-    features[@intFromEnum(Feature.policy_agent_remote_budget)] = @hasField(policy_object.CreateRequest, "max_agent_remote_calls_per_session");
-    features[@intFromEnum(Feature.policy_agent_confirmation_gate)] = @hasField(policy_object.CreateRequest, "require_agent_user_confirmation");
-    features[@intFromEnum(Feature.policy_agent_audit_gate)] = @hasField(policy_object.CreateRequest, "require_agent_audit");
-    features[@intFromEnum(Feature.agent_delegation_request)] = @hasField(policy_object.AgentDelegationRequest, "autonomous_actions") and @hasField(policy_object.AgentDelegationRequest, "audit_enabled");
-    features[@intFromEnum(Feature.agent_delegation_policy_decision)] = @hasDecl(policy_object.Directory, "agentDelegationDecision");
-    features[@intFromEnum(Feature.typed_agent_delegation_service)] = contractPresent("zigos.agent.delegation");
-    features[@intFromEnum(Feature.agent_authorize_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_authorize);
-    features[@intFromEnum(Feature.agent_record_action_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_record_action);
-    features[@intFromEnum(Feature.agent_revoke_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_revoke);
-    features[@intFromEnum(Feature.agent_delegation_ledger)] = event_ledger.EventKind.agent_delegation == .agent_delegation and @hasDecl(event_ledger.Ledger, "recordAgentDelegation");
-    features[@intFromEnum(Feature.agent_delegation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "agent_delegation_events") and @hasField(event_ledger.DiagnosticSummary, "agent_remote_call_events");
+    features[@backingInt(Feature.agent_digest_covers_purpose)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@backingInt(Feature.package_preserves_agent_delegation)] = @hasField(package_model.BundleRevision, "agent_delegation");
+    features[@backingInt(Feature.package_resolves_agent_delegation)] = @hasField(package_model.ResolvedManifest, "agent_delegation");
+    features[@backingInt(Feature.policy_agent_allowed_gate)] = @hasField(policy_object.CreateRequest, "agent_delegation_allowed");
+    features[@backingInt(Feature.policy_agent_action_budget)] = @hasField(policy_object.CreateRequest, "max_agent_actions_per_session");
+    features[@backingInt(Feature.policy_agent_remote_budget)] = @hasField(policy_object.CreateRequest, "max_agent_remote_calls_per_session");
+    features[@backingInt(Feature.policy_agent_confirmation_gate)] = @hasField(policy_object.CreateRequest, "require_agent_user_confirmation");
+    features[@backingInt(Feature.policy_agent_audit_gate)] = @hasField(policy_object.CreateRequest, "require_agent_audit");
+    features[@backingInt(Feature.agent_delegation_request)] = @hasField(policy_object.AgentDelegationRequest, "autonomous_actions") and @hasField(policy_object.AgentDelegationRequest, "audit_enabled");
+    features[@backingInt(Feature.agent_delegation_policy_decision)] = @hasDecl(policy_object.Directory, "agentDelegationDecision");
+    features[@backingInt(Feature.typed_agent_delegation_service)] = contractPresent("zigos.agent.delegation");
+    features[@backingInt(Feature.agent_authorize_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_authorize);
+    features[@backingInt(Feature.agent_record_action_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_record_action);
+    features[@backingInt(Feature.agent_revoke_operation)] = contractOperationPresent("zigos.agent.delegation", .agent_revoke);
+    features[@backingInt(Feature.agent_delegation_ledger)] = event_ledger.EventKind.agent_delegation == .agent_delegation and @hasDecl(event_ledger.Ledger, "recordAgentDelegation");
+    features[@backingInt(Feature.agent_delegation_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "agent_delegation_events") and @hasField(event_ledger.DiagnosticSummary, "agent_remote_call_events");
 }
 
 fn fillNinthContract(features: *[feature_count]bool) void {
-    features[@intFromEnum(Feature.attention_policy_create_request)] =
+    features[@backingInt(Feature.attention_policy_create_request)] =
         @hasField(policy_object.CreateRequest, "quiet_until_tick") and
         @hasField(policy_object.CreateRequest, "max_visible_notifications") and
         @hasField(policy_object.CreateRequest, "max_interruptive_notifications") and
         @hasField(policy_object.CreateRequest, "allow_critical_interruption");
-    features[@intFromEnum(Feature.quiet_hours_policy)] = attentionPolicyDenies(.attention_quiet_denied);
-    features[@intFromEnum(Feature.visible_notification_budget_policy)] = attentionPolicyDenies(.attention_visible_budget_denied);
-    features[@intFromEnum(Feature.interruptive_notification_budget_policy)] = attentionPolicyDenies(.attention_interruption_budget_denied);
-    features[@intFromEnum(Feature.critical_interruption_policy)] = attentionPolicyDenies(.attention_critical_denied);
-    features[@intFromEnum(Feature.attention_policy_request)] = @hasField(policy_object.AttentionRequest, "requests_interruption") and
+    features[@backingInt(Feature.quiet_hours_policy)] = attentionPolicyDenies(.attention_quiet_denied);
+    features[@backingInt(Feature.visible_notification_budget_policy)] = attentionPolicyDenies(.attention_visible_budget_denied);
+    features[@backingInt(Feature.interruptive_notification_budget_policy)] = attentionPolicyDenies(.attention_interruption_budget_denied);
+    features[@backingInt(Feature.critical_interruption_policy)] = attentionPolicyDenies(.attention_critical_denied);
+    features[@backingInt(Feature.attention_policy_request)] = @hasField(policy_object.AttentionRequest, "requests_interruption") and
         @hasField(policy_object.AttentionRequest, "critical");
-    features[@intFromEnum(Feature.attention_policy_decision)] = @hasDecl(policy_object.Directory, "attentionDecision");
-    features[@intFromEnum(Feature.notification_center_attention_policy)] = @hasDecl(notification_center.Center, "postWithAttentionPolicy") and
+    features[@backingInt(Feature.attention_policy_decision)] = @hasDecl(policy_object.Directory, "attentionDecision");
+    features[@backingInt(Feature.notification_center_attention_policy)] = @hasDecl(notification_center.Center, "postWithAttentionPolicy") and
         @hasDecl(notification_center.Center, "attentionDecision");
-    features[@intFromEnum(Feature.notification_center_quiet_mode)] = notificationQuietModeCheck();
-    features[@intFromEnum(Feature.notification_center_interruption_budget)] = notificationInterruptionBudgetCheck();
-    features[@intFromEnum(Feature.attention_policy_ledger)] = event_ledger.EventKind.attention_policy == .attention_policy and
+    features[@backingInt(Feature.notification_center_quiet_mode)] = notificationQuietModeCheck();
+    features[@backingInt(Feature.notification_center_interruption_budget)] = notificationInterruptionBudgetCheck();
+    features[@backingInt(Feature.attention_policy_ledger)] = event_ledger.EventKind.attention_policy == .attention_policy and
         @hasDecl(event_ledger.Ledger, "recordAttentionDecision");
-    features[@intFromEnum(Feature.attention_policy_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "attention_policy_events") and
+    features[@backingInt(Feature.attention_policy_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "attention_policy_events") and
         @hasField(event_ledger.DiagnosticSummary, "attention_interruptions_denied");
-    features[@intFromEnum(Feature.attention_policy_redaction)] = attentionRedactionCheck();
-    features[@intFromEnum(Feature.policy_digest_covers_attention)] = attentionPolicyDigestCheck();
-    features[@intFromEnum(Feature.structured_urgency_classification)] = notification_center.isInterruptive(.high) and
+    features[@backingInt(Feature.attention_policy_redaction)] = attentionRedactionCheck();
+    features[@backingInt(Feature.policy_digest_covers_attention)] = attentionPolicyDigestCheck();
+    features[@backingInt(Feature.structured_urgency_classification)] = notification_center.isInterruptive(.high) and
         notification_center.isInterruptive(.critical) and
         !notification_center.isInterruptive(.normal);
-    features[@intFromEnum(Feature.suppression_replacement_preserved)] = @hasField(notification_center.PostRequest, "suppression_policy") and
+    features[@backingInt(Feature.suppression_replacement_preserved)] = @hasField(notification_center.PostRequest, "suppression_policy") and
         notification_center.SuppressionPolicy.replace_same_source_reason_task == .replace_same_source_reason_task;
 }
 
@@ -1841,9 +1841,9 @@ fn fillTenthContract(features: *[feature_count]bool) void {
     const digest_b = package_digest.digestBundle(accessible_reader_v2);
     const shell_profile = humane_shell.AccessibilityProfile{};
 
-    features[@intFromEnum(Feature.accessibility_manifest)] = @hasField(manifest.BundleManifest, "accessibility") and
+    features[@backingInt(Feature.accessibility_manifest)] = @hasField(manifest.BundleManifest, "accessibility") and
         @hasField(manifest.AccessibilityDecl, "supports_reduced_motion");
-    features[@intFromEnum(Feature.accessibility_profile_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.accessibility_profile_validation)] = validationFailsWith(.{
         .bundle_id = "app.reader",
         .display_name = "Reader",
         .publisher = "zigos.dev",
@@ -1853,7 +1853,7 @@ fn fillTenthContract(features: *[feature_count]bool) void {
             .supports_screen_reader = true,
         },
     }, error.AccessibilityReducedMotionMissing);
-    features[@intFromEnum(Feature.accessibility_keyboard_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.accessibility_keyboard_validation)] = validationFailsWith(.{
         .bundle_id = "app.reader",
         .display_name = "Reader",
         .publisher = "zigos.dev",
@@ -1863,28 +1863,28 @@ fn fillTenthContract(features: *[feature_count]bool) void {
             .supports_reduced_motion = true,
         },
     }, error.AccessibilityKeyboardNavigationMissing);
-    features[@intFromEnum(Feature.accessibility_digest_covers_profile)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@intFromEnum(Feature.package_preserves_accessibility)] = @hasField(package_model.BundleRevision, "accessibility");
-    features[@intFromEnum(Feature.package_resolves_accessibility)] = @hasField(package_model.ResolvedManifest, "accessibility") and
+    features[@backingInt(Feature.accessibility_digest_covers_profile)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@backingInt(Feature.package_preserves_accessibility)] = @hasField(package_model.BundleRevision, "accessibility");
+    features[@backingInt(Feature.package_resolves_accessibility)] = @hasField(package_model.ResolvedManifest, "accessibility") and
         @hasField(package_model.StoredAccessibility, "supports_keyboard_navigation");
-    features[@intFromEnum(Feature.policy_adaptive_ui_gate)] = accessibilityPolicyDenies(.accessibility_adaptive_ui_denied);
-    features[@intFromEnum(Feature.policy_screen_reader_gate)] = accessibilityPolicyDenies(.accessibility_screen_reader_denied);
-    features[@intFromEnum(Feature.policy_keyboard_navigation_gate)] = accessibilityPolicyDenies(.accessibility_keyboard_navigation_denied);
-    features[@intFromEnum(Feature.policy_reduced_motion_gate)] = accessibilityPolicyDenies(.accessibility_reduced_motion_denied);
-    features[@intFromEnum(Feature.policy_high_contrast_gate)] = accessibilityPolicyDenies(.accessibility_high_contrast_denied);
-    features[@intFromEnum(Feature.accessibility_policy_request)] = @hasField(policy_object.AccessibilityRequest, "reduced_motion_supported") and
+    features[@backingInt(Feature.policy_adaptive_ui_gate)] = accessibilityPolicyDenies(.accessibility_adaptive_ui_denied);
+    features[@backingInt(Feature.policy_screen_reader_gate)] = accessibilityPolicyDenies(.accessibility_screen_reader_denied);
+    features[@backingInt(Feature.policy_keyboard_navigation_gate)] = accessibilityPolicyDenies(.accessibility_keyboard_navigation_denied);
+    features[@backingInt(Feature.policy_reduced_motion_gate)] = accessibilityPolicyDenies(.accessibility_reduced_motion_denied);
+    features[@backingInt(Feature.policy_high_contrast_gate)] = accessibilityPolicyDenies(.accessibility_high_contrast_denied);
+    features[@backingInt(Feature.accessibility_policy_request)] = @hasField(policy_object.AccessibilityRequest, "reduced_motion_supported") and
         @hasDecl(policy_object.Directory, "accessibilityDecision");
-    features[@intFromEnum(Feature.typed_accessibility_profile_service)] = contractPresent("zigos.accessibility.profile");
-    features[@intFromEnum(Feature.accessibility_profile_get_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_get);
-    features[@intFromEnum(Feature.accessibility_profile_apply_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_apply);
-    features[@intFromEnum(Feature.native_registry_accessibility_discovery)] =
+    features[@backingInt(Feature.typed_accessibility_profile_service)] = contractPresent("zigos.accessibility.profile");
+    features[@backingInt(Feature.accessibility_profile_get_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_get);
+    features[@backingInt(Feature.accessibility_profile_apply_operation)] = contractOperationPresent("zigos.accessibility.profile", .accessibility_profile_apply);
+    features[@backingInt(Feature.native_registry_accessibility_discovery)] =
         typed_component_abi.interfaceId(.accessibility_profile) == .accessibility_profile;
-    features[@intFromEnum(Feature.accessibility_profile_ledger)] = event_ledger.EventKind.accessibility_profile == .accessibility_profile and
+    features[@backingInt(Feature.accessibility_profile_ledger)] = event_ledger.EventKind.accessibility_profile == .accessibility_profile and
         @hasDecl(event_ledger.Ledger, "recordAccessibilityProfile");
-    features[@intFromEnum(Feature.accessibility_profile_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "accessibility_profile_events") and
+    features[@backingInt(Feature.accessibility_profile_diagnostics)] = @hasField(event_ledger.DiagnosticSummary, "accessibility_profile_events") and
         @hasField(event_ledger.DiagnosticSummary, "accessibility_denials");
-    features[@intFromEnum(Feature.accessibility_redaction)] = accessibilityRedactionCheck();
-    features[@intFromEnum(Feature.rendered_shell_accessibility_profile)] =
+    features[@backingInt(Feature.accessibility_redaction)] = accessibilityRedactionCheck();
+    features[@backingInt(Feature.rendered_shell_accessibility_profile)] =
         @hasField(humane_shell.AccessibilityProfile, "keyboard_navigation") and
         @hasField(humane_shell.AccessibilityProfile, "screen_reader_labels") and
         @hasField(humane_shell.AccessibilityProfile, "visible_focus") and
@@ -2008,15 +2008,15 @@ fn fillEleventhContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(session_bound_agent);
     const digest_b = package_digest.digestBundle(larger_context_agent);
 
-    features[@intFromEnum(Feature.agent_manifest_session_binding)] =
+    features[@backingInt(Feature.agent_manifest_session_binding)] =
         @hasField(manifest.AgentDelegationDecl, "session_bound");
-    features[@intFromEnum(Feature.agent_manifest_local_context)] =
+    features[@backingInt(Feature.agent_manifest_local_context)] =
         @hasField(manifest.AgentDelegationDecl, "local_context_only");
-    features[@intFromEnum(Feature.agent_manifest_context_budget)] =
+    features[@backingInt(Feature.agent_manifest_context_budget)] =
         @hasField(manifest.AgentDelegationDecl, "max_context_bytes");
-    features[@intFromEnum(Feature.agent_manifest_kill_switch)] =
+    features[@backingInt(Feature.agent_manifest_kill_switch)] =
         @hasField(manifest.AgentDelegationDecl, "kill_switch_supported");
-    features[@intFromEnum(Feature.agent_session_binding_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.agent_session_binding_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent-session",
         .display_name = "Agent Session",
         .publisher = "zigos.dev",
@@ -2030,7 +2030,7 @@ fn fillEleventhContract(features: *[feature_count]bool) void {
             .kill_switch_supported = true,
         },
     }, error.AgentDelegationSessionBindingRequired);
-    features[@intFromEnum(Feature.agent_context_budget_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.agent_context_budget_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent-session",
         .display_name = "Agent Session",
         .publisher = "zigos.dev",
@@ -2044,7 +2044,7 @@ fn fillEleventhContract(features: *[feature_count]bool) void {
             .kill_switch_supported = true,
         },
     }, error.AgentDelegationContextBudgetMissing);
-    features[@intFromEnum(Feature.agent_kill_switch_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.agent_kill_switch_validation)] = validationFailsWith(.{
         .bundle_id = "app.agent-session",
         .display_name = "Agent Session",
         .publisher = "zigos.dev",
@@ -2058,52 +2058,52 @@ fn fillEleventhContract(features: *[feature_count]bool) void {
             .max_context_bytes = 4096,
         },
     }, error.AgentDelegationKillSwitchRequired);
-    features[@intFromEnum(Feature.agent_digest_covers_session_scope)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@intFromEnum(Feature.package_preserves_agent_session_scope)] =
+    features[@backingInt(Feature.agent_digest_covers_session_scope)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@backingInt(Feature.package_preserves_agent_session_scope)] =
         @hasField(package_model.StoredAgentDelegation, "session_bound") and
         @hasField(package_model.StoredAgentDelegation, "local_context_only") and
         @hasField(package_model.StoredAgentDelegation, "max_context_bytes") and
         @hasField(package_model.StoredAgentDelegation, "kill_switch_supported");
-    features[@intFromEnum(Feature.package_resolves_agent_session_scope)] =
+    features[@backingInt(Feature.package_resolves_agent_session_scope)] =
         @hasField(package_model.ResolvedManifest, "agent_delegation") and
         @hasField(manifest.AgentDelegationDecl, "kill_switch_supported");
-    features[@intFromEnum(Feature.policy_agent_session_binding_gate)] = agentSessionPolicyDenies(.agent_session_binding_denied);
-    features[@intFromEnum(Feature.policy_agent_local_context_gate)] = agentSessionPolicyDenies(.agent_context_scope_denied);
-    features[@intFromEnum(Feature.policy_agent_context_budget_gate)] = agentSessionPolicyDenies(.agent_context_budget_denied);
-    features[@intFromEnum(Feature.policy_agent_kill_switch_gate)] = agentSessionPolicyDenies(.agent_kill_switch_denied);
-    features[@intFromEnum(Feature.policy_agent_visible_plan_gate)] = agentSessionPolicyDenies(.agent_plan_visibility_required);
-    features[@intFromEnum(Feature.agent_session_policy_request)] =
+    features[@backingInt(Feature.policy_agent_session_binding_gate)] = agentSessionPolicyDenies(.agent_session_binding_denied);
+    features[@backingInt(Feature.policy_agent_local_context_gate)] = agentSessionPolicyDenies(.agent_context_scope_denied);
+    features[@backingInt(Feature.policy_agent_context_budget_gate)] = agentSessionPolicyDenies(.agent_context_budget_denied);
+    features[@backingInt(Feature.policy_agent_kill_switch_gate)] = agentSessionPolicyDenies(.agent_kill_switch_denied);
+    features[@backingInt(Feature.policy_agent_visible_plan_gate)] = agentSessionPolicyDenies(.agent_plan_visibility_required);
+    features[@backingInt(Feature.agent_session_policy_request)] =
         @hasField(policy_object.AgentDelegationRequest, "session_bound") and
         @hasField(policy_object.AgentDelegationRequest, "local_context_only") and
         @hasField(policy_object.AgentDelegationRequest, "context_bytes") and
         @hasField(policy_object.AgentDelegationRequest, "delegation_generation") and
         @hasField(policy_object.AgentDelegationRequest, "user_visible_plan");
-    features[@intFromEnum(Feature.typed_agent_session_bind_operation)] =
+    features[@backingInt(Feature.typed_agent_session_bind_operation)] =
         contractOperationPresent("zigos.agent.delegation", .agent_bind_session);
-    features[@intFromEnum(Feature.typed_agent_kill_switch_operation)] =
+    features[@backingInt(Feature.typed_agent_kill_switch_operation)] =
         contractOperationPresent("zigos.agent.delegation", .agent_kill_switch);
-    features[@intFromEnum(Feature.agent_session_service_model)] =
+    features[@backingInt(Feature.agent_session_service_model)] =
         @hasDecl(agent_delegation_service.Service, "authorize") and
         @hasDecl(agent_delegation_service.Service, "recordAction") and
         @hasField(agent_delegation_service.AuthorizeRequest, "session_id") and
         @hasField(agent_delegation_service.RecordActionRequest, "subject") and
         @hasField(agent_delegation_service.RecordActionRequest, "task_id") and
         @hasField(agent_delegation_service.RecordActionRequest, "expected_generation");
-    features[@intFromEnum(Feature.agent_action_binding_gate)] =
+    features[@backingInt(Feature.agent_action_binding_gate)] =
         agentActionBindingCheck() and
         @hasField(typed_component_abi.AgentRecordActionRequest, "expected_subject_serial") and
         @hasField(typed_component_abi.AgentRecordActionRequest, "expected_subject_kind") and
         @hasField(typed_component_abi.AgentRecordActionRequest, "expected_task_id") and
         @hasField(typed_component_abi.AgentRecordActionRequest, "expected_generation");
-    features[@intFromEnum(Feature.agent_session_service_kill_switch)] =
+    features[@backingInt(Feature.agent_session_service_kill_switch)] =
         @hasDecl(agent_delegation_service.Service, "killSwitch") and
         @hasField(agent_delegation_service.Service, "minimum_generation");
-    features[@intFromEnum(Feature.agent_session_cumulative_context_budget)] = agentCumulativeContextBudgetCheck();
-    features[@intFromEnum(Feature.agent_action_denial_audit)] = agentActionDenialAuditCheck();
-    features[@intFromEnum(Feature.agent_session_ledger)] =
+    features[@backingInt(Feature.agent_session_cumulative_context_budget)] = agentCumulativeContextBudgetCheck();
+    features[@backingInt(Feature.agent_action_denial_audit)] = agentActionDenialAuditCheck();
+    features[@backingInt(Feature.agent_session_ledger)] =
         event_ledger.EventKind.agent_session == .agent_session and
         @hasDecl(event_ledger.Ledger, "recordAgentSessionBoundary");
-    features[@intFromEnum(Feature.agent_session_redaction)] = agentSessionRedactionCheck();
+    features[@backingInt(Feature.agent_session_redaction)] = agentSessionRedactionCheck();
 }
 
 fn agentSessionPolicyDenies(expected: policy_object.DecisionReason) bool {
@@ -2489,17 +2489,17 @@ fn fillTwelfthContract(features: *[feature_count]bool) void {
     const digest_a = package_digest.digestBundle(background_bundle);
     const digest_b = package_digest.digestBundle(background_bundle_b);
 
-    features[@intFromEnum(Feature.background_manifest_decl)] =
+    features[@backingInt(Feature.background_manifest_decl)] =
         @hasField(manifest.BundleManifest, "background_tasks") and
         @hasField(manifest.BackgroundTaskDecl, "budget") and
         @hasField(manifest.BackgroundTaskDecl, "visibility");
-    features[@intFromEnum(Feature.background_permission_pairing)] = validationFailsWith(.{
+    features[@backingInt(Feature.background_permission_pairing)] = validationFailsWith(.{
         .bundle_id = "app.background-contract",
         .display_name = "Background Contract",
         .publisher = "zigos.dev",
         .background_tasks = &background_tasks,
     }, error.MissingBackgroundPermission);
-    features[@intFromEnum(Feature.background_budget_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.background_budget_validation)] = validationFailsWith(.{
         .bundle_id = "app.background-contract",
         .display_name = "Background Contract",
         .publisher = "zigos.dev",
@@ -2512,25 +2512,25 @@ fn fillTwelfthContract(features: *[feature_count]bool) void {
             .visibility = .status_only,
         }},
     }, error.BackgroundTaskBudgetMissing);
-    features[@intFromEnum(Feature.background_network_visibility_validation)] = backgroundNetworkVisibilityValidation(&background_permissions);
-    features[@intFromEnum(Feature.background_digest_covers_budget)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@intFromEnum(Feature.package_preserves_background_tasks)] =
+    features[@backingInt(Feature.background_network_visibility_validation)] = backgroundNetworkVisibilityValidation(&background_permissions);
+    features[@backingInt(Feature.background_digest_covers_budget)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@backingInt(Feature.package_preserves_background_tasks)] =
         @hasField(package_model.BundleRevision, "background_tasks") and
         @hasField(package_model.StoredBackgroundTask, "budget") and
         @hasField(package_model.ResolvedManifest, "background_tasks");
-    features[@intFromEnum(Feature.policy_background_duration_gate)] = backgroundPolicyDenies(.background_duration_denied);
-    features[@intFromEnum(Feature.policy_background_cpu_gate)] = backgroundPolicyDenies(.background_cpu_denied);
-    features[@intFromEnum(Feature.policy_background_memory_gate)] = backgroundPolicyDenies(.background_memory_denied);
-    features[@intFromEnum(Feature.policy_background_network_gate)] = backgroundPolicyDenies(.background_network_denied);
-    features[@intFromEnum(Feature.policy_background_visibility_gate)] = backgroundPolicyDenies(.background_visibility_denied);
-    features[@intFromEnum(Feature.background_activity_policy_request)] =
+    features[@backingInt(Feature.policy_background_duration_gate)] = backgroundPolicyDenies(.background_duration_denied);
+    features[@backingInt(Feature.policy_background_cpu_gate)] = backgroundPolicyDenies(.background_cpu_denied);
+    features[@backingInt(Feature.policy_background_memory_gate)] = backgroundPolicyDenies(.background_memory_denied);
+    features[@backingInt(Feature.policy_background_network_gate)] = backgroundPolicyDenies(.background_network_denied);
+    features[@backingInt(Feature.policy_background_visibility_gate)] = backgroundPolicyDenies(.background_visibility_denied);
+    features[@backingInt(Feature.background_activity_policy_request)] =
         @hasField(policy_object.BackgroundActivityRequest, "expected_duration_seconds") and
         @hasDecl(policy_object.Directory, "backgroundActivityDecision");
-    features[@intFromEnum(Feature.typed_background_activity_service)] = contractPresent("zigos.background.activity");
-    features[@intFromEnum(Feature.background_authorize_operation)] = contractOperationPresent("zigos.background.activity", .background_authorize);
-    features[@intFromEnum(Feature.background_record_operation)] = contractOperationPresent("zigos.background.activity", .background_record);
-    features[@intFromEnum(Feature.background_complete_operation)] = contractOperationPresent("zigos.background.activity", .background_complete);
-    features[@intFromEnum(Feature.background_completion_binding_gate)] =
+    features[@backingInt(Feature.typed_background_activity_service)] = contractPresent("zigos.background.activity");
+    features[@backingInt(Feature.background_authorize_operation)] = contractOperationPresent("zigos.background.activity", .background_authorize);
+    features[@backingInt(Feature.background_record_operation)] = contractOperationPresent("zigos.background.activity", .background_record);
+    features[@backingInt(Feature.background_complete_operation)] = contractOperationPresent("zigos.background.activity", .background_complete);
+    features[@backingInt(Feature.background_completion_binding_gate)] =
         backgroundCompletionBindingCheck(background_bundle) and
         @hasDecl(background_dispatch, "CompleteRequest") and
         @hasField(background_dispatch.CompleteRequest, "expected_task_id") and
@@ -2540,14 +2540,14 @@ fn fillTwelfthContract(features: *[feature_count]bool) void {
         @hasField(typed_component_abi.BackgroundCompleteRequest, "expected_background_task_len") and
         @hasField(typed_component_abi.BackgroundCompleteRequest, "expected_trigger") and
         @hasField(typed_component_abi.BackgroundCompleteRequest, "completed_tick");
-    features[@intFromEnum(Feature.native_registry_background_discovery)] =
+    features[@backingInt(Feature.native_registry_background_discovery)] =
         typed_component_abi.interfaceId(.background_activity) == .background_activity;
-    features[@intFromEnum(Feature.background_dispatch_runtime_gate)] = backgroundDispatchRuntimeCheck(background_bundle);
-    features[@intFromEnum(Feature.background_expiration_watchdog)] = backgroundExpirationWatchdogCheck(background_bundle);
-    features[@intFromEnum(Feature.background_activity_ledger)] =
+    features[@backingInt(Feature.background_dispatch_runtime_gate)] = backgroundDispatchRuntimeCheck(background_bundle);
+    features[@backingInt(Feature.background_expiration_watchdog)] = backgroundExpirationWatchdogCheck(background_bundle);
+    features[@backingInt(Feature.background_activity_ledger)] =
         event_ledger.EventKind.background_activity == .background_activity and
         @hasDecl(event_ledger.Ledger, "recordBackgroundActivity");
-    features[@intFromEnum(Feature.background_activity_redaction)] = backgroundActivityRedactionCheck();
+    features[@backingInt(Feature.background_activity_redaction)] = backgroundActivityRedactionCheck();
 }
 
 fn backgroundNetworkVisibilityValidation(background_permissions: []const manifest.PermissionRequest) bool {
@@ -2849,32 +2849,32 @@ const PasteboardContractEvidence = struct {
 
 fn fillThirteenthContract(features: *[feature_count]bool) void {
     const evidence = securePasteboardContractEvidence();
-    features[@intFromEnum(Feature.secure_pasteboard_service_model)] =
+    features[@backingInt(Feature.secure_pasteboard_service_model)] =
         @hasDecl(secure_pasteboard.Service, "offer") and
         @hasDecl(secure_pasteboard.Service, "read") and
         @hasDecl(secure_pasteboard.Service, "revoke") and
         @hasField(secure_pasteboard.Grant, "foreground_session_id") and
         @hasField(secure_pasteboard.Grant, "destination") and
         @hasField(secure_pasteboard.Grant, "read_once");
-    features[@intFromEnum(Feature.pasteboard_foreground_gesture_gate)] = evidence.foreground_gesture_gate;
-    features[@intFromEnum(Feature.pasteboard_destination_bound_grant)] = evidence.destination_bound_grant;
-    features[@intFromEnum(Feature.pasteboard_destination_principal_bound_grant)] = evidence.destination_principal_bound_grant;
-    features[@intFromEnum(Feature.pasteboard_strict_expiry_gate)] = evidence.strict_expiry_gate;
-    features[@intFromEnum(Feature.pasteboard_read_once_token)] = evidence.read_once_token;
-    features[@intFromEnum(Feature.pasteboard_revocation_gate)] = evidence.revocation_gate;
-    features[@intFromEnum(Feature.pasteboard_user_visible_audit)] =
+    features[@backingInt(Feature.pasteboard_foreground_gesture_gate)] = evidence.foreground_gesture_gate;
+    features[@backingInt(Feature.pasteboard_destination_bound_grant)] = evidence.destination_bound_grant;
+    features[@backingInt(Feature.pasteboard_destination_principal_bound_grant)] = evidence.destination_principal_bound_grant;
+    features[@backingInt(Feature.pasteboard_strict_expiry_gate)] = evidence.strict_expiry_gate;
+    features[@backingInt(Feature.pasteboard_read_once_token)] = evidence.read_once_token;
+    features[@backingInt(Feature.pasteboard_revocation_gate)] = evidence.revocation_gate;
+    features[@backingInt(Feature.pasteboard_user_visible_audit)] =
         event_ledger.EventKind.pasteboard_access == .pasteboard_access and
         @hasDecl(event_ledger.Ledger, "recordPasteboardAccess") and
         evidence.user_visible_audit;
-    features[@intFromEnum(Feature.pasteboard_redacted_diagnostics)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_secure_pasteboard_service)] = contractPresent("zigos.secure.pasteboard");
-    features[@intFromEnum(Feature.pasteboard_offer_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_offer);
-    features[@intFromEnum(Feature.pasteboard_read_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_read);
-    features[@intFromEnum(Feature.pasteboard_revoke_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_revoke);
-    features[@intFromEnum(Feature.native_registry_pasteboard_discovery)] =
+    features[@backingInt(Feature.pasteboard_redacted_diagnostics)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_secure_pasteboard_service)] = contractPresent("zigos.secure.pasteboard");
+    features[@backingInt(Feature.pasteboard_offer_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_offer);
+    features[@backingInt(Feature.pasteboard_read_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_read);
+    features[@backingInt(Feature.pasteboard_revoke_operation)] = contractOperationPresent("zigos.secure.pasteboard", .pasteboard_revoke);
+    features[@backingInt(Feature.native_registry_pasteboard_discovery)] =
         typed_component_abi.interfaceId(.secure_pasteboard) == .secure_pasteboard;
-    features[@intFromEnum(Feature.pasteboard_bootstrap_service_contract)] = securePasteboardBootstrapContractCheck();
-    features[@intFromEnum(Feature.pasteboard_boot_image_registry)] = securePasteboardBootImageRegistryCheck();
+    features[@backingInt(Feature.pasteboard_bootstrap_service_contract)] = securePasteboardBootstrapContractCheck();
+    features[@backingInt(Feature.pasteboard_boot_image_registry)] = securePasteboardBootImageRegistryCheck();
 }
 
 fn serviceBootstrapContractCheck(
@@ -3130,11 +3130,11 @@ fn fillFourteenthContract(features: *[feature_count]bool) void {
     const digest_b = package_digest.digestBundle(resilient_notes_v2);
     const evidence = objectResilienceEvidence();
 
-    features[@intFromEnum(Feature.object_resilience_manifest)] =
+    features[@backingInt(Feature.object_resilience_manifest)] =
         @hasField(manifest.BundleManifest, "object_resilience") and
         @hasField(manifest.ObjectResilienceDecl, "encrypted_snapshots") and
         @hasField(manifest.ObjectResilienceDecl, "device_trust_required");
-    features[@intFromEnum(Feature.encrypted_backup_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.encrypted_backup_validation)] = validationFailsWith(.{
         .bundle_id = "app.backup",
         .display_name = "Backup",
         .publisher = "zigos.dev",
@@ -3146,7 +3146,7 @@ fn fillFourteenthContract(features: *[feature_count]bool) void {
             .backup_format = "application/zigos-object-snapshot",
         },
     }, error.ObjectEncryptedBackupRequired);
-    features[@intFromEnum(Feature.recovery_key_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.recovery_key_validation)] = validationFailsWith(.{
         .bundle_id = "app.backup",
         .display_name = "Backup",
         .publisher = "zigos.dev",
@@ -3158,7 +3158,7 @@ fn fillFourteenthContract(features: *[feature_count]bool) void {
             .backup_format = "application/zigos-object-snapshot",
         },
     }, error.ObjectBackupRecoveryKeyRequired);
-    features[@intFromEnum(Feature.portable_restore_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.portable_restore_validation)] = validationFailsWith(.{
         .bundle_id = "app.backup",
         .display_name = "Backup",
         .publisher = "zigos.dev",
@@ -3170,7 +3170,7 @@ fn fillFourteenthContract(features: *[feature_count]bool) void {
             .backup_format = "application/zigos-object-snapshot",
         },
     }, error.ObjectBackupRestoreRequired);
-    features[@intFromEnum(Feature.trusted_restore_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.trusted_restore_validation)] = validationFailsWith(.{
         .bundle_id = "app.backup",
         .display_name = "Backup",
         .publisher = "zigos.dev",
@@ -3182,34 +3182,34 @@ fn fillFourteenthContract(features: *[feature_count]bool) void {
             .backup_format = "application/zigos-object-snapshot",
         },
     }, error.ObjectBackupDeviceTrustRequired);
-    features[@intFromEnum(Feature.backup_digest_covers_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@intFromEnum(Feature.package_preserves_object_resilience)] =
+    features[@backingInt(Feature.backup_digest_covers_format)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@backingInt(Feature.package_preserves_object_resilience)] =
         @hasField(package_model.BundleRevision, "object_resilience") and
         @hasField(package_model.StoredObjectResilience, "encrypted_snapshots");
-    features[@intFromEnum(Feature.package_resolves_object_resilience)] =
+    features[@backingInt(Feature.package_resolves_object_resilience)] =
         @hasField(package_model.ResolvedManifest, "object_resilience");
-    features[@intFromEnum(Feature.policy_backup_allowed_gate)] = objectResiliencePolicyDenies(.object_backup_denied);
-    features[@intFromEnum(Feature.policy_restore_allowed_gate)] = objectResiliencePolicyDenies(.object_restore_denied);
-    features[@intFromEnum(Feature.policy_encrypted_backup_gate)] = objectResiliencePolicyDenies(.object_backup_encryption_denied);
-    features[@intFromEnum(Feature.policy_restore_device_trust_gate)] = objectResiliencePolicyDenies(.object_restore_device_trust_denied);
-    features[@intFromEnum(Feature.typed_object_resilience_service)] = contractPresent("zigos.object.resilience");
-    features[@intFromEnum(Feature.backup_prepare_operation)] = contractOperationPresent("zigos.object.resilience", .object_backup_prepare);
-    features[@intFromEnum(Feature.restore_authorize_operation)] = contractOperationPresent("zigos.object.resilience", .object_restore_authorize);
-    features[@intFromEnum(Feature.backup_revoke_operation)] = contractOperationPresent("zigos.object.resilience", .object_backup_revoke);
-    features[@intFromEnum(Feature.native_registry_object_resilience_discovery)] =
+    features[@backingInt(Feature.policy_backup_allowed_gate)] = objectResiliencePolicyDenies(.object_backup_denied);
+    features[@backingInt(Feature.policy_restore_allowed_gate)] = objectResiliencePolicyDenies(.object_restore_denied);
+    features[@backingInt(Feature.policy_encrypted_backup_gate)] = objectResiliencePolicyDenies(.object_backup_encryption_denied);
+    features[@backingInt(Feature.policy_restore_device_trust_gate)] = objectResiliencePolicyDenies(.object_restore_device_trust_denied);
+    features[@backingInt(Feature.typed_object_resilience_service)] = contractPresent("zigos.object.resilience");
+    features[@backingInt(Feature.backup_prepare_operation)] = contractOperationPresent("zigos.object.resilience", .object_backup_prepare);
+    features[@backingInt(Feature.restore_authorize_operation)] = contractOperationPresent("zigos.object.resilience", .object_restore_authorize);
+    features[@backingInt(Feature.backup_revoke_operation)] = contractOperationPresent("zigos.object.resilience", .object_backup_revoke);
+    features[@backingInt(Feature.native_registry_object_resilience_discovery)] =
         typed_component_abi.interfaceId(.object_resilience) == .object_resilience;
-    features[@intFromEnum(Feature.object_resilience_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.restore_token_device_bound)] = evidence.restore_token_device_bound;
-    features[@intFromEnum(Feature.restore_snapshot_subject_bound)] = evidence.restore_subject_binding;
-    features[@intFromEnum(Feature.revoke_snapshot_source_task_bound)] = evidence.revoke_source_binding;
-    features[@intFromEnum(Feature.backup_revocation_gate)] = evidence.backup_revocation_gate;
-    features[@intFromEnum(Feature.object_resilience_ledger)] =
+    features[@backingInt(Feature.object_resilience_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.restore_token_device_bound)] = evidence.restore_token_device_bound;
+    features[@backingInt(Feature.restore_snapshot_subject_bound)] = evidence.restore_subject_binding;
+    features[@backingInt(Feature.revoke_snapshot_source_task_bound)] = evidence.revoke_source_binding;
+    features[@backingInt(Feature.backup_revocation_gate)] = evidence.backup_revocation_gate;
+    features[@backingInt(Feature.object_resilience_ledger)] =
         event_ledger.EventKind.object_resilience == .object_resilience and
         @hasDecl(event_ledger.Ledger, "recordObjectResilience") and
         evidence.ledger;
-    features[@intFromEnum(Feature.object_resilience_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.object_resilience_bootstrap_contract)] = objectResilienceBootstrapContractCheck();
-    features[@intFromEnum(Feature.object_resilience_boot_image_registry)] = objectResilienceBootImageRegistryCheck();
+    features[@backingInt(Feature.object_resilience_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.object_resilience_bootstrap_contract)] = objectResilienceBootstrapContractCheck();
+    features[@backingInt(Feature.object_resilience_boot_image_registry)] = objectResilienceBootImageRegistryCheck();
 }
 
 fn objectResiliencePolicyDenies(expected: policy_object.DecisionReason) bool {
@@ -3473,12 +3473,12 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
     const digest_b = package_digest.digestBundle(semantic_notes_v2);
     const evidence = semanticMemoryEvidence();
 
-    features[@intFromEnum(Feature.semantic_index_manifest)] =
+    features[@backingInt(Feature.semantic_index_manifest)] =
         @hasField(manifest.BundleManifest, "semantic_index") and
         @hasField(manifest.SemanticIndexDecl, "local_only") and
         @hasField(manifest.SemanticIndexDecl, "encrypted_index") and
         @hasField(manifest.SemanticIndexDecl, "redacted_snippets");
-    features[@intFromEnum(Feature.semantic_index_local_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.semantic_index_local_validation)] = validationFailsWith(.{
         .bundle_id = "app.semantic",
         .display_name = "Semantic",
         .publisher = "zigos.dev",
@@ -3491,7 +3491,7 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
             .model_digest = "sha256:semantic-local",
         },
     }, error.SemanticIndexRequiresLocal);
-    features[@intFromEnum(Feature.semantic_index_encryption_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.semantic_index_encryption_validation)] = validationFailsWith(.{
         .bundle_id = "app.semantic",
         .display_name = "Semantic",
         .publisher = "zigos.dev",
@@ -3503,7 +3503,7 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
             .model_digest = "sha256:semantic-local",
         },
     }, error.SemanticIndexRequiresEncryption);
-    features[@intFromEnum(Feature.semantic_index_redaction_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.semantic_index_redaction_validation)] = validationFailsWith(.{
         .bundle_id = "app.semantic",
         .display_name = "Semantic",
         .publisher = "zigos.dev",
@@ -3515,7 +3515,7 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
             .model_digest = "sha256:semantic-local",
         },
     }, error.SemanticIndexRequiresRedaction);
-    features[@intFromEnum(Feature.semantic_index_query_budget_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.semantic_index_query_budget_validation)] = validationFailsWith(.{
         .bundle_id = "app.semantic",
         .display_name = "Semantic",
         .publisher = "zigos.dev",
@@ -3527,7 +3527,7 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
             .model_digest = "sha256:semantic-local",
         },
     }, error.SemanticIndexQueryBudgetMissing);
-    features[@intFromEnum(Feature.semantic_index_model_digest_validation)] = validationFailsWith(.{
+    features[@backingInt(Feature.semantic_index_model_digest_validation)] = validationFailsWith(.{
         .bundle_id = "app.semantic",
         .display_name = "Semantic",
         .publisher = "zigos.dev",
@@ -3539,34 +3539,34 @@ fn fillFifteenthContract(features: *[feature_count]bool) void {
             .max_query_bytes = 64,
         },
     }, error.SemanticIndexModelDigestMissing);
-    features[@intFromEnum(Feature.semantic_index_digest_covers_model)] = !std.mem.eql(u8, &digest_a, &digest_b);
-    features[@intFromEnum(Feature.package_preserves_semantic_index)] =
+    features[@backingInt(Feature.semantic_index_digest_covers_model)] = !std.mem.eql(u8, &digest_a, &digest_b);
+    features[@backingInt(Feature.package_preserves_semantic_index)] =
         @hasField(package_model.BundleRevision, "semantic_index") and
         @hasField(package_model.StoredSemanticIndex, "model_digest") and
         @hasDecl(package_model.StoredSemanticIndex, "modelDigestSlice");
-    features[@intFromEnum(Feature.package_resolves_semantic_index)] =
+    features[@backingInt(Feature.package_resolves_semantic_index)] =
         @hasField(package_model.ResolvedManifest, "semantic_index");
-    features[@intFromEnum(Feature.policy_semantic_memory_gate)] = semanticMemoryPolicyDenies(.semantic_memory_denied);
-    features[@intFromEnum(Feature.policy_semantic_local_model_gate)] = semanticMemoryPolicyDenies(.semantic_memory_remote_model_denied);
-    features[@intFromEnum(Feature.policy_semantic_encryption_gate)] = semanticMemoryPolicyDenies(.semantic_memory_encryption_denied);
-    features[@intFromEnum(Feature.policy_semantic_redaction_gate)] = semanticMemoryPolicyDenies(.semantic_memory_redaction_denied);
-    features[@intFromEnum(Feature.policy_semantic_query_budget_gate)] = semanticMemoryPolicyDenies(.semantic_query_budget_denied);
-    features[@intFromEnum(Feature.typed_index_search_service)] = contractPresent("zigos.index.search");
-    features[@intFromEnum(Feature.index_upsert_operation)] = contractOperationPresent("zigos.index.search", .index_upsert);
-    features[@intFromEnum(Feature.index_query_operation)] = contractOperationPresent("zigos.index.search", .index_query);
-    features[@intFromEnum(Feature.semantic_query_operation)] = contractOperationPresent("zigos.index.search", .semantic_index_query);
-    features[@intFromEnum(Feature.native_registry_index_discovery)] = indexSearchBootstrapContractCheck();
-    features[@intFromEnum(Feature.semantic_query_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.semantic_query_index_generation)] =
+    features[@backingInt(Feature.policy_semantic_memory_gate)] = semanticMemoryPolicyDenies(.semantic_memory_denied);
+    features[@backingInt(Feature.policy_semantic_local_model_gate)] = semanticMemoryPolicyDenies(.semantic_memory_remote_model_denied);
+    features[@backingInt(Feature.policy_semantic_encryption_gate)] = semanticMemoryPolicyDenies(.semantic_memory_encryption_denied);
+    features[@backingInt(Feature.policy_semantic_redaction_gate)] = semanticMemoryPolicyDenies(.semantic_memory_redaction_denied);
+    features[@backingInt(Feature.policy_semantic_query_budget_gate)] = semanticMemoryPolicyDenies(.semantic_query_budget_denied);
+    features[@backingInt(Feature.typed_index_search_service)] = contractPresent("zigos.index.search");
+    features[@backingInt(Feature.index_upsert_operation)] = contractOperationPresent("zigos.index.search", .index_upsert);
+    features[@backingInt(Feature.index_query_operation)] = contractOperationPresent("zigos.index.search", .index_query);
+    features[@backingInt(Feature.semantic_query_operation)] = contractOperationPresent("zigos.index.search", .semantic_index_query);
+    features[@backingInt(Feature.native_registry_index_discovery)] = indexSearchBootstrapContractCheck();
+    features[@backingInt(Feature.semantic_query_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.semantic_query_index_generation)] =
         @hasField(typed_component_abi.IndexResponse, "index_generation") and evidence.index_generation;
-    features[@intFromEnum(Feature.semantic_query_top_k_ranking)] = evidence.top_k_ranking;
-    features[@intFromEnum(Feature.semantic_query_result_redaction)] = evidence.result_redaction;
-    features[@intFromEnum(Feature.semantic_query_workspace_scope)] = evidence.workspace_scope;
-    features[@intFromEnum(Feature.semantic_memory_ledger)] =
+    features[@backingInt(Feature.semantic_query_top_k_ranking)] = evidence.top_k_ranking;
+    features[@backingInt(Feature.semantic_query_result_redaction)] = evidence.result_redaction;
+    features[@backingInt(Feature.semantic_query_workspace_scope)] = evidence.workspace_scope;
+    features[@backingInt(Feature.semantic_memory_ledger)] =
         event_ledger.EventKind.semantic_memory == .semantic_memory and
         @hasDecl(event_ledger.Ledger, "recordSemanticMemory") and
         evidence.ledger;
-    features[@intFromEnum(Feature.semantic_memory_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.semantic_memory_redaction)] = evidence.redacted_diagnostics;
 }
 
 fn semanticMemoryPolicyDenies(expected: policy_object.DecisionReason) bool {
@@ -3752,32 +3752,32 @@ const IdentityCredentialEvidence = struct {
 fn fillSixteenthContract(features: *[feature_count]bool) void {
     const evidence = identityCredentialEvidence();
 
-    features[@intFromEnum(Feature.passwordless_unlock_methods)] =
+    features[@backingInt(Feature.passwordless_unlock_methods)] =
         std.meta.stringToEnum(os_identity.UnlockMethod, "password") == null;
-    features[@intFromEnum(Feature.passkey_credential_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.credential_hardware_sealed_secret)] = evidence.hardware_sealed;
-    features[@intFromEnum(Feature.credential_phishing_origin_rejection)] = evidence.phishing_rejected;
-    features[@intFromEnum(Feature.credential_local_unlock_required)] = evidence.local_unlock_required;
-    features[@intFromEnum(Feature.credential_fresh_unlock_enforced)] = evidence.fresh_unlock_enforced;
-    features[@intFromEnum(Feature.device_bound_wrong_device_rejected)] = evidence.device_bound_wrong_device_rejected;
-    features[@intFromEnum(Feature.synced_credential_recovery_device_graph)] = evidence.synced_recovery;
-    features[@intFromEnum(Feature.device_bound_recovery_denied)] = evidence.device_bound_recovery_denied;
-    features[@intFromEnum(Feature.credential_revocation_gate)] = evidence.revocation_gate;
-    features[@intFromEnum(Feature.policy_credential_assertion_gate)] = credentialPolicyDenies(.credential_assertion_denied);
-    features[@intFromEnum(Feature.policy_credential_password_fallback_gate)] = credentialPolicyDenies(.credential_password_fallback_denied);
-    features[@intFromEnum(Feature.policy_credential_phishing_gate)] = credentialPolicyDenies(.credential_phishing_resistance_denied);
-    features[@intFromEnum(Feature.policy_credential_hardware_gate)] = credentialPolicyDenies(.credential_hardware_denied);
-    features[@intFromEnum(Feature.policy_credential_local_unlock_gate)] = credentialPolicyDenies(.credential_unlock_denied);
-    features[@intFromEnum(Feature.policy_credential_unlock_age_gate)] = credentialPolicyDenies(.credential_unlock_stale);
-    features[@intFromEnum(Feature.identity_credential_register_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_register);
-    features[@intFromEnum(Feature.identity_credential_assert_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_assert);
-    features[@intFromEnum(Feature.identity_credential_recover_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_recover);
-    features[@intFromEnum(Feature.identity_credential_revoke_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_revoke);
-    features[@intFromEnum(Feature.credential_ledger)] =
+    features[@backingInt(Feature.passkey_credential_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.credential_hardware_sealed_secret)] = evidence.hardware_sealed;
+    features[@backingInt(Feature.credential_phishing_origin_rejection)] = evidence.phishing_rejected;
+    features[@backingInt(Feature.credential_local_unlock_required)] = evidence.local_unlock_required;
+    features[@backingInt(Feature.credential_fresh_unlock_enforced)] = evidence.fresh_unlock_enforced;
+    features[@backingInt(Feature.device_bound_wrong_device_rejected)] = evidence.device_bound_wrong_device_rejected;
+    features[@backingInt(Feature.synced_credential_recovery_device_graph)] = evidence.synced_recovery;
+    features[@backingInt(Feature.device_bound_recovery_denied)] = evidence.device_bound_recovery_denied;
+    features[@backingInt(Feature.credential_revocation_gate)] = evidence.revocation_gate;
+    features[@backingInt(Feature.policy_credential_assertion_gate)] = credentialPolicyDenies(.credential_assertion_denied);
+    features[@backingInt(Feature.policy_credential_password_fallback_gate)] = credentialPolicyDenies(.credential_password_fallback_denied);
+    features[@backingInt(Feature.policy_credential_phishing_gate)] = credentialPolicyDenies(.credential_phishing_resistance_denied);
+    features[@backingInt(Feature.policy_credential_hardware_gate)] = credentialPolicyDenies(.credential_hardware_denied);
+    features[@backingInt(Feature.policy_credential_local_unlock_gate)] = credentialPolicyDenies(.credential_unlock_denied);
+    features[@backingInt(Feature.policy_credential_unlock_age_gate)] = credentialPolicyDenies(.credential_unlock_stale);
+    features[@backingInt(Feature.identity_credential_register_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_register);
+    features[@backingInt(Feature.identity_credential_assert_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_assert);
+    features[@backingInt(Feature.identity_credential_recover_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_recover);
+    features[@backingInt(Feature.identity_credential_revoke_operation)] = contractOperationPresent("zigos.identity.session", .identity_credential_revoke);
+    features[@backingInt(Feature.credential_ledger)] =
         event_ledger.EventKind.identity_credential == .identity_credential and
         @hasDecl(event_ledger.Ledger, "recordIdentityCredential") and
         evidence.ledger;
-    features[@intFromEnum(Feature.credential_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.credential_redaction)] = evidence.redacted_diagnostics;
 }
 
 fn credentialPolicyDenies(expected: policy_object.DecisionReason) bool {
@@ -4112,36 +4112,36 @@ fn fillSeventeenthContract(features: *[feature_count]bool) void {
         .owner = .{ .kind = .user, .serial = 1 },
     };
 
-    features[@intFromEnum(Feature.crdt_document_operation_model)] =
+    features[@backingInt(Feature.crdt_document_operation_model)] =
         @hasDecl(sync_adapters.DocumentOperation, "insert") and
         @hasDecl(sync_adapters.DocumentOperation, "remove") and
         @hasDecl(sync_adapters.DocumentOperationLog, "mergeFrom");
-    features[@intFromEnum(Feature.deterministic_document_merge)] = evidence.crdt_merge;
-    features[@intFromEnum(Feature.idempotent_operation_log_merge)] = evidence.log_idempotence;
-    features[@intFromEnum(Feature.vector_clock_tracking)] = evidence.vector_clock;
-    features[@intFromEnum(Feature.merge_buffer_bounds)] = evidence.buffer_bounds;
-    features[@intFromEnum(Feature.encrypted_transport_queue)] = evidence.encrypted_transport;
-    features[@intFromEnum(Feature.mergeable_transport_semantic)] = evidence.mergeable_semantic;
-    features[@intFromEnum(Feature.sync_service_replication_model)] =
+    features[@backingInt(Feature.deterministic_document_merge)] = evidence.crdt_merge;
+    features[@backingInt(Feature.idempotent_operation_log_merge)] = evidence.log_idempotence;
+    features[@backingInt(Feature.vector_clock_tracking)] = evidence.vector_clock;
+    features[@backingInt(Feature.merge_buffer_bounds)] = evidence.buffer_bounds;
+    features[@backingInt(Feature.encrypted_transport_queue)] = evidence.encrypted_transport;
+    features[@backingInt(Feature.mergeable_transport_semantic)] = evidence.mergeable_semantic;
+    features[@backingInt(Feature.sync_service_replication_model)] =
         evidence.service_model and @hasDecl(sync_service.Service, "replicateWorkspace");
-    features[@intFromEnum(Feature.conflict_review_service_model)] =
+    features[@backingInt(Feature.conflict_review_service_model)] =
         @hasDecl(sync_service.Service, "reviewConflictForObject");
-    features[@intFromEnum(Feature.conflict_resolution_service_model)] =
+    features[@backingInt(Feature.conflict_resolution_service_model)] =
         @hasDecl(sync_service.Service, "resolveConflictForObject");
-    features[@intFromEnum(Feature.sync_destination_policy_gate)] = evidence.policy_gate;
-    features[@intFromEnum(Feature.personal_e2ee_default_policy)] = default_policy.personal_e2ee;
-    features[@intFromEnum(Feature.offline_first_default_policy)] = default_policy.offline_first;
-    features[@intFromEnum(Feature.sync_conflict_ledger)] =
+    features[@backingInt(Feature.sync_destination_policy_gate)] = evidence.policy_gate;
+    features[@backingInt(Feature.personal_e2ee_default_policy)] = default_policy.personal_e2ee;
+    features[@backingInt(Feature.offline_first_default_policy)] = default_policy.offline_first;
+    features[@backingInt(Feature.sync_conflict_ledger)] =
         event_ledger.EventKind.sync_conflict == .sync_conflict and evidence.ledger;
-    features[@intFromEnum(Feature.sync_conflict_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_sync_replication_service)] = contractPresent("zigos.sync.replication");
-    features[@intFromEnum(Feature.sync_device_enroll_operation)] = contractOperationPresent("zigos.sync.replication", .sync_device_enroll);
-    features[@intFromEnum(Feature.sync_workspace_replicate_operation)] = contractOperationPresent("zigos.sync.replication", .sync_workspace_replicate);
-    features[@intFromEnum(Feature.sync_conflict_review_operation)] = contractOperationPresent("zigos.sync.replication", .sync_conflict_review);
-    features[@intFromEnum(Feature.sync_conflict_resolve_operation)] = contractOperationPresent("zigos.sync.replication", .sync_conflict_resolve);
-    features[@intFromEnum(Feature.sync_transport_frame_operation)] = contractOperationPresent("zigos.sync.replication", .sync_transport_frame);
-    features[@intFromEnum(Feature.native_registry_sync_discovery)] = syncBootstrapContractCheck();
-    features[@intFromEnum(Feature.sync_boot_image_registry)] = syncBootImageRegistryCheck();
+    features[@backingInt(Feature.sync_conflict_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_sync_replication_service)] = contractPresent("zigos.sync.replication");
+    features[@backingInt(Feature.sync_device_enroll_operation)] = contractOperationPresent("zigos.sync.replication", .sync_device_enroll);
+    features[@backingInt(Feature.sync_workspace_replicate_operation)] = contractOperationPresent("zigos.sync.replication", .sync_workspace_replicate);
+    features[@backingInt(Feature.sync_conflict_review_operation)] = contractOperationPresent("zigos.sync.replication", .sync_conflict_review);
+    features[@backingInt(Feature.sync_conflict_resolve_operation)] = contractOperationPresent("zigos.sync.replication", .sync_conflict_resolve);
+    features[@backingInt(Feature.sync_transport_frame_operation)] = contractOperationPresent("zigos.sync.replication", .sync_transport_frame);
+    features[@backingInt(Feature.native_registry_sync_discovery)] = syncBootstrapContractCheck();
+    features[@backingInt(Feature.sync_boot_image_registry)] = syncBootImageRegistryCheck();
 }
 
 fn privateSyncEvidence() PrivateSyncEvidence {
@@ -4273,13 +4273,13 @@ fn fillEighteenthContract(features: *[feature_count]bool) void {
     const mic_permission = capturePermission(.mic, "microphone:built-in", 120, "Record a voice note");
     const screen_permission = capturePermission(.screen_capture, "screen:active-window", 60, "Share the visible window");
 
-    features[@intFromEnum(Feature.sensitive_capture_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.capture_foreground_session_gate)] = evidence.foreground_gate;
-    features[@intFromEnum(Feature.capture_privacy_indicator_gate)] = evidence.indicator_gate;
-    features[@intFromEnum(Feature.capture_background_denial)] = evidence.background_denial;
-    features[@intFromEnum(Feature.capture_lease_policy_gate)] = evidence.lease_policy_gate;
-    features[@intFromEnum(Feature.capture_indicator_expiry_boundary)] = evidence.indicator_expiry_boundary;
-    features[@intFromEnum(Feature.capture_session_binding_gate)] =
+    features[@backingInt(Feature.sensitive_capture_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.capture_foreground_session_gate)] = evidence.foreground_gate;
+    features[@backingInt(Feature.capture_privacy_indicator_gate)] = evidence.indicator_gate;
+    features[@backingInt(Feature.capture_background_denial)] = evidence.background_denial;
+    features[@backingInt(Feature.capture_lease_policy_gate)] = evidence.lease_policy_gate;
+    features[@backingInt(Feature.capture_indicator_expiry_boundary)] = evidence.indicator_expiry_boundary;
+    features[@backingInt(Feature.capture_session_binding_gate)] =
         evidence.session_binding_gate and
         @hasField(typed_component_abi.CaptureSampleRequest, "expected_device_id") and
         @hasField(typed_component_abi.CaptureSampleRequest, "expected_foreground_session_id") and
@@ -4287,23 +4287,23 @@ fn fillEighteenthContract(features: *[feature_count]bool) void {
         @hasField(typed_component_abi.CaptureStopRequest, "expected_device_id") and
         @hasField(typed_component_abi.CaptureStopRequest, "expected_foreground_session_id") and
         @hasField(typed_component_abi.CaptureStopRequest, "expected_kind");
-    features[@intFromEnum(Feature.capture_sample_budget_gate)] = evidence.sample_budget_gate;
-    features[@intFromEnum(Feature.capture_permission_kind_policy_gate)] = evidence.permission_policy_gate;
-    features[@intFromEnum(Feature.capture_revocation_gate)] = evidence.revocation_gate;
-    features[@intFromEnum(Feature.sensitive_capture_ledger)] =
+    features[@backingInt(Feature.capture_sample_budget_gate)] = evidence.sample_budget_gate;
+    features[@backingInt(Feature.capture_permission_kind_policy_gate)] = evidence.permission_policy_gate;
+    features[@backingInt(Feature.capture_revocation_gate)] = evidence.revocation_gate;
+    features[@backingInt(Feature.sensitive_capture_ledger)] =
         event_ledger.EventKind.sensitive_capture == .sensitive_capture and evidence.ledger;
-    features[@intFromEnum(Feature.sensitive_capture_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_sensitive_capture_service)] = contractPresent("zigos.sensitive.capture");
-    features[@intFromEnum(Feature.capture_start_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_start);
-    features[@intFromEnum(Feature.capture_sample_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_sample);
-    features[@intFromEnum(Feature.capture_stop_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_stop);
-    features[@intFromEnum(Feature.native_registry_capture_discovery)] =
+    features[@backingInt(Feature.sensitive_capture_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_sensitive_capture_service)] = contractPresent("zigos.sensitive.capture");
+    features[@backingInt(Feature.capture_start_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_start);
+    features[@backingInt(Feature.capture_sample_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_sample);
+    features[@backingInt(Feature.capture_stop_operation)] = contractOperationPresent("zigos.sensitive.capture", .capture_stop);
+    features[@backingInt(Feature.native_registry_capture_discovery)] =
         typed_component_abi.interfaceId(.sensitive_capture) == .sensitive_capture;
-    features[@intFromEnum(Feature.capture_bootstrap_service_contract)] = captureBootstrapContractCheck();
-    features[@intFromEnum(Feature.capture_boot_image_registry)] = captureBootImageRegistryCheck();
-    features[@intFromEnum(Feature.camera_permission_manifest_lease)] = capturePermissionIsModern(camera_permission, .camera);
-    features[@intFromEnum(Feature.microphone_permission_manifest_lease)] = capturePermissionIsModern(mic_permission, .mic);
-    features[@intFromEnum(Feature.screen_capture_permission_manifest_lease)] = capturePermissionIsModern(screen_permission, .screen_capture);
+    features[@backingInt(Feature.capture_bootstrap_service_contract)] = captureBootstrapContractCheck();
+    features[@backingInt(Feature.capture_boot_image_registry)] = captureBootImageRegistryCheck();
+    features[@backingInt(Feature.camera_permission_manifest_lease)] = capturePermissionIsModern(camera_permission, .camera);
+    features[@backingInt(Feature.microphone_permission_manifest_lease)] = capturePermissionIsModern(mic_permission, .mic);
+    features[@backingInt(Feature.screen_capture_permission_manifest_lease)] = capturePermissionIsModern(screen_permission, .screen_capture);
 }
 
 fn sensitiveCaptureEvidence() SensitiveCaptureEvidence {
@@ -4597,39 +4597,39 @@ const SecretVaultEvidence = struct {
 fn fillNineteenthContract(features: *[feature_count]bool) void {
     const evidence = secretVaultEvidence();
 
-    features[@intFromEnum(Feature.secret_vault_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.hardware_sealed_import)] = evidence.hardware_sealed_import;
-    features[@intFromEnum(Feature.nonresident_secret_material)] = evidence.nonresident_material;
-    features[@intFromEnum(Feature.secret_owner_binding)] = evidence.owner_binding;
-    features[@intFromEnum(Feature.leased_handle_lending)] = evidence.leased_handle;
-    features[@intFromEnum(Feature.secret_handle_expiry_boundary)] = evidence.handle_expiry_boundary;
-    features[@intFromEnum(Feature.raw_export_policy_denial)] = evidence.raw_export_denial;
-    features[@intFromEnum(Feature.raw_export_handle_capability_gate)] = evidence.raw_export_handle_capability_gate;
-    features[@intFromEnum(Feature.raw_export_success_audit)] = evidence.raw_export_success_audit;
-    features[@intFromEnum(Feature.store_handle_identity_binding)] = evidence.store_handle_identity_binding;
-    features[@intFromEnum(Feature.secret_rotation_revokes_old_handles)] = evidence.rotation_revokes_old_handles;
-    features[@intFromEnum(Feature.explicit_handle_revocation)] = evidence.explicit_revocation;
-    features[@intFromEnum(Feature.secret_revoke_binding_gate)] =
+    features[@backingInt(Feature.secret_vault_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.hardware_sealed_import)] = evidence.hardware_sealed_import;
+    features[@backingInt(Feature.nonresident_secret_material)] = evidence.nonresident_material;
+    features[@backingInt(Feature.secret_owner_binding)] = evidence.owner_binding;
+    features[@backingInt(Feature.leased_handle_lending)] = evidence.leased_handle;
+    features[@backingInt(Feature.secret_handle_expiry_boundary)] = evidence.handle_expiry_boundary;
+    features[@backingInt(Feature.raw_export_policy_denial)] = evidence.raw_export_denial;
+    features[@backingInt(Feature.raw_export_handle_capability_gate)] = evidence.raw_export_handle_capability_gate;
+    features[@backingInt(Feature.raw_export_success_audit)] = evidence.raw_export_success_audit;
+    features[@backingInt(Feature.store_handle_identity_binding)] = evidence.store_handle_identity_binding;
+    features[@backingInt(Feature.secret_rotation_revokes_old_handles)] = evidence.rotation_revokes_old_handles;
+    features[@backingInt(Feature.explicit_handle_revocation)] = evidence.explicit_revocation;
+    features[@backingInt(Feature.secret_revoke_binding_gate)] =
         evidence.revoke_binding_gate and
         @hasField(typed_component_abi.SecretRevokeRequest, "subject_serial") and
         @hasField(typed_component_abi.SecretRevokeRequest, "subject_kind") and
         @hasField(typed_component_abi.SecretRevokeRequest, "expected_holder_serial") and
         @hasField(typed_component_abi.SecretRevokeRequest, "expected_holder_kind") and
         @hasField(typed_component_abi.SecretRevokeRequest, "expected_holder_task_id");
-    features[@intFromEnum(Feature.secret_hardware_policy_gate)] = evidence.hardware_policy_gate;
-    features[@intFromEnum(Feature.secret_lease_policy_gate)] = evidence.lease_policy_gate;
-    features[@intFromEnum(Feature.secret_vault_ledger)] =
+    features[@backingInt(Feature.secret_hardware_policy_gate)] = evidence.hardware_policy_gate;
+    features[@backingInt(Feature.secret_lease_policy_gate)] = evidence.lease_policy_gate;
+    features[@backingInt(Feature.secret_vault_ledger)] =
         event_ledger.EventKind.secret_vault == .secret_vault and evidence.ledger;
-    features[@intFromEnum(Feature.secret_vault_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_secret_vault_service)] = contractPresent("zigos.secret.vault");
-    features[@intFromEnum(Feature.secret_import_operation)] = contractOperationPresent("zigos.secret.vault", .secret_import);
-    features[@intFromEnum(Feature.secret_lend_operation)] = contractOperationPresent("zigos.secret.vault", .secret_lend);
-    features[@intFromEnum(Feature.secret_rotate_operation)] = contractOperationPresent("zigos.secret.vault", .secret_rotate);
-    features[@intFromEnum(Feature.secret_revoke_operation)] = contractOperationPresent("zigos.secret.vault", .secret_revoke);
-    features[@intFromEnum(Feature.native_registry_secret_discovery)] =
+    features[@backingInt(Feature.secret_vault_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_secret_vault_service)] = contractPresent("zigos.secret.vault");
+    features[@backingInt(Feature.secret_import_operation)] = contractOperationPresent("zigos.secret.vault", .secret_import);
+    features[@backingInt(Feature.secret_lend_operation)] = contractOperationPresent("zigos.secret.vault", .secret_lend);
+    features[@backingInt(Feature.secret_rotate_operation)] = contractOperationPresent("zigos.secret.vault", .secret_rotate);
+    features[@backingInt(Feature.secret_revoke_operation)] = contractOperationPresent("zigos.secret.vault", .secret_revoke);
+    features[@backingInt(Feature.native_registry_secret_discovery)] =
         typed_component_abi.interfaceId(.secret_vault) == .secret_vault;
-    features[@intFromEnum(Feature.secret_vault_bootstrap_contract)] = secretVaultBootstrapContractCheck();
-    features[@intFromEnum(Feature.secret_vault_boot_image_registry)] = secretVaultBootImageRegistryCheck();
+    features[@backingInt(Feature.secret_vault_bootstrap_contract)] = secretVaultBootstrapContractCheck();
+    features[@backingInt(Feature.secret_vault_boot_image_registry)] = secretVaultBootImageRegistryCheck();
 }
 
 fn secretVaultContractHardwareProvider() secure_secret_store.HardwareSealProvider {
@@ -5036,33 +5036,33 @@ const AttentionBrokerEvidence = struct {
 fn fillTwentiethContract(features: *[feature_count]bool) void {
     const evidence = attentionBrokerEvidence();
 
-    features[@intFromEnum(Feature.attention_broker_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.brokered_notification_post)] = evidence.brokered_post;
-    features[@intFromEnum(Feature.notification_default_task_binding)] =
+    features[@backingInt(Feature.attention_broker_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.brokered_notification_post)] = evidence.brokered_post;
+    features[@backingInt(Feature.notification_default_task_binding)] =
         evidence.default_task_binding and
         @hasField(typed_component_abi.AttentionDismissRequest, "expected_source_serial") and
         @hasField(typed_component_abi.AttentionDismissRequest, "expected_source_kind") and
         @hasField(typed_component_abi.AttentionDismissRequest, "expected_notification_task_id");
-    features[@intFromEnum(Feature.quiet_interrupt_denial)] = evidence.quiet_denial;
-    features[@intFromEnum(Feature.critical_interrupt_denial)] = evidence.critical_denial;
-    features[@intFromEnum(Feature.visible_budget_denial)] = evidence.visible_budget_denial;
-    features[@intFromEnum(Feature.interruption_budget_denial)] = evidence.interruption_budget_denial;
-    features[@intFromEnum(Feature.notification_dismissal)] = evidence.dismissal;
-    features[@intFromEnum(Feature.notification_task_bound_dismissal)] = evidence.task_bound_dismissal;
-    features[@intFromEnum(Feature.notification_strict_expiry_boundary)] = evidence.strict_expiry_boundary;
-    features[@intFromEnum(Feature.latest_visible_query)] = evidence.latest_query;
-    features[@intFromEnum(Feature.attention_broker_policy_gate)] = evidence.policy_gate;
-    features[@intFromEnum(Feature.attention_broker_ledger)] =
+    features[@backingInt(Feature.quiet_interrupt_denial)] = evidence.quiet_denial;
+    features[@backingInt(Feature.critical_interrupt_denial)] = evidence.critical_denial;
+    features[@backingInt(Feature.visible_budget_denial)] = evidence.visible_budget_denial;
+    features[@backingInt(Feature.interruption_budget_denial)] = evidence.interruption_budget_denial;
+    features[@backingInt(Feature.notification_dismissal)] = evidence.dismissal;
+    features[@backingInt(Feature.notification_task_bound_dismissal)] = evidence.task_bound_dismissal;
+    features[@backingInt(Feature.notification_strict_expiry_boundary)] = evidence.strict_expiry_boundary;
+    features[@backingInt(Feature.latest_visible_query)] = evidence.latest_query;
+    features[@backingInt(Feature.attention_broker_policy_gate)] = evidence.policy_gate;
+    features[@backingInt(Feature.attention_broker_ledger)] =
         event_ledger.EventKind.attention_policy == .attention_policy and evidence.ledger;
-    features[@intFromEnum(Feature.attention_broker_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_attention_broker_service)] = contractPresent("zigos.attention.broker");
-    features[@intFromEnum(Feature.attention_post_operation)] = contractOperationPresent("zigos.attention.broker", .attention_post);
-    features[@intFromEnum(Feature.attention_dismiss_operation)] = contractOperationPresent("zigos.attention.broker", .attention_dismiss);
-    features[@intFromEnum(Feature.attention_query_operation)] = contractOperationPresent("zigos.attention.broker", .attention_query);
-    features[@intFromEnum(Feature.native_registry_attention_discovery)] =
+    features[@backingInt(Feature.attention_broker_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_attention_broker_service)] = contractPresent("zigos.attention.broker");
+    features[@backingInt(Feature.attention_post_operation)] = contractOperationPresent("zigos.attention.broker", .attention_post);
+    features[@backingInt(Feature.attention_dismiss_operation)] = contractOperationPresent("zigos.attention.broker", .attention_dismiss);
+    features[@backingInt(Feature.attention_query_operation)] = contractOperationPresent("zigos.attention.broker", .attention_query);
+    features[@backingInt(Feature.native_registry_attention_discovery)] =
         typed_component_abi.interfaceId(.attention_broker) == .attention_broker;
-    features[@intFromEnum(Feature.attention_broker_bootstrap_contract)] = attentionBrokerBootstrapContractCheck();
-    features[@intFromEnum(Feature.attention_broker_boot_image_registry)] = attentionBrokerBootImageRegistryCheck();
+    features[@backingInt(Feature.attention_broker_bootstrap_contract)] = attentionBrokerBootstrapContractCheck();
+    features[@backingInt(Feature.attention_broker_boot_image_registry)] = attentionBrokerBootImageRegistryCheck();
 }
 
 fn attentionBrokerEvidence() AttentionBrokerEvidence {
@@ -5278,30 +5278,30 @@ const TaskLifecycleEvidence = struct {
 fn fillTwentyFirstContract(features: *[feature_count]bool) void {
     const evidence = taskLifecycleEvidence();
 
-    features[@intFromEnum(Feature.task_lifecycle_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.brokered_task_suspend)] = evidence.task_suspend;
-    features[@intFromEnum(Feature.invalid_suspend_denial)] = evidence.invalid_task_suspend_denial;
-    features[@intFromEnum(Feature.brokered_task_resume)] = evidence.task_resume;
-    features[@intFromEnum(Feature.terminate_checkpoint_policy_denial)] = evidence.checkpoint_denial;
-    features[@intFromEnum(Feature.brokered_task_terminate)] = evidence.task_terminate;
-    features[@intFromEnum(Feature.lifecycle_target_owner_binding)] =
+    features[@backingInt(Feature.task_lifecycle_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.brokered_task_suspend)] = evidence.task_suspend;
+    features[@backingInt(Feature.invalid_suspend_denial)] = evidence.invalid_task_suspend_denial;
+    features[@backingInt(Feature.brokered_task_resume)] = evidence.task_resume;
+    features[@backingInt(Feature.terminate_checkpoint_policy_denial)] = evidence.checkpoint_denial;
+    features[@backingInt(Feature.brokered_task_terminate)] = evidence.task_terminate;
+    features[@backingInt(Feature.lifecycle_target_owner_binding)] =
         evidence.target_owner_binding and
         @hasField(typed_component_abi.LifecycleControlRequest, "target_owner_serial") and
         @hasField(typed_component_abi.LifecycleControlRequest, "target_owner_kind");
-    features[@intFromEnum(Feature.task_lifecycle_policy_gate)] = evidence.policy_gate;
-    features[@intFromEnum(Feature.task_lifecycle_runtime_audit)] = evidence.runtime_audit;
-    features[@intFromEnum(Feature.task_lifecycle_ledger)] =
+    features[@backingInt(Feature.task_lifecycle_policy_gate)] = evidence.policy_gate;
+    features[@backingInt(Feature.task_lifecycle_runtime_audit)] = evidence.runtime_audit;
+    features[@backingInt(Feature.task_lifecycle_ledger)] =
         event_ledger.EventKind.task_lifecycle == .task_lifecycle and evidence.ledger;
-    features[@intFromEnum(Feature.task_lifecycle_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_task_lifecycle_service)] = contractPresent("zigos.task.lifecycle");
-    features[@intFromEnum(Feature.lifecycle_suspend_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_suspend);
-    features[@intFromEnum(Feature.lifecycle_resume_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_resume);
-    features[@intFromEnum(Feature.lifecycle_terminate_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_terminate);
-    features[@intFromEnum(Feature.native_registry_lifecycle_discovery)] =
+    features[@backingInt(Feature.task_lifecycle_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_task_lifecycle_service)] = contractPresent("zigos.task.lifecycle");
+    features[@backingInt(Feature.lifecycle_suspend_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_suspend);
+    features[@backingInt(Feature.lifecycle_resume_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_resume);
+    features[@backingInt(Feature.lifecycle_terminate_operation)] = contractOperationPresent("zigos.task.lifecycle", .lifecycle_terminate);
+    features[@backingInt(Feature.native_registry_lifecycle_discovery)] =
         typed_component_abi.interfaceId(.task_lifecycle) == .task_lifecycle;
-    features[@intFromEnum(Feature.lifecycle_bootstrap_contract)] = taskLifecycleBootstrapContractCheck();
-    features[@intFromEnum(Feature.lifecycle_boot_image_registry)] = taskLifecycleBootImageRegistryCheck();
-    features[@intFromEnum(Feature.lifecycle_policy_digest)] = evidence.policy_digest;
+    features[@backingInt(Feature.lifecycle_bootstrap_contract)] = taskLifecycleBootstrapContractCheck();
+    features[@backingInt(Feature.lifecycle_boot_image_registry)] = taskLifecycleBootImageRegistryCheck();
+    features[@backingInt(Feature.lifecycle_policy_digest)] = evidence.policy_digest;
 }
 
 fn taskLifecycleEvidence() TaskLifecycleEvidence {
@@ -5454,31 +5454,31 @@ const PackageOffboardingEvidence = struct {
 fn fillTwentySecondContract(features: *[feature_count]bool) void {
     const evidence = packageOffboardingEvidence();
 
-    features[@intFromEnum(Feature.package_offboarding_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.package_port_offboarding_authority_path)] =
+    features[@backingInt(Feature.package_offboarding_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.package_port_offboarding_authority_path)] =
         @hasDecl(package_service.PackagePort, "offboard");
-    features[@intFromEnum(Feature.offboard_policy_delete_gate)] = evidence.policy_gate;
-    features[@intFromEnum(Feature.offboard_receipt_required)] = evidence.receipt_required;
-    features[@intFromEnum(Feature.denied_offboard_preserves_install)] = evidence.denied_preserves_install;
-    features[@intFromEnum(Feature.receipt_backed_package_remove)] = evidence.package_removed;
-    features[@intFromEnum(Feature.offboard_result_receipt)] = evidence.result_receipt;
-    features[@intFromEnum(Feature.offboard_removed_bundle_digest)] = evidence.removed_bundle_digest;
-    features[@intFromEnum(Feature.offboard_removed_bundle_digest_content_binding)] = evidence.removed_bundle_digest_content_binding;
-    features[@intFromEnum(Feature.offboard_revision_purge)] = evidence.revision_purge;
-    features[@intFromEnum(Feature.removed_bundle_unlaunchable)] = evidence.unlaunchable;
-    features[@intFromEnum(Feature.offboard_data_deletion_ledger)] =
+    features[@backingInt(Feature.offboard_policy_delete_gate)] = evidence.policy_gate;
+    features[@backingInt(Feature.offboard_receipt_required)] = evidence.receipt_required;
+    features[@backingInt(Feature.denied_offboard_preserves_install)] = evidence.denied_preserves_install;
+    features[@backingInt(Feature.receipt_backed_package_remove)] = evidence.package_removed;
+    features[@backingInt(Feature.offboard_result_receipt)] = evidence.result_receipt;
+    features[@backingInt(Feature.offboard_removed_bundle_digest)] = evidence.removed_bundle_digest;
+    features[@backingInt(Feature.offboard_removed_bundle_digest_content_binding)] = evidence.removed_bundle_digest_content_binding;
+    features[@backingInt(Feature.offboard_revision_purge)] = evidence.revision_purge;
+    features[@backingInt(Feature.removed_bundle_unlaunchable)] = evidence.unlaunchable;
+    features[@backingInt(Feature.offboard_data_deletion_ledger)] =
         event_ledger.EventKind.data_deletion == .data_deletion and evidence.ledger;
-    features[@intFromEnum(Feature.offboard_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_package_remove_operation)] =
+    features[@backingInt(Feature.offboard_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_package_remove_operation)] =
         contractOperationPresent("zigos.package.install", .package_remove);
-    features[@intFromEnum(Feature.package_remove_operation_id)] =
+    features[@backingInt(Feature.package_remove_operation_id)] =
         typed_component_abi.OperationId.package_remove == .package_remove and
-        @intFromEnum(typed_component_abi.OperationId.package_remove) == 0x0604;
-    features[@intFromEnum(Feature.package_remove_wire_validation)] = packageRemoveWireValidationCheck();
-    features[@intFromEnum(Feature.package_registry_discovery)] =
+        @backingInt(typed_component_abi.OperationId.package_remove) == 0x0604;
+    features[@backingInt(Feature.package_remove_wire_validation)] = packageRemoveWireValidationCheck();
+    features[@backingInt(Feature.package_registry_discovery)] =
         userspace_registry.findByServiceClass(.package_install_update) != null and
         typed_component_abi.interfaceId(.package_install) == .package_install;
-    features[@intFromEnum(Feature.package_offboard_policy_digest)] = evidence.policy_digest;
+    features[@backingInt(Feature.package_offboard_policy_digest)] = evidence.policy_digest;
 }
 
 fn packageOffboardingEvidence() PackageOffboardingEvidence {
@@ -5583,7 +5583,7 @@ fn packageOffboardingEvidence() PackageOffboardingEvidence {
 
 fn packageRemoveWireValidationCheck() bool {
     const header = typed_component_abi.WireHeader{
-        .operation = @intFromEnum(typed_component_abi.OperationId.package_remove),
+        .operation = @backingInt(typed_component_abi.OperationId.package_remove),
         .correlation_id = 2026,
         .subject_task_id = 7601,
     };
@@ -5619,23 +5619,23 @@ const ResourceGovernanceEvidence = struct {
 fn fillTwentyThirdContract(features: *[feature_count]bool) void {
     const evidence = resourceGovernanceEvidence();
 
-    features[@intFromEnum(Feature.scheduler_resource_governance_model)] = evidence.scheduler_model;
-    features[@intFromEnum(Feature.hardware_telemetry_provider_boundary)] = evidence.telemetry_provider_boundary;
-    features[@intFromEnum(Feature.hardware_evidence_required_for_accelerator_queues)] = evidence.hardware_evidence_required;
-    features[@intFromEnum(Feature.foreground_thermal_dispatch)] = evidence.foreground_thermal_dispatch;
-    features[@intFromEnum(Feature.emergency_pressure_bypass)] = evidence.emergency_pressure_bypass;
-    features[@intFromEnum(Feature.background_thermal_delay)] = evidence.background_thermal_delay;
-    features[@intFromEnum(Feature.batch_battery_delay)] = evidence.batch_battery_delay;
-    features[@intFromEnum(Feature.batch_recovers_after_pressure)] = evidence.batch_recovers_after_pressure;
-    features[@intFromEnum(Feature.pressure_delay_reason_accounting)] = evidence.pressure_reason_accounting;
-    features[@intFromEnum(Feature.dispatch_budget_accounting)] = evidence.dispatch_budget_accounting;
-    features[@intFromEnum(Feature.privacy_mode_degrades_accelerator)] = evidence.privacy_mode_degrades_accelerator;
-    features[@intFromEnum(Feature.carbon_aware_planner_compat)] = evidence.carbon_aware_planner_compat;
-    features[@intFromEnum(Feature.resource_governance_ledger)] =
+    features[@backingInt(Feature.scheduler_resource_governance_model)] = evidence.scheduler_model;
+    features[@backingInt(Feature.hardware_telemetry_provider_boundary)] = evidence.telemetry_provider_boundary;
+    features[@backingInt(Feature.hardware_evidence_required_for_accelerator_queues)] = evidence.hardware_evidence_required;
+    features[@backingInt(Feature.foreground_thermal_dispatch)] = evidence.foreground_thermal_dispatch;
+    features[@backingInt(Feature.emergency_pressure_bypass)] = evidence.emergency_pressure_bypass;
+    features[@backingInt(Feature.background_thermal_delay)] = evidence.background_thermal_delay;
+    features[@backingInt(Feature.batch_battery_delay)] = evidence.batch_battery_delay;
+    features[@backingInt(Feature.batch_recovers_after_pressure)] = evidence.batch_recovers_after_pressure;
+    features[@backingInt(Feature.pressure_delay_reason_accounting)] = evidence.pressure_reason_accounting;
+    features[@backingInt(Feature.dispatch_budget_accounting)] = evidence.dispatch_budget_accounting;
+    features[@backingInt(Feature.privacy_mode_degrades_accelerator)] = evidence.privacy_mode_degrades_accelerator;
+    features[@backingInt(Feature.carbon_aware_planner_compat)] = evidence.carbon_aware_planner_compat;
+    features[@backingInt(Feature.resource_governance_ledger)] =
         event_ledger.EventKind.resource_governance == .resource_governance and evidence.ledger;
-    features[@intFromEnum(Feature.resource_governance_diagnostics)] = evidence.diagnostics;
-    features[@intFromEnum(Feature.resource_governance_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.resource_governance_query_index)] = evidence.query_index;
+    features[@backingInt(Feature.resource_governance_diagnostics)] = evidence.diagnostics;
+    features[@backingInt(Feature.resource_governance_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.resource_governance_query_index)] = evidence.query_index;
 }
 
 fn resourceGovernanceEvidence() ResourceGovernanceEvidence {
@@ -5948,35 +5948,35 @@ const NetworkSessionEvidence = struct {
 fn fillTwentyFourthContract(features: *[feature_count]bool) void {
     const evidence = networkSessionEvidence();
 
-    features[@intFromEnum(Feature.network_session_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.existing_egress_broker_composed)] = evidence.egress_broker_composed;
-    features[@intFromEnum(Feature.allow_list_destination_gate)] = evidence.destination_gate;
-    features[@intFromEnum(Feature.attested_session_open)] = evidence.attested_open;
-    features[@intFromEnum(Feature.session_byte_budget)] = evidence.byte_budget;
-    features[@intFromEnum(Feature.session_expiry_boundary_gate)] = evidence.expiry_boundary_gate;
-    features[@intFromEnum(Feature.session_effective_budget_policy)] = evidence.effective_budget_policy;
-    features[@intFromEnum(Feature.transfer_over_budget_denied)] = evidence.over_budget_denied;
-    features[@intFromEnum(Feature.session_mutation_binding)] =
+    features[@backingInt(Feature.network_session_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.existing_egress_broker_composed)] = evidence.egress_broker_composed;
+    features[@backingInt(Feature.allow_list_destination_gate)] = evidence.destination_gate;
+    features[@backingInt(Feature.attested_session_open)] = evidence.attested_open;
+    features[@backingInt(Feature.session_byte_budget)] = evidence.byte_budget;
+    features[@backingInt(Feature.session_expiry_boundary_gate)] = evidence.expiry_boundary_gate;
+    features[@backingInt(Feature.session_effective_budget_policy)] = evidence.effective_budget_policy;
+    features[@backingInt(Feature.transfer_over_budget_denied)] = evidence.over_budget_denied;
+    features[@backingInt(Feature.session_mutation_binding)] =
         evidence.mutation_binding and
         @hasField(typed_component_abi.NetworkRecordTransferRequest, "expected_policy_id") and
         @hasField(typed_component_abi.NetworkRecordTransferRequest, "expected_capability_id") and
         @hasField(typed_component_abi.NetworkRevokeSessionRequest, "expected_policy_id") and
         @hasField(typed_component_abi.NetworkRevokeSessionRequest, "expected_capability_id");
-    features[@intFromEnum(Feature.session_revocation_gate)] = evidence.revocation_gate;
-    features[@intFromEnum(Feature.revoked_session_transfer_denied)] = evidence.revoked_transfer_denied;
-    features[@intFromEnum(Feature.completed_session_transfer_denied)] = evidence.completed_transfer_denied;
-    features[@intFromEnum(Feature.network_session_ledger)] =
+    features[@backingInt(Feature.session_revocation_gate)] = evidence.revocation_gate;
+    features[@backingInt(Feature.revoked_session_transfer_denied)] = evidence.revoked_transfer_denied;
+    features[@backingInt(Feature.completed_session_transfer_denied)] = evidence.completed_transfer_denied;
+    features[@backingInt(Feature.network_session_ledger)] =
         event_ledger.EventKind.network_session == .network_session and evidence.ledger;
-    features[@intFromEnum(Feature.network_session_diagnostics)] = evidence.diagnostics;
-    features[@intFromEnum(Feature.network_session_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_network_open_session_operation)] =
+    features[@backingInt(Feature.network_session_diagnostics)] = evidence.diagnostics;
+    features[@backingInt(Feature.network_session_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_network_open_session_operation)] =
         contractOperationPresent("zigos.service.network.policy", .network_open_session);
-    features[@intFromEnum(Feature.typed_network_transfer_operation)] =
+    features[@backingInt(Feature.typed_network_transfer_operation)] =
         contractOperationPresent("zigos.service.network.policy", .network_record_transfer);
-    features[@intFromEnum(Feature.typed_network_revoke_operation)] =
+    features[@backingInt(Feature.typed_network_revoke_operation)] =
         contractOperationPresent("zigos.service.network.policy", .network_revoke_session);
-    features[@intFromEnum(Feature.network_session_wire_validation)] = networkSessionWireValidationCheck();
-    features[@intFromEnum(Feature.network_stack_catalog_binding)] =
+    features[@backingInt(Feature.network_session_wire_validation)] = networkSessionWireValidationCheck();
+    features[@backingInt(Feature.network_stack_catalog_binding)] =
         service_catalog.entryForClass(.network_stack) != null and
         typed_component_abi.interfaceId(.network_policy) == .network_policy;
 }
@@ -6337,7 +6337,7 @@ fn networkSessionEvidence() NetworkSessionEvidence {
 
 fn networkSessionWireValidationCheck() bool {
     const header = typed_component_abi.WireHeader{
-        .operation = @intFromEnum(typed_component_abi.OperationId.network_open_session),
+        .operation = @backingInt(typed_component_abi.OperationId.network_open_session),
         .correlation_id = 2026,
         .subject_task_id = 8812,
     };
@@ -6388,63 +6388,63 @@ const PersonalContextEvidence = struct {
 fn fillTwentyFifthContract(features: *[feature_count]bool) void {
     const evidence = personalContextEvidence();
 
-    features[@intFromEnum(Feature.personal_context_service_model)] = evidence.service_model;
-    features[@intFromEnum(Feature.semantic_policy_composed)] = evidence.policy_composed;
-    features[@intFromEnum(Feature.local_model_gate)] = semanticMemoryPolicyDenies(.semantic_memory_remote_model_denied);
-    features[@intFromEnum(Feature.encrypted_index_gate)] = semanticMemoryPolicyDenies(.semantic_memory_encryption_denied);
-    features[@intFromEnum(Feature.redacted_snippet_gate)] = semanticMemoryPolicyDenies(.semantic_memory_redaction_denied);
-    features[@intFromEnum(Feature.context_query_byte_budget)] =
+    features[@backingInt(Feature.personal_context_service_model)] = evidence.service_model;
+    features[@backingInt(Feature.semantic_policy_composed)] = evidence.policy_composed;
+    features[@backingInt(Feature.local_model_gate)] = semanticMemoryPolicyDenies(.semantic_memory_remote_model_denied);
+    features[@backingInt(Feature.encrypted_index_gate)] = semanticMemoryPolicyDenies(.semantic_memory_encryption_denied);
+    features[@backingInt(Feature.redacted_snippet_gate)] = semanticMemoryPolicyDenies(.semantic_memory_redaction_denied);
+    features[@backingInt(Feature.context_query_byte_budget)] =
         semanticMemoryPolicyDenies(.semantic_query_budget_denied) and evidence.budget_gate;
-    features[@intFromEnum(Feature.context_lease_issue)] = evidence.lease_issue;
-    features[@intFromEnum(Feature.context_lease_query_accounting)] = evidence.query_accounting;
-    features[@intFromEnum(Feature.context_query_canonical_byte_metering)] = evidence.query_canonical_byte_metering;
-    features[@intFromEnum(Feature.context_indexed_retrieval)] = evidence.indexed_retrieval;
-    features[@intFromEnum(Feature.context_pack_redaction)] = evidence.pack_redaction;
-    features[@intFromEnum(Feature.context_pack_receipt)] = evidence.pack_receipt;
-    features[@intFromEnum(Feature.context_pack_index_generation)] = evidence.pack_index_generation;
-    features[@intFromEnum(Feature.context_pack_index_staleness_guard)] = evidence.pack_index_staleness_guard;
-    features[@intFromEnum(Feature.context_pack_accounting_snapshot_guard)] = evidence.pack_accounting_snapshot_guard;
-    features[@intFromEnum(Feature.context_pack_envelope_consistency)] = evidence.pack_envelope_consistency;
-    features[@intFromEnum(Feature.context_pack_request_fingerprint)] = evidence.pack_request_fingerprint;
-    features[@intFromEnum(Feature.context_pack_sensitivity_envelope)] = evidence.pack_sensitivity_envelope;
-    features[@intFromEnum(Feature.context_pack_empty_receipt)] = evidence.pack_empty_receipt;
-    features[@intFromEnum(Feature.context_pack_freshness)] = evidence.pack_freshness;
-    features[@intFromEnum(Feature.context_pack_revocation_binding)] = evidence.pack_revocation_binding;
-    features[@intFromEnum(Feature.context_pack_replay_guard)] = evidence.pack_replay_guard;
-    features[@intFromEnum(Feature.context_pack_live_replay_verifier)] = evidence.pack_live_replay_verifier;
-    features[@intFromEnum(Feature.context_pack_receipt_audit)] =
+    features[@backingInt(Feature.context_lease_issue)] = evidence.lease_issue;
+    features[@backingInt(Feature.context_lease_query_accounting)] = evidence.query_accounting;
+    features[@backingInt(Feature.context_query_canonical_byte_metering)] = evidence.query_canonical_byte_metering;
+    features[@backingInt(Feature.context_indexed_retrieval)] = evidence.indexed_retrieval;
+    features[@backingInt(Feature.context_pack_redaction)] = evidence.pack_redaction;
+    features[@backingInt(Feature.context_pack_receipt)] = evidence.pack_receipt;
+    features[@backingInt(Feature.context_pack_index_generation)] = evidence.pack_index_generation;
+    features[@backingInt(Feature.context_pack_index_staleness_guard)] = evidence.pack_index_staleness_guard;
+    features[@backingInt(Feature.context_pack_accounting_snapshot_guard)] = evidence.pack_accounting_snapshot_guard;
+    features[@backingInt(Feature.context_pack_envelope_consistency)] = evidence.pack_envelope_consistency;
+    features[@backingInt(Feature.context_pack_request_fingerprint)] = evidence.pack_request_fingerprint;
+    features[@backingInt(Feature.context_pack_sensitivity_envelope)] = evidence.pack_sensitivity_envelope;
+    features[@backingInt(Feature.context_pack_empty_receipt)] = evidence.pack_empty_receipt;
+    features[@backingInt(Feature.context_pack_freshness)] = evidence.pack_freshness;
+    features[@backingInt(Feature.context_pack_revocation_binding)] = evidence.pack_revocation_binding;
+    features[@backingInt(Feature.context_pack_replay_guard)] = evidence.pack_replay_guard;
+    features[@backingInt(Feature.context_pack_live_replay_verifier)] = evidence.pack_live_replay_verifier;
+    features[@backingInt(Feature.context_pack_receipt_audit)] =
         @hasDecl(event_ledger.Ledger, "recordSemanticMemoryReceipt") and evidence.pack_receipt_audit;
-    features[@intFromEnum(Feature.context_pack_invalid_receipt_audit)] = evidence.pack_invalid_receipt_audit;
-    features[@intFromEnum(Feature.context_pack_malformed_receipt_audit)] = evidence.pack_malformed_receipt_audit;
-    features[@intFromEnum(Feature.context_pack_policy_reauthorization)] = evidence.pack_policy_reauthorization;
-    features[@intFromEnum(Feature.context_lease_privacy_mode_binding)] = evidence.privacy_mode_binding;
-    features[@intFromEnum(Feature.context_lease_expiration_gate)] = evidence.expiration_gate;
-    features[@intFromEnum(Feature.context_lease_revocation_gate)] = evidence.revocation_gate;
-    features[@intFromEnum(Feature.context_workspace_scope_gate)] = evidence.workspace_scope_gate;
-    features[@intFromEnum(Feature.personal_context_ledger)] =
+    features[@backingInt(Feature.context_pack_invalid_receipt_audit)] = evidence.pack_invalid_receipt_audit;
+    features[@backingInt(Feature.context_pack_malformed_receipt_audit)] = evidence.pack_malformed_receipt_audit;
+    features[@backingInt(Feature.context_pack_policy_reauthorization)] = evidence.pack_policy_reauthorization;
+    features[@backingInt(Feature.context_lease_privacy_mode_binding)] = evidence.privacy_mode_binding;
+    features[@backingInt(Feature.context_lease_expiration_gate)] = evidence.expiration_gate;
+    features[@backingInt(Feature.context_lease_revocation_gate)] = evidence.revocation_gate;
+    features[@backingInt(Feature.context_workspace_scope_gate)] = evidence.workspace_scope_gate;
+    features[@backingInt(Feature.personal_context_ledger)] =
         event_ledger.EventKind.semantic_memory == .semantic_memory and evidence.ledger;
-    features[@intFromEnum(Feature.personal_context_diagnostics)] = evidence.diagnostics;
-    features[@intFromEnum(Feature.personal_context_redaction)] = evidence.redacted_diagnostics;
-    features[@intFromEnum(Feature.typed_context_lease_operation)] =
+    features[@backingInt(Feature.personal_context_diagnostics)] = evidence.diagnostics;
+    features[@backingInt(Feature.personal_context_redaction)] = evidence.redacted_diagnostics;
+    features[@backingInt(Feature.typed_context_lease_operation)] =
         contractOperationPresent("zigos.personal.context", .personal_context_lease);
-    features[@intFromEnum(Feature.typed_context_query_operation)] =
+    features[@backingInt(Feature.typed_context_query_operation)] =
         contractOperationPresent("zigos.personal.context", .personal_context_query);
-    features[@intFromEnum(Feature.typed_context_revoke_operation)] =
+    features[@backingInt(Feature.typed_context_revoke_operation)] =
         contractOperationPresent("zigos.personal.context", .personal_context_revoke);
-    features[@intFromEnum(Feature.context_wire_validation)] = personalContextWireValidationCheck();
-    features[@intFromEnum(Feature.personal_context_catalog_binding)] = personalContextCatalogBindingCheck();
+    features[@backingInt(Feature.context_wire_validation)] = personalContextWireValidationCheck();
+    features[@backingInt(Feature.personal_context_catalog_binding)] = personalContextCatalogBindingCheck();
 }
 
 fn fill2026Floor(features: *[feature_count]bool) void {
-    features[@intFromEnum(Feature.kernel_tcb_forbids_product_imports)] = kernel_tcb.FORBIDS_PRODUCT_IMPORTS;
-    features[@intFromEnum(Feature.wait_plus_sealed_rings)] = contract_2026.floor.wait_plus_rings and contract_2026.floor.rings_only_ipc;
-    features[@intFromEnum(Feature.userspace_nvme_dataplane)] = contract_2026.floor.userspace_nvme_dataplane;
-    features[@intFromEnum(Feature.userspace_i225_dataplane)] = contract_2026.floor.userspace_i225_dataplane;
-    features[@intFromEnum(Feature.userspace_xhci_dataplane)] = contract_2026.floor.userspace_xhci_dataplane;
-    features[@intFromEnum(Feature.userspace_gop_dataplane)] = contract_2026.floor.userspace_gop_dataplane;
-    features[@intFromEnum(Feature.eight_address_spaces_pku)] = contract_2026.floor.eight_address_spaces;
-    features[@intFromEnum(Feature.efi_only_production_boot)] = true;
-    features[@intFromEnum(Feature.checkpoint_only_cold_load)] = contract_2026.floor.checkpoint_only_cold_load;
+    features[@backingInt(Feature.kernel_tcb_forbids_product_imports)] = kernel_tcb.FORBIDS_PRODUCT_IMPORTS;
+    features[@backingInt(Feature.wait_plus_sealed_rings)] = contract_2026.floor.wait_plus_rings and contract_2026.floor.rings_only_ipc;
+    features[@backingInt(Feature.userspace_nvme_dataplane)] = contract_2026.floor.userspace_nvme_dataplane;
+    features[@backingInt(Feature.userspace_i225_dataplane)] = contract_2026.floor.userspace_i225_dataplane;
+    features[@backingInt(Feature.userspace_xhci_dataplane)] = contract_2026.floor.userspace_xhci_dataplane;
+    features[@backingInt(Feature.userspace_gop_dataplane)] = contract_2026.floor.userspace_gop_dataplane;
+    features[@backingInt(Feature.eight_address_spaces_pku)] = contract_2026.floor.eight_address_spaces;
+    features[@backingInt(Feature.efi_only_production_boot)] = true;
+    features[@backingInt(Feature.checkpoint_only_cold_load)] = contract_2026.floor.checkpoint_only_cold_load;
 }
 
 fn personalContextEvidence() PersonalContextEvidence {
@@ -7151,7 +7151,7 @@ fn personalContextReceiptPolicyReauthorizationCheck() bool {
 
 fn personalContextWireValidationCheck() bool {
     const header = typed_component_abi.WireHeader{
-        .operation = @intFromEnum(typed_component_abi.OperationId.personal_context_query),
+        .operation = @backingInt(typed_component_abi.OperationId.personal_context_query),
         .correlation_id = 2027,
         .subject_task_id = 7060,
     };

@@ -56,9 +56,9 @@ pub const FlowRecord = struct {
     decision_has_lease: bool = false,
     decision_lease_ticks: manifest.LeaseTicks = 0,
     bundle_id_len: u8 = 0,
-    bundle_id: [MAX_BUNDLE_ID_BYTES]u8 = [_]u8{0} ** MAX_BUNDLE_ID_BYTES,
+    bundle_id: [MAX_BUNDLE_ID_BYTES]u8 = @as([MAX_BUNDLE_ID_BYTES]u8, @splat(0)),
     detail_len: u8 = 0,
-    detail: [MAX_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_DETAIL_BYTES,
+    detail: [MAX_DETAIL_BYTES]u8 = @as([MAX_DETAIL_BYTES]u8, @splat(0)),
 
     pub fn detailSlice(self: *const FlowRecord) []const u8 {
         return self.detail[0..self.detail_len];
@@ -84,7 +84,7 @@ pub const Error = error{
 } || task_runtime.Error || workspace.Error || sync_service.Error || sync_service.AuthorityError;
 
 pub const Controller = struct {
-    flows: [MAX_FLOWS]FlowRecord = [_]FlowRecord{zeroFlow()} ** MAX_FLOWS,
+    flows: [MAX_FLOWS]FlowRecord = @as([MAX_FLOWS]FlowRecord, @splat(zeroFlow())),
     flow_count: usize = 0,
 
     pub fn init() Controller {

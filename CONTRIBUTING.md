@@ -3,6 +3,12 @@
 Use the pinned toolchain and repo entrypoints:
 
 - Run Zig commands through `./scripts/zig.sh`.
+- Zig 0.17.0 is required. Use `debug`, `safe`, `fast`, or `small` for
+  `-Doptimize`; array initialization uses `@splat` and reflection uses
+  `@typeInfo` field names and values.
+- Native and spec tests target x86-64 on the host OS because they exercise the
+  cooperative worker assembly. Apple Silicon hosts need Rosetta to run them;
+  `-Dhost-test-target=<triple>` selects another hosted x86-64 target.
 - `zlint` and `actionlint` are optional for local focused runs, but CI requires
   both through `ZIGOS_REQUIRE_ZLINT=1` and `ZIGOS_REQUIRE_ACTIONLINT=1`.
 
@@ -57,9 +63,9 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build userspace-production-images` | You need the 24 shipped userspace images and production archive. |
 | `./scripts/zig.sh build userspace-verification-images` | You need the production images plus the five proof and synthetic-journey images. |
 | `./scripts/zig.sh build userspace-images` | You intentionally need both production and verification userspace sets. |
-| `./scripts/zig.sh build -Doptimize=ReleaseFast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance` | You set the signer environment and independently pinned verifier and need the generator-side eight-file portion of the exact 17-target release evidence. |
-| `./scripts/zig.sh build -Doptimize=ReleaseFast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-manifest-finalize` | The eight generated files and two independent reproducibility files are complete, and you are ready to candidate-verify, atomically publish, and statefully verify the exact top-level manifest. |
-| `./scripts/zig.sh build -Doptimize=ReleaseFast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-check` | You supplied the signer, independently pinned verifier, and persistent rollback state and need the full phase-A candidate ceremony after preflight. |
+| `./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance` | You set the signer environment and independently pinned verifier and need the generator-side eight-file portion of the exact 17-target release evidence. |
+| `./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-manifest-finalize` | The eight generated files and two independent reproducibility files are complete, and you are ready to candidate-verify, atomically publish, and statefully verify the exact top-level manifest. |
+| `./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-check` | You supplied the signer, independently pinned verifier, and persistent rollback state and need the full phase-A candidate ceremony after preflight. |
 | `./scripts/zig.sh build -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-verify-existing` | You need to verify an existing frozen bundle with an independently pinned verifier and no generation or signing step. |
 | `./scripts/zig.sh build release-bundle-fixture-test` | You changed release trust, exact-set, path-containment, or rollback behavior and need the credential-free attack fixtures. |
 | `./scripts/zig.sh build verify-release-cli` | You need a local development/test build of the verifier; public verification still requires an independently distributed binary and pin, and this host tool is not a signed OS target. |

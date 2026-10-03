@@ -62,7 +62,7 @@ test "host scoped transient state retains value storage" {
 
     var instance: Instance = .{};
     const state = try instance.begin();
-    state.* = .{ .bytes = [_]u8{0x5a} ** 32, .ready = true };
+    state.* = .{ .bytes = @as([32]u8, @splat(0x5a)), .ready = true };
     defer instance.deinit();
     try std.testing.expect(instance.ptr().ready);
     try std.testing.expectEqual(@as(u8, 0x5a), instance.ptr().bytes[31]);

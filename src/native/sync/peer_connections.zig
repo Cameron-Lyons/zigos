@@ -197,11 +197,11 @@ pub const Connections = struct {
         const slot = &self.slots[index];
         slot.generation += 1;
         slot.connection = connection;
-        return @enumFromInt((slot.generation << 2) | index);
+        return @fromBackingInt(@intCast((slot.generation << 2) | index));
     }
 
     fn resolve(self: *const Connections, handle: Handle) ?*Connection {
-        const value = @intFromEnum(handle);
+        const value = @backingInt(handle);
         const slot = &self.slots[value & 3];
         if (value >> 2 == 0 or slot.generation != value >> 2) return null;
         return slot.connection;
@@ -214,7 +214,7 @@ pub const Connections = struct {
 
     pub fn release(self: *Connections, handshakes: *handshake.Handshakes, sessions: *admission.Sessions, handle: Handle) !void {
         const connection = self.resolve(handle) orelse return error.StalePeerConnection;
-        self.slots[@intFromEnum(handle) & 3].connection = null;
+        self.slots[@backingInt(handle) & 3].connection = null;
         connection.destroy(handshakes, sessions);
     }
 
@@ -289,7 +289,7 @@ pub const Connections = struct {
             const slot = self.slots[index];
             const c = slot.connection orelse continue;
             const p = c.preflight orelse continue;
-            if (c.channel.local == local_device and p.started and p.exchange.needsQuote()) return @enumFromInt((slot.generation << 2) | index);
+            if (c.channel.local == local_device and p.started and p.exchange.needsQuote()) return @fromBackingInt(@intCast((slot.generation << 2) | index));
         }
         return null;
     }

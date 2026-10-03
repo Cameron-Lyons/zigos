@@ -131,7 +131,7 @@ pub fn parseRsdp(bytes: []const u8) RsdpError!Rsdp {
 }
 
 fn validXsdt() [SDT_HEADER_LENGTH + 16]u8 {
-    var table = [_]u8{0} ** (SDT_HEADER_LENGTH + 16);
+    var table = @as([SDT_HEADER_LENGTH + 16]u8, @splat(0));
     @memcpy(table[SDT_SIGNATURE_OFFSET..][0..SDT_SIGNATURE_BYTES], XSDT_SIGNATURE);
     writeU32Le(table[SDT_LENGTH_OFFSET..][0..4], table.len);
     table[SDT_REVISION_OFFSET] = 1;
@@ -144,7 +144,7 @@ fn validXsdt() [SDT_HEADER_LENGTH + 16]u8 {
 }
 
 fn validRsdpV2() [RSDP_V2_MIN_LENGTH]u8 {
-    var rsdp = [_]u8{0} ** RSDP_V2_MIN_LENGTH;
+    var rsdp = @as([RSDP_V2_MIN_LENGTH]u8, @splat(0));
     @memcpy(rsdp[0..8], RSDP_SIGNATURE);
     @memcpy(rsdp[RSDP_OEM_ID_OFFSET..][0..RSDP_OEM_ID_BYTES], "ZIGOS ");
     rsdp[RSDP_REVISION_OFFSET] = 2;

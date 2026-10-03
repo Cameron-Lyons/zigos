@@ -23,7 +23,7 @@ pub const ServiceRegisterRequestWire = extern struct {
 pub const ServiceConnectionRequestWire = extern struct {
     header: WireHeader,
     interface_id: u16,
-    _reserved: [6]u8 = [_]u8{0} ** 6,
+    _reserved: [6]u8 = @as([6]u8, @splat(0)),
 };
 
 pub const TaskDescribeRequestWire = extern struct {

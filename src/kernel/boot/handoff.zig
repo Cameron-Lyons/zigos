@@ -372,7 +372,7 @@ fn appendMemoryMapEntry(bytes: []u8, offset: usize, base: u64, length: u64, kind
 }
 
 test "Multiboot2 handoff parses memory map summary" {
-    var mmap = [_]u8{0} ** (MULTIBOOT2_MMAP_ENTRY_BYTES * 2);
+    var mmap = @as([MULTIBOOT2_MMAP_ENTRY_BYTES * 2]u8, @splat(0));
     var offset = appendMemoryMapEntry(mmap[0..], 0, 0x100000, 0x2000000, 1);
     offset = appendMemoryMapEntry(mmap[0..], offset, 0x3000000, 0x1000, 3);
     try std.testing.expectEqual(@as(usize, mmap.len), offset);
@@ -386,7 +386,7 @@ test "Multiboot2 handoff parses memory map summary" {
 }
 
 test "Multiboot2 handoff normalizes tagged map metadata and entries" {
-    var info_bytes = [_]u8{0} ** 56;
+    var info_bytes = @as([56]u8, @splat(0));
     writeU32Le(info_bytes[0..4], info_bytes.len);
     writeU32Le(info_bytes[8..12], 6);
     writeU32Le(info_bytes[12..16], 40);
@@ -409,7 +409,7 @@ test "Multiboot2 handoff normalizes tagged map metadata and entries" {
 }
 
 test "Multiboot2 handoff captures the EFI64 system table pointer" {
-    var info_bytes = [_]u8{0} ** 32;
+    var info_bytes = @as([32]u8, @splat(0));
     writeU32Le(info_bytes[0..4], info_bytes.len);
     writeU32Le(info_bytes[8..12], 12);
     writeU32Le(info_bytes[12..16], 16);
@@ -423,14 +423,14 @@ test "Multiboot2 handoff captures the EFI64 system table pointer" {
 }
 
 test "Multiboot2 memory map iterator rejects invalid fixed strides" {
-    var bytes = [_]u8{0} ** 24;
+    var bytes = @as([24]u8, @splat(0));
     var too_small = multiboot2MemoryMap(&bytes, 16).iterator();
     try std.testing.expectError(error.InvalidMemoryMap, too_small.next());
 
     var truncated = multiboot2MemoryMap(bytes[0..20], 24).iterator();
     try std.testing.expectError(error.InvalidMemoryMap, truncated.next());
 
-    var overflowing = [_]u8{0} ** MULTIBOOT2_MMAP_ENTRY_BYTES;
+    var overflowing = @as([MULTIBOOT2_MMAP_ENTRY_BYTES]u8, @splat(0));
     _ = appendMemoryMapEntry(&overflowing, 0, std.math.maxInt(u64) - 1, 4, 1);
     var overflowing_iterator = multiboot2MemoryMap(&overflowing, MULTIBOOT2_MMAP_ENTRY_BYTES).iterator();
     try std.testing.expectError(error.InvalidMemoryMap, overflowing_iterator.next());
@@ -498,7 +498,7 @@ test "captured Multiboot APIs reject wrapping outer extents before dereference" 
         .framebuffer_height = 0,
         .framebuffer_bpp = 0,
         .framebuffer_type = 0,
-        .framebuffer_rgb = [_]u8{0} ** FRAMEBUFFER_RGB_COLOR_INFO_BYTES,
+        .framebuffer_rgb = @as([FRAMEBUFFER_RGB_COLOR_INFO_BYTES]u8, @splat(0)),
         .info_bytes = MULTIBOOT2_INFO_HEADER_BYTES,
         .cmdline_length = 512,
         .mmap_entry_size = MULTIBOOT2_MMAP_ENTRY_BYTES,

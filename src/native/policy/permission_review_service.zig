@@ -96,11 +96,11 @@ pub const ScriptedPlanEntry = struct {
 };
 
 pub const CommandInput = struct {
-    pending_line: [MAX_INPUT_LINE]u8 = [_]u8{0} ** MAX_INPUT_LINE,
+    pending_line: [MAX_INPUT_LINE]u8 = @as([MAX_INPUT_LINE]u8, @splat(0)),
     pending_line_len: u8 = 0,
     pending_commands: [MAX_PHYSICAL_INPUT_COMMANDS][MAX_INPUT_LINE]u8 =
-        [_][MAX_INPUT_LINE]u8{[_]u8{0} ** MAX_INPUT_LINE} ** MAX_PHYSICAL_INPUT_COMMANDS,
-    pending_command_lens: [MAX_PHYSICAL_INPUT_COMMANDS]u8 = [_]u8{0} ** MAX_PHYSICAL_INPUT_COMMANDS,
+        @as([MAX_PHYSICAL_INPUT_COMMANDS][MAX_INPUT_LINE]u8, @splat(@as([MAX_INPUT_LINE]u8, @splat(0)))),
+    pending_command_lens: [MAX_PHYSICAL_INPUT_COMMANDS]u8 = @as([MAX_PHYSICAL_INPUT_COMMANDS]u8, @splat(0)),
     pending_command_head: u8 = 0,
     pending_command_tail: u8 = 0,
     pending_command_count: u8 = 0,
@@ -331,7 +331,7 @@ pub fn clearSystemInputRouter() void {
 }
 
 const TestHardwareReportFeed = struct {
-    reports: [3]xhci.HardwareBootKeyboardReport = [_]xhci.HardwareBootKeyboardReport{.{}} ** 3,
+    reports: [3]xhci.HardwareBootKeyboardReport = @as([3]xhci.HardwareBootKeyboardReport, @splat(.{})),
     cursor: usize = 0,
 };
 
@@ -462,11 +462,11 @@ pub const RenderedReviewSurface = struct {
     review_window_id: ?u64 = null,
     active_index: u8 = 0,
     decision_count: u8 = 0,
-    decisions: [MAX_REVIEW_DECISIONS]permission_review.ReviewDecision = [_]permission_review.ReviewDecision{.{
+    decisions: [MAX_REVIEW_DECISIONS]permission_review.ReviewDecision = @as([MAX_REVIEW_DECISIONS]permission_review.ReviewDecision, @splat(.{
         .kind = .object_access,
         .resource = "",
         .allow = false,
-    }} ** MAX_REVIEW_DECISIONS,
+    })),
 
     pub fn init(
         service: *Service,
@@ -640,7 +640,7 @@ pub const Service = struct {
     runtime: *task_runtime.Runtime,
     scripted_inputs: []const []const u8,
     scripted_plan: []const ScriptedPlanEntry = &.{},
-    scripted_plan_used: [MAX_SCRIPTED_PLAN_ENTRIES]bool = [_]bool{false} ** MAX_SCRIPTED_PLAN_ENTRIES,
+    scripted_plan_used: [MAX_SCRIPTED_PLAN_ENTRIES]bool = @as([MAX_SCRIPTED_PLAN_ENTRIES]bool, @splat(false)),
     scripted_cursor: usize = 0,
     decision_profile: []const ProfileRule = &.{},
     compositor: ?*compositor_session.Session = null,
@@ -1202,7 +1202,7 @@ test "review service rejects zero audit ticks before prompting" {
 test "review service rejects oversized scripted commands" {
     var runtime = task_runtime.Runtime.init();
     const task = try createReviewTestTask(&runtime, 4, null);
-    const oversized = [_]u8{'a'} ** (MAX_INPUT_LINE + 1);
+    const oversized = @as([MAX_INPUT_LINE + 1]u8, @splat('a'));
     const scripted_inputs = [_][]const u8{oversized[0..]};
     var service = Service.init(15, 16, &runtime, &scripted_inputs);
     const bundle = manifest_fixtures.notesBundle();

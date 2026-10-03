@@ -107,7 +107,7 @@ fn validateBootstrap(state: BootstrapValidationState) Error!void {
 }
 
 pub const Registry = struct {
-    bindings: [MAX_BINDINGS]Binding = [_]Binding{zeroBinding()} ** MAX_BINDINGS,
+    bindings: [MAX_BINDINGS]Binding = @as([MAX_BINDINGS]Binding, @splat(zeroBinding())),
 
     pub fn init() Registry {
         return .{};

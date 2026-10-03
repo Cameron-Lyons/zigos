@@ -168,8 +168,8 @@ pub const Renderer = struct {
 
     fn drawCell(self: *Renderer, column: usize, row: usize, cell: Cell, pool: []const u8) void {
         const raster = Raster.init(cell, pool);
-        const foreground = self.foregrounds[@intFromEnum(cell.style)];
-        const background = self.backgrounds[@intFromEnum(cell.style)];
+        const foreground = self.foregrounds[@backingInt(cell.style)];
+        const background = self.backgrounds[@backingInt(cell.style)];
         const left = self.origin_x + column * CELL_WIDTH;
         const top = self.origin_y + row * CELL_HEIGHT;
         for (0..CELL_HEIGHT) |y| {
@@ -186,8 +186,8 @@ pub const Renderer = struct {
     pub fn matchesCell(self: *const Renderer, column: usize, row: usize, cell: Cell) bool {
         if (!self.painted or column >= self.columns or row >= self.rows) return false;
         const raster = Raster.init(cell, self.previous_clusters[0..self.previous_cluster_length]);
-        const foreground = self.foregrounds[@intFromEnum(cell.style)];
-        const background = self.backgrounds[@intFromEnum(cell.style)];
+        const foreground = self.foregrounds[@backingInt(cell.style)];
+        const background = self.backgrounds[@backingInt(cell.style)];
         const left = self.origin_x + column * CELL_WIDTH;
         const top = self.origin_y + row * CELL_HEIGHT;
         for (0..CELL_HEIGHT) |y| {

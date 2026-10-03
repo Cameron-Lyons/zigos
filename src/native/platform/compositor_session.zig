@@ -112,13 +112,13 @@ pub const WindowRecord = struct {
     modal: bool = true,
     workspace_id: u64 = 0,
     bundle_id_len: u8 = 0,
-    bundle_id: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    bundle_id: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     display_name_len: u8 = 0,
-    display_name: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    display_name: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     title_len: u8 = 0,
-    title: [MAX_TITLE_BYTES]u8 = [_]u8{0} ** MAX_TITLE_BYTES,
+    title: [MAX_TITLE_BYTES]u8 = @as([MAX_TITLE_BYTES]u8, @splat(0)),
     detail_len: u8 = 0,
-    detail: [MAX_WINDOW_DETAIL_BYTES]u8 = [_]u8{0} ** MAX_WINDOW_DETAIL_BYTES,
+    detail: [MAX_WINDOW_DETAIL_BYTES]u8 = @as([MAX_WINDOW_DETAIL_BYTES]u8, @splat(0)),
     item_count: u8 = 0,
 
     pub fn bundleIdSlice(self: *const WindowRecord) []const u8 {
@@ -148,15 +148,15 @@ pub const ReviewItemRecord = struct {
     window_id: u64 = 0,
     kind: manifest.PermissionKind = .object_access,
     label_len: u8 = 0,
-    label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES,
+    label: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     resource_len: u8 = 0,
-    resource: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
+    resource: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     reason_len: u8 = 0,
-    reason: [MAX_REASON_BYTES]u8 = [_]u8{0} ** MAX_REASON_BYTES,
+    reason: [MAX_REASON_BYTES]u8 = @as([MAX_REASON_BYTES]u8, @splat(0)),
     object_scope_len: u8 = 0,
-    object_scope: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
+    object_scope: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     network_path_len: u8 = 0,
-    network_path: [MAX_RESOURCE_BYTES]u8 = [_]u8{0} ** MAX_RESOURCE_BYTES,
+    network_path: [MAX_RESOURCE_BYTES]u8 = @as([MAX_RESOURCE_BYTES]u8, @splat(0)),
     requested_local_only: bool = false,
     requested_lease_ticks: manifest.LeaseTicks = 0,
     decision: DecisionState = .pending,
@@ -265,7 +265,7 @@ pub const WindowReviewItemIndex = indexed_arena.MultimapIndex(MAX_REVIEW_ITEMS, 
 
 pub const WindowState = struct {
     windows: WindowArena = WindowArena.init(),
-    window_order: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS,
+    window_order: [MAX_WINDOWS]u64 = @as([MAX_WINDOWS]u64, @splat(0)),
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
     reviewer_window_index: ReviewerWindowIndex = ReviewerWindowIndex.init(),
@@ -302,7 +302,7 @@ fn initializeSurfaceArena(surfaces: *SurfaceArena) void {
 
 const ReviewItemBacking = struct {
     items: ReviewItemArena = ReviewItemArena.init(),
-    item_order: [MAX_REVIEW_ITEMS]u64 = [_]u64{0} ** MAX_REVIEW_ITEMS,
+    item_order: [MAX_REVIEW_ITEMS]u64 = @as([MAX_REVIEW_ITEMS]u64, @splat(0)),
     window_review_item_index: WindowReviewItemIndex = WindowReviewItemIndex.init(),
 
     fn init() ReviewItemBacking {
@@ -375,11 +375,11 @@ pub const SessionSnapshot = struct {
     next_window_id: u64 = 1,
     active_window_id: u64 = 0,
     windows: WindowArena = WindowArena.init(),
-    window_order: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS,
+    window_order: [MAX_WINDOWS]u64 = @as([MAX_WINDOWS]u64, @splat(0)),
     window_count: SessionCount = 0,
     visible_window_count: SessionCount = 0,
     items: ReviewItemArena = ReviewItemArena.init(),
-    item_order: [MAX_REVIEW_ITEMS]u64 = [_]u64{0} ** MAX_REVIEW_ITEMS,
+    item_order: [MAX_REVIEW_ITEMS]u64 = @as([MAX_REVIEW_ITEMS]u64, @splat(0)),
     item_count: SessionCount = 0,
     task_bundle_index: TaskBundleIndex = TaskBundleIndex.init(),
     task_window_index: TaskWindowIndex = TaskWindowIndex.init(),
@@ -719,7 +719,7 @@ pub const Session = struct {
             if (surfaces.slotIndexOf(presentation.surface_id)) |slot_index| {
                 const slot = &surfaces.slots[slot_index];
                 if (slot.surface.task_id != task.id) return error.InvalidSurface;
-                if (builtin.mode == .Debug) {
+                if (builtin.mode == .debug) {
                     std.debug.assert(self.surface_task_index.lookup(surfaceTaskKey(task.id)) == slot_index);
                 }
                 const previous_revision = slot.surface.presentation.revision;
@@ -999,7 +999,7 @@ pub const Session = struct {
             .next_window_id = self.next_window_id,
             .active_window_id = self.active_window_id,
             .windows = if (window_state) |state| state.windows else WindowArena.init(),
-            .window_order = if (window_state) |state| state.window_order else [_]u64{0} ** MAX_WINDOWS,
+            .window_order = if (window_state) |state| state.window_order else @as([MAX_WINDOWS]u64, @splat(0)),
             .window_count = self.window_count,
             .visible_window_count = self.visible_window_count,
             .items = undefined,
@@ -1237,7 +1237,7 @@ pub const Session = struct {
         const slot = &surfaces.slots[slot_index];
         if (!slot.in_use) return false;
         const task_key = surfaceTaskKey(slot.surface.task_id);
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             std.debug.assert(self.surface_task_index.lookup(task_key) == slot_index);
         }
         self.surface_task_index.remove(task_key);
@@ -1495,9 +1495,9 @@ pub const Service = struct {
 pub fn encodeRequest(buffer: []u8, request: ServiceRequest) Error![]const u8 {
     var writer = RequestWriter{ .buffer = buffer };
     try writer.writeBytes(&WIRE_MAGIC_REQUEST);
-    try writer.writeByte(@intFromEnum(request.operation));
-    try writer.writeByte(@intFromEnum(request.view_type));
-    try writer.writeByte(@intFromEnum(request.permission_kind));
+    try writer.writeByte(@backingInt(request.operation));
+    try writer.writeByte(@backingInt(request.view_type));
+    try writer.writeByte(@backingInt(request.permission_kind));
     try writer.writeByte(requestFlags(request));
     try writer.writeU64(request.subject_task_id);
     try writer.writeU64(request.reviewer_task_id);
@@ -1509,7 +1509,7 @@ pub fn encodeRequest(buffer: []u8, request: ServiceRequest) Error![]const u8 {
     try writeText(&writer, request.display_name);
     try writeText(&writer, request.resource);
     try writeText(&writer, request.detail);
-    try writer.writeByte(@intFromEnum(request.egress_intent.kind));
+    try writer.writeByte(@backingInt(request.egress_intent.kind));
     try writeText(&writer, request.egress_intent.object);
     try writeText(&writer, request.egress_intent.principal);
     try writeText(&writer, request.egress_intent.service);
@@ -1571,9 +1571,9 @@ pub fn decodeRequest(payload: []const u8) Error!ServiceRequest {
 pub fn encodeResponse(buffer: []u8, response: ServiceResponse) Error![]const u8 {
     var writer = ResponseWriter{ .buffer = buffer };
     try writer.writeBytes(&WIRE_MAGIC_RESPONSE);
-    try writer.writeByte(@intFromEnum(response.operation));
-    try writer.writeByte(@intFromEnum(response.status));
-    try writer.writeByte(@intFromEnum(response.decision));
+    try writer.writeByte(@backingInt(response.operation));
+    try writer.writeByte(@backingInt(response.status));
+    try writer.writeByte(@backingInt(response.decision));
     try writer.writeByte(if (response.recovered) 1 else 0);
     try writer.writeU64(response.window_id);
     try writer.writeU64(response.active_window_id);
@@ -1734,7 +1734,7 @@ fn taskBundleMatches(context: anytype, slot: *const WindowSlot) bool {
 
 fn reviewItemKey(window_id: u64, kind: manifest.PermissionKind, resource: []const u8) u64 {
     var hash = native_util.fnv1a64AppendU64LittleEndian(native_util.FNV1A_64_OFFSET_BASIS, window_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(kind));
     hash = native_util.fnv1a64WithSeed(hash, resource);
     return indexed_arena.nonZeroKey(hash);
 }
@@ -1941,9 +1941,9 @@ test "compositor compact record metadata preserves exact text capacities" {
     try std.testing.expectEqual(@as(usize, CHECKPOINT_STORE_SIZE_CEILING_BYTES), @sizeOf(CheckpointStore));
     try std.testing.expectEqual(@as(usize, SESSION_SIZE_CEILING_BYTES), @sizeOf(Session));
 
-    const long_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
-    const long_resource = [_]u8{'r'} ** (MAX_RESOURCE_BYTES + 1);
-    const long_reason = [_]u8{'d'} ** (MAX_REASON_BYTES + 1);
+    const long_label = @as([MAX_LABEL_BYTES + 1]u8, @splat('l'));
+    const long_resource = @as([MAX_RESOURCE_BYTES + 1]u8, @splat('r'));
+    const long_reason = @as([MAX_REASON_BYTES + 1]u8, @splat('d'));
 
     var window = zeroWindow();
     window.bundle_id_len = @intCast(copyText(&window.bundle_id, &long_label));
@@ -2240,7 +2240,7 @@ test "compositor window order indexes saturated switching removal and restore" {
     });
 
     var session = Session.init();
-    var window_ids: [MAX_WINDOWS]u64 = [_]u64{0} ** MAX_WINDOWS;
+    var window_ids: [MAX_WINDOWS]u64 = @as([MAX_WINDOWS]u64, @splat(0));
     for (&window_ids, 0..) |*window_id, order_index| {
         const owner = if (order_index % 2 == 0) first_task else second_task;
         const window = try session.openTaskView(owner, "Saturated order");
@@ -2778,9 +2778,9 @@ test "compositor surface pruning caches unchanged task lifecycle generations" {
 test "compositor surface indexes saturate prune restore and reuse exact slots" {
     var runtime = task_runtime.Runtime.init();
     var session = Session.init();
-    var task_ids: [MAX_PRESENTED_SURFACES]u64 = [_]u64{0} ** MAX_PRESENTED_SURFACES;
-    var surface_ids: [MAX_PRESENTED_SURFACES]u64 = [_]u64{0} ** MAX_PRESENTED_SURFACES;
-    var slot_indexes: [MAX_PRESENTED_SURFACES]usize = [_]usize{0} ** MAX_PRESENTED_SURFACES;
+    var task_ids: [MAX_PRESENTED_SURFACES]u64 = @as([MAX_PRESENTED_SURFACES]u64, @splat(0));
+    var surface_ids: [MAX_PRESENTED_SURFACES]u64 = @as([MAX_PRESENTED_SURFACES]u64, @splat(0));
+    var slot_indexes: [MAX_PRESENTED_SURFACES]usize = @as([MAX_PRESENTED_SURFACES]usize, @splat(0));
 
     for (0..MAX_PRESENTED_SURFACES) |index| {
         const surface_id: u64 = 1_000 + @as(u64, @intCast(index));
@@ -2838,7 +2838,7 @@ test "compositor surface indexes saturate prune restore and reuse exact slots" {
     var previous = NO_SURFACE_SLOT_INDEX;
     var active_index: usize = restored.active_surface_head;
     var active_count: usize = 0;
-    var seen: [MAX_PRESENTED_SURFACES]bool = [_]bool{false} ** MAX_PRESENTED_SURFACES;
+    var seen: [MAX_PRESENTED_SURFACES]bool = @as([MAX_PRESENTED_SURFACES]bool, @splat(false));
     while (active_index != NO_SURFACE_SLOT_INDEX) {
         try std.testing.expect(active_index < MAX_PRESENTED_SURFACES);
         try std.testing.expect(!seen[active_index]);

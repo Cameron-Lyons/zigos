@@ -58,7 +58,7 @@ pub const ParsedInfo = struct {
     framebuffer_height: u32 = 0,
     framebuffer_bpp: u8 = 0,
     framebuffer_type: u8 = 0,
-    framebuffer_rgb: [FRAMEBUFFER_RGB_BYTES]u8 = [_]u8{0} ** FRAMEBUFFER_RGB_BYTES,
+    framebuffer_rgb: [FRAMEBUFFER_RGB_BYTES]u8 = @as([FRAMEBUFFER_RGB_BYTES]u8, @splat(0)),
     efi64_system_table_addr: u64 = 0,
     acpi2_rsdp_addr: u32 = 0,
     acpi2_rsdp_length: u32 = 0,
@@ -221,7 +221,7 @@ fn writeU64(bytes: []u8, value: u64) void {
 }
 
 test "Multiboot2 parser normalizes memory map command line and framebuffer tags" {
-    var bytes = [_]u8{0} ** 112;
+    var bytes = @as([112]u8, @splat(0));
     writeU32(bytes[0..4], bytes.len);
 
     var offset: usize = INFO_HEADER_BYTES;
@@ -263,7 +263,7 @@ test "Multiboot2 parser normalizes memory map command line and framebuffer tags"
 }
 
 test "Multiboot2 parser rejects malformed tag extents and map strides" {
-    var bytes = [_]u8{0} ** 32;
+    var bytes = @as([32]u8, @splat(0));
     writeU32(bytes[0..4], bytes.len);
     writeU32(bytes[8..12], TAG_MEMORY_MAP);
     writeU32(bytes[12..16], 24);
@@ -277,7 +277,7 @@ test "Multiboot2 parser rejects malformed tag extents and map strides" {
 }
 
 test "Multiboot2 parser captures only the ACPI 2 RSDP handoff" {
-    var bytes = [_]u8{0} ** 64;
+    var bytes = @as([64]u8, @splat(0));
     writeU32(bytes[0..4], bytes.len);
 
     var offset: usize = INFO_HEADER_BYTES;
@@ -298,7 +298,7 @@ test "Multiboot2 parser captures only the ACPI 2 RSDP handoff" {
 }
 
 test "Multiboot2 parser captures the EFI64 system table pointer" {
-    var bytes = [_]u8{0} ** 32;
+    var bytes = @as([32]u8, @splat(0));
     writeU32(bytes[0..4], bytes.len);
 
     const offset: usize = INFO_HEADER_BYTES;
@@ -320,7 +320,7 @@ test "Multiboot2 parser captures the EFI64 system table pointer" {
 }
 
 test "Multiboot2 parser does not accept an obsolete ACPI descriptor as ACPI 2" {
-    var bytes = [_]u8{0} ** 48;
+    var bytes = @as([48]u8, @splat(0));
     writeU32(bytes[0..4], bytes.len);
     writeU32(bytes[8..12], 14);
     writeU32(bytes[12..16], TAG_HEADER_BYTES + 20);
@@ -336,7 +336,7 @@ test "Multiboot2 parser does not accept an obsolete ACPI descriptor as ACPI 2" {
 }
 
 test "Multiboot2 parser requires a final end tag and bounded physical offsets" {
-    var bytes = [_]u8{0} ** 16;
+    var bytes = @as([16]u8, @splat(0));
     writeU32(bytes[0..4], bytes.len);
     writeU32(bytes[8..12], 42);
     writeU32(bytes[12..16], 8);
@@ -356,7 +356,7 @@ test "EFI stub handoff round-trips through the Multiboot2 parser" {
         .{ .base = 0x100000, .length = 0x1ff00000, .kind = efi_handoff.MULTIBOOT_MEMORY_AVAILABLE },
         .{ .base = 0x20000000, .length = 0x1000, .kind = efi_handoff.MULTIBOOT_MEMORY_ACPI_RECLAIMABLE },
     };
-    var rsdp = [_]u8{0} ** efi_handoff.ACPI_RSDP_V2_MIN_BYTES;
+    var rsdp = @as([efi_handoff.ACPI_RSDP_V2_MIN_BYTES]u8, @splat(0));
     @memcpy(rsdp[0..8], "RSD PTR ");
     const request = efi_handoff.Request{
         .cmdline = "model_inventory",

@@ -62,9 +62,9 @@ pub const PermissionReviewResult = struct {
     request_count: u8 = 0,
     grant_count: u8 = 0,
     review_len: u16 = 0,
-    review_text: [MAX_PERMISSION_REVIEW_TEXT]u8 = [_]u8{0} ** MAX_PERMISSION_REVIEW_TEXT,
+    review_text: [MAX_PERMISSION_REVIEW_TEXT]u8 = @as([MAX_PERMISSION_REVIEW_TEXT]u8, @splat(0)),
     grants: [permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant =
-        [_]policy_mediation.UserGrant{.{ .kind = .object_access }} ** permission_review.MAX_REVIEW_DECISIONS,
+        @as([permission_review.MAX_REVIEW_DECISIONS]policy_mediation.UserGrant, @splat(.{ .kind = .object_access })),
 
     pub fn textSlice(self: *const PermissionReviewResult) []const u8 {
         return self.review_text[0..@as(usize, self.review_len)];
@@ -263,11 +263,11 @@ pub const Simulator = struct {
         commands: []const permission_review.ReviewCommand,
     ) !PermissionReviewResult {
         try manifest.validate(package.bundle);
-        var decisions = [_]permission_review.ReviewDecision{.{
+        var decisions = @as([permission_review.MAX_REVIEW_DECISIONS]permission_review.ReviewDecision, @splat(.{
             .kind = .object_access,
             .resource = "",
             .allow = false,
-        }} ** permission_review.MAX_REVIEW_DECISIONS;
+        }));
         var decision_count: usize = 0;
         for (package.bundle.requested_permissions, 0..) |request, index| {
             if (decision_count >= decisions.len) return error.TooManyPermissions;
@@ -551,7 +551,7 @@ test "SDK simulator installs updates rolls back launches and debugs native first
 
     var sim = Simulator.init();
     const suite = examples.firstPartySuite();
-    var launched_task_ids = [_]u64{0} ** suite.len;
+    var launched_task_ids = @as([suite.len]u64, @splat(0));
 
     for (suite, 0..) |package, index| {
         var compiled: app_platform.CompiledPackage = undefined;

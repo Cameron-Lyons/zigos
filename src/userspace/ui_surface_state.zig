@@ -21,7 +21,7 @@ pub const State = struct {
     model: mailbox.UiModelKind = .none,
     flags: mailbox.UiStateFlags = .{},
     focus_index: u16 = 0,
-    text: [TEXT_CAPACITY]u8 = [_]u8{0} ** TEXT_CAPACITY,
+    text: [TEXT_CAPACITY]u8 = @as([TEXT_CAPACITY]u8, @splat(0)),
     text_length: u16 = 0,
     cursor: u16 = 0,
     selection_anchor: u16 = 0,
@@ -41,7 +41,7 @@ pub const State = struct {
         return .{
             .model = model,
             .revision = 1,
-            .interaction_hash = mixByte(INTERACTION_HASH_SEED, @intFromEnum(model)),
+            .interaction_hash = mixByte(INTERACTION_HASH_SEED, @backingInt(model)),
         };
     }
 
@@ -68,9 +68,9 @@ pub const State = struct {
                 .selection_anchor = @intCast(self.selection_anchor),
                 .cursor_upstream = self.cursor_upstream,
                 .focus_index = @intCast(self.focus_index),
-                .model = @intCast(@intFromEnum(self.model)),
+                .model = @intCast(@backingInt(self.model)),
                 .flags = @bitCast(self.flags),
-                .save_state = @intCast(@intFromEnum(self.save_state)),
+                .save_state = @intCast(@backingInt(self.save_state)),
             },
         };
         @memcpy(out.text[0..self.text_length], self.textSlice());
@@ -578,7 +578,7 @@ test "Notes edits invalidate saved feedback while preserving in-flight and faile
     try std.testing.expectEqual(abi.DocumentSaveState.permission_denied, state.save_state);
     const presentation = state.presentationText();
     try std.testing.expect(presentation.isCanonical());
-    try std.testing.expectEqual(@intFromEnum(abi.DocumentSaveState.permission_denied), presentation.state.save_state);
+    try std.testing.expectEqual(@backingInt(abi.DocumentSaveState.permission_denied), presentation.state.save_state);
     try std.testing.expect(state.acknowledgeSavedText("ac", state.contentRevision()));
     _ = state.apply(inputEvent(5, abi.InputByte.backspace, 0));
     try std.testing.expectEqual(abi.DocumentSaveState.none, state.save_state);
@@ -754,7 +754,7 @@ test "Notes groups typing and separates navigation saves and new branches" {
 }
 
 test "Notes undo and redo preserve full documents and delete history at a new load" {
-    const full = [_]u8{'a'} ** TEXT_CAPACITY;
+    const full = @as([TEXT_CAPACITY]u8, @splat('a'));
     for ([_]u8{ abi.InputByte.text, abi.InputByte.activate, abi.InputByte.backspace, abi.InputByte.delete_forward }) |op| {
         var state = State.init("app.notes");
         try std.testing.expect(state.loadDocument(&full));
@@ -824,7 +824,7 @@ test "Notes reverse selections shrink cross lines and collapse without editing" 
 }
 
 test "Notes selection replacement works at capacity and receipts retain selection" {
-    const full = [_]u8{'a'} ** TEXT_CAPACITY;
+    const full = @as([TEXT_CAPACITY]u8, @splat('a'));
     for ([_]u8{ abi.InputByte.text, abi.InputByte.activate, abi.InputByte.backspace, abi.InputByte.delete_forward }) |op| {
         var state = State.init("app.notes");
         try std.testing.expect(state.loadDocument(&full));
@@ -886,7 +886,7 @@ test "Notes vertical movement retains its column across short and empty lines" {
 
 test "Notes cursor boundaries and full-buffer edits preserve canonical snapshots" {
     var state = State.init("app.notes");
-    const full = [_]u8{'a'} ** TEXT_CAPACITY;
+    const full = @as([TEXT_CAPACITY]u8, @splat('a'));
     try std.testing.expect(state.loadDocument(&full));
     _ = state.apply(inputEvent(1, abi.InputByte.document_start, 0));
     try std.testing.expectEqual(ApplyResult.observed, state.apply(inputEvent(2, abi.InputByte.backspace, 0)));

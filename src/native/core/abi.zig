@@ -41,7 +41,7 @@ pub const InputByte = struct {
 pub const INPUT_EXTEND_SELECTION: u8 = 1;
 
 pub fn inputPacket(op: u8, data: u8) [INPUT_PACKET_BYTES]u8 {
-    var bytes = [_]u8{0} ** INPUT_PACKET_BYTES;
+    var bytes = @as([INPUT_PACKET_BYTES]u8, @splat(0));
     bytes[0] = op;
     bytes[1] = data;
     return bytes;
@@ -221,13 +221,13 @@ pub const InputEventDescriptor = extern struct {
     slot_id: u8,
     length: u8,
     viewport: text_layout.Viewport = .{},
-    _reserved: [3]u8 = [_]u8{0} ** 3,
-    bytes: [INPUT_PACKET_BYTES]u8 = [_]u8{0} ** INPUT_PACKET_BYTES,
+    _reserved: [3]u8 = @as([3]u8, @splat(0)),
+    bytes: [INPUT_PACKET_BYTES]u8 = @as([INPUT_PACKET_BYTES]u8, @splat(0)),
 };
 
 pub const InputRecvResponse = extern struct {
     present: u8,
-    _reserved: [7]u8 = [_]u8{0} ** 7,
+    _reserved: [7]u8 = @as([7]u8, @splat(0)),
     event: InputEventDescriptor,
 };
 
@@ -288,7 +288,7 @@ pub const SurfaceText = extern struct {
     text_length: u16 = 0,
     cursor: u16 = 0,
     state: SurfaceTextState = .{},
-    text: [SURFACE_TEXT_BYTES]u8 = [_]u8{0} ** SURFACE_TEXT_BYTES,
+    text: [SURFACE_TEXT_BYTES]u8 = @as([SURFACE_TEXT_BYTES]u8, @splat(0)),
 
     pub fn textSlice(self: *const SurfaceText) []const u8 {
         return self.text[0..self.text_length];
@@ -307,11 +307,11 @@ pub const SurfaceText = extern struct {
 
 test "text surface save feedback stays bounded and rejects noncanonical states" {
     try std.testing.expectEqual(@as(usize, 528), @sizeOf(SurfaceText));
-    var text = SurfaceText{ .state = .{ .model = 1, .save_state = @intFromEnum(DocumentSaveState.retryable) } };
+    var text = SurfaceText{ .state = .{ .model = 1, .save_state = @backingInt(DocumentSaveState.retryable) } };
     try std.testing.expect(text.isCanonical());
     text.state.save_state = 15;
     try std.testing.expect(!text.isCanonical());
-    text.state.save_state = @intFromEnum(DocumentSaveState.saved);
+    text.state.save_state = @backingInt(DocumentSaveState.saved);
     text.state.model = 5;
     try std.testing.expect(!text.isCanonical());
     text.state.save_state = 0;
@@ -374,7 +374,7 @@ pub const BoolResponse = extern struct {
 pub fn boolResponse(value: bool) BoolResponse {
     return .{
         .value = @intFromBool(value),
-        ._reserved = [_]u8{0} ** BOOL_RESPONSE_RESERVED_BYTES,
+        ._reserved = @as([BOOL_RESPONSE_RESERVED_BYTES]u8, @splat(0)),
     };
 }
 
@@ -410,15 +410,15 @@ pub const SharedMemoryCreateResponse = extern struct {
 };
 
 pub fn opcode(operation: NativeOperation) u16 {
-    return @intFromEnum(operation);
+    return @backingInt(operation);
 }
 
 pub fn policyOpcode(operation: PolicyOperation) u16 {
-    return @intFromEnum(operation);
+    return @backingInt(operation);
 }
 
 pub fn reviewOpcode(operation: ReviewOperation) u16 {
-    return @intFromEnum(operation);
+    return @backingInt(operation);
 }
 
 pub fn taskFlagsHas(flags: u16, mask: u16) bool {

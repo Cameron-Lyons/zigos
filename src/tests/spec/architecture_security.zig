@@ -754,10 +754,10 @@ fn mmuStyleAddressSpaceValidationRejectsCrossSpaceRanges() !void {
 }
 
 fn componentAbiDeclarationsCoverEveryTypedOperation() !void {
-    try std.testing.expectEqual(std.meta.fields(abi.NativeOperation).len, syscall_abi.operations.len);
+    try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, syscall_abi.operations.len);
 
-    inline for (std.meta.fields(abi.NativeOperation)) |field| {
-        const operation: abi.NativeOperation = @enumFromInt(field.value);
+    inline for (@typeInfo(abi.NativeOperation).@"enum".field_values) |field| {
+        const operation: abi.NativeOperation = @fromBackingInt(@intCast(field));
         const declaration = syscall_abi.declarationFor(operation);
         try std.testing.expectEqual(operation, declaration.operation);
         try std.testing.expect(declaration.requestSize() >= @sizeOf(abi.RequestHeader));

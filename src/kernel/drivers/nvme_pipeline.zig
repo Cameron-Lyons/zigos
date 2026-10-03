@@ -25,7 +25,7 @@ pub fn SlotSet(comptime Payload: type) type {
             byte_count: usize = 0,
         };
 
-        slots: [DEPTH]Slot = [_]Slot{.{}} ** DEPTH,
+        slots: [DEPTH]Slot = @as([DEPTH]Slot, @splat(.{})),
         active_count: usize = 0,
 
         pub fn freeIndex(self: *const Self) ?usize {

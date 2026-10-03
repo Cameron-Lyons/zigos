@@ -82,7 +82,7 @@ pub const ActivationSummary = struct {
     denied_count: u8 = 0,
     required_denials: u8 = 0,
     decision_count: u8 = 0,
-    decisions: [MAX_PERMISSION_DECISIONS]PermissionDecision = [_]PermissionDecision{emptyDecision()} ** MAX_PERMISSION_DECISIONS,
+    decisions: [MAX_PERMISSION_DECISIONS]PermissionDecision = @as([MAX_PERMISSION_DECISIONS]PermissionDecision, @splat(emptyDecision())),
 
     pub fn addDecision(self: *ActivationSummary, decision: PermissionDecision, required: bool) void {
         if (self.decision_count < self.decisions.len) {
@@ -233,7 +233,7 @@ pub const PolicyMediator = struct {
         task.appendAudit(.{
             .kind = .policy_allowed,
             .capability_id = capability_id,
-            .detail = @intFromEnum(decision.request.kind),
+            .detail = @backingInt(decision.request.kind),
             .tick = now_ticks,
         });
         try self.recordDecision(decision.owner, decision.task_id, decision.request, true, .none, now_ticks);
@@ -293,7 +293,7 @@ pub const PolicyMediator = struct {
     ) Error!PermissionDecision {
         task.appendAudit(.{
             .kind = .policy_denied,
-            .detail = @intFromEnum(decision.reason),
+            .detail = @backingInt(decision.reason),
             .tick = now_ticks,
         });
         try self.recordDecision(decision.owner, decision.task_id, decision.request, false, decision.reason, now_ticks);

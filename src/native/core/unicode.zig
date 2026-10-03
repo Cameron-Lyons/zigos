@@ -288,7 +288,7 @@ test "Unicode generated property ranges cover every scalar with valid enum tags"
         const end = std.mem.readInt(u32, table[index * 6 ..][0..4], .little);
         const bits = std.mem.readInt(u16, table[index * 6 + 4 ..][0..2], .little);
         try std.testing.expect(index == 0 or end > previous);
-        try std.testing.expect(end <= 0x10ffff and bits & 15 <= @intFromEnum(Break.lvt) and bits >> 9 == 0);
+        try std.testing.expect(end <= 0x10ffff and bits & 15 <= @backingInt(Break.lvt) and bits >> 9 == 0);
         previous = end;
     }
     try std.testing.expectEqual(@as(u32, 0x10ffff), previous);

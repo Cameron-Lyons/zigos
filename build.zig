@@ -8,7 +8,7 @@ const qemu_build = @import("build_support/qemu.zig");
 const tests_build = @import("build_support/tests.zig");
 const userspace_build = @import("build_support/userspace.zig");
 
-const required_zig_version = "0.16.0";
+const required_zig_version = "0.17.0";
 
 pub fn build(b: *std.Build) void {
     enforceZigVersion();
@@ -63,16 +63,16 @@ pub fn build(b: *std.Build) void {
     kernel_role_options.addOption(
         u64,
         "maximum_production_boot_payload_size",
-        if (optimize == .Debug) 24 * 1024 * 1024 else 16 * 1024 * 1024,
+        if (optimize == .debug) 24 * 1024 * 1024 else 16 * 1024 * 1024,
     );
     kernel_role_options.addOption(
         usize,
         "maximum_production_symbol_count",
         // Production now links native enrollment, TPM PIN/recovery and catalog
         // restoration. Retain a bounded symbol budget for that shipped path.
-        if (optimize == .ReleaseFast) 3500 else std.math.maxInt(usize),
+        if (optimize == .fast) 3500 else std.math.maxInt(usize),
     );
-    kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .Debug);
+    kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .debug);
     const kernel_role_check_module = b.createModule(.{
         .root_source_file = b.path("tools/check_kernel_roles.zig"),
         .target = b.graph.host,
@@ -322,7 +322,7 @@ pub fn build(b: *std.Build) void {
     uefi_qemu_step.dependOn(&uefi_qemu_cmd.step);
     uefi_qemu_step.dependOn(kernel_role_check_step);
 
-    const unified_efi = kernel_build.addEfiImage(b, .ReleaseSmall, kernels.zigos_native.boot_payload, b.path("src/boot/cmdline-qemu.txt"));
+    const unified_efi = kernel_build.addEfiImage(b, .small, kernels.zigos_native.boot_payload, b.path("src/boot/cmdline-qemu.txt"));
     const unified_efi_cmd = b.addSystemCommand(&.{ "bash", "scripts/run-unified-efi-qemu.sh" });
     unified_efi_cmd.addFileArg(unified_efi.getEmittedBin());
     unified_efi_cmd.addFileArg(kernels.zigos_native.boot_payload);
@@ -360,8 +360,8 @@ pub fn build(b: *std.Build) void {
         "build/release-security",
         "ReleaseFast",
     });
-    if (optimize != .ReleaseFast) {
-        release_sbom_cmd.step.dependOn(&b.addFail("public release artifacts require -Doptimize=ReleaseFast").step);
+    if (optimize != .fast) {
+        release_sbom_cmd.step.dependOn(&b.addFail("public release artifacts require -Doptimize=fast").step);
     }
     release_sbom_cmd.step.dependOn(&iso_cmd.step);
     release_sbom_cmd.step.dependOn(kernel_role_check_step);

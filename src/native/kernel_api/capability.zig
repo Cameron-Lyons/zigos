@@ -85,7 +85,7 @@ pub const GrantPlanEntry = struct {
 
 pub const GrantPlan = struct {
     entry_count: u8 = 0,
-    entries: [MAX_GRANT_PLAN_ENTRIES]GrantPlanEntry = [_]GrantPlanEntry{emptyGrantPlanEntry()} ** MAX_GRANT_PLAN_ENTRIES,
+    entries: [MAX_GRANT_PLAN_ENTRIES]GrantPlanEntry = @as([MAX_GRANT_PLAN_ENTRIES]GrantPlanEntry, @splat(emptyGrantPlanEntry())),
 
     pub fn addMint(self: *GrantPlan, task_id: u64, request: MintRequest) Error!void {
         const entry_index: usize = self.entry_count;
@@ -161,11 +161,11 @@ pub const RetiredAuthority = struct {
 pub fn GrantReservationFor(comptime max_capabilities: usize) type {
     const SlotIndex = indexed_arena.ReusableIndex(max_capabilities);
     return struct {
-        slot_indexes: [MAX_GRANT_PLAN_ENTRIES]SlotIndex = [_]SlotIndex{0} ** MAX_GRANT_PLAN_ENTRIES,
-        target_generation_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
+        slot_indexes: [MAX_GRANT_PLAN_ENTRIES]SlotIndex = @as([MAX_GRANT_PLAN_ENTRIES]SlotIndex, @splat(0)),
+        target_generation_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = @as([MAX_GRANT_PLAN_ENTRIES]u8, @splat(0)),
         new_target_count: u8 = 0,
-        new_target_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = [_]u8{0} ** MAX_GRANT_PLAN_ENTRIES,
-        new_targets: [MAX_GRANT_PLAN_ENTRIES]CapabilityTarget = [_]CapabilityTarget{.{ .kind = .task, .id = 0 }} ** MAX_GRANT_PLAN_ENTRIES,
+        new_target_indexes: [MAX_GRANT_PLAN_ENTRIES]u8 = @as([MAX_GRANT_PLAN_ENTRIES]u8, @splat(0)),
+        new_targets: [MAX_GRANT_PLAN_ENTRIES]CapabilityTarget = @as([MAX_GRANT_PLAN_ENTRIES]CapabilityTarget, @splat(.{ .kind = .task, .id = 0 })),
 
         comptime {
             if (max_capabilities == MAX_CAPABILITIES and @sizeOf(@This()) > GRANT_RESERVATION_SIZE_CEILING_BYTES) {
@@ -849,7 +849,7 @@ pub fn CapabilityTableWith(comptime config: TableConfig) type {
 }
 
 fn targetKey(target: CapabilityTarget) u64 {
-    return nonZeroKey((@as(u64, @intFromEnum(target.kind)) << 56) ^ target.id);
+    return nonZeroKey((@as(u64, @backingInt(target.kind)) << 56) ^ target.id);
 }
 
 fn nonZeroKey(key: u64) u64 {
@@ -857,7 +857,7 @@ fn nonZeroKey(key: u64) u64 {
 }
 
 fn debugIndexChecksEnabled() bool {
-    return builtin.mode == .Debug;
+    return builtin.mode == .debug;
 }
 
 fn zeroCapability() Capability {

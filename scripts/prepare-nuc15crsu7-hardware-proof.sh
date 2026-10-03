@@ -184,7 +184,7 @@ if [ "$RUN_BUILD" = true ]; then
   : "${ZIGOS_RELEASE_HARDWARE_BACKED:?--build requires ZIGOS_RELEASE_HARDWARE_BACKED=true}"
   : "${ZIGOS_RELEASE_SEQUENCE:?--build requires a strictly increasing ZIGOS_RELEASE_SEQUENCE for the new candidate}"
   : "${ZIGOS_RELEASE_EXPIRES_AT:?--build requires a future ZIGOS_RELEASE_EXPIRES_AT}"
-  "$ROOT_DIR/scripts/zig.sh" build -Doptimize=ReleaseFast \
+  "$ROOT_DIR/scripts/zig.sh" build -Doptimize=fast \
     -Drelease-trust-root="$ZIGOS_RELEASE_TRUST_ROOT" \
     -Drelease-trust-root-sha256="$ZIGOS_RELEASE_TRUST_ROOT_SHA256" \
     -Drelease-trust-policy="$ZIGOS_RELEASE_TRUST_POLICY" \

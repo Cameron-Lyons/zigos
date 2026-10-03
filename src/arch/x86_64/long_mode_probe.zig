@@ -9,7 +9,7 @@ const QEMU_EXIT_PORT: u16 = 0xF4;
 const QEMU_SUCCESS: u32 = 0x10;
 const QEMU_FAILURE: u32 = 0x11;
 
-pub fn panic(_: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
+pub fn panic(_: []const u8, _: ?*std.lang.StackTrace, _: ?usize) noreturn {
     serialWrite("ZIGOS:ARCH:X86_64:LONG_MODE_ENTRY:FAIL panic\n");
     exitQemu(QEMU_FAILURE);
 }

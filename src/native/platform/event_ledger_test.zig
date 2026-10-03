@@ -108,7 +108,7 @@ test "event ledger compact inputs preserve truncation and zeroed tails" {
     try std.testing.expectEqualStrings("short detail", matched[0].detailSlice());
     try std.testing.expect(std.mem.allEqual(u8, matched[0].detail[@as(usize, matched[0].detail_len)..], 0));
 
-    var oversized = [_]u8{'x'} ** (event_ledger.MAX_DETAIL_BYTES + 8);
+    var oversized = @as([event_ledger.MAX_DETAIL_BYTES + 8]u8, @splat('x'));
     try ledger.recordProcessCrash(.network_stack, subject, 23, 5002, &oversized);
     const crash = ledger.latestKind(.process_crash).?;
     try std.testing.expectEqual(@as(u16, event_ledger.MAX_DETAIL_BYTES), crash.detail_len);
@@ -800,7 +800,7 @@ test "diagnostic reload rejects an obsolete counter header" {
     defer ledger.deinit();
     try ledger.recordUpdateTransition(owner, 1, .none, false, 20, "initial event");
     const header = try storage.resolve(ledger.workspace_id, "state/event-ledger");
-    var obsolete = [_]u8{0} ** 16;
+    var obsolete = @as([16]u8, @splat(0));
     std.mem.writeInt(u32, obsolete[0..4], 0x454C4733, .little);
     std.mem.writeInt(u64, obsolete[8..16], 2, .little);
     const replacement = try storage.putLocallySignedVersion(.{

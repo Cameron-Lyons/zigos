@@ -143,7 +143,7 @@ const EndpointOwnerIndex = indexed_arena.MultimapIndex(MAX_ENDPOINTS, MAX_ENDPOI
 
 pub const Retirement = struct {
     endpoint_count: u16 = 0,
-    endpoint_ids: [MAX_ENDPOINTS]ids.EndpointId = [_]ids.EndpointId{ids.EndpointId.zero} ** MAX_ENDPOINTS,
+    endpoint_ids: [MAX_ENDPOINTS]ids.EndpointId = @as([MAX_ENDPOINTS]ids.EndpointId, @splat(ids.EndpointId.zero)),
     disconnected_count: u16 = 0,
     disconnected_task_ids: [MAX_ENDPOINTS]ids.TaskId = undefined,
 
@@ -215,7 +215,7 @@ pub const Table = struct {
                 .owner_task_id = owner_task_id,
                 .flags = flags,
                 .label_len = @intCast(@min(label.len, MAX_ENDPOINT_LABEL_PAYLOAD_BYTES)),
-                .label = [_]u8{0} ** MAX_ENDPOINT_LABEL_BYTES,
+                .label = @as([MAX_ENDPOINT_LABEL_BYTES]u8, @splat(0)),
             },
         };
         @memcpy(slot.endpoint.label[0..slot.endpoint.label_len], label[0..slot.endpoint.label_len]);
@@ -557,7 +557,7 @@ fn zeroEndpoint() Endpoint {
         .owner_task_id = ids.TaskId.zero,
         .flags = .{},
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_ENDPOINT_LABEL_BYTES,
+        .label = @as([MAX_ENDPOINT_LABEL_BYTES]u8, @splat(0)),
     };
 }
 
@@ -780,7 +780,7 @@ test "endpoint table rejection preserves active endpoints" {
 
 test "endpoint retirement releases only unread moves across queue wraparound" {
     const Recorder = struct {
-        ids: [MAX_ENDPOINT_QUEUE]u64 = [_]u64{0} ** MAX_ENDPOINT_QUEUE,
+        ids: [MAX_ENDPOINT_QUEUE]u64 = @as([MAX_ENDPOINT_QUEUE]u64, @splat(0)),
         count: usize = 0,
         fn release(context: *anyopaque, capability_id: ids.CapabilityId) void {
             const self: *@This() = @ptrCast(@alignCast(context));

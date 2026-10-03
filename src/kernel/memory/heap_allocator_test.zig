@@ -95,7 +95,7 @@ test "heap preserves live payloads and free indexes under randomized fragmentati
     var arena: [128 * 1024]u8 align(16) = undefined;
     try heap.initHostArena(&arena);
     const Live = struct { ptr: *anyopaque, size: usize, pattern: u8 };
-    var live = [_]?Live{null} ** 128;
+    var live = @as([128]?Live, @splat(null));
     var prng = std.Random.DefaultPrng.init(0x4845_4150_2026);
     const random = prng.random();
     for (0..8000) |iteration| {

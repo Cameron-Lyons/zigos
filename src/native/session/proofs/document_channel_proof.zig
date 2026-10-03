@@ -26,7 +26,7 @@ var report_cursor: u8 = 0;
 var report_sequence: u64 = 0;
 var report_usage: u8 = 0x04;
 var report_modifiers: u8 = 0;
-var report_keys: [6]u8 = [_]u8{0} ** 6;
+var report_keys: [6]u8 = @as([6]u8, @splat(0));
 var report_mode: enum { edit, open, cancel, key } = .edit;
 const cursor_edited_text = "aS\ncond editorb";
 const selection_edited_text = "Q\nb";
@@ -402,7 +402,7 @@ fn awaitSaving(manager: anytype, editor: EditorSession) !void {
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
-        if (text.state.save_state != @intFromEnum(abi.DocumentSaveState.saving)) continue;
+        if (text.state.save_state != @backingInt(abi.DocumentSaveState.saving)) continue;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
         if (!framebuffer.verifyText(0, frame.rows - 2, "Saving...")) return error.SavingPixelsMissing;
         return;
@@ -493,9 +493,9 @@ fn pressKeysAt(manager: anytype, editor: EditorSession, usages: []const u8, modi
     report_cursor = 0;
     report_mode = .key;
     report_usage = usages[0];
-    report_keys = [_]u8{0} ** 6;
+    report_keys = @as([6]u8, @splat(0));
     @memcpy(report_keys[0..usages.len], usages);
-    defer report_keys = [_]u8{0} ** 6;
+    defer report_keys = @as([6]u8, @splat(0));
     report_modifiers = modifiers;
     if (manager.servicePendingInputWork(timer.getTicks()) != usages.len) return error.CursorInputNotRouted;
     try awaitInputPresentation(manager, editor, expected, cursor, anchor, dirty, upstream, before.input_event_count, before.last_input_sequence, usages.len);
@@ -633,7 +633,7 @@ fn visualNavigation(manager: anytype, graph: anytype, workspace_id: u64, documen
 
 fn unicodeDocument(manager: anytype, graph: anytype, workspace_id: u64, document_key: object_signer.Signer, sibling: EditorSession) !void {
     // The first clipboard chunk ends in the middle of U+754C.
-    const text = "a" ** 67 ++ "界e\u{301} café Ελληνικά\n👩‍💻\r\n終";
+    const text = &@as([67]u8, @splat('a')) ++ "界e\u{301} café Ελληνικά\n👩‍💻\r\n終";
     const unicode_path = "documents/unicode.md";
     const storage = manager.storageServicePtr();
     const stored = try storage.putVersion(.{
@@ -741,7 +741,7 @@ fn expectDeniedSave(manager: anytype, editor: EditorSession, workspace_id: u64) 
         _ = manager.runUserspaceScheduler(timer.getTicks());
         const surface = manager.compositorSessionPtr().surfacePresentation(editor.surface_id) orelse continue;
         const text = if (surface.text) |*value| value else continue;
-        if (text.state.save_state != @intFromEnum(abi.DocumentSaveState.permission_denied)) continue;
+        if (text.state.save_state != @backingInt(abi.DocumentSaveState.permission_denied)) continue;
         const flags: mailbox_abi.UiStateFlags = @bitCast(text.state.flags);
         if (!flags.dirty or !std.mem.eql(u8, text.textSlice(), undo_edited_text ++ "d")) return error.DeniedSaveLostDraft;
         const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
@@ -797,7 +797,7 @@ fn awaitPresentation(manager: anytype, editor: EditorSession, expected: []const 
         {
             const text = if (surface.text) |*content| content else return error.SurfaceTextMissing;
             if (!std.mem.eql(u8, text.textSlice(), expected)) return error.SurfaceTextMismatch;
-            if (commits != 0 and text.state.save_state != @intFromEnum(abi.DocumentSaveState.saved)) return error.SavedStateMissing;
+            if (commits != 0 and text.state.save_state != @backingInt(abi.DocumentSaveState.saved)) return error.SavedStateMissing;
             if (manager.compositorSessionPtr().active_window_id == editor.window_id) {
                 const frame = framebuffer.frame() orelse return error.FramebufferUnavailable;
                 const layout = abi.text_layout.Layout{ .text = expected, .columns = frame.columns };

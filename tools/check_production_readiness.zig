@@ -463,7 +463,7 @@ fn validateBenchmarkEnvironmentGate(
 
     const workflow_path = ".github/workflows/ci.yml";
     const workflow_source = try readRequiredSource(allocator, io, errors, workflow_path) orelse return;
-    if (std.mem.indexOf(u8, workflow_source, "command: QEMU_ACCELERATOR=kvm ./scripts/zig.sh build -Doptimize=ReleaseFast benchmark") == null) {
+    if (std.mem.indexOf(u8, workflow_source, "command: QEMU_ACCELERATOR=kvm ./scripts/zig.sh build -Doptimize=fast benchmark") == null) {
         try common.addError(errors, allocator, "Hosted benchmark CI must require KVM for cycle-regression enforcement", .{});
     }
 
@@ -1636,7 +1636,7 @@ fn validateNuc11tnki5KernelProofSources(
         "const boot_link = b.addSystemCommand",
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
-        "addEfiImage(b, .ReleaseSmall, boot_kernel",
+        "addEfiImage(b, .small, boot_kernel",
         "scripts/build-efi-iso.sh",
         "scripts/check-efi-image.sh",
         "src/boot/cmdline-qemu.txt",

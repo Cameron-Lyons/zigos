@@ -28,7 +28,7 @@ pub const KernelArtifact = struct {
     output_file: std.Build.LazyPath,
     boot_payload: std.Build.LazyPath,
     install_step: *std.Build.Step,
-    output_path: []const u8,
+    output_path: std.Build.LazyPath,
     kernel_role: KernelRole,
     bootloader_source_path: []const u8,
     qemu_boot_iso_path: std.Build.LazyPath,

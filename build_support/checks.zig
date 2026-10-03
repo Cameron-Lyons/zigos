@@ -11,7 +11,7 @@ pub const CheckSteps = struct {
 
 pub fn addCheckSteps(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     test_artifacts: tests_build.TestArtifacts,
 ) CheckSteps {
     const zig_test_roots_cmd = addHostToolRun(b, optimize, "check-zig-test-roots", "tools/check_zig_test_roots.zig");
@@ -105,7 +105,7 @@ pub fn addCheckSteps(
 
 fn addHostToolRun(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     name: []const u8,
     source_path: []const u8,
 ) *std.Build.Step.Run {
@@ -124,7 +124,7 @@ fn addHostToolRun(
 
 fn releaseSecurityGateModule(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Module {
     const check_common_module = b.createModule(.{
         .root_source_file = b.path("tools/check_common.zig"),
@@ -144,7 +144,7 @@ fn releaseSecurityGateModule(
 
 fn addReleaseSecurityGateRun(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Step.Run {
     const tool = b.addExecutable(.{
         .name = "check-release-security-gate",
@@ -157,7 +157,7 @@ fn addReleaseSecurityGateRun(
 
 fn addReleaseSecurityGateTestRun(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Step.Run {
     const tests = b.addTest(.{
         .name = "check-release-security-gate-tests",

@@ -95,9 +95,9 @@ var active_bar_address: usize = 0;
 var active = false;
 var event_consumer = xhci.EventRingConsumer{};
 var command_producer = xhci.TrbRingProducer{};
-var control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-var interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-var slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
+var control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
+var interrupt_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
+var slot_to_port = @as([xhci.MAX_DEVICE_SLOTS + 1]u8, @splat(0));
 var active_keyboard_reports: ?*xhci.BootKeyboardReportPublisher = null;
 var outstanding_interrupt_reports: usize = 0;
 var pending_interrupts: u32 = 0;
@@ -312,9 +312,9 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     publishControllerActive(false);
     event_consumer = .{};
     command_producer = .{};
-    control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
+    interrupt_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
+    slot_to_port = @as([xhci.MAX_DEVICE_SLOTS + 1]u8, @splat(0));
     active_keyboard_reports = null;
     outstanding_interrupt_reports = 0;
     ports = empty_port_runtime_states[0..];
@@ -512,9 +512,9 @@ pub fn activate() Error!void {
 
     event_consumer = .{};
     command_producer = .{};
-    control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    interrupt_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
-    slot_to_port = [_]u8{0} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
+    interrupt_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
+    slot_to_port = @as([xhci.MAX_DEVICE_SLOTS + 1]u8, @splat(0));
     outstanding_interrupt_reports = 0;
     resetControllerRuntimeState();
     outstanding_command = null;
@@ -1877,7 +1877,7 @@ fn containFailure(marker: []const u8) void {
     outstanding_command = null;
     outstanding_transfer = null;
     command_producer = .{};
-    control_producers = [_]xhci.TrbRingProducer{.{}} ** (xhci.MAX_DEVICE_SLOTS + 1);
+    control_producers = @as([xhci.MAX_DEVICE_SLOTS + 1]xhci.TrbRingProducer, @splat(.{}));
     resetControllerRuntimeState();
     if (active_capabilities) |capabilities| {
         if (active_bar_address != 0) {
@@ -2021,7 +2021,7 @@ const ExtendedCapabilityReader = struct {
 };
 
 fn readCapabilitySnapshot(base: usize) [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
-    var snapshot = [_]u8{0} ** xhci.CAPABILITY_REGISTERS_BYTES;
+    var snapshot = @as([xhci.CAPABILITY_REGISTERS_BYTES]u8, @splat(0));
     var offset: usize = 0;
     while (offset < snapshot.len) : (offset += @sizeOf(u32)) {
         const value = @as(*volatile u32, @ptrFromInt(base + offset)).*;
@@ -2031,7 +2031,7 @@ fn readCapabilitySnapshot(base: usize) [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
 }
 
 fn validTestSnapshot() [xhci.CAPABILITY_REGISTERS_BYTES]u8 {
-    var snapshot = [_]u8{0} ** xhci.CAPABILITY_REGISTERS_BYTES;
+    var snapshot = @as([xhci.CAPABILITY_REGISTERS_BYTES]u8, @splat(0));
     snapshot[0] = 0x40;
     endian.writeU16Le(snapshot[2..4], 0x0110);
     endian.writeU32Le(snapshot[4..8], 32 | (@as(u32, 8) << 8) | (@as(u32, 12) << 24));

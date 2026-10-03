@@ -295,7 +295,7 @@ pub const TransportFrame = struct {
     encrypted: bool = false,
     workspace_generation: u32 = 0,
     path_len: SyncPathLength = 0,
-    path: [workspace.MAX_ENTRY_PATH_BYTES]u8 = [_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES,
+    path: [workspace.MAX_ENTRY_PATH_BYTES]u8 = @as([workspace.MAX_ENTRY_PATH_BYTES]u8, @splat(0)),
 
     pub fn pathSlice(self: *const TransportFrame) []const u8 {
         return self.path[0..@as(usize, self.path_len)];
@@ -425,7 +425,7 @@ pub fn overlayArenaKey(workspace_id: u64) u64 {
 pub fn replicaArenaKey(workspace_id: u64, device_id: principal.PrincipalId, path_hash: u64) u64 {
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(device_id.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(device_id.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_id.serial);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, path_hash);
     return indexed_arena.nonZeroKey(hash);
@@ -435,7 +435,7 @@ pub fn conflictArenaKey(workspace_id: u64, device_id: principal.PrincipalId, pat
     var hash: u64 = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, 0xCF11_C700_5041_0001);
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(device_id.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(device_id.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, device_id.serial);
     hash = appendHashBytes(hash, path);
     return indexed_arena.nonZeroKey(hash);
@@ -533,11 +533,11 @@ pub const ResidentState = struct {
     has_persisted_state: bool = false,
     transport_cursor_loaded: bool = false,
     user_root_signers: [device_graph.MAX_USER_ROOTS][MAX_LABEL_BYTES]u8 =
-        [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** device_graph.MAX_USER_ROOTS,
+        @as([device_graph.MAX_USER_ROOTS][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
     device_signature_signers: [device_graph.MAX_DEVICES][4][MAX_LABEL_BYTES]u8 =
-        [_][4][MAX_LABEL_BYTES]u8{[_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** 4} ** device_graph.MAX_DEVICES,
+        @as([device_graph.MAX_DEVICES][4][MAX_LABEL_BYTES]u8, @splat(@as([4][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))))),
     database_contract_signers: [MAX_DATABASE_CONTRACTS][MAX_LABEL_BYTES]u8 =
-        [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_DATABASE_CONTRACTS,
+        @as([MAX_DATABASE_CONTRACTS][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
     next_state_tick: u64 = 1,
 
     pub fn initializeAllocated(self: *ResidentState) void {
@@ -679,7 +679,7 @@ pub fn zeroDeviceGraphRecord() device_graph.DeviceRecord {
         .principal_id = .{ .kind = .device, .serial = 0 },
         .owner = .{ .kind = .user, .serial = 0 },
         .label_len = 0,
-        .label = [_]u8{0} ** device_graph.MAX_LABEL_BYTES,
+        .label = @as([device_graph.MAX_LABEL_BYTES]u8, @splat(0)),
         .overlay_id = 0,
         .status = .trusted,
         .trust_generation = 1,
@@ -693,7 +693,7 @@ pub fn zeroDeviceGraphRecord() device_graph.DeviceRecord {
         .device_key_origin = .software,
         .platform_key_bound = false,
         .platform_key_label_len = 0,
-        .platform_key_label = [_]u8{0} ** device_graph.MAX_LABEL_BYTES,
+        .platform_key_label = @as([device_graph.MAX_LABEL_BYTES]u8, @splat(0)),
         .platform_key_digest = crypto_hash.zero_digest,
         .platform_root_generation = 0,
         .platform_root_provenance = measured_boot.RootProvenance.synthetic_host,
@@ -728,13 +728,13 @@ pub fn zeroWorkspacePolicy() WorkspacePolicy {
         .personal_e2ee = true,
         .require_shared_access = false,
         .selective_prefix_count = 0,
-        .selective_prefixes = [_][MAX_PREFIX_BYTES]u8{[_]u8{0} ** MAX_PREFIX_BYTES} ** MAX_SELECTIVE_PREFIXES,
-        .selective_prefix_lens = [_]u8{0} ** MAX_SELECTIVE_PREFIXES,
+        .selective_prefixes = @as([MAX_SELECTIVE_PREFIXES][MAX_PREFIX_BYTES]u8, @splat(@as([MAX_PREFIX_BYTES]u8, @splat(0)))),
+        .selective_prefix_lens = @as([MAX_SELECTIVE_PREFIXES]u8, @splat(0)),
         .device_to_device_policy_id = null,
         .relay_policy_id = null,
         .overlay_policy_id = null,
         .relay_domain_len = 0,
-        .relay_domain = [_]u8{0} ** MAX_LABEL_BYTES,
+        .relay_domain = @as([MAX_LABEL_BYTES]u8, @splat(0)),
     };
 }
 
@@ -744,11 +744,11 @@ pub fn zeroOverlay() OverlayRecord {
         .workspace_id = 0,
         .home_device = .{ .kind = .device, .serial = 0 },
         .service_identity_len = 0,
-        .service_identity = [_]u8{0} ** MAX_LABEL_BYTES,
+        .service_identity = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .remote_access_enabled = false,
         .private_service_count = 0,
-        .private_services = [_][MAX_LABEL_BYTES]u8{[_]u8{0} ** MAX_LABEL_BYTES} ** MAX_PRIVATE_SERVICES,
-        .private_service_lens = [_]u8{0} ** MAX_PRIVATE_SERVICES,
+        .private_services = @as([MAX_PRIVATE_SERVICES][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
+        .private_service_lens = @as([MAX_PRIVATE_SERVICES]u8, @splat(0)),
     };
 }
 
@@ -758,7 +758,7 @@ pub fn zeroReplicaEntry() ReplicaEntry {
         .device_id = .{ .kind = .device, .serial = 0 },
         .workspace_generation = 0,
         .path_len = 0,
-        .path = [_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES,
+        .path = @as([workspace.MAX_ENTRY_PATH_BYTES]u8, @splat(0)),
         .object_id = 0,
         .version_id = 0,
     };
@@ -770,7 +770,7 @@ pub fn zeroConflict() ConflictRecord {
         .device_id = .{ .kind = .device, .serial = 0 },
         .object_id = 0,
         .path_len = 0,
-        .path = [_]u8{0} ** workspace.MAX_ENTRY_PATH_BYTES,
+        .path = @as([workspace.MAX_ENTRY_PATH_BYTES]u8, @splat(0)),
         .local_version_id = 0,
         .remote_version_id = 0,
         .semantic = .mergeable_crdt,
@@ -782,9 +782,9 @@ pub fn zeroDatabaseContract() DatabaseContract {
         .id = 0,
         .workspace_id = 0,
         .bundle_id_len = 0,
-        .bundle_id = [_]u8{0} ** MAX_LABEL_BYTES,
+        .bundle_id = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .signature = .{},
     };
 }
@@ -797,8 +797,8 @@ pub fn copyTransportPath(destination: *[workspace.MAX_ENTRY_PATH_BYTES]u8, path:
 }
 
 test "compact sync record metadata preserves exact path and label capacities" {
-    const full_label = [_]u8{'l'} ** MAX_LABEL_BYTES;
-    const full_path = [_]u8{'p'} ** workspace.MAX_ENTRY_PATH_BYTES;
+    const full_label = @as([MAX_LABEL_BYTES]u8, @splat('l'));
+    const full_path = @as([workspace.MAX_ENTRY_PATH_BYTES]u8, @splat('p'));
 
     var policy = zeroWorkspacePolicy();
     policy.relay_domain_len = @intCast(try native_util.copyTextExact(&policy.relay_domain, &full_label));

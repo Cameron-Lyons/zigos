@@ -60,7 +60,7 @@ pub const KeyboardEvent = struct {
 pub const Error = error{InvalidBootKeyboardReport};
 
 pub const DecodedEvents = struct {
-    events: [BOOT_KEY_SLOTS]KeyboardEvent = [_]KeyboardEvent{.{ .kind = .activate }} ** BOOT_KEY_SLOTS,
+    events: [BOOT_KEY_SLOTS]KeyboardEvent = @as([BOOT_KEY_SLOTS]KeyboardEvent, @splat(.{ .kind = .activate })),
     count: u8 = 0,
 
     pub fn slice(self: *const DecodedEvents) []const KeyboardEvent {
@@ -75,7 +75,7 @@ pub const DecodedEvents = struct {
 };
 
 pub const Decoder = struct {
-    previous_keys: [BOOT_KEY_SLOTS]u8 = [_]u8{0} ** BOOT_KEY_SLOTS,
+    previous_keys: [BOOT_KEY_SLOTS]u8 = @as([BOOT_KEY_SLOTS]u8, @splat(0)),
 
     // Call before decode, and use only after decode validates the report. A
     // chord containing any new command key must never acquire repeat authority.
@@ -233,7 +233,7 @@ fn asciiFromUsage(usage: u8, shifted: bool) ?u8 {
 }
 
 fn testReport(modifiers: u8, keys: []const u8) [BOOT_KEYBOARD_REPORT_BYTES]u8 {
-    var result = [_]u8{0} ** BOOT_KEYBOARD_REPORT_BYTES;
+    var result = @as([BOOT_KEYBOARD_REPORT_BYTES]u8, @splat(0));
     result[0] = modifiers;
     @memcpy(result[2..][0..keys.len], keys);
     return result;

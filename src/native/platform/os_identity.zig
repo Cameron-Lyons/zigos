@@ -250,7 +250,7 @@ pub const Error = error{
 } || vault_service.Error || device_graph.Error || unlock_context.Error;
 
 pub const Store = struct {
-    credentials: [MAX_CREDENTIALS]CredentialRecord = [_]CredentialRecord{zeroCredential()} ** MAX_CREDENTIALS,
+    credentials: [MAX_CREDENTIALS]CredentialRecord = @as([MAX_CREDENTIALS]CredentialRecord, @splat(zeroCredential())),
     credential_count: u8 = 0,
 
     comptime {
@@ -285,9 +285,9 @@ pub const Store = struct {
             if (!std.mem.eql(u8, &digest, &record.credential_digest)) return error.InvalidIdentitySnapshot;
             try writer.writeBytes(&record.owner.keyBytes());
             try writer.writeBytes(&record.primary_device.keyBytes());
-            try writer.writeByte(@intFromEnum(record.scope));
+            try writer.writeByte(@backingInt(record.scope));
             try writer.writeByte(record.recovery_threshold);
-            try writer.writeByte(@intFromEnum(record.status));
+            try writer.writeByte(@backingInt(record.status));
             try writer.writeByte(record.relying_party_id_len);
             try writer.writeBytes(record.relyingPartySlice());
             try writer.writeByte(record.label_len);
@@ -405,11 +405,11 @@ pub const Store = struct {
             .credential_generation = credential.credential_generation,
             .assertion_counter = next_counter,
             .relying_party_id_len = 0,
-            .relying_party_id = [_]u8{0} ** MAX_RP_ID_BYTES,
+            .relying_party_id = @as([MAX_RP_ID_BYTES]u8, @splat(0)),
             .origin_len = 0,
-            .origin = [_]u8{0} ** MAX_ORIGIN_BYTES,
+            .origin = @as([MAX_ORIGIN_BYTES]u8, @splat(0)),
             .challenge_len = 0,
-            .challenge = [_]u8{0} ** MAX_CHALLENGE_BYTES,
+            .challenge = @as([MAX_CHALLENGE_BYTES]u8, @splat(0)),
             .signature = .{},
             .local_unlock_verified = true,
             .phishing_resistant = true,
@@ -646,9 +646,9 @@ fn makeLocalUnlockProof(
         .expires_at_ticks = expires_at_ticks,
         .context = context,
         .relying_party_id_len = 0,
-        .relying_party_id = [_]u8{0} ** MAX_RP_ID_BYTES,
+        .relying_party_id = @as([MAX_RP_ID_BYTES]u8, @splat(0)),
         .challenge_len = 0,
-        .challenge = [_]u8{0} ** MAX_CHALLENGE_BYTES,
+        .challenge = @as([MAX_CHALLENGE_BYTES]u8, @splat(0)),
     };
     proof.relying_party_id_len = @intCast(native_util.copyTextExact(&proof.relying_party_id, relying_party_id) catch return error.RelyingPartyTooLong);
     proof.challenge_len = @intCast(native_util.copyTextExact(&proof.challenge, challenge) catch return error.ChallengeTooLong);
@@ -784,12 +784,12 @@ fn zeroCredential() CredentialRecord {
         .hardware_backed_credential = false,
         .sealed_credential_secret = false,
         .relying_party_id_len = 0,
-        .relying_party_id = [_]u8{0} ** MAX_RP_ID_BYTES,
+        .relying_party_id = @as([MAX_RP_ID_BYTES]u8, @splat(0)),
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .secret_id = 0,
         .sealed_secret_digest = crypto_hash.zero_digest,
-        .credential_public_key = [_]u8{0} ** signing.PUBLIC_KEY_BYTES,
+        .credential_public_key = @as([signing.PUBLIC_KEY_BYTES]u8, @splat(0)),
         .credential_digest = crypto_hash.zero_digest,
         .credential_generation = 1,
         .assertion_count = 0,
@@ -1086,8 +1086,8 @@ test "os identity registration rejects overlong text without consuming credentia
         .label = "oversized-passkey",
         .seed = signing.seedFromByte(0xD3),
     };
-    const oversized_relying_party = [_]u8{'r'} ** (MAX_RP_ID_BYTES + 1);
-    const oversized_label = [_]u8{'l'} ** (MAX_LABEL_BYTES + 1);
+    const oversized_relying_party = @as([MAX_RP_ID_BYTES + 1]u8, @splat('r'));
+    const oversized_label = @as([MAX_LABEL_BYTES + 1]u8, @splat('l'));
 
     _ = try graph.ensureUserRoot(user, "owner", user_identity);
     _ = try graph.enrollDevice(user, laptop, "laptop", user_identity, laptop_identity, 1);
@@ -1482,7 +1482,7 @@ test "os identity signs every assertion claim through the sealed vault key" {
     changed = assertion;
     changed.challenge_len = MAX_CHALLENGE_BYTES + 1;
     try std.testing.expect(!verifyAssertion(&changed, &record.credential_public_key));
-    const wrong_key = [_]u8{0x91} ** signing.PUBLIC_KEY_BYTES;
+    const wrong_key = @as([signing.PUBLIC_KEY_BYTES]u8, @splat(0x91));
     try std.testing.expect(!verifyAssertion(&assertion, &wrong_key));
 }
 

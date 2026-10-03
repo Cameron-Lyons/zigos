@@ -101,7 +101,7 @@ const HandleArena = indexed_arena.GenerationalArena("SecureSecretStoreHandle", H
 
 pub const Store = struct {
     hardware_provider: HardwareSealProvider = .{},
-    secrets: [MAX_SECRETS]SecretRecord = [_]SecretRecord{zeroSecret()} ** MAX_SECRETS,
+    secrets: [MAX_SECRETS]SecretRecord = @as([MAX_SECRETS]SecretRecord, @splat(zeroSecret())),
     secret_count: u8 = 0,
     handles: HandleArena = HandleArena.init(),
 
@@ -436,7 +436,7 @@ fn zeroSecret() SecretRecord {
         .exportable = false,
         .resident_material = false,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .sealed_digest_present = false,
         .sealed_digest = crypto_hash.zero_digest,
         .material = .{ .raw = .{} },
@@ -544,7 +544,7 @@ test "secure secret store reports missing handles and oversized secrets" {
     var store = Store.init();
     const owner = principal.PrincipalId{ .kind = .user, .serial = 2 };
     const holder = principal.PrincipalId{ .kind = .app, .serial = 45 };
-    const oversized = [_]u8{'x'} ** (MAX_VALUE_BYTES + 1);
+    const oversized = @as([MAX_VALUE_BYTES + 1]u8, @splat('x'));
 
     try std.testing.expectError(error.SecretTooLarge, store.importSecret(owner, "too-large", &oversized, true, false));
     try std.testing.expectError(error.SecretNotFound, store.lendHandle(999, holder, 1, false));
@@ -774,7 +774,7 @@ test "signing key generation rejects invalid labels capacity and failed provider
     const owner = principal.PrincipalId{ .kind = .user, .serial = 452 };
     try std.testing.expectError(error.HardwareProviderUnavailable, store.generateSigningKey(owner, "key"));
     store.attachHardwareProvider(generator.provider());
-    try std.testing.expectError(error.LabelTooLong, store.generateSigningKey(owner, "x" ** (MAX_LABEL_BYTES + 1)));
+    try std.testing.expectError(error.LabelTooLong, store.generateSigningKey(owner, &@as([MAX_LABEL_BYTES + 1]u8, @splat('x'))));
     try std.testing.expectEqual(@as(u8, 0), generator.calls);
     const before = store;
     generator.result = .fail;

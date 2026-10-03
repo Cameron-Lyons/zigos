@@ -201,7 +201,7 @@ pub fn audit(root: *const Node) AccessibilityReport {
 const AuditState = struct {
     report: AccessibilityReport = .{},
     seen_count: u8 = 0,
-    seen_ids: [MAX_A11Y_NODES]u32 = [_]u32{0} ** MAX_A11Y_NODES,
+    seen_ids: [MAX_A11Y_NODES]u32 = @as([MAX_A11Y_NODES]u32, @splat(0)),
 };
 
 comptime {

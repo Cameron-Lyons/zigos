@@ -91,7 +91,7 @@ const ScalingCapabilityTable = capability.CapabilityTableWith(.{
 
 const CapabilityLookupContext = struct {
     table: ScalingCapabilityTable = ScalingCapabilityTable.init(),
-    live_capability_ids: [CAPABILITY_LOOKUP_LIVE_COUNT]u64 = [_]u64{0} ** CAPABILITY_LOOKUP_LIVE_COUNT,
+    live_capability_ids: [CAPABILITY_LOOKUP_LIVE_COUNT]u64 = @as([CAPABILITY_LOOKUP_LIVE_COUNT]u64, @splat(0)),
     revoked_sibling_id: u64 = 0,
     revoked_target_id: u64 = 0,
 };
@@ -138,9 +138,9 @@ const WorkspaceCommitContext = struct {
 
 const StorageVolumeContext = struct {
     volume: storage_volume.Volume = storage_volume.Volume.init(),
-    seed_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
+    seed_image: [storage_volume.image_bytes]u8 = @as([storage_volume.image_bytes]u8, @splat(0)),
 
-    pristine_image: [storage_volume.image_bytes]u8 = [_]u8{0} ** storage_volume.image_bytes,
+    pristine_image: [storage_volume.image_bytes]u8 = @as([storage_volume.image_bytes]u8, @splat(0)),
     object_payload: [object_store.MAX_CHUNK_BYTES + 64]u8 = undefined,
     store: object_store.Store = object_store.Store.init(),
     workspaces: workspace.Directory = workspace.Directory.init(),
@@ -220,7 +220,7 @@ const UpdateHealthContext = struct {
     compositor: compositor_session.Session = compositor_session.Session.init(),
     supervisor: supervisor_mod.Supervisor = supervisor_mod.Supervisor.init(),
     ledger: event_ledger.Ledger = event_ledger.Ledger.init(),
-    core_service_ids: [UPDATE_HEALTH_CORE_SERVICE_COUNT]u64 = [_]u64{0} ** UPDATE_HEALTH_CORE_SERVICE_COUNT,
+    core_service_ids: [UPDATE_HEALTH_CORE_SERVICE_COUNT]u64 = @as([UPDATE_HEALTH_CORE_SERVICE_COUNT]u64, @splat(0)),
     request: update_health.CheckRequest = undefined,
 };
 
@@ -1183,7 +1183,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
 
 fn benchmarkCapabilityMintReuseFreeSlot(iteration: u32) u64 {
     var table = ScalingCapabilityTable.init();
-    var minted_ids: [CAPABILITY_REUSE_MINTED_IDS]u64 = [_]u64{0} ** CAPABILITY_REUSE_MINTED_IDS;
+    var minted_ids: [CAPABILITY_REUSE_MINTED_IDS]u64 = @as([CAPABILITY_REUSE_MINTED_IDS]u64, @splat(0));
     var checksum: u64 = iteration;
 
     for (&minted_ids, 0..) |*capability_id, index| {
@@ -1282,7 +1282,7 @@ fn benchmarkNetworkPolicyAuthorize(iteration: u32) u64 {
     return @as(u64, @intFromBool(decision.allowed)) +
         @as(u64, @intFromBool(decision.attestation_required)) +
         @as(u64, @intFromBool(decision.identity_pinned)) +
-        @as(u64, @intFromEnum(decision.matched_mode));
+        @as(u64, @backingInt(decision.matched_mode));
 }
 
 fn benchmarkBackgroundDispatch(iteration: u32) u64 {
@@ -1305,7 +1305,7 @@ fn benchmarkBackgroundDispatch(iteration: u32) u64 {
     return @intFromBool(decision.allowed) +
         decision.expected_duration_seconds +
         task.background_cpu_consumed_ticks +
-        @intFromEnum(task.last_background_network);
+        @backingInt(task.last_background_network);
 }
 
 fn benchmarkSupervisorReadyLookup(iteration: u32) u64 {
@@ -1461,7 +1461,7 @@ fn benchmarkAcceleratorClaimRelease(iteration: u32) u64 {
     std.mem.doNotOptimizeAway(&controller);
     std.mem.doNotOptimizeAway(shared);
     _ = shared.revoke(object.id) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
-    return claim.id + object.id.raw() + @intFromBool(released) + @intFromEnum(claim.engine);
+    return claim.id + object.id.raw() + @intFromBool(released) + @backingInt(claim.engine);
 }
 
 fn benchmarkFileBridgeResolve(iteration: u32) u64 {
@@ -1614,7 +1614,7 @@ fn benchmarkMediaPrintSubmitComplete(iteration: u32) u64 {
 
     return export_job.id +
         print_job.id +
-        @intFromEnum(export_job.engine) +
+        @backingInt(export_job.engine) +
         media_context.notifications.activeCount(31 + iteration);
 }
 
@@ -2037,7 +2037,7 @@ fn qualitySchedulerFairnessRatioPercent() u64 {
         .memory_capacity_bytes = mebibytes(16),
     });
 
-    var task_ids: [FAIRNESS_BACKGROUND_TASKS]u64 = [_]u64{0} ** FAIRNESS_BACKGROUND_TASKS;
+    var task_ids: [FAIRNESS_BACKGROUND_TASKS]u64 = @as([FAIRNESS_BACKGROUND_TASKS]u64, @splat(0));
     for (&task_ids, 0..) |*task_id, index| {
         const task = createLoadTask(
             runtime,
@@ -2358,7 +2358,7 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
         .memory_capacity_bytes = mebibytes(16),
     });
 
-    var background_ids: [LATENCY_BACKGROUND_TASKS]u64 = [_]u64{0} ** LATENCY_BACKGROUND_TASKS;
+    var background_ids: [LATENCY_BACKGROUND_TASKS]u64 = @as([LATENCY_BACKGROUND_TASKS]u64, @splat(0));
     for (&background_ids, 0..) |*task_id, index| {
         const task = createLoadTask(
             runtime,
@@ -2452,7 +2452,7 @@ const SloIrqContext = struct {
 };
 
 const SloNvmeContext = struct {
-    image: [kernel_nvme.SECTOR_BYTES * 8]u8 = [_]u8{0} ** (kernel_nvme.SECTOR_BYTES * 8),
+    image: [kernel_nvme.SECTOR_BYTES * 8]u8 = @as([kernel_nvme.SECTOR_BYTES * 8]u8, @splat(0)),
     namespaces: [1]kernel_nvme.Namespace = undefined,
     controller: kernel_nvme.Controller = undefined,
     ready: bool = false,
@@ -2463,7 +2463,7 @@ const SloEndpointContext = struct {
     source_id: ids.EndpointId = ids.endpoint(0),
     target_id: ids.EndpointId = ids.endpoint(0),
     payload: [4]u8 = [_]u8{ 'p', 'i', 'n', 'g' },
-    recv_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = [_]u8{0} ** endpoint.MAX_MESSAGE_BYTES,
+    recv_buffer: [endpoint.MAX_MESSAGE_BYTES]u8 = @as([endpoint.MAX_MESSAGE_BYTES]u8, @splat(0)),
     ready: bool = false,
     correlation: u64 = 1,
 };

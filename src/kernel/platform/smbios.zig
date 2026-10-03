@@ -132,7 +132,7 @@ fn efiTableHeaderChecksumIsValid(bytes: []const u8) bool {
     if (bytes.len != EFI_SYSTEM_TABLE_BYTES) return false;
     var crc: std.hash.Crc32 = .init();
     crc.update(bytes[0..EFI_SYSTEM_TABLE_CRC32_OFFSET]);
-    crc.update(&[_]u8{0} ** 4);
+    crc.update(&@as([4]u8, @splat(0)));
     crc.update(bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET + 4 ..]);
     return crc.final() == readU32Le(bytes[EFI_SYSTEM_TABLE_CRC32_OFFSET..][0..4]);
 }
@@ -199,7 +199,7 @@ fn structureEnd(table: []const u8, strings_start: usize) ?usize {
 }
 
 test "EFI64 system table exposes bounded configuration entries" {
-    var bytes = [_]u8{0} ** EFI_SYSTEM_TABLE_BYTES;
+    var bytes = @as([EFI_SYSTEM_TABLE_BYTES]u8, @splat(0));
     writeU64Le(bytes[0..8], EFI_SYSTEM_TABLE_SIGNATURE);
     writeU32Le(bytes[EFI_SYSTEM_TABLE_REVISION_OFFSET..][0..4], EFI_SYSTEM_TABLE_MIN_REVISION);
     writeU32Le(bytes[EFI_SYSTEM_TABLE_HEADER_SIZE_OFFSET..][0..4], EFI_SYSTEM_TABLE_BYTES);
@@ -221,7 +221,7 @@ test "EFI64 system table exposes bounded configuration entries" {
 }
 
 test "SMBIOS 3 entry point validates checksum and table address" {
-    var entry = [_]u8{0} ** SMBIOS3_MIN_LENGTH;
+    var entry = @as([SMBIOS3_MIN_LENGTH]u8, @splat(0));
     @memcpy(entry[0..SMBIOS3_ANCHOR.len], SMBIOS3_ANCHOR);
     entry[SMBIOS3_LENGTH_OFFSET] = SMBIOS3_MIN_LENGTH;
     entry[SMBIOS3_MAJOR_VERSION_OFFSET] = SMBIOS3_MAJOR_VERSION;
@@ -238,7 +238,7 @@ test "SMBIOS 3 entry point validates checksum and table address" {
 }
 
 test "EFI configuration table locates only the SMBIOS 3 entry point" {
-    var entries = [_]u8{0} ** (EFI_CONFIGURATION_ENTRY_BYTES * 2);
+    var entries = @as([EFI_CONFIGURATION_ENTRY_BYTES * 2]u8, @splat(0));
     @memcpy(entries[EFI_CONFIGURATION_ENTRY_BYTES..][0..SMBIOS3_TABLE_GUID.len], &SMBIOS3_TABLE_GUID);
     writeU64Le(entries[EFI_CONFIGURATION_ENTRY_BYTES + EFI_CONFIGURATION_ENTRY_ADDRESS_OFFSET ..][0..8], 0x8000_4000);
     try std.testing.expectEqual(@as(?u64, 0x8000_4000), findSmbios3EntryPointAddress(&entries));

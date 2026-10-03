@@ -240,7 +240,7 @@ fn captureMemoryMap(
         entries[count] = .{
             .base = descriptor.physical_start,
             .length = length,
-            .kind = efi_handoff.kindFromEfiMemoryType(@intFromEnum(descriptor.type)),
+            .kind = efi_handoff.kindFromEfiMemoryType(@backingInt(descriptor.type)),
         };
         count += 1;
     }

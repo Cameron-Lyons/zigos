@@ -169,7 +169,7 @@ pub const CapturedPacket = struct {
     in_use: bool = false,
     packet_id: u64 = 0,
     len: u16 = 0,
-    bytes: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES,
+    bytes: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = @as([network_driver_task.MAX_NATIVE_FRAME_BYTES]u8, @splat(0)),
 
     pub fn slice(self: *const CapturedPacket) []const u8 {
         return self.bytes[0..@as(usize, self.len)];
@@ -393,7 +393,7 @@ pub const ObjectShareEnvelope = struct {
     version_id: u64,
     encrypted: bool,
     payload_len: ObjectSharePayloadLength,
-    payload: [MAX_PACKET_BYTES]u8 = [_]u8{0} ** MAX_PACKET_BYTES,
+    payload: [MAX_PACKET_BYTES]u8 = @as([MAX_PACKET_BYTES]u8, @splat(0)),
 
     pub fn payloadSlice(self: *const ObjectShareEnvelope) []const u8 {
         return self.payload[0..@as(usize, self.payload_len)];
@@ -429,7 +429,7 @@ pub const NativeTransportService = struct {
     i225_rx_tail_register_writes: u32 = 0,
     i225_interrupt_cause_reads: u32 = 0,
     i225_link_speed_mbps: u32 = 0,
-    i225_mac_address: [6]u8 = [_]u8{0} ** 6,
+    i225_mac_address: [6]u8 = @as([6]u8, @splat(0)),
     trust_graph: ?*const device_graph.Graph = null,
 
     pub fn init() NativeTransportService {
@@ -1011,9 +1011,9 @@ pub fn encodeNativeSyncFrame(
     try writer.writeU64(sequence);
     try writer.writeU64(source_task_id);
     try writer.writeU64(target_task_id);
-    try writer.writeByte(@intFromEnum(session.transport));
-    try writer.writeByte(@intFromEnum(principal.PrincipalKind.device));
-    try writer.writeByte(@intFromEnum(principal.PrincipalKind.device));
+    try writer.writeByte(@backingInt(session.transport));
+    try writer.writeByte(@backingInt(principal.PrincipalKind.device));
+    try writer.writeByte(@backingInt(principal.PrincipalKind.device));
     const flags = (if (frame.packet.encrypted) NativeTransportAbi.flag_encrypted else 0) |
         (if (frame.packet.egress_allowed) NativeTransportAbi.flag_egress_allowed else 0);
     try writer.writeByte(flags);
@@ -1057,20 +1057,20 @@ fn validateNativeFrameForSession(
 
 fn parseTransportMode(raw: u8) Error!sync_state.TransportMode {
     return switch (raw) {
-        @intFromEnum(sync_state.TransportMode.device_to_device) => .device_to_device,
-        @intFromEnum(sync_state.TransportMode.relay_assisted) => .relay_assisted,
+        @backingInt(sync_state.TransportMode.device_to_device) => .device_to_device,
+        @backingInt(sync_state.TransportMode.relay_assisted) => .relay_assisted,
         else => error.NativeTransportMalformedFrame,
     };
 }
 
 fn parsePrincipalKind(raw: u8) Error!principal.PrincipalKind {
     return switch (raw) {
-        @intFromEnum(principal.PrincipalKind.user) => .user,
-        @intFromEnum(principal.PrincipalKind.device) => .device,
-        @intFromEnum(principal.PrincipalKind.app) => .app,
-        @intFromEnum(principal.PrincipalKind.service) => .service,
-        @intFromEnum(principal.PrincipalKind.policy_authority) => .policy_authority,
-        @intFromEnum(principal.PrincipalKind.team) => .team,
+        @backingInt(principal.PrincipalKind.user) => .user,
+        @backingInt(principal.PrincipalKind.device) => .device,
+        @backingInt(principal.PrincipalKind.app) => .app,
+        @backingInt(principal.PrincipalKind.service) => .service,
+        @backingInt(principal.PrincipalKind.policy_authority) => .policy_authority,
+        @backingInt(principal.PrincipalKind.team) => .team,
         else => error.NativeTransportMalformedFrame,
     };
 }
@@ -1155,13 +1155,13 @@ test "native sync transport uses endpoints and reconnects without the in-process
     try std.testing.expectEqualStrings("sync after reconnect", received.payload());
     native_transport.acknowledge(&connection, delivered.sequence);
 
-    const max_payload = [_]u8{0xA5} ** MAX_NATIVE_PAYLOAD_BYTES;
+    const max_payload = @as([MAX_NATIVE_PAYLOAD_BYTES]u8, @splat(0xA5));
     const max_delivery = try native_transport.sendSigned(&connection, &max_payload, signer);
     const max_received = try native_transport.receive(&connection);
     try std.testing.expectEqualSlices(u8, &max_payload, max_received.payload());
     native_transport.acknowledge(&connection, max_delivery.sequence);
 
-    const oversized_payload = [_]u8{0xA5} ** (MAX_NATIVE_PAYLOAD_BYTES + 1);
+    const oversized_payload = @as([MAX_NATIVE_PAYLOAD_BYTES + 1]u8, @splat(0xA5));
     const endpoint_frames_before_oversized = native_transport.endpoint_frame_count;
     const captured_frames_before_oversized = native_transport.capture.capturedCount();
     try std.testing.expectError(error.PacketTooLarge, native_transport.sendSigned(&connection, &oversized_payload, signer));
@@ -1177,8 +1177,8 @@ test "native sync transport captures encrypted driver packets and handles replay
     const Driver = struct {
         var send_count: usize = 0;
         var last_frame_len: usize = 0;
-        var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = [_]u8{0} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
-        var last_destination: [6]u8 = [_]u8{0} ** 6;
+        var last_frame: [network_driver_task.MAX_NATIVE_FRAME_BYTES]u8 = @as([network_driver_task.MAX_NATIVE_FRAME_BYTES]u8, @splat(0));
+        var last_destination: [6]u8 = @as([6]u8, @splat(0));
 
         fn send(destination: [6]u8, frame: []const u8) bool {
             send_count += 1;
@@ -1202,7 +1202,7 @@ test "native sync transport captures encrypted driver packets and handles replay
 
     Driver.send_count = 0;
     Driver.last_frame_len = 0;
-    Driver.last_destination = [_]u8{0} ** 6;
+    Driver.last_destination = @as([6]u8, @splat(0));
     network_driver_task.reset();
     defer network_driver_task.reset();
     const device = network_driver_task.NetworkDevice{
@@ -1341,10 +1341,10 @@ test "native sync transport captures encrypted driver packets and handles replay
     missing_egress_flag.bytes[flags_offset] &= ~NativeTransportAbi.flag_egress_allowed;
     try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, missing_egress_flag.slice()));
     var non_device_source = captured;
-    non_device_source.bytes[source_kind_offset] = @intFromEnum(principal.PrincipalKind.app);
+    non_device_source.bytes[source_kind_offset] = @backingInt(principal.PrincipalKind.app);
     try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, non_device_source.slice()));
     var non_device_target = captured;
-    non_device_target.bytes[target_kind_offset] = @intFromEnum(principal.PrincipalKind.service);
+    non_device_target.bytes[target_kind_offset] = @backingInt(principal.PrincipalKind.service);
     try std.testing.expectError(error.NativeTransportMalformedFrame, decodeNativeSyncFrame(&connection.session, non_device_target.slice()));
     var zero_policy = captured;
     std.mem.writeInt(u64, zero_policy.bytes[policy_id_offset..][0..@sizeOf(u64)], 0, .little);
@@ -1609,7 +1609,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
         var authorized_native_frames: usize = 0;
         var allowed_capability_id: u64 = 0;
         var allowed_policy_id: u64 = 0;
-        var last_destination: [6]u8 = [_]u8{0} ** 6;
+        var last_destination: [6]u8 = @as([6]u8, @splat(0));
 
         fn send(destination: [6]u8, _: []const u8) bool {
             send_count += 1;
@@ -1639,7 +1639,7 @@ test "native sync transport rejects revoked trusted devices and requires real I2
     defer network_driver_task.reset();
     ProductionDriver.send_count = 0;
     ProductionDriver.authorized_native_frames = 0;
-    ProductionDriver.last_destination = [_]u8{0} ** 6;
+    ProductionDriver.last_destination = @as([6]u8, @splat(0));
     ProductionDriver.allowed_capability_id = relay_capability.id;
     ProductionDriver.allowed_policy_id = relay.id;
     const production_device = network_driver_task.NetworkDevice{
@@ -1941,7 +1941,7 @@ test "compact capture metadata preserves maximum native frames" {
     try std.testing.expectEqual(@as(usize, 0), transport_capture.capturedCount());
     try std.testing.expect(transport_capture.lastPtr() == null);
 
-    const frame = [_]u8{0xA5} ** network_driver_task.MAX_NATIVE_FRAME_BYTES;
+    const frame = @as([network_driver_task.MAX_NATIVE_FRAME_BYTES]u8, @splat(0xA5));
     var capture = PacketCapture{};
     try std.testing.expectEqual(@as(usize, 0), capture.capturedCount());
     try std.testing.expect(capture.lastPtr() == null);

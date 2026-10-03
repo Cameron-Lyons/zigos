@@ -89,7 +89,7 @@ pub fn zeroAddressSpace(AddressSpaceType: type, RegionType: type, comptime regio
         .load_segment_count = 0,
         .region_count = 0,
         .image_sha256 = zeroed.image_sha256,
-        .regions = [_]RegionType{zeroAddressSpaceRegion(RegionType)} ** region_count,
+        .regions = @as([region_count]RegionType, @splat(zeroAddressSpaceRegion(RegionType))),
     };
 }
 

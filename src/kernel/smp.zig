@@ -71,7 +71,7 @@ else
         pub fn start(_: *[MAX_CPUS]Cpu, _: *u8, _: *u8) void {}
     };
 
-var cpus: [MAX_CPUS]Cpu = [_]Cpu{.{}} ** MAX_CPUS;
+var cpus: [MAX_CPUS]Cpu = @as([MAX_CPUS]Cpu, @splat(.{}));
 var cpu_count: u8 = 1;
 var online_count: u8 = 1;
 var bsp_cpu_index: u8 = 0;

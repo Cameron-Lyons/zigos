@@ -40,7 +40,7 @@ pub const PrincipalId = struct {
     pub fn keyBytes(self: PrincipalId) [key_bytes]u8 {
         const serial_offset = @sizeOf(PrincipalKind);
         var bytes: [key_bytes]u8 = undefined;
-        bytes[0] = @intFromEnum(self.kind);
+        bytes[0] = @backingInt(self.kind);
         std.mem.writeInt(u64, bytes[serial_offset..][0..@sizeOf(u64)], self.serial, .little);
         return bytes;
     }
@@ -55,7 +55,7 @@ pub const PrincipalRecord = struct {
         var record = PrincipalRecord{
             .id = id,
             .label_len = @min(label.len, MAX_PRINCIPAL_LABEL_BYTES - 1),
-            .label = [_]u8{0} ** MAX_PRINCIPAL_LABEL_BYTES,
+            .label = @as([MAX_PRINCIPAL_LABEL_BYTES]u8, @splat(0)),
         };
         @memcpy(record.label[0..record.label_len], label[0..record.label_len]);
         return record;
@@ -71,7 +71,7 @@ pub const PrincipalKeyRecord = struct {
     issuer: PrincipalId,
     public_key: signing.PublicKey,
     publisher_len: u8 = 0,
-    publisher: [MAX_PUBLISHER_BYTES]u8 = [_]u8{0} ** MAX_PUBLISHER_BYTES,
+    publisher: [MAX_PUBLISHER_BYTES]u8 = @as([MAX_PUBLISHER_BYTES]u8, @splat(0)),
     policy_authority_root: bool = false,
     revoked: bool = false,
     revocation_generation: u32 = 0,

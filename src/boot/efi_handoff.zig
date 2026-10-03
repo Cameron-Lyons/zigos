@@ -199,7 +199,7 @@ fn alignTag(value: usize) usize {
 test "EFI embedded command line rejects truncation and control bytes" {
     try std.testing.expectEqualStrings("model_inventory", try embeddedCommandLine("model_inventory\n"));
     try std.testing.expectEqualStrings("", try embeddedCommandLine("\r\n"));
-    for ([_][]const u8{ "x\x00y", "x\ny", "x\x7f", "x" ** 257 }) |invalid|
+    for ([_][]const u8{ "x\x00y", "x\ny", "x\x7f", &@as([257]u8, @splat('x')) }) |invalid|
         try std.testing.expectError(error.InvalidCommandLine, embeddedCommandLine(invalid));
 }
 

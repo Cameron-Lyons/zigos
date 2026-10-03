@@ -23,7 +23,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
     @memset(out, 0);
     put(u32, out, MAGIC);
     out[4] = 1;
-    out[5] = @intFromEnum(frame.body);
+    out[5] = @backingInt(frame.body);
     put(u64, out[8..], frame.request_id);
     const length: usize = switch (frame.body) {
         .assert => |challenge| blk: {
@@ -42,7 +42,7 @@ pub fn encode(out: *[MAX_FRAME_BYTES]u8, frame: Frame) Error![]const u8 {
                 reply.bytes.len > reply.total - reply.offset or
                 (reply.status == .ok and (reply.total == 0 or reply.bytes.len == 0)) or
                 (reply.status != .ok and (reply.total != 0 or reply.offset != 0 or reply.bytes.len != 0))) return error.MalformedIdentityFrame;
-            put(u16, out[6..], @intFromEnum(reply.status));
+            put(u16, out[6..], @backingInt(reply.status));
             put(u16, out[16..], reply.total);
             put(u16, out[18..], reply.offset);
             @memcpy(out[20..][0..reply.bytes.len], reply.bytes);

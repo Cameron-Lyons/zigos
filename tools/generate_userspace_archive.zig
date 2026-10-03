@@ -58,18 +58,18 @@ const BuildArtifactEntry = struct {
 const BuildArtifactSignature = struct {
     format: []const u8 = signing.SIGNATURE_FORMAT_ED25519,
     signer: []const u8 = "",
-    public_key: [signing.ED25519_PUBLIC_KEY_BYTES]u8 = [_]u8{0} ** signing.ED25519_PUBLIC_KEY_BYTES,
-    value: [signing.ED25519_SIGNATURE_BYTES]u8 = [_]u8{0} ** signing.ED25519_SIGNATURE_BYTES,
+    public_key: [signing.ED25519_PUBLIC_KEY_BYTES]u8 = @splat(0),
+    value: [signing.ED25519_SIGNATURE_BYTES]u8 = @splat(0),
 };
 
 const BuildArtifactManifest = struct {
     generation: u64,
     entry_count: usize = 0,
-    entries: [max_build_artifact_entries]BuildArtifactEntry = [_]BuildArtifactEntry{.{
+    entries: [max_build_artifact_entries]BuildArtifactEntry = @splat(.{
         .kind = .bootloader_source,
         .label = "",
         .digest = crypto_hash.zero_digest,
-    }} ** max_build_artifact_entries,
+    }),
     signature: BuildArtifactSignature = .{},
 
     fn init(generation: u64) BuildArtifactManifest {
@@ -129,6 +129,9 @@ pub fn main(init: std.process.Init) !void {
         try artifacts.append(allocator, try parseArtifact(arena, allocator, cwd, io, bundle_id, path));
     }
 
+    // Keep the finalized descriptors stable while both writers borrow the slice.
+    artifacts.lockPointers();
+    defer artifacts.unlockPointers();
     try writeArchive(cwd, io, allocator, output_dir, archive_role, artifacts.items);
     try writeBuildArtifactManifest(cwd, io, allocator, output_dir, boot_profile, archive_role, bootloader_label, bootloader_path, artifacts.items);
 }
@@ -172,7 +175,7 @@ fn buildChunkedArchive(
         chunks_by_digest.deinit();
     }
 
-    const zero_padding = [_]u8{0} ** archive_chunk_bytes;
+    const zero_padding: [archive_chunk_bytes]u8 = @splat(0);
     for (artifacts) |artifact| {
         const bytes = try cwd.readFileAlloc(io, artifact.source_path, allocator, .limited(max_userspace_image_bytes));
         defer allocator.free(bytes);
@@ -417,7 +420,7 @@ fn writeBuildArtifactManifest(
         try writer.print(
             "    .{{ .kind = {d}, .label = \"{f}\", .digest = .{{",
             .{
-                @intFromEnum(entry.kind),
+                @backingInt(entry.kind),
                 std.zig.fmtString(entry.label),
             },
         );

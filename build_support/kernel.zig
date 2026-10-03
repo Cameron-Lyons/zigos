@@ -29,7 +29,7 @@ pub const KernelSteps = struct {
 // line. Neither boot-volume files nor LoadedImage options can replace them.
 pub fn addEfiImage(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     kernel: std.Build.LazyPath,
     cmdline: std.Build.LazyPath,
 ) *std.Build.Step.Compile {
@@ -50,7 +50,7 @@ pub fn addEfiImage(
 
 pub fn addX86_64ArchitectureCompileCheck(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Step {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -72,7 +72,7 @@ pub fn addX86_64ArchitectureCompileCheck(
 
 pub fn addX86_64KernelCompileCheck(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step {
     const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
@@ -87,7 +87,7 @@ pub fn addX86_64KernelCompileCheck(
 
 pub fn addX86_64KernelBootCheck(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Step {
     const kernel_module = createX86_64KernelModule(b, optimize, userspace_images);
@@ -99,6 +99,7 @@ pub fn addX86_64KernelBootCheck(
     // compiler exposes the LLVM pass through the LTO linker. Switches use
     // direct branches because this LLVM pass does not mark jump-table targets;
     // supervisor IBT remains enforced without NOTRACK exemptions.
+    kernel_object.use_llvm = true;
     kernel_object.lto = .full;
     const kernel_assembly = addKernelAssemblyObject(b, kernel_module.resolved_target.?, optimize);
     kernel_object.bundle_compiler_rt = true;
@@ -108,6 +109,9 @@ pub fn addX86_64KernelBootCheck(
     const link = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "ld.lld",
+        // LLVM emits probe calls after LTO dead-code elimination. Keep the
+        // bundled routine alive so large frames still touch each stack page.
+        "--undefined=__zig_probe_stack",
         "-mllvm",
         "-x86-indirect-branch-tracking",
         "-mllvm",
@@ -154,7 +158,7 @@ pub fn addX86_64KernelBootCheck(
 
 fn createX86_64KernelModule(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Module {
     const target = b.resolveTargetQuery(.{
@@ -188,7 +192,7 @@ fn createX86_64KernelModule(
 
 pub fn addX86_64LongModeEntryCheck(
     b: *std.Build,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) *std.Build.Step {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -255,7 +259,7 @@ pub fn addX86_64LongModeEntryCheck(
 pub fn addKernelProfiles(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     userspace_images: userspace_build.ArtifactSet,
 ) KernelArtifacts {
     return .{
@@ -444,8 +448,8 @@ pub fn addKernelProfileSteps(
 }
 
 pub fn gateArtifactInstalls(kernels: KernelArtifacts, validation_step: *std.Build.Step) void {
-    inline for (std.meta.fields(KernelArtifacts)) |field| {
-        @field(kernels, field.name).install_step.dependOn(validation_step);
+    inline for (@typeInfo(KernelArtifacts).@"struct".field_names) |field_name| {
+        @field(kernels, field_name).install_step.dependOn(validation_step);
     }
 }
 
@@ -465,7 +469,7 @@ fn addKernelInstallStep(
 pub fn addKernelArtifact(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     name: []const u8,
     boot_profile: shared.BootProfile,
     kernel_role: shared.KernelRole,
@@ -516,6 +520,7 @@ pub fn addKernelArtifact(
     // compiler exposes the LLVM pass through the LTO linker. Switches use
     // direct branches because this LLVM pass does not mark jump-table targets;
     // supervisor IBT remains enforced without NOTRACK exemptions.
+    kernel_object.use_llvm = true;
     kernel_object.lto = .full;
     const kernel_assembly = addKernelAssemblyObject(b, kernel_module.resolved_target.?, optimize);
     kernel_object.bundle_compiler_rt = true;
@@ -525,6 +530,7 @@ pub fn addKernelArtifact(
     const link = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "ld.lld",
+        "--undefined=__zig_probe_stack",
         "-mllvm",
         "-x86-indirect-branch-tracking",
         "-mllvm",
@@ -547,6 +553,7 @@ pub fn addKernelArtifact(
     const boot_link = b.addSystemCommand(&.{
         b.graph.zig_exe,
         "ld.lld",
+        "--undefined=__zig_probe_stack",
         "-mllvm",
         "-x86-indirect-branch-tracking",
         "-mllvm",
@@ -567,7 +574,7 @@ pub fn addKernelArtifact(
     boot_link.addFileArg(kernel_object.getEmittedBin());
     boot_link.addFileArg(kernel_assembly.getEmittedBin());
 
-    const efi_stub = addEfiImage(b, .ReleaseSmall, boot_kernel, b.path("src/boot/cmdline-qemu.txt"));
+    const efi_stub = addEfiImage(b, .small, boot_kernel, b.path("src/boot/cmdline-qemu.txt"));
     const validate_qemu_image = b.addSystemCommand(&.{"bash"});
     validate_qemu_image.addFileArg(b.path("scripts/check-efi-image.sh"));
     validate_qemu_image.addFileArg(efi_stub.getEmittedBin());
@@ -585,14 +592,14 @@ pub fn addKernelArtifact(
         .output_file = linked_kernel,
         .boot_payload = boot_kernel,
         .install_step = &install.step,
-        .output_path = b.getInstallPath(.bin, name),
+        .output_path = b.graph.path(.install_bin, name),
         .kernel_role = kernel_role,
         .bootloader_source_path = "src/boot/efi_stub.zig",
         .qemu_boot_iso_path = qemu_iso_path,
     };
 }
 
-fn addKernelAssemblyObject(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn addKernelAssemblyObject(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     addKernelAssemblyFiles(b, module);
     return b.addObject(.{ .name = "kernel-assembly", .root_module = module });

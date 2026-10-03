@@ -106,7 +106,7 @@ install_apt() {
 
   if ! have_cmd zig; then
     if ! ${s} apt-get "${apt_options[@]}" install -y zig; then
-      log "Could not install Zig from apt on this distro. Install Zig 0.16.0 exactly from https://ziglang.org/download/ or use mise."
+      log "Could not install Zig from apt on this distro. Install Zig 0.17.0 exactly from https://ziglang.org/download/ or use mise."
     fi
   fi
 }
@@ -145,7 +145,7 @@ verify_tools() {
   done
 
   if ! "${ZIG}" version >/dev/null 2>&1; then
-    log "Missing Zig 0.16.0. Install it exactly, use mise, or set ZIG_BIN."
+    log "Missing Zig 0.17.0. Install it exactly, use mise, or set ZIG_BIN."
     missing=1
   fi
 

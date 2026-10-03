@@ -263,7 +263,7 @@ fn densePolicySlotIndex(policy_id: u64) ?usize {
 }
 
 const DensePolicyTable = struct {
-    slots: [MAX_POLICIES]PolicySlot = [_]PolicySlot{.{}} ** MAX_POLICIES,
+    slots: [MAX_POLICIES]PolicySlot = @as([MAX_POLICIES]PolicySlot, @splat(.{})),
 
     pub fn init() DensePolicyTable {
         return .{};
@@ -602,10 +602,10 @@ fn zeroPolicy() PolicyRecord {
         .owner = .{ .kind = .service, .serial = 0 },
         .workspace_id = null,
         .label_len = 0,
-        .label = [_]u8{0} ** MAX_LABEL_BYTES,
+        .label = @as([MAX_LABEL_BYTES]u8, @splat(0)),
         .mode = .none,
         .target_len = 0,
-        .target = [_]u8{0} ** MAX_TARGET_BYTES,
+        .target = @as([MAX_TARGET_BYTES]u8, @splat(0)),
         .explicit_internet_grant = false,
         .require_remote_attestation = false,
         .pinned_root_digest_present = false,
@@ -620,7 +620,7 @@ fn policyRequestKey(request: CreateRequest) u64 {
     updatePrincipalHash(&hasher, request.owner);
     updateOptionalU64Hash(&hasher, request.workspace_id);
     updateSliceHash(&hasher, request.label);
-    updateByteHash(&hasher, @intFromEnum(request.mode));
+    updateByteHash(&hasher, @backingInt(request.mode));
     updateSliceHash(&hasher, request.target);
     updateBoolHash(&hasher, request.explicit_internet_grant);
     updateBoolHash(&hasher, request.require_remote_attestation);
@@ -636,7 +636,7 @@ fn policyRecordRequestKey(policy: *const PolicyRecord) u64 {
     updatePrincipalHash(&hasher, policy.owner);
     updateOptionalU64Hash(&hasher, policy.workspace_id);
     updateSliceHash(&hasher, policy.labelSlice());
-    updateByteHash(&hasher, @intFromEnum(policy.mode));
+    updateByteHash(&hasher, @backingInt(policy.mode));
     updateSliceHash(&hasher, policy.targetSlice());
     updateBoolHash(&hasher, policy.explicit_internet_grant);
     updateBoolHash(&hasher, policy.require_remote_attestation);
@@ -669,7 +669,7 @@ fn policyMatchesRequest(policy: *const PolicyRecord, request: CreateRequest) boo
 }
 
 fn updatePrincipalHash(hasher: *std.hash.Wyhash, id: principal.PrincipalId) void {
-    updateByteHash(hasher, @intFromEnum(id.kind));
+    updateByteHash(hasher, @backingInt(id.kind));
     updateU64Hash(hasher, id.serial);
 }
 
@@ -842,8 +842,8 @@ test "network policy objects enforce discovery inbound service domain and explic
 }
 
 test "compact network policy metadata preserves exact text capacities" {
-    const full_label = [_]u8{'l'} ** MAX_LABEL_BYTES;
-    const full_target = [_]u8{'t'} ** MAX_TARGET_BYTES;
+    const full_label = @as([MAX_LABEL_BYTES]u8, @splat('l'));
+    const full_target = @as([MAX_TARGET_BYTES]u8, @splat('t'));
     var directory = Directory.init();
     const policy = try directory.create(.{
         .owner = .{ .kind = .service, .serial = 79 },
@@ -862,8 +862,8 @@ test "compact network policy metadata preserves exact text capacities" {
 test "network policy text rejects overlong values without publishing slots" {
     var directory = Directory.init();
     const owner = principal.PrincipalId{ .kind = .service, .serial = 80 };
-    const oversized_label = [_]u8{'x'} ** (MAX_LABEL_BYTES + 1);
-    const oversized_target = [_]u8{'a'} ** (MAX_TARGET_BYTES + 1);
+    const oversized_label = @as([MAX_LABEL_BYTES + 1]u8, @splat('x'));
+    const oversized_target = @as([MAX_TARGET_BYTES + 1]u8, @splat('a'));
 
     try std.testing.expectError(
         error.LabelTooLong,
@@ -1042,13 +1042,13 @@ test "network policy creation is idempotent for identical requests" {
 }
 
 fn paddedLabel(text: []const u8) [MAX_LABEL_BYTES]u8 {
-    var buffer = [_]u8{0} ** MAX_LABEL_BYTES;
+    var buffer = @as([MAX_LABEL_BYTES]u8, @splat(0));
     @memcpy(buffer[0..text.len], text);
     return buffer;
 }
 
 fn paddedTarget(text: []const u8) [MAX_TARGET_BYTES]u8 {
-    var buffer = [_]u8{0} ** MAX_TARGET_BYTES;
+    var buffer = @as([MAX_TARGET_BYTES]u8, @splat(0));
     @memcpy(buffer[0..text.len], text);
     return buffer;
 }

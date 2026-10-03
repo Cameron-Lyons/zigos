@@ -389,14 +389,14 @@ pub const Ticket = enum(u64) { _ };
 pub fn CommandSlot(comptime Deadline: type) type {
     return struct {
         operation: ?Operation(Deadline) = null,
-        current: Ticket = @enumFromInt(0),
+        current: Ticket = @fromBackingInt(@intCast(0)),
         next_ticket: u64 = 1,
 
         pub fn begin(self: *@This(), transport: *Transport, io: anytype, command: []const u8, response: []u8, timeout_ms: u32) Error!Ticket {
             if (self.operation != null) return error.Busy;
             if (self.next_ticket == 0) return error.TicketExhausted;
             self.operation = try transport.begin(io, command, response, timeout_ms);
-            self.current = @enumFromInt(self.next_ticket);
+            self.current = @fromBackingInt(@intCast(self.next_ticket));
             self.next_ticket +%= 1;
             return self.current;
         }

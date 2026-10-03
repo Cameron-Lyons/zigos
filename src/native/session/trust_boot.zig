@@ -590,7 +590,7 @@ pub const TrustBoot = struct {
     ) [BASE_IMAGE_SLOT_PAYLOAD_BYTES]u8 {
         const base_digest = self.productionBaseImageManifestDigest(graph);
         const policy_digest = self.productionPolicyDigest(graph);
-        var payload = [_]u8{0} ** BASE_IMAGE_SLOT_PAYLOAD_BYTES;
+        var payload = @as([BASE_IMAGE_SLOT_PAYLOAD_BYTES]u8, @splat(0));
         @memcpy(payload[BASE_IMAGE_DIGEST_OFFSET..][0..crypto_hash.digest_bytes], &base_digest);
         @memcpy(payload[POLICY_DIGEST_OFFSET..][0..crypto_hash.digest_bytes], &policy_digest);
         std.mem.writeInt(u64, payload[BASE_IMAGE_SLOT_INDEX_OFFSET..][0..@sizeOf(u64)], slot_index, .little);
@@ -618,7 +618,7 @@ pub const TrustBoot = struct {
             crypto_hash.updateInt(&hasher, "registry-owner-task-id", self.registeredServiceOwnerTaskId(binding));
             crypto_hash.updateInt(&hasher, "registry-endpoint-id", binding.endpoint_id);
             crypto_hash.updateInt(&hasher, "registry-endpoint-capability-id", binding.endpoint_capability_id);
-            crypto_hash.updateInt(&hasher, "registry-interface-id", @intFromEnum(contract.interface_id));
+            crypto_hash.updateInt(&hasher, "registry-interface-id", @backingInt(contract.interface_id));
             crypto_hash.updateBytes(&hasher, "registry-interface-name", contract.interface.name);
             crypto_hash.updateInt(&hasher, "registry-version-major", contract.interface.version_major);
             crypto_hash.updateInt(&hasher, "registry-version-minor", contract.interface.version_minor);
@@ -1109,7 +1109,7 @@ const direct_measured_boot_root_digest_offset: usize = 32;
 
 fn loadDirectMeasuredBootSummary(storage_service_id: u64) ?measured_boot.BootSummary {
     if (builtin.target.os.tag != .freestanding) return null;
-    var sector = [_]u8{0} ** direct_measured_boot_sector_size;
+    var sector = @as([direct_measured_boot_sector_size]u8, @splat(0));
     if (!readDirectMeasuredBootSector(storage_service_id, &sector)) return null;
     if (!std.mem.eql(u8, sector[direct_measured_boot_magic_offset..][0..direct_measured_boot_magic.len], direct_measured_boot_magic)) return null;
     if (std.mem.readInt(u16, sector[direct_measured_boot_version_offset..][0..@sizeOf(u16)], .little) != direct_measured_boot_version) return null;
@@ -1117,7 +1117,7 @@ fn loadDirectMeasuredBootSummary(storage_service_id: u64) ?measured_boot.BootSum
     var summary = measured_boot.BootSummary{
         .generation = std.mem.readInt(u64, sector[direct_measured_boot_generation_offset..][0..@sizeOf(u64)], .little),
         .record_count = std.mem.readInt(u16, sector[direct_measured_boot_record_count_offset..][0..@sizeOf(u16)], .little),
-        .kind_counts = [_]u16{0} ** measured_boot.MEASUREMENT_KIND_COUNT,
+        .kind_counts = @as([measured_boot.MEASUREMENT_KIND_COUNT]u16, @splat(0)),
         .root_digest = crypto_hash.zero_digest,
     };
     var offset: usize = direct_measured_boot_kind_counts_offset;
@@ -1132,7 +1132,7 @@ fn loadDirectMeasuredBootSummary(storage_service_id: u64) ?measured_boot.BootSum
 
 fn storeDirectMeasuredBootSummary(storage_service_id: u64, summary: measured_boot.BootSummary) bool {
     if (builtin.target.os.tag != .freestanding) return false;
-    var sector = [_]u8{0} ** direct_measured_boot_sector_size;
+    var sector = @as([direct_measured_boot_sector_size]u8, @splat(0));
     @memcpy(sector[direct_measured_boot_magic_offset..][0..direct_measured_boot_magic.len], direct_measured_boot_magic);
     std.mem.writeInt(u16, sector[direct_measured_boot_version_offset..][0..@sizeOf(u16)], direct_measured_boot_version, .little);
     std.mem.writeInt(u16, sector[direct_measured_boot_record_count_offset..][0..@sizeOf(u16)], summary.record_count, .little);

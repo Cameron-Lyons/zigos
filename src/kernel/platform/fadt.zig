@@ -237,7 +237,7 @@ pub fn withHardwareSuspendResumeEvidence(
 }
 
 fn validFadt() [FADT_TEST_TABLE_BYTES]u8 {
-    var table = [_]u8{0} ** FADT_TEST_TABLE_BYTES;
+    var table = @as([FADT_TEST_TABLE_BYTES]u8, @splat(0));
     @memcpy(table[0..4], FADT_SIGNATURE);
     writeU32Le(table[4..8], table.len);
     table[FADT_REVISION_OFFSET] = 6;

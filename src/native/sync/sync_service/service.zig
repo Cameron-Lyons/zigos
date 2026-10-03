@@ -622,7 +622,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 }
             }
             if (overlay.private_service_count >= MAX_PRIVATE_SERVICES) return error.TooManyPrivateServices;
-            var service_label: [MAX_LABEL_BYTES]u8 = [_]u8{0} ** MAX_LABEL_BYTES;
+            var service_label: [MAX_LABEL_BYTES]u8 = @as([MAX_LABEL_BYTES]u8, @splat(0));
             const service_label_len = native_util.copyTextExact(&service_label, label) catch return error.ServiceIdentityTooLong;
             const slot_index = overlay.private_service_count;
             overlay.private_services[slot_index] = service_label;

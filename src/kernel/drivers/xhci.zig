@@ -85,7 +85,7 @@ pub const ContextSize = enum(u8) {
     bytes_64 = 64,
 
     pub fn byteCount(self: ContextSize) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -511,7 +511,7 @@ pub const ConfigurationDescriptorParser = struct {
     speed_id: ?u4 = null,
     header: ?UsbConfigurationDescriptor = null,
     bytes_consumed: usize = 0,
-    interface_numbers: [4]u64 = [_]u64{0} ** 4,
+    interface_numbers: [4]u64 = @as([4]u64, @splat(0)),
     distinct_interface_count: u16 = 0,
     active_interface: bool = false,
     expected_endpoint_count: u8 = 0,
@@ -792,10 +792,10 @@ fn fullOrLowSpeedInterruptInterval(descriptor_interval: u8) u8 {
 }
 
 pub const SupportedProtocols = struct {
-    first_ports: [MAX_EXTENDED_CAPABILITIES]u8 = [_]u8{0} ** MAX_EXTENDED_CAPABILITIES,
-    port_counts: [MAX_EXTENDED_CAPABILITIES]u8 = [_]u8{0} ** MAX_EXTENDED_CAPABILITIES,
-    protocol_tags: [MAX_EXTENDED_CAPABILITIES]u8 = [_]u8{0} ** MAX_EXTENDED_CAPABILITIES,
-    speed_classes: [MAX_EXTENDED_CAPABILITIES]u32 = [_]u32{0} ** MAX_EXTENDED_CAPABILITIES,
+    first_ports: [MAX_EXTENDED_CAPABILITIES]u8 = @as([MAX_EXTENDED_CAPABILITIES]u8, @splat(0)),
+    port_counts: [MAX_EXTENDED_CAPABILITIES]u8 = @as([MAX_EXTENDED_CAPABILITIES]u8, @splat(0)),
+    protocol_tags: [MAX_EXTENDED_CAPABILITIES]u8 = @as([MAX_EXTENDED_CAPABILITIES]u8, @splat(0)),
+    speed_classes: [MAX_EXTENDED_CAPABILITIES]u32 = @as([MAX_EXTENDED_CAPABILITIES]u32, @splat(0)),
     range_count: u8 = 0,
 
     pub fn forPort(self: *const SupportedProtocols, port_id: u8) ?PortProtocol {
@@ -1854,7 +1854,7 @@ pub const HardwareBootKeyboardReport = struct {
     endpoint_id: u8 = 0,
     vendor_id: u16 = 0,
     product_id: u16 = 0,
-    bytes: [HID_BOOT_KEYBOARD_REPORT_BYTES]u8 = [_]u8{0} ** HID_BOOT_KEYBOARD_REPORT_BYTES,
+    bytes: [HID_BOOT_KEYBOARD_REPORT_BYTES]u8 = @as([HID_BOOT_KEYBOARD_REPORT_BYTES]u8, @splat(0)),
 };
 
 pub const BootKeyboardReportPublisher = struct {
@@ -1864,7 +1864,7 @@ pub const BootKeyboardReportPublisher = struct {
     tail: u8 = 0,
     count: u8 = 0,
     reports: [HARDWARE_HID_REPORT_QUEUE_CAPACITY]HardwareBootKeyboardReport =
-        [_]HardwareBootKeyboardReport{.{}} ** HARDWARE_HID_REPORT_QUEUE_CAPACITY,
+        @as([HARDWARE_HID_REPORT_QUEUE_CAPACITY]HardwareBootKeyboardReport, @splat(.{})),
 
     pub fn publish(
         self: *BootKeyboardReportPublisher,
@@ -1890,7 +1890,7 @@ pub const BootKeyboardReportPublisher = struct {
             .endpoint_id = keyboard.endpoint_id,
             .vendor_id = descriptor.vendor_id,
             .product_id = descriptor.product_id,
-            .bytes = [_]u8{0} ** HID_BOOT_KEYBOARD_REPORT_BYTES,
+            .bytes = @as([HID_BOOT_KEYBOARD_REPORT_BYTES]u8, @splat(0)),
         };
         @memcpy(published.bytes[0..], report);
         self.reports[self.tail] = published;
@@ -1926,8 +1926,7 @@ pub const BootKeyboardReportPublisher = struct {
     }
 
     pub fn clearPort(self: *BootKeyboardReportPublisher, port_id: u8) void {
-        var retained_reports = [_]HardwareBootKeyboardReport{.{}} **
-            HARDWARE_HID_REPORT_QUEUE_CAPACITY;
+        var retained_reports = @as([HARDWARE_HID_REPORT_QUEUE_CAPACITY]HardwareBootKeyboardReport, @splat(.{}));
         var retained: usize = 0;
         var offset: usize = 0;
         while (offset < @as(usize, self.count)) : (offset += 1) {
@@ -1960,15 +1959,15 @@ pub const HidController = struct {
     tail: u8 = 0,
     count: u8 = 0,
     boot_keyboard: ?HidBootKeyboardDevice = null,
-    ports: [MAX_BOOT_PORTS]PortState = [_]PortState{.{}} ** MAX_BOOT_PORTS,
-    slots: [DEVICE_SLOT_TABLE_ENTRIES]DeviceSlot = [_]DeviceSlot{.{}} ** DEVICE_SLOT_TABLE_ENTRIES,
+    ports: [MAX_BOOT_PORTS]PortState = @as([MAX_BOOT_PORTS]PortState, @splat(.{})),
+    slots: [DEVICE_SLOT_TABLE_ENTRIES]DeviceSlot = @as([DEVICE_SLOT_TABLE_ENTRIES]DeviceSlot, @splat(.{})),
     port_limit: u8 = maxBootPortsU8(),
     device_slot_limit: u8 = maxDeviceSlotsU8(),
     input_events_delivered: usize = 0,
-    reports: [HID_EVENT_QUEUE_CAPACITY]HidReport = [_]HidReport{emptyHidReport()} ** HID_EVENT_QUEUE_CAPACITY,
+    reports: [HID_EVENT_QUEUE_CAPACITY]HidReport = @as([HID_EVENT_QUEUE_CAPACITY]HidReport, @splat(emptyHidReport())),
     mmio: ?MmioState = null,
     next_unclaimed_slot: u8 = 1,
-    recycled_slots: [MAX_DEVICE_SLOTS]u8 = [_]u8{0} ** MAX_DEVICE_SLOTS,
+    recycled_slots: [MAX_DEVICE_SLOTS]u8 = @as([MAX_DEVICE_SLOTS]u8, @splat(0)),
     recycled_slot_count: u8 = 0,
 
     pub fn initInto(self: *HidController, ring_plan: RingPlan) Error!void {
@@ -2165,7 +2164,7 @@ pub const HidController = struct {
             .device_id = device_id,
             .endpoint_id = endpoint_id,
             .report_len = HID_BOOT_KEYBOARD_REPORT_BYTES,
-            .report = [_]u8{0} ** HID_BOOT_KEYBOARD_REPORT_BYTES,
+            .report = @as([HID_BOOT_KEYBOARD_REPORT_BYTES]u8, @splat(0)),
         };
         @memcpy(report.report[0..report_bytes.len], report_bytes);
         try self.enqueueInterruptReport(report);
@@ -2235,7 +2234,7 @@ pub const HidController = struct {
         self.tail = 0;
         self.count = 0;
         self.input_events_delivered = 0;
-        self.reports = [_]HidReport{emptyHidReport()} ** HID_EVENT_QUEUE_CAPACITY;
+        self.reports = @as([HID_EVENT_QUEUE_CAPACITY]HidReport, @splat(emptyHidReport()));
         if (self.mmio) |*mmio| {
             mmio.transfer_doorbells = 0;
             mmio.event_ring_dequeue_count = 0;
@@ -2256,7 +2255,7 @@ pub fn bootKeyboardReport(device_id: u64, endpoint_id: u8, modifiers: u8, keys: 
         .device_id = device_id,
         .endpoint_id = endpoint_id,
         .report_len = HID_BOOT_KEYBOARD_REPORT_BYTES,
-        .report = [_]u8{0} ** HID_BOOT_KEYBOARD_REPORT_BYTES,
+        .report = @as([HID_BOOT_KEYBOARD_REPORT_BYTES]u8, @splat(0)),
     };
     report.report[0] = modifiers;
     @memcpy(report.report[2..][0..keys.len], keys);
@@ -3463,12 +3462,12 @@ fn emptyHidReport() HidReport {
         .device_id = 0,
         .endpoint_id = 0,
         .report_len = 0,
-        .report = [_]u8{0} ** HID_BOOT_KEYBOARD_REPORT_BYTES,
+        .report = @as([HID_BOOT_KEYBOARD_REPORT_BYTES]u8, @splat(0)),
     };
 }
 
 fn validCapabilityRegisters() [CAPABILITY_REGISTERS_BYTES]u8 {
-    var mmio = [_]u8{0} ** CAPABILITY_REGISTERS_BYTES;
+    var mmio = @as([CAPABILITY_REGISTERS_BYTES]u8, @splat(0));
     mmio[CAPABILITY_LENGTH_OFFSET] = TEST_CAPABILITY_LENGTH;
     writeU16Le(mmio[INTERFACE_VERSION_OFFSET .. INTERFACE_VERSION_OFFSET + U16_REGISTER_BYTES], TEST_INTERFACE_VERSION);
     writeU32Le(
@@ -3563,7 +3562,7 @@ test "xHCI capability parser extracts the extended capability pointer" {
 }
 
 test "xHCI legacy ownership accepts absent and firmware-released capabilities" {
-    var registers = [_]u8{0} ** 0x80;
+    var registers = @as([0x80]u8, @splat(0));
     var reader = TestExtendedCapabilityReader{ .bytes = &registers };
     try std.testing.expectEqual(LegacyOwnership.not_present, try inspectLegacyOwnership(0, reader));
 
@@ -3578,7 +3577,7 @@ test "xHCI legacy ownership accepts absent and firmware-released capabilities" {
 }
 
 test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
-    var registers = [_]u8{0} ** 0x100;
+    var registers = @as([0x100]u8, @splat(0));
     writeU32Le(
         registers[0x40..0x44],
         SUPPORTED_PROTOCOL_CAPABILITY_ID |
@@ -3652,7 +3651,7 @@ test "xHCI supported protocols accept sparse nonoverlapping USB port ranges" {
 }
 
 test "xHCI supported protocol PSI definitions validate custom USB2 speed ids" {
-    var registers = [_]u8{0} ** 0x80;
+    var registers = @as([0x80]u8, @splat(0));
     writeU32Le(
         registers[0x40..0x44],
         SUPPORTED_PROTOCOL_CAPABILITY_ID |
@@ -3921,7 +3920,7 @@ test "xHCI configuration parser validates complete USB2 and USB3 descriptor tree
 }
 
 test "xHCI legacy ownership rejects firmware-owned and malformed chains" {
-    var registers = [_]u8{0} ** 0x80;
+    var registers = @as([0x80]u8, @splat(0));
     writeU32Le(
         registers[0x40..0x44],
         USB_LEGACY_SUPPORT_CAPABILITY_ID | USB_LEGACY_BIOS_OWNED_SEMAPHORE,
@@ -4042,7 +4041,7 @@ const ScriptedOperationalMmio = struct {
     status_reads: []const u32,
     command_read_index: usize = 0,
     status_read_index: usize = 0,
-    writes: [4]u32 = [_]u32{0} ** 4,
+    writes: [4]u32 = @as([4]u32, @splat(0)),
     write_count: usize = 0,
 
     pub fn readReg32(self: *@This(), offset: u32) u32 {
@@ -4077,7 +4076,7 @@ fn scriptedOperationalMmio(command_reads: []const u32, status_reads: []const u32
 
 const MockResetClock = struct {
     deadline_checks: usize,
-    requested_milliseconds: [4]u64 = [_]u64{0} ** 4,
+    requested_milliseconds: [4]u64 = @as([4]u64, @splat(0)),
     request_count: usize = 0,
 
     pub fn afterMilliseconds(self: *@This(), milliseconds: u64) MockOwnershipDeadline {
@@ -4517,7 +4516,7 @@ test "xHCI descriptor control stages and slot doorbell are exact" {
 }
 
 test "xHCI Address Device context encodes only slot and endpoint zero authority" {
-    var input_context = [_]u8{0xA5} ** (INPUT_CONTEXT_ENTRIES * 64);
+    var input_context = @as([INPUT_CONTEXT_ENTRIES * 64]u8, @splat(0xA5));
     try initializeAddressDeviceInputContext(
         .bytes_64,
         7,
@@ -4547,7 +4546,7 @@ test "xHCI Address Device context encodes only slot and endpoint zero authority"
     );
     try std.testing.expectEqualSlices(
         u8,
-        &([_]u8{0} ** 64),
+        &(@as([64]u8, @splat(0))),
         input_context[3 * 64 .. 4 * 64],
     );
 
@@ -4561,7 +4560,7 @@ test "xHCI Address Device context encodes only slot and endpoint zero authority"
     try std.testing.expectError(error.InvalidInputContext, addressDeviceCommand(0x9001, 5, 1));
     try std.testing.expectError(error.InvalidDeviceSlot, addressDeviceCommand(0x9000, 0, 1));
 
-    var compact_context = [_]u8{0xA5} ** (INPUT_CONTEXT_ENTRIES * 32);
+    var compact_context = @as([INPUT_CONTEXT_ENTRIES * 32]u8, @splat(0xA5));
     try initializeAddressDeviceInputContext(
         .bytes_32,
         2,
@@ -4587,15 +4586,15 @@ test "xHCI Address Device context encodes only slot and endpoint zero authority"
 }
 
 test "xHCI Evaluate Context updates only endpoint-zero max packet size" {
-    var input_context = [_]u8{0xA5} ** (INPUT_CONTEXT_ENTRIES * 64);
+    var input_context = @as([INPUT_CONTEXT_ENTRIES * 64]u8, @splat(0xA5));
     try initializeEvaluateEndpointZeroInputContext(.bytes_64, 32, &input_context);
     try std.testing.expectEqual(
         EVALUATE_ENDPOINT_ZERO_ADD_CONTEXT_FLAGS,
         readU32Le(input_context[4..8]),
     );
     try std.testing.expectEqual(@as(u32, 32) << 16, readU32Le(input_context[132..136]));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 64), input_context[64..128]);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 48), input_context[144..192]);
+    try std.testing.expectEqualSlices(u8, &(@as([64]u8, @splat(0))), input_context[64..128]);
+    try std.testing.expectEqualSlices(u8, &(@as([48]u8, @splat(0))), input_context[144..192]);
 
     const command = try evaluateContextCommand(0x9000, 5, 1);
     try std.testing.expectEqual(@as(u32, 0x9000), command[0]);
@@ -4622,7 +4621,7 @@ test "xHCI Configure Endpoint context grants one interrupt-IN endpoint" {
         .interval = 9,
         .max_esit_payload = HID_BOOT_KEYBOARD_REPORT_BYTES,
     };
-    var input_context = [_]u8{0xA5} ** (INPUT_CONTEXT_ENTRIES * 64);
+    var input_context = @as([INPUT_CONTEXT_ENTRIES * 64]u8, @splat(0xA5));
     try initializeConfigureInterruptInEndpointInputContext(
         .bytes_64,
         keyboard,
@@ -4655,7 +4654,7 @@ test "xHCI Configure Endpoint context grants one interrupt-IN endpoint" {
             (@as(u32, keyboard.max_esit_payload) << 16),
         readU32Le(input_context[endpoint_offset + 16 ..][0..4]),
     );
-    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 64), input_context[128..192]);
+    try std.testing.expectEqualSlices(u8, &(@as([64]u8, @splat(0))), input_context[128..192]);
 
     const command = try configureEndpointCommand(0x9000, 5, 1);
     try std.testing.expectEqual(@as(u32, 0x9000), command[0]);
@@ -5026,7 +5025,7 @@ test "xHCI controller DMA plan initializes rings tables and scratchpad pointers"
     try std.testing.expectEqual(@as(u32, 64), plan.event_ring_segment_table_bytes);
     try std.testing.expectEqual(@as(u64, 0x3000), plan.arena.base_address);
 
-    var memory = [_]u8{0xA5} ** (35 * @as(usize, XHCI_PAGE_BYTES));
+    var memory = @as([35 * @as(usize, XHCI_PAGE_BYTES)]u8, @splat(0xA5));
     try std.testing.expectError(
         error.DmaBufferTooSmall,
         initializeControllerDma(plan, memory[0 .. memory.len - 1]),
@@ -5088,7 +5087,7 @@ test "xHCI transfer ring reset discards stale slot TRBs before reuse" {
     capabilities.max_device_slots = 1;
     capabilities.max_scratchpad_buffers = 2;
     const plan = try planControllerDma(capabilities, 1, 0x1000);
-    var memory = [_]u8{0} ** (35 * @as(usize, XHCI_PAGE_BYTES));
+    var memory = @as([35 * @as(usize, XHCI_PAGE_BYTES)]u8, @splat(0));
     const ring_address = plan.arena.interrupt_transfer_rings_address;
     const ring_offset: usize = @intCast(ring_address - plan.base_address);
     const ring_bytes: usize = plan.arena.interrupt_transfer_ring_stride;
@@ -5102,7 +5101,7 @@ test "xHCI transfer ring reset discards stale slot TRBs before reuse" {
     );
     try std.testing.expectEqualSlices(
         u8,
-        &([_]u8{0} ** TRB_BYTES),
+        &(@as([TRB_BYTES]u8, @splat(0))),
         memory[ring_offset..][0..TRB_BYTES],
     );
     const link_offset = ring_offset + ring_bytes - TRB_BYTES;
@@ -5154,7 +5153,7 @@ test "xHCI controller DMA regions preserve page-granular direction isolation" {
 }
 
 const MockDmaRegisterMmio = struct {
-    registers: [0x1100]u8 = [_]u8{0} ** 0x1100,
+    registers: [0x1100]u8 = @as([0x1100]u8, @splat(0)),
     accept_writes: bool = true,
 
     fn ready() @This() {

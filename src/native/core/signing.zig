@@ -347,7 +347,7 @@ pub const ReleaseVerifierMetadata = struct {
             .profile = descriptor.profile,
             .signature_format = descriptor.format(),
             .public_key_len = @intCast(public_key.len),
-            .public_key = [_]u8{0} ** ML_DSA65_PUBLIC_KEY_BYTES,
+            .public_key = @as([ML_DSA65_PUBLIC_KEY_BYTES]u8, @splat(0)),
             .generation = generation,
             .provider_boundary = descriptor.provider_boundary,
             .custody = descriptor.custody,
@@ -543,11 +543,11 @@ pub const SignerIdentity = struct {
 };
 
 pub fn seedFromByte(byte: u8) Seed {
-    return [_]u8{byte} ** SEED_BYTES;
+    return @as([SEED_BYTES]u8, @splat(byte));
 }
 
 pub fn publicKeyFromByte(byte: u8) PublicKey {
-    return [_]u8{byte} ** PUBLIC_KEY_BYTES;
+    return @as([PUBLIC_KEY_BYTES]u8, @splat(byte));
 }
 
 pub const PublicIdentity = struct {
@@ -1054,7 +1054,7 @@ test "external ML-DSA release provider requires a validated FIPS 204 boundary" {
     const key = MlDsaReleaseRootKeyHandle{
         .key_id = "hsm://zigos/release/ml-dsa65/1",
         .label = "zigos.release.ml-dsa65",
-        .public_key = [_]u8{0xa5} ** ML_DSA65_PUBLIC_KEY_BYTES,
+        .public_key = @as([ML_DSA65_PUBLIC_KEY_BYTES]u8, @splat(0xa5)),
         .generation = 1,
         .provider_boundary = .offline_hsm,
         .custody = .hardware_security_module,

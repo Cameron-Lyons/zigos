@@ -33,9 +33,9 @@ pub const ObjectHandle = struct {
     version_id: object_store.ids.VersionId,
     object_type: ObjectType,
     label_len: u8 = 0,
-    label: [object_store.MAX_METADATA_LABEL_BYTES]u8 = [_]u8{0} ** object_store.MAX_METADATA_LABEL_BYTES,
+    label: [object_store.MAX_METADATA_LABEL_BYTES]u8 = @as([object_store.MAX_METADATA_LABEL_BYTES]u8, @splat(0)),
     content_type_len: u8 = 0,
-    content_type: [object_store.MAX_CONTENT_TYPE_BYTES]u8 = [_]u8{0} ** object_store.MAX_CONTENT_TYPE_BYTES,
+    content_type: [object_store.MAX_CONTENT_TYPE_BYTES]u8 = @as([object_store.MAX_CONTENT_TYPE_BYTES]u8, @splat(0)),
 
     pub fn labelSlice(self: *const ObjectHandle) []const u8 {
         return self.label[0..@min(@as(usize, self.label_len), self.label.len)];

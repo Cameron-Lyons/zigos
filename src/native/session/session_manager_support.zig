@@ -48,7 +48,7 @@ pub const ServiceBindings = struct {
 
     pub fn init() ServiceBindings {
         return .{
-            .bindings = [_]service_bootstrap.ServiceBinding{.{ .task_id = 0, .endpoint_id = 0 }} ** service_contract.ordered_service_contracts.len,
+            .bindings = @as([service_contract.ordered_service_contracts.len]service_bootstrap.ServiceBinding, @splat(.{ .task_id = 0, .endpoint_id = 0 })),
         };
     }
 

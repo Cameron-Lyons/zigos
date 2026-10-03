@@ -397,7 +397,7 @@ const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .fr
 
 const MappedImageRegions = struct {
     const Range = struct { start: usize = 0, size: usize = 0 };
-    ranges: [task_runtime.MAX_EXECUTABLE_SEGMENTS]Range = [_]Range{.{}} ** task_runtime.MAX_EXECUTABLE_SEGMENTS,
+    ranges: [task_runtime.MAX_EXECUTABLE_SEGMENTS]Range = @as([task_runtime.MAX_EXECUTABLE_SEGMENTS]Range, @splat(.{})),
     count: usize = 0,
     stack: Range = .{},
 };
@@ -505,8 +505,8 @@ pub const Executor = struct {
     user_page_fault_count: u64 = 0,
     active_nx_probe_target: NxProbeTarget = if (include_verification_evidence) 0 else {},
     mappings: MappingArenaBacking = if (heap_backed_mappings) null else MappingArena.init(),
-    group_spaces: [GROUP_SPACE_COUNT]?freestanding.paging.UserAddressSpace = .{null} ** GROUP_SPACE_COUNT,
-    group_refs: [GROUP_SPACE_COUNT]u8 = .{0} ** GROUP_SPACE_COUNT,
+    group_spaces: [GROUP_SPACE_COUNT]?freestanding.paging.UserAddressSpace = @splat(null),
+    group_refs: [GROUP_SPACE_COUNT]u8 = @splat(0),
 
     comptime {
         if (heap_backed_mappings and @sizeOf(@This()) > units.kibibytes(1)) {
@@ -881,7 +881,7 @@ pub const Executor = struct {
         expected_pulse: u16,
     ) bool {
         const mapping = self.findMapping(address_space_id) orelse return false;
-        return @as(u8, @truncate(mapping.last_user_counter >> 24)) == @intFromEnum(expected_stage) and
+        return @as(u8, @truncate(mapping.last_user_counter >> 24)) == @backingInt(expected_stage) and
             @as(u16, @truncate(mapping.last_user_counter)) == expected_pulse;
     }
 
@@ -1215,7 +1215,7 @@ pub const Executor = struct {
         }
         const group = userspace_registry.addressSpaceGroupForBundle(bundle_id) orelse
             return freestanding.paging.createUserAddressSpace();
-        const index = @intFromEnum(group);
+        const index = @backingInt(group);
         if (self.group_refs[index] == 0) {
             const space = try freestanding.paging.createUserAddressSpace();
             self.group_spaces[index] = space;
@@ -1246,7 +1246,7 @@ pub const Executor = struct {
         slot_index: usize,
         entry: *MappingEntry,
     ) void {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
         if (entry.address_space) |*space| {
@@ -1289,8 +1289,8 @@ pub const Executor = struct {
             if (!slot.in_use) continue;
             self.releaseMapping(mappings, slot_index, &slot.mapping);
         }
-        self.group_spaces = .{null} ** GROUP_SPACE_COUNT;
-        self.group_refs = .{0} ** GROUP_SPACE_COUNT;
+        self.group_spaces = @splat(null);
+        self.group_refs = @splat(0);
         self.releaseMappingArena();
     }
 
@@ -1305,7 +1305,7 @@ pub const Executor = struct {
         if (completed_mapping.state != .retire_pending) return;
         const mappings = self.mappingArena() orelse
             native_util.impossibleByInvariant("completed userspace mapping has no arena");
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             const slot = mappings.getByHandle(completed_mapping_handle) orelse
                 native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
             std.debug.assert(&slot.mapping == completed_mapping);
@@ -1370,7 +1370,7 @@ fn prepareMappingDispatchMetadata(
 }
 
 fn debugIndexChecksEnabled() bool {
-    return builtin.mode == .Debug;
+    return builtin.mode == .debug;
 }
 
 pub const MailboxAuthorities = struct {
@@ -1464,7 +1464,7 @@ fn prepareBootstrapMailboxUpdate(
     return .{
         .address = @intCast(address),
         .preserve_runtime_state = preserve_runtime_state,
-        .detail = @intFromEnum(userspace_bootstrap_mailbox.classifyDetail(@intFromEnum(component_class), contract_flags)),
+        .detail = @backingInt(userspace_bootstrap_mailbox.classifyDetail(@backingInt(component_class), contract_flags)),
         .heartbeat_increment = heartbeat_increment,
         .authorities = authorities,
         .task_id = task_id,
@@ -1508,10 +1508,10 @@ fn kernelPublishedMailbox(
 ) userspace_bootstrap_mailbox.Mailbox {
     var mailbox: userspace_bootstrap_mailbox.Mailbox = preserved orelse .{
         .version = userspace_bootstrap_mailbox.VERSION,
-        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.boot),
+        .stage = @backingInt(userspace_bootstrap_mailbox.Stage.boot),
         .detail = update.detail,
         .fault_code = 0,
-        ._reserved0 = [_]u8{0} ** userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES,
+        ._reserved0 = @as([userspace_bootstrap_mailbox.MAILBOX_RESERVED_BYTES]u8, @splat(0)),
         .resource_mask = 0,
         .last_counter = 0,
     };
@@ -2270,7 +2270,7 @@ test "mailbox snapshot uses the mapping address and rejects an invalid version" 
 test "shared mailbox restore keeps the dispatching task snapshot" {
     const captured = userspace_bootstrap_mailbox.Mailbox{
         .version = userspace_bootstrap_mailbox.VERSION,
-        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady),
+        .stage = @backingInt(userspace_bootstrap_mailbox.Stage.steady),
         .task_id = 10,
         .ui_state_revision = 4,
         .ui_presented_revision = 4,
@@ -2278,13 +2278,13 @@ test "shared mailbox restore keeps the dispatching task snapshot" {
     };
     const sibling = userspace_bootstrap_mailbox.Mailbox{
         .version = userspace_bootstrap_mailbox.VERSION,
-        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.runtime_ready),
+        .stage = @backingInt(userspace_bootstrap_mailbox.Stage.runtime_ready),
         .task_id = 11,
     };
     const update = BootstrapMailboxUpdate{
         .address = 0x4000,
         .preserve_runtime_state = true,
-        .detail = @intFromEnum(userspace_bootstrap_mailbox.Detail.ui),
+        .detail = @backingInt(userspace_bootstrap_mailbox.Detail.ui),
         .heartbeat_increment = 15,
         .authorities = .{ .bootstrap_capability_id = 101, .surface_presentation_capability_id = 104 },
         .task_id = 10,
@@ -2295,7 +2295,7 @@ test "shared mailbox restore keeps the dispatching task snapshot" {
     try std.testing.expectEqual(@as(u64, 10), restored.task_id);
     try std.testing.expectEqual(@as(u64, 2), restored.ui_surface_id);
     try std.testing.expectEqual(@as(u64, 101), restored.authority_capability_id);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), restored.stage);
+    try std.testing.expectEqual(@as(u8, @backingInt(userspace_bootstrap_mailbox.Stage.steady)), restored.stage);
     try std.testing.expectEqual(@as(u64, 4), restored.ui_presented_revision);
     var first_launch = update;
     first_launch.preserve_runtime_state = false;
@@ -2327,7 +2327,7 @@ test "prepared document survives a sibling dispatch before first launch" {
     var update = BootstrapMailboxUpdate{
         .address = 0x4000,
         .preserve_runtime_state = false,
-        .detail = @intFromEnum(userspace_bootstrap_mailbox.Detail.ui),
+        .detail = @backingInt(userspace_bootstrap_mailbox.Detail.ui),
         .heartbeat_increment = 1,
         .authorities = .{ .bootstrap_capability_id = 101 },
         .task_id = 1,
@@ -2378,7 +2378,7 @@ test "materialized dispatch metadata may relocate a shared-group stack" {
 
 test "mailbox publication preserves resume state and resets first launch" {
     var mailbox = userspace_bootstrap_mailbox.Mailbox{
-        .stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady),
+        .stage = @backingInt(userspace_bootstrap_mailbox.Stage.steady),
         .fault_code = 0x72,
         .resource_mask = 0x7,
         .service_operation_count = 9,
@@ -2406,7 +2406,7 @@ test "mailbox publication preserves resume state and resets first launch" {
     try std.testing.expectEqual(@as(u64, 104), mailbox.surface_presentation_capability_id);
     try std.testing.expectEqual(@as(u64, 105), mailbox.task_id);
     try std.testing.expectEqual(@as(u64, 106), mailbox.ui_surface_id);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), mailbox.stage);
+    try std.testing.expectEqual(@as(u8, @backingInt(userspace_bootstrap_mailbox.Stage.steady)), mailbox.stage);
     try std.testing.expectEqual(@as(u8, 0x72), mailbox.fault_code);
     try std.testing.expectEqual(@as(u32, 0x7), mailbox.resource_mask);
     try std.testing.expectEqual(@as(u16, 9), mailbox.service_operation_count);
@@ -2420,7 +2420,7 @@ test "mailbox publication preserves resume state and resets first launch" {
     const first_launch = prepareBootstrapMailboxUpdate(address, false, .app_component, 0, 11, 107, 108, authorities).?;
     writeBootstrapMailbox(first_launch);
     try std.testing.expect(!first_launch.preserve_runtime_state);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.boot)), mailbox.stage);
+    try std.testing.expectEqual(@as(u8, @backingInt(userspace_bootstrap_mailbox.Stage.boot)), mailbox.stage);
     try std.testing.expectEqual(@as(u8, 0), mailbox.fault_code);
     try std.testing.expectEqual(@as(u32, 0), mailbox.resource_mask);
     try std.testing.expectEqual(@as(u16, 0), mailbox.service_operation_count);
@@ -2479,7 +2479,7 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
     writeBootstrapMailbox(first_launch_retry);
     try std.testing.expectEqual(@as(u64, 1), cache.published_authority_generation);
 
-    mailbox.stage = @intFromEnum(userspace_bootstrap_mailbox.Stage.steady);
+    mailbox.stage = @backingInt(userspace_bootstrap_mailbox.Stage.steady);
     mailbox.last_counter = 207;
     const unchanged_resume = prepareCachedBootstrapMailboxUpdate(
         &cache,
@@ -2496,7 +2496,7 @@ test "mailbox publication cache suppresses unchanged resumed kernel writes" {
     try std.testing.expect(unchanged_resume == null);
     writeBootstrapMailbox(unchanged_resume);
     try std.testing.expectEqual(@as(u64, 1), cache.published_authority_generation);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(userspace_bootstrap_mailbox.Stage.steady)), mailbox.stage);
+    try std.testing.expectEqual(@as(u8, @backingInt(userspace_bootstrap_mailbox.Stage.steady)), mailbox.stage);
     try std.testing.expectEqual(@as(u32, 207), mailbox.last_counter);
 
     var refreshed_authorities = initial_authorities;

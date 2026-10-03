@@ -49,7 +49,7 @@ pub const DocumentOperation = struct {
     position: DocumentOffset,
     delete_len: DocumentOffset = 0,
     text_len: u8 = 0,
-    text: [MAX_DOCUMENT_OPERATION_TEXT_BYTES]u8 = [_]u8{0} ** MAX_DOCUMENT_OPERATION_TEXT_BYTES,
+    text: [MAX_DOCUMENT_OPERATION_TEXT_BYTES]u8 = @as([MAX_DOCUMENT_OPERATION_TEXT_BYTES]u8, @splat(0)),
     actor: principal.PrincipalId,
     lamport: u64,
 
@@ -110,7 +110,7 @@ pub const DocumentOperationLog = struct {
     operations: [MAX_DOCUMENT_OPERATIONS]DocumentOperation = undefined,
     operation_count: u8 = 0,
     operation_index: DocumentOperationIndex = DocumentOperationIndex.init(),
-    clocks: [MAX_DOCUMENT_VECTOR_CLOCKS]DocumentVectorClock = [_]DocumentVectorClock{.{}} ** MAX_DOCUMENT_VECTOR_CLOCKS,
+    clocks: [MAX_DOCUMENT_VECTOR_CLOCKS]DocumentVectorClock = @as([MAX_DOCUMENT_VECTOR_CLOCKS]DocumentVectorClock, @splat(.{})),
     clock_count: u8 = 0,
     clock_index: DocumentVectorClockIndex = DocumentVectorClockIndex.init(),
 
@@ -503,7 +503,7 @@ fn transportFrameSlotId(slot: *const TransportFrameSlot) u64 {
 fn transportFrameTargetKey(workspace_id: u64, target_device: principal.PrincipalId) u64 {
     var hash = native_util.FNV1A_64_OFFSET_BASIS;
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, workspace_id);
-    hash = native_util.fnv1a64AppendByte(hash, @intFromEnum(target_device.kind));
+    hash = native_util.fnv1a64AppendByte(hash, @backingInt(target_device.kind));
     hash = native_util.fnv1a64AppendU64LittleEndian(hash, target_device.serial);
     return indexed_arena.nonZeroKey(hash);
 }
@@ -631,7 +631,7 @@ fn versionStartsWith(
     prefix: []const u8,
 ) Error!bool {
     var cursor = try store.versionChunkCursor(version);
-    var prefix_buffer: [VERSION_PREFIX_BUFFER_BYTES]u8 = [_]u8{0} ** VERSION_PREFIX_BUFFER_BYTES;
+    var prefix_buffer: [VERSION_PREFIX_BUFFER_BYTES]u8 = @as([VERSION_PREFIX_BUFFER_BYTES]u8, @splat(0));
     if (prefix.len > prefix_buffer.len) return error.PayloadTooLarge;
     var copied: usize = 0;
     while (copied < prefix.len) {
@@ -658,9 +658,9 @@ fn sortDocumentOperations(operations: []DocumentOperation) void {
 fn documentOperationLess(left: DocumentOperation, right: DocumentOperation) bool {
     if (left.lamport != right.lamport) return left.lamport < right.lamport;
     if (left.actor.serial != right.actor.serial) return left.actor.serial < right.actor.serial;
-    if (left.actor.kind != right.actor.kind) return @intFromEnum(left.actor.kind) < @intFromEnum(right.actor.kind);
+    if (left.actor.kind != right.actor.kind) return @backingInt(left.actor.kind) < @backingInt(right.actor.kind);
     if (left.position != right.position) return left.position < right.position;
-    return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+    return @backingInt(left.kind) < @backingInt(right.kind);
 }
 
 fn applyDocumentOperation(operation: DocumentOperation, output: []u8, current_len: usize) Error!usize {
@@ -787,7 +787,7 @@ test "document operation log merges CRDT operations idempotently with vector clo
 }
 
 test "compact document log metadata preserves exact capacities" {
-    const full_text = [_]u8{'d'} ** MAX_DOCUMENT_OPERATION_TEXT_BYTES;
+    const full_text = @as([MAX_DOCUMENT_OPERATION_TEXT_BYTES]u8, @splat('d'));
     var log = DocumentOperationLog{};
     var operation_index: usize = 0;
     while (operation_index < MAX_DOCUMENT_OPERATIONS) : (operation_index += 1) {
@@ -932,7 +932,7 @@ test "transport queue records encrypted semantic replication frames" {
     try std.testing.expectEqualStrings("secrets/token", latest.pathSlice());
 
     const latest_before_rejected_frame = queue.latestFrameId();
-    const overlong_path: [workspace.MAX_ENTRY_PATH_BYTES + 1]u8 = [_]u8{'a'} ** (workspace.MAX_ENTRY_PATH_BYTES + 1);
+    const overlong_path: [workspace.MAX_ENTRY_PATH_BYTES + 1]u8 = @as([workspace.MAX_ENTRY_PATH_BYTES + 1]u8, @splat('a'));
     try std.testing.expectError(error.PathTooLong, queue.enqueue(.{
         .workspace_id = 42,
         .object_id = 86,

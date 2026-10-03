@@ -180,7 +180,7 @@ test "public enrollment joins independent vaults and disks without exchanging pr
     try std.testing.expectEqual(@as(u8, 3), a.keys.service.store.secret_count);
     try std.testing.expectEqual(@as(u8, 2), b.keys.service.store.secret_count);
     try std.testing.expect(b.root_key == null);
-    for ([_]u8{ 11, 12, 51 }) |seed| try std.testing.expect(std.mem.indexOf(u8, bytes, &([_]u8{seed} ** 32)) == null);
+    for ([_]u8{ 11, 12, 51 }) |seed| try std.testing.expect(std.mem.indexOf(u8, bytes, &(@as([32]u8, @splat(seed)))) == null);
     try connect(a, b);
     const av = a.disk.service.versionCount();
     const bv = b.disk.service.versionCount();

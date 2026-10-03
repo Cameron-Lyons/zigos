@@ -111,7 +111,7 @@ test "workspace paths reject overlong values instead of truncating" {
         ),
     );
 
-    const max_path = [_]u8{'p'} ** workspace_model.MAX_ENTRY_PATH_BYTES;
+    const max_path = @as([workspace_model.MAX_ENTRY_PATH_BYTES]u8, @splat('p'));
     try directory.beginTransaction(workspace.id);
     try directory.stagePut(workspace.id, &max_path, ids.object(11), ids.version(21), .document);
     _ = try directory.commit(workspace.id, 1);
@@ -489,15 +489,15 @@ test "workspace snapshots and exports must stay signed" {
         .snapshot_id = ids.SnapshotId.zero,
         .generation = 0,
         .label_len = 0,
-        .label = [_]u8{0} ** workspace_model.MAX_WORKSPACE_LABEL_BYTES,
+        .label = @as([workspace_model.MAX_WORKSPACE_LABEL_BYTES]u8, @splat(0)),
         .root_address = workspace_merkle.zeroRootAddress(),
         .signature = .{},
         .signature_format_len = 0,
-        .signature_format_storage = [_]u8{0} ** workspace_model.MAX_EXPORT_SIGNATURE_FORMAT_BYTES,
+        .signature_format_storage = @as([workspace_model.MAX_EXPORT_SIGNATURE_FORMAT_BYTES]u8, @splat(0)),
         .signature_signer_len = 0,
-        .signature_signer_storage = [_]u8{0} ** workspace_model.MAX_EXPORT_SIGNATURE_SIGNER_BYTES,
+        .signature_signer_storage = @as([workspace_model.MAX_EXPORT_SIGNATURE_SIGNER_BYTES]u8, @splat(0)),
         .entry_count = 0,
-        .entries = [_]Entry{Entry{}} ** MAX_WORKSPACE_ENTRIES,
+        .entries = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{})),
     };
     try std.testing.expectError(error.UnsignedExport, directory.importWorkspaceFromPackage(.{ .kind = .service, .serial = 10 }, "import", &package, 0));
 }

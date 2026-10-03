@@ -223,7 +223,7 @@ fn appendHashBytes(hash: u64, bytes: []const u8) u64 {
 }
 
 fn appendPrincipal(hash: u64, value: principal.PrincipalId) u64 {
-    var next = native_util.fnv1a64AppendByte(hash, @intFromEnum(value.kind));
+    var next = native_util.fnv1a64AppendByte(hash, @backingInt(value.kind));
     next = native_util.fnv1a64AppendU64LittleEndian(next, value.serial);
     return next;
 }
@@ -245,10 +245,10 @@ fn CompactMultimapIndex(comptime link_capacity: usize, comptime bucket_capacity:
             count: u8 = 0,
         };
 
-        buckets: [bucket_capacity]Bucket = [_]Bucket{Bucket{}} ** bucket_capacity,
-        next_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
-        previous_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
-        bucket_by_slot: [link_capacity]u8 = [_]u8{empty_link} ** link_capacity,
+        buckets: [bucket_capacity]Bucket = @as([bucket_capacity]Bucket, @splat(Bucket{})),
+        next_by_slot: [link_capacity]u8 = @as([link_capacity]u8, @splat(empty_link)),
+        previous_by_slot: [link_capacity]u8 = @as([link_capacity]u8, @splat(empty_link)),
+        bucket_by_slot: [link_capacity]u8 = @as([link_capacity]u8, @splat(empty_link)),
 
         pub fn init() Self {
             return .{};

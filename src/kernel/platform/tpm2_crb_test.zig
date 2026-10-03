@@ -31,11 +31,11 @@ const FakeIo = struct {
         return io;
     }
     fn set(self: *FakeIo, reg: crb.Reg, value: u32) void {
-        self.regs[@intFromEnum(reg) / 4] = value;
+        self.regs[@backingInt(reg) / 4] = value;
     }
     pub fn read(self: *FakeIo, reg: crb.Reg) u32 {
         self.reads += 1;
-        return self.regs[@intFromEnum(reg) / 4];
+        return self.regs[@backingInt(reg) / 4];
     }
     pub fn write(self: *FakeIo, reg: crb.Reg, value: u32) void {
         self.writes += 1;
