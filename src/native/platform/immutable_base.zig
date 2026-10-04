@@ -462,7 +462,7 @@ fn imageObjectId(slot_index: usize) u64 {
 
 test "immutable base persists signed read-only image activation and rollback metadata" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 61 };
     const state_signer = signing.SignerIdentity{
@@ -507,12 +507,12 @@ test "immutable base persists signed read-only image activation and rollback met
     try std.testing.expect(restarted.verifyActiveImage());
     try std.testing.expectEqual(@as(u8, 1), (try restarted.selectVerifiedBootImage()).slot_index);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "immutable base verification rejects mutable signer and measurement tampering" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 62 };
     const state_signer = signing.SignerIdentity{
@@ -544,5 +544,5 @@ test "immutable base verification rejects mutable signer and measurement tamperi
     try std.testing.expect(!manager.verifyActiveImage());
     try std.testing.expectError(error.ImageVerificationFailed, manager.selectVerifiedBootImage());
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }

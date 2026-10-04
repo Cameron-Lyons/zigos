@@ -239,19 +239,21 @@ pub fn proveBootedDriverPermissions(
     try std.testing.expect(storage_driver.allowsDma(storage_dma_range.base, DMA_PAGE_BYTES));
     try std.testing.expect(!storage_driver.allowsDma(storage_dma_range.base + storage_dma_range.length - DMA_TAIL_PROBE_OFFSET_BYTES, DMA_PAGE_BYTES));
 
-    device_broker.reset();
-    defer device_broker.reset();
-    try std.testing.expect(device_broker.publishPciController(storage_driver.device_id));
+    // This proof borrows the booted controller. Replacing its broker generation
+    // would invalidate the live storage session and its DMA authorization.
+    const broker_generation = device_broker.brokerGeneration(storage_driver.device_id) orelse return error.MissingBootedDriverBinding;
+    const broker_descriptor = try device_broker.describe(storage_driver.device_id);
 
     runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
     const descriptor = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 90);
     try std.testing.expectEqual(storage_driver.device_id, descriptor.device_id);
-    try std.testing.expectEqual(@as(u8, 0), descriptor.mmio_window_count);
+    try std.testing.expectEqual(broker_descriptor.mmio_window_count, descriptor.mmio_window_count);
 
     runtime.allowHostPointerSyscallsForTask(network_service_task.id);
     const cross_task = deviceDescribeResult(kernel_port, network_service_task.id, storage_driver.authority_capability_id, 91);
     try std.testing.expectEqual(abi.SyscallStatus.not_found, cross_task.status);
     try std.testing.expectEqual(abi.DenialReason.capability_missing, cross_task.denial_reason);
+    try std.testing.expectEqual(broker_generation, device_broker.brokerGeneration(storage_driver.device_id) orelse return error.MissingBootedDriverBinding);
 }
 
 pub fn proveBootedProcessIsolationVisibleEntitlementGates(

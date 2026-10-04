@@ -24,7 +24,6 @@ const extended1_edx_nx: u32 = 1 << 20;
 const extended1_edx_pages_1g: u32 = 1 << 26;
 const extended1_edx_long_mode: u32 = 1 << 29;
 const extended7_edx_invariant_tsc: u32 = 1 << 8;
-const hertz_per_megahertz: u64 = 1_000_000;
 
 pub const Registers = struct {
     cpuid_available: bool = false,
@@ -34,7 +33,6 @@ pub const Registers = struct {
     leaf15_eax: u32 = 0,
     leaf15_ebx: u32 = 0,
     leaf15_ecx: u32 = 0,
-    leaf16_eax: u32 = 0,
     leaf7_eax: u32 = 0,
     leaf7_ebx: u32 = 0,
     leaf7_ecx: u32 = 0,
@@ -156,6 +154,8 @@ pub fn decode(registers: Registers) Features {
 }
 
 fn decodeTscFrequency(registers: Registers) u64 {
+    // CPUID.15H reports the TSC/core-crystal ratio and nominal crystal rate.
+    // CPUID.16H is display information, not an architectural counter rate.
     if (registers.max_basic_leaf >= 0x15 and
         registers.leaf15_eax != 0 and
         registers.leaf15_ebx != 0 and
@@ -163,9 +163,6 @@ fn decodeTscFrequency(registers: Registers) u64 {
     {
         const scaled = std.math.mul(u64, registers.leaf15_ecx, registers.leaf15_ebx) catch return 0;
         return scaled / registers.leaf15_eax;
-    }
-    if (registers.max_basic_leaf >= 0x16 and registers.leaf16_eax != 0) {
-        return std.math.mul(u64, registers.leaf16_eax, hertz_per_megahertz) catch 0;
     }
     return 0;
 }
@@ -376,16 +373,60 @@ test "baseline rejects every missing required feature" {
     try std.testing.expect(isSupported(completeFeatures()));
 }
 
-test "TSC frequency prefers CPUID ratio and falls back to base MHz" {
+test "TSC frequency requires an advertised complete CPUID crystal ratio" {
     try std.testing.expectEqual(@as(u64, 2_400_000_000), decodeTscFrequency(.{
         .max_basic_leaf = 0x16,
         .leaf15_eax = 2,
         .leaf15_ebx = 200,
         .leaf15_ecx = 24_000_000,
-        .leaf16_eax = 1_800,
     }));
-    try std.testing.expectEqual(@as(u64, 1_800_000_000), decodeTscFrequency(.{
-        .max_basic_leaf = 0x16,
-        .leaf16_eax = 1_800,
+    try std.testing.expectEqual(@as(u64, 0), decodeTscFrequency(.{
+        .max_basic_leaf = 0x14,
+        .leaf15_eax = 2,
+        .leaf15_ebx = 200,
+        .leaf15_ecx = 24_000_000,
     }));
+}
+
+test "TSC rejects a leaf16 only processor base frequency" {
+    var registers = modernRegisters();
+    registers.leaf15_eax = 0;
+    registers.leaf15_ebx = 0;
+    registers.leaf15_ecx = 0;
+    // Later CPUID leaves cannot supply a replacement counter frequency.
+    try std.testing.expect(!@hasField(Registers, "leaf16_eax"));
+    const features = decode(registers);
+    try std.testing.expectEqual(@as(u64, 0), features.tsc_frequency_hz);
+    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(features).?);
+}
+
+test "TSC rejects each incomplete architectural frequency field" {
+    for (0..3) |missing_field| {
+        var registers = modernRegisters();
+        switch (missing_field) {
+            0 => registers.leaf15_eax = 0,
+            1 => registers.leaf15_ebx = 0,
+            2 => registers.leaf15_ecx = 0,
+            else => unreachable,
+        }
+        const features = decode(registers);
+        try std.testing.expectEqual(@as(u64, 0), features.tsc_frequency_hz);
+        try std.testing.expectEqual(MissingFeature.tsc, firstMissing(features).?);
+    }
+}
+
+test "TSC rejects a complete ratio that does not produce a usable frequency" {
+    var registers = modernRegisters();
+    registers.leaf15_eax = std.math.maxInt(u32);
+    registers.leaf15_ebx = 1;
+    registers.leaf15_ecx = 1;
+    const features = decode(registers);
+    try std.testing.expectEqual(@as(u64, 0), features.tsc_frequency_hz);
+    try std.testing.expectEqual(MissingFeature.tsc, firstMissing(features).?);
+}
+
+test "a valid clock never relaxes the mandatory XSAVES floor" {
+    var features = completeFeatures();
+    features.xsaves = false;
+    try std.testing.expectEqual(MissingFeature.xsaves, firstMissing(features).?);
 }

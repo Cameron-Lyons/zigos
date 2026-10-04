@@ -113,8 +113,8 @@ pub const StorageCore = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         checkpoint_store: *CheckpointStore,
-    ) StorageCore {
-        checkpoint_store.resetPreparedState();
+    ) error{VolumeOperationBusy}!StorageCore {
+        if (!checkpoint_store.resetPreparedState()) return error.VolumeOperationBusy;
         const loaded_from_volume = checkpoint_store.loadPreparedStateFromAttachedVolume();
         return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }
@@ -239,6 +239,12 @@ pub const StorageCore = struct {
     pub fn commit(self: *Service, workspace_id: anytype, tick: u64) workspace.Error!u32 {
         const generation = try self.workspaces.commit(workspaceId(workspace_id), tick);
         if (self.deferred_checkpoint_count != 0) self.deferred_checkpoint_count -= 1;
+        self.noteMutation(true);
+        return generation;
+    }
+
+    pub fn replaceEntries(self: *Service, workspace_id: anytype, target_entries: []const workspace.Entry, tick: u64) workspace.Error!u32 {
+        const generation = try self.workspaces.replaceEntries(workspaceId(workspace_id), target_entries, tick);
         self.noteMutation(true);
         return generation;
     }
@@ -529,8 +535,12 @@ pub const StoragePort = struct {
         version_record: *const object_store.VersionRecord,
         transfer: SharedPayloadReadTransfer,
     ) (AuthorityError || SharedPayloadError)!object_store.PayloadTransferSummary {
-        _ = try self.requireStorageAuthority(authority, null, .read);
-        return self.core.versionPayloadIntoSharedMemory(version_record, transfer);
+        const storage_authority = try self.requireStorageAuthority(authority, null, .read);
+        // Caller supplied record fields cannot choose a sibling blob slot or
+        // relabel its object. Bind both authority and bytes to the stored ID.
+        const stored_version = self.core.version(version_record.id) orelse return error.VersionNotFound;
+        try self.requireObjectTarget(authority, storage_authority, stored_version.object_id, .read);
+        return self.core.versionPayloadIntoSharedMemory(stored_version, transfer);
     }
 
     pub fn createWorkspace(self: *StoragePort, authority: AuthorityContext, request: workspace.CreateRequest) (AuthorityError || workspace.Error)!*workspace.WorkspaceRecord {
@@ -583,7 +593,7 @@ pub const StoragePort = struct {
         identity: signing.SignerIdentity,
     ) (AuthorityError || workspace.Error)!*workspace.SnapshotRecord {
         const key = workspaceId(workspace_id);
-        _ = try self.requireStorageAuthority(authority, key, .read);
+        _ = try self.requireAggregateAuthority(authority, key, .read);
         return self.core.snapshot(key, label, identity);
     }
 
@@ -750,7 +760,7 @@ pub const StoragePort = struct {
         query: object_store.ObjectQuery,
         output: []object_store.ObjectQueryResult,
     ) AuthorityError![]const object_store.ObjectQueryResult {
-        _ = try self.requireStorageAuthority(authority, null, .read);
+        _ = try self.requireAggregateAuthority(authority, null, .read);
         return self.core.queryObjects(query, output);
     }
 
@@ -781,8 +791,9 @@ pub const StoragePort = struct {
         access: Access,
     ) (AuthorityError || workspace.Error)!workspace.Entry {
         const id = ids.workspace(workspace_id);
-        _ = try self.requireStorageAuthority(authority, id, access);
+        const storage_authority = try self.requireStorageAuthority(authority, id, access);
         const entry = try self.core.resolve(id, path);
+        try self.requireObjectTarget(authority, storage_authority, entry.object_id, access);
         if (!self.core.workspaceHasAccess(id, .{
             .principal_id = authority.principal,
             .object_id = entry.object_id,
@@ -797,7 +808,7 @@ pub const StoragePort = struct {
     // Checking a workspace capability does not authorize any entry name.
     // Callers must still use openEntry for each object they expose.
     pub fn requireWorkspaceCapability(self: *const StoragePort, authority: AuthorityContext, workspace_id: u64, access: Access) AuthorityError!void {
-        _ = try self.requireStorageAuthority(authority, ids.workspace(workspace_id), access);
+        _ = try self.requireAggregateAuthority(authority, ids.workspace(workspace_id), access);
     }
 
     pub fn requireDocumentWrite(
@@ -818,8 +829,45 @@ pub const StoragePort = struct {
         access: Access,
     ) AuthorityError!*const capability.Capability {
         const authority = try self.requireStorageAuthority(authority_context, null, access);
-        if (authority.target.kind == .object and authority.target.id != object_id.raw()) return error.PermissionDenied;
+        try self.requireObjectTarget(authority_context, authority, object_id, access);
         if (authority.target.kind != .object and authority.target.kind != .service) return error.CapabilityRequired;
+        return authority;
+    }
+
+    inline fn requireObjectTarget(
+        self: *const StoragePort,
+        authority_context: AuthorityContext,
+        authority: *const capability.Capability,
+        object_id: ids.ObjectId,
+        access: Access,
+    ) AuthorityError!void {
+        if (authority.target.kind == .object and authority.target.id != object_id.raw()) {
+            return self.denyStorageAuthorityTarget(
+                authority_context,
+                if (access == .write) .object_write else .object_read,
+                authority,
+                .invalid_target,
+                error.PermissionDenied,
+            );
+        }
+    }
+
+    inline fn requireAggregateAuthority(
+        self: *const StoragePort,
+        authority_context: AuthorityContext,
+        workspace_id: ?ids.WorkspaceId,
+        access: Access,
+    ) AuthorityError!*const capability.Capability {
+        const authority = try self.requireStorageAuthority(authority_context, workspace_id, access);
+        if (authority.target.kind == .object) {
+            return self.denyStorageAuthorityTarget(
+                authority_context,
+                if (access == .write) .object_write else .object_read,
+                authority,
+                .invalid_target,
+                error.PermissionDenied,
+            );
+        }
         return authority;
     }
 

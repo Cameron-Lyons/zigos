@@ -5,6 +5,7 @@ const object_store = @import("object_store.zig");
 const signing = @import("../core/signing.zig");
 const storage_service = @import("storage_service.zig");
 const object_signer = @import("sealed_object_signer.zig");
+const operation_guard = @import("../platform/operation_guard.zig");
 
 pub const Request = RequestFor(object_signer.Signer);
 pub const VerificationRequest = RequestFor(signing.SignerIdentity);
@@ -17,6 +18,7 @@ fn RequestFor(comptime Signer: type) type {
         payload: []const u8,
         signer: Signer,
         tick: u64,
+        publication_guard: ?*const operation_guard.Guard = null,
     };
 }
 
@@ -60,7 +62,7 @@ pub const Session = struct {
 
     fn saveImpl(self: *Session, storage: *storage_service.Service, request: anytype) !Receipt {
         const uses_vault = @TypeOf(request.signer) == object_signer.Signer;
-        if (uses_vault) try request.signer.validate(request.tick);
+        var current_ticks = try validatePublication(request, request.tick);
         try storage.requireDurableBoundary();
         const workspace_id = ids.workspace(request.workspace_id);
         const entry = try storage.resolve(workspace_id, request.path);
@@ -74,7 +76,10 @@ pub const Session = struct {
             if (pending.workspace_id != request.workspace_id or pending.object_id != object_id or
                 !std.mem.eql(u8, &pending.path_digest, &path_digest)) return error.PendingDocumentSave;
             if (entry.version_id.raw() != pending.version_id or expected_version != pending.base_version_id) return error.DocumentChanged;
+            try requireCurrentEntry(storage, request, entry.object_id.raw(), pending.version_id);
             const generation = try storage.checkpointDurable();
+            current_ticks = try validatePublication(request, current_ticks);
+            try requireCurrentEntry(storage, request, entry.object_id.raw(), pending.version_id);
             // Keep the token until the entire requested save succeeds, including
             // when the user continues editing after a previous flush failure.
             if (std.mem.eql(u8, &pending.request_digest, &request_digest)) {
@@ -91,11 +96,18 @@ pub const Session = struct {
         // conflict token is that workspace's pointer, while the object store
         // serializes all versions in one append-only history. Appending to its
         // current head does not move any other workspace's pointer.
-        const parent = storage.latestVersion(entry.object_id) orelse return error.ObjectMissing;
+        const parent_id = (storage.latestVersion(entry.object_id) orelse return error.ObjectMissing).id;
         const metadata = if (uses_vault)
-            try request.signer.signMetadata(request.path, request.payload, request.tick)
+            try request.signer.signMetadata(request.path, request.payload, current_ticks)
         else
-            try object_store.signMetadata(request.signer, request.path, "text/markdown", .document, request.payload, request.tick);
+            try object_store.signMetadata(request.signer, request.path, "text/markdown", .document, request.payload, current_ticks);
+
+        // Signing can suspend for hardware I/O. Retain only IDs across that
+        // boundary, then reacquire both the workspace pointer and object head.
+        current_ticks = try validatePublication(request, current_ticks);
+        try requireCurrentEntry(storage, request, object_id, expected_version);
+        const current_parent = storage.latestVersion(entry.object_id) orelse return error.ObjectMissing;
+        if (!current_parent.id.eql(parent_id)) return error.DocumentChanged;
 
         {
             // The object bytes and workspace pointer belong to one checkpoint.
@@ -112,10 +124,10 @@ pub const Session = struct {
                 .object_type = .document,
                 .payload = request.payload,
                 .metadata = metadata,
-                .parent_version_id = parent.id,
+                .parent_version_id = parent_id,
             });
             try storage.stagePut(workspace_id, request.path, edited.object_id, edited.version_id, .document);
-            _ = try storage.commit(workspace_id, request.tick);
+            _ = try storage.commit(workspace_id, current_ticks);
             self.pending = .{
                 .workspace_id = request.workspace_id,
                 .object_id = object_id,
@@ -127,11 +139,29 @@ pub const Session = struct {
             };
         }
         const generation = try storage.checkpointDurable();
+        current_ticks = try validatePublication(request, current_ticks);
+        try requireCurrentEntry(storage, request, object_id, self.pending.?.version_id);
         const result = receipt(self.pending.?, generation);
         self.pending = null;
         return result;
     }
 };
+
+fn validatePublication(request: anytype, observed_ticks: u64) !u64 {
+    var current_ticks = try operation_guard.currentTicks(request.publication_guard, observed_ticks);
+    if (@TypeOf(request.signer) == object_signer.Signer) {
+        if (request.signer.key.authority) |authority|
+            current_ticks = try operation_guard.currentTicks(authority.publication_guard, current_ticks);
+        try request.signer.validate(current_ticks);
+    }
+    return current_ticks;
+}
+
+fn requireCurrentEntry(storage: *storage_service.Service, request: anytype, object_id: u64, version_id: u64) !void {
+    const entry = storage.resolve(ids.workspace(request.workspace_id), request.path) catch return error.DocumentChanged;
+    if (entry.object_type != .document or entry.object_id.raw() != object_id or entry.version_id.raw() != version_id)
+        return error.DocumentChanged;
+}
 
 fn receipt(pending: Pending, generation: u64) Receipt {
     return .{

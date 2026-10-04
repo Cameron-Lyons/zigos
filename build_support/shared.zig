@@ -28,6 +28,7 @@ pub const KernelArtifact = struct {
     output_file: std.Build.LazyPath,
     boot_payload: std.Build.LazyPath,
     install_step: *std.Build.Step,
+    debug_install_step: *std.Build.Step,
     output_path: std.Build.LazyPath,
     kernel_role: KernelRole,
     bootloader_source_path: []const u8,
@@ -38,3 +39,21 @@ pub const native_store_image_path = "build/native-store.img";
 pub const native_store_smoke_image_path = "build/native-store-smoke.img";
 pub const native_store_spec_image_path = "build/native-store-spec.img";
 pub const native_store_size_mib = "8";
+
+pub fn addEfiIsoEpochArg(b: *std.Build, command: *std.Build.Step.Run) void {
+    const name = "source-date-epoch";
+    const default_epoch = "315532800";
+    // Declare the option once even when several EFI images share this Build.
+    // The pinned wrapper translates SOURCE_DATE_EPOCH into this configuration
+    // input, which invalidates both the configure cache and the media Run step.
+    const epoch = if (!b.available_options_map.contains(name))
+        b.option([]const u8, name, "EFI media timestamp in decimal Unix seconds (defaults to 1980-01-01 UTC)") orelse default_epoch
+    else if (b.user_input_options.get(name)) |value|
+        switch (value) {
+            .scalar => |scalar| scalar,
+            else => default_epoch,
+        }
+    else
+        default_epoch;
+    command.addArg(epoch);
+}

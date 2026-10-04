@@ -11,14 +11,12 @@ const nvme_hw = @import("../drivers/nvme_hw.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
 const smp = @import("../smp.zig");
 const event_wake = @import("../event_wake.zig");
-const x86 = @import("../../arch/x86.zig");
 
 const GateHandler = *const fn () callconv(.c) void;
 
 const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
-const DEVICE_NOT_AVAILABLE_VECTOR: u8 = 7;
 const PAGE_FAULT_VECTOR: u32 = 14;
 const USERSPACE_YIELD_VECTOR: u8 = 129;
 const REQUESTED_PRIVILEGE_LEVEL_MASK: usize = 0x3;
@@ -168,13 +166,19 @@ pub export fn isrHandler(regs: *Registers) void {
     interrupt_context.enter();
     defer interrupt_context.leave();
     const vector = interruptVector(regs);
-    if (vector == DEVICE_NOT_AVAILABLE_VECTOR) {
-        x86.clearTaskSwitched();
-        return;
-    }
+    // Owned xstate never lazily arms TS. Unexpected #NM follows the registered
+    // user containment handler or the ordinary fatal kernel exception path.
     if (handlerForVector(vector)) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
+        // Device handlers only latch/acknowledge work. Return an interrupted
+        // user to the runtime owner so that deferred service can make receivers
+        // runnable before the next scheduler tick. Never interrupt kernel work.
+        if (frameOriginatesFromUserspace(frame.cs) and
+            (vector == timer.INTERRUPT_VECTOR or deviceWorkPending(vector)))
+        {
+            if (runtime_preemption) |hook| hook(frame);
+        }
         return;
     }
 
@@ -191,10 +195,36 @@ pub export fn isrHandler(regs: *Registers) void {
 pub const InterruptFrame = Registers;
 pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
-var timer_preemption: ?InterruptHandler = null;
+var runtime_preemption: ?InterruptHandler = null;
 
-pub fn setTimerPreemption(handler: InterruptHandler) void {
-    timer_preemption = handler;
+pub fn setRuntimePreemption(handler: InterruptHandler) void {
+    runtime_preemption = handler;
+}
+
+fn deviceWorkPending(vector: usize) bool {
+    return switch (vector) {
+        intel_i225_hw.INTERRUPT_VECTOR => event_wake.peek().network,
+        // NVMe also raises a deferred-work latch. Preserve the same owner
+        // boundary without processing completions in this interrupt hook.
+        nvme_hw.INTERRUPT_VECTOR => event_wake.peek().nvme,
+        xhci_hw.INTERRUPT_VECTOR => event_wake.peek().xhci,
+        else => false,
+    };
+}
+
+// Hosted integration fixtures use the real ISR dispatcher with registered
+// latch-only handlers; preserve its shared tables without fake device MMIO.
+pub fn withTestHandlers(context: anytype, callback: anytype) !void {
+    if (!@import("builtin").is_test) @compileError("ISR fixture state is test-only");
+    const saved_exceptions = exception_handlers;
+    const saved_external = external_handlers;
+    const saved_preemption = runtime_preemption;
+    defer {
+        exception_handlers = saved_exceptions;
+        external_handlers = saved_external;
+        runtime_preemption = saved_preemption;
+    }
+    try callback(context);
 }
 
 const external_handler_vectors = [_]u8{
@@ -273,11 +303,10 @@ fn doubleFaultInterrupt(frame: *InterruptFrame) void {
     );
 }
 
-fn timerInterrupt(frame: *InterruptFrame) void {
+fn timerInterrupt(_: *InterruptFrame) void {
     timer.handleInterrupt();
     event_wake.raise(.timer);
     event_wake.raise(.scheduler);
-    if (timer_preemption) |hook| hook(frame);
 }
 
 fn i225Interrupt(_: *InterruptFrame) void {
@@ -376,7 +405,9 @@ fn disableLegacyPic() void {
 }
 
 comptime {
-    if (@sizeOf(@TypeOf(exception_handlers)) + @sizeOf(@TypeOf(external_handlers)) > HANDLER_STORAGE_SIZE_CEILING_BYTES) {
+    if (@sizeOf(@TypeOf(exception_handlers)) + @sizeOf(@TypeOf(external_handlers)) +
+        @sizeOf(@TypeOf(runtime_preemption)) > HANDLER_STORAGE_SIZE_CEILING_BYTES)
+    {
         @compileError("interrupt handler storage exceeds its compact size ceiling");
     }
     for (external_handler_vectors, 0..) |vector, index| {
@@ -398,4 +429,28 @@ comptime {
     {
         @compileError("x86-64 interrupt privilege-origin decoding diverged from the GDT selectors");
     }
+}
+
+test "owned state ISR dispatches registered device-not-available and ordinary handlers" {
+    const Handler = struct {
+        var called: usize = 0;
+        fn receive(frame: *InterruptFrame) void {
+            if (!interrupt_context.active()) @panic("registered ISR handler has no interrupt context");
+            called += 1;
+            frame.eax = 0xfeed;
+        }
+    };
+    const previous_handlers = exception_handlers;
+    defer exception_handlers = previous_handlers;
+    for ([_]u8{ 7, 13 }) |vector| {
+        registerHandler(vector, Handler.receive);
+        var frame = std.mem.zeroes(Registers);
+        frame.int_no = vector;
+        frame.cs = gdt.USER_CODE_SEG | USER_PRIVILEGE_LEVEL;
+        frame.eip = 0x4000_1008;
+        isrHandler(&frame);
+        try std.testing.expectEqual(@as(usize, 0xfeed), frame.eax);
+        try std.testing.expect(!interrupt_context.active());
+    }
+    try std.testing.expectEqual(@as(usize, 2), Handler.called);
 }

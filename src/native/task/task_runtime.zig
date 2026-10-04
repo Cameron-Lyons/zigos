@@ -48,8 +48,8 @@ pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
-pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 604_808;
-pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 68_880;
+pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 604_936;
+pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_008;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_RUNTIME_SIZE_CEILING_BYTES
 else
@@ -100,6 +100,27 @@ pub const TaskRetirementSink = struct {
 
     pub fn eql(self: TaskRetirementSink, other: TaskRetirementSink) bool {
         return self.context == other.context and self.retire == other.retire;
+    }
+};
+
+// Scoped borrows keep resolved records alive through callbacks and user dispatch.
+// They live outside TaskRecord and checkpoints, preserving both wire metadata
+// and the 424-byte record. Runtime ownership is confined to the BSP.
+pub const TaskBorrow = struct {
+    runtime: *Runtime,
+    handle: TaskHandle,
+    task_id: u64,
+
+    pub fn release(self: *TaskBorrow) void {
+        const slot = self.runtime.tasks.getByHandle(self.handle) orelse
+            native_util.impossibleByInvariant("borrowed task incarnation remains resident");
+        if (self.task_id == 0 or slot.task.id != self.task_id or
+            self.runtime.task_borrow_counts[self.handle.slotIndex()] == 0)
+        {
+            native_util.impossibleByInvariant("task borrow releases its exact incarnation once");
+        }
+        self.runtime.task_borrow_counts[self.handle.slotIndex()] -= 1;
+        self.task_id = 0;
     }
 };
 
@@ -290,6 +311,8 @@ pub const Runtime = struct {
     task_initial_component_label_index: TaskInitialComponentLabelIndex = TaskInitialComponentLabelIndex.init(),
     task_state_counts: [TASK_STATE_COUNT]TaskStateCount = @as([TASK_STATE_COUNT]TaskStateCount, @splat(0)),
     task_lifecycle_generation: u64 = 1,
+    task_borrow_counts: [MAX_TASKS]u8 = @as([MAX_TASKS]u8, @splat(0)),
+    lifecycle_transition_active: bool = false,
     task_cold: TaskColdBacking = if (heap_backed_task_cold) null else @as([MAX_TASKS]TaskColdRecord, @splat(zeroTaskCold())),
     address_spaces: AddressSpaceBacking = if (heap_backed_address_spaces) null else model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
@@ -429,8 +452,13 @@ pub const Runtime = struct {
     }
 
     pub fn reset(self: *Runtime) void {
+        if (self.hasTaskBorrows() or self.lifecycle_transition_active)
+            native_util.impossibleByInvariant("runtime reset follows every task borrow and lifecycle callback");
+        self.lifecycle_transition_active = true;
+        defer self.lifecycle_transition_active = false;
         const retirements = self.captureAddressSpaceRetirements(.runtime_reset);
         self.retireUnretainedTasks(std.bit_set.Static(MAX_TASKS).empty);
+        if (self.hasTaskBorrows()) native_util.impossibleByInvariant("reset callbacks return every scoped task borrow");
         // Issuance cursors belong to this runtime's lifetime, not its task set.
         self.tasks.reset();
         self.task_owner_index.reset();
@@ -478,7 +506,10 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) error{NoSpaceLeft}!void {
+    pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) error{ NoSpaceLeft, TaskRuntimeBorrowed }!void {
+        if (self.hasTaskBorrows() or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
+        self.lifecycle_transition_active = true;
+        defer self.lifecycle_transition_active = false;
         const task_cold = if (state.task_count == 0) null else try self.ensureTaskColdRecords();
         const previous_task_claimed_count = self.tasks.claimedCount();
         const restored_address_spaces = if (state.address_space_count == 0) null else try self.ensureAddressSpaceArena();
@@ -513,6 +544,7 @@ pub const Runtime = struct {
         }
         const retirements = self.captureAddressSpaceRetirements(.snapshot_restore);
         self.retireUnretainedTasks(retained);
+        if (self.hasTaskBorrows()) native_util.impossibleByInvariant("restore callbacks return every scoped task borrow");
         self.resetForSnapshotRestore();
         if (state.task_count == 0 and heap_backed_task_cold) {
             self.releaseTaskColdRecords();
@@ -581,6 +613,8 @@ pub const Runtime = struct {
         for (0..self.tasks.claimedCount()) |index| {
             const slot = self.tasks.slotAt(index);
             if (!slot.in_use or retained.isSet(index) or slot.task.state == .terminated) continue;
+            var borrow = self.borrowResolvedTask(&slot.task);
+            defer borrow.release();
             self.removeInitialComponentLabelIndex(index, &slot.task);
             self.setTaskState(&slot.task, .terminated);
             self.notifyTaskRetirement(&slot.task, 0);
@@ -597,7 +631,8 @@ pub const Runtime = struct {
         }
     }
 
-    pub fn rebuildIndexes(self: *Runtime) error{HandleGenerationExhausted}!void {
+    pub fn rebuildIndexes(self: *Runtime) error{ HandleGenerationExhausted, TaskRuntimeBorrowed }!void {
+        if (self.hasTaskBorrows() or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
         try self.tasks.rebuildPrimaryIndex();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
@@ -628,6 +663,7 @@ pub const Runtime = struct {
     }
 
     pub fn createTask(self: *Runtime, request: TaskCreateRequest) Error!*TaskRecord {
+        if (self.lifecycle_transition_active) return error.TaskTableFull;
         const requested_userspace_image = if (request.userspace_image) |image|
             image.*
         else
@@ -637,7 +673,7 @@ pub const Runtime = struct {
         else
             ExecutableImageSpec{};
         const task_id = self.nextReservableTaskId() orelse return error.TaskTableFull;
-        const slot_index = self.tasks.reserveIndex(task_id) orelse return error.TaskTableFull;
+        const slot_index = self.reserveTaskSlot(task_id) orelse return error.TaskTableFull;
         errdefer _ = self.tasks.removeIndex(slot_index);
         const task_cold = try self.ensureTaskColdRecords();
 
@@ -747,6 +783,20 @@ pub const Runtime = struct {
         return handle;
     }
 
+    pub fn borrowResolvedTask(self: *Runtime, task: *const TaskRecord) TaskBorrow {
+        const index: usize = task.arena_slot_index;
+        const slot = self.tasks.slotAtConst(index);
+        if (!slot.in_use or &slot.task != task or self.task_borrow_counts[index] == std.math.maxInt(u8))
+            native_util.impossibleByInvariant("resolved task borrows are resident and bounded");
+        self.task_borrow_counts[index] += 1;
+        return .{ .runtime = self, .handle = self.tasks.handleForClaimedIndex(index), .task_id = task.id };
+    }
+
+    fn hasTaskBorrows(self: *const Runtime) bool {
+        for (self.task_borrow_counts) |count| if (count != 0) return true;
+        return false;
+    }
+
     pub fn findByHandle(self: *Runtime, handle: TaskHandle, expected_task_id: u64) ?*TaskRecord {
         const slot = self.tasks.getByHandle(handle) orelse return null;
         if (slot.task.id != expected_task_id) return null;
@@ -844,11 +894,51 @@ pub const Runtime = struct {
     }
 
     fn nextReservableTaskId(self: *const Runtime) ?u64 {
-        if (self.taskCount() >= MAX_TASKS or self.next_task_id == 0) return null;
+        if (self.next_task_id == 0) return null;
         if (self.indexedTaskSlotConst(self.next_task_id) != null) {
             native_util.impossibleByInvariant("next task id must be monotonic and unused");
         }
         return self.next_task_id;
+    }
+
+    fn reserveTaskSlot(self: *Runtime, task_id: u64) ?usize {
+        // Reuse history only when reservation fails. Removing an exhausted
+        // generational slot may not make room, so retry with another candidate.
+        while (true) {
+            if (self.tasks.reserveIndex(task_id)) |index| return index;
+            const index = self.oldestReclaimableTask() orelse return null;
+            const task = &self.tasks.slotAt(index).task;
+            if (!self.task_owner_index.remove(taskOwnerIndexKey(task.owner), index))
+                native_util.impossibleByInvariant("retired task remains in its owner index until reclamation");
+            self.removeInitialComponentLabelIndex(index, task);
+            self.task_state_counts[taskStateIndex(.terminated)] -= 1;
+            resetTaskCold(&self.taskColdRecords().?[index]);
+            if (!self.tasks.removeIndex(index))
+                native_util.impossibleByInvariant("reclamation removes a resident retired task");
+            self.advanceTaskLifecycleGeneration();
+        }
+    }
+
+    fn oldestReclaimableTask(self: *const Runtime) ?usize {
+        var oldest: ?usize = null;
+        var oldest_tick: u64 = std.math.maxInt(u64);
+        for (0..self.tasks.claimedCount()) |index| {
+            const slot = self.tasks.slotAtConst(index);
+            const task = &slot.task;
+            // Services/session bindings retain raw pointers for their lifetime.
+            // An app is retired only after all synchronous sinks have returned.
+            if (!slot.in_use or task.component_class != .app_component or task.state != .terminated or
+                self.task_borrow_counts[index] != 0 or task.execution_component_count != 0 or
+                task.capability_count != 0 or self.findAddressSpaceConst(task.address_space_id) != null) continue;
+            const tick = if (task.latestAuditEvent()) |event| event.tick else 0;
+            if (oldest == null or tick < oldest_tick or
+                (tick == oldest_tick and task.id < self.tasks.slotAtConst(oldest.?).task.id))
+            {
+                oldest = index;
+                oldest_tick = tick;
+            }
+        }
+        return oldest;
     }
 
     fn advanceNextTaskIdFrom(self: *Runtime, task_id: u64) void {
@@ -1185,6 +1275,8 @@ pub const Runtime = struct {
         if (builtin.mode == .debug) _ = self.taskHandleForResolved(task);
         const slot_index: usize = task.arena_slot_index;
         if (task.state == .terminated) return false;
+        var borrow = self.borrowResolvedTask(task);
+        defer borrow.release();
         const retired_address_space_id = task.address_space_id;
 
         self.removeInitialComponentLabelIndex(slot_index, task);
@@ -2830,4 +2922,209 @@ test "initial component label lookup is indexed across lifecycle and restore" {
 
     try std.testing.expect(try restored.terminateTask(first_task_id, 24));
     try std.testing.expect(restored.findByInitialComponentLabel("indexed-service") == null);
+}
+
+test "task reclamation keeps recent history and clears every reused index and cold slot" {
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const first = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 1 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 100, .memory_bytes = TEST_MINIMAL_MEMORY_BYTES, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        .initial_component = .{ .label = "old-history-entry" },
+    });
+    const first_id = first.id;
+    const first_process_id = first.process_id;
+    const first_address_space_id = first.address_space_id;
+    const first_handle = runtime.taskHandleForResolved(first);
+    const first_slot = first.arena_slot_index;
+    try runtime.grantCapability(first_id, 77);
+    try std.testing.expect(runtime.terminateResolvedTask(first, 1));
+    for (1..MAX_TASKS) |index| {
+        const task = try createTaskIdTestTask(&runtime, @intCast(index + 1));
+        try std.testing.expect(runtime.terminateResolvedTask(task, @intCast(index + 1)));
+    }
+    try std.testing.expect(runtime.find(first_id) != null);
+    const replacement = try createTaskIdTestTask(&runtime, 1001);
+    try std.testing.expectEqual(first_slot, replacement.arena_slot_index);
+    try std.testing.expect(replacement.id > first_id and replacement.process_id > first_process_id);
+    try std.testing.expect(replacement.address_space_id > first_address_space_id);
+    try std.testing.expect(runtime.find(first_id) == null);
+    try std.testing.expect(runtime.findByHandle(first_handle, first_id) == null);
+    try std.testing.expect(runtime.findByOwner(.{ .kind = .app, .serial = 1 }) == null);
+    try std.testing.expect(runtime.findByInitialComponentLabel("old-history-entry") == null);
+    try std.testing.expect(runtime.findAddressSpaceConst(first_address_space_id) == null);
+    try std.testing.expectEqual(replacement.id, runtime.findByOwner(replacement.owner).?.id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.countTasksInState(.active));
+    try std.testing.expectEqual(MAX_TASKS - 1, runtime.countTasksInState(.terminated));
+    try std.testing.expectEqual(@as(u8, 0), replacement.audit_count);
+    try std.testing.expectEqual(@as(u8, 1), replacement.provenance_count);
+    try std.testing.expectEqual(@as(u8, 0), replacement.capability_count);
+    try std.testing.expectEqual(@as(u64, 1), replacement.capabilityGeneration());
+    try std.testing.expect(std.mem.allEqual(u64, &taskCold(replacement).capability_ids, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &taskCold(replacement).dense_of_stable, model.CSPACE_SLOT_EMPTY));
+    try std.testing.expect(std.meta.eql(AuditEvent{ .kind = .created }, taskCold(replacement).audit_trail[0]));
+    try std.testing.expect(std.meta.eql(TaskProvenanceRecord{}, taskCold(replacement).provenance_trail[1]));
+    runtime.debugAssertIndexIntegrity();
+    try std.testing.expect(runtime.terminateResolvedTask(replacement, 1001));
+    for (0..MAX_TASKS * 3) |index| {
+        const task = try createTaskIdTestTask(&runtime, @intCast(index + 2000));
+        try std.testing.expect(runtime.terminateResolvedTask(task, @intCast(index + 2000)));
+    }
+    try std.testing.expectEqual(MAX_TASKS, runtime.taskCount());
+    try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.active));
+    runtime.debugAssertIndexIntegrity();
+}
+
+test "task reclamation respects nested borrows and exhausted generations" {
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const first = try createTaskIdTestTask(&runtime, 1);
+    const first_id = first.id;
+    runtime.tasks.slot_generations[first.arena_slot_index] = indexed_arena.MAX_HANDLE_GENERATION;
+    const handle = runtime.taskHandleForResolved(first);
+    var outer = runtime.borrowResolvedTask(first);
+    var inner = runtime.borrowResolvedTask(first);
+    try std.testing.expect(runtime.terminateResolvedTask(first, 0));
+    for (1..MAX_TASKS) |index| {
+        const task = try createTaskIdTestTask(&runtime, @intCast(index + 1));
+        try std.testing.expect(runtime.terminateResolvedTask(task, @intCast(index + 1)));
+    }
+    var snapshot = Runtime.initSnapshot();
+    runtime.writeSnapshot(&snapshot);
+    const generation = runtime.taskLifecycleGeneration();
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.restoreFromSnapshot(&snapshot));
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.rebuildIndexes());
+    try std.testing.expectEqual(generation, runtime.taskLifecycleGeneration());
+    outer.release();
+    const while_borrowed = try createTaskIdTestTask(&runtime, 1001);
+    try std.testing.expectEqual(first, runtime.findByHandle(handle, first_id).?);
+    try std.testing.expect(runtime.terminateResolvedTask(while_borrowed, 1001));
+    inner.release();
+    const replacement = try createTaskIdTestTask(&runtime, 1002);
+    try std.testing.expect(runtime.find(first_id) == null);
+    try std.testing.expect(runtime.findByHandle(handle, first_id) == null);
+    try std.testing.expect(replacement.arena_slot_index != handle.slotIndex());
+    try std.testing.expect(replacement.id > while_borrowed.id);
+    runtime.debugAssertIndexIntegrity();
+}
+
+test "task reclamation preserves session service suspended and live records" {
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    var request = TaskCreateRequest{
+        .owner = .{ .kind = .service, .serial = 1 },
+        .component_class = .service_component,
+        .budget = .{ .cpu_time_ticks = 100, .memory_bytes = TEST_MINIMAL_MEMORY_BYTES, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+    };
+    const service = try runtime.createTask(request);
+    const service_id = service.id;
+    try std.testing.expect(runtime.terminateResolvedTask(service, 0));
+    request.component_class = .session_manager;
+    const session = try runtime.createTask(request);
+    const session_id = session.id;
+    try std.testing.expect(runtime.terminateResolvedTask(session, 0));
+    const suspended = try createTaskIdTestTask(&runtime, 3);
+    const suspended_id = suspended.id;
+    try std.testing.expect(runtime.suspendResolvedTask(suspended, 0));
+    for (3..MAX_TASKS) |index| _ = try createTaskIdTestTask(&runtime, @intCast(index + 1));
+    try std.testing.expectError(error.TaskTableFull, createTaskIdTestTask(&runtime, 1001));
+    const victim = runtime.find(4).?;
+    try std.testing.expect(runtime.terminateResolvedTask(victim, 1));
+    _ = try createTaskIdTestTask(&runtime, 1002);
+    try std.testing.expectEqual(service, runtime.find(service_id).?);
+    try std.testing.expectEqual(session, runtime.find(session_id).?);
+    try std.testing.expectEqual(suspended, runtime.find(suspended_id).?);
+    try std.testing.expectEqual(TaskState.suspended, suspended.state);
+    try std.testing.expectEqual(@as(usize, 2), runtime.countTasksInState(.terminated));
+    runtime.debugAssertIndexIntegrity();
+}
+
+test "task reclamation pins retirement callbacks that create under pressure" {
+    const Callback = struct {
+        runtime: *Runtime,
+        task: *TaskRecord,
+        task_id: u64,
+        address_space_id: u64,
+        notifications: usize = 0,
+
+        fn churn(self: *@This()) void {
+            for (0..MAX_TASKS + 3) |index| {
+                const child = createTaskIdTestTask(self.runtime, @intCast(1000 + index)) catch @panic("callback creation retains capacity");
+                if (!(self.runtime.terminateResolvedTask(child, @intCast(1000 + index)))) @panic("task reclamation fixture invariant failed");
+                if (!(self.task.id == self.task_id)) @panic("task reclamation fixture invariant failed");
+                if (!(self.runtime.find(self.task_id).? == self.task)) @panic("task reclamation fixture invariant failed");
+            }
+            self.notifications += 1;
+        }
+
+        fn retire(context: *anyopaque, event: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event.task_id != self.task_id) return;
+            if (!(event.capability_ids.len == 1 and event.capability_ids[0] == 77)) @panic("task reclamation fixture invariant failed");
+            self.churn();
+            if (!(event.capability_ids[0] == 77)) @panic("task reclamation fixture invariant failed");
+        }
+
+        pub fn retireAddressSpace(self: *@This(), event: AddressSpaceRetirementEvent) void {
+            if (event.address_space_id != self.address_space_id) return;
+            if (!(self.runtime.findAddressSpaceConst(self.address_space_id) == null)) @panic("task reclamation fixture invariant failed");
+            self.churn();
+        }
+    };
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const task = try createTaskIdTestTask(&runtime, 1);
+    const task_id = task.id;
+    const handle = runtime.taskHandleForResolved(task);
+    try runtime.grantCapability(task_id, 77);
+    for (1..MAX_TASKS) |index| {
+        const child = try createTaskIdTestTask(&runtime, @intCast(index + 1));
+        try std.testing.expect(runtime.terminateResolvedTask(child, @intCast(index + 1)));
+    }
+    var callback = Callback{ .runtime = &runtime, .task = task, .task_id = task_id, .address_space_id = task.address_space_id };
+    const task_sink = TaskRetirementSink{ .context = &callback, .retire = Callback.retire };
+    const address_sink = AddressSpaceRetirementSink.init(Callback, &callback);
+    try std.testing.expect(runtime.bindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(address_sink));
+    try std.testing.expect(runtime.terminateResolvedTask(task, 0));
+    try std.testing.expectEqual(@as(usize, 2), callback.notifications);
+    try std.testing.expectEqual(task, runtime.findByHandle(handle, task_id).?);
+    try std.testing.expect(runtime.unbindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(address_sink));
+    _ = try createTaskIdTestTask(&runtime, 9999);
+    try std.testing.expect(runtime.find(task_id) == null);
+    runtime.debugAssertIndexIntegrity();
+}
+
+test "task reclamation lifecycle replacement rejects callback creation and restore" {
+    const Callback = struct {
+        runtime: *Runtime,
+        snapshot: *const Snapshot,
+        count: usize = 0,
+
+        fn retire(context: *anyopaque, _: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const result = createTaskIdTestTask(self.runtime, 100);
+            if (result) |_| @panic("lifecycle replacement cannot publish callback-created tasks") else |err| if (!(err == error.TaskTableFull)) @panic("task reclamation fixture invariant failed");
+            const restored = self.runtime.restoreFromSnapshot(self.snapshot);
+            if (restored) |_| @panic("lifecycle callbacks cannot recursively restore") else |err| if (!(err == error.TaskRuntimeBorrowed)) @panic("task reclamation fixture invariant failed");
+            self.count += 1;
+        }
+    };
+    var runtime = Runtime.init();
+    _ = try createTaskIdTestTask(&runtime, 1);
+    var snapshot = Runtime.initSnapshot();
+    var callback = Callback{ .runtime = &runtime, .snapshot = &snapshot };
+    const sink = TaskRetirementSink{ .context = &callback, .retire = Callback.retire };
+    try std.testing.expect(runtime.bindTaskRetirementSink(sink));
+    runtime.reset();
+    try std.testing.expectEqual(@as(usize, 1), callback.count);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    _ = try createTaskIdTestTask(&runtime, 2);
+    try runtime.restoreFromSnapshot(&snapshot);
+    try std.testing.expectEqual(@as(usize, 2), callback.count);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    try std.testing.expect(runtime.unbindTaskRetirementSink(sink));
+    runtime.reset();
 }

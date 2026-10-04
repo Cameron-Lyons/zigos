@@ -1,0 +1,7 @@
+format=zigos-nuc15crsu7-device-identity-v1
+target_id=asus-nuc15crsu7
+board_sku=RNUC15CRSU7
+device_id=TODO-fill-same-stable-device-id-as-proof-manifest
+smbios_system_uuid=TODO-fill-canonical-SMBIOS-UUID
+baseboard_serial=TODO-fill-baseboard-serial
+tpm_ek_public_sha256=TODO-fill-64-lowercase-hex-EK-public-key-digest

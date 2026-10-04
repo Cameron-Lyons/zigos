@@ -1,3 +1,4 @@
+#include "../../arch/xstate64.inc"
 .section .text
 
 .extern isrHandler
@@ -13,9 +14,6 @@
 .equ USER_CODE_SELECTOR, 0x23
 .equ CPU_KERNEL_STACK_TOP, 0
 .equ CPU_USER_STACK_POINTER, 8
-.equ XSAVE_BYTES, 576
-.equ XSAVE_ALIGN_SLACK, 64
-.equ XCOMP_BV, 0x8000000000000003
 
 .macro SAVE_REGISTERS
     pushq %rax
@@ -87,51 +85,22 @@ zigos_syscall_entry:
 
 .save_and_dispatch:
     SAVE_REGISTERS
-    clts
-    movq %rsp, %rdi
-    cmpq $SYSCALL_VECTOR, 136(%rsp)
-    jne .yield_with_xstate
-    call syscall_handler
-    jmp .dispatch_complete_lazy
-
-.yield_with_xstate:
     movq %rsp, %r12
-    subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
-    andq $-64, %rsp
-    leaq 512(%rsp), %rdi
-    xorl %eax, %eax
-    movl $8, %ecx
-    rep stosq
-    movabsq $XCOMP_BV, %rax
-    movq %rax, 520(%rsp)
-    movl $3, %eax
-    xorl %edx, %edx
-    # xsaves (%rsp)
-    .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
-    cld
+    ENTER_KERNEL_XSTATE 160
     movq %r12, %rdi
-    clts
-    call isrHandler
-    movl $3, %eax
-    xorl %edx, %edx
-    # xrstors (%rsp)
-    .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
-    movq %r12, %rsp
+    cmpq $SYSCALL_VECTOR, 136(%r12)
+    jne .yield_dispatch
+    call syscall_handler
     jmp .dispatch_complete
-
+.yield_dispatch:
+    call isrHandler
 .dispatch_complete:
     cmpl $0, zigos_userspace_resume_requested(%rip)
-    je .sysret
+    je .restore_user_xstate
     cmpq $0, zigos_userspace_resume_eip(%rip)
-    je .sysret
-    jmp .userspace_resume
-
-.dispatch_complete_lazy:
-    cmpl $0, zigos_userspace_resume_requested(%rip)
-    je .sysret
-    cmpq $0, zigos_userspace_resume_eip(%rip)
-    je .sysret
-    jmp .userspace_resume
+    jne .userspace_resume
+.restore_user_xstate:
+    LEAVE_KERNEL_XSTATE 160
 
 .sysret:
     RESTORE_REGISTERS
@@ -142,7 +111,7 @@ zigos_syscall_entry:
     sysretq
 
 .userspace_resume:
-    swapgs
+    # Keep the kernel GS owner when bypassing SYSRET for the scheduler.
     jmp zigos_resume_from_userspace_interrupt
 
 .invalid_kernel_stack:
@@ -168,6 +137,8 @@ zigos_syscall_benchmark_user_start:
     jne .benchmark_dispatch_loop
 
     movq %r13, %rdi
+    xorl %esi, %esi
+    xorl %edx, %edx
     movl $SYSCALL_CALL_YIELD, %eax
     syscall
     ud2

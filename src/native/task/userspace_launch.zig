@@ -98,8 +98,11 @@ fn launchDirectImage(
         logLaunchFailure(bundle_id, failure_phase, err);
         return err;
     };
-    errdefer _ = runtime_ptr.terminateTask(task.id, 0) catch false;
-    if (!scheduleTask(schedule_task, task.id)) return error.SchedulerUnavailable;
+    var borrow = runtime_ptr.borrowResolvedTask(task);
+    defer borrow.release();
+    const task_id = task.id;
+    errdefer _ = runtime_ptr.terminateTask(task_id, 0) catch false;
+    if (!scheduleTask(schedule_task, task_id) or task.state == .terminated) return error.SchedulerUnavailable;
     return task;
 }
 
@@ -163,8 +166,11 @@ pub fn launchInstalledDirect(
     schedule_task: anytype,
 ) Error!*task_runtime.TaskRecord {
     const task = try prepareInstalledDirect(packages, catalog, runtime_ptr, bundle_id, request);
-    errdefer _ = runtime_ptr.terminateTask(task.id, 0) catch false;
-    if (!scheduleTask(schedule_task, task.id)) return error.SchedulerUnavailable;
+    var borrow = runtime_ptr.borrowResolvedTask(task);
+    defer borrow.release();
+    const task_id = task.id;
+    errdefer _ = runtime_ptr.terminateTask(task_id, 0) catch false;
+    if (!scheduleTask(schedule_task, task_id) or task.state == .terminated) return error.SchedulerUnavailable;
     return task;
 }
 
@@ -243,4 +249,70 @@ test "scheduler rejection retires a newly created userspace task and address spa
     try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(scheduler.task_id).?.state);
     try std.testing.expect(runtime.findAddressSpaceConst(scheduler.address_space_id) == null);
     try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.active));
+}
+
+test "task reclamation launch rollback preserves capacity across scheduler rejection" {
+    const std = @import("std");
+    const RejectingScheduler = struct {
+        pub fn registerTask(_: *@This(), _: u64) bool {
+            return false;
+        }
+    };
+    var scheduler = RejectingScheduler{};
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    defer runtime.reset();
+    var previous_task_id: u64 = 0;
+    for (0..task_runtime.MAX_TASKS * 3) |index| {
+        try std.testing.expectError(error.SchedulerUnavailable, launchRegisteredDirect(&catalog, &runtime, "app.notes", .{
+            .owner = .{ .kind = .app, .serial = @intCast(index + 1) },
+            .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        }, &scheduler));
+        const task_id = runtime.next_task_id - 1;
+        const task = runtime.find(task_id).?;
+        try std.testing.expect(task_id > previous_task_id);
+        try std.testing.expectEqual(task_runtime.TaskState.terminated, task.state);
+        try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id) == null);
+        previous_task_id = task_id;
+    }
+    try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.active));
+}
+
+test "task reclamation launch scheduling callback retains exact record while it terminates and churns" {
+    const std = @import("std");
+    const ReentrantScheduler = struct {
+        runtime: *task_runtime.Runtime,
+        accept: bool,
+        task_id: u64 = 0,
+
+        pub fn registerTask(self: *@This(), task_id: u64) bool {
+            self.task_id = task_id;
+            const task = self.runtime.find(task_id).?;
+            const handle = self.runtime.taskHandleForResolved(task);
+            if (!(self.runtime.terminateResolvedTask(task, 0))) @panic("task reclamation fixture invariant failed");
+            for (0..task_runtime.MAX_TASKS * 2) |index| {
+                const child = self.runtime.createTask(.{
+                    .owner = .{ .kind = .app, .serial = @intCast(index + 1000) },
+                    .component_class = .app_component,
+                    .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 4096, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+                }) catch @panic("launch callback retains capacity");
+                if (!(self.runtime.terminateResolvedTask(child, @intCast(index + 1)))) @panic("task reclamation fixture invariant failed");
+                if (!(task.id == task_id)) @panic("task reclamation fixture invariant failed");
+                if (!(self.runtime.findByHandle(handle, task_id).? == task)) @panic("task reclamation fixture invariant failed");
+            }
+            return self.accept;
+        }
+    };
+    for ([_]bool{ false, true }) |accept| {
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        defer runtime.reset();
+        var scheduler = ReentrantScheduler{ .runtime = &runtime, .accept = accept };
+        try std.testing.expectError(error.SchedulerUnavailable, launchRegisteredDirect(&catalog, &runtime, "app.notes", .{
+            .owner = .{ .kind = .app, .serial = 1 },
+            .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 256 * 1024, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+        }, &scheduler));
+        try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(scheduler.task_id).?.state);
+        try std.testing.expectEqual(@as(usize, 0), runtime.countTasksInState(.active));
+    }
 }

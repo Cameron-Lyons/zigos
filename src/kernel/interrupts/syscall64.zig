@@ -9,9 +9,14 @@ const CpuState = extern struct {
     user_stack_pointer: usize = 0,
     kernel_port: usize = 0,
     active_task_id: u64 = 0,
+    native_entry_modes: u8 = 0,
 };
 
-const USER_STAR_BASE_SELECTOR: u16 = gdt.USER_DATA_SEG - 8;
+const ENTRY_PKU: u8 = 1;
+const ENTRY_FRED: u8 = 2;
+const ENTRY_READY: u8 = 4;
+
+const USER_STAR_BASE_SELECTOR: u16 = (gdt.USER_DATA_SEG - 8) | 3;
 const SYSCALL_STAR_VALUE = (@as(u64, gdt.KERNEL_CODE_SEG) << 32) |
     (@as(u64, USER_STAR_BASE_SELECTOR) << 48);
 const RFLAGS_TRAP: u64 = 1 << 8;
@@ -36,25 +41,28 @@ pub fn init() void {
     bindCpu(0, @intFromPtr(&stack_top));
     enableNativeEntry(cpu_states[0].kernel_stack_top);
     if (!enabled()) unreachable;
+    publishNativeEntryModes(0);
 }
 
 pub fn initApplicationProcessor(cpu_index: u8, stack_top_value: usize) void {
     bindCpu(cpu_index, stack_top_value);
     enableNativeEntry(stack_top_value);
     if (!enabled()) unreachable;
+    publishNativeEntryModes(cpu_index);
 }
 
 pub fn setKernelStack(stack_top_value: usize) void {
     const state = currentState();
     const stack_slot: *volatile usize = &state.kernel_stack_top;
     stack_slot.* = stack_top_value;
-    if (x86.fredEnabled()) {
+    // Keep pre-publication stack setup valid, then use this CPU's verified mode.
+    if (publishedFredMode(state) orelse ((x86.readCr4() & x86.CR4_FRED) != 0)) {
         x86.setFredRsp0(stack_top_value);
     }
 }
 
 pub fn enabled() bool {
-    if (x86.fredEnabled()) return true;
+    if (x86.fredEnabled()) return syscallSelectorsEnabled();
     return syscallMsrsEnabled();
 }
 
@@ -79,9 +87,13 @@ pub fn currentActiveTaskId() u64 {
 }
 
 fn enableNativeEntry(kernel_stack_top: usize) void {
+    // FRED reads STAR directly on ring transitions and requires SCE for SYSCALL.
+    x86.writeMsr(x86.IA32_STAR_MSR, SYSCALL_STAR_VALUE);
+    x86.writeMsr(x86.EFER_MSR, x86.readMsr(x86.EFER_MSR) | x86.EFER_SCE);
+    if (!syscallSelectorsEnabled()) unreachable;
     const features = @import("../../arch/cpu_features.zig").detect();
     if (features.fred and features.lkgs) {
-        x86.enableFred(kernel_stack_top);
+        x86.enableFred(kernel_stack_top, gdt.doubleFaultStackGuardAddress() + gdt.DOUBLE_FAULT_STACK_TOTAL_BYTES);
         if (!x86.fredEnabled()) unreachable;
         return;
     }
@@ -90,20 +102,23 @@ fn enableNativeEntry(kernel_stack_top: usize) void {
 }
 
 fn enableSyscallMsrs() void {
-    x86.writeMsr(x86.IA32_STAR_MSR, SYSCALL_STAR_VALUE);
     x86.writeMsr(x86.IA32_LSTAR_MSR, @intFromPtr(&zigos_syscall_entry));
     x86.writeMsr(x86.IA32_FMASK_MSR, SYSCALL_RFLAGS_MASK);
-    x86.writeMsr(x86.EFER_MSR, x86.readMsr(x86.EFER_MSR) | x86.EFER_SCE);
 }
 
 fn syscallMsrsEnabled() bool {
-    return x86.syscallExtensionEnabled() and
+    return syscallSelectorsEnabled() and
         x86.readMsr(x86.IA32_LSTAR_MSR) == @intFromPtr(&zigos_syscall_entry) and
         x86.readMsr(x86.IA32_FMASK_MSR) == SYSCALL_RFLAGS_MASK;
 }
 
+fn syscallSelectorsEnabled() bool {
+    return x86.syscallExtensionEnabled() and
+        x86.readMsr(x86.IA32_STAR_MSR) == SYSCALL_STAR_VALUE;
+}
+
 fn bindCpu(cpu_index: u8, stack_top_value: usize) void {
-    if (stack_top_value == 0 or (stack_top_value & 0xF) != 0) unreachable;
+    if (stack_top_value == 0 or stack_top_value % x86.FRED_STACK_ALIGNMENT != 0) unreachable;
     if (cpu_index >= cpu_identity.MAX_CPUS) unreachable;
     if (!@import("../../arch/cpu_features.zig").detect().rdpid) @panic("RDPID is required for native CPU identity");
     cpu_states[cpu_index] = .{
@@ -111,7 +126,8 @@ fn bindCpu(cpu_index: u8, stack_top_value: usize) void {
     };
     const state_addr = @intFromPtr(&cpu_states[cpu_index]);
     x86.writeMsr(x86.IA32_GS_BASE_MSR, state_addr);
-    x86.writeMsr(x86.IA32_KERNEL_GS_BASE_MSR, state_addr);
+    // ERETU (or the explicit validation path's SWAPGS) installs the user base.
+    x86.writeMsr(x86.IA32_KERNEL_GS_BASE_MSR, 0);
     cpu_identity.initialize(cpu_index);
 }
 
@@ -119,18 +135,63 @@ fn currentState() *CpuState {
     return &cpu_states[cpu_identity.currentIndex()];
 }
 
+inline fn publishNativeEntryModes(cpu_index: u8) void {
+    // Prepared entry never clears TS or re-reads immutable CPU controls. Publish
+    // only after this CPU's complete xstate and native-entry setup is verified.
+    if (!x86.xsavesEnabled() or x86.taskSwitched()) unreachable;
+    cpu_states[cpu_index].native_entry_modes = entryModesFromCr4(x86.readCr4());
+}
+
+inline fn entryModesFromCr4(cr4: usize) u8 {
+    return ENTRY_READY |
+        (if ((cr4 & x86.CR4_PKE) != 0) ENTRY_PKU else @as(u8, 0)) |
+        (if ((cr4 & x86.CR4_FRED) != 0) ENTRY_FRED else @as(u8, 0));
+}
+
+inline fn publishedFredMode(state: *const CpuState) ?bool {
+    if ((state.native_entry_modes & ENTRY_READY) == 0) return null;
+    return (state.native_entry_modes & ENTRY_FRED) != 0;
+}
+
 comptime {
     if (@offsetOf(CpuState, "kernel_stack_top") != 0 or
         @offsetOf(CpuState, "user_stack_pointer") != 8 or
         @offsetOf(CpuState, "kernel_port") != 16 or
-        @offsetOf(CpuState, "active_task_id") != 24)
+        @offsetOf(CpuState, "active_task_id") != 24 or
+        @offsetOf(CpuState, "native_entry_modes") != 32)
     {
         @compileError("x86-64 FRED CPU state layout diverged from GS-relative fields");
     }
     if (gdt.USER_DATA_SEG + 8 != gdt.USER_CODE_SEG) {
         @compileError("SYSRET requires the user data descriptor immediately before user code");
     }
-    if (SYSCALL_STAR_VALUE != 0x0010_0008_0000_0000) {
+    if (SYSCALL_STAR_VALUE != 0x0013_0008_0000_0000) {
         @compileError("x86-64 syscall selectors diverged from the STAR encoding");
+    }
+}
+
+test "native entry modes remain bound to each initialized logical CPU" {
+    const std = @import("std");
+    const previous_index = cpu_identity.currentIndex();
+    const previous_states = cpu_states;
+    defer {
+        cpu_states = previous_states;
+        cpu_identity.setIndexForTest(previous_index);
+    }
+    cpu_states = @splat(.{});
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expectEqual(@as(?bool, null), publishedFredMode(currentState()));
+        const cr4 = (if ((index & 1) != 0) x86.CR4_PKE else @as(usize, 0)) |
+            (if ((index & 2) != 0) x86.CR4_FRED else @as(usize, 0));
+        currentState().native_entry_modes = entryModesFromCr4(cr4 | x86.CR4_SMEP | x86.CR4_OSXSAVE);
+    }
+    // Interleave CPUs after publication: PKE or FRED on another CPU must not
+    // change the prepared mode read from the selected CPU's GS state.
+    for ([_]u8{ 7, 0, 3, 1, 6, 2, 5, 4, 0 }) |index| {
+        cpu_identity.setIndexForTest(index);
+        try std.testing.expectEqual(@as(?bool, (index & 2) != 0), publishedFredMode(currentState()));
+        try std.testing.expectEqual((index & 1) != 0, (currentState().native_entry_modes & ENTRY_PKU) != 0);
+        try std.testing.expectEqual(@as(u8, 0), currentState().native_entry_modes & ~(ENTRY_READY | ENTRY_PKU | ENTRY_FRED));
     }
 }

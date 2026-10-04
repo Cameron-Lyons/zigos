@@ -11,6 +11,16 @@ Use the pinned toolchain and repo entrypoints:
   `-Dhost-test-target=<triple>` selects another hosted x86-64 target.
 - `zlint` and `actionlint` are optional for local focused runs, but CI requires
   both through `ZIGOS_REQUIRE_ZLINT=1` and `ZIGOS_REQUIRE_ACTIONLINT=1`.
+- EFI ISO generation normalizes FAT identity and all media timestamps in UTC.
+  `SOURCE_DATE_EPOCH` selects nonnegative decimal seconds through the end of 2107;
+  the default is 1980-01-01, and earlier values are clamped to 1980 for all media
+  dates. The pinned wrapper passes the epoch as a cached build input;
+  `-Dsource-date-epoch=<seconds>` overrides it. Keep the same epoch for both
+  builds when checking reproducibility.
+- The published production kernel and embedded EFI payload share one ELF with
+  static symbols retained and debug sections removed. Full source-line and type
+  information is installed at `zig-out/kernel-debug/kernel-zigos-native.elf`;
+  use that file with `llvm-addr2line` when diagnosing kernel return addresses.
 
 ## Verification Matrix
 
@@ -31,7 +41,10 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build kernel-role-check` | You changed native boot composition and need to prove verification code and state are absent from production. |
 | `./scripts/zig.sh build kernel-recovery` | You need the freestanding recovery kernel profile. |
 | `./scripts/zig.sh build kernel-benchmark` | You need the benchmark kernel profile. |
-| `./scripts/zig.sh build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, and test-root reachability. |
+| `./scripts/zig.sh build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, native host-tool tests, authenticated release-tool fixtures, and test-root reachability. |
+| `./scripts/zig.sh build host-tool-tests` | You changed native file/media, QEMU process/log, release, or hardware utilities. |
+| `./scripts/zig.sh build release-tool-fixture-test` | You changed release generation/publication or signer arguments and need the real independent verifier with disposable fixture keys. |
+| `./scripts/zig.sh build tool -- COMMAND [ARGUMENTS]` | Run one of the native utilities; use `--help` to list commands. |
 | `./scripts/zig.sh build spec-tests` | You need spec coverage and native spec tests without QEMU. |
 | `./scripts/zig.sh build prod-readiness` | You need production-readiness and secure-by-design release-gate checks without changing spec conformance status. |
 | `./scripts/zig.sh build release-security-check` | You touched parser, ABI, diagnostics, release-security policy, unsafe Zig, or disclosure gate inputs and need the fast release-security gate. |
@@ -45,12 +58,12 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build uefi-qemu-test` | You touched the production ISO, GRUB, or UEFI handoff. |
 | `./scripts/zig.sh build uefi-verification-qemu-test` | You touched the verification ISO or first-hardware-target proof media. |
 | `./scripts/zig.sh build benchmark` | You touched performance-sensitive kernel or native-service paths. |
-| `./scripts/zig.sh build frame-allocator-benchmark` | Measure physical-page allocator reuse, sparse-memory searches, contiguous runs, and bounded exhaustion on the host without QEMU. Uses ReleaseFast and reports the median of five samples. |
-| `./scripts/zig.sh build heap-allocator-benchmark` | Measure heap reuse, successful or failed allocation across 1024 separated free blocks, and 512 page-sized allocations freed in permuted order. Reports allocator array bytes and the median of five ReleaseFast samples. |
-| `./scripts/zig.sh build ipc-ring-benchmark` | Measure host IPC send/receive with full inline payloads and full-queue backpressure. Compares one receive snapshot with separate peek/pop calls in the same ReleaseFast build; reports the median of five samples. |
-| `./scripts/zig.sh build text-scanout-benchmark` | Measure host text rasterization, single-cell edits, and Unicode pool reordering with framebuffer damage counters. Uses ReleaseFast and reports the median of five samples. |
-| `./scripts/zig.sh build id-index-benchmark` | Measure ID hits, misses, generation reuse, empty-table lookups after deletion, and steady churn. Reports table bytes and the median of five ReleaseFast samples. |
-| `./scripts/zig.sh build endpoint-readiness-benchmark` | Compare owner scans and maintained readiness counts for 1–63 endpoints, including send/drain accounting. Checks results in the same ReleaseFast build. |
+| `./scripts/zig.sh build frame-allocator-benchmark` | Measure physical-page allocator reuse, sparse-memory searches, contiguous runs, and bounded exhaustion on the host without QEMU. Uses `fast` and reports the median of five samples. |
+| `./scripts/zig.sh build heap-allocator-benchmark` | Measure heap reuse, successful or failed allocation across 1024 separated free blocks, and 512 page-sized allocations freed in permuted order. Reports allocator array bytes and the median of five `fast` samples. |
+| `./scripts/zig.sh build ipc-ring-benchmark` | Measure host IPC send/receive with full inline payloads and full-queue backpressure. Compares one receive snapshot with separate peek/pop calls in the same `fast` build; reports the median of five samples. |
+| `./scripts/zig.sh build text-scanout-benchmark` | Measure host text rasterization, single-cell edits, and Unicode pool reordering with framebuffer damage counters. Uses `fast` and reports the median of five samples. |
+| `./scripts/zig.sh build id-index-benchmark` | Measure ID hits, misses, generation reuse, empty-table lookups after deletion, and steady churn. Reports table bytes and the median of five `fast` samples. |
+| `./scripts/zig.sh build endpoint-readiness-benchmark` | Compare owner scans and maintained readiness counts for 1–63 endpoints, including send/drain accounting. Checks results in the same `fast` build. |
 | `./scripts/zig.sh build text-layout-benchmark` | Compare repeated layout and one-pass visible windows for ASCII and Unicode documents. Checks exact row/caret equivalence before timing. |
 | `./scripts/zig.sh build workspace-index-benchmark` | Measure path/object hits, empty misses after churn, and steady directory mutation using 192 path and 96 object buckets. Checks lookup results and replacement consistency. |
 | `./scripts/zig.sh build object-chunks-benchmark` | Compare prefix scans and positioned cursors for forward, reverse, and retransmitted object ranges. Checks reconstructed payload bytes and reports page visits. |
@@ -60,7 +73,7 @@ Use the pinned toolchain and repo entrypoints:
 
 | Command | Use it when |
 | --- | --- |
-| `./scripts/zig.sh build userspace-production-images` | You need the 24 shipped userspace images and production archive. |
+| `./scripts/zig.sh build userspace-production-images` | You need the eight shipped userspace images and production archive. |
 | `./scripts/zig.sh build userspace-verification-images` | You need the production images plus the five proof and synthetic-journey images. |
 | `./scripts/zig.sh build userspace-images` | You intentionally need both production and verification userspace sets. |
 | `./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance` | You set the signer environment and independently pinned verifier and need the generator-side eight-file portion of the exact 17-target release evidence. |
@@ -73,7 +86,7 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build native-store-image` | You need to build or preserve the native storage image used by run targets. |
 | `./scripts/zig.sh build iso` | You need a bootable ISO at `build/os.iso`. |
 | `./scripts/zig.sh build iso-verification` | You need bootable proof media at `build/os-verification.iso`. |
-| `./test_kernel.sh` | You want the release-fast smoke-test convenience wrapper. |
+| `./scripts/zig.sh build -Doptimize=fast zigos-native-smoke-test` | You want the optimized smoke-test convenience wrapper. |
 | `./scripts/zig.sh build clean` | You want to remove local build outputs and Zig caches. |
 | `./scripts/zig.sh build -Dclean-dry-run=true clean` | You want to inspect what `clean` would remove. |
 
@@ -81,8 +94,8 @@ Keep the spec contract intact:
 
 - Treat `spec/coverage.json` as the architecture and coverage contract.
 - Treat `spec/production_readiness.json` as the separate manifest for prototype-to-production work; do not encode production readiness by weakening or overloading spec conformance status.
-- Keep `first_hardware_target` pinned to one real machine until it is boringly reliable. The current target is `asus-nuc15crsu7`; QEMU can be preflight evidence, but production readiness requires a real hardware proof bundle checked by `scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>`.
-- Prepare the NUC proof bundle with `scripts/prepare-nuc15crsu7-hardware-proof.sh --build --nonce <fresh-64-hex> --output build/hardware-proofs/<fresh-name>` after provisioning the authenticated release signer, root, policy, sequence, expiry, rollback state, and independently pinned verifier. The output must be a fresh empty direct child of `build/hardware-proofs`; acceptance requires two single-boot logs, individually hashed cycle evidence, a canonical capture statement, two role quote/signature pairs, an independently pinned hardware verifier and nonce, and an independently pinned release verifier, root, and persistent state path.
+- Keep `first_hardware_target` pinned to one real machine until it is boringly reliable. The current target is `asus-nuc15crsu7`; QEMU can be preflight evidence, but production readiness requires a real hardware proof bundle checked by `./scripts/zig.sh build tool -- check-nuc15crsu7-hardware-proof build/hardware-proofs/<fresh-name>`.
+- Prepare the NUC proof bundle with `./scripts/zig.sh build tool -- prepare-nuc15crsu7-hardware-proof --build --nonce <fresh-64-hex> --output build/hardware-proofs/<fresh-name>` after provisioning the authenticated release signer, root, policy, sequence, expiry, rollback state, and independently pinned verifier. The output must be a fresh empty direct child of `build/hardware-proofs`; acceptance requires two single-boot logs, individually hashed cycle evidence, a canonical capture statement, two role quote/signature pairs, an independently pinned hardware verifier and nonce, and an independently pinned release verifier, root, and persistent state path.
 - Keep the secure-by-design release gate in `spec/production_readiness.json` complete, release-blocking, and backed by `./scripts/zig.sh build release-security-check`. Updates that touch parsing, boot, storage, sync, kernel/user ABI, drivers, diagnostics, crypto, or release tooling should consider fuzzing, fault injection, reproducible builds, DSSE SBOM/provenance, hardware-backed TPM/secure-enclave/HSM/KMS release keys, rotation/revocation, `zigos-verify-release` customer verifier coverage, artifact measurements, threat-model tests, memory-safety audits, crash dump redaction, and the disclosure process in `SECURITY.md`.
 - Keep requirement ids stable when editing manifest prose or mappings so coverage references do not churn.
 - If you add, rename, or split spec tests, keep the test names and coverage references aligned.

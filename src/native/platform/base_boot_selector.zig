@@ -441,8 +441,8 @@ fn writeRootVolumeSector(buffer: *const [sector_size]u8) bool {
 
 test "freestanding base boot selector promotes and rolls back signed artifacts across reboot" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 71 };
     const state_signer = signing.SignerIdentity{
@@ -536,8 +536,8 @@ test "freestanding base boot selector promotes and rolls back signed artifacts a
 
 test "base boot selector rejects tampered manager slot before boot handoff" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 72 };
     const state_signer = signing.SignerIdentity{

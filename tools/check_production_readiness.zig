@@ -199,10 +199,8 @@ const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
     "spec/hardware/nuc15crsu7-production-required-markers.txt",
     "spec/hardware/nuc15crsu7-required-markers.txt",
     "spec/hardware/nuc15crsu7-proof-bundle.md",
-    "scripts/prepare-nuc15crsu7-hardware-proof.sh",
-    "scripts/write-nuc15crsu7-capture-statement.sh",
-    "scripts/check-nuc15crsu7-hardware-proof.sh",
-    "scripts/test-nuc15crsu7-hardware-proof-checker.sh",
+    "tools/host/hardware.zig",
+    "tools/host/hardware/fixtures.zig",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_QEMU_PREFLIGHT_COMMANDS = [_][]const u8{
     "./scripts/zig.sh build iso",
@@ -434,12 +432,12 @@ fn validateBenchmarkEnvironmentGate(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const capture_path = "scripts/capture-kernel-benchmark.sh";
+    const capture_path = "tools/host/qemu.zig";
     const capture_source = try readRequiredSource(allocator, io, errors, capture_path) orelse return;
     const capture_snippets = [_][]const u8{
-        "qemu_harness_accelerator",
-        "guest output must not declare its host accelerator",
-        "BENCH:ENV:accelerator=%s",
+        "h.accelerator()",
+        "absentGroup(h.ctx, bytes, &.{\"BENCH:ENV:\"})",
+        "BENCH:ENV:accelerator={s}",
     };
     for (capture_snippets) |snippet| {
         if (std.mem.indexOf(u8, capture_source, snippet) == null) {
@@ -928,22 +926,25 @@ fn validateNuc11tnki5KernelProofSources(
     const syscall_path = "src/kernel/interrupts/syscall64.zig";
     const syscall_entry_path = "src/kernel/interrupts/syscall64.S";
     const fred_entry_path = "src/kernel/interrupts/fred64.S";
+    const fred_frame_path = "src/kernel/interrupts/fred_frame64.inc";
+    const xstate_entry_path = "src/arch/xstate64.inc";
     const userspace_syscall_path = "src/arch/x86/syscall_trap.S";
     const gdt_path = "src/kernel/interrupts/gdt64.zig";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
     const native_profile_path = "src/kernel/boot/profiles/zigos_native.zig";
     const timer_path = "src/kernel/timer/timer.zig";
-    const qemu_harness_path = "scripts/qemu-harness.sh";
+    const qemu_harness_path = "tools/host/qemu.zig";
     const kernel_build_path = "build_support/kernel.zig";
     const bootloader_path = "src/boot/boot_x86_64.S";
     const efi_stub_path = "src/boot/efi_stub.zig";
     const efi_handoff_path = "src/boot/efi_handoff.zig";
     const efi_elf_path = "src/boot/efi_elf.zig";
-    const efi_iso_path = "scripts/build-efi-iso.sh";
-    const efi_image_check_path = "scripts/check-efi-image.sh";
+    const efi_iso_path = "tools/host/images.zig";
+    const efi_image_check_path = "tools/host/images.zig";
     const kernel_linker_path = "src/arch/x86_64/linker.ld";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
     const production_cmdline_path = "src/boot/cmdline.txt";
+    const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
     const cpu_baseline_path = "src/arch/cpu_baseline.zig";
     const x86_path = "src/arch/x86.zig";
@@ -1102,6 +1103,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "production EFI command line is missing: {s}", .{production_cmdline_path});
         return;
     }
+    if (!common.pathExists(io, production_grub_path)) {
+        try common.addError(errors, allocator, "production GRUB configuration is missing: {s}", .{production_grub_path});
+        return;
+    }
     if (!common.pathExists(io, ci_setup_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 CI setup action is missing: {s}", .{ci_setup_path});
         return;
@@ -1214,6 +1219,8 @@ fn validateNuc11tnki5KernelProofSources(
     const syscall_source = try common.readFileAlloc(allocator, io, syscall_path, common.source_file_max_bytes);
     const syscall_entry_source = try common.readFileAlloc(allocator, io, syscall_entry_path, common.source_file_max_bytes);
     const fred_entry_source = try common.readFileAlloc(allocator, io, fred_entry_path, common.source_file_max_bytes);
+    const fred_frame_source = try common.readFileAlloc(allocator, io, fred_frame_path, common.source_file_max_bytes);
+    const xstate_entry_source = try common.readFileAlloc(allocator, io, xstate_entry_path, common.source_file_max_bytes);
     const userspace_syscall_source = try common.readFileAlloc(allocator, io, userspace_syscall_path, common.source_file_max_bytes);
     const gdt_source = try common.readFileAlloc(allocator, io, gdt_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
@@ -1228,6 +1235,7 @@ fn validateNuc11tnki5KernelProofSources(
     const kernel_linker_source = try common.readFileAlloc(allocator, io, kernel_linker_path, common.source_file_max_bytes);
     const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
     const production_cmdline_source = try common.readFileAlloc(allocator, io, production_cmdline_path, common.source_file_max_bytes);
+    const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
     const cpu_baseline_source = try common.readFileAlloc(allocator, io, cpu_baseline_path, common.source_file_max_bytes);
     const x86_source = try common.readFileAlloc(allocator, io, x86_path, common.source_file_max_bytes);
@@ -1580,28 +1588,7 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "RNUC15CRSU7 timer must use invariant TSC-deadline delivery: {s}", .{snippet});
         }
     }
-    const required_one_shot_scheduler_snippets = [_][]const u8{
-        "timer.synchronize()",
-        "xhci_driver_task.boundTaskId()",
-        "session_manager.bindHardwareInput",
-        "pollHardwareKeyboardReport",
-        "xhci_driver_task.pollKeyboardReport()",
-        "hardwareInputProof",
-        "xhci_driver_task.inputProof()",
-        "session_manager.servicePendingInputWork(now_ticks)",
-        "xhci_driver_task.lifecyclePending()",
-        "userspaceSchedulerHasDispatchableTasks(timer.getTicks())",
-        "timer.armSchedulerTick()",
-        "timer.disarmSchedulerTick()",
-        "x86.cli()",
-        "x86.sti()",
-        "smp.idle()",
-    };
-    for (required_one_shot_scheduler_snippets) |snippet| {
-        if (std.mem.indexOf(u8, native_profile_source, snippet) == null) {
-            try common.addError(errors, allocator, "native scheduler loop must retain one-shot idle deadline control: {s}", .{snippet});
-        }
-    }
+    try validateNativeSchedulerLoopSource(allocator, errors, native_profile_source);
     const required_emulator_countdown_timer_snippets = [_][]const u8{
         "TICKLESS_TSC_DEADLINE",
         "X2APIC_TIMER_MODE_TSC_DEADLINE",
@@ -1621,10 +1608,11 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_accelerated_qemu_snippets = [_][]const u8{
-        "qemu_harness_accelerator",
-        "-c /dev/kvm",
-        "QEMU_HARNESS_COMMAND+=(-accel",
-        "printf '%s\\n' \"host\"",
+        "fn accelerator(",
+        "/dev/kvm",
+        ".character_device",
+        "\"-accel\"",
+        "return \"host\"",
         "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lkgs,+lass,tsc-frequency=2400000000",
     };
     for (required_accelerated_qemu_snippets) |snippet| {
@@ -1637,8 +1625,8 @@ fn validateNuc11tnki5KernelProofSources(
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
         "addEfiImage(b, .small, boot_kernel",
-        "scripts/build-efi-iso.sh",
-        "scripts/check-efi-image.sh",
+        "host_tools.addRun(b, \"build-efi-iso\")",
+        "host_tools.addRun(b, \"check-efi-image\")",
         "src/boot/cmdline-qemu.txt",
     };
     for (required_compact_kernel_boot_snippets) |snippet| {
@@ -1652,9 +1640,8 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
         try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
     }
-    if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
-        try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
-    }
+    try validateProductionBootFlags(allocator, errors, production_cmdline_path, production_cmdline_source);
+    try validateProductionBootFlags(allocator, errors, production_grub_path, production_grub_source);
     if (std.mem.indexOf(u8, kernel_build_source, "addEfiImage") == null or
         std.mem.indexOf(u8, kernel_build_source, ".os_tag = .uefi") == null)
     {
@@ -1849,10 +1836,15 @@ fn validateNuc11tnki5KernelProofSources(
     {
         try common.addError(errors, allocator, "x86 interrupt entry must land on endbr64 and clear AC before entering kernel handlers", .{});
     }
-    if (std.mem.indexOf(u8, interrupt_stubs_source, "xsaves") == null or
-        std.mem.indexOf(u8, interrupt_stubs_source, "xrstors") == null)
-    {
-        try common.addError(errors, allocator, "x86 interrupt entry must save compact extended state with XSAVES", .{});
+    for ([_][]const u8{ "#include \"../../arch/xstate64.inc\"", "ENTER_KERNEL_XSTATE", "LEAVE_KERNEL_XSTATE" }) |snippet| {
+        if (std.mem.indexOf(u8, interrupt_stubs_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 interrupt entry must use owned extended state: {s}", .{snippet});
+        }
+    }
+    for ([_][]const u8{ "xsaves64", "xrstors64", "xsave64", "xrstor64", "zigos_userspace_xstate", "zigos_kernel_xstate", "wrpkru", "ENTER_KERNEL_XSTATE", "LEAVE_KERNEL_XSTATE" }) |snippet| {
+        if (std.mem.indexOf(u8, xstate_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "owned extended-state assembly must retain snippet: {s}", .{snippet});
+        }
     }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
@@ -1880,7 +1872,9 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_process_context_snippets = [_][]const u8{
-        "softwareCpuFallbackRequested",
+        "cpuModelRequest",
+        "model_request.enabled()",
+        "model_request.resolveTscFrequency",
         "model_inventory",
         "qemu_software_cpu_fallback",
         "qemu_tsc_frequency_hz",
@@ -1903,7 +1897,8 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_timer_snippets = [_][]const u8{
-        "softwareCpuFallbackRequested",
+        "cpuModelRequest",
+        "model_request.enabled()",
         "qemu_software_cpu_fallback",
         "software_cpu_fallback",
         "hardware_tsc_timer",
@@ -2052,16 +2047,45 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_fred_entry_snippets = [_][]const u8{
         "zigos_fred_entry",
-        "FRED_EVENT_TYPE_SYSCALL",
-        "xsaves",
-        "xrstors",
+        "zigos_fred_kernel_entry",
+        ".balign 4096",
+        ".balign 256",
+        "#include \"fred_frame64.inc\"",
+        "#include \"../../arch/xstate64.inc\"",
+        "ZIGOS_FRED_TEST_SYSCALL",
+        "ZIGOS_FRED_COPY_RETURN_FRAME",
+        "ENTER_KERNEL_XSTATE",
+        "LEAVE_KERNEL_XSTATE",
         "call syscall_handler",
         "call isrHandler",
         "0xf2, 0x0f, 0x01, 0xca",
+        "0xf3, 0x0f, 0x01, 0xca",
     };
     for (required_fred_entry_snippets) |snippet| {
         if (std.mem.indexOf(u8, fred_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "native x86-64 FRED entry must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_fred_frame_snippets = [_][]const u8{
+        "FRED_ERROR, 0",
+        "FRED_RIP, 8",
+        "FRED_CS, 16",
+        "FRED_RFLAGS, 24",
+        "FRED_RSP, 32",
+        "FRED_SS, 40",
+        "FRED_EVENT_DATA, 48",
+        "FRED_RESERVED, 56",
+        "FRED_FRAME_BYTES, 64",
+        "FRED_VECTOR_SHIFT, 32",
+        "FRED_EVENT_TYPE_SHIFT, 48",
+        "FRED_SYSCALL_CLASS, 0x70001",
+        "ZIGOS_FRED_TEST_SYSCALL",
+        "ZIGOS_FRED_COPY_RETURN_FRAME",
+        ".Lfred_reject_user_software_event",
+    };
+    for (required_fred_frame_snippets) |snippet| {
+        if (std.mem.indexOf(u8, fred_frame_source, snippet) == null) {
+            try common.addError(errors, allocator, "architectural FRED frame must retain snippet: {s}", .{snippet});
         }
     }
     const required_syscall_entry_snippets = [_][]const u8{
@@ -2069,8 +2093,9 @@ fn validateNuc11tnki5KernelProofSources(
         "swapgs",
         "CPU_KERNEL_STACK_TOP",
         "CPU_USER_STACK_POINTER",
-        "xsaves",
-        "xrstors",
+        "#include \"../../arch/xstate64.inc\"",
+        "ENTER_KERNEL_XSTATE",
+        "LEAVE_KERNEL_XSTATE",
         "endbr64",
         "sysretq",
         "call syscall_handler",
@@ -2882,12 +2907,14 @@ fn validateNuc11tnki5ProofPreparation(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const prep_path = "scripts/prepare-nuc15crsu7-hardware-proof.sh";
+    const prep_path = "tools/host/hardware.zig";
     if (!common.pathExists(io, prep_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 proof preparation script is missing: {s}", .{prep_path});
         return;
     }
-    const source = try common.readFileAlloc(allocator, io, prep_path, common.source_file_max_bytes);
+    const implementation = try common.readFileAlloc(allocator, io, prep_path, common.source_file_max_bytes);
+    const template = try common.readFileAlloc(allocator, io, "tools/host/hardware/proof-manifest.template", common.source_file_max_bytes);
+    const source = try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ implementation, template });
     const required_snippets = [_][]const u8{
         "build/os.iso",
         "build/os-verification.iso",
@@ -2896,7 +2923,7 @@ fn validateNuc11tnki5ProofPreparation(
         "--nonce",
         "ZIGOS_HARDWARE_PROOF_NONCE",
         "zigos-nuc15crsu7-proof-v2",
-        "capture_nonce=$CAPTURE_NONCE",
+        "capture_nonce={s}",
         "device_identity=device-identity.txt",
         "production_serial_log=production-serial.log",
         "production_boot_medium=build/os.iso",
@@ -2913,22 +2940,22 @@ fn validateNuc11tnki5ProofPreparation(
         "verification_signature=verification-attestation.sig",
         "capture_statement=capture-statement.txt",
         "release-bundle-check",
-        "-Drelease-verifier=",
-        "-Drelease-verifier-sha256=",
-        "is_safe_proof_output_dir",
-        "use a fresh --output directory",
-        "write_new_file",
-        "Perform two separate single-boot captures",
+        "release-verifier",
+        "release-verifier-sha256",
+        "UnsafeProofOutput",
+        "ProofOutputNotEmpty",
+        "atomicWrite",
+        "Capture separate production and verification boots",
         "production-serial.log",
         "verification-serial.log",
         "cycle-manifest.txt",
         "operator-metadata-markers.txt",
-        "$TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE",
-        "$TARGET_PREFIX:BOARD_SKU:RNUC15CRSU7",
-        "$TARGET_PREFIX:PROOF_MANIFEST:RECORDED",
-        "$TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED",
-        "$TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED",
-        "$TARGET_PREFIX:ARTIFACT_DIGESTS:RECORDED",
+        ":EVIDENCE_SOURCE:REAL_HARDWARE",
+        ":BOARD_SKU:RNUC15CRSU7",
+        ":PROOF_MANIFEST:RECORDED",
+        ":FIRMWARE_SETTINGS:RECORDED",
+        ":POWER_CYCLE_NOTES:RECORDED",
+        ":ARTIFACT_DIGESTS:RECORDED",
     };
     for (required_snippets) |snippet| {
         if (std.mem.indexOf(u8, source, snippet) == null) {
@@ -2936,7 +2963,7 @@ fn validateNuc11tnki5ProofPreparation(
         }
     }
 
-    const statement_writer_path = "scripts/write-nuc15crsu7-capture-statement.sh";
+    const statement_writer_path = "tools/host/hardware.zig";
     if (!common.pathExists(io, statement_writer_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 capture-statement writer is missing: {s}", .{statement_writer_path});
         return;
@@ -2944,25 +2971,26 @@ fn validateNuc11tnki5ProofPreparation(
     const statement_source = try common.readFileAlloc(allocator, io, statement_writer_path, common.source_file_max_bytes);
     const statement_snippets = [_][]const u8{
         "format=zigos-nuc15crsu7-capture-statement-v1",
-        "capture_nonce=$nonce",
-        "device_identity_sha256=",
-        "production_serial_sha256=",
-        "verification_serial_sha256=",
-        "cycle_manifest_sha256=",
-        "production_iso_sha256=",
-        "production_kernel_sha256=",
-        "verification_iso_sha256=",
-        "verification_kernel_sha256=",
-        "production_marker_contract_sha256=",
-        "verification_marker_contract_sha256=",
-        "firmware_settings_sha256=",
-        "power_cycle_notes_sha256=",
-        "attestation_lifecycle_sha256=",
-        "artifact_digests_sha256=",
-        "production_quote_sha256=",
-        "production_signature_sha256=",
-        "verification_quote_sha256=",
-        "verification_signature_sha256=",
+        "capture_nonce",
+        "{s}_sha256={s}",
+        "device_identity",
+        "production_serial",
+        "verification_serial",
+        "cycle_manifest",
+        "production_iso",
+        "production_kernel",
+        "verification_iso",
+        "verification_kernel",
+        "production_marker_contract",
+        "verification_marker_contract",
+        "firmware_settings",
+        "power_cycle_notes",
+        "attestation_lifecycle",
+        "artifact_digests",
+        "production_quote",
+        "production_signature",
+        "verification_quote",
+        "verification_signature",
     };
     for (statement_snippets) |snippet| {
         if (std.mem.indexOf(u8, statement_source, snippet) == null) {
@@ -2976,12 +3004,14 @@ fn validateNuc11tnki5ProofChecker(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const checker_path = "scripts/check-nuc15crsu7-hardware-proof.sh";
+    const checker_path = "tools/host/hardware.zig";
     if (!common.pathExists(io, checker_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 proof checker is missing: {s}", .{checker_path});
         return;
     }
-    const source = try common.readFileAlloc(allocator, io, checker_path, common.source_file_max_bytes);
+    const implementation = try common.readFileAlloc(allocator, io, checker_path, common.source_file_max_bytes);
+    const sidecar_template = try common.readFileAlloc(allocator, io, "tools/host/hardware/power-cycle-notes.template", common.source_file_max_bytes);
+    const source = try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ implementation, sidecar_template });
     const required_snippets = [_][]const u8{
         "zigos-nuc15crsu7-proof-v2",
         "proof-manifest.txt",
@@ -2997,35 +3027,34 @@ fn validateNuc11tnki5ProofChecker(
         "ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE",
         "ZIGOS_HARDWARE_PROOF_VERIFIER",
         "ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256",
-        "externally pinned lowercase SHA-256 digest",
-        "fresh externally issued 64-hex capture nonce",
-        "actual_verifier_sha256",
-        "trusted verifier executable digest does not match",
-        "trusted hardware verifier must be obtained independently of the proof bundle and artifact root",
-        "release verifier must be obtained independently of the proof bundle and artifact root",
+        "FreshNonceRequired",
+        "PinnedTrustDigestRequired",
+        "PinnedVerifierDigestMismatch",
+        "IndependentTrustRequired",
         "format=zigos-nuc15crsu7-capture-statement-v1",
-        "write_expected_statement",
-        "production_serial_sha256=",
-        "verification_serial_sha256=",
-        "cycle_manifest_sha256=",
-        "production_iso_sha256=",
-        "production_kernel_sha256=",
-        "verification_iso_sha256=",
-        "verification_kernel_sha256=",
-        "production_marker_contract_sha256=",
-        "verification_marker_contract_sha256=",
-        "production_quote_sha256=",
-        "production_signature_sha256=",
-        "verification_quote_sha256=",
-        "verification_signature_sha256=",
-        "capture statement is not the canonical statement recomputed",
+        "NonCanonicalCaptureStatement",
+        "production_serial",
+        "verification_serial",
+        "cycle_manifest",
+        "production_iso",
+        "production_kernel",
+        "verification_iso",
+        "verification_kernel",
+        "production_marker_contract",
+        "verification_marker_contract",
+        "production_quote",
+        "production_signature",
+        "verification_quote",
+        "verification_signature",
         "format=zigos-nuc15crsu7-cycle-manifest-v1",
         "zigos-nuc15crsu7-cycle-log-v1",
-        "cycle manifest is malformed, non-canonical, out of order, non-contiguous, or contains duplicate evidence",
-        "cycles directory must contain exactly the logs named",
-        "cycle log digest mismatch",
-        "valid unique",
-        "does not match $count valid cycle entries",
+        "NonCanonicalCycleManifest",
+        "NonCanonicalCyclePath",
+        "DuplicateCycleEvidence",
+        "UnlistedCycleEvidence",
+        "CycleDigestMismatch",
+        "InsufficientHardwareCycles",
+        "SpoofedCycleSummary",
         "COLD_BOOTS",
         "WARM_REBOOTS",
         "STORAGE_WRITE_READ_CYCLES",
@@ -3037,40 +3066,34 @@ fn validateNuc11tnki5ProofChecker(
         "BOOT:ROLE:production",
         "BOOT:ROLE:verification",
         "ZIGOS:NATIVE:READY",
-        "exactly one BOOT:ROLE marker",
         "ZIGOS:STORAGE:CHECKPOINT:FINAL",
         "enabled=true",
         "dirty=false",
-        "generation=[0-9]+",
+        "generation=",
         "error=none",
         "ZIGOS:TASK:SESSION_READY",
-        "require_marker_before",
+        "MarkerOrder",
         "EVIDENCE_SOURCE:REAL_HARDWARE",
         "BOARD_SKU:RNUC15CRSU7",
-        "APIC_TIMER_INTERRUPT:OBSERVED",
-        "FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
-        "XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
-        "NVME_WRITE_READ_COMPLETION:OBSERVED",
-        "I225_LM_FRAME_INTERRUPT:OBSERVED",
-        "SUSPEND_RESUME_POWER:OBSERVED",
-        "CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
-        "active_marker_lines",
-        "production marker contract under artifact root differs",
-        "verification marker contract under artifact root differs",
+        "activeMarkers",
+        "for (try activeMarkers(ctx, try readEvidence(ctx, root, production_contract)))",
+        "for (try activeMarkers(ctx, try readEvidence(ctx, root, verification_contract)))",
+        "MarkerContractMismatch",
         "app.notes.daily",
         "userspace-notes-daily.elf",
-        "artifact digest mismatch",
+        "ArtifactDigestMismatch",
         "stale_generation_rejected",
         "revoked_generation_rejected",
         "verifier_rejected_stale_attestation",
         "format=zigos-trusted-hardware-verifier-response-v1",
         "assertion=signed-response",
-        "statement_sha256=$statement_sha256",
-        "nonce=$capture_nonce",
+        "statement_sha256={s}",
+        "nonce={s}",
         "production_role=verified",
         "verification_role=verified",
-        "cmp -s \"$expected_response\" \"$verifier_response\"",
-        "did not return the exact signed-response assertion",
+        "ExactVerifierResponseRequired",
+        "follow_symlinks = false",
+        "secureParent",
         "QEMU",
     };
     for (required_snippets) |snippet| {
@@ -3337,9 +3360,14 @@ fn validateStorageModernOnlyTrack(
         try common.addError(errors, allocator, "Storage production track must not restore the freestanding inline signer text pool", .{});
     }
     const production_attachment_snippets = [_][]const u8{
-        "pub fn attachNvmePciBackend(self: *Volume, backend: Backend) void",
+        "pub fn attachNvmePciBackend(self: *Volume, backend: Backend) bool",
         "pub fn hasProductionStorageBackend(self: *const Volume) bool",
         "self.attached_backend_kind == .nvme_pci",
+        "pub fn attachmentBusy(self: *const Volume) bool",
+        "if (!self.beginOperation()) return error.VolumeOperationBusy",
+        "snapshot_current: bool",
+        "dirty_snapshot.acknowledge(store, workspaces)",
+        "try validateReplayLog(log, loaded.root)",
     };
     for (production_attachment_snippets) |snippet| {
         if (std.mem.indexOf(u8, source, snippet) == null) {
@@ -3900,7 +3928,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 18",
+        "pub const ABI_VERSION: u16 = 19",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -4002,15 +4030,17 @@ fn validateUserspaceDriverDataPathTrack(
     }{
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "pub fn copyUserSlice(" },
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user slice copies enforce source and destination bounds" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "if (request.payload.len != 0 and !dispatch.validateUserRange(" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.copyUserSlice(memory, request.payload, &payload)" },
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user_memory.readUserMemory(memory.caller_task_id," },
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user_memory.writeUserMemory(memory.caller_task_id," },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks)" },
         .{ .path = endpoint_path, .source = endpoint_source, .snippet = "ipc_ring.pushRecord(peer.data_ring, record)" },
-        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "x86.allowSupervisorUserMemory()" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
     };
     for (protected_endpoint_send_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
-            try common.addError(errors, allocator, "SMAP-safe endpoint send path must retain snippet in {s}: {s}", .{ required.path, required.snippet });
+            try common.addError(errors, allocator, "Safe endpoint copy path must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
     if (std.mem.indexOf(u8, syscall_dispatch_source, "borrowImmediateUserSlice") != null or
@@ -4579,7 +4609,7 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
         \\    "reference_artifacts": [
         \\      "src/native/platform/hardware_target.zig",
         \\      "spec/hardware/nuc15crsu7-required-markers.txt",
-        \\      "scripts/check-nuc15crsu7-hardware-proof.sh"
+        \\      "tools/host/hardware.zig"
         \\    ],
         \\    "qemu_preflight_commands": ["./scripts/zig.sh build iso"],
         \\    "hardware_exit_criteria": ["self-test"],
@@ -4597,11 +4627,162 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
     }
 }
 
+fn validateNativeSchedulerLoopSource(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    source: []const u8,
+) !void {
+    const code = try allocator.dupeSentinel(u8, source, 0);
+    defer allocator.free(code);
+    var tokens = std.ArrayList(std.zig.Token).empty;
+    defer tokens.deinit(allocator);
+    var lexer = std.zig.Tokenizer.init(code);
+    while (true) {
+        const token = lexer.next();
+        if (token.tag == .eof) break;
+        if (token.tag == .invalid) {
+            try common.addError(errors, allocator, "native scheduler loop must remain valid Zig source", .{});
+            return;
+        }
+        if (token.tag != .doc_comment and token.tag != .container_doc_comment) try tokens.append(allocator, token);
+    }
+    const required_one_shot_scheduler_snippets = [_][:0]const u8{
+        "timer.synchronize()",
+        "session_manager.bindHardwareInput",
+        "pollHardwareKeyboardReport",
+        "xhci_driver_task.pollKeyboardReport()",
+        "hardwareInputProof",
+        "xhci_driver_task.inputProof()",
+        "session_manager.servicePendingInputWork(now_ticks)",
+        "xhci_driver_task.lifecyclePending()",
+        "userspaceSchedulerHasDispatchableTasks(timer.getTicks())",
+        "timer.armSchedulerTick()",
+        "timer.disarmSchedulerTick()",
+        "x86.cli()",
+        "x86.sti()",
+        "smp.idle()",
+    };
+    for (required_one_shot_scheduler_snippets) |snippet| {
+        if (!hasCodeTokens(code, tokens.items, snippet)) {
+            try common.addError(errors, allocator, "native scheduler loop must retain one-shot idle deadline control: {s}", .{snippet});
+        }
+    }
+    const run = topLevelFunctionBody(code, tokens.items, "run") orelse {
+        try common.addError(errors, allocator, "native scheduler loop must retain its actual run function", .{});
+        return;
+    };
+    const required_run_snippets = [_][:0]const u8{
+        "session_manager.system().serviceAuthenticationClock(now_ticks); wakeBoundXhciTask(xhci_driver_task, session_manager, pending, now_ticks);",
+        "if (xhci_driver_task.lifecyclePending()) { timer.armSchedulerTick(); } else if (session_manager.nextServiceWake()) |deadline| { timer.armWakeAt(deadline); } else { timer.disarmSchedulerTick();",
+    };
+    for (required_run_snippets) |snippet| {
+        if (!hasCodeTokens(code, run, snippet)) {
+            try common.addError(errors, allocator, "native scheduler run must retain bound xHCI wake, authority expiry and idle deadline control: {s}", .{snippet});
+        }
+    }
+    const helper = topLevelFunctionBody(code, tokens.items, "wakeBoundXhciTask") orelse {
+        try common.addError(errors, allocator, "native scheduler must retain its actual bound xHCI wake helper", .{});
+        return;
+    };
+    // Compare the whole executable body: test calls, quoted snippets, comments
+    // or an unreachable predicate must not replace the production wake guard.
+    const required_helper_body =
+        "if (pending.xhci or (pending.timer and driver.workPending())) { " ++
+        "const bound_task_id = driver.boundTaskId(); " ++
+        "if (bound_task_id != 0) _ = manager.wakeUserspaceTask(bound_task_id, now_ticks); }";
+    const matching_tokens = codeTokenSequenceLength(code, helper, required_helper_body);
+    if (matching_tokens == null or matching_tokens.? != helper.len) {
+        try common.addError(errors, allocator, "native scheduler xHCI helper must wake on IRQ or pending timer work through the exact nonzero bound task", .{});
+    }
+}
+
+fn topLevelFunctionBody(source: []const u8, tokens: []const std.zig.Token, name: []const u8) ?[]const std.zig.Token {
+    var depth: usize = 0;
+    for (tokens, 0..) |token, index| {
+        if (depth == 0 and token.tag == .keyword_fn and index + 1 < tokens.len and
+            tokens[index + 1].tag == .identifier and std.mem.eql(u8, source[tokens[index + 1].loc.start..tokens[index + 1].loc.end], name))
+        {
+            var start = index + 2;
+            while (start < tokens.len and tokens[start].tag != .l_brace) : (start += 1) {
+                if (tokens[start].tag == .semicolon) return null;
+            }
+            if (start == tokens.len) return null;
+            var nested: usize = 1;
+            var end = start + 1;
+            while (end < tokens.len) : (end += 1) {
+                if (tokens[end].tag == .l_brace) nested += 1;
+                if (tokens[end].tag == .r_brace) nested -= 1;
+                if (nested == 0) return tokens[start + 1 .. end];
+            }
+            return null;
+        }
+        if (token.tag == .l_brace) depth += 1;
+        if (token.tag == .r_brace) {
+            if (depth == 0) return null;
+            depth -= 1;
+        }
+    }
+    return null;
+}
+
+fn codeTokenSequenceLength(source: []const u8, tokens: []const std.zig.Token, pattern: [:0]const u8) ?usize {
+    var lexer = std.zig.Tokenizer.init(pattern);
+    var count: usize = 0;
+    while (true) {
+        const expected = lexer.next();
+        if (expected.tag == .eof) return count;
+        if (count == tokens.len) return null;
+        const actual = tokens[count];
+        if (actual.tag != expected.tag or
+            !std.mem.eql(u8, source[actual.loc.start..actual.loc.end], pattern[expected.loc.start..expected.loc.end])) return null;
+        count += 1;
+    }
+}
+
+fn hasCodeTokens(source: []const u8, tokens: []const std.zig.Token, pattern: [:0]const u8) bool {
+    for (tokens, 0..) |_, index| if (codeTokenSequenceLength(source, tokens[index..], pattern) != null) return true;
+    return false;
+}
+
+fn validateProductionBootFlags(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+    source: []const u8,
+) !void {
+    for ([_][]const u8{ "model_inventory", "qemu_software_cpu_fallback", "qemu_tsc_frequency_hz" }) |flag| {
+        if (std.mem.indexOf(u8, source, flag) != null) {
+            try common.addError(errors, allocator, "production boot defaults must not enable modeled hardware or a fabricated clock ({s}): {s}", .{ path, flag });
+        }
+    }
+}
+
 fn isOneOf(value: []const u8, allowed: []const []const u8) bool {
     for (allowed) |candidate| {
         if (std.mem.eql(u8, value, candidate)) return true;
     }
     return false;
+}
+
+test "production boot defaults reject modeled hardware and fixed clock overrides" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    for ([_][]const u8{
+        "model_inventory",
+        "qemu_tsc_frequency_hz=2400000000",
+        "qemu_software_cpu_fallback",
+        "multiboot2 /boot/kernel.elf model_inventory qemu_tsc_frequency_hz=2400000000",
+    }) |source| {
+        var errors = std.ArrayList([]const u8).empty;
+        try validateProductionBootFlags(allocator, &errors, "production boot fixture", source);
+        try std.testing.expect(errors.items.len > 0);
+    }
+    for ([_][]const u8{ "", "\n", "multiboot2 /boot/kernel.elf\nboot\n" }) |source| {
+        var errors = std.ArrayList([]const u8).empty;
+        try validateProductionBootFlags(allocator, &errors, "production boot fixture", source);
+        try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+    }
 }
 
 test "synthetic userspace marker gate rejects unmarked fixture" {
@@ -4660,4 +4841,65 @@ test "hardware marker lookup ignores commented requirements" {
 test "hardware marker lookup requires a complete active line" {
     const source = "prefix ZIGOS:NATIVE:READY suffix\nZIGOS:NATIVE:READY_EXTRA\n";
     try std.testing.expect(!markerFileHasActiveLine(source, "ZIGOS:NATIVE:READY"));
+}
+
+test "native scheduler source gate accepts the actual bound wake helper and idle deadlines" {
+    const source = try common.readFileAlloc(std.testing.allocator, std.testing.io, "src/kernel/boot/profiles/zigos_native.zig", common.source_file_max_bytes);
+    defer std.testing.allocator.free(source);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var errors = std.ArrayList([]const u8).empty;
+    try validateNativeSchedulerLoopSource(arena.allocator(), &errors, source);
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+}
+
+test "native scheduler source gate rejects broken driver binding pending predicate and idle deadlines" {
+    const source = try common.readFileAlloc(std.testing.allocator, std.testing.io, "src/kernel/boot/profiles/zigos_native.zig", common.source_file_max_bytes);
+    defer std.testing.allocator.free(source);
+    const mutations = [_]struct { needle: []const u8, replacement: []const u8 }{
+        .{ .needle = "wakeBoundXhciTask(xhci_driver_task, session_manager, pending, now_ticks);", .replacement = "wakeBoundXhciTask(other_driver, session_manager, pending, now_ticks);" },
+        .{ .needle = "pending.timer and driver.workPending()", .replacement = "pending.timer" },
+        .{ .needle = "pending.xhci or (pending.timer", .replacement = "false or (pending.timer" },
+        .{ .needle = "driver.boundTaskId()", .replacement = "unrelatedTaskId()" },
+        .{ .needle = "if (bound_task_id != 0)", .replacement = "if (true)" },
+        .{ .needle = "timer.armWakeAt(deadline);", .replacement = "timer.disarmSchedulerTick();" },
+        .{ .needle = "session_manager.system().serviceAuthenticationClock(now_ticks);", .replacement = "{}" },
+    };
+    for (mutations) |mutation| {
+        try std.testing.expect(std.mem.indexOf(u8, source, mutation.needle) != null);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const altered = try std.mem.replaceOwned(u8, arena.allocator(), source, mutation.needle, mutation.replacement);
+        var errors = std.ArrayList([]const u8).empty;
+        try validateNativeSchedulerLoopSource(arena.allocator(), &errors, altered);
+        try std.testing.expect(errors.items.len != 0);
+    }
+}
+
+test "native scheduler source gate ignores comments quoted calls and unreachable helper bodies" {
+    const source = try common.readFileAlloc(std.testing.allocator, std.testing.io, "src/kernel/boot/profiles/zigos_native.zig", common.source_file_max_bytes);
+    defer std.testing.allocator.free(source);
+    const call = "wakeBoundXhciTask(xhci_driver_task, session_manager, pending, now_ticks);";
+    const mutations = [_]struct { needle: []const u8, replacement: []const u8 }{
+        .{ .needle = call, .replacement = "// " ++ call },
+        .{ .needle = call, .replacement = "_ = \"" ++ call ++ "\";" },
+        .{ .needle = call, .replacement = "{}" },
+        .{ .needle = "if (pending.xhci or (pending.timer and driver.workPending()))", .replacement = "return; if (pending.xhci or (pending.timer and driver.workPending()))" },
+        .{
+            .needle = "    if (pending.xhci or (pending.timer and driver.workPending())) {\n" ++
+                "        const bound_task_id = driver.boundTaskId();\n" ++
+                "        if (bound_task_id != 0) _ = manager.wakeUserspaceTask(bound_task_id, now_ticks);\n" ++
+                "    }",
+            .replacement = "",
+        },
+    };
+    for (mutations) |mutation| {
+        try std.testing.expect(std.mem.indexOf(u8, source, mutation.needle) != null);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const altered = try std.mem.replaceOwned(u8, arena.allocator(), source, mutation.needle, mutation.replacement);
+        var errors = std.ArrayList([]const u8).empty;
+        try validateNativeSchedulerLoopSource(arena.allocator(), &errors, altered);
+        try std.testing.expect(errors.items.len != 0);
+    }
 }

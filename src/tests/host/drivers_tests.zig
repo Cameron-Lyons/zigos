@@ -22,7 +22,13 @@ test "driver host tests import native driver modules" {
     // Reach the hardware module's pure tests without instantiating MMIO/VT-d
     // entry points in a hosted Debug executable.
     _ = @import("../../kernel/drivers/xhci_hw.zig").keyboardContinuityEpoch;
+    _ = @import("../../kernel/boot/profiles/zigos_native.zig").INTERRUPT_DRIVEN_IDLE;
+    _ = @import("../../kernel/drivers/intel_i225_hw.zig").transmitCount;
+    _ = @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount;
+    _ = @import("../../kernel/interrupts/syscall64.zig").FRED_ONLY_TRAPS;
     std.testing.refAllDecls(tpm2_crb_test);
+    std.testing.refAllDecls(@import("fred_gpr_capture_test.zig"));
+    std.testing.refAllDecls(@import("xstate_roundtrip_test.zig"));
     std.testing.refAllDecls(accelerator_driver_task);
     std.testing.refAllDecls(bootstrap_driver_port);
     std.testing.refAllDecls(dataplane_handoff);
@@ -36,6 +42,7 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(nvme_completion);
     std.testing.refAllDecls(nvme_prp);
     std.testing.refAllDecls(nvme_timing);
+    std.testing.refAllDecls(@import("../../kernel/drivers/nvme_wait_test.zig"));
     std.testing.refAllDecls(network_driver_task);
     std.testing.refAllDecls(storage_driver_task);
     std.testing.refAllDecls(xhci_driver_task);

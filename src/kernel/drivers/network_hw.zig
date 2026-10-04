@@ -57,6 +57,13 @@ export fn zigosNetworkBootstrapWorkPending() callconv(.c) bool {
     return if (virtio.attached()) virtio.workPending() else intel_nic.networkWorkPending();
 }
 
+export fn zigosNetworkBootstrapNextWake(deadline: *u64) callconv(.c) bool {
+    deadline.* = 0;
+    const wake = (if (virtio.attached()) virtio.nextWake() else intel_nic.nextWake()) orelse return false;
+    deadline.* = wake;
+    return true;
+}
+
 export fn zigosNetworkBootstrapMac(output: [*]u8) callconv(.c) bool {
     if (!zigosNetworkBootstrapAttached()) return false;
     const mac = if (virtio.attached()) virtio.macAddress() else intel_nic.macAddress();

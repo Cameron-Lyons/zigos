@@ -767,7 +767,11 @@ fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u
                 parkUntilEvent();
                 break :blk .wait_for_event;
             } else .runnable;
-        } else .runnable;
+        } else wait: {
+            if (identity_work) break :wait .runnable;
+            parkUntilEvent();
+            break :wait .wait_for_event;
+        };
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
     }

@@ -35,10 +35,15 @@ pub fn noNetworkWorkPending() bool {
     return false;
 }
 
+pub fn noNetworkWake() ?u64 {
+    return null;
+}
+
 pub const NetworkDevice = struct {
     send: *const fn (destination: [6]u8, data: []const u8) bool,
     receive: *const fn (output: []u8) ReceiveResult,
     workPending: *const fn () bool = noNetworkWorkPending,
+    nextWake: *const fn () ?u64 = noNetworkWake,
     getMacAddress: *const fn () [6]u8,
 };
 
@@ -811,6 +816,11 @@ pub fn activeTaskId() u64 {
 pub fn networkWorkPending() bool {
     const device = active_device orelse return false;
     return device.workPending();
+}
+
+pub fn nextNetworkWake() ?u64 {
+    const device = active_device orelse return null;
+    return device.nextWake();
 }
 
 pub fn setEgressBroker(broker: ?EgressBroker) void {

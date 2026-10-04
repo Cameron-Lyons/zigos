@@ -23,7 +23,6 @@ pub const alternate_data_region_offset: u32 = @intCast(data_region_bytes);
 
 pub const root_magic = "ZG4LOG1";
 pub const root_format_version: u16 = 5;
-pub const USES_INCREMENTAL_LIVE_INDEX = true;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = true;
 pub const COMPACTS_IN_BACKGROUND = true;
 pub const max_replay_log_records: u16 = 512;

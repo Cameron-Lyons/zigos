@@ -12,6 +12,7 @@ const storage_driver_task = @import("storage_driver_task.zig");
 const xhci_driver_task = @import("xhci_driver_task.zig");
 const display_driver_task = @import("display_driver_task.zig");
 const storage_volume = @import("../storage/storage_volume.zig");
+const cooperative = @import("../task/cooperative_worker.zig");
 const kernel_device_start = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/boot/init/devices.zig")
 else
@@ -183,7 +184,11 @@ var published_network: ?NetworkPublication = null;
 var published_storage: ?StoragePublication = null;
 var published_device_planes = @as([device_class_count]?DeviceDataPlanePublication, @splat(null));
 
-pub fn reset() void {
+pub fn reset() bool {
+    if (!storageAttachmentMutable()) return false;
+    if (!storage_volume.clearAttachedBackend()) return false;
+    if (!dataplane_handoff.reset()) @panic("idle storage handoff resets without suspension");
+    StorageAuthorityClock.reset();
     published_network = null;
     published_storage = null;
     published_device_planes = @as([device_class_count]?DeviceDataPlanePublication, @splat(null));
@@ -192,10 +197,9 @@ pub fn reset() void {
     owned_storage_generation = 0;
     owned_storage_backend = null;
     device_broker.reset();
-    dataplane_handoff.reset();
     kernel_network_claim.init();
     network_driver_task.reset();
-    storage_volume.clearAttachedBackend();
+    return true;
 }
 
 pub fn publishNetworkDevice(
@@ -232,6 +236,8 @@ pub fn publishStorageBackend(
     backend: storage_volume.Backend,
     kernel_bootstrap: bool,
 ) Error!bool {
+    if (!storageAttachmentMutable()) return false;
+    if (published_storage) |publication| if (publication.active_service_id != 0) return false;
     if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
     var publication = try initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
@@ -246,6 +252,8 @@ pub fn publishStorageActivator(
     activator: StorageActivator,
     kernel_bootstrap: bool,
 ) Error!bool {
+    if (!storageAttachmentMutable()) return false;
+    if (published_storage) |publication| if (publication.active_service_id != 0) return false;
     if (kernel_bootstrap) return false;
     if (!canPublishPublication(StoragePublication, published_storage, device_id)) return false;
     var publication = try initPublication(StoragePublication, device_id, publisher, kernel_bootstrap);
@@ -367,6 +375,10 @@ pub fn networkWorkPending() bool {
     return network_driver_task.networkWorkPending();
 }
 
+pub fn nextNetworkWake() ?u64 {
+    return network_driver_task.nextNetworkWake();
+}
+
 pub fn activeNetworkTaskId() u64 {
     return network_driver_task.activeTaskId();
 }
@@ -424,6 +436,7 @@ pub fn activateStorageBackend(
     now_ticks: u64,
     kernel_port: ?*component_port.KernelPort,
 ) bool {
+    if (!storageAttachmentMutable()) return false;
     if (publicationForActivation(StoragePublication, &published_storage, device_id, service_id)) |publication| {
         storage_driver_task.bindTaskId(owner_task_id);
         if (builtin.target.os.tag == .freestanding and !storage_driver_task.bringUpForTask(owner_task_id)) return false;
@@ -446,6 +459,7 @@ pub fn activateStorageBackend(
             return false;
         }
         if (!attachOwnedStorageBackend(publication, publication.backend.?)) return false;
+        StorageAuthorityClock.recordValidatedAdmission(now_ticks);
         publication.active_service_id = service_id;
         return true;
     }
@@ -463,21 +477,24 @@ pub fn deactivateNetworkDevice(service_id: u64) bool {
 }
 
 pub fn deactivateStorageBackend(service_id: u64) bool {
+    if (!storageAttachmentMutable()) return false;
     if (publicationForDeactivation(StoragePublication, &published_storage, service_id)) |publication| {
+        if (!storage_volume.clearAttachedBackend()) return false;
+        if (!dataplane_handoff.release(publication.device_id) and dataplane_handoff.claimed(publication.device_id))
+            @panic("idle owned storage claim retires without suspension");
         publication.active_service_id = 0;
         publication.controller_session = null;
-        _ = dataplane_handoff.release(publication.device_id);
         owned_storage_device_id = 0;
         owned_storage_task_id = 0;
         owned_storage_generation = 0;
         owned_storage_backend = null;
-        storage_volume.clearAttachedBackend();
         return true;
     }
     return false;
 }
 
 pub fn refreshActiveStorageAttachment(service_id: u64) bool {
+    if (!storageAttachmentMutable()) return false;
     const publication = publicationForActiveStorage(service_id) orelse return false;
     const backend = publication.backend orelse return false;
     if (!storageControllerSessionCurrent(publication)) return false;
@@ -513,7 +530,7 @@ pub fn activeStorageControllerSession(service_id: u64) ?StorageControllerSession
 
 pub fn storageSessionIsCurrent(session: *const StorageControllerSession) bool {
     const task = session.kernel_port.kernel.runtime.find(session.task_id) orelse return false;
-    if (task.process_generation != session.process_generation) return false;
+    if (task.state == .terminated or task.process_generation != session.process_generation) return false;
     if (device_broker.brokerGeneration(session.device_id) != session.broker_generation) return false;
     return device_broker.brokeredDmaBufferStillValid(session.brokered_dma_buffer);
 }
@@ -647,27 +664,26 @@ fn programStorageDmaIsolation(device_id: u64, dma_domain_id: u64) bool {
 }
 
 fn attachOwnedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {
+    if (!storageAttachmentMutable() or !storagePublicationMatchesTargetNvme(publication) or backend.sector_count < storage_volume.required_device_sectors)
+        return false;
     const session = publication.controller_session;
     const owner_task_id = if (session) |bound| bound.task_id else 0;
     const process_generation = if (session) |bound| bound.process_generation else 0;
+    const already_claimed = dataplane_handoff.claimed(publication.device_id);
     dataplane_handoff.claim(publication.device_id, owner_task_id, process_generation) catch return false;
-    owned_storage_device_id = publication.device_id;
-    owned_storage_task_id = owner_task_id;
-    owned_storage_generation = process_generation;
-    owned_storage_backend = backend;
     if (!attachSealedPublishedStorageBackend(publication, .{
         .sector_count = backend.sector_count,
         .read = ownedStorageRead,
         .write = ownedStorageWrite,
         .flush = ownedStorageFlush,
     })) {
-        _ = dataplane_handoff.release(publication.device_id);
-        owned_storage_device_id = 0;
-        owned_storage_task_id = 0;
-        owned_storage_generation = 0;
-        owned_storage_backend = null;
+        if (!already_claimed) _ = dataplane_handoff.release(publication.device_id);
         return false;
     }
+    owned_storage_device_id = publication.device_id;
+    owned_storage_task_id = owner_task_id;
+    owned_storage_generation = process_generation;
+    owned_storage_backend = backend;
     return true;
 }
 
@@ -675,26 +691,102 @@ var owned_storage_device_id: u64 = 0;
 var owned_storage_task_id: u64 = 0;
 var owned_storage_generation: u32 = 0;
 var owned_storage_backend: ?storage_volume.Backend = null;
+const StorageSubmission = struct {
+    lease: dataplane_handoff.Lease,
+    backend: storage_volume.Backend,
+    controller_session: ?StorageControllerSession,
+};
+var active_storage_submission: ?*const StorageSubmission = null;
+
+comptime {
+    if (builtin.target.os.tag == .freestanding)
+        @export(&storageOwnedSubmitAuthorityCurrent, .{ .name = "zigosStorageOwnedSubmitAuthorityCurrent" });
+}
+
+pub fn storageOwnedSubmitAuthorityCurrent(device_id: u64) callconv(.c) bool {
+    const submission = active_storage_submission orelse return false;
+    if (submission.lease.device_id != device_id or !dataplane_handoff.leaseCurrent(submission.lease)) return false;
+    return storageAuthorityCurrent(submission.controller_session, storageAuthorityTicks());
+}
+
+fn storageAuthorityTicks() u64 {
+    return StorageAuthorityClock.now();
+}
+
+const StorageAuthorityClock = if (builtin.target.os.tag == .freestanding) struct {
+    fn now() u64 {
+        const timer = @import("../../kernel/timer/timer.zig");
+        timer.synchronize();
+        return timer.getTicks();
+    }
+    fn recordValidatedAdmission(_: u64) void {}
+    fn reset() void {}
+} else struct {
+    // Hosted driver contracts use explicit model ticks. Retain the latest
+    // successful controller admission rather than treating all later IO as
+    // tick zero. A new model world begins only after idle reset succeeds.
+    var admitted_ticks: u64 = 0;
+    fn now() u64 {
+        return admitted_ticks;
+    }
+    fn recordValidatedAdmission(ticks: u64) void {
+        admitted_ticks = @max(admitted_ticks, ticks);
+    }
+    fn reset() void {
+        admitted_ticks = 0;
+    }
+};
+
+fn storageAuthorityCurrent(session: ?StorageControllerSession, now_ticks: u64) bool {
+    const bound = session orelse return builtin.target.os.tag != .freestanding;
+    if (!storageSessionIsCurrent(&bound)) return false;
+    const authority = bound.kernel_port.kernel.requireTaskCapability(bound.task_id, bound.authority_capability_id, now_ticks) catch return false;
+    return authority.target.kind == .device and authority.target.id == bound.device_id and authority.rights.containsAll(driver_service.allowedRightsFor(.storage_controller));
+}
+
+fn endStorageSubmit(submission: *const StorageSubmission) void {
+    if (active_storage_submission != submission) @panic("owned storage submission retains its exact callback context");
+    active_storage_submission = null;
+    if (!dataplane_handoff.endOwnedSubmit(submission.lease)) @panic("owned storage callback releases its exact submission");
+}
 
 fn ownedStorageRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
-    dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return false;
-    defer dataplane_handoff.endOwnedSubmit(owned_storage_device_id);
-    const backend = owned_storage_backend orelse return false;
-    return backend.read(start_lba, buffer_ptr, buffer_len);
+    const submission = beginStorageSubmit() orelse return false;
+    active_storage_submission = &submission;
+    defer endStorageSubmit(&submission);
+    return submission.backend.read(start_lba, buffer_ptr, buffer_len);
 }
 
 fn ownedStorageWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
-    dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return false;
-    defer dataplane_handoff.endOwnedSubmit(owned_storage_device_id);
-    const backend = owned_storage_backend orelse return false;
-    return backend.write(start_lba, buffer_ptr, buffer_len);
+    const submission = beginStorageSubmit() orelse return false;
+    active_storage_submission = &submission;
+    defer endStorageSubmit(&submission);
+    return submission.backend.write(start_lba, buffer_ptr, buffer_len);
 }
 
 fn ownedStorageFlush() callconv(.c) bool {
-    dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return false;
-    defer dataplane_handoff.endOwnedSubmit(owned_storage_device_id);
-    const backend = owned_storage_backend orelse return false;
-    return backend.flush();
+    const submission = beginStorageSubmit() orelse return false;
+    active_storage_submission = &submission;
+    defer endStorageSubmit(&submission);
+    return submission.backend.flush();
+}
+
+fn storageAttachmentMutable() bool {
+    return !dataplane_handoff.operationBusy() and !storage_volume.operationBusy();
+}
+
+fn beginStorageSubmit() ?StorageSubmission {
+    // Copy and authenticate the attachment before entering a backend that may
+    // suspend. Its exact lease pins these globals until that backend drains.
+    const backend = owned_storage_backend orelse return null;
+    const publication = published_storage orelse return null;
+    if (publication.device_id != owned_storage_device_id or publication.active_service_id == 0 or !storageControllerSessionCurrent(&publication)) return null;
+    if (publication.controller_session) |session| {
+        if (session.task_id != owned_storage_task_id or session.process_generation != owned_storage_generation) return null;
+    }
+    if (!storageAuthorityCurrent(publication.controller_session, storageAuthorityTicks())) return null;
+    const lease = dataplane_handoff.beginOwnedSubmit(owned_storage_device_id, owned_storage_task_id, owned_storage_generation) catch return null;
+    return .{ .lease = lease, .backend = backend, .controller_session = publication.controller_session };
 }
 
 fn attachSealedPublishedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {
@@ -705,7 +797,7 @@ fn attachSealedPublishedStorageBackend(publication: *const StoragePublication, b
 
 fn attachPublishedStorageBackend(publication: *const StoragePublication, backend: storage_volume.Backend) bool {
     if (!storagePublicationMatchesTargetNvme(publication)) return false;
-    storage_volume.attachNvmePciBackend(backend);
+    if (!storage_volume.attachNvmePciBackend(backend)) return false;
     return storage_volume.hasProductionStorageBackend();
 }
 
@@ -759,8 +851,8 @@ test "bootstrap driver publications use compact bounded metadata" {
 test "driver-backed network tx fails closed without capability-backed egress decision" {
     if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
     device_inventory.reset();
     defer device_inventory.reset();
     const i225_device_id: u64 = 0x8086_15F2_0001;
@@ -819,8 +911,8 @@ test "driver-backed network tx fails closed without capability-backed egress dec
 test "adversarial raw IP or domain knowledge cannot substitute for egress capability" {
     if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
     device_inventory.reset();
     defer device_inventory.reset();
     const i225_device_id: u64 = 0x8086_15F2_0001;
@@ -870,8 +962,8 @@ test "adversarial raw IP or domain knowledge cannot substitute for egress capabi
 test "kernel bootstrap cannot publish storage data-plane transports directly" {
     if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
 
     const Backend = struct {
         fn read(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
@@ -906,8 +998,8 @@ test "kernel bootstrap cannot publish storage data-plane transports directly" {
 test "active storage attachment refreshes from the publication" {
     if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
     device_inventory.reset();
     defer device_inventory.reset();
 
@@ -940,18 +1032,201 @@ test "active storage attachment refreshes from the publication" {
     try std.testing.expect(storage_volume.hasAttachedDevice());
     try std.testing.expect(storage_volume.hasProductionStorageBackend());
 
-    storage_volume.clearAttachedBackend();
+    _ = storage_volume.clearAttachedBackend();
     try std.testing.expect(!storage_volume.hasAttachedDevice());
     try std.testing.expect(refreshActiveStorageAttachment(service_id));
     try std.testing.expect(storage_volume.hasAttachedDevice());
     try std.testing.expect(storage_volume.hasProductionStorageBackend());
 }
 
+test "owned storage delayed backend pins attachment through cancellation and foreign teardown" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+    try std.testing.expect(reset());
+    defer std.debug.assert(reset());
+    device_inventory.reset();
+    defer device_inventory.reset();
+    const device_id: u64 = 0x0000_8086_5845_5301;
+    const service_id: u64 = 0x5302;
+    const Backend = struct {
+        var accepted: usize = 0;
+        var completed: usize = 0;
+        var cancelled: bool = false;
+        fn read(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+        fn write(_: u64, bytes: [*]const u8, length: usize) callconv(.c) bool {
+            if (!dataplane_handoff.allowsKernelRuntimeIo(device_id)) return false;
+            accepted += 1;
+            if (cooperative.current()) |worker| {
+                worker.yield();
+                cancelled = worker.cancel_requested;
+            }
+            if (!dataplane_handoff.allowsKernelRuntimeIo(device_id) or !std.mem.allEqual(u8, bytes[0..length], 0xA5)) return false;
+            completed += 1;
+            return true;
+        }
+        fn flush() callconv(.c) bool {
+            return dataplane_handoff.allowsKernelRuntimeIo(device_id);
+        }
+    };
+    Backend.accepted = 0;
+    Backend.completed = 0;
+    Backend.cancelled = false;
+    const backend = storage_volume.Backend{
+        .sector_count = storage_volume.required_device_sectors,
+        .read = Backend.read,
+        .write = Backend.write,
+        .flush = Backend.flush,
+    };
+    device_inventory.registerDetected(.storage_controller, device_id, .nvme_pci_inventory, false);
+    try std.testing.expect(try publishStorageBackend(device_id, "delayed-owned-storage", backend, false));
+    try std.testing.expect(activateStorageBackend(device_id, service_id, 0, 0, 1, 0, null));
+    const Fixture = struct {
+        completed: bool = false,
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var payload: [storage_volume.sector_size]u8 = @splat(0xA5);
+            self.completed = activeStorageWrite(service_id, 9, &payload);
+        }
+    };
+    var stack: [32 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    var fixture = Fixture{};
+    try worker.start(&fixture, Fixture.run);
+    try worker.step();
+    defer if (worker.state == .suspended) worker.step() catch unreachable;
+    try std.testing.expectEqual(@as(usize, 1), Backend.accepted);
+    try std.testing.expectEqual(@as(usize, 0), Backend.completed);
+    try std.testing.expect(!dataplane_handoff.allowsKernelRuntimeIo(device_id));
+    try std.testing.expect(!dataplane_handoff.release(device_id));
+    try std.testing.expect(!deactivateStorageBackend(service_id));
+    try std.testing.expect(!refreshActiveStorageAttachment(service_id));
+    try std.testing.expect(!activateStorageBackend(device_id, service_id, 0, 0, 1, 1, null));
+    try std.testing.expect(!reset());
+    try std.testing.expect(!(try publishStorageBackend(device_id, "replacement", backend, false)));
+    try std.testing.expect(!storage_volume.clearAttachedBackend());
+    try std.testing.expect(!storage_volume.attachNvmePciBackend(backend));
+    try std.testing.expectEqual(service_id, storagePublication().?.active_service_id);
+    try std.testing.expect(storage_volume.hasProductionStorageBackend());
+    const foreign_payload: [storage_volume.sector_size]u8 = @splat(0xA5);
+    try std.testing.expect(!activeStorageWrite(service_id, 10, &foreign_payload));
+    try std.testing.expect(!activeStorageFlush(service_id));
+    try std.testing.expectEqual(@as(usize, 1), Backend.accepted);
+    worker.cancel();
+    try worker.step();
+    try std.testing.expect(fixture.completed and Backend.cancelled);
+    try std.testing.expectEqual(@as(usize, 1), Backend.completed);
+    try std.testing.expect(!dataplane_handoff.operationBusy());
+    try std.testing.expect(!dataplane_handoff.allowsKernelRuntimeIo(device_id));
+    try std.testing.expect(deactivateStorageBackend(service_id));
+    try std.testing.expect(!storage_volume.hasAttachedDevice());
+}
+
+test "owned storage copied authority denies refill after broker process capability or clock expiry" {
+    if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
+    const capability = @import("../kernel_api/capability.zig");
+    const endpoint = @import("../kernel_api/endpoint.zig");
+    const native_kernel = @import("../kernel_api/native_kernel.zig");
+    const shared_memory = @import("../kernel_api/shared_memory.zig");
+    const generated = @import("../task/generated_image_fixtures.zig");
+    const task_runtime = @import("../task/task_runtime.zig");
+    const device_id: u64 = 0x0000_8086_5845_5303;
+    const service_id: u64 = 0x5304;
+    const Backend = struct {
+        var admitted: usize = 0;
+        var drained: usize = 0;
+        var permitted_after_resume: bool = true;
+        fn read(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
+            return false;
+        }
+        fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
+            if (!storageOwnedSubmitAuthorityCurrent(device_id)) return false;
+            admitted += 1;
+            cooperative.current().?.yield();
+            permitted_after_resume = storageOwnedSubmitAuthorityCurrent(device_id);
+            // Accepted work retires even when current authority forbids refill.
+            drained += 1;
+            return permitted_after_resume;
+        }
+        fn flush() callconv(.c) bool {
+            return storageOwnedSubmitAuthorityCurrent(device_id);
+        }
+    };
+    for ([_]enum { broker, process, capability, expiry }{ .broker, .process, .capability, .expiry }) |revocation| {
+        try std.testing.expect(reset());
+        defer std.debug.assert(reset());
+        device_inventory.reset();
+        defer device_inventory.reset();
+        Backend.admitted = 0;
+        Backend.drained = 0;
+        Backend.permitted_after_resume = true;
+        const backend = storage_volume.Backend{
+            .sector_count = storage_volume.required_device_sectors,
+            .read = Backend.read,
+            .write = Backend.write,
+            .flush = Backend.flush,
+        };
+        device_inventory.registerDetected(.storage_controller, device_id, .nvme_pci_inventory, false);
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        var endpoints = endpoint.Table.init();
+        var shared = shared_memory.Table.init();
+        var kernel: native_kernel.Kernel = undefined;
+        kernel.initInPlace(.{ .kind = .policy_authority, .serial = 1 }, &runtime, &capabilities, &endpoints, &shared);
+        defer kernel.deinit();
+        var port = component_port.KernelPort.init(&kernel);
+        const owner = @import("../core/principal.zig").PrincipalId{ .kind = .service, .serial = service_id };
+        const image = try generated.storageDriverImage();
+        const task = try runtime.createTask(.{
+            .owner = owner,
+            .component_class = .service_component,
+            .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 1024, .endpoint_slots = 4, .shared_memory_bytes = 1024 },
+            .local_only = true,
+            .launch = .{ .boundary = .userspace_process, .image_id = 51, .component_abi_version = 1, .signed = true, .bundle_id = "zigos.system.storage-driver" },
+            .userspace_image = &image,
+        });
+        const authority = try driver_service.mintDriverAuthority(&capabilities, .{ .holder = owner, .task_id = task.id, .device_id = device_id, .device_class = .storage_controller, .issued_at_ticks = 100, .expires_at_ticks = 101 });
+        try runtime.grantCapability(task.id, authority.id);
+        try std.testing.expect(try publishStorageBackend(device_id, "delayed-storage-authority", backend, false));
+        try std.testing.expect(activateStorageBackend(device_id, service_id, authority.id, task.id, 0xD513, 100, &port));
+        const Fixture = struct {
+            result: bool = true,
+            fn run(context: *anyopaque) void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                var bytes: [storage_volume.sector_size]u8 = @splat(0xC7);
+                self.result = activeStorageWrite(service_id, 5, &bytes);
+            }
+        };
+        var stack: [32 * 1024]u8 align(16) = undefined;
+        var worker = cooperative.Worker{ .stack = &stack };
+        var fixture = Fixture{};
+        try worker.start(&fixture, Fixture.run);
+        try worker.step();
+        defer if (worker.state == .suspended) worker.step() catch unreachable;
+        try std.testing.expectEqual(@as(usize, 1), Backend.admitted);
+        try std.testing.expect(!storageOwnedSubmitAuthorityCurrent(device_id));
+        switch (revocation) {
+            .broker => try std.testing.expect(device_broker.revokePciController(device_id)),
+            .process => try std.testing.expect(try runtime.rehostTask(task.id, 101)),
+            .capability => try capabilities.revokeGrant(authority.id),
+            .expiry => StorageAuthorityClock.recordValidatedAdmission(102),
+        }
+        try worker.step();
+        try std.testing.expect(!fixture.result and !Backend.permitted_after_resume);
+        try std.testing.expectEqual(@as(usize, 1), Backend.drained);
+        try std.testing.expect(!dataplane_handoff.operationBusy());
+        var bytes: [storage_volume.sector_size]u8 = @splat(0xC7);
+        try std.testing.expect(!activeStorageWrite(service_id, 6, &bytes));
+        try std.testing.expectEqual(@as(usize, 1), Backend.admitted);
+        try std.testing.expect(deactivateStorageBackend(service_id));
+    }
+}
+
 test "refresh and active I/O keep owned submits after the kernel data plane is sealed" {
     if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
     device_inventory.reset();
     defer device_inventory.reset();
 
@@ -1009,7 +1284,7 @@ test "refresh and active I/O keep owned submits after the kernel data plane is s
     try std.testing.expectEqual(@as(u32, 1), Backend.flushes);
     try std.testing.expect(!dataplane_handoff.allowsKernelRuntimeIo(device_id));
 
-    storage_volume.clearAttachedBackend();
+    _ = storage_volume.clearAttachedBackend();
     try std.testing.expect(refreshActiveStorageAttachment(service_id));
     try std.testing.expect(storage_volume.hasProductionStorageBackend());
     try std.testing.expect(storage_volume.defaultVolume().attached_backend_write(3, payload[0..].ptr, payload.len));
@@ -1022,8 +1297,8 @@ test "refresh and active I/O keep owned submits after the kernel data plane is s
 test "storage backend activation requires target nvme inventory" {
     if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
     device_inventory.reset();
     defer device_inventory.reset();
 
@@ -1053,7 +1328,7 @@ test "storage backend activation requires target nvme inventory" {
     try std.testing.expect(!activateStorageBackend(uninventoried_device_id, 0x5202, 0, 0, 1, 0, null));
     try std.testing.expect(!storage_volume.hasAttachedDevice());
 
-    reset();
+    _ = reset();
     const non_nvme_device_id: u64 = 0x0000_8086_5845_5203;
     device_inventory.registerDetected(.storage_controller, non_nvme_device_id, .pci_inventory, false);
     try std.testing.expect(try publishStorageBackend(non_nvme_device_id, "test-storage", backend, false));
@@ -1073,12 +1348,12 @@ test "active nvme controller sessions reject stale broker generations" {
     const task_runtime = @import("../task/task_runtime.zig");
     const units = @import("../core/units.zig");
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
     device_inventory.reset();
     defer device_inventory.reset();
-    storage_volume.clearAttachedBackend();
-    defer storage_volume.clearAttachedBackend();
+    _ = storage_volume.clearAttachedBackend();
+    defer std.debug.assert(storage_volume.clearAttachedBackend());
 
     const device_id: u64 = 0x0000_8086_5845_5103;
     const service_id: u64 = 0x5104;
@@ -1227,8 +1502,8 @@ test "active nvme controller sessions reject stale broker generations" {
 test "kernel bootstrap cannot publish peripheral device data-plane transports directly" {
     if (builtin.target.os.tag == .freestanding) return error.SkipZigTest;
 
-    reset();
-    defer reset();
+    _ = reset();
+    defer std.debug.assert(reset());
 
     const peripheral_classes = [_]driver_service.DeviceClass{
         .usb_controller,

@@ -5,6 +5,33 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)"
 REQUIRED_ZIG_VERSION="${REQUIRED_ZIG_VERSION:-$(awk '$1 == "zig" { print $2; exit }' "$ROOT_DIR/.tool-versions")}"
 
+# Environment observations in build.zig do not invalidate Zig's configure
+# cache. Make the reproducible-media timestamp an explicit build option.
+if [ "${1:-}" = build ] && [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  have_epoch_option=false
+  for zig_arg in "$@"; do
+    case "$zig_arg" in
+      -Dsource-date-epoch | -Dsource-date-epoch=*) have_epoch_option=true ;;
+      --) break ;;
+    esac
+  done
+  if ! "$have_epoch_option"; then
+    zig_build_args=()
+    epoch_added=false
+    for zig_arg in "$@"; do
+      if [ "$zig_arg" = -- ] && ! "$epoch_added"; then
+        zig_build_args+=("-Dsource-date-epoch=$SOURCE_DATE_EPOCH")
+        epoch_added=true
+      fi
+      zig_build_args+=("$zig_arg")
+    done
+    if ! "$epoch_added"; then
+      zig_build_args+=("-Dsource-date-epoch=$SOURCE_DATE_EPOCH")
+    fi
+    set -- "${zig_build_args[@]}"
+  fi
+fi
+
 : "${ZIG_LOCAL_CACHE_DIR:=${ROOT_DIR}/build/zig-cache}"
 : "${ZIG_GLOBAL_CACHE_DIR:=${ROOT_DIR}/build/zig-global-cache}"
 export ZIG_LOCAL_CACHE_DIR

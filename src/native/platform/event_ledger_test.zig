@@ -662,7 +662,7 @@ test "event ledger renders what an app knows about a document" {
 
 test "event ledger persists history across restart" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 44 };
     const signer = signing.SignerIdentity{
@@ -685,12 +685,12 @@ test "event ledger persists history across restart" {
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=update_transition") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "kind=device_trust_change") != null);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "event ledger batches durable writes until persistence batch flush" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
     const signer = signing.SignerIdentity{
@@ -719,12 +719,12 @@ test "event ledger batches durable writes until persistence batch flush" {
     try std.testing.expect(restarted.loaded_existing_state);
     try std.testing.expectEqual(EventKind.device_trust_change, restarted.latestKind(.device_trust_change).?.kind);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "bulk boot ledger absorption survives two full histories within storage capacity" {
     var checkpoint = storage_service.CheckpointStore{};
-    defer checkpoint.resetPersistent();
+    defer if (!checkpoint.resetPersistent()) @panic("storage lifecycle transition was refused");
     const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
     const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
     var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
@@ -751,7 +751,7 @@ test "bulk boot ledger absorption survives two full histories within storage cap
 
 test "bulk ledger absorption preserves caller persistence deferral" {
     var checkpoint = storage_service.CheckpointStore{};
-    defer checkpoint.resetPersistent();
+    defer if (!checkpoint.resetPersistent()) @panic("storage lifecycle transition was refused");
     const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
     const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
     var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
@@ -770,7 +770,7 @@ test "bulk ledger absorption preserves caller persistence deferral" {
 
 test "diagnostic appends retain one format header and derive sequence after reload" {
     var checkpoint = storage_service.CheckpointStore{};
-    defer checkpoint.resetPersistent();
+    defer if (!checkpoint.resetPersistent()) @panic("storage lifecycle transition was refused");
     const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
     const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
     var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
@@ -792,7 +792,7 @@ test "diagnostic appends retain one format header and derive sequence after relo
 
 test "diagnostic reload rejects an obsolete counter header" {
     var checkpoint = storage_service.CheckpointStore{};
-    defer checkpoint.resetPersistent();
+    defer if (!checkpoint.resetPersistent()) @panic("storage lifecycle transition was refused");
     const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
     const signer = signing.SignerIdentity{ .label = "boot-ledger", .seed = signing.seedFromByte(0xAA) };
     var storage = storage_service.Service.initWithStore(904, 306, owner, &checkpoint);
@@ -821,7 +821,7 @@ test "diagnostic reload rejects an obsolete counter header" {
 
 test "event ledger persists user visible policy ux history across restart and query" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 46 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 8 };
@@ -890,12 +890,12 @@ test "event ledger persists user visible policy ux history across restart and qu
     try std.testing.expect(std.mem.indexOf(u8, exported, "reason=permission_request") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "flow_kind=review_permission_request") != null);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "event ledger rebuilds eviction order across restart" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 49 };
@@ -922,12 +922,12 @@ test "event ledger rebuilds eviction order across restart" {
     try std.testing.expectEqual(@as(usize, 1), restarted.countMatching(.{ .task_id = event_ledger.MAX_EVENTS + 1 }));
     try std.testing.expectEqual(@as(u64, event_ledger.MAX_EVENTS + 1), restarted.latestKind(.permission_decision).?.sequence);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "event ledger persistence retains full in-memory history and detail payloads" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
     const signer = signing.SignerIdentity{
@@ -964,12 +964,12 @@ test "event ledger persistence retains full in-memory history and detail payload
     try std.testing.expect(std.mem.indexOf(u8, exported, "#8 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exported, "abcdefghijklmnopqrstuvwxyz-0123456789") != null);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "event ledger persist failure aborts its transaction instead of wedging the workspace" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
     const signer = signing.SignerIdentity{
@@ -1007,5 +1007,5 @@ test "event ledger persist failure aborts its transaction instead of wedging the
         ledger.recordUpdateTransition(owner, 1, .none, false, 11, "stable-b activated"),
     );
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }

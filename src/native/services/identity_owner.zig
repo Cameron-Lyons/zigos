@@ -18,6 +18,10 @@ const identity = @import("../platform/os_identity.zig");
 const graph_mod = @import("../sync/device_graph.zig");
 const channel_mod = @import("identity_channel.zig");
 const kernel_port = @import("../kernel_api/component_port.zig");
+const document_sessions = @import("../session/document_sessions.zig");
+const document_worker = @import("document_operation_worker.zig");
+const owned_documents = @import("../session/owned_document_launch.zig");
+const document_view = @import("../platform/trusted_document_view.zig");
 
 const consent_mod = @import("identity_consent.zig");
 
@@ -57,6 +61,13 @@ pub const Interface = struct {
     service_requests: *const fn (*anyopaque, u64) bool,
     requests_ready: *const fn (*anyopaque) bool,
     next_request_wake: *const fn (*anyopaque) ?u64,
+    service_documents: *const fn (*anyopaque, u64) bool,
+    documents_ready: *const fn (*anyopaque, u64) bool,
+    quiesce_documents: *const fn (*anyopaque, u64) void,
+    document_access: *const fn (*anyopaque, u64) ?owned_documents.DocumentAccess,
+    set_document_job: *const fn (*anyopaque, ?document_worker.JobInterface) void,
+    document_job_busy: *const fn (*anyopaque) bool,
+    cancel_document_job: *const fn (*anyopaque, u64) void,
 };
 
 pub fn Owner(comptime Io: type) type {
@@ -81,6 +92,9 @@ pub fn Owner(comptime Io: type) type {
         channels: [4]channel_mod.Channel,
         channel_cursor: u8,
         consent: consent_mod.Pending,
+        documents: ?*document_sessions.Sessions,
+        document_operations: document_worker.Coordinator(Io),
+        document_view: ?*document_view.View,
 
         pub fn create(io: *Io, storage: *storage_mod.Service, config: Config) !*Self {
             if (config.owner.kind != .user or config.owner.serial == 0 or config.lifetime_ticks == 0 or
@@ -105,10 +119,13 @@ pub fn Owner(comptime Io: type) type {
             self.setup_worker = .{ .io = io, .storage = storage, .state = self.state(), .policies = &self.policies, .request = .{ .owner = config.owner, .device = .{ .kind = .device, .serial = 0 }, .record_object_id = 0, .catalog_object_id = 0, .parent_handle = config.parent_handle, .anchor_index = config.anchor_index, .boot_index = config.boot_index, .max_session_ticks = config.lifetime_ticks }, .scratch = &self.scratch, .max_duration_ticks = config.operation_timeout_ticks };
             self.setup = .{ .backend = self.setup_worker.backend(), .input_timeout_ticks = config.input_timeout_ticks, .requires_discovery = true };
             self.authentication_ready = false;
+            self.document_view = null;
             self.unavailable_reported = false;
             for (&self.channels) |*channel| channel.* = .{};
             self.channel_cursor = 0;
             self.consent = .{};
+            self.documents = null;
+            self.document_operations = undefined;
             return self;
         }
 
@@ -116,7 +133,83 @@ pub fn Owner(comptime Io: type) type {
             router.bindTrustedEntry(.{ .setup = &self.setup }, now);
             self.setup.discover(now);
             router.synchronizeTrustedInput();
-            return .{ .context = self, .service = service, .destroy = destroy, .review_credential = reviewCredential, .take_credential = takeCredential, .revoke_credential = revokeCredential, .service_requests = serviceRequests, .requests_ready = requestsReady, .next_request_wake = nextRequestWake };
+            return .{ .context = self, .service = service, .destroy = destroy, .review_credential = reviewCredential, .take_credential = takeCredential, .revoke_credential = revokeCredential, .service_requests = serviceRequests, .requests_ready = requestsReady, .next_request_wake = nextRequestWake, .service_documents = serviceDocuments, .documents_ready = documentsReady, .quiesce_documents = quiesceDocuments, .document_access = documentAccess, .set_document_job = setDocumentJob, .document_job_busy = documentJobBusy, .cancel_document_job = cancelDocumentJob };
+        }
+
+        // The manager binds its stable channel collection once. No app receives
+        // a signer or document authority from this execution-only association.
+        pub fn bindDocuments(self: *Self, documents: *document_sessions.Sessions) void {
+            if (self.documents != null) @panic("native identity owner binds document storage once");
+            self.documents = documents;
+            self.document_operations = .{ .session = &self.session, .documents = documents, .timeout_ticks = self.config.operation_timeout_ticks };
+        }
+
+        pub fn bindDocumentView(self: *Self, view: *document_view.View) void {
+            if (self.document_view != null) @panic("native document view has one stable owner");
+            self.document_view = view;
+            if (self.authentication_ready) self.authentication.view.documents = view;
+        }
+
+        fn setDocumentJob(context: *anyopaque, job: ?document_worker.JobInterface) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (self.documents == null) @panic("native document job requires the bound channel collection");
+            self.document_operations.setJob(job);
+            // Teardown detaches the public pointer before Launch backing is
+            // freed. Router quiescence and owner destruction can lock again.
+            if (job == null) {
+                self.document_view = null;
+                if (self.authentication_ready) self.authentication.view.documents = null;
+            }
+        }
+
+        fn documentJobBusy(context: *anyopaque) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            return self.documents != null and self.document_operations.busy();
+        }
+        fn cancelDocumentJob(context: *anyopaque, now: u64) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (self.documents != null) self.document_operations.cancelJob(now);
+        }
+
+        // Main-context discovery never cancels or yields while the operation
+        // worker borrows this session. Publication validates the live guard.
+        fn documentAccess(context: *anyopaque, now: u64) ?owned_documents.DocumentAccess {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.authentication_ready or !self.session.replay.active or self.session.lock_pending or
+                now < self.session.last_ticks or now < self.session.verified_at_ticks or now >= self.session.expires_at_ticks) return null;
+            const binding = self.session.replay.binding() catch return null;
+            const coordinator = self.session.coordinator orelse return null;
+            const signer = coordinator.signer;
+            if (signer.key.authority != &self.session.signing_authority) return null;
+            signer.validateService(self.storage.owner, self.storage.task_id, now) catch return null;
+            // Open can publish its grant without starting a document Worker.
+            // Apply the same live session policy as the operation guard while
+            // leaving any current worker's borrowed backing untouched.
+            if (!self.session.policies.sessionLifetimeDecision(self.session.subjects, self.session.expires_at_ticks - self.session.verified_at_ticks).allowed) return null;
+            const platform_backed = if (self.session.state.devices) |graph|
+                if (graph.findDeviceConst(self.session.enrollment.device)) |device| device.usesPlatformBackedKey() else false
+            else
+                false;
+            if (!self.session.policies.sessionTrustDecision(self.session.subjects, .{ .hardware_backed_credential = true, .device_platform_backed = platform_backed, .unlock_age_ticks = now - self.session.verified_at_ticks }).allowed) return null;
+            return .{ .owner = self.session.enrollment.owner, .binding = binding, .expires_at_ticks = self.session.expires_at_ticks, .signer = signer, .authorization = .{ .policies = self.session.policies, .subjects = self.session.subjects, .owner = self.session.enrollment.owner, .expires_at_ticks = self.session.expires_at_ticks } };
+        }
+
+        fn serviceDocuments(context: *anyopaque, now: u64) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.authentication_ready or self.documents == null) return false;
+            return self.document_operations.service(now);
+        }
+
+        fn documentsReady(context: *anyopaque, now: u64) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            return self.authentication_ready and self.documents != null and self.document_operations.ready(now);
+        }
+
+        fn quiesceDocuments(context: *anyopaque, now: u64) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.authentication_ready or self.documents == null) return;
+            self.session.lock();
+            self.document_operations.quiesce(now);
         }
 
         fn reviewCredential(context: *anyopaque, kernel: *kernel_port.KernelPort, request: CredentialRequest, now: u64) !void {
@@ -184,6 +277,7 @@ pub fn Owner(comptime Io: type) type {
         fn nextRequestWake(context: *anyopaque) ?u64 {
             const self: *Self = @ptrCast(@alignCast(context));
             var wake: ?u64 = null;
+            if (self.authentication_ready and self.documents != null) wake = self.document_operations.nextWake();
             for (&self.channels) |*channel| if (channel.nextWake()) |deadline| {
                 wake = @min(wake orelse deadline, deadline);
             };
@@ -224,14 +318,21 @@ pub fn Owner(comptime Io: type) type {
             try self.setup_worker.deinit();
             try self.bundle.session_policy.attach(&self.policies, enrolled.owner, self.bundle.initial_anchor.device_root_pin.?);
             self.session = .{ .io = self.io, .enrollment = enrolled, .state = self.state(), .storage = self.storage, .policies = &self.policies, .subjects = .{ .user_id = enrolled.owner.serial } };
+            if (self.documents != null) self.document_operations.bind();
             self.adapter = .{ .session = &self.session, .capsule = &self.bundle.identity.capsule, .recovery_package = &self.bundle.package, .recovery_pin = trusted, .boot_instance = self.config.boot_instance, .lifetime_ticks = @min(self.config.lifetime_ticks, self.bundle.session_policy.max_session_ticks), .scratch = &self.scratch };
             self.authentication = .{ .authenticator = self.adapter.authenticator(), .input_timeout_ticks = self.config.input_timeout_ticks };
+            self.authentication.view.documents = self.document_view;
             self.authentication_ready = true;
             router.bindTrustedEntry(.{ .authentication = &self.authentication }, now);
         }
 
+        pub fn deinit(self: *Self) void {
+            destroy(self);
+        }
+
         fn destroy(context: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(context));
+            quiesceDocuments(self, if (self.authentication_ready) self.session.last_ticks else 0);
             for (&self.channels) |*channel| channel.close(0);
             if (self.authentication_ready) {
                 self.consent.clear(&self.authentication);
@@ -240,6 +341,7 @@ pub fn Owner(comptime Io: type) type {
                 self.session.close() catch {};
             } else self.setup.quiesce();
             self.setup_worker.deinit() catch unreachable;
+            if (self.documents != null) self.document_operations.deinit() catch unreachable;
             self.vault.unload();
             self.identities.reset();
             self.graph.reset();
@@ -282,8 +384,14 @@ test "identity owner discovers without input and drains borrowed commands before
         var router = router_mod.Router{};
         defer router.deinit();
         const owner = try Owner(Io).create(&io, &disk.service, config);
+        var documents = document_sessions.Sessions{};
+        defer documents.deinit(99) catch unreachable;
+        owner.bindDocuments(&documents);
         const interface = owner.attach(&router, 1);
         defer interface.destroy(interface.context);
+        try std.testing.expect(!interface.documents_ready(interface.context, 1));
+        try std.testing.expect(!interface.service_documents(interface.context, 1));
+        try std.testing.expect(owner.document_operations.stack == null);
         try std.testing.expect(owner.setup.capturing() and owner.setup.nextWake().? == 1);
         try std.testing.expect(owner.setup.prepareWork(1));
         owner.setup.runWork(1);
@@ -298,5 +406,119 @@ test "identity owner discovers without input and drains borrowed commands before
         try std.testing.expect(std.mem.allEqual(u8, owner.setup_worker.stack.?.bytes, 0));
         try std.testing.expect(owner.vault.store.empty() and owner.vault.activeHandleCount() == 0);
         try std.testing.expect(router.trusted_entry == null and router.drain_until_neutral);
+    }
+}
+
+test "native document access rechecks current policy without revoking borrowed session state" {
+    const cooperative = @import("../task/cooperative_worker.zig");
+    const signers = @import("../../tests/fixtures/document_signer.zig");
+    const disk_mod = @import("../storage/document_save_test.zig");
+    const Io = struct {
+        calls: usize = 0,
+        pub fn execute(self: *@This(), _: []const u8, _: []u8, _: u32) ![]u8 {
+            self.calls += 1;
+            return error.UnexpectedHardwareCommand;
+        }
+        pub fn random(self: *@This(), _: []u8) !void {
+            self.calls += 1;
+            return error.UnexpectedEntropyRequest;
+        }
+    };
+    const Borrow = struct {
+        fn run(context: *anyopaque) void {
+            const session: *session_mod.Session(Io) = @ptrCast(@alignCast(context));
+            const worker = cooperative.current() orelse @panic("session fixture owns its actual Worker");
+            session.beginOperation(worker) catch @panic("session fixture starts idle");
+            defer session.endOperation(worker);
+            worker.yield();
+        }
+    };
+    const Failure = enum { none, pending_lock, last_clock, verified_clock, expiry, lifetime_policy, trust_policy, platform_policy };
+    for (std.enums.values(Failure)) |failure| {
+        const disk = try disk_mod.Fixture.init(true);
+        defer disk.deinit();
+        var keys = signers.Fixture{};
+        const signer = try keys.init(.{ .kind = .user, .serial = 1 }, disk.service.owner, disk.service.task_id, disk_mod.signer);
+        var io = Io{};
+        const owner = try Owner(Io).create(&io, &disk.service, .{ .owner = keys.authority.owner, .parent_handle = 0x8100_1234, .anchor_index = 0x0180_1235, .boot_index = 0x0180_1234, .boot_instance = @splat(1), .input_timeout_ticks = 20, .operation_timeout_ticks = 20, .lifetime_ticks = 100 });
+        var router = router_mod.Router{};
+        defer router.deinit();
+        const interface = owner.attach(&router, 1);
+        defer {
+            // This callback fixture does not claim to complete a TPM sign-in.
+            // Detach discovery and avoid the uninitialized authentication view.
+            router.clearTrustedEntry();
+            owner.authentication_ready = false;
+            interface.destroy(interface.context);
+        }
+        const record = try @import("../../tests/fixtures/identity_enrollment.zig").record();
+        owner.session = .{
+            .io = &io,
+            .enrollment = record.enrollment,
+            .state = .{ .vault = &keys.service, .identities = &owner.identities, .devices = &owner.graph },
+            .storage = &disk.service,
+            .policies = &keys.policies,
+            .subjects = keys.authority.subjects,
+            .replay = @import("../../tests/fixtures/identity_vault.zig").unlock_session,
+            .signing_authority = keys.authority,
+            .verified_at_ticks = 1,
+            .last_ticks = 5,
+            .expires_at_ticks = 100,
+        };
+        owner.session.enrollment.owner = keys.authority.owner;
+        var current_signer = signer;
+        current_signer.key.authority = &owner.session.signing_authority;
+        owner.session.coordinator = .{ .state = owner.session.state, .storage = &disk.service, .signer = current_signer, .object_id = record.enrollment.catalog_object_id };
+        owner.authentication_ready = true;
+        var stack: [32 * 1024]u8 align(16) = undefined;
+        var worker = cooperative.Worker{ .stack = &stack };
+        try worker.start(&owner.session, Borrow.run);
+        try worker.step();
+        defer {
+            owner.session.lock_pending = false;
+            if (worker.state == .suspended) worker.step() catch @panic("borrow fixture returns before Owner teardown");
+        }
+        try std.testing.expectEqual(cooperative.Worker.State.suspended, worker.state);
+        const binding = try owner.session.replay.binding();
+        const handle_count = keys.service.activeHandleCount();
+        var now: u64 = 10;
+        switch (failure) {
+            .none => {},
+            .pending_lock => owner.session.lock_pending = true,
+            .last_clock => now = 4,
+            .verified_clock => owner.session.verified_at_ticks = 11,
+            .expiry => now = 100,
+            .lifetime_policy, .trust_policy, .platform_policy => {
+                _ = try keys.policies.create(.{
+                    .scope = .user,
+                    .subject_id = keys.authority.owner.serial,
+                    .issuer = .{ .kind = .policy_authority, .serial = 1 },
+                    .label = "current document session restriction",
+                    .secret_vault_allowed = true,
+                    .require_hardware_backed_secrets = true,
+                    .max_secret_handle_lease_ticks = std.math.maxInt(u64),
+                    .max_session_unlock_age_ticks = if (failure == .lifetime_policy) 3 else 0,
+                    .require_primary_device_session = failure == .trust_policy,
+                    .require_platform_backed_device_session = failure == .platform_policy,
+                }, disk_mod.signer);
+                // The actual sealed signer remains usable: the new denial is
+                // session policy, rather than a revoked key or bad signature.
+                try current_signer.validateService(disk.service.owner, disk.service.task_id, now);
+            },
+        }
+        const access = interface.document_access(interface.context, now);
+        if (failure == .none) {
+            const live = access orelse return error.DocumentAccessMissing;
+            try std.testing.expectEqualDeep(binding, live.binding);
+            try std.testing.expectEqualDeep(current_signer, live.signer);
+            try std.testing.expectEqual(@as(u64, 100), live.expires_at_ticks);
+        } else try std.testing.expect(access == null);
+        try std.testing.expectEqualDeep(binding, try owner.session.replay.binding());
+        try std.testing.expect(owner.session.operation_worker == &worker and !worker.cancel_requested);
+        try std.testing.expectEqual(cooperative.Worker.State.suspended, worker.state);
+        try std.testing.expectEqual(handle_count, keys.service.activeHandleCount());
+        try std.testing.expectEqual(@as(usize, 0), io.calls);
+        try std.testing.expectEqual(failure == .pending_lock, owner.session.lock_pending);
+        try std.testing.expect(owner.session.coordinator != null);
     }
 }

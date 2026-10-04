@@ -598,6 +598,7 @@ pub const Error = error{
     InvalidUserspaceImage,
     NoSpaceLeft,
     TaskNotFound,
+    TaskRuntimeBorrowed,
     TaskTableFull,
 };
 

@@ -11,14 +11,17 @@ pub const View = union(enum) {
     // Only the native display owner acknowledges a complete successful scanout.
     pub fn presented(self: View, columns: usize, rows: usize, success: bool) void {
         switch (self) {
-            .authentication => |view| view.review.presented = success and view.review.fits(columns, rows),
+            .authentication => |view| {
+                view.review.presented = success and view.review.fits(columns, rows);
+                if (view.documents) |documents| documents.presented(columns, rows, success and view.status == .hidden and !view.review.visible());
+            },
             else => {},
         }
     }
     pub fn visible(self: View) bool {
         return switch (self) {
             .none => false,
-            .authentication => |view| view.status != .hidden or view.review.visible(),
+            .authentication => |view| view.status != .hidden or view.review.visible() or (if (view.documents) |documents| documents.visible() else false),
             .setup => true,
         };
     }
@@ -72,6 +75,18 @@ pub const Entry = union(enum) {
         switch (self) {
             inline else => |entry| entry.handle(event, now),
         }
+    }
+    pub fn handlePhysical(self: Entry, event: input.KeyboardEvent, now: u64, sequence: u64) void {
+        switch (self) {
+            .authentication => |entry| entry.handlePhysical(event, now, sequence),
+            .setup => |entry| entry.handle(event, now),
+        }
+    }
+    pub fn desktopShortcut(self: Entry, event: input.KeyboardEvent, now: u64, sequence: u64) bool {
+        return switch (self) {
+            .authentication => |entry| entry.desktopShortcut(event, now, sequence),
+            .setup => false,
+        };
     }
     pub fn quiesce(self: Entry) void {
         switch (self) {

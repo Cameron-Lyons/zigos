@@ -83,6 +83,104 @@ test "session idle readiness respects future worker deadlines and resumes at the
     try std.testing.expect(manager.nextServiceWake() == null);
 }
 
+test "session network watchdog wakes silent transmits without polling or repeated containment" {
+    const network = @import("../drivers/network_driver_task.zig");
+    const tx = @import("../../kernel/drivers/intel_i225_tx.zig");
+    const Harness = struct {
+        var now: u64 = 0;
+        var queue: tx.Queue = .{};
+        var completion_pending: bool = false;
+        var active: bool = true;
+        var polls: usize = 0;
+        var contained: usize = 0;
+
+        fn send(_: [6]u8, _: []const u8) bool {
+            _ = queue.reserve(now) catch return false;
+            return true;
+        }
+
+        fn receive(_: []u8) network.ReceiveResult {
+            polls += 1;
+            if (completion_pending) {
+                _ = queue.reclaimCompleted(1);
+                completion_pending = false;
+            }
+            if (queue.oldestSubmissionExpired(now, 100)) {
+                active = false;
+                contained += 1;
+                return .{ .status = .failed };
+            }
+            return .{ .status = .empty };
+        }
+
+        fn pending() bool {
+            return active and (completion_pending or queue.oldestSubmissionExpired(now, 100));
+        }
+
+        fn nextWake() ?u64 {
+            return if (active) queue.nextWake(100) else null;
+        }
+
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+    };
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.initializeAllocated();
+    defer manager.reset();
+    network.reset();
+    defer network.reset();
+    Harness.queue = .{};
+    Harness.now = 107;
+    Harness.completion_pending = false;
+    Harness.active = true;
+    Harness.polls = 0;
+    Harness.contained = 0;
+    const device = network.NetworkDevice{
+        .send = Harness.send,
+        .receive = Harness.receive,
+        .workPending = Harness.pending,
+        .nextWake = Harness.nextWake,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(network.activateDeviceForTask(&device, 10, 99));
+    try std.testing.expect(device.send(Harness.mac(), "frame"));
+    try std.testing.expectEqual(@as(?u64, 207), manager.nextServiceWake());
+    Harness.now = 206;
+    try std.testing.expect(!manager.networkWorkPending());
+    try std.testing.expectEqual(@as(usize, 0), manager.servicePendingNetworkWork(Harness.now));
+    try std.testing.expectEqual(@as(usize, 0), Harness.polls);
+    Harness.now = 207;
+    try std.testing.expect(manager.networkWorkPending());
+    try std.testing.expectEqual(@as(usize, 0), manager.servicePendingNetworkWork(Harness.now));
+    try std.testing.expectEqual(@as(usize, 1), Harness.polls);
+    try std.testing.expectEqual(@as(usize, 1), Harness.contained);
+    try std.testing.expect(!manager.networkWorkPending());
+    try std.testing.expect(manager.nextServiceWake() == null);
+    _ = manager.servicePendingNetworkWork(Harness.now);
+    try std.testing.expectEqual(@as(usize, 1), Harness.contained);
+
+    // A completion before the interrupt drains its deadline through the same
+    // native service gate. Deactivation removes any remaining device deadline.
+    Harness.queue = .{};
+    Harness.active = true;
+    Harness.now = 300;
+    try std.testing.expect(device.send(Harness.mac(), "frame"));
+    Harness.now = 350;
+    Harness.completion_pending = true;
+    try std.testing.expect(manager.networkWorkPending());
+    _ = manager.servicePendingNetworkWork(Harness.now);
+    try std.testing.expect(manager.nextServiceWake() == null);
+    try std.testing.expect(!manager.networkWorkPending());
+    Harness.now = 400;
+    try std.testing.expect(device.send(Harness.mac(), "frame"));
+    try std.testing.expectEqual(@as(?u64, 500), manager.nextServiceWake());
+    try std.testing.expect(network.deactivateDevice(10));
+    try std.testing.expect(manager.nextServiceWake() == null);
+    try std.testing.expect(!manager.networkWorkPending());
+}
+
 test "session manager authentication deadlines wake and revoke without keyboard activity" {
     var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
     var entry = @import("../platform/trusted_auth_entry.zig").Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 20 };
@@ -106,6 +204,25 @@ test "session manager authentication deadlines wake and revoke without keyboard 
     try std.testing.expect(!backend.active and entry.capturing());
     try std.testing.expect(manager.inputRouterPtr().drain_until_neutral);
     try std.testing.expect(manager.nextServiceWake() == null);
+}
+
+test "session external wake records current time and rejects suspended tasks" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const task = session_manager.testing.findTask("network-service").?;
+    const scheduler = manager.userspaceSchedulerPtr();
+    try std.testing.expect(scheduler.parkTaskUntilEvent(task.id));
+
+    try std.testing.expect(manager.wakeUserspaceTask(task.id, 107));
+    const dispatch = scheduler.taskDispatchStats(task.id).?;
+    try std.testing.expect(dispatch.queued_ready);
+    try std.testing.expectEqual(@as(u64, 107), dispatch.last_wake_tick);
+
+    try std.testing.expect(try manager.runtimePtr().suspendTask(task.id, 108));
+    try std.testing.expect(!manager.wakeUserspaceTask(task.id, 109));
+    try std.testing.expectEqual(dispatch.wake_event_count, scheduler.taskDispatchStats(task.id).?.wake_event_count);
 }
 
 test "boot assembles core services without running explicit scenarios" {
@@ -669,6 +786,43 @@ test "prepared document task waits for activation and cancellation retires grant
     try std.testing.expectEqual(grants_before, capabilities.activeCount());
     try std.testing.expectEqual(windows_before, manager.compositorSessionPtr().window_count);
     try std.testing.expectError(error.TaskNotPrepared, manager.cancelPreparedDocumentTask(task_id, 3));
+}
+
+test "prepared document cancellation reuses retired task capacity across repeated launches" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const runtime = manager.runtimePtr();
+    const session_task = manager.findTask("session-manager").?;
+    const session_id = session_task.id;
+    const active_before = runtime.countTasksInState(.active);
+    const grants_before = manager.capabilityTablePtr().activeCount();
+    const windows_before = manager.compositorSessionPtr().window_count;
+    var previous_id: u64 = 0;
+    var first_handle: ?task_runtime.TaskHandle = null;
+    var first_id: u64 = 0;
+    for (0..300) |round| {
+        const task = try prepareNotesForLaunchTest(manager);
+        const task_id = task.id;
+        const address_space_id = task.address_space_id;
+        try std.testing.expect(task_id > previous_id);
+        previous_id = task_id;
+        if (round == 0) {
+            first_handle = runtime.taskHandleForResolved(task);
+            first_id = task_id;
+        }
+        try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+        try manager.cancelPreparedDocumentTask(task_id, @intCast(round + 1));
+        try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(task_id).?.state);
+        try std.testing.expect(runtime.findAddressSpaceConst(address_space_id) == null);
+        try std.testing.expectEqual(active_before, runtime.countTasksInState(.active));
+        try std.testing.expectEqual(grants_before, manager.capabilityTablePtr().activeCount());
+        try std.testing.expectEqual(windows_before, manager.compositorSessionPtr().window_count);
+    }
+    try std.testing.expect(runtime.findByHandle(first_handle.?, first_id) == null);
+    try std.testing.expect(runtime.find(session_id).? == session_task);
+    try std.testing.expectEqual(task_runtime.TaskState.active, session_task.state);
 }
 
 test "document activation denial retires preparation but never cancels a scheduled editor" {

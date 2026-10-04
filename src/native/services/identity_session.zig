@@ -17,6 +17,8 @@ const sealed = @import("sealed_signing_key.zig");
 const durable = @import("durable_identity_service.zig");
 const enrollment_mod = @import("identity_enrollment.zig");
 const recovery = @import("identity_recovery.zig");
+const operation_guard = @import("../platform/operation_guard.zig");
+const cooperative = @import("../task/cooperative_worker.zig");
 
 // Provisioning supplies this independently of the capsule/catalog being opened.
 // Secret IDs select keys; their public keys are checked against the NV pins.
@@ -52,15 +54,64 @@ pub fn Session(comptime Io: type) type {
         verified_at_ticks: u64 = 0,
         last_ticks: u64 = 0,
         expires_at_ticks: u64 = 0,
+        publication_guard: ?*const operation_guard.Guard = null,
+        operation_worker: ?*cooperative.Worker = null,
+        revocation: ?struct { context: *anyopaque, call: *const fn (*anyopaque) void } = null,
+        lock_pending: bool = false,
 
         comptime {
             if (@sizeOf(Self) > 4096) @compileError("identity session exceeds bounded coordination state");
+        }
+
+        pub fn bindPublicationGuard(self: *Self, guard: ?*const operation_guard.Guard) void {
+            self.publication_guard = guard;
+            self.signing_authority.publication_guard = guard;
+        }
+
+        // Own session state before installing guards or entering any protocol.
+        // The token is the stable worker, including while it waits for TPM use.
+        pub fn beginOperation(self: *Self, worker: *cooperative.Worker) error{WorkerBusy}!void {
+            if (self.operation_worker != null) return error.WorkerBusy;
+            self.operation_worker = worker;
+            self.lock_pending = false;
+        }
+
+        pub fn endOperation(self: *Self, worker: *cooperative.Worker) void {
+            if (self.operation_worker != worker) @panic("identity operation releases its exact worker");
+            self.bindPublicationGuard(null);
+            if (self.lock_pending) self.lockNow();
+            self.operation_worker = null;
+            self.lock_pending = false;
+        }
+
+        pub fn lockOwned(self: *Self, worker: *cooperative.Worker) void {
+            if (self.operation_worker != worker) @panic("identity cleanup owns its session operation");
+            self.replay.lock();
+            if (self.revocation) |revoke| revoke.call(revoke.context);
+            self.lockNow();
+        }
+
+        pub fn closeOwned(self: *Self, worker: *cooperative.Worker) !void {
+            self.lockOwned(worker);
+            try self.client.close(self.io);
+            self.client = .{};
         }
 
         // No I/O, allocation, audit or fallible policy check. Invalidate replay
         // authority first. Arenas retain generation history, even on failed
         // unlocks. Pending checkpoints are recovered from disk/NV next time.
         pub fn lock(self: *Self) void {
+            self.replay.lock();
+            if (self.revocation) |revoke| revoke.call(revoke.context);
+            if (self.operation_worker) |worker| {
+                self.lock_pending = true;
+                worker.cancel();
+                return;
+            }
+            self.lockNow();
+        }
+
+        fn lockNow(self: *Self) void {
             self.replay.lock();
             self.state.vault.unload();
             std.crypto.secureZero(u8, &self.authorization);
@@ -80,6 +131,7 @@ pub fn Session(comptime Io: type) type {
         // keep the session locked; retain the client so cleanup can be retried.
         pub fn close(self: *Self) !void {
             self.lock();
+            if (self.operation_worker != null) return error.WorkerBusy;
             try self.client.close(self.io);
             self.client = .{};
         }
@@ -123,7 +175,10 @@ pub fn Session(comptime Io: type) type {
             if (!self.policies.sessionLifetimeDecision(self.subjects, lifetime_ticks).allowed) return error.IdentityPolicyDenied;
             if (!self.state.vault.store.empty() or self.state.vault.handles.countInUse() != 0 or self.state.vault.store.handles.countInUse() != 0 or
                 self.state.identities.credential_count != 0 or !graph_snapshot.empty(devices)) return error.VaultNotEmpty;
-            try self.close();
+            if (self.operation_worker) |worker| {
+                if (cooperative.current() != worker) return error.WorkerBusy;
+                try self.closeOwned(worker);
+            } else try self.close();
             return deadline;
         }
 
@@ -147,7 +202,7 @@ pub fn Session(comptime Io: type) type {
             _ = try devices.authenticatedRoot(enrolled.owner, root_pin);
             const device = try devices.authenticatedDevice(enrolled.device, root_pin);
             if (!device.owner.eql(enrolled.owner)) return error.InvalidIdentitySession;
-            self.signing_authority = .{ .service = self.state.vault, .policies = self.policies, .subjects = self.subjects, .owner = enrolled.owner, .holder = self.storage.owner, .task_id = self.storage.task_id };
+            self.signing_authority = .{ .service = self.state.vault, .policies = self.policies, .subjects = self.subjects, .owner = enrolled.owner, .holder = self.storage.owner, .task_id = self.storage.task_id, .publication_guard = self.publication_guard };
             self.expires_at_ticks = deadline;
             const catalog_key = try self.lendKey(enrolled.catalog_secret_id, now_ticks);
             if (!std.mem.eql(u8, &(try catalog_key.publicKey(now_ticks)), &record.checkpoint.public_key)) return error.SigningKeyChanged;
@@ -176,15 +231,37 @@ pub fn Session(comptime Io: type) type {
             self.verified_at_ticks = now_ticks;
             self.last_ticks = now_ticks;
             self.unlock_method = method;
-            // This is the only activation point, after every authenticated
-            // restore and key check. Entropy failure erases all loaded state.
+            // Activate only after authenticated restore. Entropy acquisition
+            // may also yield; neither gate erases an active command's backing.
+            try self.activate(boot_instance, now_ticks, deadline, device.usesPlatformBackedKey(), catalog_key);
+        }
+
+        fn activationTicks(self: *Self, observed_ticks: u64, verified_ticks: u64, deadline: u64, device_platform_backed: bool, catalog_key: sealed.Key) !u64 {
+            const actual_ticks = try operation_guard.currentTicks(self.publication_guard, observed_ticks);
+            if (actual_ticks >= deadline) return error.IdentitySessionExpired;
+            if (!self.policies.sessionLifetimeDecision(self.subjects, deadline - verified_ticks).allowed or
+                !self.policies.sessionTrustDecision(self.subjects, .{
+                    .hardware_backed_credential = true,
+                    .device_platform_backed = device_platform_backed,
+                    .unlock_age_ticks = actual_ticks - verified_ticks,
+                }).allowed) return error.IdentityPolicyDenied;
+            try self.device_key.validate(actual_ticks);
+            try catalog_key.validate(actual_ticks);
+            return actual_ticks;
+        }
+
+        fn activate(self: *Self, boot_instance: [16]u8, verified_ticks: u64, deadline: u64, device_platform_backed: bool, catalog_key: sealed.Key) !void {
+            errdefer self.replay.lock();
+            const before = try self.activationTicks(verified_ticks, verified_ticks, deadline, device_platform_backed, catalog_key);
             try self.replay.begin(boot_instance, self.io);
+            self.last_ticks = try self.activationTicks(before, verified_ticks, deadline, device_platform_backed, catalog_key);
         }
 
         pub fn issueUnlockProof(self: *Self, relying_party_id: []const u8, challenge: []const u8, now_ticks: u64, expires_at_ticks: u64) !identity.LocalUnlockProof {
-            try self.requireActive(now_ticks);
+            const actual_ticks = try operation_guard.currentTicks(self.publication_guard, now_ticks);
+            try self.requireActive(actual_ticks);
             if (expires_at_ticks > self.expires_at_ticks) return error.LocalUnlockExpired;
-            return identity.issueLocalUnlockProof(self.state.devices.?, self.authority(now_ticks), .{
+            return identity.issueLocalUnlockProof(self.state.devices.?, self.authority(actual_ticks), .{
                 .owner = self.enrollment.owner,
                 .device = self.enrollment.device,
                 .relying_party_id = relying_party_id,
@@ -197,13 +274,14 @@ pub fn Session(comptime Io: type) type {
         }
 
         pub fn assertCredential(self: *Self, request: AssertionRequest, now_ticks: u64, scratch: *[catalog.MAX_BYTES]u8) !identity.Assertion {
-            try self.requireActive(now_ticks);
+            const actual_ticks = try operation_guard.currentTicks(self.publication_guard, now_ticks);
+            try self.requireActive(actual_ticks);
             const credential = self.state.identities.findCredentialConst(request.credential_id) orelse return error.CredentialNotFound;
             if (!credential.owner.eql(self.enrollment.owner)) return error.InvalidIdentitySession;
             // This private lease never crosses an app boundary. Reuse it for
             // repeated assertions instead of consuming the bounded handle table.
-            const key = try self.lendKey(credential.secret_id, now_ticks);
-            return self.coordinator.?.assertCredential(self.state.devices.?, self.authority(now_ticks), .{
+            const key = try self.lendKey(credential.secret_id, actual_ticks);
+            return self.coordinator.?.assertCredential(self.state.devices.?, self.authority(actual_ticks), .{
                 .credential_id = request.credential_id,
                 .device = self.enrollment.device,
                 .relying_party_id = request.relying_party_id,
@@ -224,7 +302,7 @@ pub fn Session(comptime Io: type) type {
         }
 
         fn authority(self: *Self, now_ticks: u64) identity.VaultAuthority {
-            return .{ .vault = self.state.vault, .policies = self.policies, .subjects = self.subjects, .holder = self.storage.owner, .task_id = self.storage.task_id, .now_ticks = now_ticks, .unlock_session = &self.replay };
+            return .{ .vault = self.state.vault, .policies = self.policies, .subjects = self.subjects, .holder = self.storage.owner, .task_id = self.storage.task_id, .now_ticks = now_ticks, .unlock_session = &self.replay, .publication_guard = self.publication_guard };
         }
 
         fn lendKey(self: *Self, secret_id: u64, now_ticks: u64) !sealed.Key {
@@ -262,6 +340,14 @@ test "identity session lock erases authority before fallible TPM cleanup" {
     var graph = @import("../sync/device_graph.zig").Graph.init();
     var io = Io{};
     var session = Session(Io){ .io = &io, .enrollment = .{ .owner = owner, .device = .{ .kind = .device, .serial = 2 }, .capsule_digest = @splat(4), .parent = .{ .handle = 0x8100_4321, .name = .{ 0, 0x0b } ++ @as([32]u8, @splat(4)) }, .catalog_object_id = 1000, .anchor_index = 0x0180_4321, .catalog_secret_id = 1, .device_secret_id = 2 }, .state = .{ .vault = &keys.service, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &keys.policies, .subjects = .{ .user_id = owner.serial } };
+    const Check = struct {
+        fn current(_: *anyopaque) operation_guard.Error!u64 {
+            return 3;
+        }
+    };
+    const guard = operation_guard.Guard{ .context = &session, .check_fn = Check.current };
+    session.bindPublicationGuard(&guard);
+    try std.testing.expect(session.signing_authority.publication_guard == &guard);
     session.replay = @import("../../tests/fixtures/identity_vault.zig").unlock_session;
     const captured = try session.replay.binding();
     session.authorization = @splat(0x55);
@@ -281,6 +367,8 @@ test "identity session lock erases authority before fallible TPM cleanup" {
     try std.testing.expectError(error.VaultHandleNotFound, signer.key.validate(3));
     try std.testing.expect(session.coordinator == null);
     try std.testing.expect(session.unlock_method == null);
+    session.bindPublicationGuard(null);
+    try std.testing.expect(session.publication_guard == null and session.signing_authority.publication_guard == null);
     session.lock();
     try std.testing.expectEqual(@as(usize, 1), io.calls);
     // Repeated local lock preserves the last nonce and cannot do I/O.
@@ -364,4 +452,79 @@ test "identity session recovery authenticates enrollment before hardware and nev
     try std.testing.expectEqual(@as(usize, 1), io.reads);
     try std.testing.expect(std.mem.allEqual(u8, &session.authorization, 0));
     try std.testing.expect(session.unlock_method == null and !session.replay.active and session.coordinator == null and vault.store.empty());
+}
+
+test "identity session activation rechecks live authority after entropy yields without unloading borrows" {
+    const guarded = @import("../task/guarded_worker_stack.zig");
+    const Control = struct {
+        ticks: u64 = 1,
+        cancelled: bool = false,
+        fn check(context: *anyopaque) operation_guard.Error!u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.cancelled) return error.Cancelled;
+            return self.ticks;
+        }
+    };
+    const Io = struct {
+        pub fn random(_: *@This(), out: []u8) !void {
+            cooperative.current().?.yield();
+            @memset(out, 0x72);
+        }
+        pub fn execute(_: *@This(), _: []const u8, _: []u8, _: u32) ![]u8 {
+            return error.UnexpectedHardwareCommand;
+        }
+    };
+    const Run = struct {
+        session: *Session(Io),
+        key: sealed.Key,
+        failure: ?anyerror = null,
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.session.activate(@splat(1), 1, 10, false, self.key) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    const Variant = enum { success, cancel, expiry, rollback, policy };
+    for (std.enums.values(Variant)) |variant| {
+        const device = try @import("../storage/document_save_test.zig").Fixture.init(false);
+        defer device.deinit();
+        var keys = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+        const record = try @import("../../tests/fixtures/identity_enrollment.zig").record();
+        const signer = try keys.init(record.enrollment.owner, device.service.owner, device.service.task_id, .{ .label = "activation fixture", .seed = @splat(0x21) });
+        var identities = identity.Store.init();
+        var graph = @import("../sync/device_graph.zig").Graph.init();
+        var io = Io{};
+        var control = Control{};
+        const guard = operation_guard.Guard{ .context = &control, .check_fn = Control.check };
+        keys.authority.publication_guard = &guard;
+        var session = Session(Io){ .io = &io, .enrollment = record.enrollment, .state = .{ .vault = &keys.service, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &keys.policies, .subjects = keys.authority.subjects, .device_key = signer.key, .publication_guard = &guard };
+        defer session.close() catch unreachable;
+        var run = Run{ .session = &session, .key = signer.key };
+        // Policy verification needs the native operation worker's bounded,
+        // guarded stack before entropy acquisition can suspend activation.
+        var stack = try guarded.Stack.allocate();
+        defer stack.deinit();
+        try std.testing.expect(stack.guardsPresent());
+        var worker = cooperative.Worker{ .stack = stack.bytes };
+        try worker.start(&run, Run.run);
+        try worker.step();
+        try std.testing.expectEqual(cooperative.Worker.State.suspended, worker.state);
+        switch (variant) {
+            .success => control.ticks = 2,
+            .cancel => control.cancelled = true,
+            .expiry => control.ticks = 10,
+            .rollback => control.ticks = 0,
+            .policy => {
+                _ = try keys.policies.create(.{ .scope = .user, .subject_id = record.enrollment.owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "require platform session", .secret_vault_allowed = true, .require_platform_backed_device_session = true }, .{ .label = "policy fixture", .seed = @splat(11) });
+            },
+        }
+        try worker.step();
+        try std.testing.expectEqual(cooperative.Worker.State.complete, worker.state);
+        try std.testing.expectEqual(variant == .success, session.replay.active);
+        try std.testing.expectEqual(variant != .success, run.failure != null);
+        try std.testing.expect(!keys.service.store.empty());
+        try std.testing.expect(keys.service.findHandleConst(signer.key.handle_id) != null);
+        try std.testing.expect(std.mem.allEqual(u8, stack.bytes, 0));
+    }
 }

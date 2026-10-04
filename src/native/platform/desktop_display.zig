@@ -27,6 +27,7 @@ pub fn present(session: *const compositor.Session) bool {
         if (session.trusted_view) |trusted| trusted.presented(0, 0, false);
         return false;
     };
+    if (session.trusted_view) |trusted| trusted.presented(0, 0, false);
     if (session.trusted_view) |trusted| {
         if (trusted.visible()) {
             view.render(frame, session, null);
@@ -59,5 +60,6 @@ pub fn present(session: *const compositor.Session) bool {
     }
     view.render(frame, session, content);
     const result = hardware.present() catch return false;
+    if (session.trusted_view) |trusted| trusted.presented(frame.columns, frame.rows, true);
     return result.pixels_written != 0;
 }

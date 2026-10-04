@@ -50,8 +50,15 @@ pub const Queue = struct {
     }
 
     pub fn oldestSubmissionExpired(self: *const Queue, now_ticks: u64, timeout_ticks: u64) bool {
-        if (self.in_flight == 0 or timeout_ticks == 0) return false;
-        return now_ticks -% self.submitted_at_ticks[self.head] >= timeout_ticks;
+        const deadline = self.nextWake(timeout_ticks) orelse return false;
+        return now_ticks >= deadline;
+    }
+
+    pub fn nextWake(self: *const Queue, timeout_ticks: u64) ?u64 {
+        if (self.in_flight == 0 or timeout_ticks == 0) return null;
+        // Idle wake deadlines use absolute ticks. Saturation keeps a submission
+        // near the clock limit from wrapping into an immediate, repeated wake.
+        return self.submitted_at_ticks[self.head] +| timeout_ticks;
     }
 };
 
@@ -136,6 +143,25 @@ test "I225 transmit queue detects only an expired oldest submission" {
     try std.testing.expect(!queue.oldestSubmissionExpired(1_000, 10));
 
     try std.testing.expectEqual(@as(u32, 2), try queue.reserve(std.math.maxInt(u64) - 4));
-    try std.testing.expect(!queue.oldestSubmissionExpired(4, 10));
-    try std.testing.expect(queue.oldestSubmissionExpired(5, 10));
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), queue.nextWake(10));
+    try std.testing.expect(!queue.oldestSubmissionExpired(std.math.maxInt(u64) - 1, 10));
+    try std.testing.expect(queue.oldestSubmissionExpired(std.math.maxInt(u64), 10));
+    _ = queue.reclaimCompleted(STATUS_DONE);
+    try std.testing.expect(queue.nextWake(10) == null);
+}
+
+test "I225 transmit wake follows the oldest owned slot through ring reuse" {
+    var queue = Queue{};
+    try std.testing.expect(queue.nextWake(100) == null);
+    for (0..DESCRIPTOR_COUNT * 2) |iteration| {
+        const now: u64 = 107 + iteration * 2;
+        _ = try queue.reserve(now);
+        _ = try queue.reserve(now + 1);
+        try std.testing.expectEqual(@as(?u64, now + 100), queue.nextWake(100));
+        try std.testing.expect(queue.nextWake(0) == null);
+        _ = queue.reclaimCompleted(STATUS_DONE);
+        try std.testing.expectEqual(@as(?u64, now + 101), queue.nextWake(100));
+        _ = queue.reclaimCompleted(STATUS_DONE);
+        try std.testing.expect(queue.nextWake(100) == null);
+    }
 }

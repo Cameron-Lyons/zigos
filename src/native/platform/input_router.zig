@@ -404,11 +404,21 @@ pub const Router = struct {
                 if (entry.capturing()) {
                     for (decoded.slice()) |event| {
                         const revision = entry.revision();
-                        entry.handle(event, now_ticks);
+                        entry.handlePhysical(event, now_ticks, report.sequence);
                         // A mode or authority change ends this report too.
                         if (entry.revision() != revision) break;
                     }
                     events_routed += decoded.count;
+                    self.synchronizeTrustedInput();
+                    continue;
+                }
+                var shortcut = false;
+                for (decoded.slice()) |event| if (entry.desktopShortcut(event, now_ticks, report.sequence)) {
+                    shortcut = true;
+                    break;
+                };
+                if (shortcut) {
+                    events_routed += 1;
                     self.synchronizeTrustedInput();
                     continue;
                 }
@@ -567,6 +577,7 @@ pub const Router = struct {
         now_ticks: u64,
     ) bool {
         switch (event.kind) {
+            .new_document, .open_document => return false,
             .task_switch_next, .task_switch_previous => {
                 self.repeat = null;
                 self.routing_epoch +|= 1;
@@ -897,6 +908,7 @@ fn inputByte(kind: input_driver_task.EventKind) u8 {
         .paste => abi.InputByte.paste,
         .page_up => abi.InputByte.page_up,
         .page_down => abi.InputByte.page_down,
+        .new_document, .open_document => 0,
     };
 }
 
@@ -1853,4 +1865,189 @@ test "input router keeps first-user PIN confirmation private across report and d
     router.clearCompositor();
     try std.testing.expect(entry.view.status == .choose_pin and entry.view.notice == .interrupted);
     try std.testing.expect(std.mem.allEqual(u8, &entry.first_pin, 0) and compositor.trusted_view == null);
+}
+
+// Drives the actual USB decoder and native authentication boundary; only the
+// service-owned document publication is supplied by this fixture.
+const DocumentInputFixture = struct {
+    compositor: compositor_session.Session = .init(),
+    router: Router = .{},
+    backend: @import("../../tests/fixtures/authenticator.zig").Fixture = .{},
+    entry: trusted_auth.Entry = undefined,
+    documents: @import("trusted_document_view.zig").View = .{},
+    sequence: u64 = 0,
+    task_id: u64 = 0,
+    window_id: u64 = 0,
+
+    fn init(self: *DocumentInputFixture) !void {
+        var runtime = task_runtime.Runtime.init();
+        const app = try runtime.createTask(.{ .owner = .{ .kind = .app, .serial = 73 }, .component_class = .app_component, .budget = testTaskBudget(), .ui_surface_id = 45, .local_only = true });
+        _ = try self.compositor.openTaskView(app, "Other task");
+        self.task_id = app.id;
+        self.window_id = (try self.compositor.openDocumentView(app, 7, "notes.md")).id;
+        self.entry = .{ .authenticator = self.backend.authenticator(), .input_timeout_ticks = 50 };
+        self.entry.view.documents = &self.documents;
+        repeat_test_epoch = 1;
+        self.router.bindCompositor(&self.compositor, 99);
+        self.router.bindHardwareSource(.{ .poll_report = pollTestReport, .input_proof = noTestProof, .continuity_epoch = repeatTestEpoch });
+        self.router.bindTrustedEntry(.{ .authentication = &self.entry }, 1);
+        try self.unlock();
+        self.publish(.home);
+        self.report(0, &.{});
+        self.router.trusted_view.presented(40, 20, true);
+    }
+    fn deinit(self: *DocumentInputFixture) void {
+        self.router.deinit();
+        self.compositor.deinit();
+    }
+    fn report(self: *DocumentInputFixture, modifiers: u8, keys: []const u8) void {
+        self.sequence += 1;
+        self.exactReport(self.sequence, modifiers, keys);
+    }
+    fn exactReport(self: *DocumentInputFixture, sequence: u64, modifiers: u8, keys: []const u8) void {
+        test_feed = .{};
+        test_feed.reports[0] = makeTestReport(sequence, 1, modifiers, keys);
+        test_feed.count = 1;
+        _ = self.router.service(2, DEFAULT_REPORT_BUDGET);
+    }
+    fn unlock(self: *DocumentInputFixture) !void {
+        self.report(0, &.{});
+        for (self.backend.expected) |byte| {
+            self.report(0, &.{if (byte == '0') 0x27 else byte - '1' + 0x1e});
+            self.report(0, &.{});
+        }
+        self.report(0, &.{0x28});
+        try std.testing.expect(self.entry.prepareVerification(2));
+        self.entry.verify(2);
+        try std.testing.expect(self.backend.active and !self.entry.capturing());
+    }
+    fn publish(self: *DocumentInputFixture, phase: @import("trusted_document_view.zig").Phase) void {
+        self.documents.phase = phase;
+        self.documents.token = 7;
+        self.documents.touch();
+        self.entry.revision += 1;
+        self.router.synchronizeTrustedInput();
+    }
+    fn expectExclusive(self: *DocumentInputFixture) !void {
+        try std.testing.expect(self.router.pollForTask(self.task_id) == null);
+        try std.testing.expectEqual(self.window_id, self.compositor.activeWindow().?.id);
+        try std.testing.expect(self.router.pollForTask(99) == null and self.router.pollWakeTarget() == null);
+        try std.testing.expect(self.router.repeat == null);
+    }
+};
+
+test "document New shortcut and approval require separate physical reports release and successful repaint" {
+    var f = DocumentInputFixture{};
+    try f.init();
+    defer f.deinit();
+    f.report(1, &.{0x11}); // Ctrl+N.
+    const request = f.documents.take().?;
+    try std.testing.expect(request.action == .request and request.action.request == .new and request.token == 7);
+    f.report(1, &.{0x11}); // Held shortcut cannot enqueue a second operation.
+    try std.testing.expect(f.documents.take() == null);
+    f.documents.path = try @import("trusted_document_view.zig").Label.init("notes/new.md");
+    f.publish(.review);
+    f.router.trusted_view.presented(40, 20, true);
+    f.report(0, &.{0x28}); // Enter queued before this modal's release barrier.
+    try std.testing.expect(f.documents.take() == null and !f.documents.allow_selected);
+    f.report(0, &.{});
+    f.report(0, &.{ 0x2b, 0x28 }); // Tab changes the view; trailing Enter is discarded.
+    try std.testing.expect(f.documents.allow_selected and f.documents.take() == null);
+    try std.testing.expectEqual(@as(u64, 0), f.documents.presented_revision);
+    f.router.trusted_view.presented(40, 20, true);
+    f.report(0, &.{0x28}); // Repaint alone does not permit a held key.
+    try std.testing.expect(f.documents.take() == null);
+    f.report(0, &.{});
+    f.router.trusted_view.presented(40, 20, false);
+    f.report(0, &.{0x28}); // Failed presentation cannot authorize Allow.
+    try std.testing.expect(f.documents.take() == null);
+    f.report(0, &.{});
+    f.router.trusted_view.presented(40, 20, true);
+    f.report(0, &.{0x28});
+    const approved = f.documents.take().?;
+    try std.testing.expect(approved.action == .approve and approved.report_sequence == f.sequence and approved.revision > request.revision);
+    try f.expectExclusive();
+}
+
+test "document Open picker rejects report replay and synthetic approval while exclusively routing its modal" {
+    var f = DocumentInputFixture{};
+    try f.init();
+    defer f.deinit();
+    f.report(0, &.{0x04}); // Application input queued before the modal is discarded.
+    try std.testing.expectEqual(@as(usize, 1), f.router.queuedForTask(f.task_id));
+    f.report(0, &.{});
+    f.report(1, &.{0x12}); // Ctrl+O.
+    try std.testing.expectEqual(@import("trusted_document_view.zig").Kind.open, f.documents.take().?.action.request);
+    f.documents.count = 2;
+    f.documents.paths[0] = try @import("trusted_document_view.zig").Label.init("草稿.md");
+    f.documents.paths[1] = try @import("trusted_document_view.zig").Label.init("notes/second.md");
+    f.publish(.browsing);
+    f.report(0, &.{});
+    f.router.trusted_view.presented(40, 20, true);
+    f.report(0, &.{0x51}); // Down selects second entry and requires repaint.
+    try std.testing.expectEqual(@as(u8, 1), f.documents.selected);
+    f.report(0, &.{});
+    f.router.trusted_view.presented(40, 20, true);
+    f.exactReport(f.sequence - 1, 0, &.{0x28});
+    try std.testing.expect(f.documents.take() == null);
+    f.entry.handle(.{ .kind = .activate }, 2); // App-style event has no hardware sequence.
+    try std.testing.expect(f.documents.take() == null);
+    f.report(0, &.{0x28});
+    try std.testing.expectEqual(@as(u8, 1), f.documents.take().?.action.select);
+    f.documents.path = f.documents.paths[1];
+    f.publish(.review);
+    f.report(0, &.{});
+    f.router.trusted_view.presented(40, 20, true);
+    f.report(0, &.{0x04}); // Text and task-switch commands stay out of task inboxes.
+    f.report(0, &.{});
+    f.report(4, &.{0x2b});
+    f.report(0, &.{});
+    f.report(0, &.{0x2b});
+    f.report(0, &.{});
+    f.entry.handle(.{ .kind = .activate }, 2);
+    try std.testing.expect(f.documents.take() == null);
+    f.router.trusted_view.presented(40, 20, true);
+    f.report(0, &.{0x28});
+    try std.testing.expect(f.documents.take().?.action == .approve);
+    try f.expectExclusive();
+}
+
+test "document consent cancels on secure attention and USB epoch replacement before old reports can approve" {
+    for ([_]bool{ false, true }) |replace_source| {
+        var f = DocumentInputFixture{};
+        try f.init();
+        defer f.deinit();
+        f.report(1, &.{0x11});
+        _ = f.documents.take();
+        f.documents.path = try @import("trusted_document_view.zig").Label.init("notes/private.md");
+        f.publish(.review);
+        f.report(0, &.{});
+        f.router.trusted_view.presented(40, 20, true);
+        f.report(0, &.{0x2b});
+        f.report(0, &.{});
+        f.router.trusted_view.presented(40, 20, true);
+        if (replace_source) {
+            repeat_test_epoch = 2;
+            f.exactReport(1, 0, &.{0x28}); // Reused controller report identity.
+        } else f.report(5, &.{ 0x4c, 0x28 }); // Secure attention wins over Enter.
+        try std.testing.expect(!f.backend.active and f.entry.capturing());
+        try std.testing.expect(f.documents.phase == .disabled and f.documents.pending == null);
+        try std.testing.expectEqual(@as(u64, 0), f.documents.presented_revision);
+        try f.expectExclusive();
+        if (replace_source) f.report(5, &.{0x4c}); // Requires a fresh neutral report before this can lock.
+        f.report(0, &.{});
+        if (replace_source) {
+            f.report(5, &.{0x4c});
+            f.report(0, &.{});
+        }
+        try f.unlock();
+        f.publish(.home);
+        f.router.trusted_view.presented(40, 20, true);
+        f.report(1, &.{0x11}); // Old queued key cannot cross reauthentication.
+        try std.testing.expect(f.documents.take() == null);
+        f.report(0, &.{});
+        f.report(1, &.{0x11});
+        try std.testing.expect(f.documents.take().?.action.request == .new);
+        try f.expectExclusive();
+    }
 }

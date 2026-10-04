@@ -54,6 +54,10 @@ const verification_orchestration_symbol_prefixes = [_][]const u8{
     "userspace.identity_client_proof.",
     "native.session.proofs.identity_session_proof.",
     "native.session.proofs.tpm2_quote_proof.",
+    // Hosted assembly probes must never become loaded production kernel code.
+    "zigos_fred_capture_probe",
+    "zigos_fred_return_probe",
+    "zigos_xstate_host_roundtrip",
 };
 const verification_only_signatures = [_][]const u8{
     "ZIGOS:RUNTIME_PROOF:PROCESS_ISOLATION:PASS",
@@ -1792,6 +1796,36 @@ test "ELF64 parser reads the same loaded-state and symbol contract" {
     const userspace = try analyzeUserspaceElf(bytes);
     try std.testing.expectEqual(verification_only_signatures.len, userspace.verification_only_signatures);
     try std.testing.expectEqual(@as(u8, 0x1f), userspace.verification_identity_mask);
+}
+
+test "ELF64 role analysis detects defined hosted assembly probes" {
+    for ([_][]const u8{
+        "zigos_fred_capture_probe",
+        "zigos_fred_return_probe",
+        "zigos_xstate_host_roundtrip",
+    }) |probe| {
+        var storage: [4096]u8 = @splat(0);
+        const bytes = buildTestElf64(&storage);
+        const sections = try resolveSectionTable(bytes, try parseHeader(bytes));
+        const strings = try parseSection(bytes, sections, 4);
+        const symbols = try parseSection(bytes, sections, 5);
+        const first_symbol = @as(usize, @intCast(symbols.offset)) + @sizeOf(elf.Elf64_Sym);
+        const original = try parseSymbol(bytes, first_symbol, .elf64);
+        const name_offset = @as(usize, @intCast(strings.offset)) + original.name_offset;
+        const original_name = try readString(try sectionBytes(bytes, strings), original.name_offset);
+        try std.testing.expect(probe.len <= original_name.len);
+        @memset(storage[name_offset..][0 .. original_name.len + 1], 0);
+        @memcpy(storage[name_offset..][0..probe.len], probe);
+
+        const analysis = try analyzeElf(bytes);
+        try std.testing.expectEqual(@as(usize, 1), analysis.verification_orchestration_symbols);
+        try std.testing.expectEqual(@as(usize, 0), analysis.runtime_proof_symbols);
+        try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
+        // An unresolved reference is not code present in a loaded kernel.
+        writeU16(&storage, first_symbol + @offsetOf(elf.Elf64_Sym, "st_shndx"), shn_undef);
+        const unresolved = try analyzeElf(bytes);
+        try std.testing.expectEqual(@as(usize, 0), unresolved.verification_orchestration_symbols);
+    }
 }
 
 fn buildTestElf(storage: []u8) []u8 {

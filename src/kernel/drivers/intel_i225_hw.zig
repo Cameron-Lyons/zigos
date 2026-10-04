@@ -1,3 +1,4 @@
+const std = @import("std");
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
 const mmio_windows = @import("../memory/mmio_windows.zig");
@@ -363,9 +364,19 @@ pub fn failedReceivePollCount() u64 {
 }
 
 pub fn networkWorkPending() bool {
+    return networkWorkPendingAt(timer.getTicks());
+}
+
+fn networkWorkPendingAt(now_ticks: u64) bool {
     if (!controllerActive()) return false;
     if (@atomicLoad(u32, &pending_interrupt_causes, .monotonic) != 0) return true;
-    return receiveCompletionReady();
+    return receiveCompletionReady() or transmitCompletionReady() or
+        controller.tx_queue.oldestSubmissionExpired(now_ticks, TRANSMIT_TIMEOUT_TICKS);
+}
+
+pub fn nextWake() ?u64 {
+    if (!controllerActive()) return null;
+    return controller.tx_queue.nextWake(TRANSMIT_TIMEOUT_TICKS);
 }
 
 pub fn handleInterrupt() void {
@@ -447,7 +458,7 @@ pub fn pollReceive(output: []u8) ReceiveResult {
     writeback = descriptor.header_or_writeback;
     defer recycleRxDescriptor(descriptor_index, descriptor);
 
-    const completion = i225_rx.decodeCompletion(writeback);
+    const completion = observeReceiveCompletion(writeback);
     const frame_len: usize = completion.length;
     if (!completion.validSingleBuffer() or frame_len < i225_frame.ETHERNET_HEADER_BYTES) {
         dropped_receive_frames +%= 1;
@@ -490,6 +501,7 @@ fn configureTransmitQueue(pending: *Controller) Error!void {
 fn reapTransmitCompletions() u32 {
     if (!controllerActive()) return 0;
     var reaped: u32 = 0;
+    defer if (reaped != 0) noteQueueProgress();
     while (controller.tx_queue.in_flight != 0) {
         const descriptor_index = controller.tx_queue.head;
         const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
@@ -505,12 +517,40 @@ fn reapTransmitCompletions() u32 {
     return reaped;
 }
 
+fn noteQueueProgress() void {
+    // DMA completions may be polled before their MSI arrives. They establish
+    // queue liveness even when no interrupt is pending in this service pass.
+    empty_interrupt_streak = 0;
+}
+
+fn observeReceiveCompletion(writeback: u64) i225_rx.Completion {
+    const completion = i225_rx.decodeCompletion(writeback);
+    // A completed descriptor will be recycled even when its packet is dropped;
+    // malformed packet data does not make that completion an empty interrupt.
+    if (completion.done) noteQueueProgress();
+    return completion;
+}
+
 fn serviceTransmitQueue(now_ticks: u64) bool {
-    if (!servicePendingInterrupt()) return false;
+    return serviceTransmitQueueWith(TransmitService, now_ticks);
+}
+
+const TransmitService = struct {
+    fn serviceInterrupt() bool {
+        return servicePendingInterrupt();
+    }
+
+    fn contain() void {
+        containFailure("ZIGOS:I225:HW:TX_STALL_CONTAINED\n");
+    }
+};
+
+fn serviceTransmitQueueWith(comptime Backend: type, now_ticks: u64) bool {
+    if (!controllerActive() or !Backend.serviceInterrupt()) return false;
     _ = reapTransmitCompletions();
     if (!controller.tx_queue.oldestSubmissionExpired(now_ticks, TRANSMIT_TIMEOUT_TICKS)) return true;
     failed_transmit_frames +%= 1;
-    containFailure("ZIGOS:I225:HW:TX_STALL_CONTAINED\n");
+    Backend.contain();
     return false;
 }
 
@@ -552,6 +592,14 @@ fn servicePendingInterrupt() bool {
 fn receiveCompletionReady() bool {
     const descriptor: *volatile i225_rx.Descriptor = rxDescriptor(controller.rx_head);
     return i225_rx.decodeCompletion(descriptor.header_or_writeback).done;
+}
+
+fn transmitCompletionReady() bool {
+    if (controller.tx_queue.in_flight == 0) return false;
+    const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
+        controller.tx_descriptor.offset(controller.tx_queue.head * i225_tx.DESCRIPTOR_BYTES).alias,
+    );
+    return i225_tx.completionDone(descriptor.olinfo_status);
 }
 
 fn rearmQueueInterrupts() void {
@@ -684,4 +732,150 @@ fn publishDescriptor() void {
 
 fn acquireDescriptor() void {
     asm volatile ("lfence" ::: .{ .memory = true });
+}
+
+test "I225 polled transmit completions preserve liveness across delayed interrupts" {
+    const saved_state = controllerState();
+    const saved_controller: ?Controller = if (controllerPrepared()) controller else null;
+    const saved_completed = completed_transmit_frames;
+    const saved_streak = empty_interrupt_streak;
+    defer {
+        if (saved_controller) |previous| controller = previous;
+        publishControllerState(saved_state);
+        completed_transmit_frames = saved_completed;
+        empty_interrupt_streak = saved_streak;
+    }
+    var descriptors = std.mem.zeroes([i225_tx.DESCRIPTOR_COUNT]i225_tx.Descriptor);
+    controller = .{
+        .bar = 0,
+        .tx_descriptor = .{ .physical = 0x1000, .alias = @intFromPtr(&descriptors) },
+        .tx_buffer = .{},
+        .rx_descriptor = .{},
+        .rx_buffer = .{},
+        .mac = @splat(0),
+    };
+    publishControllerState(.active);
+    empty_interrupt_streak = i225_irq.EMPTY_INTERRUPT_LIMIT - 1;
+    for (0..i225_tx.DESCRIPTOR_COUNT * 2) |iteration| {
+        const index = try controller.tx_queue.reserve(iteration);
+        descriptors[index] = try i225_tx.submissionDescriptor(0x2000, 64);
+        const prior_streak = empty_interrupt_streak;
+        try std.testing.expectEqual(@as(u32, 0), reapTransmitCompletions());
+        try std.testing.expectEqual(prior_streak, empty_interrupt_streak);
+        descriptors[index].olinfo_status |= 1;
+        try std.testing.expectEqual(@as(u32, 1), reapTransmitCompletions());
+        try std.testing.expectEqual(@as(u8, 0), empty_interrupt_streak);
+        // The subsequent MSI has no remaining descriptor to reclaim. Each
+        // actual completion breaks the streak before this delayed interrupt.
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+        try std.testing.expect(!i225_irq.shouldContain(empty_interrupt_streak));
+        try std.testing.expectEqual(@as(u8, 1), empty_interrupt_streak);
+    }
+    try std.testing.expectEqual(saved_completed + i225_tx.DESCRIPTOR_COUNT * 2, completed_transmit_frames);
+    for (0..i225_irq.EMPTY_INTERRUPT_LIMIT - 1) |_| {
+        try std.testing.expectEqual(@as(u32, 0), reapTransmitCompletions());
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+    }
+    try std.testing.expect(i225_irq.shouldContain(empty_interrupt_streak));
+}
+
+test "I225 receive progress includes dropped descriptors before delayed interrupts" {
+    const saved_streak = empty_interrupt_streak;
+    defer empty_interrupt_streak = saved_streak;
+    empty_interrupt_streak = i225_irq.EMPTY_INTERRUPT_LIMIT - 1;
+    try std.testing.expect(!observeReceiveCompletion(@as(u64, 64) << 32).done);
+    try std.testing.expectEqual(i225_irq.EMPTY_INTERRUPT_LIMIT - 1, empty_interrupt_streak);
+
+    for (0..i225_rx.DESCRIPTOR_COUNT * 2) |iteration| {
+        const dropped = iteration % 2 != 0;
+        const writeback = @as(u64, if (dropped) 0x8000_0003 else 3) | (@as(u64, 64) << 32);
+        const completion = observeReceiveCompletion(writeback);
+        try std.testing.expect(completion.done);
+        try std.testing.expectEqual(!dropped, completion.validSingleBuffer());
+        try std.testing.expectEqual(@as(u8, 0), empty_interrupt_streak);
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+        try std.testing.expect(!i225_irq.shouldContain(empty_interrupt_streak));
+        try std.testing.expectEqual(@as(u8, 1), empty_interrupt_streak);
+    }
+    for (0..i225_irq.EMPTY_INTERRUPT_LIMIT - 1) |_| {
+        _ = observeReceiveCompletion(0);
+        empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
+    }
+    try std.testing.expect(i225_irq.shouldContain(empty_interrupt_streak));
+}
+
+test "I225 idle transmit deadlines service polled completion and contain one stalled submission" {
+    const Backend = struct {
+        var contained: usize = 0;
+
+        fn serviceInterrupt() bool {
+            return servicePendingInterrupt();
+        }
+
+        fn contain() void {
+            contained += 1;
+            // The policy test replaces only privileged containment operations.
+            // Published descriptors stay owned and pinned after containment.
+            publishControllerState(.prepared);
+        }
+    };
+    const saved_state = controllerState();
+    const saved_controller: ?Controller = if (controllerPrepared()) controller else null;
+    const saved_completed = completed_transmit_frames;
+    const saved_failed = failed_transmit_frames;
+    const saved_pending = @atomicLoad(u32, &pending_interrupt_causes, .monotonic);
+    const saved_streak = empty_interrupt_streak;
+    defer {
+        if (saved_controller) |previous| controller = previous;
+        publishControllerState(saved_state);
+        completed_transmit_frames = saved_completed;
+        failed_transmit_frames = saved_failed;
+        @atomicStore(u32, &pending_interrupt_causes, saved_pending, .monotonic);
+        empty_interrupt_streak = saved_streak;
+    }
+    var registers = std.mem.zeroes([BAR_MAP_BYTES / @sizeOf(u32)]u32);
+    var tx = std.mem.zeroes([i225_tx.DESCRIPTOR_COUNT]i225_tx.Descriptor);
+    var rx = std.mem.zeroes([i225_rx.DESCRIPTOR_COUNT]i225_rx.Descriptor);
+    controller = .{
+        .bar = @intFromPtr(&registers),
+        .tx_descriptor = .{ .physical = 0x1000, .alias = @intFromPtr(&tx) },
+        .tx_buffer = .{},
+        .rx_descriptor = .{ .physical = 0x2000, .alias = @intFromPtr(&rx) },
+        .rx_buffer = .{},
+        .mac = @splat(0),
+    };
+    Backend.contained = 0;
+    resetPendingInterruptCauses();
+    publishControllerState(.active);
+    empty_interrupt_streak = i225_irq.EMPTY_INTERRUPT_LIMIT - 1;
+    try std.testing.expect(nextWake() == null);
+    const first = try controller.tx_queue.reserve(107);
+    tx[first] = try i225_tx.submissionDescriptor(0x3000, 64);
+    try std.testing.expectEqual(@as(?u64, 207), nextWake());
+    try std.testing.expect(!networkWorkPendingAt(206));
+    // Lost or delayed MSI does not hide a completion or force periodic polling.
+    tx[first].olinfo_status |= 1;
+    try std.testing.expect(networkWorkPendingAt(150));
+    try std.testing.expect(serviceTransmitQueueWith(Backend, 150));
+    try std.testing.expect(nextWake() == null);
+    try std.testing.expect(!networkWorkPendingAt(150));
+    try std.testing.expectEqual(@as(u8, 0), empty_interrupt_streak);
+    @atomicStore(u32, &pending_interrupt_causes, PENDING_INTERRUPT_EVENT, .monotonic);
+    try std.testing.expect(serviceTransmitQueueWith(Backend, 151));
+    try std.testing.expectEqual(@as(u8, 1), empty_interrupt_streak);
+    try std.testing.expectEqual(@as(usize, 0), Backend.contained);
+
+    const stalled = try controller.tx_queue.reserve(200);
+    tx[stalled] = try i225_tx.submissionDescriptor(0x3000, 64);
+    try std.testing.expectEqual(@as(?u64, 300), nextWake());
+    try std.testing.expect(!networkWorkPendingAt(299));
+    try std.testing.expect(networkWorkPendingAt(300));
+    try std.testing.expect(!serviceTransmitQueueWith(Backend, 300));
+    try std.testing.expectEqual(@as(usize, 1), Backend.contained);
+    try std.testing.expectEqual(saved_failed + 1, failed_transmit_frames);
+    try std.testing.expectEqual(@as(u32, 1), controller.tx_queue.in_flight);
+    try std.testing.expect(nextWake() == null);
+    try std.testing.expect(!networkWorkPendingAt(300));
+    try std.testing.expect(!serviceTransmitQueueWith(Backend, 301));
+    try std.testing.expectEqual(@as(usize, 1), Backend.contained);
 }

@@ -459,7 +459,7 @@ const UserspaceStorageHarness = struct {
     storage_service_id: u64 = STORAGE_SERVICE_ID,
 
     fn init(self: *UserspaceStorageHarness) !void {
-        self.checkpoint_store.resetPersistent();
+        if (!self.checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
         self.kernel.initInPlace(
             self.policy_authority,
             &self.runtime,

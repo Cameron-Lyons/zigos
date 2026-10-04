@@ -171,6 +171,8 @@ const DISABLE_SLOT_COMMAND_TRB_TYPE: u32 = 10;
 const ADDRESS_DEVICE_COMMAND_TRB_TYPE: u32 = 11;
 const CONFIGURE_ENDPOINT_COMMAND_TRB_TYPE: u32 = 12;
 const EVALUATE_CONTEXT_COMMAND_TRB_TYPE: u32 = 13;
+const RESET_ENDPOINT_COMMAND_TRB_TYPE: u32 = 14;
+const STOP_ENDPOINT_COMMAND_TRB_TYPE: u32 = 15;
 const TRB_TYPE_SHIFT: u5 = 10;
 const TRB_TYPE_MASK: u32 = 0x3F;
 const TRB_INTERRUPT_ON_SHORT_PACKET: u32 = 1 << 2;
@@ -267,6 +269,7 @@ pub const Error = error{
     MissingInterruptInEndpoint,
     UnknownHidDevice,
     EndpointMismatch,
+    EndpointContextStateInvalid,
     InvalidBootKeyboardReport,
     InvalidPort,
     PortNotConnected,
@@ -359,6 +362,31 @@ pub const EventType = enum(u8) {
     unknown,
 };
 
+pub const EndpointState = enum(u3) {
+    disabled = 0,
+    running = 1,
+    halted = 2,
+    stopped = 3,
+    error_state = 4,
+};
+
+pub fn decodeEndpointState(dword0: u32) Error!EndpointState {
+    return switch (@as(u3, @truncate(dword0))) {
+        0 => .disabled,
+        1 => .running,
+        2 => .halted,
+        3 => .stopped,
+        4 => .error_state,
+        else => error.EndpointContextStateInvalid,
+    };
+}
+
+pub const StoppedTransferCompletion = enum {
+    stopped,
+    stopped_length_invalid,
+    stopped_short_packet,
+};
+
 pub const Event = struct {
     parameter: u64,
     kind: EventType,
@@ -372,6 +400,16 @@ pub const Event = struct {
 
     pub fn succeeded(self: Event) bool {
         return self.completion_code == COMPLETION_CODE_SUCCESS;
+    }
+
+    pub fn stoppedCompletion(self: Event) ?StoppedTransferCompletion {
+        if (self.kind != .transfer) return null;
+        return switch (self.completion_code) {
+            26 => .stopped,
+            27 => .stopped_length_invalid,
+            28 => .stopped_short_packet,
+            else => null,
+        };
     }
 };
 
@@ -916,6 +954,8 @@ pub const CommandKind = enum(u8) {
     address_device,
     configure_endpoint,
     evaluate_context,
+    reset_endpoint,
+    stop_endpoint,
 };
 
 pub const TrbRingProducer = struct {
@@ -1015,6 +1055,47 @@ pub fn disableSlotCommand(slot_id: u8, cycle_state: u1) Error![4]u32 {
         0,
         (@as(u32, slot_id) << 24) |
             (DISABLE_SLOT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) |
+            cycle_state,
+    };
+}
+
+pub fn stopEndpointCommand(
+    slot_id: u8,
+    endpoint_dci: u5,
+    suspend_endpoint: bool,
+    cycle_state: u1,
+) Error![4]u32 {
+    if (slot_id == 0) return error.InvalidDeviceSlot;
+    if (endpoint_dci == 0) return error.EndpointMismatch;
+    // xHCI 1.2c section 6.4.3.8: SP denotes an impending >= 10 ms suspend.
+    return .{
+        0,
+        0,
+        0,
+        (@as(u32, slot_id) << 24) |
+            (@as(u32, @intFromBool(suspend_endpoint)) << 23) |
+            (@as(u32, endpoint_dci) << 16) |
+            (STOP_ENDPOINT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) |
+            cycle_state,
+    };
+}
+
+pub fn resetEndpointCommand(
+    slot_id: u8,
+    endpoint_dci: u5,
+    preserve_transfer_state: bool,
+    cycle_state: u1,
+) Error![4]u32 {
+    if (slot_id == 0) return error.InvalidDeviceSlot;
+    if (endpoint_dci == 0) return error.EndpointMismatch;
+    return .{
+        0,
+        0,
+        0,
+        (@as(u32, slot_id) << 24) |
+            (@as(u32, endpoint_dci) << 16) |
+            (RESET_ENDPOINT_COMMAND_TRB_TYPE << TRB_TYPE_SHIFT) |
+            (@as(u32, @intFromBool(preserve_transfer_state)) << 9) |
             cycle_state,
     };
 }
@@ -1358,6 +1439,65 @@ pub fn validateInterruptTransferEvent(
     {
         return error.TrbRingStateInvalid;
     }
+}
+
+pub fn validateFailedTransferEvent(
+    event: Event,
+    owned_trb_addresses: []const u64,
+    slot_id: u8,
+    endpoint_dci: u5,
+) Error!void {
+    if (event.kind != .transfer or event.completion_code != 4 or event.event_data or
+        slot_id == 0 or event.slot_id != slot_id or endpoint_dci == 0 or
+        event.endpoint_id != endpoint_dci or owned_trb_addresses.len == 0 or
+        owned_trb_addresses.len > 3 or event.transfer_length > XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES)
+    {
+        return error.TrbRingStateInvalid;
+    }
+    // Current control requests own separate Setup/[Data]/Status TDs; interrupt
+    // requests own one Normal TRB. A failure must name the active request, unlike
+    // a forced stopped event which can name the empty ring's Link TRB.
+    var matched = false;
+    for (owned_trb_addresses, 0..) |address, index| {
+        if (address == 0 or !aligned(address, TRB_BYTES)) return error.TrbRingStateInvalid;
+        _ = std.math.add(u64, address, TRB_BYTES) catch return error.TrbRingStateInvalid;
+        for (owned_trb_addresses[0..index]) |previous| {
+            if (address == previous) return error.TrbRingStateInvalid;
+        }
+        matched = matched or event.parameter == address;
+    }
+    if (!matched) return error.TrbRingStateInvalid;
+}
+
+pub fn validateStoppedTransferEvent(
+    event: Event,
+    ring_address: u64,
+    ring_trbs: u32,
+    slot_id: u8,
+    endpoint_dci: u5,
+) Error!StoppedTransferCompletion {
+    const completion = event.stoppedCompletion() orelse return error.TrbRingStateInvalid;
+    if (ring_address == 0 or !aligned(ring_address, RING_ALIGNMENT_BYTES) or
+        ring_trbs < 2 or slot_id == 0 or event.slot_id != slot_id or
+        endpoint_dci == 0 or event.endpoint_id != endpoint_dci or event.event_data or
+        !aligned(event.parameter, TRB_BYTES))
+    {
+        return error.TrbRingStateInvalid;
+    }
+    const ring_bytes = std.math.mul(u64, ring_trbs, TRB_BYTES) catch
+        return error.TrbRingStateInvalid;
+    const ring_end = std.math.add(u64, ring_address, ring_bytes) catch
+        return error.TrbRingStateInvalid;
+    if (event.parameter < ring_address or event.parameter >= ring_end) {
+        return error.TrbRingStateInvalid;
+    }
+    // Stops may identify any interrupted TRB, including the Link TRB on an empty
+    // ring. Code 26 carries a residual; code 27's length is invalid and code 28
+    // reports EDTLA bytes transferred rather than that residual (tables 6-38/90).
+    if (completion == .stopped and event.transfer_length > XHCI_TRANSFER_BUFFER_BOUNDARY_BYTES) {
+        return error.TrbRingStateInvalid;
+    }
+    return completion;
 }
 
 pub fn addressDeviceCommand(
@@ -4400,6 +4540,159 @@ test "xHCI TRB producer encodes slot commands and toggles on the link TRB" {
         (LINK_TRB_TYPE << TRB_TYPE_SHIFT) | LINK_TRB_TOGGLE_CYCLE | 1,
         ringLinkControl(1),
     );
+}
+
+test "xHCI Stop Endpoint command uses protocol fields and validates identifiers" {
+    const stopped = try stopEndpointCommand(1, ENDPOINT_ZERO_DCI, false, 1);
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0x0101_3C01 }, stopped);
+    const suspended = try stopEndpointCommand(255, 31, true, 0);
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0xFF9F_3C00 }, suspended);
+    try std.testing.expectEqual(
+        @as(u32, 1) << 23,
+        (try stopEndpointCommand(7, 5, true, 1))[3] ^
+            (try stopEndpointCommand(7, 5, false, 1))[3],
+    );
+    try std.testing.expectError(error.InvalidDeviceSlot, stopEndpointCommand(0, 1, false, 1));
+    try std.testing.expectError(error.EndpointMismatch, stopEndpointCommand(1, 0, false, 1));
+}
+
+test "xHCI Reset Endpoint command preserves transfer state with protocol bit 9" {
+    const reset = try resetEndpointCommand(1, ENDPOINT_ZERO_DCI, true, 1);
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0x0101_3A01 }, reset);
+    const maximum = try resetEndpointCommand(255, 31, false, 0);
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0xFF1F_3800 }, maximum);
+    try std.testing.expectEqual(
+        @as(u32, 1) << 9,
+        (try resetEndpointCommand(7, 5, true, 1))[3] ^
+            (try resetEndpointCommand(7, 5, false, 1))[3],
+    );
+    try std.testing.expectError(error.InvalidDeviceSlot, resetEndpointCommand(0, 1, true, 1));
+    try std.testing.expectError(error.EndpointMismatch, resetEndpointCommand(1, 0, true, 1));
+}
+
+test "xHCI failed transaction belongs to the exact active control or interrupt request" {
+    const control_td = [_]u64{ 0x530E0, 0x53000, 0x53010 };
+    var event = decodeEvent(.{ 0x530E0, 0, 4 << 24, (3 << 24) | (1 << 16) | (32 << 10) });
+    for (control_td) |address| {
+        event.parameter = address;
+        try validateFailedTransferEvent(event, &control_td, 3, 1);
+    }
+    // A two-stage no-data control request excludes a neighboring Data TRB.
+    try validateFailedTransferEvent(event, &.{ 0x530E0, 0x53010 }, 3, 1);
+    event.parameter = 0x53000;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{ 0x530E0, 0x53010 }, 3, 1));
+    event.endpoint_id = 3;
+    event.transfer_length = 8;
+    try validateFailedTransferEvent(event, &.{0x53000}, 3, 3);
+    event.transfer_length = 65536;
+    try validateFailedTransferEvent(event, &.{0x53000}, 3, 3);
+    event.transfer_length = 65537;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{0x53000}, 3, 3));
+    event.transfer_length = 0;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateInterruptTransferEvent(event, 0x53000, 3, 3));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53000, 16, 3, 3));
+}
+
+test "xHCI failed transaction rejects foreign malformed and inactive TRBs" {
+    const event = decodeEvent(.{ 0x53000, 0, 4 << 24, (3 << 24) | (1 << 16) | (32 << 10) });
+    var mismatch = event;
+    mismatch.kind = .command_completion;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(mismatch, &.{0x53000}, 3, 1));
+    for ([_]u8{ 0, 1, 5, 6, 26, 27, 28 }) |code| {
+        mismatch = event;
+        mismatch.completion_code = code;
+        try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(mismatch, &.{0x53000}, 3, 1));
+    }
+    mismatch = event;
+    mismatch.event_data = true;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(mismatch, &.{0x53000}, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{0x53000}, 0, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{0x53000}, 4, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{0x53000}, 3, 0));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{0x53000}, 3, 2));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{}, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{ 0x53000, 0x53010, 0x53020, 0x53030 }, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{ 0x53000, 0 }, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{ 0x53000, 0x53001 }, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{ 0x53000, 0x53000 }, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(event, &.{ 0x53000, std.math.maxInt(u64) - 15 }, 3, 1));
+    // Both an older TD in the same ring and the terminal Link are unowned.
+    for ([_]u64{ 0, 0x53001, 0x52FF0, 0x53020, 0x530F0 }) |pointer| {
+        mismatch = event;
+        mismatch.parameter = pointer;
+        try std.testing.expectError(error.TrbRingStateInvalid, validateFailedTransferEvent(mismatch, &.{0x53000}, 3, 1));
+    }
+}
+
+test "xHCI output endpoint state rejects reserved protocol values" {
+    const states = [_]EndpointState{ .disabled, .running, .halted, .stopped, .error_state };
+    for (states, 0..) |state, value| {
+        try std.testing.expectEqual(state, try decodeEndpointState(@intCast(value)));
+        try std.testing.expectEqual(state, try decodeEndpointState(0xFFFF_FFF8 | @as(u32, @intCast(value))));
+    }
+    for (5..8) |reserved| {
+        try std.testing.expectError(error.EndpointContextStateInvalid, decodeEndpointState(@intCast(reserved)));
+    }
+}
+
+test "xHCI stopped transfer completion validates every owned TRB and length semantics" {
+    var event = decodeEvent(.{ 0x53000, 0, 26 << 24, (3 << 24) | (1 << 16) | (32 << 10) });
+    const completions = [_]StoppedTransferCompletion{ .stopped, .stopped_length_invalid, .stopped_short_packet };
+    for (completions, 26..) |completion, code| {
+        event.completion_code = @intCast(code);
+        try std.testing.expectEqual(completion, event.stoppedCompletion().?);
+        // Includes Setup/Data/Status/Normal positions and the terminal Link TRB.
+        for (0..TRANSFER_RING_TRBS) |index| {
+            event.parameter = 0x53000 + index * TRB_BYTES;
+            try std.testing.expectEqual(
+                completion,
+                try validateStoppedTransferEvent(event, 0x53000, TRANSFER_RING_TRBS, 3, 1),
+            );
+        }
+    }
+    event.parameter = 0x53000;
+    event.completion_code = 26;
+    event.transfer_length = 65536;
+    try std.testing.expectEqual(.stopped, try validateStoppedTransferEvent(event, 0x53000, TRANSFER_RING_TRBS, 3, 1));
+    event.transfer_length = 65537;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53000, TRANSFER_RING_TRBS, 3, 1));
+    event.transfer_length = std.math.maxInt(u24);
+    event.completion_code = 27;
+    try std.testing.expectEqual(.stopped_length_invalid, try validateStoppedTransferEvent(event, 0x53000, TRANSFER_RING_TRBS, 3, 1));
+    event.completion_code = 28;
+    try std.testing.expectEqual(.stopped_short_packet, try validateStoppedTransferEvent(event, 0x53000, TRANSFER_RING_TRBS, 3, 1));
+    // Stopped completion never satisfies an ordinary successful report TD.
+    event.endpoint_id = 3;
+    event.transfer_length = 0;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateInterruptTransferEvent(event, 0x53000, 3, 3));
+}
+
+test "xHCI stopped transfer completion rejects foreign events and invalid ring geometry" {
+    const event = decodeEvent(.{ 0x53000, 0, 27 << 24, (3 << 24) | (1 << 16) | (32 << 10) });
+    var mismatch = event;
+    mismatch.kind = .command_completion;
+    try std.testing.expectEqual(@as(?StoppedTransferCompletion, null), mismatch.stoppedCompletion());
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(mismatch, 0x53000, 16, 3, 1));
+    mismatch = event;
+    mismatch.completion_code = 1;
+    try std.testing.expectEqual(@as(?StoppedTransferCompletion, null), mismatch.stoppedCompletion());
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(mismatch, 0x53000, 16, 3, 1));
+    mismatch = event;
+    mismatch.event_data = true;
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(mismatch, 0x53000, 16, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53000, 16, 0, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53000, 16, 4, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53000, 16, 3, 0));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53000, 16, 3, 2));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0, 16, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53001, 16, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, 0x53000, 1, 3, 1));
+    try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(event, std.math.maxInt(u64) - 63, 16, 3, 1));
+    for ([_]u64{ 0x52FF0, 0x53001, 0x53100 }) |pointer| {
+        mismatch = event;
+        mismatch.parameter = pointer;
+        try std.testing.expectError(error.TrbRingStateInvalid, validateStoppedTransferEvent(mismatch, 0x53000, 16, 3, 1));
+    }
 }
 
 const MockDoorbellMmio = struct {

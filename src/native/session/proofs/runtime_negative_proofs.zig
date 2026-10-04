@@ -308,12 +308,13 @@ fn userGeneralProtectionFaultIsContained(
     };
     const owned_endpoint = kernel.endpointCreate(context, launched.id, "fault-owned", .{ .local_only = true }, 0) catch return false;
     const owned_memory = kernel.sharedMemoryCreate(context, launched.id, shared_memory.PAGE_SIZE, 0) catch return false;
+    const baseline_frames = paging.frameStats().allocated;
+    if (!scheduler.executor.materializeTaskForProof(catalog, runtime, launched.id)) return false;
     _ = kernel.sharedMemoryMap(.{
         .caller_task_id = launched.id,
         .presented_capability_id = owned_memory.capability_id,
         .target = .none,
     }, launched.id, 0) catch return false;
-    const baseline_frames = paging.frameStats().allocated;
 
     var attempt: usize = 0;
     while (attempt < 3) : (attempt += 1) {

@@ -357,6 +357,7 @@ pub const Error = error{
     RelayDeliveryMissing,
     RemoteAccessDisabled,
     StateSigningFailed,
+    StateCheckpointFailed,
     StateTooLarge,
     SyncSemanticMismatch,
     PathTooLong,
@@ -532,6 +533,7 @@ pub const ResidentState = struct {
     persisted_state: PersistentState = .{},
     has_persisted_state: bool = false,
     transport_cursor_loaded: bool = false,
+    checkpoint_retry_pending: bool = false,
     user_root_signers: [device_graph.MAX_USER_ROOTS][MAX_LABEL_BYTES]u8 =
         @as([device_graph.MAX_USER_ROOTS][MAX_LABEL_BYTES]u8, @splat(@as([MAX_LABEL_BYTES]u8, @splat(0)))),
     device_signature_signers: [device_graph.MAX_DEVICES][4][MAX_LABEL_BYTES]u8 =
@@ -548,6 +550,7 @@ pub const ResidentState = struct {
     pub fn resetForServiceInit(self: *ResidentState) void {
         self.persisted_state.reset();
         self.transport_cursor_loaded = false;
+        self.checkpoint_retry_pending = false;
         self.resetSignatureStorage();
     }
 
@@ -555,6 +558,7 @@ pub const ResidentState = struct {
         self.persisted_state.reset();
         self.has_persisted_state = false;
         self.transport_cursor_loaded = false;
+        self.checkpoint_retry_pending = false;
         self.resetSignatureStorage();
         self.next_state_tick = 1;
     }

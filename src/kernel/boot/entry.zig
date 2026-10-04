@@ -2,6 +2,7 @@ const std = @import("std");
 const secure_random = @import("../platform/secure_random.zig");
 const x86 = @import("../../arch/x86.zig");
 const cpu_features = @import("../../arch/cpu_features.zig");
+const cpu_policy = @import("cpu_policy.zig");
 const console = @import("../utils/console.zig");
 const config = @import("../config.zig");
 const common = @import("common.zig");
@@ -14,19 +15,19 @@ const hardware_proof = @import("../platform/hardware_proof.zig");
 const tcb = @import("../tcb.zig");
 const tsc_clock = @import("../timer/tsc_clock.zig");
 
-const QEMU_TSC_FREQUENCY_HZ: u64 = 2_400_000_000;
-
 comptime {
     if (!tcb.FORBIDS_PRODUCT_IMPORTS or !tcb.KERNEL_PORT_REQUIRES_PUBLISHED_GS or !tcb.IDLE_NEVER_SERVICES_DEVICE_QUEUES) {
         @compileError("kernel TCB contracts must stay enabled");
     }
 }
 
-fn softwareCpuFallbackRequested() bool {
-    const info = handoff.capturedInfo() orelse return false;
-    return handoff.commandLineHasFlag(info, "model_inventory") and
-        handoff.commandLineHasFlag(info, "qemu_software_cpu_fallback") and
-        handoff.commandLineU64(info, "qemu_tsc_frequency_hz") == QEMU_TSC_FREQUENCY_HZ;
+fn cpuModelRequest() cpu_policy.ModelRequest {
+    const info = handoff.capturedInfo() orelse return .{};
+    return .{
+        .model_inventory = handoff.commandLineHasFlag(info, "model_inventory"),
+        .software_cpu_fallback = handoff.commandLineHasFlag(info, "qemu_software_cpu_fallback"),
+        .tsc_frequency_hz = handoff.commandLineU64(info, "qemu_tsc_frequency_hz"),
+    };
 }
 
 fn printBootIdentity() void {
@@ -39,16 +40,9 @@ pub fn kernelMain() void {
     x86.enableSse();
     console.init();
     var features = cpu_features.detect();
-    if (features.tsc_frequency_hz == 0) {
-        if (handoff.capturedInfo()) |info| {
-            if (handoff.commandLineHasFlag(info, "model_inventory") and
-                handoff.commandLineU64(info, "qemu_tsc_frequency_hz") == QEMU_TSC_FREQUENCY_HZ)
-            {
-                features.tsc_frequency_hz = QEMU_TSC_FREQUENCY_HZ;
-            }
-        }
-    }
-    const software_cpu_fallback = softwareCpuFallbackRequested();
+    const model_request = cpuModelRequest();
+    features.tsc_frequency_hz = model_request.resolveTscFrequency(features.tsc_frequency_hz);
+    const software_cpu_fallback = model_request.enabled();
     const hardware_process_contexts = features.pcid and features.invpcid;
     const software_process_context_fallback = !hardware_process_contexts and software_cpu_fallback;
     const hardware_tsc_timer = features.tsc_deadline and features.invariant_tsc;
@@ -108,6 +102,7 @@ pub fn kernelMain() void {
         features,
         if (hardware_process_contexts) .hardware_pcid else .software_flush,
         if (hardware_cet) .hardware else .deferred,
+        if (software_cpu_fallback) .explicit_model else .hardware,
     );
     common.printBootMarker(boot_markers.cpu_nx_enabled);
     common.printBootMarker(boot_markers.cpu_smep_enabled);

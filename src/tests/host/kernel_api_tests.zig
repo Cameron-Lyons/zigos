@@ -8,8 +8,10 @@ const kernel_operation_descriptor = @import("../../native/kernel_api/kernel_oper
 const native_kernel = @import("../../native/kernel_api/native_kernel.zig");
 const operation_metadata = @import("../../native/kernel_api/operation_metadata.zig");
 const shared_memory = @import("../../native/kernel_api/shared_memory.zig");
+const shared_memory_lifetime_test = @import("../../native/kernel_api/shared_memory_lifetime_test.zig");
 const syscall_abi = @import("../../native/kernel_api/syscall_abi.zig");
 const syscall_surface = @import("../../native/kernel_api/syscall_surface.zig");
+const syscall_failure_test = @import("../../native/kernel_api/syscall_failure_test.zig");
 
 test "kernel api host tests import native kernel api modules" {
     std.testing.refAllDecls(capability);
@@ -20,6 +22,8 @@ test "kernel api host tests import native kernel api modules" {
     std.testing.refAllDecls(native_kernel);
     std.testing.refAllDecls(operation_metadata);
     std.testing.refAllDecls(shared_memory);
+    std.testing.refAllDecls(shared_memory_lifetime_test);
     std.testing.refAllDecls(syscall_abi);
     std.testing.refAllDecls(syscall_surface);
+    std.testing.refAllDecls(syscall_failure_test);
 }

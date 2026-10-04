@@ -102,6 +102,8 @@ pub const Channel = struct {
 
     pub fn hasPendingWork(self: *const Channel) bool {
         const server = if (self.server) |*value| value else return false;
+        if (server.running) return false;
+        if (server.closing) return true;
         switch (self.peerState()) {
             .closed => return true,
             .suspended => return false,
@@ -134,6 +136,11 @@ pub const Channel = struct {
     // queued commit that executes after its document channel is closed.
     pub fn runOnce(self: *Channel, now_ticks: u64) bool {
         const server = if (self.server) |*value| value else return false;
+        if (server.running) return false;
+        if (server.closing) {
+            self.close(now_ticks);
+            return true;
+        }
         switch (self.peerState()) {
             .closed => {
                 self.close(now_ticks);
@@ -142,14 +149,17 @@ pub const Channel = struct {
             .suspended => return false,
             .active => {},
         }
-        return server.runOnce(now_ticks) catch {
+        const progress = server.runOnce(now_ticks) catch {
             self.close(now_ticks);
             return true;
         };
+        if (server.closing) self.close(now_ticks);
+        return progress;
     }
 
     pub fn close(self: *Channel, now_ticks: u64) void {
         const server = if (self.server) |*value| value else return;
+        server.closing = true;
         const kernel = server.kernel.kernel;
         for ([_]u64{ self.server_endpoint_id, self.client_endpoint_id }) |endpoint_id| {
             kernel.retireEndpoint(ids.endpoint(endpoint_id), now_ticks) catch |err| switch (err) {
@@ -157,9 +167,13 @@ pub const Channel = struct {
                 else => unreachable,
             };
         }
-        // Discard upload bytes and signing material before reusing the slot.
-        @memset(std.mem.asBytes(self), 0);
+        // Cancel and detach immediately, but a suspended command still borrows
+        // this server, its path and upload bytes until its terminal return.
+        if (server.running) return;
+        // Assign the inactive optional before erasing it: Debug assignments
+        // may poison its payload, which must not retain upload or signing bytes.
         self.server = null;
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
     }
 };
 

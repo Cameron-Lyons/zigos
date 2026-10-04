@@ -1,4 +1,5 @@
 const std = @import("std");
+const host_tools = @import("host_tools.zig");
 const shared = @import("shared.zig");
 const userspace_build = @import("userspace.zig");
 
@@ -42,6 +43,7 @@ pub fn addEfiImage(
         .root_source_file = b.path("src/boot/efi_stub.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = optimize != .debug,
         .red_zone = false,
     });
     module.addImport("boot_payload", b.createModule(.{ .root_source_file = payload, .target = target, .optimize = optimize }));
@@ -106,8 +108,10 @@ pub fn addX86_64KernelBootCheck(
     kernel_object.link_function_sections = true;
     kernel_object.link_data_sections = true;
 
-    const link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    // Configure graphs survive cache relocation. Resolve the invoking compiler
+    // during execution rather than serializing its temporary installation path.
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
         "ld.lld",
         // LLVM emits probe calls after LTO dead-code elimination. Keep the
         // bundled routine alive so large frames still touch each stack page.
@@ -133,19 +137,17 @@ pub fn addX86_64KernelBootCheck(
     link.addFileArg(kernel_assembly.getEmittedBin());
 
     const efi_stub = addEfiImage(b, optimize, linked_kernel, b.path("src/boot/cmdline-qemu.txt"));
-    const validate_image = b.addSystemCommand(&.{"bash"});
-    validate_image.addFileArg(b.path("scripts/check-efi-image.sh"));
+    const validate_image = host_tools.addRun(b, "check-efi-image");
     validate_image.addFileArg(efi_stub.getEmittedBin());
 
-    const iso = b.addSystemCommand(&.{"bash"});
-    iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
+    const iso = host_tools.addRun(b, "build-efi-iso");
     iso.addFileArg(efi_stub.getEmittedBin());
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
+    shared.addEfiIsoEpochArg(b, iso);
     iso.step.dependOn(&validate_image.step);
 
-    const run = b.addSystemCommand(&.{"bash"});
-    run.addFileArg(b.path("scripts/run-x86-64-kernel-smoke.sh"));
+    const run = host_tools.addRun(b, "run-x86-64-kernel-smoke");
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-kernel-core-boot.log");
 
@@ -216,8 +218,8 @@ pub fn addX86_64LongModeEntryCheck(
         .root_module = module,
     });
 
-    const link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
         "ld.lld",
         "-m",
         "elf_x86_64",
@@ -233,12 +235,10 @@ pub fn addX86_64LongModeEntryCheck(
     const linked_probe = link.addOutputFileArg("x86_64-long-mode-entry-probe.elf");
     link.addFileArg(probe.getEmittedBin());
 
-    const validate_image = b.addSystemCommand(&.{"bash"});
-    validate_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
+    const validate_image = host_tools.addRun(b, "check-multiboot2-image");
     validate_image.addFileArg(linked_probe);
 
-    const iso = b.addSystemCommand(&.{"bash"});
-    iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
+    const iso = host_tools.addRun(b, "build-grub-iso");
     iso.addFileArg(linked_probe);
     const iso_path = iso.addOutputFileArg("x86_64-long-mode-entry.iso");
     _ = iso.addOutputDirectoryArg("x86_64-long-mode-entry-staging");
@@ -246,8 +246,7 @@ pub fn addX86_64LongModeEntryCheck(
     iso.addFileArg(addEfiImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt")).getEmittedBin());
     iso.step.dependOn(&validate_image.step);
 
-    const run = b.addSystemCommand(&.{"bash"});
-    run.addFileArg(b.path("scripts/run-long-mode-entry-smoke.sh"));
+    const run = host_tools.addRun(b, "run-long-mode-entry-smoke");
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-long-mode-entry.log");
 
@@ -450,6 +449,7 @@ pub fn addKernelProfileSteps(
 pub fn gateArtifactInstalls(kernels: KernelArtifacts, validation_step: *std.Build.Step) void {
     inline for (@typeInfo(KernelArtifacts).@"struct".field_names) |field_name| {
         @field(kernels, field_name).install_step.dependOn(validation_step);
+        @field(kernels, field_name).debug_install_step.dependOn(validation_step);
     }
 }
 
@@ -527,8 +527,8 @@ pub fn addKernelArtifact(
     kernel_object.link_function_sections = true;
     kernel_object.link_data_sections = true;
 
-    const link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
         "ld.lld",
         "--undefined=__zig_probe_stack",
         "-mllvm",
@@ -550,8 +550,8 @@ pub fn addKernelArtifact(
     link.addFileArg(kernel_object.getEmittedBin());
     link.addFileArg(kernel_assembly.getEmittedBin());
 
-    const boot_link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    const boot_link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    boot_link.addArgs(&.{
         "ld.lld",
         "--undefined=__zig_probe_stack",
         "-mllvm",
@@ -575,23 +575,29 @@ pub fn addKernelArtifact(
     boot_link.addFileArg(kernel_assembly.getEmittedBin());
 
     const efi_stub = addEfiImage(b, .small, boot_kernel, b.path("src/boot/cmdline-qemu.txt"));
-    const validate_qemu_image = b.addSystemCommand(&.{"bash"});
-    validate_qemu_image.addFileArg(b.path("scripts/check-efi-image.sh"));
+    const validate_qemu_image = host_tools.addRun(b, "check-efi-image");
     validate_qemu_image.addFileArg(efi_stub.getEmittedBin());
 
-    const qemu_iso = b.addSystemCommand(&.{"bash"});
-    qemu_iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
+    const qemu_iso = host_tools.addRun(b, "build-efi-iso");
     qemu_iso.addFileArg(efi_stub.getEmittedBin());
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));
+    shared.addEfiIsoEpochArg(b, qemu_iso);
     qemu_iso.step.dependOn(&validate_qemu_image.step);
 
-    const install = b.addInstallBinFile(linked_kernel, name);
+    // Publish the same production ELF that firmware measures. Keep its complete
+    // DWARF separately for address-to-line diagnostics, with identical load
+    // segments and static symbol addresses.
+    const published_kernel = if (kernel_role == .production) boot_kernel else linked_kernel;
+    const install = b.addInstallBinFile(published_kernel, name);
+    const debug_install = b.addInstallFile(linked_kernel, b.fmt("kernel-debug/{s}", .{name}));
+    install.step.dependOn(&debug_install.step);
     return .{
         .compile_step = kernel_object,
-        .output_file = linked_kernel,
+        .output_file = published_kernel,
         .boot_payload = boot_kernel,
         .install_step = &install.step,
+        .debug_install_step = &debug_install.step,
         .output_path = b.graph.path(.install_bin, name),
         .kernel_role = kernel_role,
         .bootloader_source_path = "src/boot/efi_stub.zig",

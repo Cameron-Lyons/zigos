@@ -1,0 +1,16 @@
+target_id=asus-nuc15crsu7
+evidence_source=real_hardware
+operator=TODO-fill-operator
+captured_at_utc=TODO-fill-attestation-capture-time
+provider=TODO-fill-tpm-secure-enclave-hsm-or-kms-provider
+root_key_id=TODO-fill-root-key-id
+initial_generation=0
+active_generation=0
+revoked_generation_count=0
+stale_generation_rejected=TODO-true-after-verifier-rejected-old-generation
+revoked_generation_rejected=TODO-true-after-verifier-rejected-revoked-generation
+verifier_rejected_stale_attestation=TODO-true-after-response-verification-failed
+verifier_metadata_digest_bound=TODO-true-after-request-bound-metadata-digest
+verifier_metadata_digest=TODO-fill-64-hex-digest
+attestation_request_digest=TODO-fill-64-hex-request-digest
+notes=TODO-record-root-rotation-revocation-and-verifier-rejection-evidence

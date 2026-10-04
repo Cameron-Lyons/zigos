@@ -394,7 +394,7 @@ test "recovery entry sessions derive action count from their authoritative slice
 
 test "recovery environment verifies reinstalls restores repairs and rotates" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 4 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8 };
@@ -506,12 +506,12 @@ test "recovery environment verifies reinstalls restores repairs and rotates" {
     try std.testing.expect(recovery.report.device_keys_rotated);
     try std.testing.expect(recovery.report.device_trust_revoked);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "recovery environment requires boot-profile recovery session gates and refuses missing repair targets" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 5 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 9 };
@@ -595,7 +595,7 @@ test "recovery environment requires boot-profile recovery session gates and refu
     try std.testing.expectError(error.DeviceNotTrusted, recovery.repairSyncMetadata(recovery_boot.session(), &sync, &storage, workspace_record.id, untrusted_device));
     try std.testing.expect(!recovery.report.sync_metadata_repaired);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "recovery environment audits break-glass recovery authorization" {

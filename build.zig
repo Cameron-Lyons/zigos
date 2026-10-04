@@ -4,6 +4,7 @@ const benchmarks_build = @import("build_support/benchmarks.zig");
 const checks_build = @import("build_support/checks.zig");
 const shared = @import("build_support/shared.zig");
 const kernel_build = @import("build_support/kernel.zig");
+const host_tools = @import("build_support/host_tools.zig");
 const qemu_build = @import("build_support/qemu.zig");
 const tests_build = @import("build_support/tests.zig");
 const userspace_build = @import("build_support/userspace.zig");
@@ -14,13 +15,17 @@ pub fn build(b: *std.Build) void {
     enforceZigVersion();
 
     const clean_dry_run = b.option(bool, "clean-dry-run", "Print generated paths that clean would remove without deleting them") orelse false;
-    const clean_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/clean-build.sh",
-    });
+    const clean_cmd = host_tools.addRun(b, "clean-build");
     if (clean_dry_run) clean_cmd.addArg("--dry-run");
     const clean_step = b.step("clean", "Remove generated build outputs and Zig caches");
     clean_step.dependOn(&clean_cmd.step);
+
+    const host_tool_cmd = host_tools.addInvocation(b);
+    host_tool_cmd.addPassthruArgs();
+    const host_tool_step = b.step("tool", "Run a native host utility: zig build tool -- COMMAND [ARGUMENTS]");
+    host_tool_step.dependOn(&host_tool_cmd.step);
+    const host_tool_install = b.addInstallArtifact(host_tools.tool(b), .{});
+    b.step("host-tools", "Install the native zigos-tool executable").dependOn(&host_tool_install.step);
 
     const verify_smoke = b.option(bool, "verify-smoke", "Include the QEMU native smoke test in `zig build verify`") orelse false;
     const verify_benchmark = b.option(bool, "verify-benchmark", "Include the QEMU benchmark suite in `zig build verify`") orelse false;
@@ -68,9 +73,10 @@ pub fn build(b: *std.Build) void {
     kernel_role_options.addOption(
         usize,
         "maximum_production_symbol_count",
-        // Production now links native enrollment, TPM PIN/recovery and catalog
-        // restoration. Retain a bounded symbol budget for that shipped path.
-        if (optimize == .fast) 3500 else std.math.maxInt(usize),
+        // Native Notes selection, durable creation and exact document approval
+        // belong to the shipped identity path. Keep its bounded production
+        // budget and verification workload exclusions explicit.
+        if (optimize == .fast) 3600 else std.math.maxInt(usize),
     );
     kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .debug);
     const kernel_role_check_module = b.createModule(.{
@@ -138,6 +144,10 @@ pub fn build(b: *std.Build) void {
     const verify_release_cli_step = b.step("verify-release-cli", "Build the host release verifier for independent distribution and local tests");
     verify_release_cli_step.dependOn(&verify_release_cli_install.step);
 
+    const release_tool_fixture_cmd = host_tools.addReleaseFixture(b, verify_release_cli);
+    const release_tool_fixture_step = b.step("release-tool-fixture-test", "Exercise native release signing and publication with the real independent verifier and disposable fixture keys");
+    release_tool_fixture_step.dependOn(&release_tool_fixture_cmd.step);
+
     const release_bundle_fixture_tests = b.addTest(.{
         .name = "release-bundle-fixture-tests",
         .root_module = b.createModule(.{
@@ -194,8 +204,8 @@ pub fn build(b: *std.Build) void {
         shared.native_store_smoke_image_path,
         .full,
     );
-    zigos_native_smoke_test_cmd.setEnvironmentVariable("QEMU_NATIVE_SMOKE_MEMORY", "2G");
-    zigos_native_smoke_test_cmd.setEnvironmentVariable("ZIGOS_REQUIRE_HIGH_MEMORY", "1");
+    host_tools.addEnvironmentOverride(zigos_native_smoke_test_cmd, "QEMU_NATIVE_SMOKE_MEMORY", "2G");
+    host_tools.addEnvironmentOverride(zigos_native_smoke_test_cmd, "ZIGOS_REQUIRE_HIGH_MEMORY", "1");
 
     const negative_smoke_cmds = [_]*std.Build.Step.Run{
         qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_artifact_manifest, userspace_images, .tampered_artifact_manifest),
@@ -247,6 +257,7 @@ pub fn build(b: *std.Build) void {
     recovery_qemu_step.dependOn(&recovery_qemu_cmd.step);
 
     const check_steps = checks_build.addCheckSteps(b, optimize, test_artifacts);
+    check_steps.host_tests.dependOn(&release_tool_fixture_cmd.step);
     const spec_smoke_cmd = qemu_build.addNativeSmokeCommand(
         b,
         kernels.zigos_native_verification,
@@ -323,7 +334,7 @@ pub fn build(b: *std.Build) void {
     uefi_qemu_step.dependOn(kernel_role_check_step);
 
     const unified_efi = kernel_build.addEfiImage(b, .small, kernels.zigos_native.boot_payload, b.path("src/boot/cmdline-qemu.txt"));
-    const unified_efi_cmd = b.addSystemCommand(&.{ "bash", "scripts/run-unified-efi-qemu.sh" });
+    const unified_efi_cmd = host_tools.addRun(b, "run-unified-efi-qemu");
     unified_efi_cmd.addFileArg(unified_efi.getEmittedBin());
     unified_efi_cmd.addFileArg(kernels.zigos_native.boot_payload);
     unified_efi_cmd.addFileArg(b.path("src/boot/cmdline-qemu.txt"));
@@ -343,9 +354,8 @@ pub fn build(b: *std.Build) void {
     verification_uefi_qemu_step.dependOn(&verification_uefi_qemu_cmd.step);
     verification_uefi_qemu_step.dependOn(kernel_role_check_step);
 
-    const hardware_proof_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/check-nuc15crsu7-hardware-proof.sh",
+    const hardware_proof_cmd = host_tools.addRun(b, "check-nuc15crsu7-hardware-proof");
+    hardware_proof_cmd.addArgs(&.{
         hardware_proof_dir,
     });
     const hardware_proof_step = b.step("hardware-proof", "Validate the completed RNUC15CRSU7 real-hardware proof bundle");
@@ -354,9 +364,8 @@ pub fn build(b: *std.Build) void {
         hardware_proof_cmd.step.dependOn(&b.addFail("hardware proof validation requires -Dhardware-proof-dir=build/hardware-proofs/<fresh-name>").step);
     }
 
-    const release_sbom_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/generate-release-sbom-provenance.sh",
+    const release_sbom_cmd = host_tools.addRun(b, "generate-release-sbom-provenance");
+    release_sbom_cmd.addArgs(&.{
         "build/release-security",
         "ReleaseFast",
     });
@@ -369,17 +378,16 @@ pub fn build(b: *std.Build) void {
     const release_sbom_step = b.step("release-sbom-provenance", "Generate the eight generator-side evidence files for the exact 17-target release catalog");
     release_sbom_step.dependOn(&release_sbom_cmd.step);
 
-    const reproducible_build_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/check-reproducible-build.sh",
+    const reproducible_build_cmd = host_tools.addRun(b, "check-reproducible-build");
+    reproducible_build_cmd.addArgs(&.{
         "build/release-security",
     });
+    shared.addEfiIsoEpochArg(b, reproducible_build_cmd);
     const reproducible_build_step = b.step("reproducible-build-check", "Build release artifacts twice in isolated tracked-workspace copies and compare digests");
     reproducible_build_step.dependOn(&reproducible_build_cmd.step);
 
-    const release_manifest_finalize_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/finalize-release-manifest.sh",
+    const release_manifest_finalize_cmd = host_tools.addRun(b, "finalize-release-manifest");
+    release_manifest_finalize_cmd.addArgs(&.{
         "build/release-security",
         ".",
     });
@@ -395,23 +403,23 @@ pub fn build(b: *std.Build) void {
     const release_verifier_arg = release_verifier orelse "<missing-release-verifier>";
     const release_verifier_sha256_arg = release_verifier_sha256 orelse "<missing-release-verifier-sha256>";
     if (release_trust_root != null and release_trust_root_sha256 != null and release_trust_policy != null and release_verifier != null and release_verifier_sha256 != null) {
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
     } else {
         const missing_trust_inputs = b.addFail("release generation requires -Drelease-trust-root=<absolute path>, -Drelease-trust-root-sha256=<lowercase sha256>, -Drelease-trust-policy=<absolute path>, -Drelease-verifier=<absolute path>, and -Drelease-verifier-sha256=<lowercase sha256>");
         release_sbom_cmd.step.dependOn(&missing_trust_inputs.step);
         release_manifest_finalize_cmd.step.dependOn(&missing_trust_inputs.step);
     }
     if (release_trust_state) |_| {
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
     } else {
         const missing_trust_state = b.addFail("release verification requires -Drelease-trust-state=<persistent external state path>");
         release_manifest_finalize_cmd.step.dependOn(&missing_trust_state.step);
@@ -420,9 +428,8 @@ pub fn build(b: *std.Build) void {
     const release_bundle_step = b.step("release-bundle-check", "Create, candidate-verify, publish, and statefully verify the authenticated exact release bundle");
     release_bundle_step.dependOn(&release_manifest_finalize_cmd.step);
 
-    const release_bundle_existing_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/verify-release-bundle.sh",
+    const release_bundle_existing_cmd = host_tools.addRun(b, "verify-release-bundle");
+    release_bundle_existing_cmd.addArgs(&.{
         release_verifier_arg,
         release_verifier_sha256_arg,
         "build/release-security",
@@ -439,11 +446,11 @@ pub fn build(b: *std.Build) void {
     release_bundle_existing_step.dependOn(&release_bundle_existing_cmd.step);
 
     if (release_trust_root != null and release_trust_root_sha256 != null and release_trust_state != null and release_verifier != null and release_verifier_sha256 != null) {
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
     }
 
     const release_security_preflight_step = b.step("release-security-preflight", "Run all mutable public-release build, audit, fixture, and QEMU gates before freezing a candidate");

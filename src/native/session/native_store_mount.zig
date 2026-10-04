@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
 const bootstrap_driver_port = @import("../drivers/bootstrap_driver_port.zig");
+const dataplane_handoff = @import("../drivers/dataplane_handoff.zig");
 const ids = @import("../core/ids.zig");
 const native_util = @import("../core/util.zig");
 const principal = @import("../core/principal.zig");
@@ -31,9 +32,18 @@ pub const NativeStoreMount = struct {
         return .{};
     }
 
-    pub fn resetPersistent(self: *NativeStoreMount) void {
+    pub fn operationBusy(self: *const NativeStoreMount) bool {
+        if (dataplane_handoff.operationBusy() or storage_volume.attachmentBusy()) return true;
+        if (comptime heap_backed_checkpoint_store) {
+            return if (self.storage_checkpoint_store) |store| store.operationBusy() else false;
+        }
+        return self.storage_checkpoint_store.operationBusy();
+    }
+
+    pub fn resetPersistent(self: *NativeStoreMount) bool {
+        if (self.operationBusy()) return false;
         if (self.checkpointStorePtr()) |checkpoint_store| {
-            checkpoint_store.resetPersistent();
+            if (!checkpoint_store.resetPersistent()) return false;
             if (comptime heap_backed_checkpoint_store) {
                 @memset(std.mem.asBytes(checkpoint_store), 0);
                 kernel_memory.kfree(@ptrCast(checkpoint_store));
@@ -60,6 +70,7 @@ pub const NativeStoreMount = struct {
             self.sync_resident_state_backing.resetPersistent();
         }
         self.storage_service_instance = emptyStorageService();
+        return true;
     }
 
     pub fn checkpointStorePtr(self: *NativeStoreMount) ?*storage_service_mod.CheckpointStore {
@@ -109,11 +120,13 @@ pub const NativeStoreMount = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         capability_table: *capability.CapabilityTable,
-    ) error{NoSpaceLeft}!void {
+    ) error{ NoSpaceLeft, StorageAttachmentUnavailable, VolumeOperationBusy }!void {
         const checkpoint_store = try self.ensureCheckpointStore();
-        _ = bootstrap_driver_port.refreshActiveStorageAttachment(service_id);
-        _ = adoptRootStorageVolume(checkpoint_store);
-        self.storage_service_instance = storage_service_mod.Service.reloadFromAttachedVolume(
+        if (comptime builtin.target.os.tag == .freestanding) {
+            if (!bootstrap_driver_port.refreshActiveStorageAttachment(service_id) or
+                !adoptRootStorageVolume(checkpoint_store)) return error.StorageAttachmentUnavailable;
+        } else _ = bootstrap_driver_port.refreshActiveStorageAttachment(service_id);
+        self.storage_service_instance = try storage_service_mod.Service.reloadFromAttachedVolume(
             service_id,
             task_id,
             owner,
@@ -126,8 +139,10 @@ pub const NativeStoreMount = struct {
     pub fn checkpoint(self: *NativeStoreMount) void {
         const checkpoint_store = self.checkpointStorePtr() orelse
             native_util.impossibleByInvariant("bound native storage service retains checkpoint state");
-        _ = bootstrap_driver_port.refreshActiveStorageAttachment(self.storage_service_instance.service_id);
-        _ = adoptRootStorageVolume(checkpoint_store);
+        if (comptime builtin.target.os.tag == .freestanding) {
+            if (!bootstrap_driver_port.refreshActiveStorageAttachment(self.storage_service_instance.service_id) or
+                !adoptRootStorageVolume(checkpoint_store)) return;
+        } else _ = bootstrap_driver_port.refreshActiveStorageAttachment(self.storage_service_instance.service_id);
         self.storage_service_instance.checkpoint();
     }
 };
@@ -154,8 +169,7 @@ pub fn adoptRootStorageVolume(checkpoint_store: *storage_service_mod.CheckpointS
     if (builtin.target.os.tag != .freestanding) return false;
     const root_volume = storage_volume.defaultVolume();
     if (!canAdoptProductionRootVolume(root_volume)) return false;
-    checkpoint_store.adoptRootVolume(root_volume);
-    return true;
+    return checkpoint_store.adoptRootVolume(root_volume);
 }
 
 pub fn canAdoptProductionRootVolume(root_volume: anytype) bool {
@@ -164,7 +178,7 @@ pub fn canAdoptProductionRootVolume(root_volume: anytype) bool {
 
 test "native store initializes reuses and resets its export package buffer" {
     var mount = NativeStoreMount.init();
-    defer mount.resetPersistent();
+    defer if (!mount.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const first = try mount.exportPackagePtr();
     try std.testing.expect(first.workspace_id.isZero());
@@ -174,7 +188,7 @@ test "native store initializes reuses and resets its export package buffer" {
     try std.testing.expect(first == try mount.exportPackagePtr());
 
     first.entry_count = 1;
-    mount.resetPersistent();
+    if (!mount.resetPersistent()) @panic("storage lifecycle transition was refused");
     const reset = try mount.exportPackagePtr();
     try std.testing.expect(first == reset);
     try std.testing.expectEqual(@as(usize, 0), reset.entry_count);
@@ -195,7 +209,7 @@ test "allocated checkpoint stores receive canonical arena sentinels" {
 
 test "native store initializes reuses and resets its sync resident state" {
     var mount = NativeStoreMount.init();
-    defer mount.resetPersistent();
+    defer if (!mount.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const first = try mount.syncResidentStatePtr();
     try std.testing.expect(!first.has_persisted_state);
@@ -204,7 +218,7 @@ test "native store initializes reuses and resets its sync resident state" {
 
     first.has_persisted_state = true;
     first.next_state_tick = 8;
-    mount.resetPersistent();
+    if (!mount.resetPersistent()) @panic("storage lifecycle transition was refused");
     const reset = try mount.syncResidentStatePtr();
     try std.testing.expect(first == reset);
     try std.testing.expect(!reset.has_persisted_state);
@@ -236,7 +250,7 @@ test "native store root adoption only accepts production NVMe PCI volumes" {
     var volume = storage_volume.Volume.init();
     try @import("std").testing.expect(!canAdoptProductionRootVolume(&volume));
 
-    volume.attachBackend(production_backend);
+    if (!volume.attachBackend(production_backend)) @panic("storage lifecycle transition was refused");
     try @import("std").testing.expect(!canAdoptProductionRootVolume(&volume));
 
     const undersized_nvme_backend = storage_volume.Backend{
@@ -245,9 +259,34 @@ test "native store root adoption only accepts production NVMe PCI volumes" {
         .write = BackendFns.write,
         .flush = BackendFns.flush,
     };
-    volume.attachNvmePciBackend(undersized_nvme_backend);
+    if (!volume.attachNvmePciBackend(undersized_nvme_backend)) @panic("storage lifecycle transition was refused");
     try @import("std").testing.expect(!canAdoptProductionRootVolume(&volume));
 
-    volume.attachNvmePciBackend(production_backend);
+    if (!volume.attachNvmePciBackend(production_backend)) @panic("storage lifecycle transition was refused");
     try @import("std").testing.expect(canAdoptProductionRootVolume(&volume));
+}
+
+test "native store teardown retains backing for an independent suspended submit" {
+    const cooperative = @import("../task/cooperative_worker.zig");
+    try std.testing.expect(dataplane_handoff.reset());
+    defer std.debug.assert(dataplane_handoff.reset());
+    try dataplane_handoff.claim(0x1F003, 43, 3);
+    const Job = struct {
+        fn run(_: *anyopaque) void {
+            const lease = dataplane_handoff.beginOwnedSubmit(0x1F003, 43, 3) catch unreachable;
+            defer if (!dataplane_handoff.endOwnedSubmit(lease)) @panic("owned submit retains its exact lease");
+            cooperative.current().?.yield();
+        }
+    };
+    var mount = NativeStoreMount.init();
+    var stack: [16 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    try worker.start(&mount, Job.run);
+    try worker.step();
+    defer if (worker.state == .suspended) worker.step() catch unreachable;
+    try std.testing.expect(mount.operationBusy());
+    try std.testing.expect(!mount.resetPersistent());
+    try worker.step();
+    try std.testing.expect(!mount.operationBusy());
+    try std.testing.expect(mount.resetPersistent());
 }

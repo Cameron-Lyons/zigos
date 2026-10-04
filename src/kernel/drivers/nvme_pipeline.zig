@@ -2,6 +2,39 @@ const std = @import("std");
 
 pub const DEPTH: usize = 2;
 
+// submit must either return an accepted command or fail before submission.
+// Revocation/cancellation stops refill, but every accepted DMA command retains
+// its slot until an authenticated completion or caller containment.
+pub fn transfer(comptime Payload: type, io: anytype, total_sectors: usize, chunk_sectors: usize, sector_bytes: usize) @TypeOf(io.*).Error!void {
+    var slots = SlotSet(Payload){};
+    var next_sector: usize = 0;
+    var failure: ?@TypeOf(io.*).Error = null;
+    while (next_sector < total_sectors or slots.active_count != 0) {
+        if (failure == null) {
+            if (io.cancelled()) failure = error.Cancelled else if (!io.authorized()) failure = error.AuthorityRevoked;
+        }
+        while (failure == null and next_sector < total_sectors and slots.active_count < DEPTH) {
+            const slot_index = slots.freeIndex() orelse unreachable;
+            const chunk = @min(total_sectors - next_sector, chunk_sectors);
+            const command = io.submit(slot_index, next_sector, chunk) catch |err| {
+                failure = err;
+                break;
+            };
+            if (!slots.activate(slot_index, command, next_sector, chunk * sector_bytes)) unreachable;
+            next_sector += chunk;
+        }
+        if (slots.active_count == 0) break;
+        var pending: [DEPTH]Payload = undefined;
+        const cid = try io.wait(slots.collect(&pending));
+        const completed = slots.complete(cid) orelse return error.CompletionOwnershipMismatch;
+        io.completed(completed);
+    }
+    if (failure == null) {
+        if (io.cancelled()) failure = error.Cancelled else if (!io.authorized()) failure = error.AuthorityRevoked;
+    }
+    if (failure) |err| return err;
+}
+
 pub fn SlotSet(comptime Payload: type) type {
     comptime {
         if (!@hasField(Payload, "cid") or @FieldType(Payload, "cid") != u16) {

@@ -13,6 +13,7 @@ const object_signer = @import("sealed_object_signer.zig");
 const identity = @import("../platform/os_identity.zig");
 const graph = @import("../sync/device_graph.zig");
 const graph_snapshot = @import("../sync/device_graph_snapshot.zig");
+const operation_guard = @import("../platform/operation_guard.zig");
 
 pub const CONTENT_TYPE = "application/x-zigos-vault-catalog";
 const label = "Sealed vault catalog";
@@ -131,6 +132,8 @@ pub const Session = struct {
         } else {
             const metadata = try signer.signObjectMetadata(label, CONTENT_TYPE, .secret, payload, now_ticks);
             if (previous_key) |key| if (!std.mem.eql(u8, &key, metadata.signature.publicKeySlice())) return error.UntrustedVaultCatalog;
+            const publication_ticks = try operation_guard.currentTicks(signer.key.authority.?.publication_guard, now_ticks);
+            try signer.validateService(storage.owner, storage.task_id, publication_ticks);
             // Signing may yield to another storage publisher. Retain only the
             // version identity across that wait, then reacquire the current head.
             const current = storage.latestVersion(object_id);
@@ -153,6 +156,7 @@ pub const Session = struct {
                 .key_digest = signer.key.sealed_digest,
             };
         }
+        _ = try operation_guard.currentTicks(signer.key.authority.?.publication_guard, now_ticks);
         return .{ .version_id = self.pending.?.version_id, .checkpoint = .{
             .object_id = object_id,
             .owner = signer.key.authority.?.owner,

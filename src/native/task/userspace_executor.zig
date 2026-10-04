@@ -12,6 +12,12 @@ const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_registry = @import("userspace_registry.zig");
+const smp = @import("../../kernel/smp.zig");
+const xstate = @import("../../arch/xstate.zig");
+const timer = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/timer/timer.zig")
+else
+    struct {};
 const demand_paging = @import("../../kernel/memory/demand_paging.zig");
 const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
@@ -59,6 +65,23 @@ else
 const include_verification_evidence = kernel_config.includesVerificationEvidence();
 const NxProbeTarget = if (include_verification_evidence) u64 else void;
 
+// A dispatch is bounded even when no other task is ready yet. This returns the
+// runtime owner to deferred device work before it can discover new runnable work.
+pub const DISPATCH_QUANTUM_TICKS: u64 = 2;
+pub const DispatchQuantum = struct {
+    task_id: u64 = 0,
+    deadline_tick: u64 = 0,
+
+    pub fn begin(task_id: u64, now_ticks: u64) DispatchQuantum {
+        if (task_id == 0) native_util.impossibleByInvariant("dispatch quantum requires an active task");
+        return .{ .task_id = task_id, .deadline_tick = now_ticks +| DISPATCH_QUANTUM_TICKS };
+    }
+
+    pub fn expired(self: DispatchQuantum, task_id: u64, now_ticks: u64) bool {
+        return self.task_id != 0 and self.task_id == task_id and now_ticks >= self.deadline_tick;
+    }
+};
+
 pub const ExecutionOutcome = enum(u8) {
     unavailable,
     yielded,
@@ -102,11 +125,11 @@ else
         };
 
         pub const isr = struct {
-            pub const InterruptFrame = opaque {};
+            pub const InterruptFrame = @import("../../kernel/interrupts/isr.zig").InterruptFrame;
             pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
             pub fn registerHandler(_: u8, _: InterruptHandler) void {}
-            pub fn setTimerPreemption(_: *const fn (regs: *InterruptFrame) void) void {}
+            pub fn setRuntimePreemption(_: *const fn (regs: *InterruptFrame) void) void {}
         };
 
         pub const paging = struct {
@@ -348,13 +371,25 @@ comptime {
     }
 }
 
-extern fn zigos_enter_userspace(context: usize, reserved: usize) callconv(.c) u32;
+extern var zigos_userspace_xstate: usize;
+extern var zigos_kernel_xstate: usize;
+extern fn zigos_enter_userspace(context: usize, state: usize) callconv(.c) u32;
 
 pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
     if (builtin.target.os.tag != .freestanding) return 0;
-    const result = zigos_enter_userspace(@intFromPtr(context), 0);
+    var storage: xstate.Storage = .{};
+    storage.initialize();
+    defer storage.erase();
+    return enterUserContextWithState(context, storage.state());
+}
+
+fn enterUserContextWithState(context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+    if (!smp.isRuntimeOwner()) native_util.impossibleByInvariant("one runtime CPU owns the userspace entry state");
+    const result = zigos_enter_userspace(@intFromPtr(context), @intFromPtr(state));
     zigos_userspace_resume_eip = 0;
     zigos_userspace_resume_esp = 0;
+    zigos_userspace_xstate = 0;
+    zigos_kernel_xstate = 0;
     return result;
 }
 
@@ -392,7 +427,7 @@ const MappingDispatchMetadata = struct {
 };
 
 const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 40;
-const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 680 else 456;
+const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 688 else 464;
 const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 98_304 else 66_560;
 
 const MappedImageRegions = struct {
@@ -407,6 +442,7 @@ const MappingEntry = struct {
     address_space_id: u64 = 0,
     address_space: ?freestanding.paging.UserAddressSpace = null,
     image_regions: ?*MappedImageRegions = null,
+    owned_xstate: ?*xstate.Storage = null,
     dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
     resume_instruction_pointer: u64 = 0,
@@ -471,6 +507,43 @@ const MappingResolution = struct {
 var trap_handler_registered = false;
 var registered_executor: ?*Executor = null;
 
+fn activeUserMemoryMapping(executor: *Executor, caller_task_id: u64) ?*MappingEntry {
+    if (caller_task_id == 0 or executor.active_task_id != caller_task_id) return null;
+    const mapping = executor.active_mapping orelse return null;
+    const mappings = executor.mappingArena() orelse return null;
+    const slot = mappings.getByHandle(executor.active_mapping_handle) orelse return null;
+    if (&slot.mapping != mapping) return null;
+    if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != caller_task_id or mapping.address_space == null) return null;
+    return mapping;
+}
+
+pub fn prepareUserMemory(caller_task_id: u64, addr: usize, len: usize, write: bool) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const executor = registered_executor orelse return false;
+    const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
+    return demand_paging.prepareUserRange(&mapping.address_space.?, addr, len, write);
+}
+
+pub fn readUserMemory(caller_task_id: u64, addr: usize, destination: []u8) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const executor = registered_executor orelse return false;
+    const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
+    const space = &mapping.address_space.?;
+    if (!demand_paging.prepareUserRange(space, addr, destination.len, false)) return false;
+    freestanding.paging.readOwnedUserRange(space, addr, destination) catch return false;
+    return true;
+}
+
+pub fn writeUserMemory(caller_task_id: u64, addr: usize, source: []const u8) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const executor = registered_executor orelse return false;
+    const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
+    const space = &mapping.address_space.?;
+    if (!demand_paging.prepareUserRange(space, addr, source.len, true)) return false;
+    freestanding.paging.writeOwnedUserRange(space, addr, source) catch return false;
+    return true;
+}
+
 pub fn activeTaskId() u64 {
     const executor = registered_executor orelse return 0;
     return executor.activeTaskId();
@@ -485,9 +558,12 @@ pub const Executor = struct {
     initialized: bool = false,
     binding_owner: ?*const anyopaque = null,
     bound_runtime: ?*task_runtime.Runtime = null,
+    mapped_object_table: ?*shared_memory.Table = null,
+    mapped_object_count: u16 = 0,
     probe_marker_printed: bool = false,
     resume_marker_printed: bool = false,
     active_task_id: u64 = 0,
+    dispatch_quantum: DispatchQuantum = .{},
     active_mapping: ?*MappingEntry = null,
     active_mapping_handle: MappingHandle = .{},
     handoff_completed: bool = false,
@@ -545,7 +621,11 @@ pub const Executor = struct {
     }
 
     pub fn init(self: *Executor) void {
-        shared_memory.setMappedObjectHook(registerMappedObject);
+        if (comptime builtin.target.os.tag == .freestanding) shared_memory.setMappedObjectLifetime(.{
+            .context = self,
+            .register = registerMappedObject,
+            .unregister = unregisterMappedObject,
+        });
         if (builtin.target.os.tag != .freestanding) return;
         registered_executor = self;
         if (self.initialized) return;
@@ -555,7 +635,7 @@ pub const Executor = struct {
                 freestanding.isr.registerHandler(vector, userspaceExceptionHandler);
             }
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
-            freestanding.isr.setTimerPreemption(userspaceTimerPreemption);
+            freestanding.isr.setRuntimePreemption(userspaceInterruptPreemption);
             trap_handler_registered = true;
         }
         const trap_stack_top = prepareKernelStack();
@@ -628,6 +708,7 @@ pub const Executor = struct {
         self.probe_marker_printed = false;
         self.resume_marker_printed = false;
         self.active_task_id = 0;
+        self.dispatch_quantum = .{};
         self.active_mapping = null;
         self.active_mapping_handle = .{};
         self.handoff_completed = false;
@@ -647,6 +728,7 @@ pub const Executor = struct {
         zigos_userspace_resume_eip = 0;
         publishRootActiveTaskId(0);
         if (registered_executor == self) {
+            shared_memory.clearMappedObjectLifetime(self);
             registered_executor = null;
         }
     }
@@ -895,15 +977,18 @@ pub const Executor = struct {
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
-        _ = xhci_driver_task.dispatchForTask(task.id);
+        if (!smp.isRuntimeOwner()) return .unavailable;
         if (!self.initialized) return .unavailable;
         if (self.bound_runtime != runtime) return .unavailable;
+        var task_borrow = runtime.borrowResolvedTask(task);
+        defer task_borrow.release();
+        _ = xhci_driver_task.dispatchForTask(task.id);
         if (debugIndexChecksEnabled()) {
             const bound_task = runtime.findConst(task.id) orelse
                 native_util.impossibleByInvariant("prepared userspace task is absent from the bound runtime");
             if (bound_task != task) native_util.impossibleByInvariant("prepared userspace task does not belong to the bound runtime");
         }
-        if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
+        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
 
         const mapping = self.resolveMappingForDispatch(mapping_handle, task.address_space_id) orelse blk: {
             const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
@@ -966,6 +1051,7 @@ pub const Executor = struct {
 
         const completed_mapping_handle = self.active_mapping_handle;
         self.active_task_id = 0;
+        self.dispatch_quantum = .{};
         self.active_mapping = null;
         self.active_mapping_handle = .{};
         if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
@@ -1119,6 +1205,8 @@ pub const Executor = struct {
         };
         errdefer self.releaseMapping(mappings, handle.slotIndex(), entry);
 
+        entry.owned_xstate = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
+        entry.owned_xstate.?.initialize();
         entry.address_space = try self.acquireUserAddressSpace(image.bundleIdSlice());
         entry.image_regions = table_backing.alloc(MappedImageRegions) orelse return error.OutOfMemory;
 
@@ -1249,6 +1337,11 @@ pub const Executor = struct {
         if (builtin.mode == .debug) {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
+        if (self.mapped_object_table) |table| {
+            const handle = mappings.handleForIndex(slot_index) orelse
+                native_util.impossibleByInvariant("shared-memory retirement retains its materialized mapping handle");
+            table.retireMappingLifetime(handle.value);
+        }
         if (entry.address_space) |*space| {
             if (entry.image_regions) |regions| {
                 const stack = regions.stack;
@@ -1274,6 +1367,11 @@ pub const Executor = struct {
         if (entry.image_regions) |image_regions| {
             table_backing.free(MappedImageRegions, image_regions);
             entry.image_regions = null;
+        }
+        if (entry.owned_xstate) |state| {
+            state.erase();
+            table_backing.free(xstate.Storage, state);
+            entry.owned_xstate = null;
         }
         if (!mappings.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("live userspace mapping disappeared during release");
@@ -1811,13 +1909,44 @@ fn scanMailboxAuthorities(
     return resolution;
 }
 
+fn shouldPreemptUserDispatch(executor: *const Executor, from_userspace: bool, now_ticks: u64, check: ?PreemptCheck) bool {
+    if (executor.active_task_id == 0 or !from_userspace or executor.active_mapping == null) return false;
+    // A missing policy callback never disables the finite dispatch watchdog.
+    if (executor.dispatch_quantum.expired(executor.active_task_id, now_ticks)) return true;
+    return if (check) |priority_check| priority_check(executor.active_task_id) else false;
+}
+
 fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
     if (comptime builtin.target.os.tag != .freestanding) return;
     const executor = registered_executor orelse return;
-    if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) return;
-    const check = preempt_check orelse return;
-    if (!check(executor.active_task_id)) return;
+    if (!shouldPreemptUserDispatch(executor, (frame.cs & 0x3) == 0x3, timer.getTicks(), preempt_check)) return;
     const mapping = executor.active_mapping orelse return;
+    handoffInterruptedUser(executor, mapping, frame);
+}
+
+fn userspaceInterruptPreemption(frame: *freestanding.isr.InterruptFrame) void {
+    if (frame.int_no == @import("../../kernel/timer/timer.zig").INTERRUPT_VECTOR) {
+        userspaceTimerPreemption(frame);
+    } else {
+        userspaceDevicePreemption(frame);
+    }
+}
+
+fn userspaceDevicePreemption(frame: *freestanding.isr.InterruptFrame) void {
+    const executor = registered_executor orelse return;
+    if ((frame.cs & 0x3) != 0x3 or executor.active_task_id == 0 or
+        executor.dispatch_quantum.task_id != executor.active_task_id) return;
+    // Dispatch pins this task until handoff. Monotonic task IDs and the exact
+    // live mapping handle authenticate its incarnation without scheduler work.
+    const mapping = activeUserMemoryMapping(executor, executor.active_task_id) orelse return;
+    if (mapping.owned_xstate == null) return;
+    handoffInterruptedUser(executor, mapping, frame);
+}
+
+fn handoffInterruptedUser(executor: *Executor, mapping: *MappingEntry, frame: anytype) void {
+    // Multiple device interrupts may be queued for one user frame. Preserve an
+    // earlier retirement/exception handoff and charge/capture this resume once.
+    if (executor.handoff_completed or zigos_userspace_resume_requested != 0) return;
     mapping.resume_valid = true;
     mapping.resume_instruction_pointer = frame.eip;
     mapping.resume_stack_pointer = frame.useresp;
@@ -1832,15 +1961,21 @@ fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     const executor = registered_executor orelse return;
+    handleUserspaceYield(executor, frame);
+}
+
+fn handleUserspaceYield(executor: *Executor, frame: anytype) void {
     if (executor.active_task_id == 0) return;
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
     const instruction_pointer = frame.eip;
     const stack_pointer = frame.useresp;
     const counter = std.math.cast(u32, frame.eax) orelse
-        native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
+        return containMalformedYield(executor, frame.eip);
     const disposition_raw = std.math.cast(u32, frame.esi) orelse
-        native_util.impossibleByInvariant("userspace yield disposition exceeds its ABI width");
+        return containMalformedYield(executor, frame.eip);
+    const disposition = userspace_bootstrap_mailbox.yieldDisposition(disposition_raw) orelse
+        return containMalformedYield(executor, frame.eip);
     const ui_revision: u64 = @intCast(frame.edx);
     @call(.never_inline, recordTrapState, .{
         executor,
@@ -1855,13 +1990,28 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     captureUserContext64(mapping, frame);
     mapping.yield_count += 1;
     mapping.last_user_counter = executor.last_trap_counter;
-    executor.last_yield_disposition = userspace_bootstrap_mailbox.yieldDisposition(disposition_raw) orelse .runnable;
+    executor.last_yield_disposition = disposition;
     executor.last_yield_ui_revision = ui_revision;
 
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
     captureMailbox(mapping);
+    freestanding.paging.switchToKernelAddressSpace();
+}
+
+fn containMalformedYield(executor: *Executor, instruction_pointer: u64) void {
+    requestUserExceptionHandoff(executor, .{
+        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .error_code = 0,
+        .instruction_pointer = instruction_pointer,
+    });
+}
+
+fn requestUserExceptionHandoff(executor: *Executor, exception: UserException) void {
+    executor.last_user_exception = exception;
+    executor.handoff_completed = true;
+    zigos_userspace_resume_requested = 1;
     freestanding.paging.switchToKernelAddressSpace();
 }
 
@@ -1874,17 +2024,19 @@ fn userspaceExceptionHandler(frame: *freestanding.isr.InterruptFrame) void {
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
     const vector = std.math.cast(u8, frame.int_no) orelse
         native_util.impossibleByInvariant("userspace exception vector exceeds the IDT range");
-    if (!isContainableUserExceptionVector(vector)) {
+    if (!containUserException(executor, vector, @intCast(frame.err_code), @intCast(frame.eip))) {
         freestanding.isr.haltUnhandledException(frame);
     }
-    executor.last_user_exception = .{
+}
+
+fn containUserException(executor: *Executor, vector: u8, error_code: u32, instruction_pointer: u64) bool {
+    if (!isContainableUserExceptionVector(vector)) return false;
+    requestUserExceptionHandoff(executor, .{
         .vector = vector,
-        .error_code = @intCast(frame.err_code),
-        .instruction_pointer = @intCast(frame.eip),
-    };
-    executor.handoff_completed = true;
-    zigos_userspace_resume_requested = 1;
-    freestanding.paging.switchToKernelAddressSpace();
+        .error_code = error_code,
+        .instruction_pointer = instruction_pointer,
+    });
+    return true;
 }
 
 pub export fn zigos_handle_invalid_interrupt_return(frame: *freestanding.isr.InterruptFrame) void {
@@ -1929,12 +2081,8 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     const faulting_address = x86.readCr2();
     const error_code = std.math.cast(u32, frame.err_code) orelse
         native_util.impossibleByInvariant("userspace page-fault code exceeds its ABI width");
-    const not_present = (error_code & 0x1) == 0;
-    const write_fault = (error_code & 0x2) != 0;
-    if (not_present) {
-        if (mapping.address_space) |*space| {
-            if (demand_paging.resolveAndMap(space, faulting_address, write_fault)) return;
-        }
+    if (mapping.address_space) |*space| {
+        if (demand_paging.resolveFault(space, faulting_address, error_code)) return;
     }
     @call(.never_inline, recordUserPageFault, .{
         executor,
@@ -2057,7 +2205,7 @@ fn mapZeroedRegion(
         .virt_start = virtual_address,
         .virt_end_exclusive = region_end,
         .writable = access.write,
-        .kind = if (access.write) .anonymous_zero else .object_cow,
+        .kind = .anonymous_zero,
         .protection_key = protection_key,
     })) return error.OutOfMemory;
 }
@@ -2104,41 +2252,98 @@ fn mapUniqueZeroedStack(
 }
 
 fn registerMappedObject(
-    virt_start: u64,
-    size_bytes: u64,
+    context: *anyopaque,
+    table: *shared_memory.Table,
+    descriptor: shared_memory.FreestandingMappingDescriptor,
     writable: bool,
-    physical_base: u64,
     copy_on_write: bool,
-    task_id: u64,
-) bool {
-    if (size_bytes == 0) return false;
-    const end = std.math.add(u64, virt_start, size_bytes) catch return false;
-    const mapping = mappingForDemandPagedObject(task_id) orelse return false;
-    const space = if (mapping.address_space) |*address_space| address_space else return false;
-    return demand_paging.registerForSpace(space, .{
-        .virt_start = virt_start,
+) ?u64 {
+    const executor: *Executor = @ptrCast(@alignCast(context));
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (registered_executor != executor) return null;
+    }
+    if (descriptor.size_bytes == 0 or descriptor.task_id.raw() == 0 or descriptor.target != null) return null;
+    if (executor.mapped_object_table) |bound_table| {
+        if (bound_table != table) return null;
+    }
+    if (executor.mapped_object_count >= shared_memory.MAX_SHARED_MEMORY_OBJECTS * shared_memory.MAX_MAPPINGS_PER_OBJECT) return null;
+    const mapped_size = std.math.mul(usize, descriptor.page_count, shared_memory.PAGE_SIZE) catch return null;
+    if (mapped_size == 0 or descriptor.size_bytes > mapped_size or (descriptor.virtual_base & (shared_memory.PAGE_SIZE - 1)) != 0) return null;
+    const mapped_end = std.math.add(u64, descriptor.virtual_base, mapped_size) catch return null;
+    const end = std.math.add(u64, descriptor.virtual_base, descriptor.size_bytes) catch return null;
+    const task_id = descriptor.task_id.raw();
+    const mapping = blk: {
+        if (executor.active_mapping) |active| {
+            if (active.dispatch_metadata.owner_task_id == task_id) break :blk active;
+        }
+        const runtime = executor.bound_runtime orelse return null;
+        const task = runtime.findConst(task_id) orelse return null;
+        break :blk executor.findMapping(task.address_space_id) orelse return null;
+    };
+    if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != task_id) return null;
+    const resolution = executor.findMappingWithHandle(mapping.address_space_id) orelse return null;
+    if (resolution.entry != mapping) return null;
+    const space = if (mapping.address_space) |*address_space| address_space else return null;
+    if (demand_paging.regionOverlapsSpace(space, descriptor.virtual_base, mapped_end)) return null;
+    freestanding.paging.validateUserRangeAvailable(space, @intCast(descriptor.virtual_base), mapped_size) catch return null;
+    if (!demand_paging.registerForSpace(space, .{
+        .virt_start = descriptor.virtual_base,
         .virt_end_exclusive = end,
         .writable = writable,
         .kind = if (copy_on_write) .object_cow else .object_physical,
-        .physical_base = physical_base,
-    });
+        .physical_base = descriptor.physical_base,
+    })) return null;
+    executor.mapped_object_table = table;
+    executor.mapped_object_count += 1;
+    return resolution.handle.value;
 }
 
-fn mappingForDemandPagedObject(task_id: u64) ?*MappingEntry {
-    const executor = registered_executor orelse return null;
-    if (executor.active_mapping) |mapping| {
-        if (mapping.dispatch_metadata.owner_task_id == task_id) return mapping;
+fn unregisterMappedObject(
+    context: *anyopaque,
+    table: *shared_memory.Table,
+    registration_token: u64,
+    descriptor: shared_memory.FreestandingMappingDescriptor,
+) bool {
+    const executor: *Executor = @ptrCast(@alignCast(context));
+    if (registration_token == 0 or descriptor.size_bytes == 0 or descriptor.target != null) return false;
+    if (executor.mapped_object_table != table or executor.mapped_object_count == 0) return false;
+    const mappings = executor.mappingArena() orelse return false;
+    const slot = mappings.getByHandle(MappingHandle{ .value = registration_token }) orelse return false;
+    const mapping = &slot.mapping;
+    if (mapping.state != .live and mapping.state != .retire_pending) return false;
+    if (mapping.dispatch_metadata.owner_task_id != descriptor.task_id.raw()) return false;
+    const space = if (mapping.address_space) |*address_space| address_space else return false;
+    const end = std.math.add(u64, descriptor.virtual_base, descriptor.size_bytes) catch return false;
+    if (!demand_paging.unregisterRegionForSpace(space, descriptor.virtual_base, end)) return false;
+    executor.mapped_object_count -= 1;
+    if (executor.mapped_object_count == 0) executor.mapped_object_table = null;
+    return true;
+}
+
+fn enterUserspace(executor: *Executor) u32 {
+    return enterUserspaceWithClock(executor, timer, UserEntry{});
+}
+
+const UserEntry = struct {
+    fn enter(_: @This(), context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+        return enterUserContextWithState(context, state);
     }
-    const runtime = executor.bound_runtime orelse return null;
-    const task = runtime.findConst(task_id) orelse return null;
-    return executor.findMapping(task.address_space_id);
+};
+
+// Both scheduled and direct Executor dispatch reach this boundary. Arming here
+// includes the first entry after an idle one-shot/disarmed timer and measures
+// the user quantum after materialization/mailbox work has completed.
+fn enterUserspaceWithClock(executor: *Executor, clock: anytype, entry: anytype) u32 {
+    const mapping = executor.active_mapping orelse
+        native_util.impossibleByInvariant("userspace entry requires the active mapping owner");
+    const storage = mapping.owned_xstate orelse
+        native_util.impossibleByInvariant("userspace entry requires private extended state");
+    clock.armSchedulerTick();
+    executor.dispatch_quantum = DispatchQuantum.begin(executor.active_task_id, clock.getTicks());
+    return entry.enter(&executor.pending_user_context64, storage.state());
 }
 
-fn enterUserspace(executor: *const Executor) u32 {
-    return enterPreparedUserContext(&executor.pending_user_context64);
-}
-
-fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame) void {
+fn captureUserContext64(mapping: *MappingEntry, frame: anytype) void {
     mapping.user_context64 = .{
         .rax = frame.eax,
         .rbx = frame.ebx,
@@ -2716,6 +2921,41 @@ test "executor runtime binding has one owner and compare-release semantics" {
     try std.testing.expect(executor.releaseRuntimeBinding(&second_owner, &second_runtime));
 }
 
+test "user memory copies require the live active owner and exact mapping generation" {
+    var executor = Executor{};
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+        .dispatch_metadata = .{ .owner_task_id = 8 },
+    });
+    const mapping = &executor.mappingArena().?.getByHandle(handle).?.mapping;
+    executor.active_mapping = mapping;
+    executor.active_mapping_handle = handle;
+    executor.active_task_id = 8;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == mapping);
+    try std.testing.expect(activeUserMemoryMapping(&executor, 0) == null);
+    try std.testing.expect(activeUserMemoryMapping(&executor, 9) == null);
+
+    mapping.dispatch_metadata.owner_task_id = 9;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    mapping.dispatch_metadata.owner_task_id = 8;
+    mapping.state = .retire_pending;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    mapping.state = .live;
+    mapping.address_space = null;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    mapping.address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 };
+
+    const saved_mapping = mapping.*;
+    try std.testing.expect(executor.mappingArena().?.removeHandle(handle));
+    const replacement = installTestMappingAt(&executor, 0, saved_mapping);
+    try std.testing.expect(!handle.eql(replacement));
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    executor.active_mapping_handle = replacement;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == mapping);
+}
+
 test "zero-initialized mapping arenas preserve generational reuse" {
     var mappings: MappingArena = undefined;
     initializeMappingArena(&mappings);
@@ -2922,8 +3162,578 @@ test "userspace exception containment excludes system-fatal and dedicated vector
     try std.testing.expect(!isContainableUserExceptionVector(18));
 }
 
+const YieldTestFrame = struct {
+    eax: u64,
+    ebx: u64 = 13,
+    ecx: u64 = 15,
+    edx: u64 = 14,
+    ebp: u64 = 11,
+    esi: u64,
+    edi: u64 = 9,
+    r8: u64 = 8,
+    r9: u64 = 7,
+    r10: u64 = 6,
+    r11: u64 = 5,
+    r12: u64 = 4,
+    r13: u64 = 3,
+    r14: u64 = 2,
+    r15: u64 = 1,
+    eip: u64 = 0x4000_1008,
+    eflags: u64 = DEFAULT_USER_RFLAGS,
+    useresp: u64 = 0x7fff_eff0,
+};
+
+fn expectYieldHandler(counter: u64, disposition: u64, expected: ?userspace_bootstrap_mailbox.YieldDisposition) !void {
+    var executor = Executor{};
+    const previous_executor = registered_executor;
+    const previous_requested = zigos_userspace_resume_requested;
+    const previous_esp = zigos_userspace_resume_esp;
+    const previous_eip = zigos_userspace_resume_eip;
+    defer {
+        executor.active_task_id = 0;
+        executor.active_mapping = null;
+        executor.reset();
+        registered_executor = previous_executor;
+        zigos_userspace_resume_requested = previous_requested;
+        zigos_userspace_resume_esp = previous_esp;
+        zigos_userspace_resume_eip = previous_eip;
+    }
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .yield_count = 8,
+        .last_user_counter = 9,
+    });
+    const mapping = &executor.mappingArena().?.getByHandle(handle).?.mapping;
+    executor.active_mapping = mapping;
+    executor.active_mapping_handle = handle;
+    executor.active_task_id = 7;
+    zigos_userspace_resume_requested = 0;
+    var frame = YieldTestFrame{ .eax = counter, .esi = disposition };
+    const before = frame;
+    // This is the production handler body; only the compiler-known frame type
+    // differs from the entry assembly's Registers pointer.
+    handleUserspaceYield(&executor, &frame);
+    try std.testing.expectEqualDeep(before, frame);
+    try std.testing.expect(executor.handoff_completed);
+    try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+    try std.testing.expectEqual(@as(u64, 7), executor.active_task_id);
+    try std.testing.expect(executor.active_mapping == mapping);
+    if (expected) |valid| {
+        try std.testing.expect(executor.last_user_exception == null);
+        try std.testing.expectEqual(valid, executor.last_yield_disposition);
+        try std.testing.expectEqual(@as(u32, @intCast(counter)), mapping.last_user_counter);
+        try std.testing.expectEqual(@as(u64, 9), mapping.yield_count);
+        try std.testing.expect(mapping.resume_valid);
+        try std.testing.expectEqual(frame.eip, mapping.resume_instruction_pointer);
+        try std.testing.expectEqual(frame.useresp, mapping.resume_stack_pointer);
+        try std.testing.expectEqual(frame.eax, mapping.user_context64.rax);
+        try std.testing.expectEqual(frame.esi, mapping.user_context64.rsi);
+        try std.testing.expectEqual(frame.r12, mapping.user_context64.r12);
+        try std.testing.expectEqual(frame.r13, mapping.user_context64.r13);
+        try std.testing.expectEqual(frame.eflags, mapping.user_context64.flags);
+        try std.testing.expectEqual(frame.edx, executor.last_yield_ui_revision);
+    } else {
+        try std.testing.expectEqualDeep(UserException{
+            .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+            .error_code = 0,
+            .instruction_pointer = frame.eip,
+        }, executor.last_user_exception.?);
+        try std.testing.expectEqual(@as(u32, 9), mapping.last_user_counter);
+        try std.testing.expectEqual(@as(u64, 8), mapping.yield_count);
+        try std.testing.expect(!mapping.resume_valid);
+        try std.testing.expectEqual(UserContext64{}, mapping.user_context64);
+        try std.testing.expectEqual(@as(u32, 0), executor.last_trap_counter);
+        try std.testing.expectEqual(@as(u64, 0), executor.last_yield_ui_revision);
+    }
+}
+
+test "yield handler contains counter overflow before publishing a resume" {
+    try expectYieldHandler(@as(u64, std.math.maxInt(u32)) + 1, 0, null);
+    try expectYieldHandler(std.math.maxInt(u64), 1, null);
+}
+
+test "yield handler contains disposition overflow before publishing a resume" {
+    try expectYieldHandler(1, @as(u64, std.math.maxInt(u32)) + 1, null);
+    try expectYieldHandler(1, std.math.maxInt(u64), null);
+}
+
+test "yield handler contains unknown disposition enums" {
+    try expectYieldHandler(1, 2, null);
+    try expectYieldHandler(1, std.math.maxInt(u32), null);
+}
+
+test "yield handler preserves maximum valid counters and both dispositions" {
+    try expectYieldHandler(std.math.maxInt(u32), 0, .runnable);
+    try expectYieldHandler(std.math.maxInt(u32), 1, .wait_for_event);
+}
+
+test "owned state exceptions use user containment without lazy retry" {
+    var executor = Executor{ .active_task_id = 7 };
+    const previous_requested = zigos_userspace_resume_requested;
+    defer zigos_userspace_resume_requested = previous_requested;
+    for ([_]u8{ 7, GENERAL_PROTECTION_FAULT_VECTOR }) |vector| {
+        zigos_userspace_resume_requested = 0;
+        executor.handoff_completed = false;
+        try std.testing.expect(containUserException(&executor, vector, 0, 0x4000_1008));
+        try std.testing.expectEqual(vector, executor.last_user_exception.?.vector);
+        try std.testing.expect(executor.handoff_completed);
+        try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+    }
+    executor.last_user_exception = null;
+    executor.handoff_completed = false;
+    zigos_userspace_resume_requested = 0;
+    try std.testing.expect(!containUserException(&executor, 2, 0, 0x4000_1008));
+    try std.testing.expect(executor.last_user_exception == null);
+    try std.testing.expect(!executor.handoff_completed);
+    try std.testing.expectEqual(@as(u32, 0), zigos_userspace_resume_requested);
+}
+
+const DeviceInterruptFixture = struct {
+    const isr = @import("../../kernel/interrupts/isr.zig");
+    const wake = @import("../../kernel/event_wake.zig");
+    executor: Executor = .{},
+    mapping: *MappingEntry = undefined,
+    frame: isr.Registers = undefined,
+    previous_executor: ?*Executor = null,
+    previous_requested: u32 = 0,
+    previous_esp: usize = 0,
+    previous_eip: usize = 0,
+    previous_wakes: wake.Pending = .{},
+
+    fn init(self: *@This()) !void {
+        const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
+        storage.initialize();
+        self.previous_executor = registered_executor;
+        self.previous_requested = zigos_userspace_resume_requested;
+        self.previous_esp = zigos_userspace_resume_esp;
+        self.previous_eip = zigos_userspace_resume_eip;
+        self.previous_wakes = wake.take();
+        const handle = installTestMappingAt(&self.executor, 0, .{
+            .state = .live,
+            .address_space_id = 42,
+            .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+            .dispatch_metadata = .{ .owner_task_id = 7, .image_id = 41 },
+            .owned_xstate = storage,
+            .last_user_counter = 9,
+            .yield_count = 8,
+        });
+        self.mapping = &self.executor.mappingArena().?.getByHandle(handle).?.mapping;
+        self.executor.active_task_id = 7;
+        self.executor.active_mapping = self.mapping;
+        self.executor.active_mapping_handle = handle;
+        self.executor.dispatch_quantum = DispatchQuantum.begin(7, 100);
+        registered_executor = &self.executor;
+        zigos_userspace_resume_requested = 0;
+        zigos_userspace_resume_esp = 0xfeed_1000;
+        zigos_userspace_resume_eip = 0xfeed_2000;
+        self.frame = std.mem.zeroes(isr.Registers);
+        inline for (.{ "eax", "ebx", "ecx", "edx", "ebp", "esi", "edi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }, 0..) |field, index|
+            @field(self.frame, field) = 0x1234_0000 + index * 0x101;
+        self.frame.eip = 0x4000_1008;
+        self.frame.cs = 0x23;
+        self.frame.eflags = 0x246;
+        self.frame.useresp = 0x7fff_eff0;
+        self.frame.ss = 0x1b;
+    }
+
+    fn deinit(self: *@This()) void {
+        self.executor.active_task_id = 0;
+        self.executor.active_mapping = null;
+        self.executor.reset();
+        registered_executor = self.previous_executor;
+        zigos_userspace_resume_requested = self.previous_requested;
+        zigos_userspace_resume_esp = self.previous_esp;
+        zigos_userspace_resume_eip = self.previous_eip;
+        _ = wake.take();
+        inline for (.{ "timer", "xhci", "network", "nvme", "scheduler" }) |field|
+            if (@field(self.previous_wakes, field)) wake.raise(@field(wake.Kind, field));
+    }
+
+    const Latch = struct {
+        var kind: ?wake.Kind = null;
+        fn receive(_: *isr.InterruptFrame) void {
+            if (!@import("../../kernel/interrupts/context.zig").active())
+                @panic("device fixture must execute in the real ISR context");
+            if (kind) |work| wake.raise(work);
+        }
+    };
+
+    fn dispatch(self: *@This(), vector: u8, kind: ?wake.Kind) !void {
+        const Case = struct {
+            fixture: *DeviceInterruptFixture,
+            vector: u8,
+            kind: ?wake.Kind,
+            fn run(self_case: *@This()) !void {
+                const previous_kind = Latch.kind;
+                defer Latch.kind = previous_kind;
+                Latch.kind = self_case.kind;
+                isr.registerHandler(self_case.vector, Latch.receive);
+                isr.setRuntimePreemption(userspaceInterruptPreemption);
+                self_case.fixture.frame.int_no = self_case.vector;
+                isr.isrHandler(&self_case.fixture.frame);
+            }
+        };
+        var case = Case{ .fixture = self, .vector = vector, .kind = kind };
+        try isr.withTestHandlers(&case, Case.run);
+        try std.testing.expect(!@import("../../kernel/interrupts/context.zig").active());
+    }
+
+    fn expectResume(self: *const @This()) !void {
+        try std.testing.expect(self.executor.handoff_completed);
+        try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+        try std.testing.expect(self.mapping.resume_valid);
+        try std.testing.expectEqual(@as(u64, 9), self.mapping.yield_count);
+        try std.testing.expectEqual(@as(u32, 9), self.mapping.last_user_counter);
+        try std.testing.expectEqual(self.frame.eip, self.mapping.resume_instruction_pointer);
+        try std.testing.expectEqual(self.frame.useresp, self.mapping.resume_stack_pointer);
+        inline for (.{ "rax", "rbx", "rcx", "rdx", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }, .{ "eax", "ebx", "ecx", "edx", "ebp", "esi", "edi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }) |user_field, frame_field|
+            try std.testing.expectEqual(@field(self.frame, frame_field), @field(self.mapping.user_context64, user_field));
+        try std.testing.expectEqual(self.frame.eflags, self.mapping.user_context64.flags);
+        try std.testing.expectEqual(self.frame.eip, self.mapping.user_context64.instruction_pointer);
+        try std.testing.expectEqual(self.frame.useresp, self.mapping.user_context64.stack_pointer);
+        try std.testing.expectEqual(userspace_bootstrap_mailbox.YieldDisposition.runnable, self.executor.last_yield_disposition);
+        try std.testing.expect(self.executor.last_user_exception == null);
+        try std.testing.expectEqual(DispatchQuantum.begin(7, 100), self.executor.dispatch_quantum);
+        try std.testing.expectEqual(@as(usize, 0xfeed_1000), zigos_userspace_resume_esp);
+        try std.testing.expectEqual(@as(usize, 0xfeed_2000), zigos_userspace_resume_eip);
+    }
+
+    fn expectNoResume(self: *const @This()) !void {
+        try std.testing.expect(!self.executor.handoff_completed);
+        try std.testing.expectEqual(@as(u32, 0), zigos_userspace_resume_requested);
+        try std.testing.expect(!self.mapping.resume_valid);
+        try std.testing.expectEqual(@as(u64, 8), self.mapping.yield_count);
+    }
+};
+
+test "device IRQ real ISR hands off allowlisted users before their watchdog" {
+    inline for (.{ .{ @as(u8, 65), DeviceInterruptFixture.wake.Kind.network }, .{ @as(u8, 66), DeviceInterruptFixture.wake.Kind.nvme }, .{ @as(u8, 67), DeviceInterruptFixture.wake.Kind.xhci } }) |case| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        const state_before = fixture.mapping.owned_xstate.?.*;
+        try std.testing.expect(!shouldPreemptUserDispatch(&fixture.executor, true, 100, null));
+        try fixture.dispatch(case[0], case[1]);
+        try fixture.expectResume();
+        try std.testing.expectEqualDeep(state_before, fixture.mapping.owned_xstate.?.*);
+        const pending = DeviceInterruptFixture.wake.peek();
+        try std.testing.expect(switch (case[1]) {
+            .network => pending.network,
+            .nvme => pending.nvme,
+            .xhci => pending.xhci,
+            else => false,
+        });
+        try std.testing.expect(shouldPreemptUserDispatch(&fixture.executor, true, 102, null));
+    }
+}
+
+test "device IRQ real ISR requires the matching latch and excludes other vectors" {
+    for ([_]u8{ 7, 13, 64, 112, 129, 255 }) |vector| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.dispatch(vector, .network);
+        try fixture.expectNoResume();
+        try std.testing.expect(DeviceInterruptFixture.wake.peek().network);
+    }
+    for ([_]?DeviceInterruptFixture.wake.Kind{ null, .network }) |kind| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.dispatch(67, kind);
+        try fixture.expectNoResume();
+    }
+}
+
+test "device IRQ real ISR preserves kernel continuation and missing active dispatch" {
+    const Absent = enum { kernel, executor, task, quantum, mapping, address_space, xstate };
+    for (std.enums.values(Absent)) |absent| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        const storage = fixture.mapping.owned_xstate;
+        defer fixture.mapping.owned_xstate = storage;
+        switch (absent) {
+            .kernel => fixture.frame.cs = 0x08,
+            .executor => registered_executor = null,
+            .task => fixture.executor.active_task_id = 0,
+            .quantum => fixture.executor.dispatch_quantum = .{},
+            .mapping => fixture.executor.active_mapping = null,
+            .address_space => fixture.mapping.address_space = null,
+            .xstate => fixture.mapping.owned_xstate = null,
+        }
+        try fixture.dispatch(67, .xhci);
+        try fixture.expectNoResume();
+        try std.testing.expect(DeviceInterruptFixture.wake.peek().xhci);
+    }
+}
+
+test "device IRQ real ISR rejects foreign retired and recycled mapping incarnations" {
+    const Invalid = enum { foreign_owner, retired, stale_handle, foreign_mapping };
+    for (std.enums.values(Invalid)) |invalid| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        switch (invalid) {
+            .foreign_owner => fixture.mapping.dispatch_metadata.owner_task_id = 8,
+            .retired => fixture.mapping.state = .retire_pending,
+            .stale_handle => {
+                const old_handle = fixture.executor.active_mapping_handle;
+                const mapping_copy = fixture.mapping.*;
+                try std.testing.expect(fixture.executor.mappingArena().?.removeHandle(old_handle));
+                const replacement = installTestMappingAt(&fixture.executor, 0, mapping_copy);
+                try std.testing.expect(!old_handle.eql(replacement));
+                fixture.mapping = &fixture.executor.mappingArena().?.getByHandle(replacement).?.mapping;
+                fixture.executor.active_mapping = fixture.mapping;
+            },
+            .foreign_mapping => {
+                const other = installTestMappingAt(&fixture.executor, 1, .{ .address_space_id = 43 });
+                fixture.executor.active_mapping = &fixture.executor.mappingArena().?.getByHandle(other).?.mapping;
+            },
+        }
+        try fixture.dispatch(65, .network);
+        try fixture.expectNoResume();
+        try std.testing.expect(DeviceInterruptFixture.wake.peek().network);
+    }
+}
+
+test "device IRQ real ISR coalesces duplicate handoffs and preserves existing containment" {
+    var fixture = DeviceInterruptFixture{};
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.dispatch(67, .xhci);
+    try fixture.expectResume();
+    const captured = fixture.mapping.user_context64;
+    fixture.frame.eip += 4;
+    fixture.frame.eax += 1;
+    try fixture.dispatch(67, .xhci);
+    try fixture.dispatch(65, .network);
+    try std.testing.expectEqual(captured, fixture.mapping.user_context64);
+    try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+    const wakes = DeviceInterruptFixture.wake.take();
+    try std.testing.expect(wakes.xhci and wakes.network);
+    try std.testing.expect(!DeviceInterruptFixture.wake.any());
+
+    fixture.executor.last_user_exception = .{ .vector = 13, .error_code = 0, .instruction_pointer = 0x4000_0000 };
+    fixture.mapping.state = .retire_pending;
+    try fixture.dispatch(66, .nvme);
+    try std.testing.expectEqual(@as(u8, 13), fixture.executor.last_user_exception.?.vector);
+    try std.testing.expectEqual(captured, fixture.mapping.user_context64);
+    try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+}
+
+test "device IRQ actual FRED captured context resumes through the shared ISR handler" {
+    const Probe = struct {
+        extern fn zigos_fred_capture_probe(*const [15]u64, *const [8]u64, *[32]u64) callconv(.c) void;
+    };
+    var fixture = DeviceInterruptFixture{};
+    try fixture.init();
+    defer fixture.deinit();
+    var seeds: [15]u64 = undefined;
+    for (&seeds, 0..) |*value, index| value.* = 0x1234_0000 + index * 0x101;
+    const raw = [8]u64{ 0, 0x4000_1008, 0x23, 0x246, 0x7fff_eff0, 0x1b | (@as(u64, 67) << 32) | (@as(u64, 1) << 57), 0, 0 };
+    var captured: [32]u64 = undefined;
+    Probe.zigos_fred_capture_probe(&seeds, &raw, &captured);
+    @memcpy(std.mem.asBytes(&fixture.frame), std.mem.sliceAsBytes(captured[0..24]));
+    try fixture.dispatch(67, .xhci);
+    try fixture.expectResume();
+    try std.testing.expectEqualSlices(u64, &seeds, std.mem.bytesAsSlice(u64, std.mem.asBytes(&fixture.mapping.user_context64))[0..15]);
+}
+
 test "production address-space groups share page tables" {
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
     try std.testing.expect(!USES_PKU_WITHIN_SHARED_TABLES);
     try std.testing.expectEqual(@as(usize, 8), GROUP_SPACE_COUNT);
+}
+
+test "syscall failure wait response validation preserves the executor disposition" {
+    var executor = Executor{};
+    const previous = registered_executor;
+    defer registered_executor = previous;
+    registered_executor = &executor;
+    const failure_tests = if (builtin.is_test) @import("../kernel_api/syscall_failure_test.zig") else struct {};
+    try failure_tests.expectWaitResponseFailures(&executor);
+}
+
+test "shared lifetime registration rejects foreign tail ownership before publication" {
+    const ids = @import("../core/ids.zig");
+    demand_paging.reset();
+    defer demand_paging.reset();
+    var executor = Executor{};
+    defer executor.reset();
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+        .dispatch_metadata = .{ .owner_task_id = 7 },
+    });
+    const mapping = &executor.mappingArena().?.getByHandle(handle).?.mapping;
+    executor.active_mapping = mapping;
+    var table = shared_memory.Table.initWithMappingLifetime(.{
+        .context = &executor,
+        .register = registerMappedObject,
+        .unregister = unregisterMappedObject,
+    });
+    defer table.deinit();
+    const object = try table.create(ids.task(7), 1);
+    const first = userspace_layout.shared_start + shared_memory.PAGE_SIZE;
+    const foreign_start = first + 64;
+    try std.testing.expect(demand_paging.registerForSpace(&mapping.address_space.?, .{
+        .virt_start = foreign_start,
+        .virt_end_exclusive = foreign_start + 64,
+        .writable = true,
+    }));
+    try std.testing.expectError(error.MappingRegistrationFailed, table.map(object.id, ids.task(7)));
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(object.id)).mapped_task_count);
+    try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(@as(u16, 0), executor.mapped_object_count);
+    try std.testing.expect(executor.mapped_object_table == null);
+    try std.testing.expect(demand_paging.resolveFault(&mapping.address_space.?, foreign_start, 4));
+    try std.testing.expect(demand_paging.unregisterRegionForSpace(&mapping.address_space.?, foreign_start, foreign_start + 64));
+    try table.map(object.id, ids.task(7));
+    const registered = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
+    try std.testing.expectEqual(first, registered.virtual_base);
+    try std.testing.expect(try table.unmap(object.id, ids.task(7)));
+    try std.testing.expect(!demand_paging.resolveFault(&mapping.address_space.?, first, 4));
+    try std.testing.expect(executor.mapped_object_table == null);
+}
+
+test "shared lifetime executor retirement rejects recycled handles and preserves grouped peers" {
+    const ids = @import("../core/ids.zig");
+    demand_paging.reset();
+    defer demand_paging.reset();
+    var executor = Executor{};
+    defer executor.reset();
+    const space = freestanding.paging.UserAddressSpace{ .directory = @ptrFromInt(0x1000), .pcid = 1 };
+    executor.group_spaces[0] = space;
+    executor.group_refs[0] = 2;
+    const first_handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 7 },
+    });
+    const peer_handle = installTestMappingAt(&executor, 1, .{
+        .state = .live,
+        .address_space_id = 43,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 8 },
+    });
+    var table = shared_memory.Table.initWithMappingLifetime(.{
+        .context = &executor,
+        .register = registerMappedObject,
+        .unregister = unregisterMappedObject,
+    });
+    defer table.deinit();
+    const object = try table.create(ids.task(7), shared_memory.PAGE_SIZE);
+    executor.active_mapping = &executor.mappingArena().?.getByHandle(first_handle).?.mapping;
+    try table.map(object.id, ids.task(7));
+    const retired = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
+    executor.active_mapping = &executor.mappingArena().?.getByHandle(peer_handle).?.mapping;
+    try table.map(object.id, ids.task(8));
+    const peer = try table.freestandingTaskMappingDescriptor(object.id, ids.task(8));
+    executor.active_mapping = null;
+    try std.testing.expectEqual(@as(u16, 2), executor.mapped_object_count);
+    try std.testing.expect(!unregisterMappedObject(&executor, &table, peer_handle.value, retired));
+    executor.retireAddressSpace(.{ .address_space_id = 42, .reason = .snapshot_restore });
+    try std.testing.expectEqual(@as(u16, 1), executor.mapped_object_count);
+    try std.testing.expect(!table.hasMapping(object.id, ids.task(7)));
+    try std.testing.expect(table.hasMapping(object.id, ids.task(8)));
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expect(!demand_paging.resolveFault(&space, retired.virtual_base, 4));
+    try std.testing.expect(demand_paging.resolveFault(&space, peer.virtual_base, 4));
+    const replacement = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 44,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 7 },
+    });
+    executor.group_refs[0] += 1;
+    try std.testing.expect(!first_handle.eql(replacement));
+    executor.active_mapping = &executor.mappingArena().?.getByHandle(replacement).?.mapping;
+    try table.map(object.id, ids.task(7));
+    const remapped = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
+    executor.active_mapping = null;
+    try std.testing.expect(!unregisterMappedObject(&executor, &table, first_handle.value, retired));
+    try std.testing.expect(!unregisterMappedObject(&executor, &table, replacement.value, retired));
+    try std.testing.expectEqual(@as(u16, 2), executor.mapped_object_count);
+    try std.testing.expect(demand_paging.resolveFault(&space, remapped.virtual_base, 4));
+    try std.testing.expect(demand_paging.resolveFault(&space, peer.virtual_base, 4));
+    executor.reset();
+    try std.testing.expectEqual(@as(u16, 0), executor.mapped_object_count);
+    try std.testing.expect(executor.mapped_object_table == null);
+    try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(object.id)).mapped_task_count);
+    try std.testing.expect(!demand_paging.resolveFault(&space, remapped.virtual_base, 4));
+    try std.testing.expect(!demand_paging.resolveFault(&space, peer.virtual_base, 4));
+}
+
+test "userspace quantum arms at actual entry after idle and retains private extended state" {
+    const Clock = struct {
+        now: u64,
+        armed: bool = false,
+        fn armSchedulerTick(self: *@This()) void {
+            self.armed = true;
+        }
+        fn getTicks(self: *@This()) u64 {
+            return self.now;
+        }
+    };
+    const Entry = struct {
+        executor: *Executor,
+        clock: *Clock,
+        expected_state: *align(xstate.alignment) xstate.State,
+        called: bool = false,
+        fn enter(self: *@This(), context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+            if (!self.clock.armed or state != self.expected_state or context != &self.executor.pending_user_context64)
+                @panic("user entry requires its armed timer and owned context");
+            if (shouldPreemptUserDispatch(self.executor, true, self.clock.now, null) or
+                !shouldPreemptUserDispatch(self.executor, true, self.clock.now + DISPATCH_QUANTUM_TICKS, null) or
+                shouldPreemptUserDispatch(self.executor, false, self.clock.now + DISPATCH_QUANTUM_TICKS, null))
+                @panic("actual user entry starts a finite fresh quantum");
+            self.called = true;
+            return 7;
+        }
+    };
+    var storage: xstate.Storage = .{};
+    storage.initialize();
+    var mapping = MappingEntry{ .owned_xstate = &storage };
+    var executor = Executor{ .active_task_id = 42, .active_mapping = &mapping };
+    var clock = Clock{ .now = 500 };
+    var entry = Entry{ .executor = &executor, .clock = &clock, .expected_state = storage.state() };
+    try std.testing.expectEqual(@as(u32, 7), enterUserspaceWithClock(&executor, &clock, &entry));
+    try std.testing.expect(entry.called);
+    // A later dispatch does not inherit the prior task's deadline.
+    clock.armed = false;
+    clock.now = 1000;
+    entry.called = false;
+    try std.testing.expectEqual(@as(u32, 7), enterUserspaceWithClock(&executor, &clock, &entry));
+    try std.testing.expect(entry.called);
+    try std.testing.expectEqual(@as(u64, 1002), executor.dispatch_quantum.deadline_tick);
+    try std.testing.expect(!executor.dispatch_quantum.expired(43, 1002));
+    const Priority = struct {
+        fn ready(_: u64) bool {
+            return true;
+        }
+    };
+    try std.testing.expect(shouldPreemptUserDispatch(&executor, true, 1000, Priority.ready));
+    try std.testing.expect(!shouldPreemptUserDispatch(&executor, false, 1000, Priority.ready));
+    executor.dispatch_quantum = .{};
+    executor.active_task_id = 0;
+    try std.testing.expect(!shouldPreemptUserDispatch(&executor, true, 1002, Priority.ready));
+}
+
+test "userspace mapping retirement releases its private extended state allocation" {
+    var executor = Executor{};
+    defer executor.reset();
+    const mappings = executor.mappingArena().?;
+    const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
+    storage.initialize();
+    const handle = installTestMappingAt(&executor, 0, .{ .address_space_id = 11, .owned_xstate = storage });
+    const mapping = &mappings.getByHandle(handle).?.mapping;
+    executor.releaseMapping(mappings, handle.slotIndex(), mapping);
+    try std.testing.expect(mappings.getByHandle(handle) == null);
+    try std.testing.expect(mapping.owned_xstate == null);
 }

@@ -323,42 +323,37 @@ pub const Service = struct {
     ) Error![]const u8 {
         std.crypto.secureZero(u8, out);
         errdefer std.crypto.secureZero(u8, out);
-        const handle = self.findHandle(request.handle_id) orelse {
+        const handle = (self.findHandleConst(request.handle_id) orelse {
             try recordExport(ledger, request, 0, false, false);
             return error.VaultHandleNotFound;
+        }).*;
+        _ = self.requireExportHandle(policies, subjects, request) catch |err| {
+            try recordExportFromHandle(ledger, request, &handle, false);
+            return err;
         };
-        if (!handle.holder.eql(request.holder) or handle.task_id != request.task_id) {
-            try recordExportFromHandle(ledger, request, handle, false);
-            return error.HandleHolderMismatch;
-        }
-        if (handle.revoked) {
-            try recordExportFromHandle(ledger, request, handle, false);
-            return error.HandleRevoked;
-        }
-        if (handle.expired(request.now_ticks)) {
-            try recordExportFromHandle(ledger, request, handle, false);
-            return error.HandleExpired;
-        }
+        errdefer recordExportFromHandle(ledger, request, &handle, false) catch {};
+        const raw = try self.store.exportRaw(handle.store_handle_id, .{
+            .holder = request.holder,
+            .task_id = request.task_id,
+        }, out);
+        // The provider may yield while opening sealed material. A revoked or
+        // recycled lease and a new policy must withhold the recovered bytes.
+        _ = try self.requireExportHandle(policies, subjects, request);
+        try recordExportFromHandle(ledger, request, &handle, true);
+        return raw;
+    }
+
+    fn requireExportHandle(self: *const Service, policies: *const policy_object.Directory, subjects: policy_object.SubjectSet, request: ExportRequest) Error!*const VaultHandle {
+        const handle = try self.requireLiveHandle(.{ .holder = request.holder, .task_id = request.task_id, .handle_id = request.handle_id, .now_ticks = request.now_ticks });
         const decision = policies.secretVaultDecision(subjects, .{
             .operation = .export_raw,
             .hardware_backed = handle.hardware_backed,
             .raw_export = true,
             .lease_ticks = handle.expires_at_ticks - request.now_ticks,
         });
-        if (!decision.allowed) {
-            try recordExportFromHandle(ledger, request, handle, false);
-            return error.PolicyDenied;
-        }
-        if (!handle.raw_export_allowed) {
-            try recordExportFromHandle(ledger, request, handle, false);
-            return error.RawExportDenied;
-        }
-        const raw = try self.store.exportRaw(handle.store_handle_id, .{
-            .holder = request.holder,
-            .task_id = request.task_id,
-        }, out);
-        try recordExportFromHandle(ledger, request, handle, true);
-        return raw;
+        if (!decision.allowed) return error.PolicyDenied;
+        if (!handle.raw_export_allowed) return error.RawExportDenied;
+        return handle;
     }
 
     pub fn signDigest(
@@ -376,11 +371,16 @@ pub const Service = struct {
         }, &request.digest, ledger);
     }
 
-    pub fn requireSigningHandle(self: *const Service, policies: *const policy_object.Directory, subjects: policy_object.SubjectSet, request: SigningAuthority) Error!*const VaultHandle {
+    fn requireLiveHandle(self: *const Service, request: SigningAuthority) Error!*const VaultHandle {
         const handle = self.findHandleConst(request.handle_id) orelse return error.VaultHandleNotFound;
         if (!handle.holder.eql(request.holder) or handle.task_id != request.task_id) return error.HandleHolderMismatch;
         if (handle.revoked) return error.HandleRevoked;
         if (handle.expired(request.now_ticks)) return error.HandleExpired;
+        return handle;
+    }
+
+    pub fn requireSigningHandle(self: *const Service, policies: *const policy_object.Directory, subjects: policy_object.SubjectSet, request: SigningAuthority) Error!*const VaultHandle {
+        const handle = try self.requireLiveHandle(request);
         const decision = policies.secretVaultDecision(subjects, .{
             .operation = .sign,
             .hardware_backed = handle.hardware_backed,
@@ -391,16 +391,19 @@ pub const Service = struct {
     }
 
     pub fn signMessage(self: *Service, policies: *const policy_object.Directory, subjects: policy_object.SubjectSet, request: SigningAuthority, message: []const u8, ledger: ?*event_ledger.Ledger) Error!manifest.Signature {
-        const handle = self.findHandle(request.handle_id) orelse {
+        const handle = (self.findHandleConst(request.handle_id) orelse {
             if (ledger) |log| try log.recordSecretVault(request.holder, request.task_id, 0, request.handle_id, false, false, false, false, false, request.now_ticks, "sign digest");
             return error.VaultHandleNotFound;
-        };
+        }).*;
         errdefer if (ledger) |log| log.recordSecretVault(request.holder, request.task_id, handle.secret_id, handle.id, false, handle.hardware_backed, false, false, false, request.now_ticks, "sign digest") catch {};
         _ = try self.requireSigningHandle(policies, subjects, request);
         const signature = try self.store.signMessage(handle.store_handle_id, .{
             .holder = request.holder,
             .task_id = request.task_id,
         }, message);
+        // Keep the audit identity by value across the provider wait. Reacquire
+        // the full generational lease and current policy before success.
+        _ = try self.requireSigningHandle(policies, subjects, request);
         if (ledger) |log| try log.recordSecretVault(request.holder, request.task_id, handle.secret_id, handle.id, true, handle.hardware_backed, false, false, false, request.now_ticks, "sign digest");
         return signature;
     }
@@ -1327,6 +1330,108 @@ test "vault signing enforces holder lease revocation and current policy without 
         .now_ticks = 4,
     }, null);
     try std.testing.expectError(error.HandleRevoked, service.signDigest(&policies, subjects, request, null));
+}
+
+test "vault signing and export revalidate authority after a yielding provider" {
+    const cooperative = @import("../task/cooperative_worker.zig");
+    const guarded = @import("../task/guarded_worker_stack.zig");
+    const sealing = @import("../platform/secret_sealing.zig");
+    const provider_fixture = @import("../../tests/fixtures/secret_provider.zig");
+    const signing = @import("../core/signing.zig");
+    const Fixture = struct {
+        service: Service = .init(),
+        policies: policy_object.Directory = .init(),
+        request: SigningAuthority = undefined,
+        exporting: bool,
+        out: secure_secret_store.Value = @splat(0xaa),
+        signature: ?manifest.Signature = null,
+        failure: ?anyerror = null,
+        const owner = principal.PrincipalId{ .kind = .user, .serial = 101 };
+        const holder = principal.PrincipalId{ .kind = .service, .serial = 102 };
+        const subjects = policy_object.SubjectSet{ .user_id = owner.serial };
+        const seed: [32]u8 = @splat(0x91);
+        const message = "yielding vault operation";
+
+        fn seal(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {
+            try provider_fixture.provider().seal(binding, raw, out);
+        }
+        fn open(_: ?*anyopaque, binding: *const sealing.Binding, blob: []const u8, out: *sealing.Value) sealing.Error!usize {
+            const len = try provider_fixture.provider().open(binding, blob, out);
+            cooperative.current().?.yield();
+            return len;
+        }
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.exporting) {
+                _ = self.service.exportRaw(&self.policies, subjects, .{
+                    .holder = self.request.holder,
+                    .task_id = self.request.task_id,
+                    .handle_id = self.request.handle_id,
+                    .now_ticks = self.request.now_ticks,
+                }, null, &self.out) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+            } else {
+                self.signature = self.service.signMessage(&self.policies, subjects, self.request, message, null) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+            }
+        }
+        fn addKey(self: *@This()) !VaultHandle {
+            const secret = try self.service.importSecret(&self.policies, subjects, .{ .owner = owner, .task_id = 5, .label = "signer", .raw = &seed, .exportable = true, .now_ticks = 1 }, null);
+            return (try self.service.lendHandle(&self.policies, subjects, .{ .owner = owner, .holder = holder, .task_id = 6, .secret_id = secret.id, .expires_at_ticks = 10, .now_ticks = 2, .allow_raw_export = true }, null)).*;
+        }
+    };
+    for ([_]bool{ false, true }) |exporting| {
+        for (0..5) |mode| {
+            var fixture = Fixture{ .exporting = exporting };
+            defer fixture.service.unload();
+            fixture.service.attachHardwareProvider(.{ .operations = &.{ .seal = Fixture.seal, .open = Fixture.open } });
+            _ = try fixture.policies.create(.{ .scope = .user, .subject_id = Fixture.owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "allow vault", .secret_vault_allowed = true, .deny_secret_raw_export = false }, .{ .label = "policy", .seed = @splat(0x74) });
+            const handle = try fixture.addKey();
+            fixture.request = .{ .holder = Fixture.holder, .task_id = 6, .handle_id = handle.id, .now_ticks = 3 };
+            // Exercise policy signature verification on the same bounded,
+            // guarded stack used by native operation workers.
+            var stack = try guarded.Stack.allocate();
+            defer stack.deinit();
+            try std.testing.expect(stack.guardsPresent());
+            var worker = cooperative.Worker{ .stack = stack.bytes };
+            try worker.start(&fixture, Fixture.run);
+            try worker.step();
+            try std.testing.expect(worker.state == .suspended and fixture.signature == null and fixture.failure == null);
+            switch (mode) {
+                1 => try fixture.service.revoke(.{ .subject = Fixture.owner, .task_id = 5, .handle_id = handle.id, .secret_id = handle.secret_id, .expected_holder = Fixture.holder, .expected_holder_task_id = 6, .now_ticks = 4 }, null),
+                2 => {
+                    try fixture.service.retireSecret(&fixture.policies, Fixture.subjects, .{ .owner = Fixture.owner, .task_id = 5, .secret_id = handle.secret_id, .now_ticks = 4 }, null);
+                    const replacement = try fixture.addKey();
+                    try std.testing.expectEqual((HandleId{ .value = handle.id }).slotIndex(), (HandleId{ .value = replacement.id }).slotIndex());
+                    try std.testing.expect(replacement.id != handle.id and replacement.secret_id != handle.secret_id);
+                },
+                3 => fixture.service.unload(),
+                4 => {
+                    _ = try fixture.policies.create(.{ .scope = .user, .subject_id = Fixture.owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "deny vault", .secret_vault_allowed = false }, .{ .label = "policy", .seed = @splat(0x74) });
+                },
+                else => {},
+            }
+            try worker.step();
+            try std.testing.expect(worker.state == .complete and std.mem.allEqual(u8, stack.bytes, 0));
+            if (mode == 0) {
+                try std.testing.expect(fixture.failure == null);
+                if (exporting) try std.testing.expectEqualSlices(u8, &Fixture.seed, fixture.out[0..32]) else try std.testing.expect(signing.verify(fixture.signature.?, Fixture.message));
+            } else {
+                try std.testing.expectEqual(@as(?anyerror, switch (mode) {
+                    1 => error.HandleRevoked,
+                    2, 3 => error.VaultHandleNotFound,
+                    4 => error.PolicyDenied,
+                    else => unreachable,
+                }), fixture.failure);
+                try std.testing.expect(fixture.signature == null);
+                if (exporting) try std.testing.expect(std.mem.allEqual(u8, &fixture.out, 0));
+            }
+        }
+    }
 }
 
 test "vault hardware policy uses stored custody when lending a software secret" {

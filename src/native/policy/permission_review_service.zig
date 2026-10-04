@@ -154,6 +154,8 @@ pub const CommandInput = struct {
             .task_switch_previous,
             .show_recovery,
             .dismiss_recovery,
+            .new_document,
+            .open_document,
             .cursor_left,
             .cursor_right,
             .cursor_up,

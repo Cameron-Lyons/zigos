@@ -81,8 +81,8 @@ pub fn publishedDriversActivateScopedTransports() !void {
         }
     };
 
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
+    defer if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
     device_inventory.reset();
     defer device_inventory.reset();
 
@@ -436,8 +436,8 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
     try storage_service_ipc.userspaceCreateWorkspaceRoundTripProof();
 
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = spec_support.service(20);
     const writer = spec_support.user(2);
@@ -523,8 +523,8 @@ pub fn storageStaysVersionedRecoverableSignedAndDerived() !void {
 
 pub fn trustedDeviceGraphSelectiveSyncAndPolicyNetworking() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = spec_support.service(30);
     const sync_owner = spec_support.service(31);
@@ -866,8 +866,8 @@ fn realDriverEgressRequiresNetworkPolicyCapability(requester: @TypeOf(spec_suppo
         }
     };
 
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
+    defer if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
     device_inventory.reset();
     defer device_inventory.reset();
 

@@ -773,8 +773,10 @@ pub const Kernel = struct {
         if (!abi.isCanonicalSurfacePresentation(presentation)) return error.InvalidSurfacePresentation;
         if (text) |content| if (!content.isCanonical()) return error.InvalidSurfacePresentation;
         const receiver = self.surface_presentation_receiver orelse return error.SurfacePresentationUnavailable;
+        var borrow = self.runtime.borrowResolvedTask(task);
+        defer borrow.release();
         return switch (receiver.present(receiver.context, task, presentation, text)) {
-            .accepted, .duplicate => true,
+            .accepted, .duplicate => if (task.state == .active) true else error.InvalidSurfacePresentation,
             .stale => error.StaleSurfacePresentation,
             .invalid_surface => error.InvalidSurfacePresentation,
             .full => error.ResourceBudgetExceeded,
@@ -1196,6 +1198,111 @@ test "moving a capability removes its source task attachment" {
     try std.testing.expect(harness.capabilities.query(source_capability.id) == null);
     try std.testing.expect(!source_task.hasCapability(source_capability.id));
     try std.testing.expect(receiver_task.hasCapability(passed.capability_id));
+}
+
+test "surface presentation retains the presenter across reentrant termination and churn" {
+    const Receiver = struct {
+        harness: *TestKernelHarness,
+        kernel: *Kernel,
+        context: KernelCallContext,
+        task_id: u64,
+        handle: task_runtime.TaskHandle,
+        status: SurfacePresentStatus,
+        calls: usize = 0,
+        record_retained: bool = true,
+
+        fn createApp(runtime: *task_runtime.Runtime, owner_serial: u64) task_runtime.Error!*task_runtime.TaskRecord {
+            return runtime.createTask(.{
+                .owner = .{ .kind = .app, .serial = owner_serial },
+                .component_class = .app_component,
+                .budget = .{
+                    .cpu_time_ticks = 100,
+                    .memory_bytes = shared_memory.PAGE_SIZE,
+                    .endpoint_slots = 2,
+                    .shared_memory_bytes = 0,
+                },
+                .local_only = true,
+                .ui_surface_id = 7,
+            });
+        }
+
+        fn present(
+            opaque_context: *anyopaque,
+            task: *const task_runtime.TaskRecord,
+            _: *const abi.SurfacePresentation,
+            _: ?*const abi.SurfaceText,
+        ) SurfacePresentStatus {
+            const self: *@This() = @ptrCast(@alignCast(opaque_context));
+            const terminated = self.kernel.taskTerminate(self.context, 0) catch @panic("receiver can terminate its presenter");
+            if (!terminated) @panic("presenter terminates once");
+            for (0..task_runtime.MAX_TASKS + 3) |index| {
+                const child = createApp(&self.harness.runtime, @intCast(index + 1000)) catch @panic("receiver churn retains task capacity");
+                if (!self.harness.runtime.terminateResolvedTask(child, @intCast(index + 1000)))
+                    @panic("receiver retires each churn task");
+                self.record_retained = self.record_retained and task.id == self.task_id and
+                    task.state == .terminated and
+                    self.harness.runtime.findConstByHandle(self.handle, self.task_id) == task;
+            }
+            self.calls += 1;
+            return self.status;
+        }
+    };
+
+    for ([_]SurfacePresentStatus{ .accepted, .duplicate, .stale, .invalid_surface, .full }) |status| {
+        const harness = try std.testing.allocator.create(TestKernelHarness);
+        defer std.testing.allocator.destroy(harness);
+        harness.* = .{};
+        defer harness.runtime.reset();
+        var kernel: Kernel = undefined;
+        harness.initKernel(&kernel);
+        defer kernel.deinit();
+        const presenter = try Receiver.createApp(&harness.runtime, 7);
+        const task_id = presenter.id;
+        const address_space_id = presenter.address_space_id;
+        const handle = harness.runtime.taskHandleForResolved(presenter);
+        const slot_index = presenter.arena_slot_index;
+        const authority = try harness.capabilities.mintBootRoot(.{
+            .holder = presenter.owner,
+            .issuer = test_policy_authority,
+            .target = .{ .kind = .task, .id = task_id },
+            .rights = .{ .task = .{ .surface_present = true, .task_terminate = true } },
+            .scope = .{ .task_id = task_id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+        });
+        try harness.runtime.grantCapability(task_id, authority.id);
+        const context = KernelCallContext{
+            .caller_task_id = task_id,
+            .presented_capability_id = authority.id,
+            .target = .{ .task = task_id },
+        };
+        var receiver = Receiver{ .harness = harness, .kernel = &kernel, .context = context, .task_id = task_id, .handle = handle, .status = status };
+        kernel.bindSurfacePresentationReceiver(.{ .context = &receiver, .present = Receiver.present });
+        const presentation = abi.SurfacePresentation{
+            .surface_id = 7,
+            .revision = 1,
+            .buffer_object_id = 1,
+            .buffer_offset = 0,
+            .buffer_bytes = 8,
+        };
+        const result = kernel.surfacePresent(context, task_id, &presentation, null, 0);
+        try std.testing.expectEqual(@as(usize, 1), receiver.calls);
+        try std.testing.expect(receiver.record_retained);
+        switch (status) {
+            .accepted, .duplicate, .invalid_surface => try std.testing.expectError(error.InvalidSurfacePresentation, result),
+            .stale => try std.testing.expectError(error.StaleSurfacePresentation, result),
+            .full => try std.testing.expectError(error.ResourceBudgetExceeded, result),
+        }
+        try std.testing.expectEqual(@as(u8, 0), harness.runtime.task_borrow_counts[slot_index]);
+        try std.testing.expect(harness.runtime.findAddressSpaceConst(address_space_id) == null);
+        try std.testing.expect(harness.capabilities.query(authority.id) == null);
+        try std.testing.expectEqual(presenter, harness.runtime.findByHandle(handle, task_id).?);
+
+        const replacement = try Receiver.createApp(&harness.runtime, 9999);
+        try std.testing.expectEqual(slot_index, replacement.arena_slot_index);
+        try std.testing.expect(harness.runtime.findByHandle(handle, task_id) == null);
+        try std.testing.expect(harness.runtime.find(task_id) == null);
+        try std.testing.expect(harness.runtime.terminateResolvedTask(replacement, 9999));
+    }
 }
 
 const UndeliveredCase = enum { terminate, runtime_terminate, restore, endpoint_close, receiver_full, grants_full, expired };

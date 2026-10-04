@@ -39,7 +39,7 @@ pub const DataPlaneKind = data_plane_boundary.DataPlaneKind;
 
 pub fn init() void {
     console.print("Initializing device drivers...\n");
-    bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("device initialization requires drained storage work");
     device_inventory.reset();
     network_detected = false;
     storage_detected = false;
@@ -131,12 +131,16 @@ pub fn startGraphicsDataplane() bool {
 }
 
 fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
-    if (config.smokeFaultMode() != .none or model_via_cmdline) return true;
+    // Missing hardware is an unavailable device, never implicit model consent.
+    return config.smokeFaultMode() != .none or model_via_cmdline;
+}
 
-    if (config.bootProfile() == .zigos_native) {
-        return !device_inventory.recordForClass(.network_adapter).detected;
-    }
-    return false;
+test "absent hardware does not implicitly enable modeled device inventory" {
+    device_inventory.reset();
+    defer device_inventory.reset();
+    try std.testing.expect(!device_inventory.recordForClass(.network_adapter).detected);
+    try std.testing.expect(!shouldEnableModelDeviceInventory(false));
+    try std.testing.expect(shouldEnableModelDeviceInventory(true));
 }
 
 noinline fn reportHardwareFailure(

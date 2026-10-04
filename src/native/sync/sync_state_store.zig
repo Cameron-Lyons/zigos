@@ -9,6 +9,7 @@ const network_policy = @import("network_policy.zig");
 const object_store = @import("../storage/object_store.zig");
 const principal = @import("../core/principal.zig");
 const state_support = @import("sync_state_support.zig");
+const table_backing = @import("../core/table_backing.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const workspace = @import("../storage/workspace.zig");
 
@@ -29,14 +30,11 @@ const max_principal_kind_decimal_bytes: usize = 1;
 pub const COMPACT_PATH_SET_METADATA = true;
 pub const COMPACT_PATH_SET_FINGERPRINTS = true;
 pub const BOUNDS_SYNC_RECORD_PATHS_TO_SCHEMA = true;
-pub const TRACKS_STALE_SYNC_PATHS_BY_INDEX = true;
 pub const BORROWS_PERSISTENT_STATE_COLLECTIONS = true;
-pub const StalePathIndex = u8;
 pub const MAX_RECORD_PATH_BYTES: usize = record_prefix.len + 1 + 1 + max_u64_decimal_bytes + 1 +
     max_principal_kind_decimal_bytes + 1 + max_u64_decimal_bytes + 1 + max_u64_hex_bytes;
 pub const PATH_SET_SIZE_CEILING_BYTES: usize = 7_300;
-pub const STALE_PATH_INDEXES_SIZE_CEILING_BYTES: usize = 97;
-pub const PERSIST_PATH_STACK_SIZE_CEILING_BYTES: usize = 7_397;
+pub const PERSIST_PATH_METADATA_SIZE_CEILING_BYTES: usize = 7_316;
 
 comptime {
     if (workspace.MAX_WORKSPACE_ENTRIES > std.math.maxInt(u8) or
@@ -107,23 +105,6 @@ pub const PathSet = struct {
     }
 };
 
-pub const StalePathIndexes = struct {
-    indexes: [workspace.MAX_WORKSPACE_ENTRIES]StalePathIndex = @as([workspace.MAX_WORKSPACE_ENTRIES]StalePathIndex, @splat(0)),
-    count: u8 = 0,
-
-    fn add(self: *StalePathIndexes, entry_index: usize) Error!void {
-        if (entry_index >= workspace.MAX_WORKSPACE_ENTRIES or self.count >= workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
-        self.indexes[self.count] = @intCast(entry_index);
-        self.count += 1;
-    }
-
-    comptime {
-        if (@sizeOf(@This()) > STALE_PATH_INDEXES_SIZE_CEILING_BYTES) {
-            @compileError("stale sync path indexes exceeded their stack-size ceiling");
-        }
-    }
-};
-
 fn pathFingerprint(path: []const u8) u32 {
     const hash = workspace.pathHash(path);
     return @truncate(hash ^ (hash >> 32));
@@ -158,34 +139,71 @@ pub fn load(
     if (!resident.transport_cursor_loaded) return error.CorruptState;
     try repairNextIds(resident);
     resident.has_persisted_state = true;
+    // A complete RAM directory can still be ahead of its durability barrier.
+    resident.checkpoint_retry_pending = storage.checkpoint_enabled and storage.pendingCheckpointMutations();
     return true;
 }
+
+const TargetEntries = struct {
+    entries: *[workspace.MAX_WORKSPACE_ENTRIES]workspace.Entry,
+    count: usize = 0,
+
+    fn append(self: *TargetEntries, entry: workspace.Entry) Error!void {
+        if (self.count == self.entries.len) return error.StateTooLarge;
+        self.entries[self.count] = entry;
+        self.count += 1;
+    }
+};
 
 pub fn persist(
     storage: *storage_service.Service,
     workspace_id: u64,
     resident: *state_support.ResidentState,
 ) Error!void {
+    // This flag retains live resident state across service reinitialization;
+    // it is not a durability receipt, including on the first failed checkpoint.
+    resident.markDirty();
+    resident.checkpoint_retry_pending = true;
     var live_paths = PathSet{};
     try collectLivePaths(resident, &live_paths);
+    const scratch = table_backing.alloc([workspace.MAX_WORKSPACE_ENTRIES]workspace.Entry) orelse return error.NoSpaceLeft;
+    defer table_backing.free([workspace.MAX_WORKSPACE_ENTRIES]workspace.Entry, scratch);
+    var target = TargetEntries{ .entries = scratch };
+    for (try storage.entries(workspace_id)) |entry| {
+        if (!isManagedRecordPath(entry.pathSlice())) try target.append(entry);
+    }
+    if (target.count + live_paths.count > workspace.MAX_WORKSPACE_ENTRIES) return error.StateTooLarge;
 
-    try deleteStaleRecords(storage, workspace_id, &live_paths, resident);
-    if (live_paths.count == 0) return;
-
+    // Record versions are immutable, but their workspace pointers publish as
+    // one generation. Keep automatic checkpoints away from intermediate heads.
+    if (storage.checkpoint_batch_depth == std.math.maxInt(storage_service.CheckpointBatchDepth)) return error.StateCheckpointFailed;
+    storage.beginCheckpointBatch();
+    var batch_open = true;
+    defer if (batch_open) storage.endCheckpointBatch();
     const tick = resident.nextPersistTick();
-    try storage.beginTransaction(workspace_id);
-    try persistUserRoots(storage, workspace_id, resident, tick);
-    try persistDevices(storage, workspace_id, resident, tick);
-    try persistNetworkPolicies(storage, workspace_id, resident, tick);
-    try persistWorkspacePolicies(storage, workspace_id, resident, tick);
-    try persistReplicas(storage, workspace_id, resident, tick);
-    try persistConflicts(storage, workspace_id, resident, tick);
-    try persistDatabaseContracts(storage, workspace_id, resident, tick);
-    try persistOverlays(storage, workspace_id, resident, tick);
-    try persistTransportCursor(storage, workspace_id, resident, tick);
-    try persistTransportFrames(storage, workspace_id, resident, tick);
-    _ = try storage.commit(workspace_id, tick);
+    try persistUserRoots(storage, workspace_id, resident, tick, &target);
+    try persistDevices(storage, workspace_id, resident, tick, &target);
+    try persistNetworkPolicies(storage, workspace_id, resident, tick, &target);
+    try persistWorkspacePolicies(storage, workspace_id, resident, tick, &target);
+    try persistReplicas(storage, workspace_id, resident, tick, &target);
+    try persistConflicts(storage, workspace_id, resident, tick, &target);
+    try persistDatabaseContracts(storage, workspace_id, resident, tick, &target);
+    try persistOverlays(storage, workspace_id, resident, tick, &target);
+    try persistTransportCursor(storage, workspace_id, resident, tick, &target);
+    try persistTransportFrames(storage, workspace_id, resident, tick, &target);
+    _ = try storage.replaceEntries(workspace_id, target.entries[0..target.count], tick);
+    storage.endCheckpointBatch();
+    batch_open = false;
+    if (storage.checkpoint_enabled) {
+        if (storage.requireDurableBoundary()) |_| {
+            _ = storage.checkpointDurable() catch return error.StateCheckpointFailed;
+        } else |err| switch (err) {
+            error.NoBackingDevice => {},
+            else => return error.StateCheckpointFailed,
+        }
+    }
     resident.has_persisted_state = true;
+    resident.checkpoint_retry_pending = false;
 }
 
 fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet) Error!void {
@@ -234,141 +252,125 @@ fn collectLivePaths(resident: *const state_support.ResidentState, out: *PathSet)
     }
 }
 
-fn deleteStaleRecords(
-    storage: *storage_service.Service,
-    workspace_id: u64,
-    live_paths: *const PathSet,
-    resident: *state_support.ResidentState,
-) Error!void {
-    var stale = StalePathIndexes{};
-    const entries = try storage.entries(workspace_id);
-    for (entries, 0..) |entry, entry_index| {
-        const path = entry.pathSlice();
-        if (!isManagedRecordPath(path) or live_paths.contains(path)) continue;
-        try stale.add(entry_index);
-    }
-    if (stale.count == 0) return;
-
-    const tick = resident.nextPersistTick();
-    try storage.beginTransaction(workspace_id);
-    var index: usize = 0;
-    while (index < @as(usize, stale.count)) : (index += 1) {
-        const entry_index: usize = stale.indexes[index];
-        try storage.stageDelete(workspace_id, entries[entry_index].pathSlice());
-    }
-    _ = try storage.commit(workspace_id, tick);
-}
-
-fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistUserRoots(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.graph.user_roots.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try userRootPath(path_buffer[0..], slot.root.principal_id);
         const bytes = try encodeUserRoot(payload[0..], &slot.root);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistDevices(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.graph.devices.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try devicePath(path_buffer[0..], slot.device.principal_id);
         const bytes = try encodeDevice(payload[0..], &slot.device);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistNetworkPolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.network_policies.policies.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try networkPolicyPath(path_buffer[0..], slot.policy.id);
         const bytes = try encodeNetworkPolicy(payload[0..], &slot.policy);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistWorkspacePolicies(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.workspace_policies.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try workspacePolicyPath(path_buffer[0..], slot.policy.workspace_id);
         const bytes = try encodeWorkspacePolicy(payload[0..], &slot.policy);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistReplicas(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.replica_entries.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try replicaPath(path_buffer[0..], slot.entry.workspace_id, slot.entry.device_id, slot.entry.pathHash());
         const bytes = try encodeReplica(payload[0..], &slot.entry);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistConflicts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.conflicts.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try conflictPath(path_buffer[0..], slot.conflict.workspace_id, slot.conflict.device_id, workspace.pathHash(slot.conflict.pathSlice()));
         const bytes = try encodeConflict(payload[0..], &slot.conflict);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistDatabaseContracts(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.database_contracts.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try databaseContractPath(path_buffer[0..], slot.contract.id);
         const bytes = try encodeDatabaseContract(payload[0..], &slot.contract);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistOverlays(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.overlays.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try overlayPath(path_buffer[0..], slot.overlay.workspace_id);
         const bytes = try encodeOverlay(payload[0..], &slot.overlay);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistTransportFrames(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
+fn persistTransportFrames(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
     var path_buffer: [MAX_RECORD_PATH_BYTES]u8 = undefined;
     var payload: [max_record_bytes]u8 = undefined;
     for (&resident.persisted_state.outbound_transport_frames.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try transportFramePath(path_buffer[0..], .outbound, slot.frame.id);
         const bytes = try encodeTransportFrame(payload[0..], .outbound, slot);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
     for (&resident.persisted_state.inbound_transport_frames.slots) |*slot| {
         if (!slot.in_use) continue;
         const path = try transportFramePath(path_buffer[0..], .inbound, slot.frame.id);
         const bytes = try encodeTransportFrame(payload[0..], .inbound, slot);
-        try putRecord(storage, workspace_id, path, bytes, tick);
+        try target.append(try putRecord(storage, workspace_id, path, bytes, tick));
     }
 }
 
-fn persistTransportCursor(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64) Error!void {
-    if (retainedFrameCoversTransportCursor(resident)) return;
+fn persistTransportCursor(storage: *storage_service.Service, workspace_id: u64, resident: *const state_support.ResidentState, tick: u64, target: *TargetEntries) Error!void {
+    if (retainedFrameCoversTransportCursor(resident)) {
+        const existing = storage.resolve(workspace_id, transport_cursor_path) catch |err| switch (err) {
+            error.EntryNotFound => null,
+            else => return err,
+        };
+        if (existing) |entry| {
+            try target.append(entry);
+            return;
+        }
+    }
     var payload: [max_record_bytes]u8 = undefined;
     const bytes = try encodeTransportCursor(payload[0..], resident.persisted_state.next_transport_frame_id);
-    try putRecord(storage, workspace_id, transport_cursor_path, bytes, tick);
+    try target.append(try putRecord(storage, workspace_id, transport_cursor_path, bytes, tick));
 }
 
 fn putRecord(
@@ -377,27 +379,46 @@ fn putRecord(
     path: []const u8,
     payload: []const u8,
     tick: u64,
-) Error!void {
+) Error!workspace.Entry {
+    const object_id = object_store.ids.object(recordObjectId(workspace_id, path));
     const existing_entry = storage.resolve(workspace_id, path) catch |err| switch (err) {
         error.EntryNotFound => null,
         else => return err,
     };
     if (existing_entry) |entry| {
+        if (!entry.object_id.eql(object_id) or entry.object_type != .blob) return error.CorruptState;
         const existing_version = storage.version(entry.version_id) orelse return error.CorruptState;
+        if (!existing_version.object_id.eql(object_id) or existing_version.object_type != .blob) return error.CorruptState;
         const existing_payload = try storage.versionPayload(existing_version);
-        if (std.mem.eql(u8, existing_payload, payload)) return;
+        if (std.mem.eql(u8, existing_payload, payload)) return entry;
+    }
+
+    // A failed checkpoint may have appended this private record's next version
+    // without publishing its path. Reuse a matching head, or parent the actual
+    // head so a subsequent retry never depends on an obsolete workspace pointer.
+    var parent_version_id: ?object_store.ids.VersionId = null;
+    if (storage.object(object_id)) |object| {
+        if (object.object_type != .blob) return error.CorruptState;
+        const head = storage.version(object.latest_version_id) orelse return error.CorruptState;
+        if (!head.object_id.eql(object_id) or head.object_type != .blob or
+            !std.mem.eql(u8, head.metadata.labelSlice(), record_metadata_label) or
+            !std.mem.eql(u8, head.metadata.contentTypeSlice(), record_content_type)) return error.CorruptState;
+        if (std.mem.eql(u8, try storage.versionPayload(head), payload)) {
+            return workspace.Entry.init(path, object_id, head.id, .blob);
+        }
+        parent_version_id = head.id;
     }
     const result = storage.putLocallySignedVersion(.{
-        .preferred_object_id = object_store.ids.object(recordObjectId(workspace_id, path)),
+        .preferred_object_id = object_id,
         .object_type = .blob,
         .payload = payload,
         .signer = state_support.state_signer,
         .label = record_metadata_label,
         .content_type = record_content_type,
         .created_at_ticks = tick,
-        .parent_version_id = if (existing_entry) |entry| entry.version_id else null,
+        .parent_version_id = parent_version_id,
     }) catch return error.StateSigningFailed;
-    try storage.stagePut(workspace_id, path, result.object_id, result.version_id, .blob);
+    return workspace.Entry.init(path, result.object_id, result.version_id, .blob);
 }
 
 fn decodeRecordInto(resident: *state_support.ResidentState, payload: []const u8) Error!void {
@@ -1103,8 +1124,7 @@ test "persistence path sets retain full capacity with compact metadata" {
     try std.testing.expect(@FieldType(PathSet, "fingerprints") == [workspace.MAX_WORKSPACE_ENTRIES]u32);
     try std.testing.expect(@FieldType(PathSet, "count") == u8);
     try std.testing.expectEqual(@as(usize, PATH_SET_SIZE_CEILING_BYTES), @sizeOf(PathSet));
-    try std.testing.expectEqual(@as(usize, STALE_PATH_INDEXES_SIZE_CEILING_BYTES), @sizeOf(StalePathIndexes));
-    try std.testing.expectEqual(@as(usize, PERSIST_PATH_STACK_SIZE_CEILING_BYTES), @sizeOf(PathSet) + @sizeOf(StalePathIndexes));
+    try std.testing.expectEqual(@as(usize, PERSIST_PATH_METADATA_SIZE_CEILING_BYTES), @sizeOf(PathSet) + @sizeOf(TargetEntries));
 
     var paths = PathSet{};
     var path = [_]u8{ 'p', 0 };
@@ -1126,12 +1146,6 @@ test "persistence path sets retain full capacity with compact metadata" {
     const overlong_path = @as([MAX_RECORD_PATH_BYTES + 1]u8, @splat('x'));
     try std.testing.expectError(error.PathTooLong, boundary_paths.add(&overlong_path));
     try std.testing.expect(!boundary_paths.contains(&overlong_path));
-
-    var stale_paths = StalePathIndexes{};
-    try stale_paths.add(workspace.MAX_WORKSPACE_ENTRIES - 1);
-    try std.testing.expectEqual(@as(u8, 1), stale_paths.count);
-    try std.testing.expectEqual(@as(StalePathIndex, workspace.MAX_WORKSPACE_ENTRIES - 1), stale_paths.indexes[0]);
-    try std.testing.expectError(error.StateTooLarge, stale_paths.add(workspace.MAX_WORKSPACE_ENTRIES));
 }
 
 test "sync record path capacity covers the longest schema key" {
@@ -1147,8 +1161,8 @@ test "sync record path capacity covers the longest schema key" {
 
 test "transport frame cursor persists without retained frames and preserves exhaustion" {
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 9_920 };
     var storage = storage_service.Service.initWithStore(9_921, 9_922, owner, &checkpoint_store);

@@ -116,6 +116,8 @@ const TABLE_OWNER_KERNEL_DYNAMIC: u3 = 1;
 const TABLE_OWNER_USER_PRIVATE: u3 = 2;
 const PAGE_OWNER_BORROWED: u3 = 0;
 const PAGE_OWNER_USER_PRIVATE: u3 = 1;
+const PAGE_OWNER_RETIRED_BORROWED: u3 = 3;
+const PAGE_OWNER_RETIRED_PRIVATE: u3 = 4;
 
 extern var stack_bottom: u8;
 extern const __kernel_text_start: u8;
@@ -421,6 +423,45 @@ fn allocGeneralRunFrom(
     return allocator.allocateBelowWithCursor(count, low_identity_limit, low_cursor);
 }
 
+fn allocGeneralAlignedFrames(count: u32, alignment_frames: u32) ?FrameRun {
+    acquireFrameLock();
+    defer releaseFrameLock();
+    if (allocGeneralAlignedRunFrom(
+        &physical_frames,
+        high_memory_zone_has_free_frames,
+        &low_identity_frame_cursor,
+        count,
+        alignment_frames,
+        LOW_IDENTITY_PHYSICAL_LIMIT,
+        MANAGED_PHYSICAL_BYTES,
+    )) |run| return run;
+    flushFrameCachesLocked();
+    return allocGeneralAlignedRunFrom(
+        &physical_frames,
+        high_memory_zone_has_free_frames,
+        &low_identity_frame_cursor,
+        count,
+        alignment_frames,
+        LOW_IDENTITY_PHYSICAL_LIMIT,
+        MANAGED_PHYSICAL_BYTES,
+    );
+}
+
+fn allocGeneralAlignedRunFrom(
+    allocator: anytype,
+    high_zone_has_free_frames: bool,
+    low_cursor: *frame_allocator.AllocationCursor,
+    count: u32,
+    alignment_frames: u32,
+    low_identity_limit: frame_allocator.PhysicalAddress,
+    managed_bytes: frame_allocator.PhysicalAddress,
+) ?FrameRun {
+    if (high_zone_has_free_frames) {
+        if (allocator.allocateAlignedBetween(count, alignment_frames, low_identity_limit, managed_bytes)) |run| return run;
+    }
+    return allocator.allocateAlignedBetweenWithCursor(count, alignment_frames, 0, low_identity_limit, low_cursor);
+}
+
 pub fn allocIdentityDmaFrames(count: u32) ?u32 {
     acquireFrameLock();
     defer releaseFrameLock();
@@ -611,12 +652,14 @@ fn lookupLeaf(pml4: *PageDirectory, virt_addr: usize) ?*PageTableEntry {
     if (!entryPresent(pml4_entry)) return null;
     const pdpt = tableFromEntry(pml4_entry);
     const pdpt_entry = &pdpt[tableIndex(virt_addr, PDPT_SHIFT)];
+    if ((pdpt_entry.* & ENTRY_LARGE_PAGE) != 0) return pdpt_entry;
     if (!entryPresent(pdpt_entry.*)) return null;
-    if (table64.isLargePage(pdpt_entry.*)) return pdpt_entry;
     const page_directory = tableFromEntry(pdpt_entry.*);
     const directory_entry = &page_directory[tableIndex(virt_addr, PAGE_DIRECTORY_SHIFT)];
+    // Retirement clears PRESENT before its one range-wide TLB invalidation,
+    // while keeping huge-leaf geometry until the frames can be reclaimed.
+    if ((directory_entry.* & ENTRY_LARGE_PAGE) != 0) return directory_entry;
     if (!entryPresent(directory_entry.*)) return null;
-    if (table64.isLargePage(directory_entry.*)) return directory_entry;
     const page_table = tableFromEntry(directory_entry.*);
     return &page_table[tableIndex(virt_addr, PAGE_TABLE_SHIFT)];
 }
@@ -633,6 +676,52 @@ pub const PagePermissions = struct {
     executable: bool,
     user: bool,
 };
+
+const OwnedUserTables = struct {
+    fn table(entry: PageTableEntry) ?*PageTable {
+        const address = directMapAddress(@intCast(entryAddress(entry))) orelse return null;
+        return @ptrFromInt(address);
+    }
+};
+
+pub fn ownedUserPagePermissions(space: *const UserAddressSpace, virtual_address: usize) ?PagePermissions {
+    return ownedUserPagePermissionsWith(OwnedUserTables, space.directory, virtual_address);
+}
+
+fn ownedUserPagePermissionsWith(comptime tables: type, directory: *PageDirectory, virtual_address: usize) ?PagePermissions {
+    if (virtual_address >= 0x0000_8000_0000_0000) return null;
+    var current = directory;
+    var writable = true;
+    var executable = true;
+    for ([_]u6{ PML4_SHIFT, PDPT_SHIFT, PAGE_DIRECTORY_SHIFT }, 0..) |shift, level| {
+        const entry = current[tableIndex(virtual_address, shift)];
+        if (!entryPresent(entry) or (entry & ENTRY_USER) == 0) return null;
+        writable = writable and (entry & ENTRY_WRITABLE) != 0;
+        executable = executable and table64.isExecutable(entry);
+        if (table64.isLargePage(entry)) {
+            // User mappers emit 2 MiB leaves only; inherited 1 GiB leaves and
+            // unsupported geometry must never become physical copy aliases.
+            if (level != 2) return null;
+            return ownedLeafPermissions(entry, writable, executable, @intCast(LARGE_2M_PAGE_SIZE));
+        }
+        if (entryOwner(entry) != TABLE_OWNER_USER_PRIVATE) return null;
+        current = tables.table(entry) orelse return null;
+    }
+    const leaf = current[tableIndex(virtual_address, PAGE_TABLE_SHIFT)];
+    if (table64.isLargePage(leaf)) return null;
+    return ownedLeafPermissions(leaf, writable, executable, PAGE_SIZE);
+}
+
+fn ownedLeafPermissions(entry: PageTableEntry, writable: bool, executable: bool, leaf_size: usize) ?PagePermissions {
+    if (!entryPresent(entry) or entryOwner(entry) != PAGE_OWNER_USER_PRIVATE or (entry & ENTRY_USER) == 0) return null;
+    const physical = entryAddress(entry);
+    if (physical % leaf_size != 0 or physical > MANAGED_PHYSICAL_BYTES - leaf_size) return null;
+    return .{
+        .writable = writable and (entry & ENTRY_WRITABLE) != 0,
+        .executable = executable and table64.isExecutable(entry),
+        .user = true,
+    };
+}
 
 pub fn currentPagePermissions(virt_addr: usize) ?PagePermissions {
     const entry = lookupLeaf(getCurrentPageDirectory(), virt_addr) orelse return null;
@@ -724,12 +813,25 @@ fn mapOwnedUserHugePage(
     space: *UserAddressSpace,
     virtual_address: usize,
     permissions: UserPermissions,
-) UserMapError!void {
+) UserMapError!bool {
     const directory_entry = try ensureOwnedDirectorySlot(space, virtual_address);
     if (entryPresent(directory_entry.*)) return error.AlreadyMapped;
-    const run = allocGeneralFrames(LARGE_2M_FRAME_COUNT) orelse return error.OutOfMemory;
+    const run = allocGeneralAlignedFrames(LARGE_2M_FRAME_COUNT, LARGE_2M_FRAME_COUNT) orelse return false;
+    const entry = ownedUserHugeLeaf(run.base, permissions) catch |err| {
+        releasePhysicalFrames(run.base, run.count) catch
+            haltWithMessage("Corrupt rejected huge-page allocation accounting!\n");
+        return err;
+    };
     const kernel_alias = bytesAtPhysical(run.base);
     @memset(kernel_alias[0..LARGE_2M_PAGE_SIZE], 0);
+    directory_entry.* = entry;
+    return true;
+}
+
+fn ownedUserHugeLeaf(physical: frame_allocator.PhysicalAddress, permissions: UserPermissions) UserMapError!PageTableEntry {
+    // Huge PDEs require their physical base to match their 2 MiB geometry;
+    // ordinary contiguous frame allocation guarantees only 4 KiB alignment.
+    if (physical % LARGE_2M_PAGE_SIZE != 0 or !table64.physicalAddressFits(@intCast(physical))) return error.InvalidRange;
     var flags: u32 = PAGE_PRESENT | PAGE_USER;
     if (permissions.writable) flags |= PAGE_WRITABLE;
     if (permissions.write_through) flags |= PAGE_WRITE_THROUGH;
@@ -738,7 +840,7 @@ fn mapOwnedUserHugePage(
         table64.withExecutePermission(leafFlags(flags, false), permissions.executable) | ENTRY_LARGE_PAGE,
         0,
     );
-    directory_entry.* = tableEntry(@intCast(run.base), entry_flags, PAGE_OWNER_USER_PRIVATE);
+    return tableEntry(@intCast(physical), entry_flags, PAGE_OWNER_USER_PRIVATE);
 }
 
 const LARGE_2M_FRAME_COUNT: u32 = @intCast(LARGE_2M_PAGE_SIZE / PAGE_SIZE);
@@ -789,9 +891,9 @@ pub fn mapOwnedUserRange(
         if (USES_RUNTIME_2M_PAGES and
             remaining >= LARGE_2M_PAGE_SIZE and
             (virtual_address & @as(usize, @intCast(LARGE_2M_PAGE_SIZE - 1))) == 0 and
-            directorySlotFreeForHugePage(space, virtual_address))
+            directorySlotFreeForHugePage(space, virtual_address) and
+            try mapOwnedUserHugePage(space, virtual_address, permissions))
         {
-            try mapOwnedUserHugePage(space, virtual_address, permissions);
             offset += @intCast(LARGE_2M_PAGE_SIZE);
             continue;
         }
@@ -837,11 +939,43 @@ pub fn validateUserRangeAvailable(space: *const UserAddressSpace, virtual_start:
 /// Callers must own the entire range, including any huge leaves it contains.
 pub fn releaseUserRange(space: *const UserAddressSpace, virtual_start: usize, size_bytes: usize) UserMapError!void {
     const size = try checkedUserMappedSize(virtual_start, size_bytes);
+    acquireFrameLock();
+    defer releaseFrameLock();
+    return retireUserRange(UserRangeRetirement{ .space = space }, virtual_start, size);
+}
+
+const UserRangeRetirement = struct {
+    space: *const UserAddressSpace,
+
+    fn lookup(self: @This(), address: usize) ?*PageTableEntry {
+        return lookupLeaf(self.space.directory, address);
+    }
+
+    fn invalidate(self: @This()) void {
+        if (process_context_identifiers_enabled) {
+            x86.invalidatePcid(self.space.pcid);
+            if (remote_pcid_shootdown) |shootdown| shootdown(self.space.pcid);
+        } else if (self.space.directory == getCurrentPageDirectory()) {
+            x86.writeCr3(x86.readCr3());
+        }
+    }
+
+    fn release(_: @This(), physical: frame_allocator.PhysicalAddress, count: u32) void {
+        releasePhysicalFramesLocked(physical, count) catch
+            haltWithMessage("Corrupt retired user-range accounting!\n");
+    }
+};
+
+fn userLeafSize(entry: PageTableEntry) usize {
+    return if ((entry & ENTRY_LARGE_PAGE) != 0) @intCast(LARGE_2M_PAGE_SIZE) else PAGE_SIZE;
+}
+
+fn retireUserRange(backend: anytype, virtual_start: usize, size: usize) UserMapError!void {
     const end = virtual_start + size;
     var address = virtual_start;
     // Validate first: a rejected range must leave all mappings intact.
     while (address < end) {
-        const entry = lookupLeaf(space.directory, address) orelse {
+        const entry = backend.lookup(address) orelse {
             address += PAGE_SIZE;
             continue;
         };
@@ -849,17 +983,18 @@ pub fn releaseUserRange(space: *const UserAddressSpace, virtual_start: usize, si
             address += PAGE_SIZE;
             continue;
         }
-        if ((entry.* & ENTRY_USER) == 0) return error.KernelMappingCollision;
-        const leaf_size: usize = if (table64.isLargePage(entry.*)) @intCast(LARGE_2M_PAGE_SIZE) else PAGE_SIZE;
+        if ((entry.* & ENTRY_USER) == 0 or
+            (entryOwner(entry.*) != PAGE_OWNER_BORROWED and entryOwner(entry.*) != PAGE_OWNER_USER_PRIVATE))
+            return error.KernelMappingCollision;
+        const leaf_size = userLeafSize(entry.*);
         if (address % leaf_size != 0 or end - address < leaf_size) return error.InvalidRange;
         address += leaf_size;
     }
 
-    acquireFrameLock();
-    defer releaseFrameLock();
+    var retired_any = false;
     address = virtual_start;
     while (address < end) {
-        const entry = lookupLeaf(space.directory, address) orelse {
+        const entry = backend.lookup(address) orelse {
             address += PAGE_SIZE;
             continue;
         };
@@ -868,18 +1003,35 @@ pub fn releaseUserRange(space: *const UserAddressSpace, virtual_start: usize, si
             continue;
         }
         const old = entry.*;
-        const leaf_size: usize = if (table64.isLargePage(old)) @intCast(LARGE_2M_PAGE_SIZE) else PAGE_SIZE;
-        entry.* = 0;
-        // Cached translations must disappear before their frames can be reused.
-        if (process_context_identifiers_enabled) {
-            x86.invalidatePcid(space.pcid);
-            if (remote_pcid_shootdown) |shootdown| shootdown(space.pcid);
-        } else if (space.directory == getCurrentPageDirectory()) {
-            invalidate_page(address);
+        const retired_owner: u3 = if (entryOwner(old) == PAGE_OWNER_USER_PRIVATE)
+            PAGE_OWNER_RETIRED_PRIVATE
+        else
+            PAGE_OWNER_RETIRED_BORROWED;
+        entry.* = table64.withOwner(old & ~ENTRY_PRESENT, retired_owner);
+        retired_any = true;
+        address += userLeafSize(old);
+    }
+    if (!retired_any) return;
+
+    // One flush retires the complete range. No frame can re-enter the allocator
+    // until every remote CPU has acknowledged this invalidation.
+    backend.invalidate();
+    address = virtual_start;
+    while (address < end) {
+        const entry = backend.lookup(address) orelse {
+            address += PAGE_SIZE;
+            continue;
+        };
+        const old = entry.*;
+        const owner = entryOwner(old);
+        if (owner != PAGE_OWNER_RETIRED_PRIVATE and owner != PAGE_OWNER_RETIRED_BORROWED) {
+            address += PAGE_SIZE;
+            continue;
         }
-        if (entryOwner(old) == PAGE_OWNER_USER_PRIVATE) {
-            releasePhysicalFramesLocked(@intCast(entryAddress(old)), @intCast(leaf_size / PAGE_SIZE)) catch
-                haltWithMessage("Corrupt retired user-range accounting!\n");
+        const leaf_size = userLeafSize(old);
+        entry.* = 0;
+        if (owner == PAGE_OWNER_RETIRED_PRIVATE) {
+            backend.release(@intCast(entryAddress(old)), @intCast(leaf_size / PAGE_SIZE));
         }
         address += leaf_size;
     }
@@ -898,6 +1050,28 @@ pub fn ownedUserPageIsExecutable(space: *const UserAddressSpace, virtual_address
     if (!entryPresent(entry.*) or entryOwner(entry.*) != PAGE_OWNER_USER_PRIVATE) return null;
     if ((entry.* & ENTRY_USER) == 0) return null;
     return table64.isExecutable(entry.*);
+}
+
+fn writablePrivateUserLeaf(entry: PageTableEntry) UserWriteError!PageTableEntry {
+    if (!entryPresent(entry) or entryOwner(entry) != PAGE_OWNER_USER_PRIVATE or
+        (entry & ENTRY_USER) == 0 or table64.isLargePage(entry) or table64.isExecutable(entry))
+        return error.PageNotOwned;
+    return entry | ENTRY_WRITABLE;
+}
+
+pub fn promoteOwnedUserPageForWrite(space: *const UserAddressSpace, virtual_start: usize) UserWriteError!bool {
+    if (pageOffset(virtual_start) != 0) return error.InvalidRange;
+    const entry = lookupLeaf(space.directory, virtual_start) orelse return error.PageNotOwned;
+    const promoted = try writablePrivateUserLeaf(entry.*);
+    if (promoted == entry.*) return false;
+    entry.* = promoted;
+    if (process_context_identifiers_enabled) {
+        x86.invalidatePcid(space.pcid);
+        if (remote_pcid_shootdown) |shootdown| shootdown(space.pcid);
+    } else if (space.directory == getCurrentPageDirectory()) {
+        invalidate_page(virtual_start);
+    }
+    return true;
 }
 
 pub fn writeOwnedUserRange(
@@ -1595,6 +1769,49 @@ test "aligned user mappings prefer 2 MiB leaves" {
     try std.testing.expect(USES_RUNTIME_2M_PAGES);
     try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 2 * 1024 * 1024), LARGE_2M_PAGE_SIZE);
     try std.testing.expectEqual(@as(u32, 512), LARGE_2M_FRAME_COUNT);
+    const permissions = UserPermissions{ .writable = true };
+    try std.testing.expectError(error.InvalidRange, ownedUserHugeLeaf(PAGE_SIZE, permissions));
+    try std.testing.expectError(error.InvalidRange, ownedUserHugeLeaf(2 * PAGE_SIZE, permissions));
+    const aligned = try ownedUserHugeLeaf(LARGE_2M_PAGE_SIZE, permissions);
+    try std.testing.expect(table64.isLargePage(aligned));
+    try std.testing.expectEqual(@as(usize, LARGE_2M_PAGE_SIZE), entryAddress(aligned));
+}
+
+test "huge allocation preserves high-zone availability and falls back without leaking frames" {
+    const low_identity_limit = LARGE_2M_PAGE_SIZE;
+    const managed_bytes = 2 * LARGE_2M_PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
+    // Both aligned 2 MiB spans contain one unavailable frame, though almost
+    // their entire physical memory remains suitable for ordinary user pages.
+    try allocator.reserve(.{ .base = 0, .count = 1 });
+    try allocator.reserve(.{ .base = low_identity_limit, .count = 1 });
+    var high_zone_has_free_frames = true;
+    var low_cursor = frame_allocator.AllocationCursor{};
+    const before = allocator.stats();
+    try std.testing.expect(allocGeneralAlignedRunFrom(
+        &allocator,
+        high_zone_has_free_frames,
+        &low_cursor,
+        LARGE_2M_FRAME_COUNT,
+        LARGE_2M_FRAME_COUNT,
+        low_identity_limit,
+        managed_bytes,
+    ) == null);
+    try std.testing.expectEqual(before, allocator.stats());
+    const ordinary = allocGeneralRunFrom(
+        &allocator,
+        &high_zone_has_free_frames,
+        &low_cursor,
+        1,
+        low_identity_limit,
+        managed_bytes,
+    ).?;
+    try std.testing.expectEqual(low_identity_limit + PAGE_SIZE, ordinary.base);
+    try std.testing.expect(high_zone_has_free_frames);
+    try allocator.release(ordinary);
+    try std.testing.expectEqual(before, allocator.stats());
 }
 
 test "leaf mappings encode global and execute permissions explicitly" {
@@ -1605,4 +1822,135 @@ test "leaf mappings encode global and execute permissions explicitly" {
     const user_leaf = leafFlags(PAGE_PRESENT | PAGE_USER | PAGE_EXECUTABLE, false);
     try std.testing.expect((user_leaf & table64.NO_EXECUTE) == 0);
     try std.testing.expect((user_leaf & ENTRY_GLOBAL) == 0);
+}
+
+test "private-copy promotion changes only writable owned user data leaves" {
+    const original = tableEntry(0x2000, ENTRY_PRESENT | ENTRY_USER | table64.NO_EXECUTE, PAGE_OWNER_USER_PRIVATE);
+    const promoted = try writablePrivateUserLeaf(original);
+    try std.testing.expectEqual(original | ENTRY_WRITABLE, promoted);
+    try std.testing.expectEqual(promoted, try writablePrivateUserLeaf(promoted));
+    for ([_]PageTableEntry{
+        0,
+        original & ~ENTRY_PRESENT,
+        original & ~ENTRY_USER,
+        original & ~table64.NO_EXECUTE,
+        original | ENTRY_LARGE_PAGE,
+        table64.withOwner(original, PAGE_OWNER_BORROWED),
+    }) |invalid| {
+        try std.testing.expectError(error.PageNotOwned, writablePrivateUserLeaf(invalid));
+    }
+}
+
+test "user copy permissions validate private hierarchy and effective leaf permissions" {
+    const Tables = struct {
+        var storage: [3]PageTable = @splat(@splat(0));
+
+        fn table(entry: PageTableEntry) ?*PageTable {
+            return switch (entryAddress(entry)) {
+                0x1000 => &storage[0],
+                0x2000 => &storage[1],
+                0x3000 => &storage[2],
+                else => null,
+            };
+        }
+    };
+    defer Tables.storage = @splat(@splat(0));
+    var directory: PageDirectory = @splat(0);
+    const virtual_address = 0x4040_3011;
+    const flags = ENTRY_PRESENT | ENTRY_USER | ENTRY_WRITABLE;
+    directory[0] = tableEntry(0x1000, flags, TABLE_OWNER_USER_PRIVATE);
+    Tables.storage[0][1] = tableEntry(0x2000, flags, TABLE_OWNER_USER_PRIVATE);
+    Tables.storage[1][2] = tableEntry(0x3000, flags, TABLE_OWNER_USER_PRIVATE);
+    const leaf = tableEntry(0x8000, flags | table64.NO_EXECUTE, PAGE_OWNER_USER_PRIVATE);
+    Tables.storage[2][3] = leaf;
+    try std.testing.expectEqualDeep(PagePermissions{ .writable = true, .executable = false, .user = true }, ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?);
+
+    directory[0] &= ~ENTRY_WRITABLE;
+    try std.testing.expect(!ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.writable);
+    directory[0] |= ENTRY_WRITABLE | table64.NO_EXECUTE;
+    Tables.storage[2][3] = leaf & ~table64.NO_EXECUTE;
+    try std.testing.expect(!ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.executable);
+    directory[0] &= ~table64.NO_EXECUTE;
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.executable);
+    directory[0] &= ~ENTRY_USER;
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    directory[0] |= ENTRY_USER;
+    Tables.storage[0][1] = table64.withOwner(Tables.storage[0][1], TABLE_OWNER_INHERITED);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    Tables.storage[0][1] = table64.withOwner(Tables.storage[0][1], TABLE_OWNER_USER_PRIVATE);
+
+    for ([_]PageTableEntry{
+        leaf & ~ENTRY_PRESENT,
+        leaf & ~ENTRY_USER,
+        table64.withOwner(leaf, PAGE_OWNER_BORROWED),
+        table64.withOwner(leaf, PAGE_OWNER_RETIRED_PRIVATE),
+        leaf | ENTRY_LARGE_PAGE,
+        tableEntry(MANAGED_PHYSICAL_BYTES, flags, PAGE_OWNER_USER_PRIVATE),
+    }) |invalid| {
+        Tables.storage[2][3] = invalid;
+        try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    }
+    Tables.storage[1][2] = tableEntry(0x400000, flags | ENTRY_LARGE_PAGE, PAGE_OWNER_USER_PRIVATE);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.writable);
+    Tables.storage[1][2] = tableEntry(0x401000, flags | ENTRY_LARGE_PAGE, PAGE_OWNER_USER_PRIVATE);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    Tables.storage[0][1] = tableEntry(0x40000000, flags | ENTRY_LARGE_PAGE, PAGE_OWNER_USER_PRIVATE);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, 0x0000_8000_0000_0000) == null);
+}
+
+test "user range retirement batches invalidation before private frames are reused" {
+    const Model = struct {
+        entries: [3]PageTableEntry,
+        invalidations: usize = 0,
+        releases: usize = 0,
+        released_frames: u32 = 0,
+        ordering_valid: bool = true,
+
+        fn lookup(self: *@This(), address: usize) ?*PageTableEntry {
+            return switch (address) {
+                0x200000...0x3FFFFF => &self.entries[0],
+                0x400000...0x400FFF => &self.entries[1],
+                0x401000...0x401FFF => &self.entries[2],
+                else => null,
+            };
+        }
+
+        fn invalidate(self: *@This()) void {
+            for (self.entries) |entry| {
+                if (entryPresent(entry)) self.ordering_valid = false;
+            }
+            if (self.releases != 0) self.ordering_valid = false;
+            self.invalidations += 1;
+        }
+
+        fn release(self: *@This(), _: frame_allocator.PhysicalAddress, count: u32) void {
+            if (self.invalidations != 1) self.ordering_valid = false;
+            self.releases += 1;
+            self.released_frames += count;
+        }
+    };
+    const flags = ENTRY_PRESENT | ENTRY_USER | ENTRY_WRITABLE | table64.NO_EXECUTE;
+    var model = Model{ .entries = .{
+        tableEntry(0x400000, flags | ENTRY_LARGE_PAGE, PAGE_OWNER_USER_PRIVATE),
+        tableEntry(0x9000, flags, PAGE_OWNER_USER_PRIVATE),
+        tableEntry(0xA000, flags, PAGE_OWNER_BORROWED),
+    } };
+    const before = model;
+    try std.testing.expectError(error.InvalidRange, retireUserRange(&model, 0x201000, 0x200000));
+    try std.testing.expectEqualDeep(before, model);
+    model.entries[2] &= ~ENTRY_USER;
+    const with_kernel_collision = model;
+    try std.testing.expectError(error.KernelMappingCollision, retireUserRange(&model, 0x200000, 0x202000));
+    try std.testing.expectEqualDeep(with_kernel_collision, model);
+    model = before;
+    try retireUserRange(&model, 0x200000, 0x202000);
+    try std.testing.expect(model.ordering_valid);
+    try std.testing.expectEqual(@as(usize, 1), model.invalidations);
+    try std.testing.expectEqual(@as(usize, 2), model.releases);
+    try std.testing.expectEqual(@as(u32, 513), model.released_frames);
+    try std.testing.expectEqual(@as([3]PageTableEntry, @splat(0)), model.entries);
+    try retireUserRange(&model, 0x200000, 0x202000);
+    try std.testing.expectEqual(@as(usize, 1), model.invalidations);
+    try std.testing.expectEqual(@as(usize, 2), model.releases);
 }

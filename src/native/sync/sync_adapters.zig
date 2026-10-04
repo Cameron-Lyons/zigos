@@ -704,7 +704,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
         .seed = signing.seedFromByte(0x92),
     };
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
     var storage = storage_service.Service.initWithStore(402, 5, storage_owner, &checkpoint_store);
     const document = try storage.putVersion(.{
         .object_type = .document,
@@ -749,7 +749,7 @@ test "mergeable document adapter applies deterministic CRDT operations and rejec
         small_buffer[0..],
     ));
 
-    checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "document operation log merges CRDT operations idempotently with vector clocks" {
@@ -822,7 +822,7 @@ test "default chunk media adapter reports concrete payload chunks" {
         .seed = signing.seedFromByte(0x91),
     };
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
     var storage = storage_service.Service.initWithStore(401, 4, storage_owner, &checkpoint_store);
     const media_payload = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789";
     const media = try storage.putVersion(.{
@@ -848,7 +848,7 @@ test "secret transfer adapter refuses plaintext secret payloads" {
         .seed = signing.seedFromByte(0x93),
     };
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
     var storage = storage_service.Service.initWithStore(403, 6, storage_owner, &checkpoint_store);
     const plaintext_secret = try storage.putVersion(.{
         .object_type = .secret,
@@ -882,7 +882,7 @@ test "secret transfer adapter refuses plaintext secret payloads" {
     try std.testing.expect(transferred.transferred);
     try std.testing.expect(transferred.encrypted_payload);
 
-    checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "transport queue records encrypted semantic replication frames" {

@@ -11,6 +11,7 @@ const policy_object = @import("../policy/policy_object.zig");
 const event_ledger = @import("event_ledger.zig");
 const binary_cursor = @import("binary_cursor");
 pub const unlock_context = @import("unlock_context.zig");
+const operation_guard = @import("operation_guard.zig");
 
 pub const MAX_CREDENTIALS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 48;
@@ -70,6 +71,7 @@ pub const VaultAuthority = struct {
     task_id: u64,
     now_ticks: u64,
     unlock_session: *const unlock_context.Session,
+    publication_guard: ?*const operation_guard.Guard = null,
     ledger: ?*event_ledger.Ledger = null,
 };
 
@@ -247,7 +249,7 @@ pub const Error = error{
     RecoveryThresholdNotMet,
     RelyingPartyTooLong,
     TrustedUnlockRequired,
-} || vault_service.Error || device_graph.Error || unlock_context.Error;
+} || vault_service.Error || device_graph.Error || unlock_context.Error || operation_guard.Error;
 
 pub const Store = struct {
     credentials: [MAX_CREDENTIALS]CredentialRecord = @as([MAX_CREDENTIALS]CredentialRecord, @splat(zeroCredential())),
@@ -376,6 +378,7 @@ pub const Store = struct {
         authority: VaultAuthority,
         request: AssertionRequest,
     ) Error!Assertion {
+        const live_authority = try currentAuthority(authority);
         if (request.origin.len > MAX_ORIGIN_BYTES) return error.OriginTooLong;
         if (request.challenge.len == 0) return error.InvalidChallenge;
         if (request.challenge.len > MAX_CHALLENGE_BYTES) return error.ChallengeTooLong;
@@ -386,15 +389,15 @@ pub const Store = struct {
         if (!originMatchesRelyingParty(request.origin, credential.relyingPartySlice())) return error.PhishingOriginRejected;
 
         const unlock = request.local_unlock orelse return error.LocalUnlockRequired;
-        try verifyLocalUnlock(graph, credential, request.device, unlock, request.challenge, authority.now_ticks, authority.unlock_session);
-        const secret = try signingSecret(authority, request.key_handle_id, credential.owner);
+        try verifyLocalUnlock(graph, credential, request.device, unlock, request.challenge, live_authority.now_ticks, live_authority.unlock_session);
+        const secret = try signingSecret(live_authority, request.key_handle_id, credential.owner);
         if (secret.id != credential.secret_id or !std.mem.eql(u8, &secret.sealed_digest, &credential.sealed_secret_digest)) return error.CredentialKeyBindingMismatch;
         const next_counter = std.math.add(u64, credential.assertion_count, 1) catch return error.CredentialCounterExhausted;
-        const decision = authority.policies.credentialAssertionDecision(authority.subjects, .{
+        const decision = live_authority.policies.credentialAssertionDecision(live_authority.subjects, .{
             .phishing_resistant = true,
             .hardware_backed = true,
             .local_unlock_verified = true,
-            .unlock_age_ticks = authority.now_ticks - unlock.issued_at_ticks,
+            .unlock_age_ticks = live_authority.now_ticks - unlock.issued_at_ticks,
         });
         if (!decision.allowed) return error.PolicyDenied;
 
@@ -417,16 +420,30 @@ pub const Store = struct {
             .device_platform_backed = device_record.usesPlatformBackedKey(),
             .primary_device_assertion = credential.primary_device.eql(request.device),
             .device_trust_generation = device_record.trust_generation,
-            .unlock_age_ticks = authority.now_ticks - unlock.issued_at_ticks,
+            .unlock_age_ticks = live_authority.now_ticks - unlock.issued_at_ticks,
         };
         assertion.relying_party_id_len = @intCast(native_util.copyTextExact(&assertion.relying_party_id, credential.relyingPartySlice()) catch return error.RelyingPartyTooLong);
         assertion.origin_len = @intCast(native_util.copyTextExact(&assertion.origin, request.origin) catch return error.OriginTooLong);
         assertion.challenge_len = @intCast(native_util.copyTextExact(&assertion.challenge, request.challenge) catch return error.ChallengeTooLong);
         const digest = assertionDigest(&assertion);
-        assertion.signature = try signThroughVault(authority, request.key_handle_id, &digest);
-        if (!verifyAssertion(&assertion, &credential.credential_public_key)) return error.InvalidCredentialSignature;
+        assertion.signature = try signThroughVault(live_authority, request.key_handle_id, &digest);
+        const publication_authority = try currentAuthority(live_authority);
+        try requireActiveCredential(credential);
+        const current_device = try requireCredentialDevice(graph, credential, request.device);
+        try verifyLocalUnlock(graph, credential, request.device, unlock, request.challenge, publication_authority.now_ticks, publication_authority.unlock_session);
+        const current_secret = try signingSecret(publication_authority, request.key_handle_id, credential.owner);
+        if (current_secret.id != credential.secret_id or !std.mem.eql(u8, &current_secret.sealed_digest, &credential.sealed_secret_digest)) return error.CredentialKeyBindingMismatch;
+        if (!publication_authority.policies.credentialAssertionDecision(publication_authority.subjects, .{
+            .phishing_resistant = true,
+            .hardware_backed = true,
+            .local_unlock_verified = true,
+            .unlock_age_ticks = publication_authority.now_ticks - unlock.issued_at_ticks,
+        }).allowed) return error.PolicyDenied;
+        if (credential.credential_generation != assertion.credential_generation or credential.assertion_count != next_counter - 1 or
+            current_device.trust_generation != assertion.device_trust_generation or
+            !verifyAssertion(&assertion, &credential.credential_public_key)) return error.InvalidCredentialSignature;
         credential.assertion_count = next_counter;
-        credential.last_asserted_at_ticks = authority.now_ticks;
+        credential.last_asserted_at_ticks = publication_authority.now_ticks;
         return assertion;
     }
 
@@ -589,14 +606,21 @@ pub const UnlockRequest = struct {
 // device-key lease stays in that service; this API does not verify a PIN or a
 // biometric and is not an app request boundary.
 pub fn issueLocalUnlockProof(graph: *const device_graph.Graph, authority: VaultAuthority, request: UnlockRequest) Error!LocalUnlockProof {
+    const live_authority = try currentAuthority(authority);
     // Signing a new challenge must not refresh the age of an earlier PIN or
     // biometric verification. Lease checks still use the current service time.
-    if (request.verified_at_ticks > authority.now_ticks or authority.now_ticks >= request.expires_at_ticks) return error.LocalUnlockExpired;
-    const device = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
-    _ = try signingSecret(authority, request.key_handle_id, request.owner);
-    var proof = try makeLocalUnlockProof(try authority.unlock_session.binding(), request.owner, request.device, request.relying_party_id, request.challenge, request.method, request.verified_at_ticks, request.expires_at_ticks);
+    if (request.verified_at_ticks > live_authority.now_ticks or live_authority.now_ticks >= request.expires_at_ticks) return error.LocalUnlockExpired;
+    _ = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
+    const context = try live_authority.unlock_session.binding();
+    _ = try signingSecret(live_authority, request.key_handle_id, request.owner);
+    var proof = try makeLocalUnlockProof(context, request.owner, request.device, request.relying_party_id, request.challenge, request.method, request.verified_at_ticks, request.expires_at_ticks);
     const digest = localUnlockDigest(&proof);
-    const signature = try signThroughVault(authority, request.key_handle_id, &digest);
+    const signature = try signThroughVault(live_authority, request.key_handle_id, &digest);
+    const publication_authority = try currentAuthority(live_authority);
+    try publication_authority.unlock_session.require(proof.context);
+    if (publication_authority.now_ticks >= proof.expires_at_ticks) return error.LocalUnlockExpired;
+    _ = try signingSecret(publication_authority, request.key_handle_id, request.owner);
+    const device = try requireTrustedDeviceForOwner(graph, request.owner, request.device);
     if (signature.value_len != signing.SIGNATURE_BYTES or !std.mem.eql(u8, signature.publicKeySlice(), device.device_signature.publicKeySlice())) return error.InvalidLocalUnlock;
     proof.signature = signature.value[0..signing.SIGNATURE_BYTES].*;
     try verifyUnlockSignature(device, &proof);
@@ -844,12 +868,23 @@ fn localUnlockDigest(proof: *const LocalUnlockProof) crypto_hash.Digest {
 
 fn signingSecret(authority: VaultAuthority, handle_id: u64, owner: principal.PrincipalId) Error!*const secure_secret_store.SecretRecord {
     if (authority.holder.kind != .service) return error.InvalidIdentityAuthority;
-    const handle = authority.vault.findHandle(handle_id) orelse return error.VaultHandleNotFound;
+    const handle = try authority.vault.requireSigningHandle(authority.policies, authority.subjects, .{
+        .holder = authority.holder,
+        .task_id = authority.task_id,
+        .handle_id = handle_id,
+        .now_ticks = authority.now_ticks,
+    });
     const secret = authority.vault.store.describeSecret(handle.secret_id) orelse return error.SecretNotFound;
     if (!secret.owner.eql(owner)) return error.SecretOwnerMismatch;
     if (!secret.hardware_backed or !secret.hardware_provider_used or !secret.sealed_digest_present or
         secret.exportable or secret.resident_material or secret.sealedBlob() == null) return error.CredentialKeyCustodyRequired;
     return secret;
+}
+
+fn currentAuthority(authority: VaultAuthority) Error!VaultAuthority {
+    var current = authority;
+    current.now_ticks = try operation_guard.currentTicks(authority.publication_guard, authority.now_ticks);
+    return current;
 }
 
 fn signThroughVault(authority: VaultAuthority, handle_id: u64, digest: *const crypto_hash.Digest) Error!manifest.Signature {

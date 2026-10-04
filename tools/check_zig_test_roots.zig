@@ -2,6 +2,7 @@ const std = @import("std");
 const common = @import("check_common.zig");
 
 const TEST_ROOTS = [_][]const u8{
+    "tools/host/main.zig",
     "src/check_release_security_gate.zig",
     "src/native_host_test.zig",
     "src/zigos_spec_test.zig",
@@ -14,6 +15,8 @@ const NamedImport = struct {
 };
 
 const NAMED_IMPORTS = [_]NamedImport{
+    .{ .name = "native_smoke_markers", .path = "src/native_smoke_markers.zig" },
+    .{ .name = "release_catalog", .path = "src/tools/release_catalog.zig" },
     .{ .name = "binary_cursor", .path = "src/native/core/binary_cursor.zig" },
     .{ .name = "userspace_wire", .path = "src/native/task/userspace_wire.zig" },
 };
@@ -99,7 +102,7 @@ fn loadTrackedZigFiles(
     io: std.Io,
 ) !TrackedFiles {
     const result = try std.process.run(gpa, io, .{
-        .argv = &.{ "jj", "file", "list", "-T", "path ++ \"\\0\"", "src" },
+        .argv = &.{ "jj", "file", "list", "-T", "path ++ \"\\0\"", "src", "tools/host" },
         .stdout_limit = .limited(common.child_stdout_max_bytes),
         .stderr_limit = .limited(common.child_stderr_max_bytes),
     });
@@ -184,7 +187,7 @@ fn resolveImport(
 
     const owner_dir = std.fs.path.dirname(owner) orelse "";
     const normalized = try normalizeRelativePath(allocator, owner_dir, import_path);
-    if (!std.mem.startsWith(u8, normalized, "src/")) return null;
+    if (!std.mem.startsWith(u8, normalized, "src/") and !std.mem.startsWith(u8, normalized, "tools/host/")) return null;
     if (!common.pathExists(io, normalized)) return null;
     return normalized;
 }

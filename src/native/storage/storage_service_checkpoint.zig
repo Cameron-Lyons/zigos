@@ -46,12 +46,19 @@ pub const CheckpointStore = struct {
         return &self.checkpoint_volume;
     }
 
-    pub fn adoptRootVolume(self: *CheckpointStore, root_volume: *storage_volume.Volume) void {
+    pub fn operationBusy(self: *const CheckpointStore) bool {
+        if (comptime shares_root_volume) return storage_volume.attachmentBusy();
+        return self.checkpoint_volume.attachmentBusy();
+    }
+
+    pub fn adoptRootVolume(self: *CheckpointStore, root_volume: *storage_volume.Volume) bool {
+        if (self.operationBusy() or root_volume.operationBusy()) return false;
         if (comptime shares_root_volume) {
             std.debug.assert(root_volume == storage_volume.defaultVolume());
         } else {
-            self.checkpoint_volume.adoptAttachedBackendFrom(root_volume);
+            if (!self.checkpoint_volume.adoptAttachedBackendFrom(root_volume)) return false;
         }
+        return true;
     }
 
     pub fn hasCachedPersistentState(self: *const CheckpointStore) bool {
@@ -62,7 +69,8 @@ pub const CheckpointStore = struct {
         return self.last_checkpoint_error == null;
     }
 
-    pub fn resetPreparedState(self: *CheckpointStore) void {
+    pub fn resetPreparedState(self: *CheckpointStore) bool {
+        if (self.operationBusy()) return false;
         self.store.reset();
         self.workspaces.reset();
         self.has_persisted_state = false;
@@ -70,13 +78,14 @@ pub const CheckpointStore = struct {
         self.last_checkpoint_generation = 0;
         self.last_checkpoint_error = null;
         self.checkpoint_retry_count = 0;
+        return true;
     }
 
     pub fn loadPreparedStateFromAttachedVolume(self: *CheckpointStore) bool {
         const volume = self.volumePtr();
         if (comptime !shares_root_volume) {
             if (storage_volume.hasAttachedDevice()) {
-                volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+                if (!volume.adoptAttachedBackendFrom(storage_volume.defaultVolume())) return false;
             }
         }
         if (!volume.hasAttachedDevice()) return false;
@@ -88,17 +97,18 @@ pub const CheckpointStore = struct {
         return false;
     }
 
-    pub fn resetPersistent(self: *CheckpointStore) void {
-        self.resetPreparedState();
+    pub fn resetPersistent(self: *CheckpointStore) bool {
+        if (self.operationBusy()) return false;
         if (comptime !shares_root_volume) {
-            self.checkpoint_volume.clearAttachedVolume();
-            self.checkpoint_volume.clearAttachedBackend();
+            if (!self.checkpoint_volume.clearAttachedVolume()) return false;
+            if (!self.checkpoint_volume.clearAttachedBackend()) return false;
         }
+        return self.resetPreparedState();
     }
 
     pub fn preparePersistentState(self: *CheckpointStore) bool {
         if (self.has_persisted_state) return false;
-        self.resetPreparedState();
+        if (!self.resetPreparedState()) return false;
         return self.loadPreparedStateFromAttachedVolume();
     }
 };
@@ -141,7 +151,10 @@ pub fn flushCheckpoint(service: anytype) void {
     const volume = service.checkpoint_store.volumePtr();
     if (comptime !shares_root_volume) {
         if (storage_volume.hasAttachedDevice()) {
-            volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+            if (!volume.adoptAttachedBackendFrom(storage_volume.defaultVolume())) {
+                service.checkpoint_store.last_checkpoint_error = error.VolumeOperationBusy;
+                return;
+            }
         }
     }
     if (!volume.hasAttachedDevice()) return;
@@ -160,7 +173,10 @@ pub fn flushCheckpoint(service: anytype) void {
     };
     service.checkpoint_store.last_checkpoint_generation = result.generation;
     service.checkpoint_store.last_checkpoint_error = null;
-    service.checkpoint_store.dirty = false;
+    service.checkpoint_store.dirty = !result.snapshot_current or service.store.dirtyObjectIds().len != 0 or
+        service.store.dirtyVersionIds().len != 0 or
+        service.workspaces.dirtyWorkspaceIds().len != 0 or
+        service.workspaces.dirtySnapshotIds().len != 0;
 }
 
 // A clean RAM snapshot is not a durability acknowledgement. Explicit saves
@@ -170,7 +186,7 @@ pub fn requireDurableBoundary(service: anytype) DurabilityError!void {
     if (service.deferred_checkpoint_count != 0 or service.checkpoint_batch_depth != 0) return error.CheckpointDeferred;
     const volume = service.checkpoint_store.volumePtr();
     if (comptime !shares_root_volume) {
-        if (storage_volume.hasAttachedDevice()) volume.adoptAttachedBackendFrom(storage_volume.defaultVolume());
+        if (storage_volume.hasAttachedDevice() and !volume.adoptAttachedBackendFrom(storage_volume.defaultVolume())) return error.VolumeOperationBusy;
     }
     if (!volume.hasAttachedDevice()) return error.NoBackingDevice;
 }

@@ -333,7 +333,7 @@ fn proveQuoteWorker(manager: anytype, io: anytype, parent: tpm.PersistentParent,
         io.last_command = 0;
         try worker.start(owner, @fromBackingInt(@intCast(1)), now);
         const dispatch_before = (scheduler.taskDispatchStats(task_id) orelse return error.MissingQuotePeerTask).dispatch_count;
-        _ = scheduler.wakeTask(task_id, .external_event, 0, now);
+        _ = manager.wakeUserspaceTask(task_id, now);
         const deadline = clock.afterMilliseconds(20_000);
         var cancelled = false;
         while (!deadline.expired()) {

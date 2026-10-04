@@ -1,4 +1,5 @@
 const std = @import("std");
+const host_tools = @import("host_tools.zig");
 const native_modules = @import("native_modules.zig");
 const tests_build = @import("tests.zig");
 
@@ -19,46 +20,30 @@ pub fn addCheckSteps(
     zig_test_roots_step.dependOn(&zig_test_roots_cmd.step);
 
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic and userspace runtime");
+    const host_tool_tests = host_tools.addTests(b);
+    b.step("host-tool-tests", "Test native file, release, hardware and QEMU utilities").dependOn(&host_tool_tests.step);
+    host_tests_step.dependOn(&host_tool_tests.step);
     host_tests_step.dependOn(&zig_test_roots_cmd.step);
     host_tests_step.dependOn(&test_artifacts.run_host_tests.step);
     host_tests_step.dependOn(&test_artifacts.run_userspace_runtime_tests.step);
-    const production_boot_log_checker_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/test-production-boot-log-checker.sh",
-    });
+    const production_boot_log_checker_cmd = host_tools.addRun(b, "test-production-boot-log-checker");
     const production_boot_log_checker_step = b.step("production-boot-log-checker-test", "Exercise exact production checkpoint and readiness ordering checks");
     production_boot_log_checker_step.dependOn(&production_boot_log_checker_cmd.step);
     host_tests_step.dependOn(&production_boot_log_checker_cmd.step);
 
-    const fmt_check_script =
-        \\jj file list -T 'path ++ "\0"' '*.zig' | while IFS= read -r -d '' file; do [ -e "$file" ] && printf '%s\0' "$file"; done | xargs -0 ./scripts/zig.sh fmt --check
-    ;
-    const fmt_check_cmd = b.addSystemCommand(&.{
-        "bash",
-        "-c",
-        fmt_check_script,
-    });
+    const fmt_check_cmd = host_tools.addRun(b, "fmt-check");
     const fmt_check_step = b.step("fmt-check", "Check Zig formatting for tracked source files");
     fmt_check_step.dependOn(&fmt_check_cmd.step);
 
-    const shell_lint_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/lint-shell.sh",
-    });
+    const shell_lint_cmd = host_tools.addRun(b, "lint-shell");
     const shell_lint_step = b.step("shell-lint", "Run ShellCheck over all repository shell scripts");
     shell_lint_step.dependOn(&shell_lint_cmd.step);
 
-    const zig_lint_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/lint-zig.sh",
-    });
+    const zig_lint_cmd = host_tools.addRun(b, "lint-zig");
     const zig_lint_step = b.step("zig-lint", "Run zlint over Zig sources when zlint is installed");
     zig_lint_step.dependOn(&zig_lint_cmd.step);
 
-    const action_lint_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/lint-actions.sh",
-    });
+    const action_lint_cmd = host_tools.addRun(b, "lint-actions");
     const action_lint_step = b.step("action-lint", "Run actionlint over GitHub workflows when actionlint is installed");
     action_lint_step.dependOn(&action_lint_cmd.step);
 
@@ -75,10 +60,7 @@ pub fn addCheckSteps(
     spec_tests_step.dependOn(&test_artifacts.run_spec_tests.step);
 
     const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
-    const hardware_proof_checker_cmd = b.addSystemCommand(&.{
-        "bash",
-        "scripts/test-nuc15crsu7-hardware-proof-checker.sh",
-    });
+    const hardware_proof_checker_cmd = host_tools.addRun(b, "test-nuc15crsu7-hardware-proof-checker");
     const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the RNUC15CRSU7 proof-bundle checker with synthetic pass/fail fixtures");
     hardware_proof_checker_step.dependOn(&hardware_proof_checker_cmd.step);
 

@@ -81,7 +81,7 @@ pub const OBJECT_SLOT_SIZE_CEILING_BYTES: usize = 24;
 pub const VERSION_SLOT_SIZE_CEILING_BYTES: usize = 288;
 pub const CHUNK_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 48 else 4_130;
 pub const CHUNK_SLOT_SIZE_CEILING_BYTES: usize = CHUNK_RECORD_SIZE_CEILING_BYTES;
-pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 384_976 else 2_997_456;
+pub const STORE_SIZE_CEILING_BYTES: usize = if (heap_backed_chunk_payloads) 384_984 else 2_997_464;
 const OBJECT_INDEX_CAPACITY: usize = MAX_OBJECTS * 2;
 const VERSION_INDEX_CAPACITY: usize = MAX_VERSIONS * 2;
 const BLOB_INDEX_CAPACITY: usize = MAX_BLOBS * 2;
@@ -751,6 +751,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             }
         };
 
+        dirty_revision: u64 = 0,
         next_object_id: u64 = 1,
         next_version_id: u64 = 1,
         max_blob_payload_bytes: usize = 0,
@@ -773,6 +774,7 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         fn resetState(self: *Self, initialize_indexes: bool) void {
+            self.noteDirtyMutation();
             self.next_object_id = 1;
             self.next_version_id = 1;
             self.max_blob_payload_bytes = 0;
@@ -1301,7 +1303,22 @@ pub fn StoreWith(comptime config: StoreConfig) type {
             return self.versions.dirtyIds();
         }
 
+        // Saturation disables acknowledgment rather than allowing a stale
+        // checkpoint token to match a later incarnation of mutable state.
+        pub fn dirtyRevision(self: *const Self) ?u64 {
+            return if (self.dirty_revision == std.math.maxInt(u64)) null else self.dirty_revision;
+        }
+
+        pub fn dirtyRevisionIsCurrent(self: *const Self, revision: ?u64) bool {
+            return if (revision) |value| self.dirtyRevision() == value else false;
+        }
+
+        fn noteDirtyMutation(self: *Self) void {
+            self.dirty_revision +|= 1;
+        }
+
         pub fn clearDirty(self: *Self) void {
+            self.noteDirtyMutation();
             self.objects.clearDirty();
             self.versions.clearDirty();
         }
@@ -1496,10 +1513,12 @@ pub fn StoreWith(comptime config: StoreConfig) type {
         }
 
         fn markObjectDirty(self: *Self, object_id: ids.ObjectId) void {
+            self.noteDirtyMutation();
             self.objects.markDirty(object_id);
         }
 
         fn markVersionDirty(self: *Self, version_id: ids.VersionId) void {
+            self.noteDirtyMutation();
             self.versions.markDirty(version_id);
         }
     };

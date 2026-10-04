@@ -58,9 +58,6 @@ pub fn detect() baseline.Features {
         registers.leaf15_ebx = leaf15.ebx;
         registers.leaf15_ecx = leaf15.ecx;
     }
-    if (registers.max_basic_leaf >= 0x16) {
-        registers.leaf16_eax = cpuid(0x16, 0).eax;
-    }
     if (registers.max_basic_leaf >= 7) {
         const leaf7 = cpuid(7, 0);
         registers.leaf7_eax = leaf7.eax;
@@ -95,25 +92,49 @@ pub const CetMode = enum {
     deferred,
 };
 
+pub const FeatureMode = enum {
+    hardware,
+    explicit_model,
+};
+
+pub fn firstMissingForEnablement(
+    features: baseline.Features,
+    process_context_mode: ProcessContextMode,
+    cet_mode: CetMode,
+    feature_mode: FeatureMode,
+) ?baseline.MissingFeature {
+    var required_features = features;
+    switch (feature_mode) {
+        .hardware => {
+            if (process_context_mode != .hardware_pcid) return .pcid;
+            if (cet_mode != .hardware) return .cet_ibt;
+        },
+        .explicit_model => {
+            if (process_context_mode == .software_flush) {
+                required_features.pcid = true;
+                required_features.invpcid = true;
+            }
+            if (cet_mode == .deferred) {
+                required_features.cet_ibt = true;
+                required_features.cet_ss = true;
+            }
+            required_features.lass = true;
+            required_features.fred = true;
+            required_features.lkgs = true;
+            required_features.tsc_deadline = true;
+            required_features.invariant_tsc = true;
+        },
+    }
+    return baseline.firstMissing(required_features);
+}
+
 pub fn enableModernFeatures(
     features: baseline.Features,
     process_context_mode: ProcessContextMode,
     cet_mode: CetMode,
+    feature_mode: FeatureMode,
 ) void {
-    var required_features = features;
-    if (process_context_mode == .software_flush) {
-        required_features.pcid = true;
-        required_features.invpcid = true;
-    }
-    if (cet_mode == .deferred) {
-        required_features.cet_ibt = true;
-        required_features.cet_ss = true;
-    }
-    required_features.pku = true;
-    required_features.lass = true;
-    required_features.fred = true;
-    required_features.lkgs = true;
-    if (!baseline.isSupported(required_features)) unreachable;
+    if (firstMissingForEnablement(features, process_context_mode, cet_mode, feature_mode) != null) unreachable;
     x86.enableNoExecute();
     if (!x86.noExecuteEnabled()) unreachable;
     var cr4 = x86.readCr4();
@@ -144,5 +165,53 @@ pub fn enableModernFeatures(
     if (features.lass) {
         x86.enableLass();
         if (!x86.lassEnabled()) unreachable;
+    }
+}
+
+test "explicit model enablement accepts only its selected software controls" {
+    var features = baseline.completeFeatures();
+    features.pcid = false;
+    features.invpcid = false;
+    features.cet_ibt = false;
+    features.cet_ss = false;
+    features.lass = false;
+    features.fred = false;
+    features.lkgs = false;
+    features.tsc_deadline = false;
+    features.invariant_tsc = false;
+    try @import("std").testing.expectEqual(@as(?baseline.MissingFeature, null), firstMissingForEnablement(features, .software_flush, .deferred, .explicit_model));
+    try @import("std").testing.expectEqual(@as(?baseline.MissingFeature, .pcid), firstMissingForEnablement(features, .hardware_pcid, .deferred, .explicit_model));
+    features.pcid = true;
+    features.invpcid = true;
+    try @import("std").testing.expectEqual(@as(?baseline.MissingFeature, .cet_ibt), firstMissingForEnablement(features, .hardware_pcid, .hardware, .explicit_model));
+}
+
+test "hardware enablement rejects missing mandatory controls and software policy" {
+    const std = @import("std");
+    var features = baseline.completeFeatures();
+    try std.testing.expectEqual(@as(?baseline.MissingFeature, null), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
+    try std.testing.expectEqual(@as(?baseline.MissingFeature, .pcid), firstMissingForEnablement(features, .software_flush, .hardware, .hardware));
+    try std.testing.expectEqual(@as(?baseline.MissingFeature, .cet_ibt), firstMissingForEnablement(features, .hardware_pcid, .deferred, .hardware));
+    features.lass = false;
+    try std.testing.expectEqual(@as(?baseline.MissingFeature, .lass), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
+    features.lass = true;
+    features.fred = false;
+    try std.testing.expectEqual(@as(?baseline.MissingFeature, .fred), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
+    features.fred = true;
+    features.tsc_deadline = false;
+    try std.testing.expectEqual(@as(?baseline.MissingFeature, .tsc), firstMissingForEnablement(features, .hardware_pcid, .hardware, .hardware));
+}
+
+test "every enablement mode requires real XSAVES and a selected clock" {
+    const std = @import("std");
+    for ([_]FeatureMode{ .hardware, .explicit_model }) |mode| {
+        inline for ([_]baseline.MissingFeature{ .cpuid, .sse2, .long_mode, .syscall, .nx, .smep, .smap, .umip, .pge, .x2apic, .xsave, .xsaves, .pages_1g, .rdseed, .rdpid }) |required| {
+            var missing = baseline.completeFeatures();
+            @field(missing, @tagName(required)) = false;
+            try std.testing.expectEqual(@as(?baseline.MissingFeature, required), firstMissingForEnablement(missing, .hardware_pcid, .hardware, mode));
+        }
+        var features = baseline.completeFeatures();
+        features.tsc_frequency_hz = 0;
+        try std.testing.expectEqual(@as(?baseline.MissingFeature, .tsc), firstMissingForEnablement(features, .hardware_pcid, .hardware, mode));
     }
 }

@@ -794,6 +794,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (!signing.verify(signature, message)) return error.InvalidContractSignature;
 
             if (self.findEquivalentDatabaseContract(workspace_id, bundle_id, label, signature)) |existing| {
+                if (self.residentConst().checkpoint_retry_pending) try self.checkpoint();
                 return existing;
             }
 
@@ -825,6 +826,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 source.labelSlice(),
                 source.signature,
             )) |existing| {
+                if (self.residentConst().checkpoint_retry_pending) try self.checkpoint();
                 return existing;
             }
 
@@ -915,7 +917,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 try self.setReplicaVersionForPathHash(workspace_id, to_device, entry_path, entry_path_hash, entry.object_id, entry.version_id, mutation.generation);
             }
             summary.conflict_count = @intCast(self.countConflictsFor(workspace_id, to_device));
-            if (summary.selected_entry_count != 0 or summary.conflict_count != 0) {
+            if (summary.selected_entry_count != 0 or summary.conflict_count != 0 or self.residentConst().checkpoint_retry_pending) {
                 try self.checkpoint();
             }
             return summary;
@@ -975,8 +977,8 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
             if (self.replication_batch_depth != 0) self.replication_batch_depth -= 1;
             if (self.replication_batch_depth != 0) return;
             if (!self.replication_checkpoint_pending) return;
-            self.replication_checkpoint_pending = false;
             try self.checkpoint();
+            self.replication_checkpoint_pending = false;
         }
 
         pub fn cancelReplicationBatch(self: *Self) void {
@@ -997,7 +999,7 @@ pub fn ServiceWith(comptime config: ServiceConfig) type {
                 newly_acked += 1;
                 changed = true;
             }
-            if (changed) try self.checkpoint();
+            if (changed or self.residentConst().checkpoint_retry_pending) try self.checkpoint();
             return newly_acked;
         }
 

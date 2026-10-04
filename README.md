@@ -61,6 +61,29 @@ requests.
   signing seed. Each new save checks current signing policy, lease expiry,
   revocation, service ownership, and key binding before publishing a version.
   The vault signs bounded canonical metadata without exporting its key.
+  A hardware wait cannot preserve stale document authority: the backend checks
+  current time, live tasks, held grants and scoped access again before mutation
+  and after checkpoint completion. Changed workspace pointers or object heads
+  reject the save. Backpressured saved receipts and read data are checked again
+  before delivery. Closing a suspended operation detaches its endpoints while
+  retaining borrowed bytes until it finishes; pool teardown refuses live work.
+  Actual cooperative host regressions exercise these boundaries. The native
+  identity owner now runs document operations on a lazy guarded worker under
+  the shared TPM lease. Authentication, assertions and document work hold one
+  exact session operation token through provider cleanup. Lock retires idle
+  channels and cancels active work immediately, retaining borrowed buffers
+  until completion. Worker readiness and future wakes join the native loop;
+  detach and owner teardown drain work before releasing its backing. After
+  sign-in, Ctrl+N creates a note and Ctrl+O browses the owner’s Notes workspace.
+  Native review displays the complete path and grants one measured Notes
+  process read/edit access to that document until lock or session timeout.
+  New documents reach durable storage before activation; a failed checkpoint
+  retries the same candidate. These controls require fresh physical input and
+  complete scanout. Review admits paths only when the current font can render
+  their glyphs; hidden characters, fallback glyphs and edge spaces are rejected.
+  Supported Unicode paths and normal internal spaces remain available.
+  Hosted tests exercise denial and cleanup; guest and physical
+  execution of this production launch path still need capture.
   A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels
   queued saves when either endpoint or task is retired. Editors keep their text
@@ -111,8 +134,11 @@ requests.
   navigation, and saves; a new edit after undo discards the redo branch. Save
   receipts track content revisions, so a delayed save cannot mark another draft
   clean. Ctrl+C, Ctrl+X, and Ctrl+V transfer selected text between Notes editors
-  through native endpoints when document policy permits clipboard access. Each
-  transfer requires a newly delivered foreground keyboard gesture; focus changes,
+  through native endpoints when document policy permits clipboard access. The
+  document's signing lease must remain live, bound to
+  the storage service, and permitted by current policy; a valid workspace grant
+  cannot preserve clipboard access after that lease expires or is revoked.
+  Each transfer requires a newly delivered foreground keyboard gesture; focus changes,
   suspension, expiry, and revoked document authority cancel pending transfers.
   Cut removes text only after acknowledgement, and paste applies the complete
   payload as one undoable edit. Transfers accept up to 512 bytes; copied content
@@ -196,7 +222,11 @@ requests.
   audit backend fails. Unpublished material is erased without consuming a key ID;
   both lease tables are checked before audit acceptance, including slot reuse.
   Rotation prepares its replacement before revoking old leases. Export and signing
-  withhold results on audit failure. These are serialized service guarantees;
+  withhold results on audit failure. After a yielding unseal, both operations
+  reacquire the exact generational lease and recheck current policy before
+  returning success. Revocation, retirement with slot reuse, unload, and a
+  policy change withhold signatures and erase export output; audit identity
+  is retained by value across the wait. These are serialized service guarantees;
   durable audit retention remains the audit backend and caller's responsibility.
   Assertion signatures bind counters and security claims, and recovery approvals bind the registered
   threshold, replacement key, and credential generation. Unlock signatures also
@@ -378,7 +408,13 @@ requests.
   identity service returns assertions only after their counters reach disk and,
   when attached, its external freshness anchor. Failed checkpoints block further
   identity changes until an explicit flush succeeds; retries reuse the pending
-  version. A 136-byte authenticated TPM NV record binds the owner, catalog ID,
+  version. A stable native publication guard now rechecks cancellation, the exact
+  unlock binding, current policy, signing leases, and the latest trusted service
+  time after device waits. Checks precede proof publication, counter changes,
+  catalog version creation, and session activation. A cancellation during an
+  accepted disk/NV commit withholds the result while retaining its recoverable
+  signed successor. Cooperative host regressions exercise these boundaries;
+  physical TPM validation remains open. A 136-byte authenticated TPM NV record binds the owner, catalog ID,
   signing key, optional device-root pin, generation, and exact payload digest.
   Restore reads these pins independently of the native volume and rejects both
   older catalogs and different signed payloads at the same generation before
@@ -477,6 +513,14 @@ requests.
   replaced tasks retire their endpoints, queued capability moves, shared memory,
   and associated authority. Reset and restore preserve identity issuance cursors,
   including exhaustion, so old identifiers cannot be issued to new tasks.
+  When the 128-slot task table fills, it reclaims the oldest fully retired
+  application record. Live and suspended tasks, service owners, session owners,
+  and records borrowed by an active callback remain protected. Exact generational
+  borrows cover dispatch, launch, retirement, and presentation callbacks;
+  wholesale runtime replacement refuses an outstanding borrow. The scheduler
+  prunes retired registrations and claims while preserving its active dispatch.
+  Host tests exercise repeated launches and prepared-document cancellation beyond
+  table capacity, including reentrant termination during callbacks.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.
@@ -484,6 +528,27 @@ requests.
   with payload bytes allocated on demand. Failed writes release newly allocated
   chunks before publishing an object or version. Storage still has an explicit
   finite quota; automatic history reclamation remains open.
+  Trusted service owners can publish a complete workspace directory in one
+  generation, including replacement of all 96 paths. Validation and allocation
+  precede publication. Replacement retains snapshot history; insufficient history
+  capacity rejects the change without moving any path. With no retained snapshot,
+  it can compact the 192-entry mutation log to the new directory, preserving
+  capacity for later ordinary transactions without enlarging resident tables.
+  Volume operations retain exclusive replay and checkpoint scratch across
+  device waits. Checkpoints serialize object, version, workspace, and root data
+  before submission, then clear dirty state only if both monotonic mutation
+  revisions still match that snapshot. An older completed snapshot withholds a
+  current-state receipt even if another caller cleared the dirty lists; retry
+  persists newer edits without duplicating a pending immutable version. Loads
+  reject concurrent destination mutation, including staged transactions, and
+  transport failure before replay. Every load restores disk state rather than
+  trusting a cached root over mutable RAM. Reset, rebind, and teardown retain
+  borrowed storage until the operation ends; teardown runs storage cleanup
+  before releasing the controller's port, task, and grants.
+  Each store and directory adds one eight-byte revision, with no per-record
+  growth. Removing the load cache shrinks each volume by sixteen bytes.
+  Cooperative host tests exercise the actual worker and storage service;
+  physical latency and fault/recovery measurements remain pending.
 - Text surfaces use compositor-owned snapshots and the firmware framebuffer in
   production, with writes limited to changed cells. The shared-buffer handle,
   revision, and readiness-fence path still records modeled display requests;
@@ -492,6 +557,16 @@ requests.
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
   two-node QEMU proof runs with separate native stores.
+  A sync checkpoint publishes all managed workspace paths in one generation,
+  preserving unrelated entries. Failed record allocation leaves the previous
+  directory intact, and retries reconcile immutable object heads before reusing
+  or writing a version. Abandoned versions still consume the finite history
+  quota. An attached disk must complete its durability barrier
+  before a successful result is returned. Resident retry state survives service
+  reinitialization; a fresh resident loaded from unflushed RAM also retains the
+  pending checkpoint. Duplicate and unchanged operations retry a failed checkpoint.
+  Host regressions cover a full frame queue, late allocation failure, failed
+  barriers, restart, and checkpoint deferral by an outer storage batch.
   Device graph mutations verify the stored user-root signature, require the
   matching root key, and check device ownership. A sync-service capability alone
   cannot enroll, rotate, or revoke another user's devices. Enrollment retries
@@ -606,10 +681,59 @@ observable boot markers.
 Userspace dispatch and device interrupts share one explicit runtime owner on
 the bootstrap CPU. Each resource class has one ready queue; background, media,
 and batch work are serviced by the same dispatcher as interactive tasks. The
-service loop drains one atomic pending-work latch and rechecks it before idle.
+executor arms the timer at every user entry and bounds every resource class to
+a two-tick quantum, at most 20 ms in the nominal clock, even when no priority
+callback or other ready task exists. Latched network, NVMe and xHCI interrupts
+also hand an interrupted user back to the runtime owner, so its deferred
+network and input work can run before that quantum expires. Native storage
+workers yield after a bounded NVMe completion inspection and resume through
+the owner loop. Kernel-origin work remains uninterrupted. Both paths preserve the complete user context and keep
+the finite watchdog. Each materialized mapping owns an aligned x87/SSE image and
+PKRU state; allocation rollback, retirement, and reset erase and release it.
+Assembly preserves the kernel continuation and captures user state before
+entering compiled handlers. The current enabled state is XCR0=x87|SSE and
+IA32_XSS=0. Hosted alignment and dispatch regressions pass; the full assembly
+roundtrip explicitly skips hosts without OSXSAVE.
+FRED uses the architectural eight-qword frame, preserves every general register
+and augmented return field, and publishes handler edits back before ERETS or
+ERETU. Entry geometry, STAR selectors, GS ownership, 64-byte stack alignment,
+and AP initialization match that path; double faults retain the existing guarded
+emergency stack. Unsupported user software events cannot impersonate physical
+device interrupts. Oversized yield arguments and unknown yield dispositions
+stop the offending task through ordinary exception containment. Unexpected #NM
+exceptions follow the registered handler rather than the retired lazy-state
+shortcut. Native hardware execution still needs validation.
+Production clock frequency requires the complete architectural CPUID `0x15`
+ratio and crystal frequency. Advertised processor MHz is not a timer rate;
+Intel documents that distinction in its
+[CPUID reference](https://cdrdv2-public.intel.com/825745/252046-sdm-change-document.pdf).
+Normal boot defaults supply no modeled devices or fixed frequency, and missing
+network hardware cannot opt into a model implicitly. The fixed emulator clock
+and software controls require the complete explicit QEMU request. Actual feature
+flags still control privileged enablement, and every mode requires XSAVE/XSAVES.
+The service loop drains one atomic pending-work latch and rechecks it before idle.
 Idle checks use the dispatcher's eligibility rules: policy-delayed work remains
 queued while the CPU sleeps, and runnable work can pass a delayed queue head.
 Service deadlines still arm a wake timer even when no task can run yet.
+Outstanding I225 and VirtIO transmits contribute their earliest watchdog
+deadline, so stalled sends receive service even without receive traffic or an
+interrupt. Completed transmits are pending work; draining them cancels or advances
+the deadline, and contained or inactive controllers contribute no wake.
+Coalesced wakeups preserve the earliest queued deadline, so repeated events cannot
+postpone background or batch work indefinitely. Aging uses the shared 100 Hz
+timer frequency: emergency, foreground, media, background, and batch targets are
+10, 50, 200, 500, and 1000 ms. Accounting charges stay separate from elapsed
+time, and requeue slack is one actual two-tick quantum. New registrations age
+from the current clock. Hosted load regressions advance by that quantum and
+check initial and repeated service under continuing foreground work. The
+benchmark foreground wait model now also allows due lower-class work before
+the foreground deadline, with a six-tick ceiling after quantum rounding.
+These selection targets do not establish measured hardware response latency.
+Required accelerator tasks retain
+a bounded wait when claim reservation fails or policy denies an online engine;
+eligibility checks allow other work to pass and resume the waiter after telemetry
+or request changes without an idle retry loop. Credential approval records the
+actual event time through the same external-wake helper.
 Application processors are online for TLB maintenance and otherwise sleep.
 Concurrent userspace dispatch requires independent executor state and service
 ownership before it can use those processors.
@@ -621,6 +745,18 @@ and allocator caches use this number without trusting userspace GS state or
 reading a privileged MSR on each lookup. RDPID is required for every boot;
 its architectural contract is documented in the
 [Intel instruction reference](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2b-manual.pdf).
+
+Interrupt nesting uses one cache-line-isolated counter per logical CPU, so an
+application processor's TLB interrupt cannot change the runtime owner's context.
+Range retirement clears all affected mappings, invalidates the address space
+once, and only then returns private frames to the allocator. A missing remote
+acknowledgement stops the kernel before those frames can be reused. Object-backed
+private pages retain their first materialized snapshot; the first write promotes
+that owned page without recopying over task changes. Read-only zero mappings and
+hardware protection faults retain their access restrictions.
+The 2 MiB image-page path requests physically aligned runs independently of the
+ordinary frame cursor. Fragmentation that leaves only unaligned runs falls back
+to 4 KiB leaves, preserving the mapping without encoding an invalid huge page.
 
 Native ID indexes mix all 64 bits, including handle generations, and close
 probe chains after deletion. Zero marks an empty bucket, removing tombstones,
@@ -638,6 +774,14 @@ Workspace path and object indexes close affected probe chains after deletion,
 so repeated directory edits leave no tombstones. Object sync positions a
 verified chunk cursor at each transport range rather than visiting every
 preceding payload page; version and manifest validation still precede access.
+Workspace commits and snapshot replay apply each generation's deletions before
+additions, allowing a full directory to replace paths in any lexical order.
+Restore records its delta against stable entries and publishes the prepared
+target in one copy. Matched Zig 0.17 `fast` host measurements of a 64-entry
+signed-package restore with its normal mutation history reduced the median from
+85.56 to 78.97 microseconds (7.7%), with identical entries, indexes, roots, and
+checksums. Timings include signature verification and exclude fixture preparation
+and result checks.
 
 Text scanout compares visible cell metadata and grapheme bytes independently
 of pool offsets, so recomposing an unchanged Unicode frame causes no pixel
@@ -665,7 +809,12 @@ microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
 The kernel heap uses per-CPU magazines for power-of-two size classes from
 32 bytes through 4 KiB, with eight cached spans per class. A locked span table
 handles cache misses, larger allocations, splitting, and adjacent-span
-coalescing. Payloads have no in-band header; a bounded address index validates
+coalescing. When free spans cannot satisfy a request or splitting needs a
+recycled span ID, it reclaims bounded magazine snapshots from every CPU and
+coalesces them before reporting exhaustion or consuming an oversized span.
+CPU locks protect cached spans and recent allocation identities; the shared
+allocator lock always precedes a CPU lock on the slow path. Payloads have no
+in-band header; a bounded address index validates
 allocation starts and rejects invalid or duplicate frees. Compact 16-bit span
 links keep allocator arrays at 100,370 bytes. Free spans have doubly linked
 class lists for constant-time removal during coalescing; the address index
@@ -674,7 +823,10 @@ with bounded backward shifts after deletion. Host tests exercise this same
 allocator in a bounded arena, including all 4096 span slots, payload
 preservation, arbitrary release orders, and randomized fragmentation.
 `./scripts/zig.sh build heap-allocator-benchmark` measures reuse and allocation
-under fragmentation, including exhaustion and page-sized allocation batches.
+under fragmentation, including exhaustion, page-sized allocation batches, and
+whole-arena reuse after all pages have entered magazines. Host regressions cover
+every cached size class, remote CPU caches, full span-table pressure, and
+concurrent cached reuse while another CPU requests large spans.
 
 ## Design Decisions
 
@@ -734,6 +886,21 @@ under fragmentation, including exhaustion and page-sized allocation batches.
   their epoch until they are removed.
   Services retire both temporary endpoints after their startup IPC check,
   including cleanup when a later startup step fails.
+  Native ABI 19 validates and prepares fixed request and result storage before
+  resource creation, input consumption, or wait changes. Result validation
+  covers the complete declared span; page preparation touches only copied
+  bytes. Freestanding copies use private user pages through kernel physical
+  aliases, including demand preparation for untouched stack pages. Endpoint
+  payloads and attached capabilities pass through bounded kernel scratch;
+  receive outputs must be disjoint before a queued message can be consumed.
+  Syscall buffers require authorized image or stack regions. Shared-object
+  apertures retain their separate object-mapping contract.
+  Task termination acknowledges through syscall status without a result copy,
+  so self-termination never writes through a retired address-space record.
+  Shared-memory unmap, revocation, and task retirement unregister their exact
+  demand regions before mapping identities can be reused; failed registration
+  rolls back the unpublished mapping. A user mapping requires a materialized
+  target address space; unavailable targets fail before publication.
   Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.
@@ -811,14 +978,20 @@ Use the pinned toolchain and repo entrypoints:
   device I/O, accept out-of-order completions only when each CID remains owned
   by an active slot, validate phase, queue, command identifier, and
   submission-head bounds on every completion, and
-  use invariant-TSC elapsed-time deadlines derived from CRTO/CAP timeout fields
-  instead of CPU-speed-dependent loop counts. Fatal, timed-out, failed, or
+  use five-second invariant-TSC command deadlines. Controller-ready deadlines
+  derive from CRTO/CAP timeout fields instead of CPU-speed-dependent loop counts. Fatal, timed-out, failed, or
   ownership-indeterminate queues are contained. The I/O completion queue enables
   single-message vector-zero interrupts; after x2APIC and VT-d initialization,
   the controller receives an exact-requester remapped MSI route on vector 66.
-  Runtime I/O waits in `hlt` with a scheduled timer deadline and restores the
-  caller's interrupt mask after each wake, while boot-time administration
-  retains the bounded polling path. When present, boot maps the I225-LM TX/RX
+  A native storage worker yields while its completion is pending, allowing
+  input, network, and other ready work to run. One try-only operation lease
+  retains the queue, bounce buffers, and PRP lists through completion or fault
+  containment. Cancellation and revoked live task, capability, or broker
+  authority stop refill and drain accepted commands before release. Admission
+  binds one fresh token to the exact worker, device, task, and process; reset
+  and backend replacement refuse active submissions. Administrative commands
+  retain bounded polling; callers outside a worker retain interrupt-backed
+  `hlt` waits with scheduled deadlines and restored interrupt masks. When present, boot maps the I225-LM TX/RX
   descriptor pages plus independent 32-page TX and RX buffer regions in a
   separate domain and confirms translation on every unit. VT-d command transitions, queued
   invalidations, and blocked-DMA proofs use invariant-TSC elapsed deadlines
@@ -832,7 +1005,9 @@ Use the pinned toolchain and repo entrypoints:
   frames into a fixed 32-frame software queue, wakes the network task, and
   rechecks pending work with interrupts disabled before idle so receive events
   cannot be lost across the sleep boundary. Malformed
-  causes and eight consecutive no-progress interrupts fail closed. Queue
+  causes and eight consecutive no-progress interrupts fail closed. TX reclamation
+  and completed RX descriptors reset the no-progress streak even when polled
+  before their delayed MSI; dropped packets still prove descriptor progress. Queue
   enable and disable transitions use invariant-TSC elapsed deadlines.
   The halted xHCI controller owns a third requester domain containing only its
   command, event/transfer/ERST, DCBAA, scratchpad, Device Context, and Input
@@ -850,7 +1025,7 @@ Use the pinned toolchain and repo entrypoints:
   record by attempting
   a write to a reserved but unmapped guard page; the requester, address, direction,
   and unchanged canary are verified before the controller is reset and reused.
-  Every later synchronous command polls the same primary records; a DMA fault
+  Every later completion inspection checks the same primary records; a DMA fault
   disables the controller and PCI bus mastering and withdraws the storage backend.
   The xHCI input lifecycle assigns device slots in constant time, recycles them
   after disconnects, and clears queued keyboard reports before a reclaimed slot
@@ -902,7 +1077,8 @@ Use the pinned toolchain and repo entrypoints:
   preserve only architected sticky controls while acknowledging RW1CS bits;
   connected USB2/USB3 ports receive bounded normal/warm resets as appropriate.
   A single cycle-tracked TRB producer submits Enable Slot, Address Device, Evaluate
-  Context, Configure Endpoint, and disconnect-time Disable Slot commands through doorbell zero. Address
+  Context, Configure Endpoint, Stop Endpoint, Reset Endpoint, and Disable Slot
+  commands through doorbell zero. Address
   Device uses the shared serialized Input Context to publish only Slot and endpoint-zero
   state, with a slot-private control ring and the negotiated root-port speed. The same
   serialized lifecycle then rings the slot's endpoint-zero doorbell for an eight-byte
@@ -927,8 +1103,25 @@ Use the pinned toolchain and repo entrypoints:
   before the port is marked configured; no interrupt TD is posted early.
   Completion pointers, endpoint ids, residual lengths, and slot identities are
   validated before state advances, and DCBAA entries are linked or cleared only at the
-  specified completion boundary. Reset, command, and control-transfer waits keep the one-shot timer armed and
-  contain the controller after one second without progress. DMA faults, invalid
+  specified completion boundary. A disconnect notification clears published reports
+  and hides the old device, while retaining its slot, endpoints, and transfer
+  ownership. Retirement drains matching late completions without publishing input,
+  stops running endpoints, and requires each forced stopped Transfer Event before
+  its matching Stop Endpoint completion. An owned USB Transaction Error can
+  authenticate detachment through live port status before its notification arrives;
+  a halted endpoint then uses Reset Endpoint with transfer state preserved and
+  must reach Stopped before its transfer ownership is released. Endpoint command
+  choice follows validated events; stale context reads cannot trigger a reset.
+  A combined unplug and replug notification also retires the old device lifetime.
+  Only then may
+  Disable Slot release the DCBAA entry and permit a replacement attachment to
+  enumerate; a replacement that is not enabled receives a fresh port reset.
+  Other ports retain their transfers and can use report capacity released by
+  retirement. Reset, command, and control-transfer waits keep the one-shot timer
+  armed and contain the controller after one second without progress.
+  Retirement has a six-second
+  deadline set when retirement begins, which repeated notifications and
+  reconnects cannot extend. DMA faults, invalid
   port, command, or transfer events, unsupported event types, ERDP rejection, or an
   unexpected halted/error state quiesce the controller and revoke MSI plus bus
   mastering. Input-device authority still requires an interface-scoped HID
@@ -1139,7 +1332,7 @@ or `pacman`.
 ./scripts/zig.sh build run
 
 # Equivalent convenience wrapper for the default run path.
-./run.sh
+./scripts/zig.sh build run
 ```
 
 `run` and `run-zigos-native` attach `build/native-store.img`. Build targets that
@@ -1160,13 +1353,13 @@ The most common build artifacts are:
 ./scripts/zig.sh build -Doptimize=fast userspace-production-images
 ./scripts/zig.sh build -Doptimize=fast kernel
 ./scripts/zig.sh build native-store-image
-./scripts/zig.sh build iso
+./scripts/zig.sh build -Doptimize=fast iso
 ```
 
 `kernel-zigos-native.elf` and `build/os.iso` are production artifacts. Synthetic
 driver crashes, negative isolation proofs, rollback fault matrices, and scripted
 desktop journeys live only in `kernel-zigos-native-verification.elf` and
-`build/os-verification.iso`. Production embeds 24 stripped userspace ELFs;
+`build/os-verification.iso`. Production embeds 8 stripped userspace ELFs;
 verification adds five proof or synthetic-journey images. Build and check that
 boundary with:
 
@@ -1174,6 +1367,14 @@ boundary with:
 ./scripts/zig.sh build kernel-role-check
 ./scripts/zig.sh build iso-verification
 ```
+
+The published `zig-out/bin/kernel-zigos-native.elf` is the exact ELF embedded
+in the production EFI image. It retains static symbols for the role gate while
+omitting non-loadable debug sections. The full diagnostic ELF is installed at
+`zig-out/kernel-debug/kernel-zigos-native.elf` under the same role gate; use it
+with `llvm-addr2line` for source locations, or a debugger for type information.
+Optimized EFI images
+omit host-specific debugging metadata before packaging or signing.
 
 The full target matrix lives in `CONTRIBUTING.md`, which is the source of truth
 for when to use focused checks such as `host-tests`, `spec-tests`,
@@ -1192,7 +1393,7 @@ files; do not run any generator again. Prepare a fresh proof skeleton bound to
 that candidate:
 
 ```bash
-scripts/prepare-nuc15crsu7-hardware-proof.sh \
+./scripts/zig.sh build tool -- prepare-nuc15crsu7-hardware-proof \
   --nonce <fresh-verifier-issued-64-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -1208,7 +1409,7 @@ two role-specific hardware quote/signature pairs, write the canonical capture
 statement and validate it with an external trusted verifier:
 
 ```bash
-scripts/write-nuc15crsu7-capture-statement.sh build/hardware-proofs/<fresh-name>
+./scripts/zig.sh build tool -- write-nuc15crsu7-capture-statement build/hardware-proofs/<fresh-name>
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
@@ -1217,7 +1418,7 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-  scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>
+  ./scripts/zig.sh build tool -- check-nuc15crsu7-hardware-proof build/hardware-proofs/<fresh-name>
 ```
 
 The same check is exposed as `./scripts/zig.sh build
@@ -1250,7 +1451,7 @@ target files and release bundle are frozen, the verify-only
 `release-security-gate` rechecks the existing bundle and seals it with the
 completed RNUC15CRSU7 proof; it has no generator or signer dependency. Public
 release provenance must be signed per
-DSSE payload through `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a
+DSSE payload through `ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE` by a
 hardware-backed TPM, secure enclave, HSM, or KMS key. The signer key must be
 delegated by a root-threshold-signed trust policy whose root metadata and
 lowercase SHA-256 digest were obtained independently of the release bundle. The
@@ -1271,7 +1472,9 @@ Ed25519 public keys are lowercase hex encodings of the raw 32-byte public key,
 and their key ID is the lowercase SHA-256 of those raw bytes. Root policy
 thresholds may use multiple distinct signers. The current production generator
 and finalizer emit one release signature, so `releaseRole.threshold` must be
-exactly `1`. `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` receives the complete DSSE v1
+exactly `1`. `ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE` is an absolute executable path,
+invoked directly with the optional literal JSON string array
+`ZIGOS_RELEASE_DSSE_SIGN_ARGS_JSON` (default `[]`). It receives the complete DSSE v1
 pre-authentication encoding on standard input and must emit only the standard
 base64 Ed25519 signature.
 
@@ -1288,7 +1491,8 @@ consistency; the SBOM digest and `spdxVersion` are checked, but this verifier
 does not claim full SPDX graph-semantic validation.
 
 ```sh
-export ZIGOS_RELEASE_DSSE_SIGN_COMMAND='/absolute/path/to/hardware-signer'
+export ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE='/absolute/path/to/hardware-signer'
+export ZIGOS_RELEASE_DSSE_SIGN_ARGS_JSON='[]' # Literal arguments, e.g. ["--key","production"]
 export ZIGOS_RELEASE_SIGNING_KEY_ID='<derived-lowercase-sha256-key-id>'
 export ZIGOS_RELEASE_HARDWARE_BACKED=true
 export ZIGOS_RELEASE_SEQUENCE='<strictly-increasing-sequence-for-this-new-candidate>'
@@ -1312,7 +1516,7 @@ exact 17 target files and `build/release-security` inputs must be private,
 owner-controlled, and quiescent: no process outside the ceremony may replace
 them while they are being hashed. Prefer read-only or immutable staging for
 those inputs. The fresh hardware-proof sibling remains writable for capture;
-it is not one of the verifier's 15 target paths. Verification does not claim
+it is not one of the verifier's 17 target paths. Verification does not claim
 safety against a concurrent writer already authorized as the same host user.
 
 With the completed proof directory and external hardware-proof variables set,
@@ -1370,7 +1574,7 @@ fi
 
 This hashes and executes the same private copy, avoiding a path replacement
 between pin verification and execution. The repository
-`scripts/verify-release-bundle.sh` wrapper automates that flow for maintainers,
+`./scripts/zig.sh build tool -- verify-release-bundle` wrapper automates that flow for maintainers,
 but it is not a signed OS target or trust bootstrap; customers must obtain the
 wrapper itself from a trusted, pinned source if they rely on it. The verifier
 rejects policy or release rollback, authenticated-payload equivocation, clock
@@ -1404,16 +1608,16 @@ proof image; set `OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not
 installed in a standard path. Each QEMU process copies an available variables
 template beside its serial log so concurrent boots do not share firmware state.
 
-QEMU proof runs are script-backed:
+QEMU proof runs use the native Zig host utility:
 
-- `scripts/run-zigos-native-smoke.sh`
-- `scripts/run-storage-durability-qemu.sh`
-- `scripts/run-sync-two-node-qemu.sh` (drops two final confirmations by default;
+- `./scripts/zig.sh build tool -- run-zigos-native-smoke`
+- `./scripts/zig.sh build tool -- run-storage-durability-qemu`
+- `./scripts/zig.sh build tool -- run-sync-two-node-qemu` (drops two final confirmations by default;
   `SYNC_TWO_NODE_DROP_CONFIRMATIONS=0` runs without injected loss)
-- `scripts/run-kernel-recovery.sh`
-- `scripts/capture-kernel-benchmark.sh` (capture helper; `zig build benchmark` runs the strict gate)
-- `scripts/run-uefi-boot-test.sh`
-- `scripts/qemu-harness.sh`
+- `./scripts/zig.sh build tool -- run-kernel-recovery`
+- `./scripts/zig.sh build tool -- capture-kernel-benchmark` (capture helper; `zig build benchmark` runs the strict gate)
+- `./scripts/zig.sh build tool -- run-uefi-boot-test`
+- `./scripts/zig.sh build tool -- qemu-harness`
 
 Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 `src/kernel/boot/markers.zig`.
@@ -1459,8 +1663,9 @@ Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 - `src/tools/`: Zig helper binaries that need the `src/` module root.
 - `build_support/`: build graph helpers for kernels, QEMU, checks, userspace
   images, and shared build paths.
-- `scripts/`: setup, lint, build, QEMU, benchmark, smoke, ISO, and cleanup
-  entrypoints.
+- `scripts/`: dependency/toolchain bootstrap and external Python test helpers.
+- `tools/host/`: native Zig file, lint, media, QEMU, release, and hardware-proof
+  utilities, invoked with `./scripts/zig.sh build tool -- COMMAND [ARGUMENTS]`.
 - `tools/`: host-side Zig utilities for coverage, readiness, test root checks,
   and userspace archive generation.
 - `spec/`: machine-readable coverage and production-readiness manifests.

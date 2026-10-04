@@ -57,7 +57,8 @@ fn installTrampoline() ?Trampoline {
 
 fn patch(bytes: []u8, cpu_index: u8, stack_top: u64) void {
     writeU64(bytes, &smp_trampoline_cr3, x86.readCr3() & x86.CR3_ADDRESS_MASK);
-    writeU64(bytes, &smp_trampoline_cr4, x86.readCr4());
+    // FRED is per-CPU: STAR, GS and stack MSRs must exist before CR4 enables it.
+    writeU64(bytes, &smp_trampoline_cr4, x86.readCr4() & ~x86.CR4_FRED);
     writeU64(bytes, &smp_trampoline_efer, x86.readMsr(x86.EFER_MSR));
     writeU64(bytes, &smp_trampoline_entry, @intFromPtr(&apEntry));
     writeU64(bytes, &smp_trampoline_stack, stack_top);
@@ -71,9 +72,10 @@ fn writeU64(bytes: []u8, symbol: *u64, value: u64) void {
 }
 
 fn startOne(index: u8, trampoline: Trampoline) void {
-    const stack = kernel_memory.kmalloc(smp.AP_STACK_BYTES) orelse return;
+    const stack = kernel_memory.kmalloc(smp.AP_STACK_BYTES + x86.FRED_STACK_ALIGNMENT - 1) orelse return;
     const stack_bytes: [*]u8 = @ptrCast(stack);
-    const stack_top = @intFromPtr(stack_bytes) + smp.AP_STACK_BYTES;
+    const stack_base = @import("std").mem.alignForward(usize, @intFromPtr(stack_bytes), x86.FRED_STACK_ALIGNMENT);
+    const stack_top = stack_base + smp.AP_STACK_BYTES;
     bringup_cpus[index].kernel_stack_top = stack_top;
     patch(trampoline.bytes, index, stack_top);
 
