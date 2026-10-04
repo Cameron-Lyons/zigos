@@ -217,7 +217,7 @@ const Fixture = struct {
         }
     }
 
-    fn queueCommit(self: *Fixture, text: []const u8) !void {
+    pub fn queueCommit(self: *Fixture, text: []const u8) !void {
         try self.client.start(text);
         var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
         while (self.client.phase != .commit) {
@@ -1171,7 +1171,7 @@ test "document sessions enforce capacity and share each dispatch fairly" {
 
 // Explicit enrollment/sealing fixtures exercise the real session, worker,
 // IPC server and StoragePort. They do not provision a production account.
-const OwnedDocument = struct {
+pub const OwnedDocument = struct {
     const Io = struct {
         calls: usize = 0,
         pub fn random(_: *@This(), out: []u8) !void {
@@ -1198,7 +1198,7 @@ const OwnedDocument = struct {
     adapter: adapter_mod.Adapter(Io) = undefined,
     coordinator: coordinator_mod.Coordinator(Io) = undefined,
 
-    fn init() !*OwnedDocument {
+    pub fn init() !*OwnedDocument {
         const fixture = try Fixture.init();
         errdefer fixture.deinit();
         const self = try std.testing.allocator.create(OwnedDocument);
@@ -1241,7 +1241,7 @@ const OwnedDocument = struct {
         return self;
     }
 
-    fn deinit(self: *OwnedDocument) void {
+    pub fn deinit(self: *OwnedDocument) void {
         self.session.lock();
         self.coordinator.quiesce(self.coordinator.now_ticks);
         self.adapter.deinit() catch unreachable;

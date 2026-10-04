@@ -3,13 +3,14 @@
 const std = @import("std");
 const input = @import("../drivers/input_driver_task.zig");
 const recovery = @import("recovery_key.zig");
+const document_view = @import("trusted_document_view.zig");
 
 pub const MAX_PIN_BYTES = 32;
 pub const MIN_PIN_BYTES = 6;
 pub const MAX_ENTRY_BYTES = @import("../services/identity_recovery_record.zig").CODE_BYTES;
 pub const Method = enum { pin, recovery };
 pub const Status = enum { hidden, entering, too_short, too_long, invalid_code, pending, verifying, cancelling, rejected, locked_out, unavailable };
-pub const View = struct { review: @import("trusted_credential_review.zig").Review = .{}, status: Status = .hidden, characters: u8 = 0, method: Method = .pin, recovery_available: bool = false, recovery_characters: u8 = recovery.CODE_BYTES };
+pub const View = struct { review: @import("trusted_credential_review.zig").Review = .{}, documents: ?*document_view.View = null, status: Status = .hidden, characters: u8 = 0, method: Method = .pin, recovery_available: bool = false, recovery_characters: u8 = recovery.CODE_BYTES };
 
 // Stable, exclusive service owner. Start copies/decodes the borrowed input; poll performs
 // one bounded worker step. Cancellation retains all backing until busy is false.
@@ -98,12 +99,17 @@ pub const Entry = struct {
     last_ticks: u64 = 0,
 
     pub fn capturing(self: *const Entry) bool {
-        return self.view.status != .hidden or self.view.review.visible();
+        return self.view.status != .hidden or self.view.review.visible() or (if (self.view.documents) |documents| documents.visible() else false);
     }
 
     pub fn lock(self: *Entry, now_ticks: u64) void {
         self.authenticator.lock_fn(self.authenticator.context);
         self.clearReview();
+        if (self.view.documents) |documents| {
+            documents.phase = .disabled;
+            documents.pending = null;
+            documents.touch();
+        }
         self.erase();
         self.session_deadline = null;
         self.last_ticks = now_ticks;
@@ -148,12 +154,34 @@ pub const Entry = struct {
     }
 
     pub fn handle(self: *Entry, event: input.KeyboardEvent, now_ticks: u64) void {
+        self.handlePhysical(event, now_ticks, 0);
+    }
+
+    pub fn desktopShortcut(self: *Entry, event: input.KeyboardEvent, now_ticks: u64, sequence: u64) bool {
+        self.tick(now_ticks);
+        if (self.capturing() or self.busy() or self.session_deadline == null) return false;
+        const kind: document_view.Kind = switch (event.kind) {
+            .new_document => .new,
+            .open_document => .open,
+            else => return false,
+        };
+        const documents = self.view.documents orelse return false;
+        if (!documents.shortcut(kind, sequence)) return false;
+        self.revision +|= 1;
+        return true;
+    }
+
+    pub fn handlePhysical(self: *Entry, event: input.KeyboardEvent, now_ticks: u64, sequence: u64) void {
         self.tick(now_ticks);
         if (!self.capturing()) return;
         if (self.view.review.visible()) {
             if (self.view.review.handle(event)) self.revision +|= 1;
             return;
         }
+        if (self.view.status == .hidden) if (self.view.documents) |documents| {
+            if (documents.handle(event, sequence)) self.revision +|= 1;
+            return;
+        };
         // Ctrl+R is private to this prompt. Mode changes erase partial input
         // and advance the router's neutral-report barrier. A running or already
         // submitted attempt must be cancelled before selecting another method.
@@ -324,8 +352,9 @@ pub const Entry = struct {
     }
 
     comptime {
-        // Includes 240 bytes of bounded public consent text; only one entry exists per account owner.
-        if (@sizeOf(@This()) > 512) @compileError("trusted authentication entry exceeds bounded state");
+        // Includes bounded consent text and one pointer to the lazy native
+        // document view; only one entry exists per account owner.
+        if (@sizeOf(@This()) > 520) @compileError("trusted authentication entry exceeds bounded state");
     }
 };
 
@@ -490,4 +519,43 @@ test "trusted recovery entry normalizes grouped codes and isolates modes lockout
     entry.lock(27);
     entry.handle(.{ .kind = .show_recovery }, 27);
     try std.testing.expect(entry.view.method == .pin and !entry.view.recovery_available);
+}
+
+test "document shortcuts fail closed for locked inactive expired and synthetic native input" {
+    var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
+    var documents = document_view.View{ .phase = .home, .token = 3 };
+    var entry = Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 50 };
+    entry.view.documents = &documents;
+    entry.lock(1);
+    documents.phase = .home;
+    documents.presented(40, 20, true);
+    try std.testing.expect(!entry.desktopShortcut(.{ .kind = .new_document }, 2, 1));
+    entry.view.status = .hidden;
+    try std.testing.expect(!entry.desktopShortcut(.{ .kind = .open_document }, 2, 2));
+    backend.active = true;
+    backend.expires_at = 50;
+    entry.session_deadline = 50;
+    try std.testing.expect(!entry.desktopShortcut(.{ .kind = .new_document }, 2, 0));
+    try std.testing.expect(documents.pending == null);
+    try std.testing.expect(entry.desktopShortcut(.{ .kind = .new_document }, 2, 3));
+    _ = documents.take();
+    documents.phase = .review;
+    documents.path = try document_view.Label.init("notes/private.md");
+    documents.allow_selected = true;
+    documents.touch();
+    documents.presented(40, 20, true);
+    entry.handle(.{ .kind = .activate }, 2);
+    try std.testing.expect(documents.pending == null);
+    entry.handlePhysical(.{ .kind = .activate }, 50, 4);
+    try std.testing.expect(documents.phase == .disabled and documents.pending == null and !backend.active);
+    backend.active = true;
+    backend.expires_at = 60;
+    entry.session_deadline = 60;
+    entry.view.status = .hidden;
+    documents.phase = .home;
+    documents.presented(40, 20, true);
+    backend.active = false;
+    backend.expires_at = 0;
+    try std.testing.expect(!entry.desktopShortcut(.{ .kind = .new_document }, 51, 5));
+    try std.testing.expect(documents.phase == .disabled and documents.pending == null);
 }

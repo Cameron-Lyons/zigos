@@ -1076,6 +1076,25 @@ pub const Directory = struct {
         self.markWorkspaceDirty(workspace_id);
     }
 
+    // A closing document session may outlive a renewed share. Remove only the
+    // authority it published, including the lease and exact object/path scope.
+    pub fn removeShare(self: *Directory, workspace_id: ids.WorkspaceId, expected: ShareGrant) Error!bool {
+        const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        const grant_index = findShareGrantIndex(workspace, expected.principal_id) orelse return false;
+        const table = workspace.share_table.data();
+        if (!shareGrantEql(table.share_grants[grant_index], expected)) return false;
+        const last_index = workspace.counts.share_grant_count - 1;
+        if (grant_index != last_index) table.share_grants[grant_index] = table.share_grants[last_index];
+        table.share_grants[last_index] = .{ .principal_id = .{ .kind = .user, .serial = 0 } };
+        workspace.counts.share_grant_count -= 1;
+        // Rebuild the bounded index because clearing an open-addressed slot
+        // alone could hide a later principal in the same probe chain.
+        table.share_grant_principal_index.reset();
+        rebuildShareGrantIndex(workspace);
+        self.markWorkspaceDirty(workspace_id);
+        return true;
+    }
+
     pub fn findShareGrant(
         self: *const Directory,
         workspace_id: ids.WorkspaceId,
@@ -1644,6 +1663,18 @@ fn rebuildShareGrantIndex(workspace: *WorkspaceRecord) void {
     while (grant_index < workspace.counts.share_grant_count) : (grant_index += 1) {
         indexShareGrant(workspace, grant_index);
     }
+}
+
+fn shareGrantEql(left: ShareGrant, right: ShareGrant) bool {
+    return left.principal_id.eql(right.principal_id) and
+        left.scope_object_id.eql(right.scope_object_id) and
+        left.scope_path_len == right.scope_path_len and
+        std.mem.eql(u8, left.scopePathSlice(), right.scopePathSlice()) and
+        left.expires_at_ticks == right.expires_at_ticks and
+        left.can_read == right.can_read and left.can_write == right.can_write and
+        left.can_admin == right.can_admin and left.can_export == right.can_export and
+        left.network_scope == right.network_scope and left.reshare_policy == right.reshare_policy and
+        left.audit_visibility == right.audit_visibility;
 }
 
 fn indexShareGrant(workspace: *WorkspaceRecord, grant_index: usize) void {
@@ -2268,6 +2299,61 @@ test "workspace staging metadata stays compact" {
     try std.testing.expectEqual(u8, @FieldType(WorkspaceStagingState, "staged_entry_count"));
     try std.testing.expectEqual(u8, @FieldType(WorkspaceStagingState, "staged_effective_entry_count"));
     try std.testing.expectEqual(@as(usize, 3), @sizeOf(WorkspaceStagingState));
+}
+
+test "exact share removal preserves renewed authority and dirty revision" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const record = try directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "Notes" });
+    const grant = try (ShareGrant{ .principal_id = .{ .kind = .app, .serial = 2 }, .can_write = true, .expires_at_ticks = 100 }).withObjectScope(ids.object(7), "notes.md");
+    try directory.share(record.id, grant);
+    directory.clearDirty();
+    const revision = directory.dirtyRevision();
+    var wrong = grant;
+    wrong.scope_object_id = ids.object(8);
+    try std.testing.expect(!try directory.removeShare(record.id, wrong));
+    wrong = try grant.withObjectScope(ids.object(7), "sibling.md");
+    try std.testing.expect(!try directory.removeShare(record.id, wrong));
+    wrong = grant;
+    wrong.principal_id.serial += 1;
+    try std.testing.expect(!try directory.removeShare(record.id, wrong));
+    try std.testing.expectEqual(revision, directory.dirtyRevision());
+    try std.testing.expectEqual(@as(usize, 0), directory.dirtyWorkspaceIds().len);
+    var renewed = grant;
+    renewed.expires_at_ticks += 1;
+    try directory.share(record.id, renewed);
+    const renewed_revision = directory.dirtyRevision();
+    try std.testing.expect(!try directory.removeShare(record.id, grant));
+    try std.testing.expectEqual(renewed_revision, directory.dirtyRevision());
+    try std.testing.expect(try directory.removeShare(record.id, renewed));
+    try std.testing.expect(directory.findShareGrant(record.id, grant.principal_id) == null);
+    try std.testing.expect(!directory.dirtyRevisionIsCurrent(renewed_revision));
+    try std.testing.expectEqual(@as(usize, 1), directory.dirtyWorkspaceIds().len);
+    try std.testing.expectEqual(@as(u8, 0), record.counts.share_grant_count);
+}
+
+test "exact share removal rebuilds collision chains and recycles full table" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const record = try directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "Notes" });
+    var grants: [MAX_SHARE_GRANTS]ShareGrant = undefined;
+    const probe = shareGrantProbeIndex(shareGrantPrincipalKey(.{ .kind = .app, .serial = 1 }));
+    var serial: u64 = 1;
+    for (&grants) |*grant| {
+        while (shareGrantProbeIndex(shareGrantPrincipalKey(.{ .kind = .app, .serial = serial })) != probe) : (serial += 1) {}
+        grant.* = try (ShareGrant{ .principal_id = .{ .kind = .app, .serial = serial }, .expires_at_ticks = 100 }).withObjectScope(ids.object(serial), "notes.md");
+        serial += 1;
+        try directory.share(record.id, grant.*);
+    }
+    try std.testing.expectError(error.ShareTableFull, directory.share(record.id, .{ .principal_id = .{ .kind = .app, .serial = serial } }));
+    try std.testing.expect(try directory.removeShare(record.id, grants[0]));
+    for (grants[1..]) |grant| try std.testing.expect(directory.findShareGrant(record.id, grant.principal_id) != null);
+    try directory.share(record.id, grants[0]);
+    for (grants) |grant| try std.testing.expect(try directory.removeShare(record.id, grant));
+    try std.testing.expectEqual(@as(u8, 0), record.counts.share_grant_count);
+    try directory.share(record.id, grants[0]);
+    try std.testing.expect(directory.findShareGrant(record.id, grants[0].principal_id) != null);
+    try std.testing.expectEqual(@as(u8, 1), record.counts.share_grant_count);
 }
 
 test "workspace snapshot and export metadata stay compact" {

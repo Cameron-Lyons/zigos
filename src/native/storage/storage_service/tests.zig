@@ -196,6 +196,293 @@ test "storage port requires authority context for protected mutations" {
     try std.testing.expectEqualStrings("task-scope-policy", scope_trace.denial.blockingPolicySlice());
 }
 
+test "storage port object-target reads bind to the resolved entry without broadening writes" {
+    var checkpoint_store = CheckpointStore{};
+    try std.testing.expect(checkpoint_store.resetPersistent());
+    defer std.debug.assert(checkpoint_store.resetPersistent());
+    const actor = principal.PrincipalId{ .kind = .user, .serial = 1_401 };
+    var core = StorageCore.initWithStore(1_403, 80, .{ .kind = .service, .serial = 1_400 }, &checkpoint_store);
+    core.checkpoint_enabled = false;
+    const signer = signing.SignerIdentity{ .label = "object-read-test-key", .seed = signing.seedFromByte(0xC5) };
+    const first = try core.putVersion(.{
+        .preferred_object_id = ids.object(2_000),
+        .object_type = .document,
+        .payload = "first document",
+        .metadata = try object_store.signMetadata(signer, "first", "text/plain", .document, "first document", 1),
+    });
+    const sibling = try core.putVersion(.{
+        .preferred_object_id = ids.object(2_001),
+        .object_type = .document,
+        .payload = "sibling document",
+        .metadata = try object_store.signMetadata(signer, "sibling", "text/plain", .document, "sibling document", 2),
+    });
+    const notes = try core.createWorkspace(.{ .owner = actor, .label = "object-read-workspace" });
+    try core.beginTransaction(notes.id);
+    try core.stagePut(notes.id, "first.md", first.object_id, first.version_id, .document);
+    try core.stagePut(notes.id, "sibling.md", sibling.object_id, sibling.version_id, .document);
+    _ = try core.commit(notes.id, 3);
+
+    var capabilities = capability.CapabilityTable.init();
+    var port = StoragePort.init(&core, &capabilities);
+    const grant = try capabilities.mintBootRoot(.{
+        .holder = actor,
+        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+        .target = .{ .kind = .object, .id = first.object_id.raw() },
+        .rights = .{ .object = .{ .object_read = true, .object_write = true } },
+        .scope = .{ .task_id = 80, .workspace_id = notes.id.raw(), .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+        .audit = .{},
+    });
+    var trace = debug_contract.ProvenanceRecord{};
+    const authority = AuthorityContext{
+        .task_id = 80,
+        .principal = actor,
+        .capability_id = grant.id,
+        .now_ticks = 10,
+        .operation = "storage-open-entry",
+        .trace = &trace,
+    };
+    try std.testing.expectEqual(first.object_id, (try port.openEntry(authority, notes.id.raw(), "first.md", .read)).object_id);
+    try std.testing.expectError(error.PermissionDenied, port.openEntry(authority, notes.id.raw(), "sibling.md", .read));
+    try std.testing.expectEqual(debug_contract.Decision.denied, trace.decision);
+    try std.testing.expectEqual(@import("../../core/abi.zig").DenialReason.invalid_target, trace.denial.reason);
+    try std.testing.expectEqual(@as(?capability.CapabilityTargetKind, .object), trace.target_kind);
+    try std.testing.expectEqual(grant.target.id, trace.target_id);
+    try std.testing.expectEqualStrings("object_read", trace.detailSlice());
+    try std.testing.expectEqualStrings("target-routing-policy", trace.denial.blockingPolicySlice());
+    try std.testing.expect(trace.denial.fingerprint != 0);
+    try std.testing.expectError(error.PermissionDenied, port.openEntry(authority, notes.id.raw(), "first.md", .write));
+
+    // An old path binding cannot lend the grant to a replacement object.
+    try core.beginTransaction(notes.id);
+    try core.stagePut(notes.id, "first.md", sibling.object_id, sibling.version_id, .document);
+    _ = try core.commit(notes.id, 11);
+    try std.testing.expectError(error.PermissionDenied, port.openEntry(authority, notes.id.raw(), "first.md", .read));
+
+    for ([_]capability.CapabilityTargetKind{ .workspace, .service }) |target_kind| {
+        const broad = try capabilities.mintBootRoot(.{
+            .holder = actor,
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = .{ .kind = target_kind, .id = if (target_kind == .workspace) notes.id.raw() else core.service_id },
+            .rights = if (target_kind == .workspace)
+                .{ .workspace = .{ .object_read = true, .object_write = true } }
+            else
+                .{ .service = .{ .object_read = true, .object_write = true } },
+            .scope = .{ .task_id = 80, .workspace_id = notes.id.raw(), .broker_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+            .audit = .{},
+        });
+        var broad_authority = authority;
+        broad_authority.capability_id = broad.id;
+        try std.testing.expectEqual(sibling.object_id, (try port.openEntry(broad_authority, notes.id.raw(), "first.md", .read)).object_id);
+        try std.testing.expectEqual(sibling.object_id, (try port.openEntry(broad_authority, notes.id.raw(), "sibling.md", .write)).object_id);
+    }
+}
+
+const ObjectReadFixture = struct {
+    const actor = principal.PrincipalId{ .kind = .user, .serial = 1_501 };
+    const signer = signing.SignerIdentity{ .label = "read-surface-test-key", .seed = signing.seedFromByte(0xD5) };
+    const first_payload = "first document";
+    const sibling_payload = "sibling document";
+
+    core: StorageCore,
+    capabilities: capability.CapabilityTable,
+    first: object_store.PutResult,
+    sibling: object_store.PutResult,
+    workspace_id: ids.WorkspaceId,
+    object_grant_id: u64,
+
+    fn init(checkpoint_store: *CheckpointStore) !@This() {
+        var core = StorageCore.initWithStore(1_503, 80, .{ .kind = .service, .serial = 1_500 }, checkpoint_store);
+        core.checkpoint_enabled = false;
+        const first = try core.putVersion(.{
+            .preferred_object_id = ids.object(2_100),
+            .object_type = .document,
+            .payload = first_payload,
+            .metadata = try object_store.signMetadata(signer, "first", "text/plain", .document, first_payload, 1),
+        });
+        const sibling = try core.putVersion(.{
+            .preferred_object_id = ids.object(2_101),
+            .object_type = .document,
+            .payload = sibling_payload,
+            .metadata = try object_store.signMetadata(signer, "sibling", "text/plain", .document, sibling_payload, 2),
+        });
+        const notes = try core.createWorkspace(.{ .owner = actor, .label = "read-surface-workspace" });
+        try core.beginTransaction(notes.id);
+        try core.stagePut(notes.id, "first.md", first.object_id, first.version_id, .document);
+        try core.stagePut(notes.id, "sibling.md", sibling.object_id, sibling.version_id, .document);
+        _ = try core.commit(notes.id, 3);
+        var capabilities = capability.CapabilityTable.init();
+        const grant = try capabilities.mintBootRoot(.{
+            .holder = actor,
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = .{ .kind = .object, .id = first.object_id.raw() },
+            .rights = .{ .object = .{ .object_read = true } },
+            .scope = .{ .task_id = 80, .workspace_id = notes.id.raw(), .broker_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+            .audit = .{},
+        });
+        return .{ .core = core, .capabilities = capabilities, .first = first, .sibling = sibling, .workspace_id = notes.id, .object_grant_id = grant.id };
+    }
+
+    fn port(self: *@This()) StoragePort {
+        return StoragePort.init(&self.core, &self.capabilities);
+    }
+
+    fn authority(self: *const @This(), trace: ?*debug_contract.ProvenanceRecord) AuthorityContext {
+        return .{ .task_id = 80, .principal = actor, .capability_id = self.object_grant_id, .now_ticks = 10, .operation = "storage-read-surface", .trace = trace };
+    }
+
+    fn aggregateAuthority(self: *@This(), kind: capability.CapabilityTargetKind) !AuthorityContext {
+        const grant = try self.capabilities.mintBootRoot(.{
+            .holder = actor,
+            .issuer = .{ .kind = .policy_authority, .serial = 1 },
+            .target = .{ .kind = kind, .id = if (kind == .workspace) self.workspace_id.raw() else self.core.service_id },
+            .rights = if (kind == .workspace) .{ .workspace = .{ .object_read = true } } else .{ .service = .{ .object_read = true } },
+            .scope = .{ .task_id = 80, .workspace_id = self.workspace_id.raw(), .broker_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 100 },
+            .audit = .{},
+        });
+        var authority_context = self.authority(null);
+        authority_context.capability_id = grant.id;
+        return authority_context;
+    }
+
+    fn expectTargetDenial(self: *const @This(), trace: debug_contract.ProvenanceRecord) !void {
+        try std.testing.expectEqual(debug_contract.Decision.denied, trace.decision);
+        try std.testing.expectEqual(@import("../../core/abi.zig").DenialReason.invalid_target, trace.denial.reason);
+        try std.testing.expectEqual(self.first.object_id.raw(), trace.target_id);
+        try std.testing.expectEqualStrings("object_read", trace.detailSlice());
+    }
+};
+
+test "storage port shared payload reads deny sibling identity even when the supplied object field is forged" {
+    var checkpoint_store = CheckpointStore{};
+    defer std.debug.assert(checkpoint_store.resetPersistent());
+    var fixture = try ObjectReadFixture.init(&checkpoint_store);
+    var port = fixture.port();
+    var shared = shared_memory.Table.init();
+    defer shared.deinit();
+    var buffer: [64]u8 = @splat(0xC3);
+    const consumer = ids.task(81);
+    const storage = ids.task(80);
+    const mapping = try shared.create(consumer, buffer.len);
+    try shared.map(mapping.id, consumer);
+    try shared.map(mapping.id, storage);
+    const transfer = storage_service.SharedPayloadReadTransfer{ .table = &shared, .object_id = mapping.id, .consumer_task_id = consumer, .storage_task_id = storage, .bytes = &buffer };
+    var trace = debug_contract.ProvenanceRecord{};
+    const authority = fixture.authority(&trace);
+    const sibling = fixture.core.version(fixture.sibling.version_id).?;
+    var forged = sibling.*;
+    forged.object_id = fixture.first.object_id;
+    var leaked_routes: u8 = 0;
+    for ([_]*const object_store.VersionRecord{ sibling, &forged }, 0..) |record, index| {
+        if (port.versionPayloadIntoSharedMemory(authority, record, transfer)) |_| {
+            leaked_routes |= @as(u8, 1) << @intCast(index);
+        } else |err| {
+            try std.testing.expectEqual(error.PermissionDenied, err);
+            try fixture.expectTargetDenial(trace);
+            try std.testing.expectEqualSlices(u8, &@as([64]u8, @splat(0xC3)), &buffer);
+        }
+        @memset(&buffer, 0xC3);
+    }
+    try std.testing.expectEqual(@as(u8, 0), leaked_routes);
+    const summary = try port.versionPayloadIntoSharedMemory(authority, fixture.core.version(fixture.first.version_id).?, transfer);
+    try std.testing.expectEqualSlices(u8, ObjectReadFixture.first_payload, buffer[0..summary.bytes_transferred]);
+    const service_authority = try fixture.aggregateAuthority(.service);
+    const service_summary = try port.versionPayloadIntoSharedMemory(service_authority, sibling, transfer);
+    try std.testing.expectEqualSlices(u8, ObjectReadFixture.sibling_payload, buffer[0..service_summary.bytes_transferred]);
+    try std.testing.expectError(error.WorkspaceScopeViolation, port.versionPayloadIntoSharedMemory(try fixture.aggregateAuthority(.workspace), sibling, transfer));
+}
+
+test "storage port payload reads resolve the canonical version rather than caller supplied blob metadata" {
+    var checkpoint_store = CheckpointStore{};
+    defer std.debug.assert(checkpoint_store.resetPersistent());
+    var fixture = try ObjectReadFixture.init(&checkpoint_store);
+    var port = fixture.port();
+    var shared = shared_memory.Table.init();
+    defer shared.deinit();
+    var buffer: [64]u8 = @splat(0xC3);
+    const consumer = ids.task(81);
+    const storage = ids.task(80);
+    const mapping = try shared.create(consumer, buffer.len);
+    try shared.map(mapping.id, consumer);
+    try shared.map(mapping.id, storage);
+    const transfer = storage_service.SharedPayloadReadTransfer{ .table = &shared, .object_id = mapping.id, .consumer_task_id = consumer, .storage_task_id = storage, .bytes = &buffer };
+    var forged = fixture.core.version(fixture.sibling.version_id).?.*;
+    forged.id = fixture.first.version_id;
+    forged.object_id = fixture.first.object_id;
+    const summary = try port.versionPayloadIntoSharedMemory(fixture.authority(null), &forged, transfer);
+    try std.testing.expectEqualSlices(u8, ObjectReadFixture.first_payload, buffer[0..summary.bytes_transferred]);
+    @memset(&buffer, 0xC3);
+    forged.id = ids.version(99_999);
+    try std.testing.expectError(error.VersionNotFound, port.versionPayloadIntoSharedMemory(fixture.authority(null), &forged, transfer));
+    try std.testing.expectEqualSlices(u8, &@as([64]u8, @splat(0xC3)), &buffer);
+}
+
+test "storage port object-target aggregate reads deny queries snapshots and workspace gates before publication" {
+    var checkpoint_store = CheckpointStore{};
+    defer std.debug.assert(checkpoint_store.resetPersistent());
+    var fixture = try ObjectReadFixture.init(&checkpoint_store);
+    var port = fixture.port();
+    var trace = debug_contract.ProvenanceRecord{};
+    const authority = fixture.authority(&trace);
+    var output: [object_store.MAX_OBJECT_QUERY_RESULTS]object_store.ObjectQueryResult = @splat(.{});
+    const revision = fixture.core.workspaces.dirtyRevision();
+    var leaked_routes: u8 = 0;
+    if (port.queryObjects(authority, .{}, &output)) |_| {
+        leaked_routes |= 1;
+    } else |err| {
+        try std.testing.expectEqual(error.PermissionDenied, err);
+        try fixture.expectTargetDenial(trace);
+        for (output) |record| try std.testing.expect(record.object_id.isZero());
+    }
+    if (port.snapshot(authority, fixture.workspace_id, "denied object snapshot", ObjectReadFixture.signer)) |_| {
+        leaked_routes |= 2;
+    } else |err| {
+        try std.testing.expectEqual(error.PermissionDenied, err);
+        try fixture.expectTargetDenial(trace);
+    }
+    if (port.requireWorkspaceCapability(authority, fixture.workspace_id.raw(), .read)) {
+        leaked_routes |= 4;
+    } else |err| {
+        try std.testing.expectEqual(error.PermissionDenied, err);
+        try fixture.expectTargetDenial(trace);
+    }
+    try std.testing.expectEqual(@as(u8, 0), leaked_routes);
+    try std.testing.expect(!fixture.core.hasAnySnapshots());
+    try std.testing.expectEqual(revision, fixture.core.workspaces.dirtyRevision());
+    const workspace_authority = try fixture.aggregateAuthority(.workspace);
+    try port.requireWorkspaceCapability(workspace_authority, fixture.workspace_id.raw(), .read);
+    try std.testing.expectEqual(@as(u8, 2), (try port.snapshot(workspace_authority, fixture.workspace_id, "workspace snapshot", ObjectReadFixture.signer)).entry_count);
+    try std.testing.expectError(error.WorkspaceScopeViolation, port.queryObjects(workspace_authority, .{}, &output));
+    const service_authority = try fixture.aggregateAuthority(.service);
+    try port.requireWorkspaceCapability(service_authority, fixture.workspace_id.raw(), .read);
+    try std.testing.expectEqual(@as(u8, 2), (try port.snapshot(service_authority, fixture.workspace_id, "service snapshot", ObjectReadFixture.signer)).entry_count);
+    try std.testing.expectEqual(@as(usize, 2), (try port.queryObjects(service_authority, .{}, &output)).len);
+}
+
+test "storage port sibling history and operating model denials replace the allowed audit trace" {
+    var checkpoint_store = CheckpointStore{};
+    defer std.debug.assert(checkpoint_store.resetPersistent());
+    var fixture = try ObjectReadFixture.init(&checkpoint_store);
+    var port = fixture.port();
+    var trace = debug_contract.ProvenanceRecord{};
+    const authority = fixture.authority(&trace);
+    var output: [object_store.MAX_OBJECT_HISTORY_RESULTS]object_store.ObjectHistoryEntry = @splat(.{});
+    const history = try port.objectHistory(authority, fixture.first.object_id, &output);
+    try std.testing.expectEqual(@as(usize, 1), history.len);
+    try std.testing.expectEqual(fixture.first.version_id, history[0].version_id);
+    _ = try port.objectOperatingModel(authority, fixture.first.object_id);
+    var missing_denials: u8 = 0;
+    try std.testing.expectError(error.PermissionDenied, port.objectHistory(authority, fixture.sibling.object_id, &output));
+    if (trace.decision != .denied) missing_denials |= 1 else try fixture.expectTargetDenial(trace);
+    try std.testing.expectEqual(fixture.first.version_id, output[0].version_id);
+    try std.testing.expectError(error.PermissionDenied, port.objectOperatingModel(authority, fixture.sibling.object_id));
+    if (trace.decision != .denied) missing_denials |= 2 else try fixture.expectTargetDenial(trace);
+    try std.testing.expectEqual(@as(u8, 0), missing_denials);
+}
+
 test "storage port derives shared workspace capabilities and blocks unauthorized reshares" {
     var checkpoint_store = CheckpointStore{};
     if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");

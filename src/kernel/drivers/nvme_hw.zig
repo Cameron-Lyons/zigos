@@ -294,7 +294,7 @@ fn prepare(dev: pci.PCIDevice, frames: DmaFrames) Error!Controller {
     return controller;
 }
 
-fn enable(self: *Controller) Error!void {
+inline fn enable(self: *Controller) Error!void {
     self.writeReg32(REG_CC, CC_CSS_NVM | CC_MPS_4K | CC_AMS_RR | CC_IOSQES | CC_IOCQES | CC_EN);
     if (!spinUntilReady(self, true)) {
         if (self.fatal()) return error.ControllerFatal;

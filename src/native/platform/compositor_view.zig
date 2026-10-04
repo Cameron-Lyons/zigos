@@ -37,6 +37,10 @@ pub fn render(frame: *scanout.Frame, session: *const compositor.Session, content
         return;
     };
     if (frame.rows < 10) return;
+    if (session.trusted_view) |trusted| if (trusted.* == .authentication) {
+        if (trusted.authentication.documents) |documents| if (documents.phase == .home and documents.fits(frame.columns, frame.rows))
+            frame.put(0, 1, "Ctrl+N New note | Ctrl+O Open note", .accent);
+    };
     if (session.trusted_view != null and frame.columns >= 72) frame.put(14, 0, "Ctrl+Alt+Delete  Lock", .muted);
     if (frame.columns >= 40) frame.put(frame.columns - 21, 0, "Alt+Tab  Switch task", .muted);
     frame.fillRow(2, .selected);
@@ -135,6 +139,10 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: *const @import("t
         renderCredentialReview(frame, &authentication.review);
         return;
     }
+    if (authentication.status == .hidden) if (authentication.documents) |documents| if (documents.visible()) {
+        renderDocuments(frame, documents);
+        return;
+    };
     const recovering = authentication.method == .recovery;
     frame.fillRow(2, .selected);
     frame.put(1, 2, if (recovering) "Recover Zigos" else "Unlock Zigos", .selected);
@@ -168,6 +176,56 @@ fn renderAuthentication(frame: *scanout.Frame, authentication: *const @import("t
         "Enter  Unlock  |  Esc  Clear  |  Ctrl+R  Recovery"
     else
         "Enter  Unlock  |  Esc  Clear PIN", .muted);
+}
+
+fn putDocumentLines(frame: *scanout.Frame, row: *usize, text: []const u8, style: scanout.Style) void {
+    var lines = (abi.text_layout.Layout{ .text = text, .columns = frame.columns }).rows();
+    while (lines.next()) |line| {
+        frame.put(0, row.*, text[line.start..line.end], style);
+        row.* += 1;
+    }
+}
+
+fn renderDocuments(frame: *scanout.Frame, documents: *const @import("trusted_document_view.zig").View) void {
+    frame.fillRow(2, .selected);
+    frame.put(1, 2, if (documents.kind == .new) "New Notes document" else "Open Notes document", .selected);
+    if (!documents.fits(frame.columns, frame.rows)) {
+        frame.put(0, 4, "More display space is needed.", .warning);
+        frame.put(0, 6, "Esc  Cancel", .body);
+        return;
+    }
+    var row: usize = 4;
+    switch (documents.phase) {
+        .browsing => {
+            if (documents.count == 0) frame.put(0, row, "No Notes documents yet.", .muted);
+            for (documents.paths[0..documents.count], 0..) |*path, index| {
+                putDocumentLines(frame, &row, path.slice(), if (index == documents.selected) .selected else .body);
+                row += 1;
+            }
+            frame.put(0, frame.rows - 2, "PgUp/PgDn  Browse | Enter  Open", .muted);
+        },
+        .review => {
+            frame.put(0, row, "Application: Notes", .body);
+            row += 2;
+            frame.put(0, row, "Document in your Notes workspace", .muted);
+            row += 1;
+            putDocumentLines(frame, &row, documents.path.slice(), .accent);
+            row += 1;
+            frame.put(0, row, "Read and edit only this document", .body);
+            frame.put(0, row + 1, "Until lock or session timeout", .muted);
+            row += 2;
+            frame.put(0, row, " Cancel ", if (!documents.allow_selected) .selected else .body);
+            frame.put(12, row, " Allow ", if (documents.allow_selected) .selected else .body);
+            frame.put(0, frame.rows - 2, "Tab  Choose | Enter  Confirm", .muted);
+        },
+        .retry => {
+            frame.put(0, row, "Document save needs another attempt.", .warning);
+            frame.put(0, row + 2, "Enter  Retry", .body);
+        },
+        .failed => frame.put(0, row, "Unable to open this document.", .warning),
+        else => frame.put(0, row, if (documents.kind == .new) "Creating document..." else "Opening document...", .body),
+    }
+    frame.put(0, frame.rows - 1, "Esc  Cancel", .muted);
 }
 
 fn renderCredentialReview(frame: *scanout.Frame, review: *const @import("trusted_credential_review.zig").Review) void {
@@ -601,4 +659,86 @@ test "desktop view keeps picker selection and controls visible on small displays
     try expectText(&large, 0, 7, " Cancel ");
     try std.testing.expectEqual(scanout.Style.selected, large.cells[7 * large.columns].style);
     try std.testing.expectEqual(@as(u21, ' '), large.cells[7 * large.columns + 10].character);
+}
+
+test "desktop document review renders all96 path bytes and denies incomplete or unsuccessful presentation" {
+    const std = @import("std");
+    const document = @import("trusted_document_view.zig");
+    var session = compositor.Session.init();
+    defer session.deinit();
+    var runtime = @import("../task/task_runtime.zig").Runtime.init();
+    const task = try runtime.createTask(.{ .owner = .{ .kind = .app, .serial = 91 }, .component_class = .app_component, .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 65536, .endpoint_slots = 4, .shared_memory_bytes = 4096 }, .ui_surface_id = 71, .local_only = true });
+    _ = try session.openDocumentView(task, 7, "Ordinary application");
+    var documents = document.View{ .phase = .review, .kind = .new, .token = 8, .allow_selected = true };
+    documents.path = try document.Label.init(&@as([95]u8, @splat('a')) ++ "Z");
+    var authentication = @import("trusted_auth_entry.zig").View{ .status = .hidden, .documents = &documents };
+    var trusted = @import("trusted_identity_entry.zig").View{ .authentication = &authentication };
+    session.trusted_view = &trusted;
+    var frame = try scanout.Frame.init(40, 16);
+    render(&frame, &session, .{ .surface_id = 71, .text = "@UNTRUSTED TASK CONTENT", .cursor = 0, .flags = .{ .active = true } });
+    try expectText(&frame, 1, 2, "New Notes document");
+    for (frame.cells[0 .. frame.columns * frame.rows]) |cell| try std.testing.expect(cell.character != '@');
+    try expectText(&frame, 0, 4, "Application: Notes");
+    try expectText(&frame, 0, 7, &@as([40]u8, @splat('a')));
+    try expectText(&frame, 0, 8, &@as([40]u8, @splat('a')));
+    try expectText(&frame, 0, 9, &@as([15]u8, @splat('a')) ++ "Z");
+    try expectText(&frame, 0, 12, "Until lock or session timeout");
+    try expectText(&frame, 0, 11, "Read and edit only this document");
+    try expectText(&frame, 12, 13, " Allow ");
+    try std.testing.expectEqual(scanout.Style.selected, frame.cells[13 * 40 + 12].style);
+    try std.testing.expectEqual(@as(u64, 0), documents.presented_revision);
+    try std.testing.expect(!documents.handle(.{ .kind = .activate }, 1));
+    trusted.presented(frame.columns, frame.rows, false);
+    try std.testing.expect(!documents.handle(.{ .kind = .activate }, 2));
+    frame = try scanout.Frame.init(40, 15);
+    render(&frame, &session, null);
+    try expectText(&frame, 0, 4, "More display space is needed.");
+    try expectText(&frame, 0, 6, "Esc  Cancel");
+    trusted.presented(frame.columns, frame.rows, true);
+    try std.testing.expect(!documents.handle(.{ .kind = .activate }, 3));
+    frame = try scanout.Frame.init(40, 16);
+    render(&frame, &session, null);
+    trusted.presented(frame.columns, frame.rows, true);
+    try std.testing.expect(documents.handle(.{ .kind = .activate }, 4));
+    try std.testing.expect(documents.take().?.action == .approve);
+}
+
+test "desktop native picker preserves Unicode clusters and withholds document acknowledgement under authentication" {
+    const std = @import("std");
+    const document = @import("trusted_document_view.zig");
+    var session = compositor.Session.init();
+    defer session.deinit();
+    var documents = document.View{ .phase = .browsing, .kind = .open, .token = 12, .count = 2, .selected = 1 };
+    documents.paths[0] = try document.Label.init("草稿/é.md");
+    documents.paths[1] = try document.Label.init(&@as([95]u8, @splat('p')) ++ "Q");
+    var authentication = @import("trusted_auth_entry.zig").View{ .status = .hidden, .documents = &documents };
+    var trusted = @import("trusted_identity_entry.zig").View{ .authentication = &authentication };
+    session.trusted_view = &trusted;
+    var frame = try scanout.Frame.init(40, 13);
+    render(&frame, &session, null);
+    try std.testing.expectEqual(@as(u21, '草'), frame.cells[4 * 40].character);
+    try std.testing.expect(frame.cells[4 * 40].part == .left and frame.cells[4 * 40 + 1].part == .right);
+    try std.testing.expectEqual(@as(u21, '稿'), frame.cells[4 * 40 + 2].character);
+    const composed = frame.cells[4 * 40 + 5];
+    try std.testing.expectEqual(@as(u21, 'e'), composed.character);
+    try std.testing.expectEqualStrings("é", frame.clusters[composed.cluster_offset..][0..composed.cluster_length]);
+    try expectText(&frame, 0, 6, &@as([40]u8, @splat('p')));
+    try expectText(&frame, 0, 7, &@as([40]u8, @splat('p')));
+    try expectText(&frame, 0, 8, &@as([15]u8, @splat('p')) ++ "Q");
+    try std.testing.expectEqual(scanout.Style.selected, frame.cells[8 * 40 + 15].style);
+    try expectText(&frame, 0, 11, "PgUp/PgDn  Browse | Enter  Open");
+    trusted.presented(frame.columns, frame.rows, true);
+    try std.testing.expectEqual(documents.revision, documents.presented_revision);
+    authentication.status = .entering;
+    render(&frame, &session, null);
+    trusted.presented(frame.columns, frame.rows, true);
+    try expectText(&frame, 1, 2, "Unlock Zigos");
+    try std.testing.expectEqual(@as(u64, 0), documents.presented_revision);
+    try std.testing.expect(!documents.handle(.{ .kind = .activate }, 1));
+    authentication.status = .hidden;
+    authentication.review = try @import("trusted_credential_review.zig").Review.init("Notes", "example.test", "https://example.test", 100);
+    render(&frame, &session, null);
+    trusted.presented(frame.columns, frame.rows, true);
+    try std.testing.expectEqual(@as(u64, 0), documents.presented_revision);
+    try std.testing.expect(!documents.handle(.{ .kind = .activate }, 2));
 }

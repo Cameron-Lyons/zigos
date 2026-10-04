@@ -50,6 +50,8 @@ pub const EventKind = enum(u8) {
     paste,
     page_up,
     page_down,
+    new_document,
+    open_document,
 };
 
 pub const KeyboardEvent = struct {
@@ -170,6 +172,10 @@ fn eventForUsage(usage: u8, modifiers: u8) ?KeyboardEvent {
     }
 
     return switch (usage) {
+        0x11, 0x12 => if (control and !shift and !alt and !gui)
+            .{ .kind = if (usage == 0x11) .new_document else .open_document }
+        else
+            textEvent(usage, shift, control or alt or gui),
         0x06, 0x1B, 0x19 => if (control and !shift and !alt and !gui)
             .{ .kind = switch (usage) {
                 0x06 => .copy,

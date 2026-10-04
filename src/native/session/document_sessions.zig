@@ -58,6 +58,16 @@ pub const Sessions = struct {
         }
     }
 
+    pub fn hasLiveDocument(self: *const Sessions, task_id: u64, capability_id: u64, workspace_id: u64, object_id: u64, path: []const u8) bool {
+        const items = self.channelsConst() orelse return false;
+        for (items) |*item| if (item.server) |*server| {
+            const binding = server.binding;
+            if (!server.closing and binding.authority.task_id == task_id and binding.authority.capability_id == capability_id and
+                binding.workspace_id == workspace_id and binding.object_id == object_id and std.mem.eql(u8, binding.path, path)) return true;
+        };
+        return false;
+    }
+
     pub fn cancelForAuthority(self: *Sessions, authority: *const object_signer.Authority, now_ticks: u64) void {
         const items = self.channels() orelse return;
         for (items) |*item| {

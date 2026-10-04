@@ -73,8 +73,14 @@ requests.
   exact session operation token through provider cleanup. Lock retires idle
   channels and cancels active work immediately, retaining borrowed buffers
   until completion. Worker readiness and future wakes join the native loop;
-  detach and owner teardown drain work before releasing its backing. Production
-  still needs the Notes launch gesture and approved document grants.
+  detach and owner teardown drain work before releasing its backing. After
+  sign-in, Ctrl+N creates a note and Ctrl+O browses the owner’s Notes workspace.
+  Native review displays the complete path and grants one measured Notes
+  process read/edit access to that document until lock or session timeout.
+  New documents reach durable storage before activation; a failed checkpoint
+  retries the same candidate. These controls require fresh physical input and
+  complete scanout. Hosted tests exercise denial and cleanup; guest and physical
+  execution of this production launch path still need capture.
   A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels
   queued saves when either endpoint or task is retired. Editors keep their text

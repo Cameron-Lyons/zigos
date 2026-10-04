@@ -253,6 +253,8 @@ pub const BootedSystem = struct {
             .copy,
             .cut,
             .paste,
+            .new_document,
+            .open_document,
             => self.result(.tick, false),
         };
     }
