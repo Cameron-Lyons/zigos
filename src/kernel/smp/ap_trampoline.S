@@ -100,6 +100,9 @@ smp_long_mode:
     xorq %rbp, %rbp
     movq (smp_trampoline_cpu - smp_trampoline_start)(%rbx), %rdi
     movq (smp_trampoline_entry - smp_trampoline_start)(%rbx), %rax
+    # A jump into a SysV C callee needs the same 8-byte return slot as CALL.
+    # The published FRED stack top remains 64-byte aligned above this slot.
+    pushq $0
     jmpq *%rax
 
 .align 16

@@ -199,7 +199,11 @@ requests.
   audit backend fails. Unpublished material is erased without consuming a key ID;
   both lease tables are checked before audit acceptance, including slot reuse.
   Rotation prepares its replacement before revoking old leases. Export and signing
-  withhold results on audit failure. These are serialized service guarantees;
+  withhold results on audit failure. After a yielding unseal, both operations
+  reacquire the exact generational lease and recheck current policy before
+  returning success. Revocation, retirement with slot reuse, unload, and a
+  policy change withhold signatures and erase export output; audit identity
+  is retained by value across the wait. These are serialized service guarantees;
   durable audit retention remains the audit backend and caller's responsibility.
   Assertion signatures bind counters and security claims, and recovery approvals bind the registered
   threshold, replacement key, and credential generation. Unlock signatures also
@@ -381,7 +385,13 @@ requests.
   identity service returns assertions only after their counters reach disk and,
   when attached, its external freshness anchor. Failed checkpoints block further
   identity changes until an explicit flush succeeds; retries reuse the pending
-  version. A 136-byte authenticated TPM NV record binds the owner, catalog ID,
+  version. A stable native publication guard now rechecks cancellation, the exact
+  unlock binding, current policy, signing leases, and the latest trusted service
+  time after device waits. Checks precede proof publication, counter changes,
+  catalog version creation, and session activation. A cancellation during an
+  accepted disk/NV commit withholds the result while retaining its recoverable
+  signed successor. Cooperative host regressions exercise these boundaries;
+  physical TPM validation remains open. A 136-byte authenticated TPM NV record binds the owner, catalog ID,
   signing key, optional device-root pin, generation, and exact payload digest.
   Restore reads these pins independently of the native volume and rejects both
   older catalogs and different signed payloads at the same generation before
@@ -633,7 +643,22 @@ observable boot markers.
 Userspace dispatch and device interrupts share one explicit runtime owner on
 the bootstrap CPU. Each resource class has one ready queue; background, media,
 and batch work are serviced by the same dispatcher as interactive tasks. The
-service loop drains one atomic pending-work latch and rechecks it before idle.
+executor arms the timer at every user entry and bounds every resource class to
+a two-tick quantum, nominally 20 ms, even when no priority callback or other
+ready task exists. This returns control to deferred device service so new work
+can become ready. Each materialized mapping owns an aligned x87/SSE image and
+PKRU state; allocation rollback, retirement, and reset erase and release it.
+Assembly preserves the kernel continuation and captures user state before
+entering compiled handlers. The current enabled state is XCR0=x87|SSE and
+IA32_XSS=0. Hosted alignment and dispatch regressions pass; the full assembly
+roundtrip explicitly skips hosts without OSXSAVE.
+FRED uses the architectural eight-qword frame, preserves every general register
+and augmented return field, and publishes handler edits back before ERETS or
+ERETU. Entry geometry, STAR selectors, GS ownership, 64-byte stack alignment,
+and AP initialization match that path; double faults retain the existing guarded
+emergency stack. Unsupported user software events cannot impersonate physical
+device interrupts. Native hardware execution still needs validation.
+The service loop drains one atomic pending-work latch and rechecks it before idle.
 Idle checks use the dispatcher's eligibility rules: policy-delayed work remains
 queued while the CPU sleeps, and runnable work can pass a delayed queue head.
 Service deadlines still arm a wake timer even when no task can run yet.

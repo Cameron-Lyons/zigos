@@ -22,7 +22,7 @@ pub const Floor = struct {
     canonical_47_bit_user: bool,
     u64_user_stacks: bool,
     image_2m_pages: bool,
-    lazy_xsaves: bool,
+    owned_xstate: bool,
     register_fred_syscalls: bool,
     rings_only_ipc: bool,
     wait_plus_rings: bool,
@@ -42,7 +42,7 @@ pub const floor: Floor = .{
     .u64_user_stacks = task_runtime.UserStackByteLength == u64,
     .image_2m_pages = userspace_layout.USES_2M_IMAGE_PAGES and
         userspace_layout.image_start % userspace_layout.huge_page_size == 0,
-    .lazy_xsaves = x86.LAZY_XSAVES,
+    .owned_xstate = x86.OWNED_XSTATE,
     .register_fred_syscalls = syscall_surface.REGISTER_FRED_SYSCALLS and cpu_baseline.FRED_ONLY_TRAPS,
     .rings_only_ipc = ipc_ring.DATA_PLANE_USES_SEALED_RINGS and
         endpoint.RINGS_ONLY_DATAPLANE and

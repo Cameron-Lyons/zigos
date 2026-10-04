@@ -1,3 +1,4 @@
+#include "../../arch/xstate64.inc"
 .section .text
 
 .extern isrHandler
@@ -6,9 +7,6 @@
 .extern zigos_resume_from_userspace_interrupt
 .extern zigos_handle_invalid_interrupt_return
 
-.equ XSAVE_BYTES, 576
-.equ XSAVE_ALIGN_SLACK, 64
-.equ XCOMP_BV, 0x8000000000000003
 .equ KERNEL_CODE_SELECTOR, 0x08
 .equ USER_DATA_SEGMENT, 0x18
 .equ USER_DATA_SELECTOR, 0x1b
@@ -130,32 +128,12 @@ isr_common_stub:
     clac
     SAVE_REGISTERS
     movq %rsp, %r12
-    movq FRAME_CS(%r12), %rax
-    cmpq $USER_CODE_SELECTOR, %rax
-    jne .skip_xstate
-    # Restored user state remains live even when TS was re-armed on return.
-    clts
-    subq $(XSAVE_BYTES + XSAVE_ALIGN_SLACK), %rsp
-    andq $-64, %rsp
-    leaq 512(%rsp), %rdi
-    xorl %eax, %eax
-    movl $8, %ecx
-    rep stosq
-    movabsq $XCOMP_BV, %rax
-    movq %rax, 520(%rsp)
-    movl $3, %eax
-    xorl %edx, %edx
-    # xsaves (%rsp)
-    .byte 0x48, 0x0f, 0xc7, 0x2c, 0x24
-    cld
+    cmpq $USER_CODE_SELECTOR, FRAME_CS(%r12)
+    jne .isr_kernel_gs_ready
+    swapgs
+.isr_kernel_gs_ready:
+    ENTER_KERNEL_XSTATE FRAME_CS
     movq %r12, %rdi
-    jmp .isr_enter
-
-.skip_xstate:
-    movq %r12, %rdi
-
-.isr_enter:
-    clts
     call isrHandler
 
     movq FRAME_CS(%r12), %rax
@@ -202,31 +180,21 @@ isr_common_stub:
     call zigos_handle_invalid_interrupt_return
 
 .isr_dispatch_complete:
-    cmpq %rsp, %r12
-    je .skip_xrstors
-    movq FRAME_CS(%r12), %rax
-    cmpq $USER_CODE_SELECTOR, %rax
-    jne .skip_xrstors
-    movl $3, %eax
-    xorl %edx, %edx
-    # xrstors (%rsp)
-    .byte 0x48, 0x0f, 0xc7, 0x1c, 0x24
-.skip_xrstors:
-    movq %r12, %rsp
-    movq FRAME_CS(%r12), %rax
-    cmpq $USER_CODE_SELECTOR, %rax
-    jne .interrupt_return
+    # Handoff keeps the saved user image owned by its mapping. Restore it
+    # only when returning to that user, never before scheduler C code.
+    cmpq $USER_CODE_SELECTOR, FRAME_CS(%r12)
+    jne .restore_interrupted_xstate
     cmpl $0, zigos_userspace_resume_requested(%rip)
-    je .interrupt_lazy_ts
+    je .restore_interrupted_xstate
     cmpq $0, zigos_userspace_resume_eip(%rip)
     jne .userspace_resume
-.interrupt_lazy_ts:
-    cmpq $7, FRAME_INT_NO(%r12)
-    je .interrupt_return
-    movq %cr0, %rax
-    orq $8, %rax
-    movq %rax, %cr0
+.restore_interrupted_xstate:
+    LEAVE_KERNEL_XSTATE FRAME_CS
 .interrupt_return:
+    cmpq $USER_CODE_SELECTOR, FRAME_CS(%rsp)
+    jne .interrupt_restore_registers
+    swapgs
+.interrupt_restore_registers:
     RESTORE_REGISTERS
     addq $16, %rsp
     iretq

@@ -127,7 +127,7 @@ pub const CR0_MP: usize = 1 << 1;
 pub const CR0_TS: usize = 1 << 3;
 pub const CR0_WP: usize = 1 << 16;
 pub const CR0_PG: usize = 1 << 31;
-pub const LAZY_XSAVES = true;
+pub const OWNED_XSTATE = true;
 
 pub const CR4_PGE: usize = 1 << 7;
 pub const CR4_OSFXSR: usize = 1 << 9;
@@ -169,6 +169,7 @@ pub const IA32_FMASK_MSR: u32 = 0xC000_0084;
 pub const IA32_GS_BASE_MSR: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
 pub const IA32_TSC_AUX_MSR: u32 = 0xC000_0103;
+pub const IA32_XSS_MSR: u32 = 0xDA0;
 pub const IA32_U_CET_MSR: u32 = 0x6A0;
 pub const IA32_S_CET_MSR: u32 = 0x6A2;
 pub const CET_SH_STK_EN: u64 = 1 << 0;
@@ -179,7 +180,9 @@ pub const IA32_FRED_RSP2_MSR: u32 = 0x1CE;
 pub const IA32_FRED_RSP3_MSR: u32 = 0x1CF;
 pub const IA32_FRED_STKLVLS_MSR: u32 = 0x1D0;
 pub const IA32_FRED_CONFIG_MSR: u32 = 0x1D4;
-pub const FRED_CONFIG_ENTRY_ALIGN: u64 = 64;
+pub const FRED_CONFIG_ENTRY_ALIGN: u64 = 4096;
+pub const FRED_STACK_ALIGNMENT: usize = 64;
+const FRED_DOUBLE_FAULT_STACK_LEVELS: u64 = @as(u64, 3) << (2 * 8);
 
 // CPUID.7.0:ECX[22] gates RDPID and IA32_TSC_AUX. It reads the kernel's
 // logical CPU signature without reading mutable GS state or using RDMSR.
@@ -312,10 +315,14 @@ pub fn enableSse() void {
 pub fn enableXsaves() void {
     writeCr4(readCr4() | CR4_OSXSAVE);
     writeXcr0(XCR0_X87 | XCR0_SSE);
+    // Bound every XSAVES/XRSTORS owner to the enabled native image.
+    writeMsr(IA32_XSS_MSR, 0);
+    clearTaskSwitched();
 }
 
 pub fn xsavesEnabled() bool {
-    return (readCr4() & CR4_OSXSAVE) != 0 and readXcr0() == (XCR0_X87 | XCR0_SSE);
+    return (readCr4() & CR4_OSXSAVE) != 0 and readXcr0() == (XCR0_X87 | XCR0_SSE) and
+        readMsr(IA32_XSS_MSR) == 0;
 }
 
 var cet_programmed = false;
@@ -374,28 +381,37 @@ pub fn lassEnabled() bool {
 }
 
 extern fn zigos_fred_entry() callconv(.c) void;
+extern fn zigos_fred_kernel_entry() callconv(.c) void;
 
-pub fn enableFred(kernel_stack_top: usize) void {
-    if (kernel_stack_top == 0 or (kernel_stack_top & 0xF) != 0) unreachable;
+pub fn enableFred(kernel_stack_top: usize, double_fault_stack_top: usize) void {
+    if (!validFredStackTop(kernel_stack_top) or !validFredStackTop(double_fault_stack_top)) unreachable;
     const entry = @intFromPtr(&zigos_fred_entry);
     if ((entry & (FRED_CONFIG_ENTRY_ALIGN - 1)) != 0) unreachable;
+    if (@intFromPtr(&zigos_fred_kernel_entry) != entry + 256) unreachable;
     writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
     writeMsr(IA32_FRED_RSP1_MSR, kernel_stack_top);
     writeMsr(IA32_FRED_RSP2_MSR, kernel_stack_top);
-    writeMsr(IA32_FRED_RSP3_MSR, kernel_stack_top);
-    writeMsr(IA32_FRED_STKLVLS_MSR, 0);
+    writeMsr(IA32_FRED_RSP3_MSR, double_fault_stack_top);
+    writeMsr(IA32_FRED_STKLVLS_MSR, FRED_DOUBLE_FAULT_STACK_LEVELS);
     writeMsr(IA32_FRED_CONFIG_MSR, entry);
     writeCr4(readCr4() | CR4_FRED);
 }
 
 pub fn fredEnabled() bool {
     return (readCr4() & CR4_FRED) != 0 and
-        readMsr(IA32_FRED_CONFIG_MSR) == @intFromPtr(&zigos_fred_entry);
+        readMsr(IA32_FRED_CONFIG_MSR) == @intFromPtr(&zigos_fred_entry) and
+        readMsr(IA32_FRED_STKLVLS_MSR) == FRED_DOUBLE_FAULT_STACK_LEVELS and
+        validFredStackTop(@intCast(readMsr(IA32_FRED_RSP0_MSR))) and
+        validFredStackTop(@intCast(readMsr(IA32_FRED_RSP3_MSR)));
 }
 
 pub fn setFredRsp0(kernel_stack_top: usize) void {
-    if (kernel_stack_top == 0 or (kernel_stack_top & 0xF) != 0) unreachable;
+    if (!validFredStackTop(kernel_stack_top)) unreachable;
     writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
+}
+
+fn validFredStackTop(stack_top: usize) bool {
+    return stack_top != 0 and stack_top % FRED_STACK_ALIGNMENT == 0;
 }
 
 pub fn writeXcr0(value: u64) void {

@@ -11,7 +11,7 @@ const CpuState = extern struct {
     active_task_id: u64 = 0,
 };
 
-const USER_STAR_BASE_SELECTOR: u16 = gdt.USER_DATA_SEG - 8;
+const USER_STAR_BASE_SELECTOR: u16 = (gdt.USER_DATA_SEG - 8) | 3;
 const SYSCALL_STAR_VALUE = (@as(u64, gdt.KERNEL_CODE_SEG) << 32) |
     (@as(u64, USER_STAR_BASE_SELECTOR) << 48);
 const RFLAGS_TRAP: u64 = 1 << 8;
@@ -48,13 +48,14 @@ pub fn setKernelStack(stack_top_value: usize) void {
     const state = currentState();
     const stack_slot: *volatile usize = &state.kernel_stack_top;
     stack_slot.* = stack_top_value;
-    if (x86.fredEnabled()) {
+    // Initialization verified the MSRs; dispatch needs only the per-CPU mode bit.
+    if ((x86.readCr4() & x86.CR4_FRED) != 0) {
         x86.setFredRsp0(stack_top_value);
     }
 }
 
 pub fn enabled() bool {
-    if (x86.fredEnabled()) return true;
+    if (x86.fredEnabled()) return syscallSelectorsEnabled();
     return syscallMsrsEnabled();
 }
 
@@ -79,9 +80,13 @@ pub fn currentActiveTaskId() u64 {
 }
 
 fn enableNativeEntry(kernel_stack_top: usize) void {
+    // FRED reads STAR directly on ring transitions and requires SCE for SYSCALL.
+    x86.writeMsr(x86.IA32_STAR_MSR, SYSCALL_STAR_VALUE);
+    x86.writeMsr(x86.EFER_MSR, x86.readMsr(x86.EFER_MSR) | x86.EFER_SCE);
+    if (!syscallSelectorsEnabled()) unreachable;
     const features = @import("../../arch/cpu_features.zig").detect();
     if (features.fred and features.lkgs) {
-        x86.enableFred(kernel_stack_top);
+        x86.enableFred(kernel_stack_top, gdt.doubleFaultStackGuardAddress() + gdt.DOUBLE_FAULT_STACK_TOTAL_BYTES);
         if (!x86.fredEnabled()) unreachable;
         return;
     }
@@ -90,20 +95,23 @@ fn enableNativeEntry(kernel_stack_top: usize) void {
 }
 
 fn enableSyscallMsrs() void {
-    x86.writeMsr(x86.IA32_STAR_MSR, SYSCALL_STAR_VALUE);
     x86.writeMsr(x86.IA32_LSTAR_MSR, @intFromPtr(&zigos_syscall_entry));
     x86.writeMsr(x86.IA32_FMASK_MSR, SYSCALL_RFLAGS_MASK);
-    x86.writeMsr(x86.EFER_MSR, x86.readMsr(x86.EFER_MSR) | x86.EFER_SCE);
 }
 
 fn syscallMsrsEnabled() bool {
-    return x86.syscallExtensionEnabled() and
+    return syscallSelectorsEnabled() and
         x86.readMsr(x86.IA32_LSTAR_MSR) == @intFromPtr(&zigos_syscall_entry) and
         x86.readMsr(x86.IA32_FMASK_MSR) == SYSCALL_RFLAGS_MASK;
 }
 
+fn syscallSelectorsEnabled() bool {
+    return x86.syscallExtensionEnabled() and
+        x86.readMsr(x86.IA32_STAR_MSR) == SYSCALL_STAR_VALUE;
+}
+
 fn bindCpu(cpu_index: u8, stack_top_value: usize) void {
-    if (stack_top_value == 0 or (stack_top_value & 0xF) != 0) unreachable;
+    if (stack_top_value == 0 or stack_top_value % x86.FRED_STACK_ALIGNMENT != 0) unreachable;
     if (cpu_index >= cpu_identity.MAX_CPUS) unreachable;
     if (!@import("../../arch/cpu_features.zig").detect().rdpid) @panic("RDPID is required for native CPU identity");
     cpu_states[cpu_index] = .{
@@ -111,7 +119,8 @@ fn bindCpu(cpu_index: u8, stack_top_value: usize) void {
     };
     const state_addr = @intFromPtr(&cpu_states[cpu_index]);
     x86.writeMsr(x86.IA32_GS_BASE_MSR, state_addr);
-    x86.writeMsr(x86.IA32_KERNEL_GS_BASE_MSR, state_addr);
+    // ERETU (or the explicit validation path's SWAPGS) installs the user base.
+    x86.writeMsr(x86.IA32_KERNEL_GS_BASE_MSR, 0);
     cpu_identity.initialize(cpu_index);
 }
 
@@ -130,7 +139,7 @@ comptime {
     if (gdt.USER_DATA_SEG + 8 != gdt.USER_CODE_SEG) {
         @compileError("SYSRET requires the user data descriptor immediately before user code");
     }
-    if (SYSCALL_STAR_VALUE != 0x0010_0008_0000_0000) {
+    if (SYSCALL_STAR_VALUE != 0x0013_0008_0000_0000) {
         @compileError("x86-64 syscall selectors diverged from the STAR encoding");
     }
 }

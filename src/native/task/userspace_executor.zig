@@ -12,6 +12,12 @@ const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_registry = @import("userspace_registry.zig");
+const smp = @import("../../kernel/smp.zig");
+const xstate = @import("../../arch/xstate.zig");
+const timer = if (builtin.target.os.tag == .freestanding)
+    @import("../../kernel/timer/timer.zig")
+else
+    struct {};
 const demand_paging = @import("../../kernel/memory/demand_paging.zig");
 const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
@@ -58,6 +64,23 @@ else
     };
 const include_verification_evidence = kernel_config.includesVerificationEvidence();
 const NxProbeTarget = if (include_verification_evidence) u64 else void;
+
+// A dispatch is bounded even when no other task is ready yet. This returns the
+// runtime owner to deferred device work before it can discover new runnable work.
+pub const DISPATCH_QUANTUM_TICKS: u64 = 2;
+pub const DispatchQuantum = struct {
+    task_id: u64 = 0,
+    deadline_tick: u64 = 0,
+
+    pub fn begin(task_id: u64, now_ticks: u64) DispatchQuantum {
+        if (task_id == 0) native_util.impossibleByInvariant("dispatch quantum requires an active task");
+        return .{ .task_id = task_id, .deadline_tick = now_ticks +| DISPATCH_QUANTUM_TICKS };
+    }
+
+    pub fn expired(self: DispatchQuantum, task_id: u64, now_ticks: u64) bool {
+        return self.task_id != 0 and self.task_id == task_id and now_ticks >= self.deadline_tick;
+    }
+};
 
 pub const ExecutionOutcome = enum(u8) {
     unavailable,
@@ -348,13 +371,25 @@ comptime {
     }
 }
 
-extern fn zigos_enter_userspace(context: usize, reserved: usize) callconv(.c) u32;
+extern var zigos_userspace_xstate: usize;
+extern var zigos_kernel_xstate: usize;
+extern fn zigos_enter_userspace(context: usize, state: usize) callconv(.c) u32;
 
 pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
     if (builtin.target.os.tag != .freestanding) return 0;
-    const result = zigos_enter_userspace(@intFromPtr(context), 0);
+    var storage: xstate.Storage = .{};
+    storage.initialize();
+    defer storage.erase();
+    return enterUserContextWithState(context, storage.state());
+}
+
+fn enterUserContextWithState(context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+    if (!smp.isRuntimeOwner()) native_util.impossibleByInvariant("one runtime CPU owns the userspace entry state");
+    const result = zigos_enter_userspace(@intFromPtr(context), @intFromPtr(state));
     zigos_userspace_resume_eip = 0;
     zigos_userspace_resume_esp = 0;
+    zigos_userspace_xstate = 0;
+    zigos_kernel_xstate = 0;
     return result;
 }
 
@@ -392,7 +427,7 @@ const MappingDispatchMetadata = struct {
 };
 
 const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 40;
-const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 680 else 456;
+const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 688 else 464;
 const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 98_304 else 66_560;
 
 const MappedImageRegions = struct {
@@ -407,6 +442,7 @@ const MappingEntry = struct {
     address_space_id: u64 = 0,
     address_space: ?freestanding.paging.UserAddressSpace = null,
     image_regions: ?*MappedImageRegions = null,
+    owned_xstate: ?*xstate.Storage = null,
     dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
     resume_instruction_pointer: u64 = 0,
@@ -527,6 +563,7 @@ pub const Executor = struct {
     probe_marker_printed: bool = false,
     resume_marker_printed: bool = false,
     active_task_id: u64 = 0,
+    dispatch_quantum: DispatchQuantum = .{},
     active_mapping: ?*MappingEntry = null,
     active_mapping_handle: MappingHandle = .{},
     handoff_completed: bool = false,
@@ -671,6 +708,7 @@ pub const Executor = struct {
         self.probe_marker_printed = false;
         self.resume_marker_printed = false;
         self.active_task_id = 0;
+        self.dispatch_quantum = .{};
         self.active_mapping = null;
         self.active_mapping_handle = .{};
         self.handoff_completed = false;
@@ -939,6 +977,7 @@ pub const Executor = struct {
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
+        if (!smp.isRuntimeOwner()) return .unavailable;
         if (!self.initialized) return .unavailable;
         if (self.bound_runtime != runtime) return .unavailable;
         var task_borrow = runtime.borrowResolvedTask(task);
@@ -1012,6 +1051,7 @@ pub const Executor = struct {
 
         const completed_mapping_handle = self.active_mapping_handle;
         self.active_task_id = 0;
+        self.dispatch_quantum = .{};
         self.active_mapping = null;
         self.active_mapping_handle = .{};
         if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
@@ -1165,6 +1205,8 @@ pub const Executor = struct {
         };
         errdefer self.releaseMapping(mappings, handle.slotIndex(), entry);
 
+        entry.owned_xstate = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
+        entry.owned_xstate.?.initialize();
         entry.address_space = try self.acquireUserAddressSpace(image.bundleIdSlice());
         entry.image_regions = table_backing.alloc(MappedImageRegions) orelse return error.OutOfMemory;
 
@@ -1325,6 +1367,11 @@ pub const Executor = struct {
         if (entry.image_regions) |image_regions| {
             table_backing.free(MappedImageRegions, image_regions);
             entry.image_regions = null;
+        }
+        if (entry.owned_xstate) |state| {
+            state.erase();
+            table_backing.free(xstate.Storage, state);
+            entry.owned_xstate = null;
         }
         if (!mappings.removeIndex(slot_index)) {
             native_util.impossibleByInvariant("live userspace mapping disappeared during release");
@@ -1862,12 +1909,17 @@ fn scanMailboxAuthorities(
     return resolution;
 }
 
+fn shouldPreemptUserDispatch(executor: *const Executor, from_userspace: bool, now_ticks: u64, check: ?PreemptCheck) bool {
+    if (executor.active_task_id == 0 or !from_userspace or executor.active_mapping == null) return false;
+    // A missing policy callback never disables the finite dispatch watchdog.
+    if (executor.dispatch_quantum.expired(executor.active_task_id, now_ticks)) return true;
+    return if (check) |priority_check| priority_check(executor.active_task_id) else false;
+}
+
 fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
     if (comptime builtin.target.os.tag != .freestanding) return;
     const executor = registered_executor orelse return;
-    if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) return;
-    const check = preempt_check orelse return;
-    if (!check(executor.active_task_id)) return;
+    if (!shouldPreemptUserDispatch(executor, (frame.cs & 0x3) == 0x3, timer.getTicks(), preempt_check)) return;
     const mapping = executor.active_mapping orelse return;
     mapping.resume_valid = true;
     mapping.resume_instruction_pointer = frame.eip;
@@ -2219,8 +2271,27 @@ fn unregisterMappedObject(
     return true;
 }
 
-fn enterUserspace(executor: *const Executor) u32 {
-    return enterPreparedUserContext(&executor.pending_user_context64);
+fn enterUserspace(executor: *Executor) u32 {
+    return enterUserspaceWithClock(executor, timer, UserEntry{});
+}
+
+const UserEntry = struct {
+    fn enter(_: @This(), context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+        return enterUserContextWithState(context, state);
+    }
+};
+
+// Both scheduled and direct Executor dispatch reach this boundary. Arming here
+// includes the first entry after an idle one-shot/disarmed timer and measures
+// the user quantum after materialization/mailbox work has completed.
+fn enterUserspaceWithClock(executor: *Executor, clock: anytype, entry: anytype) u32 {
+    const mapping = executor.active_mapping orelse
+        native_util.impossibleByInvariant("userspace entry requires the active mapping owner");
+    const storage = mapping.owned_xstate orelse
+        native_util.impossibleByInvariant("userspace entry requires private extended state");
+    clock.armSchedulerTick();
+    executor.dispatch_quantum = DispatchQuantum.begin(executor.active_task_id, clock.getTicks());
+    return entry.enter(&executor.pending_user_context64, storage.state());
 }
 
 fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame) void {
@@ -3169,4 +3240,72 @@ test "shared lifetime executor retirement rejects recycled handles and preserves
     try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(object.id)).mapped_task_count);
     try std.testing.expect(!demand_paging.resolveFault(&space, remapped.virtual_base, 4));
     try std.testing.expect(!demand_paging.resolveFault(&space, peer.virtual_base, 4));
+}
+
+test "userspace quantum arms at actual entry after idle and retains private extended state" {
+    const Clock = struct {
+        now: u64,
+        armed: bool = false,
+        fn armSchedulerTick(self: *@This()) void {
+            self.armed = true;
+        }
+        fn getTicks(self: *@This()) u64 {
+            return self.now;
+        }
+    };
+    const Entry = struct {
+        executor: *Executor,
+        clock: *Clock,
+        expected_state: *align(xstate.alignment) xstate.State,
+        called: bool = false,
+        fn enter(self: *@This(), context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+            if (!self.clock.armed or state != self.expected_state or context != &self.executor.pending_user_context64)
+                @panic("user entry requires its armed timer and owned context");
+            if (shouldPreemptUserDispatch(self.executor, true, self.clock.now, null) or
+                !shouldPreemptUserDispatch(self.executor, true, self.clock.now + DISPATCH_QUANTUM_TICKS, null) or
+                shouldPreemptUserDispatch(self.executor, false, self.clock.now + DISPATCH_QUANTUM_TICKS, null))
+                @panic("actual user entry starts a finite fresh quantum");
+            self.called = true;
+            return 7;
+        }
+    };
+    var storage: xstate.Storage = .{};
+    storage.initialize();
+    var mapping = MappingEntry{ .owned_xstate = &storage };
+    var executor = Executor{ .active_task_id = 42, .active_mapping = &mapping };
+    var clock = Clock{ .now = 500 };
+    var entry = Entry{ .executor = &executor, .clock = &clock, .expected_state = storage.state() };
+    try std.testing.expectEqual(@as(u32, 7), enterUserspaceWithClock(&executor, &clock, &entry));
+    try std.testing.expect(entry.called);
+    // A later dispatch does not inherit the prior task's deadline.
+    clock.armed = false;
+    clock.now = 1000;
+    entry.called = false;
+    try std.testing.expectEqual(@as(u32, 7), enterUserspaceWithClock(&executor, &clock, &entry));
+    try std.testing.expect(entry.called);
+    try std.testing.expectEqual(@as(u64, 1002), executor.dispatch_quantum.deadline_tick);
+    try std.testing.expect(!executor.dispatch_quantum.expired(43, 1002));
+    const Priority = struct {
+        fn ready(_: u64) bool {
+            return true;
+        }
+    };
+    try std.testing.expect(shouldPreemptUserDispatch(&executor, true, 1000, Priority.ready));
+    try std.testing.expect(!shouldPreemptUserDispatch(&executor, false, 1000, Priority.ready));
+    executor.dispatch_quantum = .{};
+    executor.active_task_id = 0;
+    try std.testing.expect(!shouldPreemptUserDispatch(&executor, true, 1002, Priority.ready));
+}
+
+test "userspace mapping retirement releases its private extended state allocation" {
+    var executor = Executor{};
+    defer executor.reset();
+    const mappings = executor.mappingArena().?;
+    const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
+    storage.initialize();
+    const handle = installTestMappingAt(&executor, 0, .{ .address_space_id = 11, .owned_xstate = storage });
+    const mapping = &mappings.getByHandle(handle).?.mapping;
+    executor.releaseMapping(mappings, handle.slotIndex(), mapping);
+    try std.testing.expect(mappings.getByHandle(handle) == null);
+    try std.testing.expect(mapping.owned_xstate == null);
 }

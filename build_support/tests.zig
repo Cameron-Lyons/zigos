@@ -29,6 +29,8 @@ pub fn addTestArtifacts(
         .optimize = optimize,
     });
     host_tests_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
+    host_tests_module.addAssemblyFile(b.path("src/tests/host/fred_gpr_capture64.S"));
+    host_tests_module.addAssemblyFile(b.path("src/tests/host/xstate_roundtrip64.S"));
     host_tests_module.addOptions("build_options", kernel_options);
     addNativeTestImports(host_tests_module, wire_modules, userspace_images);
     const host_tests = b.addTest(.{
@@ -42,6 +44,8 @@ pub fn addTestArtifacts(
         .optimize = optimize,
     });
     spec_tests_module.addAssemblyFile(b.path("src/native/task/cooperative_worker64.S"));
+    spec_tests_module.addAssemblyFile(b.path("src/tests/host/fred_gpr_capture64.S"));
+    spec_tests_module.addAssemblyFile(b.path("src/tests/host/xstate_roundtrip64.S"));
     addNativeTestImports(spec_tests_module, wire_modules, userspace_images);
     const spec_tests = b.addTest(.{
         .name = "zigos-spec-tests",

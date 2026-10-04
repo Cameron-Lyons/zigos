@@ -4035,3 +4035,44 @@ test "task reclamation scheduler dispatch callbacks preserve slot through reentr
         try std.testing.expect(runtime.findByHandle(handle, task_ids[0]) == null);
     }
 }
+
+test "userspace quantum bounds every class and direct unregistered dispatch through actual callbacks" {
+    const Dispatcher = struct {
+        scheduler: *Scheduler,
+        calls: usize = 0,
+        fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, _: *userspace_executor.MappingHandle, now: u64) userspace_executor.ExecutionOutcome {
+            const quantum = userspace_executor.DispatchQuantum.begin(task.id, now);
+            if (quantum.expired(task.id, now + userspace_executor.DISPATCH_QUANTUM_TICKS - 1))
+                @panic("dispatch quantum must preserve its bounded interval");
+            if (!quantum.expired(task.id, now + userspace_executor.DISPATCH_QUANTUM_TICKS))
+                @panic("every user dispatch must return to deferred device work");
+            if (self.scheduler.shouldPreemptTask(task.id))
+                @panic("a solitary task has no earlier priority preemption");
+            self.calls += 1;
+            return .yielded;
+        }
+    };
+    for (resource_priority_order) |class| {
+        for ([_]bool{ false, true }) |direct| {
+            var executor = userspace_executor.Executor{};
+            var scheduler = Scheduler.init(&executor);
+            var catalog = userspace_loader.Catalog.init();
+            var runtime = task_runtime.Runtime.init();
+            var capabilities = capability.CapabilityTable.init();
+            scheduler.bind(&catalog, &runtime, &capabilities);
+            defer runtime.reset();
+            defer scheduler.deinit();
+            const task = try createRunnableSchedulerTask(&runtime, 1, class, "bounded", "app.bounded", null);
+            var dispatcher = Dispatcher{ .scheduler = &scheduler };
+            if (direct) {
+                try std.testing.expectEqual(userspace_executor.ExecutionOutcome.yielded, scheduler.executeTaskWithDispatch(task.id, 100, &dispatcher));
+                try std.testing.expect(scheduler.slots.get(task.id) == null);
+            } else {
+                try std.testing.expect(scheduler.registerTask(task.id));
+                try std.testing.expect(scheduler.runNextWithDispatch(100, &dispatcher));
+            }
+            try std.testing.expectEqual(@as(usize, 1), dispatcher.calls);
+            try std.testing.expectEqual(@as(u64, 0), scheduler.active_dispatch_task_id);
+        }
+    }
+}

@@ -928,6 +928,8 @@ fn validateNuc11tnki5KernelProofSources(
     const syscall_path = "src/kernel/interrupts/syscall64.zig";
     const syscall_entry_path = "src/kernel/interrupts/syscall64.S";
     const fred_entry_path = "src/kernel/interrupts/fred64.S";
+    const fred_frame_path = "src/kernel/interrupts/fred_frame64.inc";
+    const xstate_entry_path = "src/arch/xstate64.inc";
     const userspace_syscall_path = "src/arch/x86/syscall_trap.S";
     const gdt_path = "src/kernel/interrupts/gdt64.zig";
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
@@ -1214,6 +1216,8 @@ fn validateNuc11tnki5KernelProofSources(
     const syscall_source = try common.readFileAlloc(allocator, io, syscall_path, common.source_file_max_bytes);
     const syscall_entry_source = try common.readFileAlloc(allocator, io, syscall_entry_path, common.source_file_max_bytes);
     const fred_entry_source = try common.readFileAlloc(allocator, io, fred_entry_path, common.source_file_max_bytes);
+    const fred_frame_source = try common.readFileAlloc(allocator, io, fred_frame_path, common.source_file_max_bytes);
+    const xstate_entry_source = try common.readFileAlloc(allocator, io, xstate_entry_path, common.source_file_max_bytes);
     const userspace_syscall_source = try common.readFileAlloc(allocator, io, userspace_syscall_path, common.source_file_max_bytes);
     const gdt_source = try common.readFileAlloc(allocator, io, gdt_path, common.source_file_max_bytes);
     const runtime_init_source = try common.readFileAlloc(allocator, io, runtime_init_path, common.source_file_max_bytes);
@@ -1849,10 +1853,15 @@ fn validateNuc11tnki5KernelProofSources(
     {
         try common.addError(errors, allocator, "x86 interrupt entry must land on endbr64 and clear AC before entering kernel handlers", .{});
     }
-    if (std.mem.indexOf(u8, interrupt_stubs_source, "xsaves") == null or
-        std.mem.indexOf(u8, interrupt_stubs_source, "xrstors") == null)
-    {
-        try common.addError(errors, allocator, "x86 interrupt entry must save compact extended state with XSAVES", .{});
+    for ([_][]const u8{ "#include \"../../arch/xstate64.inc\"", "ENTER_KERNEL_XSTATE", "LEAVE_KERNEL_XSTATE" }) |snippet| {
+        if (std.mem.indexOf(u8, interrupt_stubs_source, snippet) == null) {
+            try common.addError(errors, allocator, "x86 interrupt entry must use owned extended state: {s}", .{snippet});
+        }
+    }
+    for ([_][]const u8{ "xsaves64", "xrstors64", "xsave64", "xrstor64", "zigos_userspace_xstate", "zigos_kernel_xstate", "wrpkru", "ENTER_KERNEL_XSTATE", "LEAVE_KERNEL_XSTATE" }) |snippet| {
+        if (std.mem.indexOf(u8, xstate_entry_source, snippet) == null) {
+            try common.addError(errors, allocator, "owned extended-state assembly must retain snippet: {s}", .{snippet});
+        }
     }
     const required_cpu_feature_pcid_snippets = [_][]const u8{
         "enableModernFeatures",
@@ -2052,16 +2061,45 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_fred_entry_snippets = [_][]const u8{
         "zigos_fred_entry",
-        "FRED_EVENT_TYPE_SYSCALL",
-        "xsaves",
-        "xrstors",
+        "zigos_fred_kernel_entry",
+        ".balign 4096",
+        ".balign 256",
+        "#include \"fred_frame64.inc\"",
+        "#include \"../../arch/xstate64.inc\"",
+        "ZIGOS_FRED_TEST_SYSCALL",
+        "ZIGOS_FRED_COPY_RETURN_FRAME",
+        "ENTER_KERNEL_XSTATE",
+        "LEAVE_KERNEL_XSTATE",
         "call syscall_handler",
         "call isrHandler",
         "0xf2, 0x0f, 0x01, 0xca",
+        "0xf3, 0x0f, 0x01, 0xca",
     };
     for (required_fred_entry_snippets) |snippet| {
         if (std.mem.indexOf(u8, fred_entry_source, snippet) == null) {
             try common.addError(errors, allocator, "native x86-64 FRED entry must retain snippet: {s}", .{snippet});
+        }
+    }
+    const required_fred_frame_snippets = [_][]const u8{
+        "FRED_ERROR, 0",
+        "FRED_RIP, 8",
+        "FRED_CS, 16",
+        "FRED_RFLAGS, 24",
+        "FRED_RSP, 32",
+        "FRED_SS, 40",
+        "FRED_EVENT_DATA, 48",
+        "FRED_RESERVED, 56",
+        "FRED_FRAME_BYTES, 64",
+        "FRED_VECTOR_SHIFT, 32",
+        "FRED_EVENT_TYPE_SHIFT, 48",
+        "FRED_SYSCALL_CLASS, 0x70001",
+        "ZIGOS_FRED_TEST_SYSCALL",
+        "ZIGOS_FRED_COPY_RETURN_FRAME",
+        ".Lfred_reject_user_software_event",
+    };
+    for (required_fred_frame_snippets) |snippet| {
+        if (std.mem.indexOf(u8, fred_frame_source, snippet) == null) {
+            try common.addError(errors, allocator, "architectural FRED frame must retain snippet: {s}", .{snippet});
         }
     }
     const required_syscall_entry_snippets = [_][]const u8{
@@ -2069,8 +2107,9 @@ fn validateNuc11tnki5KernelProofSources(
         "swapgs",
         "CPU_KERNEL_STACK_TOP",
         "CPU_USER_STACK_POINTER",
-        "xsaves",
-        "xrstors",
+        "#include \"../../arch/xstate64.inc\"",
+        "ENTER_KERNEL_XSTATE",
+        "LEAVE_KERNEL_XSTATE",
         "endbr64",
         "sysretq",
         "call syscall_handler",

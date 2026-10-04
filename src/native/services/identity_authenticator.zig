@@ -15,6 +15,7 @@ const guarded = @import("../task/guarded_worker_stack.zig");
 const tpm_lease = @import("../task/tpm_worker_lease.zig");
 const identity = @import("../platform/os_identity.zig");
 const request_mod = @import("identity_request.zig");
+const operation_guard = @import("../platform/operation_guard.zig");
 
 pub fn Adapter(comptime Io: type) type {
     return struct {
@@ -41,6 +42,7 @@ pub fn Adapter(comptime Io: type) type {
         challenge: [identity.MAX_CHALLENGE_BYTES]u8 = @splat(0),
         challenge_len: u8 = 0,
         assertion_result: ?identity.Assertion = null,
+        publication_guard: operation_guard.Guard = undefined,
 
         pub fn authenticator(self: *Self) entry.Authenticator {
             return .{ .context = self, .recovery_available = self.recovery_package != null, .recovery_characters = if (self.recovery_pin != null) recovery_record.CODE_BYTES else recovery_key.CODE_BYTES, .lock_fn = lock, .start_fn = start, .poll_fn = poll, .busy_fn = busy, .deadline_fn = deadline };
@@ -62,6 +64,33 @@ pub fn Adapter(comptime Io: type) type {
                 std.mem.eql(u8, credential.relyingPartySlice(), grant.relying_party_id);
         }
 
+        fn bindPublicationGuard(self: *Self) void {
+            self.publication_guard = .{ .context = self, .check_fn = checkPublication };
+            self.session.bindPublicationGuard(&self.publication_guard);
+        }
+
+        fn checkPublication(context: *anyopaque) operation_guard.Error!u64 {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (self.worker.cancel_requested) return error.Cancelled;
+            if (self.now_ticks < self.started_at) return error.OperationClockRollback;
+            if (self.operation == .assertion) {
+                if (!authorized(self, self.assertion_grant, self.now_ticks)) return error.OperationAuthorityChanged;
+                if (self.now_ticks < self.session.verified_at_ticks) return error.OperationClockRollback;
+                if (!self.session.policies.credentialAssertionDecision(self.session.subjects, .{
+                    .phishing_resistant = true,
+                    .hardware_backed = true,
+                    .local_unlock_verified = true,
+                    .unlock_age_ticks = self.now_ticks - self.session.verified_at_ticks,
+                }).allowed) return error.OperationPolicyDenied;
+            } else {
+                const expires = std.math.add(u64, self.started_at, self.lifetime_ticks) catch return error.OperationExpired;
+                if (self.now_ticks >= expires) return error.OperationExpired;
+                if (!self.session.policies.sessionLifetimeDecision(self.session.subjects, self.lifetime_ticks).allowed)
+                    return error.OperationPolicyDenied;
+            }
+            return self.now_ticks;
+        }
+
         fn startAssertion(context: *anyopaque, request: request_mod.Request, now: u64) !void {
             const self: *Self = @ptrCast(@alignCast(context));
             if (busy(self) or self.assertion_result != null) return error.WorkerBusy;
@@ -81,12 +110,15 @@ pub fn Adapter(comptime Io: type) type {
             self.now_ticks = now;
             self.failure = null;
             errdefer self.eraseAssertion();
+            self.bindPublicationGuard();
+            errdefer self.session.bindPublicationGuard(null);
             try self.worker.start(self, run);
         }
 
         fn pollAssertion(context: *anyopaque, now: u64) !?identity.Assertion {
             const self: *Self = @ptrCast(@alignCast(context));
             if (self.operation != .assertion) return error.NoIdentityRequest;
+            errdefer if (!busy(self)) self.eraseAssertion();
             if (busy(self) and !(try poll(self, now))) return null;
             if (self.failure) |err| return err;
             if (!authorized(self, self.assertion_grant, now)) {
@@ -103,6 +135,7 @@ pub fn Adapter(comptime Io: type) type {
             @memset(&self.origin, 0);
             @memset(&self.challenge, 0);
             self.challenge_len = 0;
+            self.assertion_grant = .{ .credential_id = 0, .relying_party_id = "", .origin = "", .session = .{}, .expires_at_ticks = 0 };
             self.assertion_result = null;
         }
 
@@ -114,6 +147,7 @@ pub fn Adapter(comptime Io: type) type {
                 self.session.replay.lock();
                 return;
             }
+            self.session.bindPublicationGuard(null);
             self.eraseAssertion();
         }
 
@@ -122,6 +156,7 @@ pub fn Adapter(comptime Io: type) type {
         pub fn deinit(self: *Self) !void {
             lock(self);
             if (busy(self)) return error.WorkerBusy;
+            self.session.bindPublicationGuard(null);
             if (self.stack) |*stack| stack.deinit();
             self.stack = null;
             self.worker = .{ .stack = &.{} };
@@ -140,6 +175,7 @@ pub fn Adapter(comptime Io: type) type {
                 self.session.replay.lock();
             } else {
                 self.session.lock();
+                self.session.bindPublicationGuard(null);
                 self.eraseAssertion();
             }
         }
@@ -183,6 +219,8 @@ pub fn Adapter(comptime Io: type) type {
             self.started_at = now_ticks;
             self.now_ticks = now_ticks;
             self.failure = null;
+            self.bindPublicationGuard();
+            errdefer self.session.bindPublicationGuard(null);
             try self.worker.start(self, run);
         }
 
@@ -195,6 +233,7 @@ pub fn Adapter(comptime Io: type) type {
             self.now_ticks = now_ticks;
             try self.worker.step();
             if (busy(self)) return false;
+            self.session.bindPublicationGuard(null);
             if (self.failure) |err| return err;
             return true;
         }
@@ -225,7 +264,7 @@ pub fn Adapter(comptime Io: type) type {
             if (self.worker.cancel_requested) return error.Cancelled;
             if (self.operation == .assertion) {
                 if (!authorized(self, self.assertion_grant, self.now_ticks)) return error.IdentityRequestDenied;
-                const proof = try self.session.issueUnlockProof(self.assertion_grant.relying_party_id, self.challenge[0..self.challenge_len], self.started_at, self.assertion_grant.expires_at_ticks);
+                const proof = try self.session.issueUnlockProof(self.assertion_grant.relying_party_id, self.challenge[0..self.challenge_len], self.now_ticks, self.assertion_grant.expires_at_ticks);
                 if (self.worker.cancel_requested) return error.Cancelled;
                 self.assertion_result = try self.session.assertCredential(.{
                     .credential_id = self.assertion_grant.credential_id,
@@ -233,15 +272,15 @@ pub fn Adapter(comptime Io: type) type {
                     .origin = self.assertion_grant.origin,
                     .challenge = self.challenge[0..self.challenge_len],
                     .local_unlock = proof,
-                }, self.started_at, self.scratch);
+                }, self.now_ticks, self.scratch);
                 self.assertion_result.?.signature.signer = "";
             } else switch (self.method) {
                 .pin => try self.session.unlock(self.capsule, self.value[0..self.value_len], self.boot_instance, self.started_at, self.lifetime_ticks, self.scratch),
                 .recovery => try self.session.unlockRecovery(self.capsule, &self.recovery_package.?.bytes, &self.value, self.boot_instance, self.started_at, self.lifetime_ticks, self.scratch),
             }
             // No yield between these checks and publishing completion. Validate
-            // actual elapsed time and current policy after all device waits.
-            if (self.worker.cancel_requested) return error.Cancelled;
+            // the latest trusted service time and policy after device waits.
+            _ = try checkPublication(self);
             try self.session.requireActive(self.now_ticks);
             try self.session.device_key.validate(self.now_ticks);
             try self.session.coordinator.?.signer.key.validate(self.now_ticks);
@@ -356,4 +395,151 @@ test "identity authentication adapter validates recovery before hardware and ret
     try std.testing.expectError(error.RecoveryAuthenticationFailed, auth.poll_fn(auth.context, 10));
     try std.testing.expectEqual(before, io.calls);
     try std.testing.expect(std.mem.allEqual(u8, &adapter.value, 0) and std.mem.allEqual(u8, adapter.stack.?.bytes, 0));
+    const Nested = struct {
+        auth: entry.Authenticator,
+        failure: ?anyerror = null,
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.auth.start_fn(self.auth.context, .pin, "73019428", 20) catch |err| {
+                self.failure = err;
+                return;
+            };
+            @panic("nested authentication cannot start a worker");
+        }
+    };
+    var nested = Nested{ .auth = auth };
+    var nested_stack: [32 * 1024]u8 align(16) = undefined;
+    var nested_worker = cooperative.Worker{ .stack = &nested_stack };
+    try nested_worker.start(&nested, Nested.run);
+    try nested_worker.step();
+    try std.testing.expectEqual(@as(anyerror, error.NestedWorker), nested.failure.?);
+    try std.testing.expect(session.publication_guard == null);
+    try std.testing.expect(std.mem.allEqual(u8, &adapter.value, 0));
+}
+
+test "identity assertion adapter gates live publication after cooperative waits" {
+    const signing = @import("../core/signing.zig");
+    const sealing = @import("../platform/secret_sealing.zig");
+    const software = @import("../../tests/fixtures/secret_provider.zig");
+    const Io = struct {
+        calls: usize = 0,
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 0x49);
+        }
+        pub fn execute(self: *@This(), _: []const u8, _: []u8, _: u32) ![]u8 {
+            self.calls += 1;
+            return error.UnexpectedHardwareCommand;
+        }
+    };
+    const Paused = struct {
+        calls: usize = 0,
+        pause_at: usize,
+        fn provider(self: *@This()) sealing.Provider {
+            return .{ .context = self, .operations = &.{ .seal = seal, .open = open } };
+        }
+        fn seal(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {
+            try software.provider().seal(binding, raw, out);
+        }
+        fn open(context: ?*anyopaque, binding: *const sealing.Binding, blob: []const u8, out: *sealing.Value) sealing.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls == self.pause_at) cooperative.current().?.yield();
+            return software.provider().open(binding, blob, out);
+        }
+    };
+    const Variant = enum { success, cancel, epoch, expiry, rollback, policy, unlock_age };
+    for ([_]usize{ 1, 2, 3 }) |pause_at| {
+        for (std.enums.values(Variant)) |variant| {
+            const device = try @import("../storage/document_save_test.zig").Fixture.init(true);
+            defer device.deinit();
+            var record = try @import("../../tests/fixtures/identity_enrollment.zig").record();
+            const owner = record.enrollment.owner;
+            const device_identity = signing.SignerIdentity{ .label = "device key", .seed = @splat(0x22) };
+            const credential_identity = signing.SignerIdentity{ .label = "credential key", .seed = @splat(0x33) };
+            var keys = @import("../../tests/fixtures/document_signer.zig").Fixture{};
+            const signer = try keys.init(owner, device.service.owner, device.service.task_id, @import("../storage/document_save_test.zig").signer);
+            keys.policies = .init();
+            _ = try keys.policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "assertion fixture", .secret_vault_allowed = true, .require_hardware_backed_secrets = true, .deny_secret_raw_export = true, .max_secret_handle_lease_ticks = std.math.maxInt(u64), .credential_assertions_allowed = true }, @import("../storage/document_save_test.zig").signer);
+            var graph = @import("../sync/device_graph.zig").Graph.init();
+            _ = try graph.ensureUserRoot(owner, "owner", @import("../storage/document_save_test.zig").signer);
+            _ = try graph.enrollDevice(owner, record.enrollment.device, "device", @import("../storage/document_save_test.zig").signer, device_identity, 1);
+            const device_secret = try keys.service.importSecret(&keys.policies, keys.authority.subjects, .{ .owner = owner, .task_id = device.service.task_id, .label = device_identity.label, .raw = &device_identity.seed, .now_ticks = 1 }, null);
+            record.enrollment.device_secret_id = device_secret.id;
+            const device_handle = try keys.service.lendHandle(&keys.policies, keys.authority.subjects, .{ .owner = owner, .holder = device.service.owner, .task_id = device.service.task_id, .secret_id = device_secret.id, .now_ticks = 1, .expires_at_ticks = 100 }, null);
+            const credential_secret = try keys.service.importSecret(&keys.policies, keys.authority.subjects, .{ .owner = owner, .task_id = device.service.task_id, .label = credential_identity.label, .raw = &credential_identity.seed, .now_ticks = 1 }, null);
+            const credential_handle = try keys.service.lendHandle(&keys.policies, keys.authority.subjects, .{ .owner = owner, .holder = device.service.owner, .task_id = device.service.task_id, .secret_id = credential_secret.id, .now_ticks = 1, .expires_at_ticks = 100 }, null);
+            var identities = identity.Store.init();
+            var io = Io{};
+            var session = identity_session.Session(Io){
+                .io = &io,
+                .enrollment = record.enrollment,
+                .state = .{ .vault = &keys.service, .identities = &identities, .devices = &graph },
+                .storage = &device.service,
+                .policies = &keys.policies,
+                .subjects = keys.authority.subjects,
+                .replay = @import("../../tests/fixtures/identity_vault.zig").unlock_session,
+                .signing_authority = keys.authority,
+                .unlock_method = .device_pin,
+                .verified_at_ticks = 1,
+                .last_ticks = 1,
+                .expires_at_ticks = 100,
+            };
+            defer session.close() catch unreachable;
+            session.device_key = try @import("sealed_signing_key.zig").Key.bind(&session.signing_authority, device_handle.id, 1);
+            const credential = try identities.registerCredential(&graph, .{ .vault = &keys.service, .policies = &keys.policies, .subjects = keys.authority.subjects, .holder = device.service.owner, .task_id = device.service.task_id, .now_ticks = 1, .unlock_session = &session.replay }, .{ .owner = owner, .device = record.enrollment.device, .relying_party_id = "accounts.example", .label = "account", .key_handle_id = credential_handle.id });
+            const credential_id = credential.id;
+            var scratch: [catalog.MAX_BYTES]u8 = undefined;
+            session.coordinator = .{ .state = session.state, .storage = &device.service, .signer = .{ .key = try @import("sealed_signing_key.zig").Key.bind(&session.signing_authority, signer.key.handle_id, 1) }, .object_id = record.enrollment.catalog_object_id };
+            _ = try session.coordinator.?.flush(1, &scratch);
+            const versions = device.service.versionCount();
+            const generation = device.checkpoint.last_checkpoint_generation;
+            if (variant == .unlock_age) _ = try keys.policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "bounded age", .secret_vault_allowed = true, .credential_assertions_allowed = true, .max_credential_unlock_age_ticks = 3 }, @import("../storage/document_save_test.zig").signer);
+            var paused = Paused{ .pause_at = pause_at };
+            keys.service.attachHardwareProvider(paused.provider());
+            var adapter = Adapter(Io){ .session = &session, .capsule = &record.capsule, .boot_instance = @splat(1), .lifetime_ticks = 100, .scratch = &scratch };
+            defer adapter.deinit() catch unreachable;
+            const backend = adapter.requests();
+            const grant = request_mod.Grant{ .credential_id = credential_id, .relying_party_id = "accounts.example", .origin = "https://accounts.example", .session = try session.replay.binding(), .expires_at_ticks = 50 };
+            try backend.start(backend.context, .{ .grant = grant, .challenge = "nonce" }, 3);
+            try std.testing.expect((try backend.poll(backend.context, 3)) == null);
+            try std.testing.expectEqual(pause_at, paused.calls);
+            var now: u64 = 4;
+            switch (variant) {
+                .success => {},
+                .cancel => backend.cancel(backend.context),
+                .epoch => session.replay.current.session_nonce[0] ^= 1,
+                .expiry => now = 50,
+                .rollback => now = 2,
+                .unlock_age => now = 5,
+                .policy => {
+                    _ = try keys.policies.create(.{ .scope = .user, .subject_id = owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "revoke assertion", .secret_vault_allowed = true, .credential_assertions_allowed = false }, @import("../storage/document_save_test.zig").signer);
+                },
+            }
+            var failure: ?anyerror = null;
+            const result = backend.poll(backend.context, now) catch |err| blk: {
+                failure = err;
+                break :blk null;
+            };
+            if (variant == .success) {
+                try std.testing.expect(failure == null and result != null);
+                try std.testing.expect(identity.verifyAssertion(&result.?, &(try signing.publicKey(credential_identity))));
+                try std.testing.expectEqual(@as(u64, if (pause_at == 3) 3 else 4), identities.findCredentialConst(credential_id).?.last_asserted_at_ticks);
+                try std.testing.expectEqual(versions + 1, device.service.versionCount());
+                try std.testing.expect(session.replay.active);
+            } else {
+                try std.testing.expect(failure != null and result == null);
+                try std.testing.expectEqual(versions, device.service.versionCount());
+                try std.testing.expectEqual(generation, device.checkpoint.last_checkpoint_generation);
+                try std.testing.expect(!session.replay.active and identities.credential_count == 0 and keys.service.store.empty());
+            }
+            try std.testing.expect(session.publication_guard == null);
+            try std.testing.expect(!adapter.authenticator().busy_fn(&adapter));
+            try std.testing.expect(std.mem.allEqual(u8, adapter.stack.?.bytes, 0));
+            try std.testing.expect(std.mem.allEqual(u8, &adapter.challenge, 0));
+            try std.testing.expect(std.mem.allEqual(u8, &adapter.relying_party_id, 0));
+            try std.testing.expect(std.mem.allEqual(u8, &adapter.origin, 0));
+            try std.testing.expect(!adapter.assertion_grant.session.valid());
+            try std.testing.expectEqual(@as(usize, 0), io.calls);
+        }
+    }
 }

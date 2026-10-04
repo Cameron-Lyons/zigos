@@ -6,6 +6,7 @@ const storage_service = @import("../storage/storage_service.zig");
 const object_signer = @import("../storage/sealed_object_signer.zig");
 const sealed = @import("sealed_signing_key.zig");
 const enrollment = @import("../sync/device_enrollment.zig");
+const operation_guard = @import("../platform/operation_guard.zig");
 
 // Trusted native service boundary. All borrowed state stays at stable addresses
 // and operations are serialized. A failed checkpoint withholds the result and
@@ -25,6 +26,9 @@ pub const Service = struct {
         const receipt = try self.checkpoint.save(self.storage, self.state, self.signer, self.object_id, self.version_id, now_ticks, scratch);
         self.version_id = receipt.version_id;
         self.dirty = false;
+        // Published successors remain committed if approval ends during disk/NV
+        // waits. Withhold the receipt without rolling back their recovery chain.
+        _ = try operation_guard.currentTicks(self.signer.key.authority.?.publication_guard, now_ticks);
         return receipt;
     }
 
@@ -459,4 +463,320 @@ test "durable identity rejects invalid credential bindings without publishing an
     try std.testing.expectEqual(@as(u8, 0), recovered_identity.credential_count);
     try std.testing.expectEqual(@as(u8, 0), recovered_vault.store.secret_count);
     try std.testing.expectEqual(@as(usize, 0), recovered_vault.handles.countInUse());
+}
+
+const PublicationTest = if (@import("builtin").is_test) struct {
+    const cooperative = @import("../task/cooperative_worker.zig");
+    const sealing = @import("../platform/secret_sealing.zig");
+    const software = @import("../../tests/fixtures/secret_provider.zig");
+
+    const Control = struct {
+        ticks: u64 = 3,
+        expires: u64 = 1000,
+        cancelled: bool = false,
+        session: *identity.unlock_context.Session,
+        binding: identity.unlock_context.Binding,
+        policies: ?*const @import("../policy/policy_object.zig").Directory = null,
+        subjects: @import("../policy/policy_object.zig").SubjectSet = .{},
+
+        fn check(context: *anyopaque) operation_guard.Error!u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.cancelled or (if (cooperative.current()) |worker| worker.cancel_requested else false)) return error.Cancelled;
+            if (self.ticks >= self.expires) return error.OperationExpired;
+            self.session.require(self.binding) catch return error.OperationAuthorityChanged;
+            if (self.policies) |policies| {
+                if (self.ticks < 1) return error.OperationClockRollback;
+                if (!policies.credentialAssertionDecision(self.subjects, .{ .phishing_resistant = true, .hardware_backed = true, .local_unlock_verified = true, .unlock_age_ticks = self.ticks - 1 }).allowed) return error.OperationPolicyDenied;
+            }
+            return self.ticks;
+        }
+    };
+
+    const Paused = struct {
+        calls: usize = 0,
+        pause_at: usize,
+
+        fn provider(self: *@This()) sealing.Provider {
+            return .{ .context = self, .operations = &.{ .seal = seal, .open = open } };
+        }
+        fn seal(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {
+            try software.provider().seal(binding, raw, out);
+        }
+        fn open(context: ?*anyopaque, binding: *const sealing.Binding, blob: []const u8, out: *sealing.Value) sealing.Error!usize {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            if (self.calls == self.pause_at) cooperative.current().?.yield();
+            // Model an active TPM command plus cleanup completing after local
+            // cancellation. Its owner must recheck before publishing authority.
+            return software.provider().open(binding, blob, out);
+        }
+    };
+
+    const Run = struct {
+        fixture: *Fixture,
+        guard: ?*const operation_guard.Guard,
+        scratch: *[catalog.MAX_BYTES]u8,
+        request: identity.AssertionRequest,
+        failure: ?anyerror = null,
+        result: ?identity.Assertion = null,
+
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var authority = self.fixture.authority(3);
+            authority.publication_guard = self.guard;
+            self.result = self.fixture.service.assertCredential(&self.fixture.devices, authority, self.request, self.scratch) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    };
+} else struct {};
+
+test "identity publication guards reject late signing before counter and catalog mutation" {
+    const Variant = enum { cancel, epoch, expiry, rollback, policy, unlock_age };
+    for ([_]usize{ 1, 2 }) |pause_at| {
+        for (std.enums.values(Variant)) |variant| {
+            const device = try durable.Fixture.init(true);
+            defer device.deinit();
+            var fixture = Fixture{};
+            try fixture.init(&device.service);
+            var scratch: [catalog.MAX_BYTES]u8 = undefined;
+            try fixture.register(&scratch);
+            const versions = device.service.versionCount();
+            const generation = device.checkpoint.last_checkpoint_generation;
+            var control = PublicationTest.Control{ .session = &fixture.unlock_session, .binding = try fixture.unlock_session.binding(), .policies = &fixture.keys.policies, .subjects = fixture.keys.authority.subjects };
+            const guard = operation_guard.Guard{ .context = &control, .check_fn = PublicationTest.Control.check };
+            fixture.keys.authority.publication_guard = &guard;
+            if (variant == .unlock_age) _ = try fixture.keys.policies.create(.{
+                .scope = .user,
+                .subject_id = Fixture.owner.serial,
+                .issuer = .{ .kind = .policy_authority, .serial = 1 },
+                .label = "bounded credential age",
+                .secret_vault_allowed = true,
+                .credential_assertions_allowed = true,
+                .max_credential_unlock_age_ticks = 3,
+            }, durable.signer);
+            var paused = PublicationTest.Paused{ .pause_at = pause_at };
+            fixture.keys.service.attachHardwareProvider(paused.provider());
+            var run = PublicationTest.Run{ .fixture = &fixture, .guard = &guard, .scratch = &scratch, .request = try fixture.request() };
+            var stack: [128 * 1024]u8 align(16) = undefined;
+            var worker = PublicationTest.cooperative.Worker{ .stack = &stack };
+            try worker.start(&run, PublicationTest.Run.run);
+            try worker.step();
+            try std.testing.expectEqual(PublicationTest.cooperative.Worker.State.suspended, worker.state);
+            switch (variant) {
+                .cancel => worker.cancel(),
+                .epoch => fixture.unlock_session.current.session_nonce[0] ^= 1,
+                .expiry => control.expires = control.ticks,
+                .rollback => control.ticks = 2,
+                .unlock_age => control.ticks = 5,
+                .policy => {
+                    _ = try fixture.keys.policies.create(.{
+                        .scope = .user,
+                        .subject_id = Fixture.owner.serial,
+                        .issuer = .{ .kind = .policy_authority, .serial = 1 },
+                        .label = "credential revocation during signing",
+                        .secret_vault_allowed = true,
+                        .credential_assertions_allowed = false,
+                    }, durable.signer);
+                },
+            }
+            try worker.step();
+            try std.testing.expectEqual(PublicationTest.cooperative.Worker.State.complete, worker.state);
+            try std.testing.expect(run.result == null and run.failure != null);
+            try std.testing.expectEqual(@as(u64, if (pause_at == 1) 0 else 1), fixture.identities.findCredentialConst(1).?.assertion_count);
+            try std.testing.expectEqual(versions, device.service.versionCount());
+            try std.testing.expectEqual(generation, device.checkpoint.last_checkpoint_generation);
+            try std.testing.expect(fixture.service.checkpoint.pending == null);
+            try std.testing.expect(std.mem.allEqual(u8, &stack, 0));
+            fixture.keys.authority.publication_guard = null;
+        }
+    }
+}
+
+test "identity publication guards retain immutable pending snapshots and committed successors" {
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var fixture = Fixture{};
+    try fixture.init(&device.service);
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    try fixture.register(&scratch);
+    var control = PublicationTest.Control{ .session = &fixture.unlock_session, .binding = try fixture.unlock_session.binding(), .policies = &fixture.keys.policies, .subjects = fixture.keys.authority.subjects };
+    const guard = operation_guard.Guard{ .context = &control, .check_fn = PublicationTest.Control.check };
+    fixture.keys.authority.publication_guard = &guard;
+    var authority = fixture.authority(3);
+    authority.publication_guard = &guard;
+    device.fail_flushes = true;
+    try std.testing.expectError(error.DurabilityBarrierFailed, fixture.service.assertCredential(&fixture.devices, authority, try fixture.request(), &scratch));
+    const versions = device.service.versionCount();
+    const version = fixture.service.checkpoint.pending.?.version_id;
+    const generation = device.checkpoint.last_checkpoint_generation;
+    control.ticks = 4;
+    control.cancelled = true;
+    device.fail_flushes = false;
+    try std.testing.expectError(error.Cancelled, fixture.service.flush(4, &scratch));
+    try std.testing.expectEqual(version, fixture.service.checkpoint.pending.?.version_id);
+    try std.testing.expectEqual(versions, device.service.versionCount());
+    try std.testing.expectEqual(generation, device.checkpoint.last_checkpoint_generation);
+    control.cancelled = false;
+    const receipt = try fixture.service.flush(4, &scratch);
+    try std.testing.expectEqual(version, receipt.version_id);
+    try std.testing.expectEqual(versions, device.service.versionCount());
+    fixture.keys.authority.publication_guard = null;
+    device.crash();
+    try fixture.restore(&device.service, &scratch);
+    try std.testing.expectEqual(@as(u64, 1), fixture.identities.findCredentialConst(1).?.assertion_count);
+
+    const Anchor = struct {
+        control: *PublicationTest.Control,
+        checkpoint: ?catalog.Checkpoint = null,
+        fn advance(context: *anyopaque, checkpoint: catalog.Checkpoint, _: @import("../core/crypto_hash.zig").Digest) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.checkpoint = checkpoint;
+            // The external freshness boundary completed before cancellation.
+            self.control.cancelled = true;
+        }
+    };
+    control.session = &fixture.unlock_session;
+    control.binding = try fixture.unlock_session.binding();
+    var anchor_state = Anchor{ .control = &control };
+    const anchor = catalog.Anchor{ .context = &anchor_state, .advance_fn = Anchor.advance };
+    fixture.service.checkpoint.anchor = &anchor;
+    fixture.keys.authority.publication_guard = &guard;
+    authority = fixture.authority(4);
+    authority.publication_guard = &guard;
+    try std.testing.expectError(error.Cancelled, fixture.service.assertCredential(&fixture.devices, authority, try fixture.request(), &scratch));
+    try std.testing.expect(!fixture.service.dirty and fixture.service.checkpoint.pending == null);
+    try std.testing.expectEqual(anchor_state.checkpoint.?.generation, (try catalog.inspect(&device.service, .{
+        .object_id = anchor_state.checkpoint.?.object_id,
+        .owner = anchor_state.checkpoint.?.owner,
+        .public_key = anchor_state.checkpoint.?.public_key,
+        .minimum_generation = anchor_state.checkpoint.?.generation,
+        .payload_digest = anchor_state.checkpoint.?.payload_digest,
+    }, &scratch)).generation);
+    fixture.keys.authority.publication_guard = null;
+    device.crash();
+    try fixture.restore(&device.service, &scratch);
+    try std.testing.expectEqual(@as(u64, 2), fixture.identities.findCredentialConst(1).?.assertion_count);
+}
+
+test "identity counter publication rechecks the replay binding without an optional guard" {
+    const device = try durable.Fixture.init(true);
+    defer device.deinit();
+    var fixture = Fixture{};
+    try fixture.init(&device.service);
+    var scratch: [catalog.MAX_BYTES]u8 = undefined;
+    try fixture.register(&scratch);
+    const versions = device.service.versionCount();
+    const generation = device.checkpoint.last_checkpoint_generation;
+    var paused = PublicationTest.Paused{ .pause_at = 1 };
+    fixture.keys.service.attachHardwareProvider(paused.provider());
+    var run = PublicationTest.Run{ .fixture = &fixture, .guard = null, .scratch = &scratch, .request = try fixture.request() };
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = PublicationTest.cooperative.Worker{ .stack = &stack };
+    try worker.start(&run, PublicationTest.Run.run);
+    try worker.step();
+    try std.testing.expectEqual(PublicationTest.cooperative.Worker.State.suspended, worker.state);
+    fixture.unlock_session.lock();
+    worker.cancel();
+    try worker.step();
+    try std.testing.expectEqual(PublicationTest.cooperative.Worker.State.complete, worker.state);
+    try std.testing.expect(run.result == null);
+    try std.testing.expectEqual(@as(anyerror, error.UnlockContextUnavailable), run.failure.?);
+    try std.testing.expectEqual(@as(u64, 0), fixture.identities.findCredentialConst(1).?.assertion_count);
+    try std.testing.expectEqual(versions, device.service.versionCount());
+    try std.testing.expectEqual(generation, device.checkpoint.last_checkpoint_generation);
+}
+
+test "identity publication rechecks private signing leases and device trust after cooperative hardware completion" {
+    const Kind = enum { credential, proof, proof_revocation };
+    const Run = struct {
+        fixture: *Fixture,
+        guard: *const operation_guard.Guard,
+        scratch: *[catalog.MAX_BYTES]u8,
+        kind: Kind,
+        handle_id: u64,
+        failure: ?anyerror = null,
+        published: bool = false,
+
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var authority = self.fixture.authority(3);
+            authority.publication_guard = self.guard;
+            switch (self.kind) {
+                .credential => {
+                    var request = self.fixture.request() catch |err| {
+                        self.failure = err;
+                        return;
+                    };
+                    request.key_handle_id = self.handle_id;
+                    _ = self.fixture.service.assertCredential(&self.fixture.devices, authority, request, self.scratch) catch |err| {
+                        self.failure = err;
+                        return;
+                    };
+                },
+                .proof, .proof_revocation => {
+                    _ = identity.issueLocalUnlockProof(&self.fixture.devices, authority, .{
+                        .owner = Fixture.owner,
+                        .device = Fixture.device,
+                        .relying_party_id = "accounts.example",
+                        .challenge = "nonce",
+                        .method = .device_pin,
+                        .verified_at_ticks = 1,
+                        .expires_at_ticks = 1000,
+                        .key_handle_id = self.handle_id,
+                    }) catch |err| {
+                        self.failure = err;
+                        return;
+                    };
+                },
+            }
+            self.published = true;
+        }
+    };
+    for (std.enums.values(Kind)) |kind| {
+        const device = try durable.Fixture.init(true);
+        defer device.deinit();
+        var fixture = Fixture{};
+        try fixture.init(&device.service);
+        var scratch: [catalog.MAX_BYTES]u8 = undefined;
+        try fixture.register(&scratch);
+        const original = if (kind == .credential) fixture.credential_handle else try fixture.addKey(Fixture.device_key);
+        const secret_id = fixture.keys.service.findHandleConst(original).?.secret_id;
+        const short_lease = try fixture.keys.service.lendHandle(&fixture.keys.policies, fixture.keys.authority.subjects, .{
+            .owner = Fixture.owner,
+            .holder = Fixture.holder,
+            .task_id = 600,
+            .secret_id = secret_id,
+            .now_ticks = 2,
+            .expires_at_ticks = if (kind == .proof_revocation) 1000 else 4,
+        }, null);
+        const versions = device.service.versionCount();
+        const generation = device.checkpoint.last_checkpoint_generation;
+        var control = PublicationTest.Control{ .session = &fixture.unlock_session, .binding = try fixture.unlock_session.binding() };
+        const guard = operation_guard.Guard{ .context = &control, .check_fn = PublicationTest.Control.check };
+        fixture.keys.authority.publication_guard = &guard;
+        defer fixture.keys.authority.publication_guard = null;
+        var paused = PublicationTest.Paused{ .pause_at = 1 };
+        fixture.keys.service.attachHardwareProvider(paused.provider());
+        var run = Run{ .fixture = &fixture, .guard = &guard, .scratch = &scratch, .kind = kind, .handle_id = short_lease.id };
+        var stack: [128 * 1024]u8 align(16) = undefined;
+        var worker = PublicationTest.cooperative.Worker{ .stack = &stack };
+        try worker.start(&run, Run.run);
+        try worker.step();
+        try std.testing.expectEqual(PublicationTest.cooperative.Worker.State.suspended, worker.state);
+        control.ticks = 4;
+        if (kind == .proof_revocation) try fixture.devices.revokeDevice(Fixture.owner, Fixture.device, durable.signer, control.ticks);
+        try std.testing.expectEqual(@as(u64, 4), try PublicationTest.Control.check(&control));
+        try worker.step();
+        try std.testing.expectEqual(PublicationTest.cooperative.Worker.State.complete, worker.state);
+        try std.testing.expect(!run.published);
+        try std.testing.expectEqual(@as(anyerror, if (kind == .proof_revocation) error.DeviceNotTrusted else error.HandleExpired), run.failure.?);
+        try std.testing.expectEqual(@as(u64, 0), fixture.identities.findCredentialConst(1).?.assertion_count);
+        try std.testing.expectEqual(versions, device.service.versionCount());
+        try std.testing.expectEqual(generation, device.checkpoint.last_checkpoint_generation);
+        try std.testing.expect(fixture.service.checkpoint.pending == null);
+        try std.testing.expect(fixture.unlock_session.active);
+        try std.testing.expect(std.mem.allEqual(u8, &stack, 0));
+    }
 }
