@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const authorization_clock = @import("authorization_clock.zig");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const component_port = @import("../kernel_api/component_port.zig");
@@ -455,7 +456,7 @@ const StorageRestartProbe = struct {
             driver.authority_capability_id,
             driver.owner_task_id,
             driver.dma_domain_id,
-            86,
+            authorization_clock.at(86),
             kernel_port,
         )) return false;
         const republished_session = bootstrap_driver_port.activeStorageControllerSession(service_id) orelse return false;
@@ -499,16 +500,17 @@ const DriverRecoveryRuntime = struct {
     }
 
     pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, tick: u64) !driver_runtime_mod.ActivationRecord {
+        const now_ticks = authorization_clock.at(tick);
         const task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
         const previous_generation = task.process_generation;
-        const rehosted = try self.tasks.rehostTask(driver.owner_task_id, tick);
+        const rehosted = try self.tasks.rehostTask(driver.owner_task_id, now_ticks);
         const restarted_task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
         if (driver.device_class == .storage_controller) {
             if (self.storage_probe) |probe| {
                 if (!probe.rejectStaleAccessAfterGenerationChange()) return error.StaleStorageAccessNotRejected;
             }
         }
-        const activation = try self.activations.activateAt(driver, tick);
+        const activation = try self.activations.activateAt(driver, now_ticks);
         self.activation_count += 1;
         self.last_task_id = driver.owner_task_id;
         self.last_process_generation = restarted_task.process_generation;
@@ -805,7 +807,7 @@ fn attachBootstrapDriver(
         device_class,
         bootstrap_transport,
         driver_bundle_id,
-        tick,
+        authorization_clock.at(tick),
     ) catch |err| {
         recordBootFailure(env, service_id, tick, err);
         return null;
@@ -818,7 +820,7 @@ fn activateBootstrapDriver(
     driver: *const driver_service.DriverRecord,
     tick: u64,
 ) ?driver_runtime_mod.ActivationMode {
-    return env.driver_runtime.activateModeAt(driver, tick) catch |err| {
+    return env.driver_runtime.activateModeAt(driver, authorization_clock.at(tick)) catch |err| {
         recordBootFailure(env, service_id, tick, err);
         return null;
     };
@@ -881,7 +883,7 @@ pub fn connectClient(
             .broker_only = true,
         },
         .lease = .{
-            .issued_at_ticks = 56,
+            .issued_at_ticks = authorization_clock.at(56),
             .expires_at_ticks = std.math.maxInt(u64),
             .renewable = false,
         },
@@ -901,13 +903,14 @@ pub fn connectClient(
 
     var service_connect_count: usize = 0;
     for (service_contract.ordered_service_contracts, service_bindings.bindings, 0..) |entry, binding, index| {
+        const now_ticks = authorization_clock.at(57 + @as(u64, @intCast(index)));
         const client_endpoint = kernel_port.endpointCreate(.{
             .header = component_port.makeHeader(.endpoint_create, service_client_task.id),
             .authority_capability_id = service_client_authority.id,
             .owner_task_id = service_client_task.id,
             .label = entry.interface.name,
             .flags = .{ .local_only = true },
-        }, 57 + @as(u64, @intCast(index))) catch |err| {
+        }, now_ticks) catch |err| {
             recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
@@ -920,7 +923,7 @@ pub fn connectClient(
             .endpoint_capability_id = client_endpoint.capability_id,
             .peer_endpoint_capability_id = registry_connection.endpoint_capability_id,
             .peer_endpoint_id = binding.endpoint_id,
-        }, 57 + @as(u64, @intCast(index))) catch |err| {
+        }, now_ticks) catch |err| {
             recordBootFailure(env, support.serviceId(state, entry.class), 57 + @as(u64, @intCast(index)), err);
             return false;
         };
@@ -957,7 +960,7 @@ pub fn proveDriverCrashRestart(
         &recovery_runtime,
         null,
         env.diagnostic_ledger,
-        70,
+        authorization_clock.at(70),
         0x4E,
         "network driver restarted",
     ) catch |err| {
@@ -1018,7 +1021,7 @@ pub fn proveStorageDriverRestartIo(
         &recovery_runtime,
         null,
         env.diagnostic_ledger,
-        81,
+        authorization_clock.at(81),
         0x57,
         "storage driver restarted",
     ) catch |err| {

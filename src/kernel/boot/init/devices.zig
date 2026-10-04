@@ -39,7 +39,7 @@ pub const DataPlaneKind = data_plane_boundary.DataPlaneKind;
 
 pub fn init() void {
     console.print("Initializing device drivers...\n");
-    bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("device initialization requires drained storage work");
     device_inventory.reset();
     network_detected = false;
     storage_detected = false;

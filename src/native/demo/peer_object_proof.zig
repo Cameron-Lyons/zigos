@@ -144,7 +144,7 @@ fn execute(context: *support.Context, service: *sync.Service, peer: Peer, peer_m
         const progress = current.progress orelse continue;
         if (progress.durable() and !reopened) {
             const expected = current.digest;
-            store.* = storage.Service.reloadFromAttachedVolume(context.storage_service_id, context.storage_task_id, context.storage_service_principal, context.storage_checkpoint_store);
+            store.* = try storage.Service.reloadFromAttachedVolume(context.storage_service_id, context.storage_task_id, context.storage_service_principal, context.storage_checkpoint_store);
             store.bindCapabilityTable(context.capability_table);
             store.checkpoint_enabled = false;
             if (!store.loaded_from_volume) return error.ObjectReloadFailed;

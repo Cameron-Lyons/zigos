@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const console = @import("../utils/console.zig");
 const spin = @import("../utils/spin.zig");
 const x86 = @import("../../arch/x86.zig");
@@ -12,11 +13,14 @@ const intel_vtd = @import("../platform/intel_vtd.zig");
 const nvme_completion = @import("nvme_completion.zig");
 const nvme_interrupt = @import("nvme_interrupt.zig");
 const nvme_pipeline = @import("nvme_pipeline.zig");
+const nvme_poll = @import("nvme_poll.zig");
+const nvme_operation = @import("nvme_operation.zig");
 const nvme_prp = @import("nvme_prp.zig");
 const nvme_timing = @import("nvme_timing.zig");
 const pci = @import("pci.zig");
 const dataplane_handoff = @import("../../native/drivers/dataplane_handoff.zig");
 const smp = @import("../smp.zig");
+const cooperative = @import("../../native/task/cooperative_worker.zig");
 
 pub const SECTOR_BYTES: usize = 512;
 pub const INTERRUPT_VECTOR = nvme_interrupt.INTERRUPT_VECTOR;
@@ -65,6 +69,11 @@ comptime {
 }
 
 pub const Error = error{
+    Busy,
+    InterruptContext,
+    WrongCpu,
+    Cancelled,
+    AuthorityRevoked,
     BarUnmappable,
     ControllerResetTimeout,
     ControllerEnableTimeout,
@@ -325,68 +334,59 @@ fn waitForAnyCompletion(
     queue: *Queue,
     outstanding: []const OutstandingCommand,
 ) Error!u16 {
-    if (outstanding.len == 0) return error.CompletionOwnershipMismatch;
-    const cqe: [*]volatile u32 = @ptrFromInt(queue.cq.alias + queue.cq_head * CQ_ENTRY_BYTES);
     const wait_with_interrupt = nvme_interrupt.mayIdleWait(
         queue.qid,
         interruptsActive(),
         interrupt_context.active(),
     );
-    const restore_interrupt_mask = wait_with_interrupt and !x86.interruptsEnabled();
-    var spins: u64 = 0;
-    while (true) : (spins +%= 1) {
-        if (wait_with_interrupt or (spins & 0x3FF) == 0) {
-            for (outstanding) |command| {
-                if (command.deadline.expired()) return error.CommandTimeout;
-            }
-            if (self.fatal()) return error.ControllerFatal;
-            if (intel_vtd.faultMonitoringEnabled() and
-                (intel_vtd.pollFault() catch return error.DmaFault) != null)
-            {
-                return error.DmaFault;
-            }
-        }
-        const status_dword = cqe[3];
-        if (nvme_completion.phase(status_dword) == queue.phase) {
-            acquireCompletion();
-            const completion = nvme_completion.decode(cqe[2], cqe[3]);
-            if (!completion.belongsToQueue(queue.qid, queue.entries) or
-                !containsCommandId(outstanding, completion.command_id))
-            {
-                return error.CompletionOwnershipMismatch;
-            }
-            queue.cq_head = (queue.cq_head + 1) % queue.entries;
-            if (queue.cq_head == 0) queue.phase ^= 1;
-            self.writeReg32(cqDoorbell(self, queue.qid), queue.cq_head);
-            if (intel_vtd.faultMonitoringEnabled() and
-                (intel_vtd.pollFault() catch return error.DmaFault) != null)
-            {
-                return error.DmaFault;
-            }
-            if (!completion.succeeded()) return error.CommandFailed;
-            return completion.command_id;
-        }
-        if (wait_with_interrupt) {
-            timer.armSchedulerTick();
-            x86.cli();
-            if (nvme_completion.phase(cqe[3]) == queue.phase) {
-                if (!restore_interrupt_mask) x86.sti();
-                continue;
-            }
-            x86.stiHlt();
-            if (restore_interrupt_mask) x86.cli();
-        } else {
-            spin.hint();
-        }
-    }
+    var io = CompletionIo{ .controller = self, .queue = queue, .restore_interrupt_mask = wait_with_interrupt and !x86.interruptsEnabled() };
+    const worker = if (queue.qid != 0 and !interrupt_context.active()) cooperative.current() else null;
+    return nvme_poll.wait(&io, queue, outstanding, wait_with_interrupt, worker);
 }
 
-fn containsCommandId(outstanding: []const OutstandingCommand, cid: u16) bool {
-    for (outstanding) |command| {
-        if (command.cid == cid) return true;
+const CompletionIo = struct {
+    controller: *Controller,
+    queue: *Queue,
+    restore_interrupt_mask: bool,
+
+    fn entry(self: *@This(), head: u32) [*]volatile u32 {
+        return @ptrFromInt(self.queue.cq.alias + head * CQ_ENTRY_BYTES);
     }
-    return false;
-}
+    pub fn expired(_: *@This(), deadline: tsc_clock.Deadline) bool {
+        return deadline.expired();
+    }
+    pub fn fatal(self: *@This()) bool {
+        return self.controller.fatal();
+    }
+    pub fn checkDma(_: *@This()) nvme_poll.Error!void {
+        if (intel_vtd.faultMonitoringEnabled() and (intel_vtd.pollFault() catch return error.DmaFault) != null) return error.DmaFault;
+    }
+    pub fn status(self: *@This(), head: u32) u32 {
+        return self.entry(head)[3];
+    }
+    pub fn submission(self: *@This(), head: u32) u32 {
+        return self.entry(head)[2];
+    }
+    pub fn acquireCompletion(_: *@This()) void {
+        completionFence();
+    }
+    pub fn acknowledge(self: *@This(), head: u32) void {
+        self.controller.writeReg32(cqDoorbell(self.controller, self.queue.qid), head);
+    }
+    pub fn pause(_: *@This()) void {
+        spin.hint();
+    }
+    pub fn idle(self: *@This(), queue: *Queue) void {
+        timer.armSchedulerTick();
+        x86.cli();
+        if (nvme_completion.phase(self.status(queue.cq_head)) == queue.phase) {
+            if (!self.restore_interrupt_mask) x86.sti();
+            return;
+        }
+        x86.stiHlt();
+        if (self.restore_interrupt_mask) x86.cli();
+    }
+};
 
 fn submit(self: *Controller, queue: *Queue, command: *const [16]u32) Error!void {
     const outstanding = [_]OutstandingCommand{submitCommand(self, queue, command)};
@@ -463,7 +463,7 @@ fn waitForIoCommand(self: *Controller, command: OutstandingCommand) Error!void {
     _ = try waitForAnyCompletion(self, &self.io, &outstanding);
 }
 
-pub fn flush(self: *Controller) Error!void {
+fn flush(self: *Controller) Error!void {
     if (!self.io_ready) return error.NamespaceMissing;
     var command = @as([16]u32, @splat(0));
     command[0] = NVM_OPC_FLUSH;
@@ -480,13 +480,14 @@ fn publishSubmission() void {
     asm volatile ("mfence" ::: .{ .memory = true });
 }
 
-fn acquireCompletion() void {
+fn completionFence() void {
     asm volatile ("lfence" ::: .{ .memory = true });
 }
 
 var active_controller: Controller = undefined;
 var active_device: pci.PCIDevice = undefined;
 var active_present: bool = false;
+var operation_lease = nvme_operation.Lease{};
 var published_bar_physical: u64 = 0;
 var bounce: [IO_PIPELINE_DEPTH]DmaAddress = @as([IO_PIPELINE_DEPTH]DmaAddress, @splat(.{}));
 var io_interrupts_active: bool = false;
@@ -520,10 +521,20 @@ pub fn attachedDeviceId() ?u64 {
 
 fn runtimeIoPermitted() bool {
     const device_id = attachedDeviceId() orelse return false;
-    return dataplane_handoff.allowsKernelRuntimeIo(device_id);
+    if (!dataplane_handoff.allowsKernelRuntimeIo(device_id)) return false;
+    // An accepted command still drains after revocation. Only refill and new
+    // operations consult the immutable submit snapshot's live broker authority.
+    return if (builtin.os.tag == .freestanding and dataplane_handoff.claimed(device_id))
+        zigosStorageOwnedSubmitAuthorityCurrent(device_id)
+    else
+        true;
 }
 
+extern fn zigosStorageOwnedSubmitAuthorityCurrent(device_id: u64) callconv(.c) bool;
+
 pub fn activateInterrupts() Error!void {
+    const identity = try beginOperation();
+    defer operation_lease.release(identity);
     if (!active_present) return error.NamespaceMissing;
     if (interruptsActive()) return;
     if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
@@ -622,6 +633,8 @@ pub fn attachAsBackend(
     additional_domains: []const intel_vtd.DmaDomain,
     scoped_dmar: ?[]const u8,
 ) !?intel_vtd.FaultRecord {
+    const operation_identity = try beginOperation();
+    defer operation_lease.release(operation_identity);
     if (scoped_dmar != null and vtd_summary != null) return error.InvalidDmaFirmware;
     const isolation_required = scoped_dmar != null or vtd_summary != null;
     if (pci.busMasteringEnabled(dev)) return error.BusMasteringNotRevoked;
@@ -697,92 +710,69 @@ pub fn attachAsBackend(
 }
 
 pub fn backendRead(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
-    if (!runtimeIoPermitted()) return false;
-    const total_sectors = validateBackendTransfer(start_lba, buffer_len) orelse return false;
-    pipelineRead(start_lba, buffer_ptr, total_sectors) catch |err| {
-        handleBackendError(err);
-        return false;
-    };
-    return true;
+    const identity = operationIdentity() catch return false;
+    var io = BackendOperation{ .kind = .read, .start_lba = start_lba, .read_buffer = buffer_ptr, .buffer_len = buffer_len };
+    return operation_lease.execute(identity, &io);
 }
 
 fn pipelineRead(start_lba: u64, buffer_ptr: [*]u8, total_sectors: usize) Error!void {
-    var slots = TransferSlots{};
-    var next_sector: usize = 0;
-    while (next_sector < total_sectors or slots.active_count != 0) {
-        while (next_sector < total_sectors and slots.active_count < IO_PIPELINE_DEPTH) {
-            const slot_index = slots.freeIndex() orelse unreachable;
-            const chunk = @min(total_sectors - next_sector, BOUNCE_SECTORS);
-            const command = try submitIoCommand(
-                &active_controller,
-                NVM_OPC_READ,
-                start_lba + @as(u64, @intCast(next_sector)),
-                bounce[slot_index],
-                active_controller.io_prp_lists[slot_index],
-                @intCast(chunk),
-            );
-            if (!slots.activate(
-                slot_index,
-                command,
-                next_sector,
-                chunk * SECTOR_BYTES,
-            )) unreachable;
-            next_sector += chunk;
-        }
-
-        var outstanding_buffer: [IO_PIPELINE_DEPTH]OutstandingCommand = undefined;
-        const outstanding = slots.collect(&outstanding_buffer);
-        const completed_cid = try waitForAnyCompletion(&active_controller, &active_controller.io, outstanding);
-        const completed = slots.complete(completed_cid) orelse
-            return error.CompletionOwnershipMismatch;
-        const bounce_bytes: [*]const u8 = @ptrFromInt(bounce[completed.index].alias);
-        @memcpy(
-            (buffer_ptr + completed.sector_offset * SECTOR_BYTES)[0..completed.byte_count],
-            bounce_bytes[0..completed.byte_count],
-        );
-    }
+    var io = TransferIo{ .start_lba = start_lba, .read_buffer = buffer_ptr };
+    try nvme_pipeline.transfer(OutstandingCommand, &io, total_sectors, BOUNCE_SECTORS, SECTOR_BYTES);
 }
 
 pub fn backendWrite(start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool {
-    if (!runtimeIoPermitted()) return false;
-    const total_sectors = validateBackendTransfer(start_lba, buffer_len) orelse return false;
-    pipelineWrite(start_lba, buffer_ptr, total_sectors) catch |err| {
-        handleBackendError(err);
-        return false;
-    };
-    return true;
+    const identity = operationIdentity() catch return false;
+    var io = BackendOperation{ .kind = .write, .start_lba = start_lba, .write_buffer = buffer_ptr, .buffer_len = buffer_len };
+    return operation_lease.execute(identity, &io);
 }
 
 fn pipelineWrite(start_lba: u64, buffer_ptr: [*]const u8, total_sectors: usize) Error!void {
-    var slots = TransferSlots{};
-    var next_sector: usize = 0;
-    while (next_sector < total_sectors or slots.active_count != 0) {
-        while (next_sector < total_sectors and slots.active_count < IO_PIPELINE_DEPTH) {
-            const slot_index = slots.freeIndex() orelse unreachable;
-            const chunk = @min(total_sectors - next_sector, BOUNCE_SECTORS);
-            const chunk_bytes = chunk * SECTOR_BYTES;
-            const bounce_bytes: [*]u8 = @ptrFromInt(bounce[slot_index].alias);
-            @memcpy(
-                bounce_bytes[0..chunk_bytes],
-                (buffer_ptr + next_sector * SECTOR_BYTES)[0..chunk_bytes],
-            );
-            const command = try submitIoCommand(
-                &active_controller,
-                NVM_OPC_WRITE,
-                start_lba + @as(u64, @intCast(next_sector)),
-                bounce[slot_index],
-                active_controller.io_prp_lists[slot_index],
-                @intCast(chunk),
-            );
-            if (!slots.activate(slot_index, command, next_sector, chunk_bytes)) unreachable;
-            next_sector += chunk;
-        }
+    var io = TransferIo{ .start_lba = start_lba, .write_buffer = buffer_ptr };
+    try nvme_pipeline.transfer(OutstandingCommand, &io, total_sectors, BOUNCE_SECTORS, SECTOR_BYTES);
+}
 
-        var outstanding_buffer: [IO_PIPELINE_DEPTH]OutstandingCommand = undefined;
-        const outstanding = slots.collect(&outstanding_buffer);
-        const completed_cid = try waitForAnyCompletion(&active_controller, &active_controller.io, outstanding);
-        _ = slots.complete(completed_cid) orelse return error.CompletionOwnershipMismatch;
+const TransferError = Error;
+const TransferIo = struct {
+    pub const Error = TransferError;
+    start_lba: u64,
+    read_buffer: ?[*]u8 = null,
+    write_buffer: ?[*]const u8 = null,
+
+    pub fn cancelled(_: *@This()) bool {
+        return if (cooperative.current()) |worker| worker.cancel_requested else false;
     }
+    pub fn authorized(_: *@This()) bool {
+        return runtimeIoPermitted();
+    }
+    pub fn submit(self: *@This(), slot: usize, offset: usize, sectors: usize) TransferError!OutstandingCommand {
+        if (self.write_buffer) |source| {
+            const bytes: [*]u8 = @ptrFromInt(bounce[slot].alias);
+            @memcpy(bytes[0 .. sectors * SECTOR_BYTES], (source + offset * SECTOR_BYTES)[0 .. sectors * SECTOR_BYTES]);
+        }
+        return submitIoCommand(&active_controller, if (self.read_buffer != null) NVM_OPC_READ else NVM_OPC_WRITE, self.start_lba + @as(u64, @intCast(offset)), bounce[slot], active_controller.io_prp_lists[slot], @intCast(sectors));
+    }
+    pub fn wait(_: *@This(), outstanding: []const OutstandingCommand) TransferError!u16 {
+        return waitForAnyCompletion(&active_controller, &active_controller.io, outstanding);
+    }
+    pub fn completed(self: *@This(), value: TransferSlots.Completed) void {
+        if (self.read_buffer) |destination| {
+            const source: [*]const u8 = @ptrFromInt(bounce[value.index].alias);
+            @memcpy((destination + value.sector_offset * SECTOR_BYTES)[0..value.byte_count], source[0..value.byte_count]);
+        }
+    }
+};
+
+fn beginOperation() Error!usize {
+    const identity = try operationIdentity();
+    if (!operation_lease.acquire(identity)) return error.Busy;
+    return identity;
+}
+
+fn operationIdentity() Error!usize {
+    // Do not consult the interrupted Worker or yield from an IRQ/AP caller.
+    if (interrupt_context.active()) return error.InterruptContext;
+    if (!smp.isRuntimeOwner()) return error.WrongCpu;
+    return if (cooperative.current()) |worker| @intFromPtr(worker) else 1;
 }
 
 fn validateBackendTransfer(start_lba: u64, buffer_len: usize) ?usize {
@@ -798,13 +788,35 @@ fn validateBackendTransfer(start_lba: u64, buffer_len: usize) ?usize {
 }
 
 pub fn backendFlush() callconv(.c) bool {
-    if (!runtimeIoPermitted()) return false;
-    flush(&active_controller) catch |err| {
-        handleBackendError(err);
-        return false;
-    };
-    return true;
+    const identity = operationIdentity() catch return false;
+    var io = BackendOperation{ .kind = .flush };
+    return operation_lease.execute(identity, &io);
 }
+
+const BackendOperation = struct {
+    kind: enum { read, write, flush },
+    start_lba: u64 = 0,
+    read_buffer: ?[*]u8 = null,
+    write_buffer: ?[*]const u8 = null,
+    buffer_len: usize = 0,
+
+    pub fn perform(self: *@This()) Error!void {
+        if (!runtimeIoPermitted()) return error.AuthorityRevoked;
+        if (cooperative.current()) |worker| if (worker.cancel_requested) return error.Cancelled;
+        switch (self.kind) {
+            .read => try pipelineRead(self.start_lba, self.read_buffer.?, validateBackendTransfer(self.start_lba, self.buffer_len) orelse return error.EmptyTransfer),
+            .write => try pipelineWrite(self.start_lba, self.write_buffer.?, validateBackendTransfer(self.start_lba, self.buffer_len) orelse return error.EmptyTransfer),
+            .flush => {
+                try flush(&active_controller);
+                if (cooperative.current()) |worker| if (worker.cancel_requested) return error.Cancelled;
+                if (!runtimeIoPermitted()) return error.AuthorityRevoked;
+            },
+        }
+    }
+    pub fn contain(_: *@This(), err: anyerror) void {
+        handleBackendError(err);
+    }
+};
 
 fn handleBackendError(err: anyerror) void {
     if (!backendErrorRequiresContainment(err) or !active_present) return;

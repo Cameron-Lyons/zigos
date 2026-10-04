@@ -394,8 +394,8 @@ fn seedUiProbe(session: *compositor_session.Session) !UiProbe {
 
 test "update health validates boot core storage network and ui checks and records update history" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 70 };
     const state_signer = signing.SignerIdentity{
@@ -497,8 +497,8 @@ test "update health validates boot core storage network and ui checks and record
 
 test "update health failures trigger rollback for each required post-activation check" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 71 };
     const state_signer = signing.SignerIdentity{

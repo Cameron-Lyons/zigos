@@ -401,7 +401,7 @@ fn appendFmt(buffer: []u8, used: *usize, comptime fmt: []const u8, args: anytype
 
 test "native ux records task workspace pairing review and recovery flows" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 4 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8 };
@@ -494,7 +494,7 @@ test "native ux records task workspace pairing review and recovery flows" {
     try std.testing.expectEqual(manifest.PermissionKind.object_access, controller.flowAtOrder(3).?.permission_kind);
     try std.testing.expectEqualStrings("object_access", controller.flowAtOrder(3).?.permissionResourceSlice());
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "native ux renders structured permission review decisions" {

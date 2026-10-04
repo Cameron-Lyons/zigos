@@ -17,7 +17,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
         support.common.printBootMarker("ZIGOS:STORAGE:PERSIST:CACHE_READY");
     } else {
         support.common.printBootMarker("ZIGOS:STORAGE:PERSIST:RESET_START");
-        context.storage_checkpoint_store.resetPreparedState();
+        if (!context.storage_checkpoint_store.resetPreparedState()) native_util.bootProofFailure("storage reset", error.VolumeOperationBusy);
         support.common.printBootMarker("ZIGOS:STORAGE:PERSIST:RESET_DONE");
         if (storage_volume_mod.hasAttachedDevice()) {
             support.common.printBootMarker("ZIGOS:STORAGE:PERSIST:DEVICE_READY");
@@ -263,7 +263,7 @@ pub fn run(context: *support.Context) support.StorageScenarioState {
             context.storage_task_id,
             context.storage_service_principal,
             context.storage_checkpoint_store,
-        )
+        ) catch |err| native_util.bootProofFailure("storage reload", err)
     else
         storage_service_mod.Service.initWithStore(
             context.storage_service_id,

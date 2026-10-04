@@ -180,7 +180,8 @@ pub fn attachDriver(
             .broker_only = true,
         },
         .lease = .{
-            .issued_at_ticks = now_ticks,
+            // Boot contract ordinals do not establish the runtime clock.
+            .issued_at_ticks = 0,
             .expires_at_ticks = std.math.maxInt(u64),
             .renewable = false,
         },

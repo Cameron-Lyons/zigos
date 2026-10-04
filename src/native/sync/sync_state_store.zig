@@ -1161,8 +1161,8 @@ test "sync record path capacity covers the longest schema key" {
 
 test "transport frame cursor persists without retained frames and preserves exhaustion" {
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 9_920 };
     var storage = storage_service.Service.initWithStore(9_921, 9_922, owner, &checkpoint_store);

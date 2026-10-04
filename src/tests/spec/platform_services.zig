@@ -55,8 +55,8 @@ pub fn attestationSecretsAndAcceleratorPolicyStayExplicit() !void {
     try measured_boot.verifyBootRecordAgainstManifest(&boot, &artifact_manifest, .firmware_authenticated);
 
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const measurement_owner = spec_support.service(99);
     const measurement_signer = spec_support.signer("spec.measured.state", 0x90);
@@ -413,8 +413,8 @@ pub fn failuresStayExplainableRestartableAndRedacted() !void {
     try std.testing.expectEqual(contract.ServiceClass.storage_object, ledger.latestKind(.driver_restart).?.service_class);
 
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
     const ledger_owner = spec_support.service(141);
     const ledger_signer = spec_support.signer("spec.policy.ux.history", 0x94);
     var history_storage = storage_service.Service.initWithStore(991, 141, ledger_owner, &checkpoint_store);

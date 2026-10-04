@@ -217,7 +217,7 @@ test "sync service configuration errors preserve live policy and overlay records
 
 test "sync service persists platform-backed device key bindings across restart" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 9_300 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 9_301 };
@@ -285,8 +285,8 @@ test "sync service persists platform-backed device key bindings across restart" 
 
 test "sync service requires database contract before transactional workspace replication" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 8_500 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_501 };
@@ -393,8 +393,8 @@ test "sync service requires database contract before transactional workspace rep
 
 test "sync service persists durable transport queues and enforces replay and workspace sharing policy" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 8_700 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_701 };
@@ -574,8 +574,8 @@ test "sync service persists durable transport queues and enforces replay and wor
 
 test "sync service inbound queue evicts out-of-window frames instead of the queue-full cliff" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 9_700 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 9_701 };
@@ -677,8 +677,8 @@ test "sync service inbound queue evicts out-of-window frames instead of the queu
 
 test "sync service treats per-object shares and conflict review as local-first primitives" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 8_800 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8_801 };
@@ -876,8 +876,8 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
 
     var source_checkpoint_store = storage_service.CheckpointStore{};
     var target_checkpoint_store = storage_service.CheckpointStore{};
-    source_checkpoint_store.resetPersistent();
-    target_checkpoint_store.resetPersistent();
+    if (!source_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    if (!target_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     var source_storage = storage_service.Service.initWithStore(9_220, 9_220, storage_owner, &source_checkpoint_store);
     const source_base = try source_storage.putVersion(.{
@@ -1149,8 +1149,8 @@ pub fn deterministicTwoDeviceOverlayReplication() !void {
     try std.testing.expectEqual(@as(u8, 0), restarted_clean.selected_entry_count);
     try std.testing.expectEqual(@as(u8, 0), restarted_clean.transport_frame_count);
 
-    source_checkpoint_store.resetPersistent();
-    target_checkpoint_store.resetPersistent();
+    if (!source_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    if (!target_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 fn createSyncServiceTask(
@@ -1301,8 +1301,8 @@ test "sync service replicates payloads to peer storage through booted relay fall
 
     var source_checkpoint_store = storage_service.CheckpointStore{};
     var target_checkpoint_store = storage_service.CheckpointStore{};
-    source_checkpoint_store.resetPersistent();
-    target_checkpoint_store.resetPersistent();
+    if (!source_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    if (!target_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     var source_storage = storage_service.Service.initWithStore(9_580, 9_581, storage_owner, &source_checkpoint_store);
     const source_base = try source_storage.putVersion(.{
@@ -1551,13 +1551,13 @@ test "sync service replicates payloads to peer storage through booted relay fall
     try std.testing.expectEqual(replicated_secret_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, secret_path).?);
     try std.testing.expectEqual(replicated_database_version.id.raw(), restarted_target_sync.replicaVersion(workspace_id, tablet, database_path).?);
 
-    source_checkpoint_store.resetPersistent();
-    target_checkpoint_store.resetPersistent();
+    if (!source_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    if (!target_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "sync service covers device graph policy replication semantics and restart recovery" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 4 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 8 };
@@ -1831,7 +1831,7 @@ test "sync service covers device graph policy replication semantics and restart 
     const restarted_contract = try restarted_port.registerDatabaseContract(restarted_authority, notes_id, "app.db.notes", "notes-db", contract_signer);
     try std.testing.expectEqual(contract.id, restarted_contract.id);
 
-    storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "overlay sessions cover sync remote access private service publishing and encrypted relay" {

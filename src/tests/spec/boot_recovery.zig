@@ -70,8 +70,8 @@ fn expectPendingActivationFailure(
 
 pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = spec_support.service(40);
     const state_signer = spec_support.signer("spec.base.state", 0x51);
@@ -144,8 +144,8 @@ pub fn baseImageStaysSignedMeasuredAtomicAndRollbackCapable() !void {
 
 pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = spec_support.service(50);
     const sync_owner = spec_support.service(51);
@@ -252,8 +252,8 @@ pub fn recoveryModeCanReinstallRestoreRepairRotateAndRevoke() !void {
 
 pub fn baseOsHealthChecksValidateBootCoreStorageNetworkAndUi() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = spec_support.service(41);
     const state_signer = spec_support.signer("spec.health.state", 0x53);

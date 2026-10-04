@@ -189,7 +189,7 @@ const heap_backed_recoverable_delete_logs = HEAP_BACKED_RECOVERABLE_DELETE_LOGS_
 pub const HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING = true;
 const heap_backed_workspace_entries = HEAP_BACKED_WORKSPACE_ENTRIES_ON_FREESTANDING and builtin.target.os.tag == .freestanding;
 pub const WORKSPACE_RECORD_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 152 else 43_928;
-pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 7_032 else 357_240;
+pub const DIRECTORY_SIZE_CEILING_BYTES: usize = if (heap_backed_mutation_logs and heap_backed_recoverable_delete_logs and heap_backed_workspace_share_tables and heap_backed_workspace_entries) 7_040 else 357_248;
 const MutationBacking = if (heap_backed_mutation_logs) ?*MutationEntries else MutationEntries;
 const RecoverableDeleteBacking = if (heap_backed_recoverable_delete_logs) ?*RecoverableDeleteEntries else RecoverableDeleteEntries;
 const WorkspaceEntryBacking = if (heap_backed_workspace_entries) ?*WorkspaceEntryState else WorkspaceEntryState;
@@ -788,6 +788,7 @@ const WorkspaceLabelIndex = indexed_arena.MultimapIndex(MAX_WORKSPACES, MAX_WORK
 const SnapshotLabelIndex = indexed_arena.UniqueIndex(SNAPSHOT_INDEX_CAPACITY);
 
 pub const Directory = struct {
+    dirty_revision: u64 = 0,
     next_workspace_id: u64 = 1,
     next_snapshot_id: u64 = 1,
     workspaces: WorkspaceArena = WorkspaceArena.init(),
@@ -807,6 +808,7 @@ pub const Directory = struct {
     }
 
     pub fn reset(self: *Directory) void {
+        self.noteDirtyMutation();
         self.next_workspace_id = 1;
         self.next_snapshot_id = 1;
         for (self.workspaces.slots[0..self.workspaces.next_unclaimed_index]) |*slot| {
@@ -887,6 +889,7 @@ pub const Directory = struct {
         slot.workspace.label_len = @intCast(label_len);
         rebuildWorkspaceEntryIndex(&slot.workspace);
         self.indexWorkspace(slot_index);
+        self.noteDirtyMutation();
         return &slot.workspace;
     }
 
@@ -956,6 +959,7 @@ pub const Directory = struct {
         workspace.staging.transaction_open = true;
         workspace.staging.staged_entry_count = 0;
         workspace.staging.staged_effective_entry_count = @intCast(workspace.counts.entry_count);
+        self.noteDirtyMutation();
     }
 
     pub fn abortTransaction(self: *Directory, workspace_id: ids.WorkspaceId) Error!void {
@@ -963,6 +967,7 @@ pub const Directory = struct {
         if (!workspace.staging.transaction_open) return error.NoActiveTransaction;
         discardTransactionState(workspace);
         workspace.staging.staged_effective_entry_count = @intCast(workspace.counts.entry_count);
+        self.noteDirtyMutation();
     }
 
     pub fn stagePut(
@@ -985,6 +990,7 @@ pub const Directory = struct {
                 workspace.staging.staged_effective_entry_count += 1;
             }
             staged_entry.* = try Entry.init(path, object_id, version_id, object_type);
+            self.noteDirtyMutation();
             return;
         }
         const adds_entry = findWorkspaceEntryIndex(workspace, path) == null;
@@ -993,6 +999,7 @@ pub const Directory = struct {
         }
         try insertSortedStagedEntry(workspace, try Entry.init(path, object_id, version_id, object_type));
         if (adds_entry) workspace.staging.staged_effective_entry_count += 1;
+        self.noteDirtyMutation();
     }
 
     pub fn stageDelete(self: *Directory, workspace_id: ids.WorkspaceId, path: []const u8) Error!void {
@@ -1011,6 +1018,7 @@ pub const Directory = struct {
             } else {
                 removeStagedEntry(workspace, index);
             }
+            self.noteDirtyMutation();
             return;
         }
 
@@ -1018,6 +1026,7 @@ pub const Directory = struct {
 
         try insertSortedStagedEntry(workspace, try deleteTombstone(path));
         workspace.staging.staged_effective_entry_count -= 1;
+        self.noteDirtyMutation();
     }
 
     pub fn commit(self: *Directory, workspace_id: ids.WorkspaceId, tick: u64) Error!u32 {
@@ -1162,6 +1171,7 @@ pub const Directory = struct {
         slot.snapshot = snapshot_record;
         self.snapshot_label_index.insert(snapshotLabelKey(slot.snapshot.workspace_id, slot.snapshot.labelSlice()), slot_index);
         self.recordWorkspaceSnapshotGeneration(slot.snapshot.workspace_id, slot.snapshot.generation);
+        self.noteDirtyMutation();
         return &slot.snapshot;
     }
 
@@ -1312,7 +1322,20 @@ pub const Directory = struct {
         return mutations[start_index..workspace.counts.entry_mutation_count];
     }
 
+    pub fn dirtyRevision(self: *const Directory) ?u64 {
+        return if (self.dirty_revision == std.math.maxInt(u64)) null else self.dirty_revision;
+    }
+
+    pub fn dirtyRevisionIsCurrent(self: *const Directory, revision: ?u64) bool {
+        return if (revision) |value| self.dirtyRevision() == value else false;
+    }
+
+    fn noteDirtyMutation(self: *Directory) void {
+        self.dirty_revision +|= 1;
+    }
+
     pub fn clearDirty(self: *Directory) void {
+        self.noteDirtyMutation();
         self.workspaces.clearDirty();
         self.snapshots.clearDirty();
     }
@@ -1323,6 +1346,7 @@ pub const Directory = struct {
     }
 
     fn markWorkspaceDirty(self: *Directory, workspace_id: ids.WorkspaceId) void {
+        self.noteDirtyMutation();
         self.workspaces.markDirty(workspace_id);
     }
 
@@ -2300,7 +2324,7 @@ test "workspace sharing uses capacity-sized indexed backing" {
     try std.testing.expectEqual(@as(usize, 1_472), @sizeOf(WorkspaceShareTable));
     try std.testing.expectEqual(@as(usize, 43_928), @sizeOf(WorkspaceRecord));
     try std.testing.expectEqual(@as(usize, 43_936), @sizeOf(WorkspaceSlot));
-    try std.testing.expectEqual(@as(usize, 357_240), @sizeOf(Directory));
+    try std.testing.expectEqual(@as(usize, 357_248), @sizeOf(Directory));
 }
 
 test "workspace borrowed resolution returns the directory owned entry" {

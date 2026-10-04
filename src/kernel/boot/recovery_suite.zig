@@ -142,7 +142,7 @@ fn prepareFixture(
     primary: principal.PrincipalId,
     tablet: principal.PrincipalId,
 ) !void {
-    context.checkpoint_store.resetPersistent();
+    if (!context.checkpoint_store.resetPersistent()) return error.VolumeOperationBusy;
     context.storage = storage_service.Service.initWithStore(800, 80, storage_owner, &context.checkpoint_store);
     context.manager = try immutable_base.Manager.init(&context.storage, storage_owner, signer("recovery-state", 0x61));
     _ = try context.manager.stageImage(0, "stable-a", "kernel=v1", signer("recovery-image", 0x62), 10);

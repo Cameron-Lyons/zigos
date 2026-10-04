@@ -40,6 +40,7 @@ test "driver host tests import native driver modules" {
     std.testing.refAllDecls(nvme_completion);
     std.testing.refAllDecls(nvme_prp);
     std.testing.refAllDecls(nvme_timing);
+    std.testing.refAllDecls(@import("../../kernel/drivers/nvme_wait_test.zig"));
     std.testing.refAllDecls(network_driver_task);
     std.testing.refAllDecls(storage_driver_task);
     std.testing.refAllDecls(xhci_driver_task);

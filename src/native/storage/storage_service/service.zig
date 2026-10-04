@@ -113,8 +113,8 @@ pub const StorageCore = struct {
         task_id: u64,
         owner: principal.PrincipalId,
         checkpoint_store: *CheckpointStore,
-    ) StorageCore {
-        checkpoint_store.resetPreparedState();
+    ) error{VolumeOperationBusy}!StorageCore {
+        if (!checkpoint_store.resetPreparedState()) return error.VolumeOperationBusy;
         const loaded_from_volume = checkpoint_store.loadPreparedStateFromAttachedVolume();
         return checkpoint_support.makeService(StorageCore, checkpoint_store, service_id, task_id, owner, loaded_from_volume);
     }

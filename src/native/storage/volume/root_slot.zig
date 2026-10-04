@@ -133,7 +133,7 @@ pub fn writeImageRoot(image: []u8, sector_index: u32, root: RootState) Error!voi
 
 pub fn readBackendRoot(volume: anytype, sector_index: u32) Error!LoadedRoot {
     @memset(volume.sector_buffer[0..], 0);
-    if (!volume_backend.readAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return error.CorruptImage;
+    if (!volume_backend.readAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return error.DeviceReadFailed;
     return .{
         .sector_index = sector_index,
         .root = try parseRoot(volume.sector_buffer[0..]),

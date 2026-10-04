@@ -25,15 +25,15 @@ pub fn unattachedFlush() callconv(.c) bool {
     return false;
 }
 
-pub fn clearAttachedVolume(volume: anytype) void {
-    if (!volume.hasAttachedDevice()) return;
-    if (volume.attached_backend_sector_count < volume_layout.required_device_sectors) return;
+pub fn clearAttachedVolume(volume: anytype) bool {
+    if (!volume.hasAttachedDevice()) return true;
+    if (volume.attached_backend_sector_count < volume_layout.required_device_sectors) return false;
     @memset(volume.sector_buffer[0..], 0);
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
-        if (!writeAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return;
+        if (!writeAttachedRange(volume, sector_index, volume.sector_buffer[0..])) return false;
     }
-    _ = flushAttached(volume);
+    return flushAttached(volume);
 }
 
 pub fn writeAttachedBytes(volume: anytype, offset: usize, bytes: []const u8) bool {

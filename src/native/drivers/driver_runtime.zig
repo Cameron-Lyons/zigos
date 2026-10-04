@@ -358,8 +358,8 @@ test "kernel bootstrap cannot publish network data-plane transports" {
         }
     };
 
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
+    defer if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
 
     try std.testing.expect(!(try bootstrap_driver_port.publishNetworkActivator(
         0x8086_15F2_0001,
@@ -414,14 +414,14 @@ test "runtime uses the activation tick when claiming storage authority" {
     const task_runtime = @import("../task/task_runtime.zig");
     const device_id: u64 = 0x0000_8086_5845_0001;
 
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
+    defer if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
     device_broker.reset();
     defer device_broker.reset();
     device_inventory.reset();
     defer device_inventory.reset();
-    storage_volume.clearAttachedBackend();
-    defer storage_volume.clearAttachedBackend();
+    if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
 
     var runtime = task_runtime.Runtime.init();
     var capabilities = capability.CapabilityTable.init();
@@ -567,12 +567,12 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
         }
     };
 
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
+    defer if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
     device_inventory.reset();
     defer device_inventory.reset();
-    storage_volume.clearAttachedBackend();
-    defer storage_volume.clearAttachedBackend();
+    if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
 
     var image = @as([storage_volume.image_bytes]u8, @splat(0));
     FakeBackend.image = &image;
@@ -645,8 +645,8 @@ test "runtime treats driver restart after active storage I/O as a normal invaria
 }
 
 test "runtime deactivates only the requested driver class for shared services" {
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
+    defer if (!bootstrap_driver_port.reset()) @panic("storage lifecycle transition was refused");
 
     const service_id: u64 = 91;
     const graphics_device_id: u64 = 0x1234_1111_0091;

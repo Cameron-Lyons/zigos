@@ -670,7 +670,7 @@ fn benchmarkServiceImage() task_runtime.ExecutableImageSpec {
 }
 
 fn prepareFileBridgeFixture() void {
-    file_bridge_context.checkpoint_store.resetPersistent();
+    if (!file_bridge_context.checkpoint_store.resetPersistent()) benchmark_reporting.benchStepFailure("benchmark storage reset", error.VolumeOperationBusy);
     file_bridge_context.storage = storage_service.Service.initWithStore(
         940,
         7,
@@ -2723,7 +2723,7 @@ const DriverRecoveryRuntime = struct {
 };
 
 fn prepareRecoveryFixture(iteration: u32) void {
-    recovery_context.checkpoint_store.resetPersistent();
+    if (!recovery_context.checkpoint_store.resetPersistent()) benchmark_reporting.benchStepFailure("benchmark storage reset", error.VolumeOperationBusy);
 
     const storage_owner = service(4);
     const sync_owner = service(8);
@@ -2850,7 +2850,7 @@ fn prepareRecoveryFixture(iteration: u32) void {
 }
 
 fn prepareUpdateHealthFixture(iteration: u32) void {
-    update_health_context.checkpoint_store.resetPersistent();
+    if (!update_health_context.checkpoint_store.resetPersistent()) benchmark_reporting.benchStepFailure("benchmark storage reset", error.VolumeOperationBusy);
     const owner = service(70);
     update_health_context.storage = storage_service.Service.initWithStore(1_001, 201, owner, &update_health_context.checkpoint_store);
     const probe_workspace_id = seedUpdateHealthStorageProbe(

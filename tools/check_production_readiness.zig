@@ -3384,9 +3384,14 @@ fn validateStorageModernOnlyTrack(
         try common.addError(errors, allocator, "Storage production track must not restore the freestanding inline signer text pool", .{});
     }
     const production_attachment_snippets = [_][]const u8{
-        "pub fn attachNvmePciBackend(self: *Volume, backend: Backend) void",
+        "pub fn attachNvmePciBackend(self: *Volume, backend: Backend) bool",
         "pub fn hasProductionStorageBackend(self: *const Volume) bool",
         "self.attached_backend_kind == .nvme_pci",
+        "pub fn attachmentBusy(self: *const Volume) bool",
+        "if (!self.beginOperation()) return error.VolumeOperationBusy",
+        "snapshot_current: bool",
+        "dirty_snapshot.acknowledge(store, workspaces)",
+        "try validateReplayLog(log, loaded.root)",
     };
     for (production_attachment_snippets) |snippet| {
         if (std.mem.indexOf(u8, source, snippet) == null) {

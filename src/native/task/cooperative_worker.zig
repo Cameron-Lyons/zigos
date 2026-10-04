@@ -39,6 +39,7 @@ pub fn current() ?*Worker {
 }
 
 fn requireContext() !void {
+    if (builtin.cpu.arch != .x86_64) @compileError("native workers require x86-64");
     if (freestanding) {
         const x86 = @import("../../arch/x86.zig");
         if (@import("../../kernel/interrupts/context.zig").active()) return error.InterruptContext;
@@ -117,7 +118,6 @@ pub const Worker = struct {
 };
 
 comptime {
-    if (builtin.cpu.arch != .x86_64) @compileError("native workers require x86-64");
     if (@sizeOf(Frame) != 64 or @offsetOf(Frame, "r12") != 32 or @offsetOf(Frame, "entry") != 56)
         @compileError("worker assembly frame layout changed");
 }

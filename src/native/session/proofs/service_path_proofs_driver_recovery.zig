@@ -1,4 +1,5 @@
 const std = @import("std");
+const authorization_clock = @import("../authorization_clock.zig");
 const bootstrap_driver_port = @import("../../drivers/bootstrap_driver_port.zig");
 const capability = @import("../../kernel_api/capability.zig");
 const component_port = @import("../../kernel_api/component_port.zig");
@@ -72,11 +73,12 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         }
 
         pub fn activateAt(self: *@This(), driver: *const driver_service.DriverRecord, tick: u64) !driver_runtime_mod.ActivationRecord {
+            const now_ticks = authorization_clock.at(tick);
             const task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
             const previous_generation = task.process_generation;
-            const rehosted = try self.tasks.rehostTask(driver.owner_task_id, tick);
+            const rehosted = try self.tasks.rehostTask(driver.owner_task_id, now_ticks);
             const restarted_task = self.tasks.find(driver.owner_task_id) orelse return error.TaskNotFound;
-            const activation = try self.activations.activateAt(driver, tick);
+            const activation = try self.activations.activateAt(driver, now_ticks);
             self.activation_count += 1;
             self.last_task_id = driver.owner_task_id;
             self.last_process_generation = restarted_task.process_generation;
@@ -92,8 +94,8 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         }
     };
 
-    bootstrap_driver_port.reset();
-    defer bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) return error.DriverOperationInProgress;
+    defer if (!bootstrap_driver_port.reset()) @panic("driver recovery proof left an active operation");
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();
 
@@ -125,7 +127,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const storage_process_generation_before = storage_driver_task.process_generation;
     const storage_address_space_before = storage_driver_task.address_space_id;
 
-    bootstrap_driver_port.reset();
+    if (!bootstrap_driver_port.reset()) return error.DriverOperationInProgress;
     RecoveryStorage.reset();
     try std.testing.expect(try bootstrap_driver_port.publishStorageBackend(
         storage_driver.device_id,
@@ -134,13 +136,13 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         false,
     ));
 
-    const initial_activation = try driver_runtime.activateAt(storage_driver, 780);
+    const initial_activation = try driver_runtime.activateAt(storage_driver, authorization_clock.at(780));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, initial_activation.mode);
     try std.testing.expect(initial_activation.hasExclusiveClaim());
     try std.testing.expect(initial_activation.iommuEnforced());
 
     runtime.allowHostPointerSyscallsForTask(storage_driver.owner_task_id);
-    const descriptor_before = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, 781);
+    const descriptor_before = try expectDeviceDescribe(kernel_port, storage_driver.owner_task_id, storage_driver.authority_capability_id, authorization_clock.at(781));
     try std.testing.expectEqual(storage_driver.device_id, descriptor_before.device_id);
     try std.testing.expectEqual(@as(u8, 0), descriptor_before.mmio_window_count);
 
@@ -161,7 +163,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         &booted_runtime,
         null,
         ledger,
-        790,
+        authorization_clock.at(790),
         0x510,
         "storage driver brokered crash",
     );
@@ -201,7 +203,7 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expect(!device_broker.brokeredDmaBufferStillValid(stale_crash_session.brokered_dma_buffer));
 
     runtime.allowHostPointerSyscallsForTask(recovered_driver.owner_task_id);
-    const recovered_descriptor = try expectDeviceDescribe(kernel_port, recovered_driver.owner_task_id, recovered_driver.authority_capability_id, 792);
+    const recovered_descriptor = try expectDeviceDescribe(kernel_port, recovered_driver.owner_task_id, recovered_driver.authority_capability_id, authorization_clock.at(792));
     try std.testing.expectEqual(recovered_driver.device_id, recovered_descriptor.device_id);
     try proveStorageReadback(storage_service_record.id, storage_restart_probe_lba, "driver-restart-before", 0x31);
     try proveReboundStorageSession(
@@ -218,12 +220,13 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const hot_swap_address_space_before = recovered_task.address_space_id;
     const hot_swap_restart_generation_before = recovered_driver.restart_generation;
     const hot_swap_dma_before = recovered_driver.dma_domain_id;
+    const hot_swap_ticks = authorization_clock.at(800);
     const next_authority = try driver_service.mintDriverAuthority(capability_table, .{
         .holder = storage_service_record.owner,
         .task_id = recovered_driver.owner_task_id,
         .device_id = recovered_driver.device_id,
         .device_class = .storage_controller,
-        .issued_at_ticks = 800,
+        .issued_at_ticks = hot_swap_ticks,
         .renewable = false,
         .audit = .{
             .policy_generation = 1,
@@ -241,10 +244,10 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         .authority_capability_id = next_authority.id,
         .capability_table = capability_table,
         .requester = storage_service_record.owner,
-        .now_ticks = 800,
+        .now_ticks = hot_swap_ticks,
         .signer = "zigos-storage-driver-v2",
         .bootstrap_transport = .kernel_bootstrap_broker,
-    }, driver_directory, &booted_runtime, null, ledger, 800, "storage driver hot-swapped through broker");
+    }, driver_directory, &booted_runtime, null, ledger, hot_swap_ticks, "storage driver hot-swapped through broker");
 
     const swapped_driver = driver_directory.findByClass(.storage_controller).?;
     const swapped_task = runtime.find(swapped_driver.owner_task_id).?;
@@ -281,13 +284,13 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     try std.testing.expectEqual(task_count_before, session_manager.testing.countTasks());
     try std.testing.expectEqual(session_process_generation_before, session_task.process_generation);
     try std.testing.expect(!runtime.hasCapability(swapped_driver.owner_task_id, recovered_authority_id));
-    var stale_authority_client = device_broker_client.Client.init(kernel_port, recovered_authority_id, swapped_driver.owner_task_id, 803);
+    var stale_authority_client = device_broker_client.Client.init(kernel_port, recovered_authority_id, swapped_driver.owner_task_id, authorization_clock.at(803));
     try std.testing.expectError(error.CapabilityNotFound, stale_authority_client.describe());
     try std.testing.expect(!bootstrap_driver_port.storageSessionIsCurrent(&stale_hot_swap_session));
     try std.testing.expect(!device_broker.brokeredDmaBufferStillValid(stale_hot_swap_session.brokered_dma_buffer));
 
     runtime.allowHostPointerSyscallsForTask(swapped_driver.owner_task_id);
-    const swapped_descriptor = try expectDeviceDescribe(kernel_port, swapped_driver.owner_task_id, next_authority.id, 802);
+    const swapped_descriptor = try expectDeviceDescribe(kernel_port, swapped_driver.owner_task_id, next_authority.id, authorization_clock.at(802));
     try std.testing.expectEqual(swapped_driver.device_id, swapped_descriptor.device_id);
     try std.testing.expectEqual(@as(u8, 0), swapped_descriptor.mmio_window_count);
     try proveReboundStorageSession(
@@ -314,8 +317,8 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         "zigos.system.compositor",
         false,
     ));
-    const graphics_reactivation = try driver_runtime.activateAt(graphics_driver, 818);
-    const input_reactivation = try driver_runtime.activateAt(input_driver, 819);
+    const graphics_reactivation = try driver_runtime.activateAt(graphics_driver, authorization_clock.at(818));
+    const input_reactivation = try driver_runtime.activateAt(input_driver, authorization_clock.at(819));
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, graphics_reactivation.mode);
     try std.testing.expectEqual(driver_runtime_mod.ActivationMode.published_data_plane, input_reactivation.mode);
     const graphics_task = runtime.find(graphics_driver.owner_task_id).?;
@@ -325,12 +328,13 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
     const graphics_dma_before = graphics_driver.dma_domain_id;
     const graphics_process_generation_before = graphics_task.process_generation;
     const graphics_address_space_before = graphics_task.address_space_id;
+    const graphics_hot_swap_ticks = authorization_clock.at(820);
     const graphics_authority = try driver_service.mintDriverAuthority(capability_table, .{
         .holder = compositor_service_record.owner,
         .task_id = graphics_driver.owner_task_id,
         .device_id = graphics_driver.device_id,
         .device_class = .graphics_adapter,
-        .issued_at_ticks = 820,
+        .issued_at_ticks = graphics_hot_swap_ticks,
         .renewable = false,
         .audit = .{
             .policy_generation = 2,
@@ -349,16 +353,16 @@ pub fn proveBootedDriverHotSwapAndRecoveryRebindLiveBrokeredDeviceAuthority() !v
         .authority_capability_id = graphics_authority.id,
         .capability_table = capability_table,
         .requester = compositor_service_record.owner,
-        .now_ticks = 820,
+        .now_ticks = graphics_hot_swap_ticks,
         .signer = "zigos-graphics-driver-v2",
-    }, driver_directory, &booted_runtime, &notifications, ledger, 820, "graphics driver hot-swapped through compositor service");
+    }, driver_directory, &booted_runtime, &notifications, ledger, graphics_hot_swap_ticks, "graphics driver hot-swapped through compositor service");
 
     const swapped_graphics = driver_directory.findByClass(.graphics_adapter).?;
     const swapped_graphics_task = runtime.find(swapped_graphics.owner_task_id).?;
     const input_activation_after = driver_runtime.findByClass(.input_device) orelse return error.MissingBootedDriverBinding;
     try std.testing.expect(graphics_hot_swap.visible_impact);
     try std.testing.expect(graphics_hot_swap.notification_id != null);
-    try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(821).?.reason);
+    try std.testing.expectEqual(notification_center.Reason.driver_restart, notifications.latestVisible(authorization_clock.at(821)).?.reason);
     try std.testing.expectEqual(graphics_restart_generation_before, graphics_hot_swap.previous_restart_generation);
     try std.testing.expectEqual(graphics_restart_generation_before + 1, graphics_hot_swap.next_restart_generation);
     try std.testing.expectEqual(graphics_dma_before, graphics_hot_swap.previous_dma_domain_id);

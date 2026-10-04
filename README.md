@@ -525,6 +525,21 @@ requests.
   capacity rejects the change without moving any path. With no retained snapshot,
   it can compact the 192-entry mutation log to the new directory, preserving
   capacity for later ordinary transactions without enlarging resident tables.
+  Volume operations retain exclusive replay and checkpoint scratch across
+  device waits. Checkpoints serialize object, version, workspace, and root data
+  before submission, then clear dirty state only if both monotonic mutation
+  revisions still match that snapshot. An older completed snapshot withholds a
+  current-state receipt even if another caller cleared the dirty lists; retry
+  persists newer edits without duplicating a pending immutable version. Loads
+  reject concurrent destination mutation, including staged transactions, and
+  transport failure before replay. Every load restores disk state rather than
+  trusting a cached root over mutable RAM. Reset, rebind, and teardown retain
+  borrowed storage until the operation ends; teardown runs storage cleanup
+  before releasing the controller's port, task, and grants.
+  Each store and directory adds one eight-byte revision, with no per-record
+  growth. Removing the load cache shrinks each volume by sixteen bytes.
+  Cooperative host tests exercise the actual worker and storage service;
+  physical latency and fault/recovery measurements remain pending.
 - Text surfaces use compositor-owned snapshots and the firmware framebuffer in
   production, with writes limited to changed cells. The shared-buffer handle,
   revision, and readiness-fence path still records modeled display requests;
@@ -661,9 +676,9 @@ executor arms the timer at every user entry and bounds every resource class to
 a two-tick quantum, at most 20 ms in the nominal clock, even when no priority
 callback or other ready task exists. Latched network, NVMe and xHCI interrupts
 also hand an interrupted user back to the runtime owner, so its deferred
-network and input work can run before that quantum expires. The NVMe latch
-uses the same owner boundary; current completions still wait synchronously. Kernel-origin work
-remains uninterrupted. Both paths preserve the complete user context and keep
+network and input work can run before that quantum expires. Native storage
+workers yield after a bounded NVMe completion inspection and resume through
+the owner loop. Kernel-origin work remains uninterrupted. Both paths preserve the complete user context and keep
 the finite watchdog. Each materialized mapping owns an aligned x87/SSE image and
 PKRU state; allocation rollback, retirement, and reset erase and release it.
 Assembly preserves the kernel continuation and captures user state before
@@ -954,14 +969,20 @@ Use the pinned toolchain and repo entrypoints:
   device I/O, accept out-of-order completions only when each CID remains owned
   by an active slot, validate phase, queue, command identifier, and
   submission-head bounds on every completion, and
-  use invariant-TSC elapsed-time deadlines derived from CRTO/CAP timeout fields
-  instead of CPU-speed-dependent loop counts. Fatal, timed-out, failed, or
+  use five-second invariant-TSC command deadlines. Controller-ready deadlines
+  derive from CRTO/CAP timeout fields instead of CPU-speed-dependent loop counts. Fatal, timed-out, failed, or
   ownership-indeterminate queues are contained. The I/O completion queue enables
   single-message vector-zero interrupts; after x2APIC and VT-d initialization,
   the controller receives an exact-requester remapped MSI route on vector 66.
-  Runtime I/O waits in `hlt` with a scheduled timer deadline and restores the
-  caller's interrupt mask after each wake, while boot-time administration
-  retains the bounded polling path. When present, boot maps the I225-LM TX/RX
+  A native storage worker yields while its completion is pending, allowing
+  input, network, and other ready work to run. One try-only operation lease
+  retains the queue, bounce buffers, and PRP lists through completion or fault
+  containment. Cancellation and revoked live task, capability, or broker
+  authority stop refill and drain accepted commands before release. Admission
+  binds one fresh token to the exact worker, device, task, and process; reset
+  and backend replacement refuse active submissions. Administrative commands
+  retain bounded polling; callers outside a worker retain interrupt-backed
+  `hlt` waits with scheduled deadlines and restored interrupt masks. When present, boot maps the I225-LM TX/RX
   descriptor pages plus independent 32-page TX and RX buffer regions in a
   separate domain and confirms translation on every unit. VT-d command transitions, queued
   invalidations, and blocked-DMA proofs use invariant-TSC elapsed deadlines
@@ -995,7 +1016,7 @@ Use the pinned toolchain and repo entrypoints:
   record by attempting
   a write to a reserved but unmapped guard page; the requester, address, direction,
   and unchanged canary are verified before the controller is reset and reused.
-  Every later synchronous command polls the same primary records; a DMA fault
+  Every later completion inspection checks the same primary records; a DMA fault
   disables the controller and PCI bus mastering and withdraws the storage backend.
   The xHCI input lifecycle assigns device slots in constant time, recycles them
   after disconnects, and clears queued keyboard reports before a reclaimed slot

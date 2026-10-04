@@ -14,6 +14,7 @@ const volume_log = @import("volume/log.zig");
 const volume_quota = @import("volume/quota.zig");
 const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
+const dataplane_handoff = @import("../drivers/dataplane_handoff.zig");
 const kernel_memory = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/memory/memory.zig")
 else
@@ -43,7 +44,6 @@ pub const TRACKS_REPLAY_ID_BOUNDS_INLINE = true;
 pub const BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY = true;
 pub const BUILDS_WORKSPACE_INDEXES_DURING_REPLAY = true;
 pub const SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD = true;
-pub const USES_INCREMENTAL_LIVE_INDEX = volume_layout.USES_INCREMENTAL_LIVE_INDEX;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = volume_layout.USES_CHECKPOINT_ONLY_COLD_LOAD;
 pub const COMPACTS_IN_BACKGROUND = volume_layout.COMPACTS_IN_BACKGROUND;
 const heap_backed_io_workspace = builtin.target.os.tag == .freestanding;
@@ -117,6 +117,7 @@ pub const Error = volume_errors.Error;
 
 pub const PersistResult = struct {
     generation: u64,
+    snapshot_current: bool,
 };
 
 pub const Backend = volume_backend.Backend;
@@ -125,6 +126,7 @@ pub const AttachedBackendKind = volume_backend.AttachedBackendKind;
 pub const Volume = struct {
     io_log_buffer: IoLogWorkspace = if (heap_backed_io_workspace) null else undefined,
     sector_buffer: [sector_size]u8 = @as([sector_size]u8, @splat(0)),
+    operation_active: bool = false,
     attached_backend_present: bool = false,
     attached_backend_sector_count: u64 = 0,
     attached_backend_read: *const fn (u64, [*]u8, usize) callconv(.c) bool = volume_backend.unattachedRead,
@@ -134,14 +136,31 @@ pub const Volume = struct {
     signer_text_len: u16 = 0,
     signer_text_pool: SignerTextPoolBacking = if (heap_backed_signer_text_pool) null else @as([SIGNER_TEXT_POOL_BYTES]u8, @splat(0)),
     workspace_state_hashes: WorkspaceStateHashCache = .{},
-    live_index_generation: u64 = 0,
-    live_index_root_checksum: u64 = 0,
 
     pub fn init() Volume {
         return .{};
     }
 
-    pub fn reset(self: *Volume) void {
+    pub fn operationBusy(self: *const Volume) bool {
+        return self.operation_active;
+    }
+
+    pub fn attachmentBusy(self: *const Volume) bool {
+        return self.operationBusy() or (self.attached_backend_kind == .nvme_pci and dataplane_handoff.operationBusy());
+    }
+
+    fn beginOperation(self: *Volume) bool {
+        if (self.attachmentBusy()) return false;
+        self.operation_active = true;
+        return true;
+    }
+
+    fn endOperation(self: *Volume) void {
+        self.operation_active = false;
+    }
+
+    pub fn reset(self: *Volume) bool {
+        if (self.attachmentBusy()) return false;
         self.releaseIoLogWorkspace();
         @memset(self.sector_buffer[0..], 0);
         self.attached_backend_present = false;
@@ -152,8 +171,7 @@ pub const Volume = struct {
         self.attached_backend_kind = .none;
         self.resetSignerText();
         self.workspace_state_hashes = .{};
-        self.live_index_generation = 0;
-        self.live_index_root_checksum = 0;
+        return true;
     }
 
     fn ioLogWorkspace(self: *Volume) Error![]u8 {
@@ -235,12 +253,12 @@ pub const Volume = struct {
         return pool[start..end];
     }
 
-    pub fn attachBackend(self: *Volume, backend: Backend) void {
-        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, backend.flush, .generic);
+    pub fn attachBackend(self: *Volume, backend: Backend) bool {
+        return self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, backend.flush, .generic);
     }
 
-    pub fn attachNvmePciBackend(self: *Volume, backend: Backend) void {
-        self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, backend.flush, .nvme_pci);
+    pub fn attachNvmePciBackend(self: *Volume, backend: Backend) bool {
+        return self.attachBackendFnsWithKind(backend.sector_count, backend.read, backend.write, backend.flush, .nvme_pci);
     }
 
     pub fn attachNvmePciBackendFns(
@@ -249,8 +267,8 @@ pub const Volume = struct {
         read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
         write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
         flush: *const fn () callconv(.c) bool,
-    ) void {
-        self.attachBackendFnsWithKind(sector_count, read, write, flush, .nvme_pci);
+    ) bool {
+        return self.attachBackendFnsWithKind(sector_count, read, write, flush, .nvme_pci);
     }
 
     fn attachBackendFnsWithKind(
@@ -260,22 +278,26 @@ pub const Volume = struct {
         write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
         flush: *const fn () callconv(.c) bool,
         kind: volume_backend.AttachedBackendKind,
-    ) void {
+    ) bool {
+        if (self.attachmentBusy() or (kind == .nvme_pci and dataplane_handoff.operationBusy())) return false;
         self.attached_backend_present = true;
         self.attached_backend_sector_count = sector_count;
         self.attached_backend_read = read;
         self.attached_backend_write = write;
         self.attached_backend_flush = flush;
         self.attached_backend_kind = kind;
+        return true;
     }
 
-    pub fn clearAttachedBackend(self: *Volume) void {
+    pub fn clearAttachedBackend(self: *Volume) bool {
+        if (self.attachmentBusy()) return false;
         self.attached_backend_present = false;
         self.attached_backend_sector_count = 0;
         self.attached_backend_read = volume_backend.unattachedRead;
         self.attached_backend_write = volume_backend.unattachedWrite;
         self.attached_backend_flush = volume_backend.unattachedFlush;
         self.attached_backend_kind = .none;
+        return true;
     }
 
     pub fn hasAttachedDevice(self: *const Volume) bool {
@@ -288,41 +310,54 @@ pub const Volume = struct {
             self.attached_backend_sector_count >= required_device_sectors;
     }
 
-    pub fn adoptAttachedBackendFrom(self: *Volume, source: *const Volume) void {
+    pub fn adoptAttachedBackendFrom(self: *Volume, source: *const Volume) bool {
+        if (self.attachmentBusy() or source.attachmentBusy()) return false;
         self.attached_backend_present = source.attached_backend_present;
         self.attached_backend_sector_count = source.attached_backend_sector_count;
         self.attached_backend_read = source.attached_backend_read;
         self.attached_backend_write = source.attached_backend_write;
         self.attached_backend_flush = source.attached_backend_flush;
         self.attached_backend_kind = source.attached_backend_kind;
+        return true;
     }
 
-    pub fn clearAttachedVolume(self: *Volume) void {
-        volume_backend.clearAttachedVolume(self);
+    pub fn clearAttachedVolume(self: *Volume) bool {
+        if (self.attachmentBusy()) return false;
+        if (!self.beginOperation()) return false;
+        defer self.endOperation();
+        return volume_backend.clearAttachedVolume(self);
     }
 
     pub fn loadFromVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) bool {
+        if (!self.beginOperation()) return false;
+        defer self.endOperation();
         if (!self.hasAttachedDevice()) return false;
         if (self.attached_backend_sector_count < required_device_sectors) return false;
 
         return loadLatestValidBackendRoot(self, store, workspaces) catch false;
     }
 
-    pub fn saveToVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
-        if (!self.hasAttachedDevice()) return .{ .generation = 0 };
+    pub fn saveToVolume(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory) Error!PersistResult {
+        if (!self.beginOperation()) return error.VolumeOperationBusy;
+        defer self.endOperation();
+        if (!self.hasAttachedDevice()) return .{ .generation = 0, .snapshot_current = false };
         if (self.attached_backend_sector_count < required_device_sectors) return error.ImageTooSmall;
 
-        const selection = selectBackendSaveRoot(self);
+        const selection = try selectBackendSaveRoot(self);
         return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, BackendWriteFns{ .volume = self });
     }
 
-    pub fn saveToImage(self: *Volume, image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) !PersistResult {
+    pub fn saveToImage(self: *Volume, image: []u8, store: *object_store.Store, workspaces: *workspace.Directory) Error!PersistResult {
+        if (!self.beginOperation()) return error.VolumeOperationBusy;
+        defer self.endOperation();
         if (image.len < image_bytes) return error.ImageTooSmall;
         const selection = selectImageSaveRoot(image);
         return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, ImageWriteFns{ .image = image });
     }
 
-    pub fn loadFromImage(self: *Volume, image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) !u64 {
+    pub fn loadFromImage(self: *Volume, image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) Error!u64 {
+        if (!self.beginOperation()) return error.VolumeOperationBusy;
+        defer self.endOperation();
         if (image.len < image_bytes) return error.ImageTooSmall;
         return try loadLatestValidImageRoot(self, image, store, workspaces);
     }
@@ -378,12 +413,12 @@ const SaveRootSelection = struct {
     force_compaction: bool = false,
 };
 
-pub fn attachBackend(backend: Backend) void {
-    default_volume.attachBackend(backend);
+pub fn attachBackend(backend: Backend) bool {
+    return default_volume.attachBackend(backend);
 }
 
-pub fn attachNvmePciBackend(backend: Backend) void {
-    default_volume.attachNvmePciBackend(backend);
+pub fn attachNvmePciBackend(backend: Backend) bool {
+    return default_volume.attachNvmePciBackend(backend);
 }
 
 pub fn attachNvmePciBackendFns(
@@ -391,12 +426,20 @@ pub fn attachNvmePciBackendFns(
     read: *const fn (start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool,
     write: *const fn (start_lba: u64, buffer_ptr: [*]const u8, buffer_len: usize) callconv(.c) bool,
     flush: *const fn () callconv(.c) bool,
-) void {
-    default_volume.attachNvmePciBackendFns(sector_count, read, write, flush);
+) bool {
+    return default_volume.attachNvmePciBackendFns(sector_count, read, write, flush);
 }
 
-pub fn clearAttachedBackend() void {
-    default_volume.clearAttachedBackend();
+pub fn clearAttachedBackend() bool {
+    return default_volume.clearAttachedBackend();
+}
+
+pub fn operationBusy() bool {
+    return default_volume.operationBusy();
+}
+
+pub fn attachmentBusy() bool {
+    return default_volume.attachmentBusy();
 }
 
 pub fn hasAttachedDevice() bool {
@@ -407,8 +450,8 @@ pub fn hasProductionStorageBackend() bool {
     return default_volume.hasProductionStorageBackend();
 }
 
-pub fn clearAttachedVolume() void {
-    default_volume.clearAttachedVolume();
+pub fn clearAttachedVolume() bool {
+    return default_volume.clearAttachedVolume();
 }
 
 pub fn loadFromVolume(store: *object_store.Store, workspaces: *workspace.Directory) bool {
@@ -425,6 +468,28 @@ pub fn saveToImage(image: []u8, store: *object_store.Store, workspaces: *workspa
 pub fn loadFromImage(image: []const u8, store: *object_store.Store, workspaces: *workspace.Directory) !u64 {
     return default_volume.loadFromImage(image, store, workspaces);
 }
+
+// A checkpoint acknowledges exactly the state serialized before any device
+// write or flush. Already-dirty IDs may change again while callbacks suspend.
+const DirtySnapshot = struct {
+    store: ?u64,
+    workspaces: ?u64,
+
+    fn capture(store: *const object_store.Store, workspaces: *const workspace.Directory) DirtySnapshot {
+        return .{ .store = store.dirtyRevision(), .workspaces = workspaces.dirtyRevision() };
+    }
+
+    fn current(self: DirtySnapshot, store: *const object_store.Store, workspaces: *const workspace.Directory) bool {
+        return store.dirtyRevisionIsCurrent(self.store) and workspaces.dirtyRevisionIsCurrent(self.workspaces);
+    }
+
+    fn acknowledge(self: DirtySnapshot, store: *object_store.Store, workspaces: *workspace.Directory) bool {
+        if (!self.current(store, workspaces)) return false;
+        store.clearDirty();
+        workspaces.clearDirty();
+        return true;
+    }
+};
 
 const BackendWriteFns = struct {
     volume: *Volume,
@@ -444,6 +509,7 @@ fn saveIncremental(
 ) Error!PersistResult {
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     const io_log_buffer = try self.ioLogWorkspace();
+    const dirty_snapshot = DirtySnapshot.capture(store, workspaces);
     const started_dirty = store.dirtyObjectIds().len != 0 or
         store.dirtyVersionIds().len != 0 or
         workspaces.dirtyWorkspaceIds().len != 0 or
@@ -465,17 +531,13 @@ fn saveIncremental(
     else
         null;
 
-    if (current != null and !can_append) try flushWrites(writer);
-
     if (can_append and delta != null and delta.?.bytes_len == 0) {
         if (started_dirty) try flushWrites(writer);
-        store.clearDirty();
-        workspaces.clearDirty();
-        return .{ .generation = current_generation };
+        return .{ .generation = current_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
     }
 
     if (can_append and delta != null and appendLogFits(current.?.root, delta.?)) {
-        const next_generation = current_generation + 1;
+        const next_generation = std.math.add(u64, current_generation, 1) catch return error.VolumeGenerationExhausted;
         const data_offset = current.?.root.data_offset;
         const next_log_bytes = current.?.root.log_bytes + @as(u32, @intCast(delta.?.bytes_len));
         var next_root = try buildRootState(next_generation, next_log_bytes, store, workspaces, state_hashes);
@@ -489,9 +551,7 @@ fn saveIncremental(
         try flushWrites(writer);
         try writeRoot(writer, next_root_sector, next_root);
         try flushWrites(writer);
-        store.clearDirty();
-        workspaces.clearDirty();
-        return .{ .generation = next_generation };
+        return .{ .generation = next_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
     }
 
     const checkpoint_log_len = try serializeCheckpointRecord(
@@ -500,7 +560,7 @@ fn saveIncremental(
         io_log_buffer[0..data_region_bytes],
     );
 
-    const next_generation = current_generation + 1;
+    const next_generation = std.math.add(u64, current_generation, 1) catch return error.VolumeGenerationExhausted;
 
     const next_data_offset: u32 = if (current) |loaded|
         (if (loaded.root.data_offset == 0) alternate_data_region_offset else 0)
@@ -512,13 +572,14 @@ fn saveIncremental(
     next_root.log_segment_count = 0;
     next_root.compacted_generation = next_generation;
     const next_root_sector = volume_root_slot.nextRootSector(current);
+    // Synchronize a possibly visible prior failed root before switching its
+    // alternate log region, after capturing all payload and root metadata.
+    if (current != null and !can_append) try flushWrites(writer);
     try writeBytes(writer, data_start_byte + next_data_offset, io_log_buffer[0..checkpoint_log_len]);
     try flushWrites(writer);
     try writeRoot(writer, next_root_sector, next_root);
     try flushWrites(writer);
-    store.clearDirty();
-    workspaces.clearDirty();
-    return .{ .generation = next_generation };
+    return .{ .generation = next_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
 }
 
 fn selectImageSaveRoot(image: []const u8) SaveRootSelection {
@@ -539,11 +600,12 @@ fn selectImageSaveRoot(image: []const u8) SaveRootSelection {
     return selection;
 }
 
-fn selectBackendSaveRoot(self: *Volume) SaveRootSelection {
+fn selectBackendSaveRoot(self: *Volume) Error!SaveRootSelection {
     var selection = SaveRootSelection{};
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
-        const loaded = volume_root_slot.readBackendRoot(self, sector_index) catch {
+        const loaded = volume_root_slot.readBackendRoot(self, sector_index) catch |err| {
+            if (err == error.DeviceReadFailed) return err;
             if (volume_root_slot.hasRootMagic(self.sector_buffer[0..])) selection.force_compaction = true;
             continue;
         };
@@ -596,27 +658,39 @@ fn loadLatestValidBackendRoot(
     store: *object_store.Store,
     workspaces: *workspace.Directory,
 ) Error!bool {
+    const before_read = DirtySnapshot.capture(store, workspaces);
     var roots: [volume_layout.root_sector_count]?LoadedRoot = @as([volume_layout.root_sector_count]?LoadedRoot, @splat(null));
     var root_count: usize = 0;
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
-        roots[root_count] = volume_root_slot.readBackendRoot(self, sector_index) catch continue;
+        roots[root_count] = volume_root_slot.readBackendRoot(self, sector_index) catch |err| {
+            if (err == error.DeviceReadFailed) return err;
+            continue;
+        };
         root_count += 1;
     }
+    if (!before_read.current(store, workspaces)) return error.StorageMutationDuringLoad;
     if (root_count == 0) return error.CorruptImage;
 
     var last_error: ?Error = null;
     while (takeNewestRoot(&roots, root_count)) |loaded| {
-        loadBackendRootCandidate(self, store, workspaces, loaded) catch |err| {
+        var replayed_live_state = false;
+        loadBackendRootCandidate(self, store, workspaces, loaded, &replayed_live_state) catch |err| {
+            if (replayed_live_state) {
+                // No further device read may suspend with partially replayed
+                // records visible to other native operations.
+                store.reset();
+                workspaces.reset();
+                self.resetSignerText();
+                return err;
+            }
+            if (err == error.StorageMutationDuringLoad or err == error.DeviceReadFailed) return err;
             last_error = err;
             continue;
         };
         return true;
     }
 
-    store.reset();
-    workspaces.reset();
-    self.resetSignerText();
     return last_error orelse error.CorruptImage;
 }
 
@@ -643,23 +717,12 @@ fn loadImageRootCandidate(
     loaded: LoadedRoot,
 ) Error!u64 {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
-    if (USES_INCREMENTAL_LIVE_INDEX and
-        self.live_index_generation == loaded.root.generation and
-        self.live_index_root_checksum == liveIndexChecksum(loaded.root) and
-        store.objectCount() != 0)
-    {
-        return loaded.root.generation;
-    }
     const region_start = data_start_byte + loaded.root.data_offset;
     if (region_start + loaded.root.log_bytes > image.len) return error.CorruptImage;
     try replayLog(self, store, workspaces, image[region_start .. region_start + loaded.root.log_bytes], loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
-    if (USES_INCREMENTAL_LIVE_INDEX) {
-        self.live_index_generation = loaded.root.generation;
-        self.live_index_root_checksum = liveIndexChecksum(loaded.root);
-    }
     return loaded.root.generation;
 }
 
@@ -668,25 +731,20 @@ fn loadBackendRootCandidate(
     store: *object_store.Store,
     workspaces: *workspace.Directory,
     loaded: LoadedRoot,
+    replayed_live_state: *bool,
 ) Error!void {
     if (loaded.root.log_bytes == 0 or loaded.root.log_bytes > data_region_bytes) return error.CorruptImage;
-    if (USES_INCREMENTAL_LIVE_INDEX and
-        self.live_index_generation == loaded.root.generation and
-        self.live_index_root_checksum == liveIndexChecksum(loaded.root) and
-        store.objectCount() != 0)
-    {
-        return;
-    }
     const io_log_buffer = try self.ioLogWorkspace();
-    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, io_log_buffer[0..loaded.root.log_bytes])) return error.CorruptImage;
-    try replayLog(self, store, workspaces, io_log_buffer[0..loaded.root.log_bytes], loaded.root);
+    const before_read = DirtySnapshot.capture(store, workspaces);
+    if (!volume_backend.readAttachedBytes(self, data_start_byte + loaded.root.data_offset, io_log_buffer[0..loaded.root.log_bytes])) return error.DeviceReadFailed;
+    if (!before_read.current(store, workspaces)) return error.StorageMutationDuringLoad;
+    const log = io_log_buffer[0..loaded.root.log_bytes];
+    try validateReplayLog(log, loaded.root);
+    replayed_live_state.* = true;
+    try replayValidatedLog(self, store, workspaces, log, loaded.root);
     try ensureWithinProductCapacityEnvelope(store, workspaces);
     store.clearDirty();
     workspaces.clearDirty();
-    if (USES_INCREMENTAL_LIVE_INDEX) {
-        self.live_index_generation = loaded.root.generation;
-        self.live_index_root_checksum = liveIndexChecksum(loaded.root);
-    }
 }
 
 pub fn ensureWithinProductCapacityEnvelope(store: *const object_store.Store, workspaces: *const workspace.Directory) Error!void {
@@ -961,19 +1019,7 @@ fn findWorkspaceSummary(root: RootState, workspace_id: u64) ?WorkspaceSummary {
     return null;
 }
 
-fn liveIndexChecksum(root: RootState) u64 {
-    return root.generation ^
-        (@as(u64, root.log_bytes) << 32) ^
-        root.compacted_generation ^
-        @as(u64, root.log_record_count);
-}
-
-fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
-    store.reset();
-    workspaces.reset();
-    self.resetSignerText();
-
-    self.workspace_state_hashes.reset();
+fn validateReplayLog(log: []const u8, root: RootState) Error!void {
     if (root.log_record_count == 0 or root.log_record_count > max_replay_log_records) return error.CorruptImage;
     if (root.log_segment_count > max_log_segments) return error.CorruptImage;
     if (USES_CHECKPOINT_ONLY_COLD_LOAD and
@@ -985,7 +1031,6 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
     }
 
     var reader = CursorReader{ .buffer = log };
-    var replayed_id_bounds = ReplayIdBounds{};
     var replayed_records: u16 = 0;
     var replayed_segments: u16 = 0;
     while (reader.offset < reader.buffer.len) {
@@ -997,13 +1042,37 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
         replayed_records += 1;
         if (replayed_records > max_replay_log_records) return error.CorruptImage;
 
+        if (header.kind == .segment_boundary) {
+            if (payload.len != 0) return error.CorruptImage;
+            replayed_segments += 1;
+            if (replayed_segments > max_log_segments) return error.CorruptImage;
+        }
+    }
+    if (replayed_records == 0) return error.MissingCheckpoint;
+    if (replayed_records != root.log_record_count) return error.CorruptImage;
+    if (replayed_segments != root.log_segment_count) return error.CorruptImage;
+}
+
+fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
+    try validateReplayLog(log, root);
+    try replayValidatedLog(self, store, workspaces, log, root);
+}
+
+// The exclusive Volume borrow retains these validated bytes, and replay has no
+// device callbacks. Hash each payload once before replacing live state.
+fn replayValidatedLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.Directory, log: []const u8, root: RootState) Error!void {
+    store.reset();
+    workspaces.reset();
+    self.resetSignerText();
+    self.workspace_state_hashes.reset();
+    var reader = CursorReader{ .buffer = log };
+    var replayed_id_bounds = ReplayIdBounds{};
+    while (reader.offset < reader.buffer.len) {
+        const header = try volume_log.readRecordHeader(&reader);
+        const payload = try reader.readSlice(header.payload_len);
         switch (header.kind) {
             .checkpoint => try deserializeState(self, store, workspaces, payload, &replayed_id_bounds),
-            .segment_boundary => {
-                if (payload.len != 0) return error.CorruptImage;
-                replayed_segments += 1;
-                if (replayed_segments > max_log_segments) return error.CorruptImage;
-            },
+            .segment_boundary => {},
             .object_state => replayed_id_bounds.noteObject(try applyObjectRecord(self, store, payload)),
             .chunk_state => try applyChunkRecord(store, payload),
             .blob_state => try applyBlobRecord(store, payload),
@@ -1012,9 +1081,6 @@ fn replayLog(self: *Volume, store: *object_store.Store, workspaces: *workspace.D
             .snapshot_state => replayed_id_bounds.noteSnapshot(try applySnapshotRecord(self, workspaces, payload)),
         }
     }
-    if (replayed_records == 0) return error.MissingCheckpoint;
-    if (replayed_records != root.log_record_count) return error.CorruptImage;
-    if (replayed_segments != root.log_segment_count) return error.CorruptImage;
     if (!replayed_id_bounds.fitRoot(root)) return error.CorruptImage;
 
     store.next_object_id = root.next_object_id;
@@ -1881,8 +1947,9 @@ test "checkpoint records accept exact capacity and reject one byte less" {
 test "storage replay requires exactly one leading checkpoint" {
     const allocator = std.testing.allocator;
     const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
     defer allocator.destroy(volume);
-    volume.reset();
+    _ = volume.reset();
 
     const store = try allocator.create(object_store.Store);
     defer allocator.destroy(store);

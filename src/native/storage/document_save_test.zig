@@ -5,6 +5,7 @@ const signing = @import("../core/signing.zig");
 const storage_service = @import("storage_service.zig");
 const storage_volume = @import("storage_volume.zig");
 const document_save = @import("document_save.zig");
+const cooperative = @import("../task/cooperative_worker.zig");
 
 pub const signer = signing.SignerIdentity{ .label = "document-save-test", .seed = signing.seedFromByte(0xc1) };
 pub const path = "documents/note.md";
@@ -26,7 +27,7 @@ pub const Fixture = struct {
     before_flush: ?struct { context: *anyopaque, call: *const fn (*anyopaque) void } = null,
 
     pub fn init(attach: bool) !*Fixture {
-        storage_volume.clearAttachedBackend();
+        if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
         const allocator = std.testing.allocator;
         const self = try allocator.create(Fixture);
         errdefer allocator.destroy(self);
@@ -41,12 +42,12 @@ pub const Fixture = struct {
         @memset(durable, 0);
         self.* = .{ .checkpoint = checkpoint, .service = undefined, .image = image, .durable_image = durable };
         active = self;
-        if (attach) storage_volume.attachBackend(.{
+        if (attach) if (!storage_volume.attachBackend(.{
             .sector_count = storage_volume.required_device_sectors,
             .read = read,
             .write = write,
             .flush = flush,
-        });
+        })) @panic("storage lifecycle transition was refused");
         self.service = storage_service.Service.initWithStore(500, 501, .{ .kind = .service, .serial = 500 }, checkpoint);
         const original = try self.service.putVersion(.{
             .preferred_object_id = ids.object(900),
@@ -64,8 +65,11 @@ pub const Fixture = struct {
     }
 
     pub fn deinit(self: *Fixture) void {
-        storage_volume.clearAttachedBackend();
-        self.checkpoint.resetPersistent();
+        if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
+        std.debug.assert(!self.checkpoint.operationBusy());
+        // Destroying the modeled disk does not require another successful flush.
+        if (!self.checkpoint.checkpoint_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
+        if (!self.checkpoint.resetPersistent()) @panic("storage lifecycle transition was refused");
         active = null;
         const allocator = std.testing.allocator;
         allocator.free(self.image);
@@ -78,7 +82,7 @@ pub const Fixture = struct {
     // serialized storage operation; the modeled driver has one active disk.
     pub fn activate(self: *Fixture) void {
         active = self;
-        storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush });
+        if (!storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush })) @panic("storage lifecycle transition was refused");
     }
 
     fn request(self: *Fixture, payload: []const u8) document_save.VerificationRequest {
@@ -87,7 +91,7 @@ pub const Fixture = struct {
 
     pub fn crash(self: *Fixture) void {
         @memcpy(self.image, self.durable_image);
-        self.checkpoint.resetPreparedState();
+        if (!self.checkpoint.resetPreparedState()) @panic("storage lifecycle transition was refused");
         self.service = storage_service.Service.initWithStore(500, 501, .{ .kind = .service, .serial = 500 }, self.checkpoint);
     }
 
@@ -284,4 +288,102 @@ test "an empty document and explicit save with automatic checkpoints disabled ar
     _ = try editor.saveForVerification(&fixture.service, fixture.request(""));
     fixture.crash();
     try std.testing.expectEqualStrings("", try fixture.text());
+}
+
+const SuspendedCheckpoint = struct {
+    fixture: *Fixture,
+    editor: document_save.Session = .{},
+    receipt: ?document_save.Receipt = null,
+    failure: ?anyerror = null,
+    paused: bool = false,
+
+    fn pause(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.paused) return;
+        self.paused = true;
+        cooperative.current().?.yield();
+    }
+
+    fn run(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.receipt = self.editor.saveForVerification(&self.fixture.service, self.fixture.request("owned draft")) catch |err| {
+            self.failure = err;
+            return;
+        };
+    }
+};
+
+test "document suspended checkpoint retains newer edits and withholds receipt until retry" {
+    const fixture = try Fixture.init(true);
+    defer fixture.deinit();
+    fixture.service.checkpoint_enabled = false;
+    var job = SuspendedCheckpoint{ .fixture = fixture };
+    fixture.before_flush = .{ .context = &job, .call = SuspendedCheckpoint.pause };
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    try worker.start(&job, SuspendedCheckpoint.run);
+    try worker.step();
+    try std.testing.expect(job.paused and worker.state == .suspended);
+    const pending = job.editor.pending.?;
+    const generation = fixture.checkpoint.last_checkpoint_generation;
+    const versions = fixture.service.versionCount();
+    try std.testing.expect(fixture.checkpoint.operationBusy());
+    try std.testing.expect(!fixture.checkpoint.resetPreparedState());
+    try std.testing.expect(!fixture.checkpoint.resetPersistent());
+    try std.testing.expectError(error.VolumeOperationBusy, storage_service.Service.reloadFromAttachedVolume(500, 501, .{ .kind = .service, .serial = 500 }, fixture.checkpoint));
+    try std.testing.expectEqual(versions, fixture.service.versionCount());
+    try std.testing.expectEqual(generation, fixture.checkpoint.last_checkpoint_generation);
+    const other = try fixture.service.putVersion(.{
+        .preferred_object_id = ids.object(901),
+        .object_type = .document,
+        .payload = "newer during wait",
+        .metadata = try object_store.signMetadata(signer, "documents/other.md", "text/markdown", .document, "newer during wait", 11),
+    });
+    try fixture.service.beginTransaction(fixture.workspace_id);
+    try fixture.service.stagePut(fixture.workspace_id, "documents/other.md", other.object_id, other.version_id, .document);
+    _ = try fixture.service.commit(fixture.workspace_id, 12);
+    try worker.step();
+    try std.testing.expectEqual(cooperative.Worker.State.complete, worker.state);
+    try std.testing.expectEqual(@as(?anyerror, error.CheckpointPending), job.failure);
+    try std.testing.expect(job.receipt == null);
+    try std.testing.expectEqual(pending.version_id, job.editor.pending.?.version_id);
+    try std.testing.expect(fixture.checkpoint.dirty);
+    try std.testing.expect(fixture.checkpoint.store.dirtyObjectIds().len != 0);
+    try std.testing.expect(fixture.checkpoint.workspaces.dirtyWorkspaceIds().len != 0);
+    try std.testing.expect(!fixture.checkpoint.operationBusy());
+    fixture.before_flush = null;
+    const receipt = try job.editor.saveForVerification(&fixture.service, fixture.request("owned draft"));
+    try std.testing.expectEqual(pending.version_id, receipt.version_id);
+    try std.testing.expect(!fixture.checkpoint.dirty);
+    fixture.crash();
+    try std.testing.expect(fixture.service.loaded_from_volume);
+    try std.testing.expectEqualStrings("owned draft", try fixture.text());
+    const reopened = try fixture.service.resolve(fixture.workspace_id, "documents/other.md");
+    try std.testing.expectEqual(other.version_id, reopened.version_id);
+    try std.testing.expectEqualStrings("newer during wait", try fixture.service.versionPayload(fixture.service.version(reopened.version_id).?));
+}
+
+test "document suspended checkpoint cannot acknowledge externally cleared dirty lists" {
+    const fixture = try Fixture.init(true);
+    defer fixture.deinit();
+    fixture.service.checkpoint_enabled = false;
+    var job = SuspendedCheckpoint{ .fixture = fixture };
+    fixture.before_flush = .{ .context = &job, .call = SuspendedCheckpoint.pause };
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    try worker.start(&job, SuspendedCheckpoint.run);
+    try worker.step();
+    try std.testing.expect(job.paused and worker.state == .suspended);
+    fixture.checkpoint.store.clearDirty();
+    fixture.checkpoint.workspaces.clearDirty();
+    try worker.step();
+    try std.testing.expectEqual(cooperative.Worker.State.complete, worker.state);
+    try std.testing.expectEqual(@as(?anyerror, error.CheckpointPending), job.failure);
+    try std.testing.expect(job.receipt == null and job.editor.pending != null);
+    try std.testing.expect(fixture.checkpoint.dirty);
+    fixture.before_flush = null;
+    _ = try job.editor.saveForVerification(&fixture.service, fixture.request("owned draft"));
+    try std.testing.expect(!fixture.checkpoint.dirty);
+    fixture.crash();
+    try std.testing.expectEqualStrings("owned draft", try fixture.text());
 }

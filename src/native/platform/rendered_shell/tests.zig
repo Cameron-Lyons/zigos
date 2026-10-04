@@ -74,11 +74,11 @@ const DocumentDisk = struct {
         image = try std.testing.allocator.alloc(u8, storage_volume.image_bytes);
         @memset(image, 0);
         fail_flush = false;
-        storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush });
+        if (!storage_volume.attachBackend(.{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush })) @panic("storage lifecycle transition was refused");
     }
 
     fn deinit() void {
-        storage_volume.clearAttachedBackend();
+        if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
         std.testing.allocator.free(image);
         image = &.{};
     }
@@ -203,8 +203,8 @@ fn dispatchTaskShellForTest(
 
 test "rendered demo journey drives install sync permission update recovery and removal controls" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 94 };
     const package_owner = principal.PrincipalId{ .kind = .service, .serial = 95 };
@@ -419,8 +419,8 @@ test "production journey service rejects premature controls then routes lifecycl
     try DocumentDisk.init();
     defer DocumentDisk.deinit();
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 97 };
     const package_owner = principal.PrincipalId{ .kind = .service, .serial = 98 };
@@ -834,8 +834,8 @@ test "production journey service rejects premature controls then routes lifecycl
 
 test "rendered task shell drives task workspace document panel and focus controls" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 92 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 92 };
@@ -891,8 +891,8 @@ test "rendered task shell drives task workspace document panel and focus control
 
 test "task shell service routes controls through compositor service and recovers persistent task state" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 95 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 95 };
@@ -982,8 +982,8 @@ test "task shell service routes controls through compositor service and recovers
 
 test "humane shell composes task-first review pairing snapshots diagnostics notifications keyboard and recovery" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 98 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 981 };
@@ -1200,8 +1200,8 @@ test "humane shell composes task-first review pairing snapshots diagnostics noti
 
 test "humane shell exposes object-native query history sharing capabilities and conflict review" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 100 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 1_001 };
@@ -1338,8 +1338,8 @@ test "booted rendered system runs input loop compositor prompts task switching r
     try DocumentDisk.init();
     defer DocumentDisk.deinit();
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 99 };
     const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 991 };
@@ -1545,8 +1545,8 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
     try DocumentDisk.init();
     defer DocumentDisk.deinit();
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 110 };
     const package_owner = principal.PrincipalId{ .kind = .service, .serial = 111 };
@@ -1789,8 +1789,8 @@ test "booted notes docs loop edits shares syncs reviews rollback recovery and re
 
 test "rendered task shell rejects out-of-order or missing workspace interactions" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 93 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 93 };
@@ -1820,8 +1820,8 @@ test "rendered task shell rejects out-of-order or missing workspace interactions
 
 test "task shell service rejects out-of-order controls before creating compositor state" {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 96 };
     const user = principal.PrincipalId{ .kind = .user, .serial = 96 };

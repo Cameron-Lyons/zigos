@@ -1,4 +1,8 @@
 pub const Error = error{
+    VolumeOperationBusy,
+    VolumeGenerationExhausted,
+    DeviceReadFailed,
+    StorageMutationDuringLoad,
     ChecksumMismatch,
     CorruptImage,
     DurabilityBarrierFailed,

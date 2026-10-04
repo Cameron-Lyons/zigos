@@ -5,14 +5,715 @@ const signing = @import("../core/signing.zig");
 const storage_volume = @import("storage_volume.zig");
 const volume_layout = @import("volume/layout.zig");
 const volume_log = @import("volume/log.zig");
+const volume_hashing = @import("volume/hashing.zig");
 const volume_root_slot = @import("volume/root_slot.zig");
 const workspace = @import("workspace.zig");
+const ids = @import("../core/ids.zig");
+const cooperative = @import("../task/cooperative_worker.zig");
 
 const Volume = storage_volume.Volume;
 const image_bytes = storage_volume.image_bytes;
 const saveToImage = storage_volume.saveToImage;
 const loadFromImage = storage_volume.loadFromImage;
 const DELTA_PAYLOAD_BUFFER_BYTES: usize = 32;
+
+// Device callbacks retain the actual Volume scratch borrow while the worker
+// suspends. The main test thread can then exercise another storage caller.
+const SuspendedVolumeDevice = struct {
+    const Phase = enum { none, read, write, flush };
+    var current: *@This() = undefined;
+    visible: []u8,
+    durable: []u8,
+    pause: Phase = .none,
+    paused: bool = false,
+    pause_on: usize = 1,
+    phase_hits: usize = 0,
+    fail_flush: bool = false,
+    cancelled: bool = false,
+    reenter: ?*SuspendedVolumeJob = null,
+    reenter_spare: ?*Volume = null,
+    reentry_ok: bool = false,
+
+    fn backend() storage_volume.Backend {
+        return .{ .sector_count = storage_volume.required_device_sectors, .read = read, .write = write, .flush = flush };
+    }
+
+    fn pauseAt(phase: Phase) bool {
+        if (current.pause == phase) current.phase_hits += 1;
+        if (current.pause == phase and current.phase_hits == current.pause_on and !current.paused) {
+            if (current.reenter) |job| {
+                current.reenter = null;
+                current.reentry_ok = busyCallsRejected(job, current.reenter_spare.?);
+            }
+            current.paused = true;
+            cooperative.current().?.yield();
+            if (cooperative.current().?.cancel_requested) {
+                current.cancelled = true;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn read(lba: u64, ptr: [*]u8, len: usize) callconv(.c) bool {
+        if (!pauseAt(.read)) return false;
+        const offset = @as(usize, @intCast(lba)) * storage_volume.sector_size;
+        if (offset > current.visible.len or len > current.visible.len - offset) return false;
+        @memcpy(ptr[0..len], current.visible[offset..][0..len]);
+        return true;
+    }
+
+    fn write(lba: u64, ptr: [*]const u8, len: usize) callconv(.c) bool {
+        if (!pauseAt(.write)) return false;
+        const offset = @as(usize, @intCast(lba)) * storage_volume.sector_size;
+        if (offset > current.visible.len or len > current.visible.len - offset) return false;
+        @memcpy(current.visible[offset..][0..len], ptr[0..len]);
+        return true;
+    }
+
+    fn flush() callconv(.c) bool {
+        if (!pauseAt(.flush) or current.fail_flush) return false;
+        @memcpy(current.durable, current.visible);
+        return true;
+    }
+};
+
+const SuspendedVolumeJob = struct {
+    volume: *Volume,
+    store: *object_store.Store,
+    workspaces: *workspace.Directory,
+    result: ?storage_volume.PersistResult = null,
+    failure: ?anyerror = null,
+    load: bool = false,
+    loaded: bool = false,
+    clear: bool = false,
+    cleared: bool = false,
+
+    fn run(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.clear) {
+            self.cleared = self.volume.clearAttachedVolume();
+            return;
+        }
+        if (self.load) {
+            self.loaded = self.volume.loadFromVolume(self.store, self.workspaces);
+            return;
+        }
+        self.result = self.volume.saveToVolume(self.store, self.workspaces) catch |err| {
+            self.failure = err;
+            return;
+        };
+    }
+};
+
+fn busyCallsRejected(job: *SuspendedVolumeJob, spare: *Volume) bool {
+    const volume = job.volume;
+    if (!volume.operationBusy() or !volume.attachmentBusy()) return false;
+    if (volume.reset() or volume.clearAttachedBackend() or volume.clearAttachedVolume()) return false;
+    if (volume.attachBackend(SuspendedVolumeDevice.backend()) or volume.attachNvmePciBackend(SuspendedVolumeDevice.backend())) return false;
+    if (volume.attachNvmePciBackendFns(storage_volume.required_device_sectors, SuspendedVolumeDevice.read, SuspendedVolumeDevice.write, SuspendedVolumeDevice.flush)) return false;
+    if (volume.adoptAttachedBackendFrom(spare) or spare.adoptAttachedBackendFrom(volume)) return false;
+    if (volume.loadFromVolume(job.store, job.workspaces)) return false;
+    if (volume.saveToVolume(job.store, job.workspaces)) |_| return false else |err| {
+        if (err != error.VolumeOperationBusy) return false;
+    }
+    if (volume.saveToImage(SuspendedVolumeDevice.current.visible, job.store, job.workspaces)) |_| return false else |err| {
+        if (err != error.VolumeOperationBusy) return false;
+    }
+    if (volume.loadFromImage(SuspendedVolumeDevice.current.visible, job.store, job.workspaces)) |_| return false else |err| {
+        if (err != error.VolumeOperationBusy) return false;
+    }
+    return true;
+}
+
+const SuspendedVolumeFixture = struct {
+    volume: *Volume,
+    spare: *Volume,
+    store: *object_store.Store,
+    directory: *workspace.Directory,
+    visible: []u8,
+    durable: []u8,
+    workspace_id: ids.WorkspaceId,
+
+    fn init() !@This() {
+        const allocator = std.testing.allocator;
+        const volume = try allocator.create(Volume);
+        errdefer allocator.destroy(volume);
+        volume.* = Volume.init();
+        const spare = try allocator.create(Volume);
+        errdefer allocator.destroy(spare);
+        spare.* = Volume.init();
+        const store = try allocator.create(object_store.Store);
+        errdefer allocator.destroy(store);
+        store.* = object_store.Store.init();
+        const directory = try allocator.create(workspace.Directory);
+        errdefer allocator.destroy(directory);
+        directory.* = workspace.Directory.init();
+        const visible = try allocator.alloc(u8, image_bytes);
+        errdefer allocator.free(visible);
+        const durable = try allocator.alloc(u8, image_bytes);
+        errdefer allocator.free(durable);
+        @memset(visible, 0);
+        @memset(durable, 0);
+        const workspace_id = (try directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "paused" })).id;
+        return .{ .volume = volume, .spare = spare, .store = store, .directory = directory, .visible = visible, .durable = durable, .workspace_id = workspace_id };
+    }
+
+    fn deinit(self: *@This()) void {
+        if (self.volume.operationBusy() or self.spare.operationBusy()) @panic("test destroys suspended volume");
+        _ = self.volume.reset();
+        _ = self.spare.reset();
+        self.directory.reset();
+        self.store.reset();
+        const allocator = std.testing.allocator;
+        allocator.destroy(self.volume);
+        allocator.destroy(self.spare);
+        allocator.destroy(self.store);
+        allocator.destroy(self.directory);
+        allocator.free(self.visible);
+        allocator.free(self.durable);
+    }
+
+    fn version(self: *@This(), payload: []const u8) !object_store.PutResult {
+        return putSuspendedVersion(self.store, self.directory, self.workspace_id, payload);
+    }
+};
+
+fn putSuspendedVersion(store: *object_store.Store, directory: *workspace.Directory, workspace_id: ids.WorkspaceId, payload: []const u8) !object_store.PutResult {
+    const signer = signing.SignerIdentity{ .label = "paused-volume", .seed = signing.seedFromByte(0x6D) };
+    const result = try store.putVersion(.{
+        .preferred_object_id = object_store.ids.object(0xB900),
+        .object_type = .document,
+        .payload = payload,
+        .metadata = try object_store.signMetadata(signer, "paused", "text/plain", .document, payload, 1),
+    });
+    try directory.beginTransaction(workspace_id);
+    try directory.stagePut(workspace_id, "documents/paused.md", result.object_id, result.version_id, .document);
+    _ = try directory.commit(workspace_id, 2);
+    return result;
+}
+
+fn expectSuspendedCheckpointMutation(phase: SuspendedVolumeDevice.Phase, existing_root: bool, force_compaction: bool) !void {
+    const allocator = std.testing.allocator;
+    const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
+    defer allocator.destroy(volume);
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+    const directory = try allocator.create(workspace.Directory);
+    defer allocator.destroy(directory);
+    directory.* = workspace.Directory.init();
+    const visible = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(visible);
+    const durable = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(durable);
+    @memset(visible, 0);
+    @memset(durable, 0);
+    var device = SuspendedVolumeDevice{ .visible = visible, .durable = durable };
+    SuspendedVolumeDevice.current = &device;
+    _ = volume.attachBackend(SuspendedVolumeDevice.backend());
+    const ws_id = (try directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "paused" })).id;
+    if (existing_root) {
+        _ = try putSuspendedVersion(store, directory, ws_id, "initial");
+        _ = try volume.saveToVolume(store, directory);
+        if (force_compaction) {
+            var root = (try volume_root_slot.findLatestImageRoot(visible)).?;
+            root.root.next_version_id += 4;
+            try volume_root_slot.writeImageRoot(visible, root.sector_index, root.root);
+            try volume_root_slot.writeImageRoot(durable, root.sector_index, root.root);
+        }
+    }
+    const captured = try putSuspendedVersion(store, directory, ws_id, "captured");
+    device.pause = phase;
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    var job = SuspendedVolumeJob{ .volume = volume, .store = store, .workspaces = directory };
+    try worker.start(&job, SuspendedVolumeJob.run);
+    try worker.step();
+    try std.testing.expect(device.paused and worker.state == .suspended);
+    const newer = try putSuspendedVersion(store, directory, ws_id, "newer");
+    try worker.step();
+    try std.testing.expect(worker.state == .complete and job.failure == null);
+    try std.testing.expect(!job.result.?.snapshot_current);
+    try std.testing.expect(store.dirtyVersionIds().len != 0 and directory.dirtyWorkspaceIds().len != 0);
+
+    const reopened_store = try allocator.create(object_store.Store);
+    defer allocator.destroy(reopened_store);
+    reopened_store.* = object_store.Store.init();
+    const reopened_directory = try allocator.create(workspace.Directory);
+    defer allocator.destroy(reopened_directory);
+    reopened_directory.* = workspace.Directory.init();
+    const reopened_volume = try allocator.create(Volume);
+    reopened_volume.* = Volume.init();
+    defer allocator.destroy(reopened_volume);
+    reopened_volume.* = Volume.init();
+    _ = try reopened_volume.loadFromImage(durable, reopened_store, reopened_directory);
+    try std.testing.expectEqual(captured.version_id, reopened_store.latestVersion(0xB900).?.id);
+    try std.testing.expectEqual(captured.version_id, (try reopened_directory.resolve(ws_id, "documents/paused.md")).version_id);
+    device.pause = .none;
+    _ = try volume.saveToVolume(store, directory);
+    try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
+    _ = try reopened_volume.loadFromImage(durable, reopened_store, reopened_directory);
+    try std.testing.expectEqual(newer.version_id, reopened_store.latestVersion(0xB900).?.id);
+    try std.testing.expectEqual(newer.version_id, (try reopened_directory.resolve(ws_id, "documents/paused.md")).version_id);
+}
+
+test "storage suspended checkpoint preserves mutations after serialization" {
+    try expectSuspendedCheckpointMutation(.write, false, false);
+    try expectSuspendedCheckpointMutation(.flush, false, false);
+    try expectSuspendedCheckpointMutation(.write, true, false);
+    try expectSuspendedCheckpointMutation(.flush, true, false);
+    try expectSuspendedCheckpointMutation(.flush, true, true);
+}
+
+test "storage suspended device callbacks reject scratch reuse and attachment mutation" {
+    for ([_]SuspendedVolumeDevice.Phase{ .read, .write, .flush }) |phase| {
+        var fixture = try SuspendedVolumeFixture.init();
+        defer fixture.deinit();
+        var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable, .pause = phase, .reenter_spare = fixture.spare };
+        SuspendedVolumeDevice.current = &device;
+        try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+        _ = try fixture.version("owned scratch");
+        var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory };
+        device.reenter = &job;
+        var stack: [128 * 1024]u8 align(16) = undefined;
+        var worker = cooperative.Worker{ .stack = &stack };
+        try worker.start(&job, SuspendedVolumeJob.run);
+        try worker.step();
+        try std.testing.expect(device.reentry_ok and device.paused and worker.state == .suspended);
+        try std.testing.expect(busyCallsRejected(&job, fixture.spare));
+        try worker.step();
+        try std.testing.expect(job.failure == null and worker.state == .complete);
+        try std.testing.expect(!fixture.volume.attachmentBusy());
+        try std.testing.expect(fixture.spare.adoptAttachedBackendFrom(fixture.volume));
+        try std.testing.expect(fixture.spare.clearAttachedBackend());
+    }
+}
+
+test "storage suspended load rejects foreign mutation before live replay" {
+    // The third read is the payload after both root sectors were examined.
+    for ([_]usize{ 1, 3 }) |pause_on| {
+        var fixture = try SuspendedVolumeFixture.init();
+        defer fixture.deinit();
+        var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+        SuspendedVolumeDevice.current = &device;
+        try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+        _ = try fixture.version("disk");
+        _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+        device.pause = .read;
+        device.pause_on = pause_on;
+        var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory, .load = true };
+        var stack: [128 * 1024]u8 align(16) = undefined;
+        var worker = cooperative.Worker{ .stack = &stack };
+        try worker.start(&job, SuspendedVolumeJob.run);
+        try worker.step();
+        try std.testing.expect(device.paused);
+        const newer = try fixture.version("must remain in RAM");
+        try worker.step();
+        try std.testing.expect(!job.loaded and worker.state == .complete);
+        try std.testing.expectEqual(newer.version_id, fixture.store.latestVersion(0xB900).?.id);
+        try std.testing.expectEqual(newer.version_id, (try fixture.directory.resolve(fixture.workspace_id, "documents/paused.md")).version_id);
+        try std.testing.expect(fixture.store.dirtyVersionIds().len != 0 and fixture.directory.dirtyWorkspaceIds().len != 0);
+        try std.testing.expect(!fixture.volume.operationBusy());
+    }
+}
+
+test "storage suspended barriers and cancellation preserve immutable retry state" {
+    for ([_]bool{ false, true }) |cancel| {
+        for ([_]usize{ 1, 2 }) |pause_on| {
+            var fixture = try SuspendedVolumeFixture.init();
+            defer fixture.deinit();
+            var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+            SuspendedVolumeDevice.current = &device;
+            try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+            _ = try fixture.version("disk");
+            _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+            const candidate = try fixture.version("candidate");
+            device.pause = .flush;
+            device.pause_on = pause_on;
+            var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory };
+            var stack: [128 * 1024]u8 align(16) = undefined;
+            var worker = cooperative.Worker{ .stack = &stack };
+            try worker.start(&job, SuspendedVolumeJob.run);
+            try worker.step();
+            try std.testing.expect(device.paused);
+            if (cancel) worker.cancel() else device.fail_flush = true;
+            try worker.step();
+            try std.testing.expectEqual(error.DurabilityBarrierFailed, job.failure.?);
+            try std.testing.expect(!fixture.volume.operationBusy());
+            try std.testing.expectEqual(@as(usize, 2), fixture.store.versionCount());
+            try std.testing.expect(fixture.store.dirtyVersionIds().len != 0 and fixture.directory.dirtyWorkspaceIds().len != 0);
+            try std.testing.expectEqual(@as(u64, 1), (try volume_root_slot.findLatestImageRoot(fixture.durable)).?.root.generation);
+            device.pause = .none;
+            device.fail_flush = false;
+            _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+            try std.testing.expectEqual(@as(usize, 2), fixture.store.versionCount());
+            try std.testing.expectEqual(@as(usize, 0), fixture.store.dirtyVersionIds().len);
+            _ = try fixture.spare.loadFromImage(fixture.durable, fixture.store, fixture.directory);
+            try std.testing.expectEqual(candidate.version_id, fixture.store.latestVersion(0xB900).?.id);
+        }
+    }
+}
+
+test "storage suspended load cancellation retains live dirty records" {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+    SuspendedVolumeDevice.current = &device;
+    try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+    _ = try fixture.version("disk");
+    _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+    const live = try fixture.version("live");
+    device.pause = .read;
+    device.pause_on = 3;
+    var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory, .load = true };
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    try worker.start(&job, SuspendedVolumeJob.run);
+    try worker.step();
+    try std.testing.expect(device.paused);
+    worker.cancel();
+    try worker.step();
+    try std.testing.expect(!job.loaded and device.cancelled and worker.state == .complete);
+    try std.testing.expectEqual(live.version_id, fixture.store.latestVersion(0xB900).?.id);
+    try std.testing.expect(fixture.store.dirtyVersionIds().len != 0 and fixture.directory.dirtyWorkspaceIds().len != 0);
+}
+
+test "storage suspended clear owns callbacks and reports failed durability" {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+    SuspendedVolumeDevice.current = &device;
+    try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+    _ = try fixture.version("disk");
+    _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+    device.pause = .write;
+    var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory, .clear = true };
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    try worker.start(&job, SuspendedVolumeJob.run);
+    try worker.step();
+    try std.testing.expect(device.paused and busyCallsRejected(&job, fixture.spare));
+    device.fail_flush = true;
+    try worker.step();
+    try std.testing.expect(!job.cleared and !fixture.volume.operationBusy());
+    try std.testing.expect((try volume_root_slot.findLatestImageRoot(fixture.durable)) != null);
+    device.pause = .none;
+    device.fail_flush = false;
+    try std.testing.expect(fixture.volume.clearAttachedVolume());
+    try std.testing.expect((try volume_root_slot.findLatestImageRoot(fixture.durable)) == null);
+    try std.testing.expect(fixture.volume.clearAttachedBackend());
+    try std.testing.expect(fixture.volume.clearAttachedVolume());
+}
+
+test "storage checkpoint revision saturation cannot acknowledge newer state" {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    const before_reset = fixture.store.dirtyRevision();
+    fixture.store.reset();
+    try std.testing.expect(!fixture.store.dirtyRevisionIsCurrent(before_reset));
+    fixture.store.dirty_revision = std.math.maxInt(u64) - 1;
+    fixture.directory.dirty_revision = std.math.maxInt(u64) - 1;
+    _ = try fixture.version("saturated");
+    try std.testing.expect(fixture.store.dirtyRevision() == null and fixture.directory.dirtyRevision() == null);
+    _ = try fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory);
+    try std.testing.expect(fixture.store.dirtyVersionIds().len != 0 and fixture.directory.dirtyWorkspaceIds().len != 0);
+    try std.testing.expect(!fixture.store.dirtyRevisionIsCurrent(null) and !fixture.directory.dirtyRevisionIsCurrent(null));
+    var root = (try volume_root_slot.findLatestImageRoot(fixture.visible)).?;
+    root.root.generation = std.math.maxInt(u64);
+    try volume_root_slot.writeImageRoot(fixture.visible, root.sector_index, root.root);
+    try std.testing.expectError(error.VolumeGenerationExhausted, fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory));
+    try std.testing.expect(!fixture.volume.operationBusy());
+}
+
+test "storage suspended no-op checkpoint keeps changed workspace sharing dirty" {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+    SuspendedVolumeDevice.current = &device;
+    try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+    _ = try fixture.version("disk");
+    const recipient = principal.PrincipalId{ .kind = .app, .serial = 2 };
+    try fixture.directory.share(fixture.workspace_id, .{ .principal_id = recipient, .expires_at_ticks = 100 });
+    _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+    // Equal sharing state has no new log record but still needs its barrier.
+    try fixture.directory.share(fixture.workspace_id, .{ .principal_id = recipient, .expires_at_ticks = 100 });
+    device.pause = .flush;
+    var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory };
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    try worker.start(&job, SuspendedVolumeJob.run);
+    try worker.step();
+    try std.testing.expect(device.paused);
+    try fixture.directory.share(fixture.workspace_id, .{ .principal_id = recipient, .expires_at_ticks = 200 });
+    try worker.step();
+    try std.testing.expectEqual(@as(u64, 1), job.result.?.generation);
+    try std.testing.expect(fixture.directory.dirtyWorkspaceIds().len != 0);
+    try std.testing.expect(!job.result.?.snapshot_current);
+    var reopened = try SuspendedVolumeFixture.init();
+    defer reopened.deinit();
+    _ = try fixture.spare.loadFromImage(fixture.durable, reopened.store, reopened.directory);
+    try std.testing.expectEqual(@as(u64, 100), reopened.directory.findConst(fixture.workspace_id).?.findShareGrant(recipient).?.expires_at_ticks);
+    device.pause = .none;
+    const next = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+    try std.testing.expect(next.snapshot_current);
+    _ = try fixture.spare.loadFromImage(fixture.durable, reopened.store, reopened.directory);
+    try std.testing.expectEqual(@as(u64, 200), reopened.directory.findConst(fixture.workspace_id).?.findShareGrant(recipient).?.expires_at_ticks);
+}
+
+test "storage suspended checkpoint receipt detects raw reset and dirty acknowledgment" {
+    for ([_]bool{ false, true }) |reset| {
+        var fixture = try SuspendedVolumeFixture.init();
+        defer fixture.deinit();
+        var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable, .pause = .write };
+        SuspendedVolumeDevice.current = &device;
+        try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+        const captured = try fixture.version("captured");
+        var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory };
+        var stack: [128 * 1024]u8 align(16) = undefined;
+        var worker = cooperative.Worker{ .stack = &stack };
+        try worker.start(&job, SuspendedVolumeJob.run);
+        try worker.step();
+        try std.testing.expect(device.paused);
+        if (reset) {
+            fixture.store.reset();
+            fixture.directory.reset();
+        } else {
+            fixture.store.clearDirty();
+            fixture.directory.clearDirty();
+        }
+        try worker.step();
+        try std.testing.expect(job.failure == null and !job.result.?.snapshot_current);
+        try std.testing.expectEqual(@as(usize, 0), fixture.store.dirtyVersionIds().len);
+        try std.testing.expectEqual(@as(usize, 0), fixture.directory.dirtyWorkspaceIds().len);
+        var reopened = try SuspendedVolumeFixture.init();
+        defer reopened.deinit();
+        _ = try fixture.spare.loadFromImage(fixture.durable, reopened.store, reopened.directory);
+        try std.testing.expectEqual(captured.version_id, reopened.store.latestVersion(0xB900).?.id);
+        device.pause = .none;
+        const next = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+        try std.testing.expect(next.snapshot_current);
+        _ = try fixture.spare.loadFromImage(fixture.durable, reopened.store, reopened.directory);
+        if (reset) {
+            try std.testing.expectEqual(@as(usize, 0), reopened.store.objectCount());
+            try std.testing.expectEqual(@as(usize, 0), reopened.directory.workspaceCount());
+        } else {
+            try std.testing.expectEqual(captured.version_id, reopened.store.latestVersion(0xB900).?.id);
+        }
+    }
+}
+
+fn corruptLatestDelta(image: []u8, semantic: bool) !void {
+    const loaded = (try volume_root_slot.findLatestImageRoot(image)).?;
+    try std.testing.expect(loaded.root.log_bytes < storage_volume.sector_size);
+    const start = volume_layout.data_start_byte + loaded.root.data_offset;
+    const log = image[start..][0..loaded.root.log_bytes];
+    if (!semantic) {
+        log[log.len - 1] ^= 0x80;
+        return;
+    }
+    var offset: usize = 0;
+    while (offset < log.len) {
+        const payload_len = std.mem.readInt(u32, log[offset + 1 ..][0..4], .little);
+        if (log[offset] == @backingInt(volume_log.RecordKind.object_state)) {
+            const payload = log[offset + volume_log.recordHeaderLen() ..][0..payload_len];
+            // Valid framing/checksum, invalid logical ObjectType after the
+            // preceding checkpoint has already reconstructed live records.
+            payload[8] = 0xff;
+            std.mem.writeInt(u64, log[offset + volume_layout.log_record_checksum_offset ..][0..8], volume_hashing.checksumBytes(payload), .little);
+            return;
+        }
+        offset += volume_log.recordHeaderLen() + payload_len;
+    }
+    return error.MissingDeltaObject;
+}
+
+fn expectCorruptCandidateBoundary(semantic: bool) !void {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+    SuspendedVolumeDevice.current = &device;
+    try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+    const first = try fixture.version("disk first");
+    _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+    if (semantic) {
+        try std.testing.expect(fixture.volume.loadFromVolume(fixture.store, fixture.directory));
+        var bytes: [64]u8 = undefined;
+        try std.testing.expectEqualSlices(u8, "disk first", try fixture.store.versionPayloadInto(fixture.store.latestVersion(0xB900).?, &bytes));
+    }
+    _ = try fixture.version("disk second");
+    _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+    const live = try fixture.version("RAM live");
+    try corruptLatestDelta(fixture.visible, semantic);
+    device.pause = .read;
+    device.pause_on = 4;
+    var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = fixture.directory, .load = true };
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = cooperative.Worker{ .stack = &stack };
+    try worker.start(&job, SuspendedVolumeJob.run);
+    defer if (worker.state == .suspended) {
+        worker.cancel();
+        worker.step() catch @panic("test failed to drain corrupt candidate");
+    };
+    try worker.step();
+    if (semantic) {
+        try std.testing.expect(!device.paused and worker.state == .complete and !job.loaded);
+        try std.testing.expectEqual(@as(usize, 0), fixture.store.objectCount());
+        try std.testing.expectEqual(@as(usize, 0), fixture.directory.workspaceCount());
+        // A later load must reconstruct disk payload after RAM repopulation.
+        fixture.workspace_id = (try fixture.directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "paused" })).id;
+        _ = try fixture.version("RAM recreated");
+        const bad = (try volume_root_slot.findLatestImageRoot(fixture.visible)).?;
+        const bad_offset = @as(usize, bad.sector_index) * storage_volume.sector_size;
+        @memset(fixture.visible[bad_offset..][0..storage_volume.sector_size], 0);
+        device.pause = .none;
+        try std.testing.expect(fixture.volume.loadFromVolume(fixture.store, fixture.directory));
+        var bytes: [64]u8 = undefined;
+        try std.testing.expectEqualSlices(u8, "disk first", try fixture.store.versionPayloadInto(fixture.store.latestVersion(0xB900).?, &bytes));
+    } else {
+        try std.testing.expect(device.paused and worker.state == .suspended);
+        try std.testing.expectEqual(live.version_id, fixture.store.latestVersion(0xB900).?.id);
+        try std.testing.expectEqual(live.version_id, (try fixture.directory.resolve(fixture.workspace_id, "documents/paused.md")).version_id);
+        try worker.step();
+        try std.testing.expect(job.loaded and worker.state == .complete);
+        try std.testing.expectEqual(first.version_id, fixture.store.latestVersion(0xB900).?.id);
+    }
+    try std.testing.expect(!fixture.volume.operationBusy());
+}
+
+test "storage corrupt candidate fallback retains live state before yielding read" {
+    try expectCorruptCandidateBoundary(false);
+}
+
+test "storage corrupt candidate logical replay failure never yields partial state" {
+    try expectCorruptCandidateBoundary(true);
+}
+
+test "storage same root reload restores disk payload into changed or alternate RAM" {
+    const Change = enum { version, reset, alternate };
+    for ([_]bool{ false, true }) |from_image| {
+        for ([_]Change{ .version, .reset, .alternate }) |change| {
+            var fixture = try SuspendedVolumeFixture.init();
+            defer fixture.deinit();
+            var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+            SuspendedVolumeDevice.current = &device;
+            try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+            const disk = try fixture.version("same root disk payload");
+            _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+            if (from_image) {
+                _ = try fixture.volume.loadFromImage(fixture.durable, fixture.store, fixture.directory);
+            } else {
+                try std.testing.expect(fixture.volume.loadFromVolume(fixture.store, fixture.directory));
+            }
+
+            var alternate = try SuspendedVolumeFixture.init();
+            defer alternate.deinit();
+            const store = if (change == .alternate) alternate.store else fixture.store;
+            const directory = if (change == .alternate) alternate.directory else fixture.directory;
+            var workspace_id = if (change == .alternate) alternate.workspace_id else fixture.workspace_id;
+            if (change == .reset) {
+                store.reset();
+                directory.reset();
+                workspace_id = (try directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "paused" })).id;
+            }
+            _ = try putSuspendedVersion(store, directory, workspace_id, "RAM must be replaced");
+            if (from_image) {
+                _ = try fixture.volume.loadFromImage(fixture.durable, store, directory);
+            } else {
+                try std.testing.expect(fixture.volume.loadFromVolume(store, directory));
+            }
+            var bytes: [64]u8 = undefined;
+            try std.testing.expectEqualSlices(u8, "same root disk payload", try store.versionPayloadInto(store.latestVersion(0xB900).?, &bytes));
+            try std.testing.expectEqual(disk.version_id, (try directory.resolve(fixture.workspace_id, "documents/paused.md")).version_id);
+            try std.testing.expectEqual(@as(usize, 1), store.versionCount());
+            try std.testing.expectEqual(@as(usize, 0), store.dirtyVersionIds().len);
+            try std.testing.expectEqual(@as(usize, 0), directory.dirtyWorkspaceIds().len);
+        }
+    }
+}
+
+test "storage suspended load retains successful transient workspace mutations" {
+    const Mutation = enum { begin, put_new, put_replace, put_resurrect, delete_base, delete_staged, abort };
+    for ([_]usize{ 1, 3 }) |pause_on| {
+        for ([_]Mutation{ .begin, .put_new, .put_replace, .put_resurrect, .delete_base, .delete_staged, .abort }) |mutation| {
+            var fixture = try SuspendedVolumeFixture.init();
+            defer fixture.deinit();
+            var device = SuspendedVolumeDevice{ .visible = fixture.visible, .durable = fixture.durable };
+            SuspendedVolumeDevice.current = &device;
+            try std.testing.expect(fixture.volume.attachBackend(SuspendedVolumeDevice.backend()));
+            const disk = try fixture.version("disk survives staging");
+            _ = try fixture.volume.saveToVolume(fixture.store, fixture.directory);
+            const directory = fixture.directory;
+            const workspace_id = fixture.workspace_id;
+            if (mutation != .begin) try directory.beginTransaction(workspace_id);
+            switch (mutation) {
+                .put_replace, .delete_staged, .abort => try directory.stagePut(workspace_id, "transient.md", disk.object_id, disk.version_id, .document),
+                .put_resurrect => try directory.stageDelete(workspace_id, "documents/paused.md"),
+                else => {},
+            }
+            const before = directory.dirtyRevision();
+            device.pause = .read;
+            device.pause_on = pause_on;
+            var job = SuspendedVolumeJob{ .volume = fixture.volume, .store = fixture.store, .workspaces = directory, .load = true };
+            var stack: [128 * 1024]u8 align(16) = undefined;
+            var worker = cooperative.Worker{ .stack = &stack };
+            try worker.start(&job, SuspendedVolumeJob.run);
+            defer if (worker.state == .suspended) {
+                worker.cancel();
+                worker.step() catch @panic("test failed to drain transaction load");
+            };
+            try worker.step();
+            try std.testing.expect(device.paused and worker.state == .suspended);
+            switch (mutation) {
+                .begin => try directory.beginTransaction(workspace_id),
+                .put_new, .put_replace => try directory.stagePut(workspace_id, "transient.md", disk.object_id, disk.version_id, .document),
+                .put_resurrect => try directory.stagePut(workspace_id, "documents/paused.md", disk.object_id, disk.version_id, .document),
+                .delete_base => try directory.stageDelete(workspace_id, "documents/paused.md"),
+                .delete_staged => try directory.stageDelete(workspace_id, "transient.md"),
+                .abort => try directory.abortTransaction(workspace_id),
+            }
+            try worker.step();
+            try std.testing.expect(worker.state == .complete and !job.loaded);
+            try std.testing.expect(!directory.dirtyRevisionIsCurrent(before));
+            const resident = directory.find(workspace_id).?;
+            try std.testing.expectEqual(mutation != .abort, resident.staging.transaction_open);
+            const expected_count: usize = switch (mutation) {
+                .begin, .delete_staged, .abort => 0,
+                else => 1,
+            };
+            try std.testing.expectEqual(expected_count, resident.staging.staged_entry_count);
+            try std.testing.expectEqual(disk.version_id, (try directory.resolve(workspace_id, "documents/paused.md")).version_id);
+            try std.testing.expectEqual(@as(usize, 0), directory.dirtyWorkspaceIds().len);
+            try std.testing.expectEqual(@as(usize, 0), fixture.store.dirtyVersionIds().len);
+        }
+    }
+}
+
+test "storage rejected workspace staging leaves revision and dirty IDs unchanged" {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    const disk = try fixture.version("clean staging");
+    fixture.directory.clearDirty();
+    const directory = fixture.directory;
+    const workspace_id = fixture.workspace_id;
+    var before = directory.dirtyRevision();
+    try std.testing.expectError(error.NoActiveTransaction, directory.abortTransaction(workspace_id));
+    try std.testing.expectError(error.NoActiveTransaction, directory.stagePut(workspace_id, "transient.md", disk.object_id, disk.version_id, .document));
+    try std.testing.expect(directory.dirtyRevisionIsCurrent(before));
+    try directory.beginTransaction(workspace_id);
+    before = directory.dirtyRevision();
+    try std.testing.expectError(error.TransactionAlreadyOpen, directory.beginTransaction(workspace_id));
+    try std.testing.expectError(error.InvalidEntry, directory.stagePut(workspace_id, "transient.md", ids.object(0), disk.version_id, .document));
+    try std.testing.expectError(error.EntryNotFound, directory.stageDelete(workspace_id, "missing.md"));
+    try std.testing.expect(directory.dirtyRevisionIsCurrent(before));
+    try directory.stageDelete(workspace_id, "documents/paused.md");
+    before = directory.dirtyRevision();
+    try std.testing.expectError(error.EntryNotFound, directory.stageDelete(workspace_id, "documents/paused.md"));
+    try std.testing.expect(directory.dirtyRevisionIsCurrent(before));
+    try std.testing.expectEqual(@as(usize, 0), directory.dirtyWorkspaceIds().len);
+    try std.testing.expectEqual(@as(usize, 0), directory.dirtySnapshotIds().len);
+}
 
 const WriteBackBackend = struct {
     const Event = enum(u8) {
@@ -37,7 +738,7 @@ const WriteBackBackend = struct {
         @memset(visible, 0);
         @memset(durable, 0);
         beginAttempt(0);
-        volume.attachBackend(.{
+        _ = volume.attachBackend(.{
             .sector_count = storage_volume.required_device_sectors,
             .read = read,
             .write = write,
@@ -134,8 +835,9 @@ fn expectBarrierFailurePreservesDirtyState(failing_flush: usize, object_serial: 
     const durable = try allocator.alloc(u8, image_bytes);
     defer allocator.free(durable);
     const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
     defer allocator.destroy(volume);
-    volume.reset();
+    _ = volume.reset();
     WriteBackBackend.attach(volume, visible, durable);
 
     var store = object_store.Store.init();
@@ -175,8 +877,9 @@ test "storage backend commits log and root through ordered durability barriers" 
     const durable = try allocator.alloc(u8, image_bytes);
     defer allocator.free(durable);
     const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
     defer allocator.destroy(volume);
-    volume.reset();
+    _ = volume.reset();
     WriteBackBackend.attach(volume, visible, durable);
 
     var store = object_store.Store.init();
@@ -231,8 +934,8 @@ test "storage deltas persist shared chunks once across committed versions and di
     defer allocator.free(image);
     @memset(image, 0);
     const volume = try allocator.create(Volume);
-    defer allocator.destroy(volume);
     volume.* = Volume.init();
+    defer allocator.destroy(volume);
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{ .label = "dedup", .seed = signing.seedFromByte(0x6D) };
@@ -266,7 +969,7 @@ test "storage deltas persist shared chunks once across committed versions and di
     // A cold replay reconstructs the committed set without a process-local cache.
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();
-    volume.reset();
+    _ = volume.reset();
     _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
     payload[object_store.MAX_CHUNK_BYTES + 17] = 9;
     const edited = try loaded_store.putVersion(.{
@@ -283,7 +986,7 @@ test "storage deltas persist shared chunks once across committed versions and di
         changed.bytes[@backingInt(volume_log.RecordKind.chunk_state)],
     );
     try std.testing.expectEqual(@as(u16, 11), try storage_volume.testing.latestImageLogRecordCount(image));
-    volume.reset();
+    _ = volume.reset();
     store.reset();
     _ = try volume.loadFromImage(image, &store, &workspaces);
     var output: [payload.len]u8 = undefined;
@@ -299,6 +1002,7 @@ test "storage delta chunk reuse survives failed barriers retries and power loss"
         const durable = try allocator.alloc(u8, image_bytes);
         defer allocator.free(durable);
         const volume = try allocator.create(Volume);
+        volume.* = Volume.init();
         defer allocator.destroy(volume);
         volume.* = Volume.init();
         WriteBackBackend.attach(volume, visible, durable);
@@ -325,6 +1029,7 @@ test "storage delta chunk reuse survives failed barriers retries and power loss"
         try std.testing.expectEqual(@as(usize, 1), store.dirtyVersionIds().len);
         WriteBackBackend.powerLoss();
         const reboot = try allocator.create(Volume);
+        reboot.* = Volume.init();
         defer allocator.destroy(reboot);
         reboot.* = Volume.init();
         var reboot_store = object_store.Store.init();
@@ -339,7 +1044,7 @@ test "storage delta chunk reuse survives failed barriers retries and power loss"
         const stats = try latestLogRecordStats(durable);
         try std.testing.expectEqual(@as(usize, 1), stats.counts[@backingInt(volume_log.RecordKind.chunk_state)]);
         WriteBackBackend.powerLoss();
-        reboot.reset();
+        _ = reboot.reset();
         reboot_store.reset();
         _ = try reboot.loadFromImage(durable, &reboot_store, &reboot_workspaces);
         var output: [payload.len]u8 = undefined;
@@ -353,8 +1058,8 @@ test "storage delta deduplicates new shared chunks between distinct blobs in one
     defer allocator.free(image);
     @memset(image, 0);
     const volume = try allocator.create(Volume);
-    defer allocator.destroy(volume);
     volume.* = Volume.init();
+    defer allocator.destroy(volume);
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
     _ = try volume.saveToImage(image, &store, &workspaces);
@@ -384,7 +1089,7 @@ test "storage delta deduplicates new shared chunks between distinct blobs in one
     try std.testing.expectEqual(@as(u16, 11), try storage_volume.testing.latestImageLogRecordCount(image));
     var loaded_store = object_store.Store.init();
     var loaded_workspaces = workspace.Directory.init();
-    volume.reset();
+    _ = volume.reset();
     _ = try volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
     var output: [payload.len]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &payload, try loaded_store.versionPayloadInto(loaded_store.version(second.version_id).?, &output));
@@ -426,7 +1131,7 @@ test "single chunk blobs fill their quota and survive a volume round trip" {
     defer allocator.free(image);
     @memset(image, 0);
     var volume = Volume.init();
-    defer volume.reset();
+    defer _ = volume.reset();
     const signer = signing.SignerIdentity{ .label = "chunk-quota", .seed = signing.seedFromByte(0xE3) };
     var payload: [8]u8 = undefined;
     for (0..object_store.MAX_BLOBS) |index| {
@@ -475,8 +1180,9 @@ test "storage volume preserves exhausted identifier watermarks" {
     defer allocator.free(image);
     @memset(image, 0);
     const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
     defer allocator.destroy(volume);
-    volume.reset();
+    _ = volume.reset();
 
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
@@ -501,8 +1207,9 @@ test "storage volume compacts instead of trusting ahead delta watermarks" {
     defer allocator.free(image);
     @memset(image, 0);
     const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
     defer allocator.destroy(volume);
-    volume.reset();
+    _ = volume.reset();
 
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-watermark",
@@ -553,8 +1260,9 @@ test "storage volume rejects replayed identifiers beyond root watermarks" {
     defer allocator.free(image);
     @memset(image, 0);
     const volume = try allocator.create(Volume);
+    volume.* = Volume.init();
     defer allocator.destroy(volume);
-    volume.reset();
+    _ = volume.reset();
 
     const signer = signing.SignerIdentity{
         .label = "zigos-storage-root-rewind",
@@ -655,11 +1363,11 @@ test "storage volume separates generic and target nvme attachments" {
         .write = BackendFns.write,
         .flush = BackendFns.flush,
     };
-    volume.attachBackend(backend);
+    _ = volume.attachBackend(backend);
     try std.testing.expectEqual(storage_volume.AttachedBackendKind.generic, volume.attached_backend_kind);
     try std.testing.expect(!volume.hasProductionStorageBackend());
 
-    volume.attachNvmePciBackend(backend);
+    _ = volume.attachNvmePciBackend(backend);
     try std.testing.expectEqual(storage_volume.AttachedBackendKind.nvme_pci, volume.attached_backend_kind);
     try std.testing.expect(volume.hasProductionStorageBackend());
 
@@ -669,7 +1377,7 @@ test "storage volume separates generic and target nvme attachments" {
         .write = BackendFns.write,
         .flush = BackendFns.flush,
     };
-    volume.attachNvmePciBackend(undersized_nvme_backend);
+    _ = volume.attachNvmePciBackend(undersized_nvme_backend);
     try std.testing.expectEqual(storage_volume.AttachedBackendKind.nvme_pci, volume.attached_backend_kind);
     try std.testing.expect(!volume.hasProductionStorageBackend());
 }
@@ -886,11 +1594,13 @@ test "storage volume persists workspace snapshot roots through entry mutations" 
 test "storage volume instances keep image reload state isolated" {
     const allocator = std.testing.allocator;
     const first_volume = try allocator.create(Volume);
+    first_volume.* = Volume.init();
     defer allocator.destroy(first_volume);
     const second_volume = try allocator.create(Volume);
+    second_volume.* = Volume.init();
     defer allocator.destroy(second_volume);
-    first_volume.reset();
-    second_volume.reset();
+    _ = first_volume.reset();
+    _ = second_volume.reset();
     const first_image = try std.testing.allocator.alloc(u8, image_bytes);
     defer std.testing.allocator.free(first_image);
     const second_image = try std.testing.allocator.alloc(u8, image_bytes);
@@ -1216,7 +1926,7 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     const allocator = std.testing.allocator;
     const volume = try allocator.create(storage_volume.Volume);
     defer allocator.destroy(volume);
-    volume.reset();
+    _ = volume.reset();
     var store = object_store.Store.init();
     var workspaces = workspace.Directory.init();
     const signer = signing.SignerIdentity{
@@ -1257,7 +1967,7 @@ test "storage volume persists a mutated workspace alongside an untouched one acr
     var loaded_workspaces = workspace.Directory.init();
     const loaded_volume = try allocator.create(storage_volume.Volume);
     defer allocator.destroy(loaded_volume);
-    loaded_volume.reset();
+    _ = loaded_volume.reset();
     _ = try loaded_volume.loadFromImage(image, &loaded_store, &loaded_workspaces);
     const loaded_notes = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "notes").?;
     const loaded_journal = loaded_workspaces.findOwned(.{ .kind = .user, .serial = 1 }, "journal").?;

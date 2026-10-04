@@ -33,12 +33,12 @@ const FakeStorageVolumeBackend = struct {
 
     fn attach(image_buffer: []u8) void {
         image = image_buffer;
-        storage_volume.attachBackend(.{
+        if (!storage_volume.attachBackend(.{
             .sector_count = storage_volume.required_device_sectors,
             .read = read,
             .write = write,
             .flush = flush,
-        });
+        })) @panic("storage lifecycle transition was refused");
     }
 
     fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
@@ -73,12 +73,12 @@ const TransientCheckpointBackend = struct {
         image = image_buffer;
         write_failures_remaining = write_failures;
         flush_failures_remaining = flush_failures;
-        storage_volume.attachBackend(.{
+        if (!storage_volume.attachBackend(.{
             .sector_count = storage_volume.required_device_sectors,
             .read = read,
             .write = write,
             .flush = flush,
-        });
+        })) @panic("storage lifecycle transition was refused");
     }
 
     fn read(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
@@ -114,8 +114,8 @@ const TransientCheckpointBackend = struct {
 
 test "storage port requires authority context for protected mutations" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 47 };
     const actor = principal.PrincipalId{ .kind = .user, .serial = 7 };
@@ -198,8 +198,8 @@ test "storage port requires authority context for protected mutations" {
 
 test "storage port derives shared workspace capabilities and blocks unauthorized reshares" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 49 };
     const owner_user = principal.PrincipalId{ .kind = .user, .serial = 40 };
@@ -408,8 +408,8 @@ test "storage port derives shared workspace capabilities and blocks unauthorized
 
 test "storage service enforces durable object-scoped workspace shares" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 149 };
     const owner_user = principal.PrincipalId{ .kind = .user, .serial = 140 };
@@ -522,8 +522,8 @@ test "storage service enforces durable object-scoped workspace shares" {
 
 test "storage port queries object history and grants object capabilities" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = principal.PrincipalId{ .kind = .service, .serial = 151 };
     const owner_user = principal.PrincipalId{ .kind = .user, .serial = 151 };
@@ -648,8 +648,8 @@ test "storage port queries object history and grants object capabilities" {
 
 test "storage service accepts large object payloads through mapped shared memory transfer" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };
     const producer_task_id = ids.task(200);
@@ -714,7 +714,7 @@ test "storage service accepts large object payloads through mapped shared memory
 
 test "storage service retains authoritative object and workspace state across restart" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 44 };
     const signer = signing.SignerIdentity{
@@ -777,17 +777,17 @@ test "storage service retains authoritative object and workspace state across re
     }));
     try std.testing.expect(restarted.workspaceCanReshare(notes.id, .{ .kind = .app, .serial = 70 }, .trusted_overlay, 50));
 
-    checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 }
 
 test "storage service reloads authoritative state from the attached volume after a cold start" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     var image = @as([storage_volume.image_bytes]u8, @splat(0));
     FakeStorageVolumeBackend.attach(&image);
-    defer storage_volume.clearAttachedBackend();
+    defer if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 45 };
     const signer = signing.SignerIdentity{
@@ -820,7 +820,7 @@ test "storage service reloads authoritative state from the attached volume after
     try first.stagePut(notes.id, "documents/notes.md", object.object_id, object.version_id, .document);
     _ = try first.commit(notes.id, 11);
 
-    checkpoint_store.resetPreparedState();
+    if (!checkpoint_store.resetPreparedState()) @panic("storage lifecycle transition was refused");
 
     var reloaded = Service.initWithStore(701, 18, owner, &checkpoint_store);
     const resolved = try reloaded.resolve(notes.id, "documents/notes.md");
@@ -852,23 +852,23 @@ test "storage service refreshes checkpoint backend after device republish" {
         fn attachFirst(image_buffer: []u8) void {
             first_image = image_buffer;
             first_revoked = false;
-            storage_volume.attachBackend(.{
+            if (!storage_volume.attachBackend(.{
                 .sector_count = storage_volume.required_device_sectors,
                 .read = readFirst,
                 .write = writeFirst,
                 .flush = flushFirst,
-            });
+            })) @panic("storage lifecycle transition was refused");
         }
 
         fn attachSecond(image_buffer: []u8) void {
             second_image = image_buffer;
             first_revoked = true;
-            storage_volume.attachBackend(.{
+            if (!storage_volume.attachBackend(.{
                 .sector_count = storage_volume.required_device_sectors,
                 .read = readSecond,
                 .write = writeSecond,
                 .flush = flushSecond,
-            });
+            })) @panic("storage lifecycle transition was refused");
         }
 
         fn readFirst(start_lba: u64, buffer_ptr: [*]u8, buffer_len: usize) callconv(.c) bool {
@@ -915,13 +915,13 @@ test "storage service refreshes checkpoint backend after device republish" {
     };
 
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     var first_image = @as([storage_volume.image_bytes]u8, @splat(0));
     var second_image = @as([storage_volume.image_bytes]u8, @splat(0));
     RepublishedBackend.attachFirst(&first_image);
-    defer storage_volume.clearAttachedBackend();
+    defer if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 49 };
     const signer = signing.SignerIdentity{
@@ -948,7 +948,7 @@ test "storage service refreshes checkpoint backend after device republish" {
     });
 
     try std.testing.expect(checkpoint_store.checkpointHealthy());
-    checkpoint_store.resetPreparedState();
+    if (!checkpoint_store.resetPreparedState()) @panic("storage lifecycle transition was refused");
     var reloaded = Service.initWithStore(705, 24, owner, &checkpoint_store);
     try std.testing.expect(reloaded.loaded_from_volume);
     try std.testing.expectEqual(second.version_id, reloaded.latestVersion(ids.object(956)).?.id);
@@ -957,12 +957,12 @@ test "storage service refreshes checkpoint backend after device republish" {
 
 test "storage service coalesces checkpoint writes across an explicit batch" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     var image = @as([storage_volume.image_bytes]u8, @splat(0));
     FakeStorageVolumeBackend.attach(&image);
-    defer storage_volume.clearAttachedBackend();
+    defer if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 48 };
     const signer = signing.SignerIdentity{
@@ -993,65 +993,77 @@ test "storage service coalesces checkpoint writes across an explicit batch" {
     try std.testing.expect(!service.pendingCheckpointMutations());
     try std.testing.expectEqual(@as(u64, 1), checkpoint_store.last_checkpoint_generation);
 
-    checkpoint_store.resetPreparedState();
+    if (!checkpoint_store.resetPreparedState()) @panic("storage lifecycle transition was refused");
     var reloaded = Service.initWithStore(704, 22, owner, &checkpoint_store);
     try std.testing.expect(reloaded.loaded_from_volume);
     const resolved = try reloaded.resolve(notes.id, "documents/batched.md");
     try std.testing.expectEqual(object.version_id, resolved.version_id);
 }
 
-test "storage service records checkpoint flush failures" {
+test "storage service records checkpoint transport write and barrier failures" {
     const FailingBackend = struct {
-        fn read(_: u64, _: [*]u8, _: usize) callconv(.c) bool {
-            return false;
+        const Stage = enum { read, write, flush };
+        var stage: Stage = .read;
+        var writes: usize = 0;
+        var flushes: usize = 0;
+        fn read(_: u64, bytes: [*]u8, len: usize) callconv(.c) bool {
+            if (stage == .read) return false;
+            @memset(bytes[0..len], 0);
+            return true;
         }
-
         fn write(_: u64, _: [*]const u8, _: usize) callconv(.c) bool {
-            return false;
+            writes += 1;
+            return stage != .write;
         }
-
         fn flush() callconv(.c) bool {
+            flushes += 1;
             return false;
         }
     };
-
-    var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
-    storage_volume.attachBackend(.{
-        .sector_count = storage_volume.required_device_sectors,
-        .read = FailingBackend.read,
-        .write = FailingBackend.write,
-        .flush = FailingBackend.flush,
-    });
-    defer storage_volume.clearAttachedBackend();
-
-    var service = Service.initWithStore(702, 19, .{ .kind = .service, .serial = 46 }, &checkpoint_store);
-    const signer = signing.SignerIdentity{
-        .label = "zigos-storage-key",
-        .seed = signing.seedFromByte(0xA6),
-    };
-    _ = try service.putVersion(.{
-        .preferred_object_id = ids.object(952),
-        .object_type = .document,
-        .payload = "checkpoint failure",
-        .metadata = try object_store.signMetadata(signer, "failure", "text/plain", .document, "checkpoint failure", 10),
-    });
-
-    try std.testing.expect(checkpoint_store.dirty);
-    try std.testing.expect(!checkpoint_store.checkpointHealthy());
-    try std.testing.expectEqual(storage_volume.Error.CorruptImage, checkpoint_store.last_checkpoint_error.?);
-    try std.testing.expectEqual(@as(u64, 1), checkpoint_store.checkpoint_retry_count);
+    const failures = [_]storage_volume.Error{ error.DeviceReadFailed, error.CorruptImage, error.DurabilityBarrierFailed };
+    for ([_]FailingBackend.Stage{ .read, .write, .flush }, failures) |stage, failure| {
+        FailingBackend.stage = stage;
+        FailingBackend.writes = 0;
+        FailingBackend.flushes = 0;
+        var checkpoint_store = CheckpointStore{};
+        if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+        defer {
+            // A faulted modeled disk is discarded only after retained callbacks end.
+            if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
+            if (!checkpoint_store.checkpoint_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
+            if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+        }
+        if (!storage_volume.attachBackend(.{
+            .sector_count = storage_volume.required_device_sectors,
+            .read = FailingBackend.read,
+            .write = FailingBackend.write,
+            .flush = FailingBackend.flush,
+        })) @panic("storage lifecycle transition was refused");
+        var service = Service.initWithStore(702, 19, .{ .kind = .service, .serial = 46 }, &checkpoint_store);
+        const signer = signing.SignerIdentity{ .label = "zigos-storage-key", .seed = signing.seedFromByte(0xA6) };
+        _ = try service.putVersion(.{
+            .preferred_object_id = ids.object(952),
+            .object_type = .document,
+            .payload = "checkpoint failure",
+            .metadata = try object_store.signMetadata(signer, "failure", "text/plain", .document, "checkpoint failure", 10),
+        });
+        try std.testing.expect(checkpoint_store.dirty);
+        try std.testing.expect(!checkpoint_store.checkpointHealthy());
+        try std.testing.expectEqual(failure, checkpoint_store.last_checkpoint_error.?);
+        try std.testing.expectEqual(@as(u64, if (stage == .read) 0 else 1), checkpoint_store.checkpoint_retry_count);
+        try std.testing.expectEqual(@as(usize, if (stage == .read) 0 else 2), FailingBackend.writes);
+        try std.testing.expectEqual(@as(usize, if (stage == .flush) 2 else 0), FailingBackend.flushes);
+    }
 }
 
 test "storage service retries transient checkpoint writes and durability barriers" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     var image = @as([storage_volume.image_bytes]u8, @splat(0));
     TransientCheckpointBackend.attach(&image, 1, 0);
-    defer storage_volume.clearAttachedBackend();
+    defer if (!storage_volume.clearAttachedBackend()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 50 };
     const signer = signing.SignerIdentity{
@@ -1086,7 +1098,7 @@ test "storage service retries transient checkpoint writes and durability barrier
     try std.testing.expect(checkpoint_store.checkpointHealthy());
     try std.testing.expect(!checkpoint_store.dirty);
 
-    checkpoint_store.resetPreparedState();
+    if (!checkpoint_store.resetPreparedState()) @panic("storage lifecycle transition was refused");
     var reloaded = Service.initWithStore(706, 26, owner, &checkpoint_store);
     try std.testing.expect(reloaded.loaded_from_volume);
     try std.testing.expectEqual(first.version_id, reloaded.latestVersion(first.object_id).?.id);
@@ -1096,8 +1108,8 @@ test "storage service retries transient checkpoint writes and durability barrier
 
 test "workspace commit compacts the mutation log so high-churn workspaces avoid the lifetime cap" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 9_900 };
     const signer = signing.SignerIdentity{ .label = "compact-signer", .seed = signing.seedFromByte(0xE1) };
@@ -1139,8 +1151,8 @@ test "workspace commit compacts the mutation log so high-churn workspaces avoid 
 
 test "workspace mutation-log compaction is skipped while a live snapshot needs older generations" {
     var checkpoint_store = CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 9_920 };
     const signer = signing.SignerIdentity{ .label = "snap-signer", .seed = signing.seedFromByte(0xE2) };

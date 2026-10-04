@@ -156,6 +156,7 @@ pub const SessionManager = struct {
         self.clearPeerAttestationWorker();
         // Revoke and drain authentication before any borrowed service is freed.
         self.clearIdentityOwner();
+        if (self.native_store.operationBusy()) @panic("trusted reset requires storage operations to finish");
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
         const retired_peer_handles = self.peer_connections;
         self.peer_handshakes.deinit();
@@ -163,6 +164,10 @@ pub const SessionManager = struct {
         self.launcher.deinit(self, 0);
         self.clipboard.deinit(0);
         self.documents.deinit(0) catch unreachable;
+        // Storage cleanup still needs the controller's live port, task and grants.
+        if (!self.native_store.resetPersistent()) @panic("trusted reset retains native storage until cleanup succeeds");
+        if (!bootstrap_driver_port.reset()) @panic("trusted reset requires drained device submissions");
+        session_service_bootstrap.resetBootedDataPlanes();
         self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
         self.input_router.deinit();
@@ -181,11 +186,8 @@ pub const SessionManager = struct {
         self.service_graph_builder.supervisor.deinit();
         self.service_graph_builder.releaseBackgroundDispatch();
         self.service_graph_builder.releasePackageService();
-        self.native_store.resetPersistent();
         self.initializeAllocated();
         self.peer_connections = retired_peer_handles;
-        bootstrap_driver_port.reset();
-        session_service_bootstrap.resetBootedDataPlanes();
         if (self.ensureConstructed()) self.runtime_context.resetScheduler();
     }
 
@@ -1238,6 +1240,7 @@ pub const SessionManager = struct {
         self.documents.requireQuiescent() catch @panic("trusted boot teardown requires document operations to finish");
         self.clearPeerAttestationWorker();
         self.clearIdentityOwner();
+        if (self.native_store.operationBusy()) @panic("trusted boot teardown requires storage operations to finish");
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
         self.peer_handshakes.deinit();
         self.peers.deinit();
@@ -1245,6 +1248,9 @@ pub const SessionManager = struct {
         self.launcher.deinit(self, 0);
         self.clipboard.deinit(0);
         self.documents.deinit(0) catch unreachable;
+        if (!self.native_store.resetPersistent()) @panic("trusted boot teardown retains native storage until cleanup succeeds");
+        if (!bootstrap_driver_port.reset()) @panic("trusted boot teardown requires drained device submissions");
+        session_service_bootstrap.resetBootedDataPlanes();
         self.initialized = false;
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
         self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();

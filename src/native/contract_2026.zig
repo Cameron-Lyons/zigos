@@ -68,7 +68,9 @@ pub const floor: Floor = .{
         !userspace_registry.USES_PKU_WITHIN_GROUP and
         userspace_executor.SHARES_GROUP_PAGE_TABLES and
         !userspace_executor.USES_PKU_WITHIN_SHARED_TABLES,
-    .checkpoint_only_cold_load = storage_volume.USES_INCREMENTAL_LIVE_INDEX and
+    .checkpoint_only_cold_load = storage_volume.BUILDS_OBJECT_STORE_DERIVED_INDEXES_DURING_REPLAY and
+        storage_volume.BUILDS_WORKSPACE_INDEXES_DURING_REPLAY and
+        storage_volume.SKIPS_POST_REPLAY_FULL_WORKSPACE_INDEX_REBUILD and
         storage_volume.USES_CHECKPOINT_ONLY_COLD_LOAD and
         storage_volume.COMPACTS_IN_BACKGROUND,
     .fred_only_traps = cpu_baseline.FRED_ONLY_TRAPS,

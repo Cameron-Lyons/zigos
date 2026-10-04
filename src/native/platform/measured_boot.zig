@@ -1121,8 +1121,8 @@ test "driver set measurements bind signed driver records and restart generation"
 
 test "measured boot journal persists and compares latest boot summary across restart" {
     var checkpoint_store = storage_service.CheckpointStore{};
-    checkpoint_store.resetPersistent();
-    defer checkpoint_store.resetPersistent();
+    if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const owner = principal.PrincipalId{ .kind = .service, .serial = 160 };
     const state_signer = signing.SignerIdentity{

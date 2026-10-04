@@ -48,8 +48,8 @@ fn packageHarness(
 
 pub fn taskFirstUxRecordsStructuredFlows() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = spec_support.service(60);
     const sync_owner = spec_support.service(61);
@@ -114,8 +114,8 @@ pub fn taskFirstUxRecordsStructuredFlows() !void {
 
 pub fn userJourneyKeepsInstallSyncPermissionUpdateAndRecoveryCohesive() !void {
     var storage_checkpoint_store = storage_service.CheckpointStore{};
-    storage_checkpoint_store.resetPersistent();
-    defer storage_checkpoint_store.resetPersistent();
+    if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
+    defer if (!storage_checkpoint_store.resetPersistent()) @panic("storage lifecycle transition was refused");
 
     const storage_owner = spec_support.service(62);
     const sync_owner = spec_support.service(63);
