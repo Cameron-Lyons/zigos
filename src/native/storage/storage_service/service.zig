@@ -243,6 +243,12 @@ pub const StorageCore = struct {
         return generation;
     }
 
+    pub fn replaceEntries(self: *Service, workspace_id: anytype, target_entries: []const workspace.Entry, tick: u64) workspace.Error!u32 {
+        const generation = try self.workspaces.replaceEntries(workspaceId(workspace_id), target_entries, tick);
+        self.noteMutation(true);
+        return generation;
+    }
+
     pub fn snapshot(
         self: *Service,
         workspace_id: anytype,

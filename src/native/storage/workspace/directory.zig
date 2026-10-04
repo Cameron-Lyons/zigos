@@ -1032,6 +1032,19 @@ pub const Directory = struct {
         return workspace.generation;
     }
 
+    // Trusted owners publish a complete directory in one generation. Unlike
+    // staging each delete and insertion, replacement needs no spare path slot.
+    // Snapshot history is retained, or capacity failure leaves it untouched.
+    pub fn replaceEntries(self: *Directory, workspace_id: ids.WorkspaceId, target_entries: []const Entry, tick: u64) Error!u32 {
+        _ = tick;
+        const workspace = self.find(workspace_id) orelse return error.WorkspaceNotFound;
+        if (workspace.staging.transaction_open) return error.TransactionAlreadyOpen;
+        try replaceCurrentEntriesWith(workspace, target_entries);
+        compactMutationLogIfSafe(workspace);
+        self.markWorkspaceDirty(workspace_id);
+        return workspace.generation;
+    }
+
     fn compactMutationLogIfSafe(workspace: *WorkspaceRecord) void {
         if (workspace.counts.entry_mutation_count <= MUTATION_LOG_COMPACTION_THRESHOLD) return;
         if (workspace.oldest_snapshot_generation < workspace.generation) return;
@@ -1923,10 +1936,12 @@ fn materializeEntriesAtGeneration(
 
 fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []const Entry) Error!void {
     const next_generation = try nextWorkspaceGeneration(workspace);
+    if (source_entries.len > MAX_WORKSPACE_ENTRIES) return error.EntryTableFull;
     var target_entries: [MAX_WORKSPACE_ENTRIES]Entry = @as([MAX_WORKSPACE_ENTRIES]Entry, @splat(Entry{}));
     var target_count: usize = 0;
     for (source_entries) |entry| {
-        if (isDeleteTombstone(entry)) continue;
+        if (entry.object_id.isZero() or entry.version_id.isZero() or entry.path_len > entry.path.len) return error.InvalidEntry;
+        if (findEntryIndex(target_entries[0..target_count], entry.pathSlice()) != null) return error.InvalidEntry;
         _ = try insertSortedEntry(&target_entries, &target_count, entry);
     }
 
@@ -1967,9 +1982,23 @@ fn replaceCurrentEntriesWith(workspace: *WorkspaceRecord, source_entries: []cons
             },
         }
     }
-    if (workspace.counts.entry_mutation_count + mutation_count_needed > MAX_WORKSPACE_ENTRY_MUTATIONS) return error.EntryTableFull;
+    const compact_replacement = workspace.counts.entry_mutation_count + mutation_count_needed > MAX_WORKSPACE_ENTRY_MUTATIONS;
+    if (compact_replacement and workspace.oldest_snapshot_generation != NO_SNAPSHOT_GENERATION) return error.EntryTableFull;
     if (deletion_needed) try workspace.recoverable_deletes.ensureBacking();
     if (target_count != 0) try workspace.path_index.ensureEntryBacking();
+
+    if (compact_replacement) {
+        // All fallible checks and allocations precede publication. There is no
+        // snapshot referring to the old log, so seed the new complete state
+        // rather than needing room for both its tombstones and insertions.
+        for (current_entries) |entry| {
+            if (findEntryIndex(target_entries[0..target_count], entry.pathSlice()) == null) appendDeleted(workspace, entry);
+        }
+        seedWorkspaceEntries(workspace, target_entries[0..target_count], next_generation) catch
+            native_util.impossibleByInvariant("preflighted complete workspace replacement fits its backing");
+        workspace.generation = next_generation;
+        return;
+    }
 
     current_index = 0;
     target_index = 0;

@@ -788,6 +788,43 @@ test "prepared document task waits for activation and cancellation retires grant
     try std.testing.expectError(error.TaskNotPrepared, manager.cancelPreparedDocumentTask(task_id, 3));
 }
 
+test "prepared document cancellation reuses retired task capacity across repeated launches" {
+    session_manager.testing.resetState();
+    defer session_manager.testing.resetState();
+    session_manager.boot();
+    const manager = session_manager.system();
+    const runtime = manager.runtimePtr();
+    const session_task = manager.findTask("session-manager").?;
+    const session_id = session_task.id;
+    const active_before = runtime.countTasksInState(.active);
+    const grants_before = manager.capabilityTablePtr().activeCount();
+    const windows_before = manager.compositorSessionPtr().window_count;
+    var previous_id: u64 = 0;
+    var first_handle: ?task_runtime.TaskHandle = null;
+    var first_id: u64 = 0;
+    for (0..300) |round| {
+        const task = try prepareNotesForLaunchTest(manager);
+        const task_id = task.id;
+        const address_space_id = task.address_space_id;
+        try std.testing.expect(task_id > previous_id);
+        previous_id = task_id;
+        if (round == 0) {
+            first_handle = runtime.taskHandleForResolved(task);
+            first_id = task_id;
+        }
+        try std.testing.expect(manager.userspaceSchedulerPtr().taskDispatchStats(task_id) == null);
+        try manager.cancelPreparedDocumentTask(task_id, @intCast(round + 1));
+        try std.testing.expectEqual(task_runtime.TaskState.terminated, runtime.find(task_id).?.state);
+        try std.testing.expect(runtime.findAddressSpaceConst(address_space_id) == null);
+        try std.testing.expectEqual(active_before, runtime.countTasksInState(.active));
+        try std.testing.expectEqual(grants_before, manager.capabilityTablePtr().activeCount());
+        try std.testing.expectEqual(windows_before, manager.compositorSessionPtr().window_count);
+    }
+    try std.testing.expect(runtime.findByHandle(first_handle.?, first_id) == null);
+    try std.testing.expect(runtime.find(session_id).? == session_task);
+    try std.testing.expectEqual(task_runtime.TaskState.active, session_task.state);
+}
+
 test "document activation denial retires preparation but never cancels a scheduled editor" {
     session_manager.testing.resetState();
     defer session_manager.testing.resetState();

@@ -111,8 +111,11 @@ requests.
   navigation, and saves; a new edit after undo discards the redo branch. Save
   receipts track content revisions, so a delayed save cannot mark another draft
   clean. Ctrl+C, Ctrl+X, and Ctrl+V transfer selected text between Notes editors
-  through native endpoints when document policy permits clipboard access. Each
-  transfer requires a newly delivered foreground keyboard gesture; focus changes,
+  through native endpoints when document policy permits clipboard access. The
+  document's signing lease must remain live, bound to
+  the storage service, and permitted by current policy; a valid workspace grant
+  cannot preserve clipboard access after that lease expires or is revoked.
+  Each transfer requires a newly delivered foreground keyboard gesture; focus changes,
   suspension, expiry, and revoked document authority cancel pending transfers.
   Cut removes text only after acknowledgement, and paste applies the complete
   payload as one undoable edit. Transfers accept up to 512 bytes; copied content
@@ -477,6 +480,14 @@ requests.
   replaced tasks retire their endpoints, queued capability moves, shared memory,
   and associated authority. Reset and restore preserve identity issuance cursors,
   including exhaustion, so old identifiers cannot be issued to new tasks.
+  When the 128-slot task table fills, it reclaims the oldest fully retired
+  application record. Live and suspended tasks, service owners, session owners,
+  and records borrowed by an active callback remain protected. Exact generational
+  borrows cover dispatch, launch, retirement, and presentation callbacks;
+  wholesale runtime replacement refuses an outstanding borrow. The scheduler
+  prunes retired registrations and claims while preserving its active dispatch.
+  Host tests exercise repeated launches and prepared-document cancellation beyond
+  table capacity, including reentrant termination during callbacks.
 - Diagnostic ledger format v4 writes its header once and reconstructs sequence
   numbers from retained events, avoiding a second immutable version per append.
   Older diagnostic ledger formats are rejected.
@@ -484,6 +495,12 @@ requests.
   with payload bytes allocated on demand. Failed writes release newly allocated
   chunks before publishing an object or version. Storage still has an explicit
   finite quota; automatic history reclamation remains open.
+  Trusted service owners can publish a complete workspace directory in one
+  generation, including replacement of all 96 paths. Validation and allocation
+  precede publication. Replacement retains snapshot history; insufficient history
+  capacity rejects the change without moving any path. With no retained snapshot,
+  it can compact the 192-entry mutation log to the new directory, preserving
+  capacity for later ordinary transactions without enlarging resident tables.
 - Text surfaces use compositor-owned snapshots and the firmware framebuffer in
   production, with writes limited to changed cells. The shared-buffer handle,
   revision, and readiness-fence path still records modeled display requests;
@@ -492,6 +509,16 @@ requests.
   durable inbound/outbound frame queues, replay rejection, offline edits,
   explicit conflict review, object-scoped sharing, revocation enforcement, and
   two-node QEMU proof runs with separate native stores.
+  A sync checkpoint publishes all managed workspace paths in one generation,
+  preserving unrelated entries. Failed record allocation leaves the previous
+  directory intact, and retries reconcile immutable object heads before reusing
+  or writing a version. Abandoned versions still consume the finite history
+  quota. An attached disk must complete its durability barrier
+  before a successful result is returned. Resident retry state survives service
+  reinitialization; a fresh resident loaded from unflushed RAM also retains the
+  pending checkpoint. Duplicate and unchanged operations retry a failed checkpoint.
+  Host regressions cover a full frame queue, late allocation failure, failed
+  barriers, restart, and checkpoint deferral by an outer storage batch.
   Device graph mutations verify the stored user-root signature, require the
   matching root key, and check device ownership. A sync-service capability alone
   cannot enroll, rotate, or revoke another user's devices. Enrollment retries

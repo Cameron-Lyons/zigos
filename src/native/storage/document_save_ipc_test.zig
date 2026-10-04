@@ -55,6 +55,46 @@ test "clipboard document authorization rechecks signed workspace policy and exis
     try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, true, 10));
 }
 
+test "clipboard document authorization requires a live service signing lease" {
+    const document_sessions = @import("../session/document_sessions.zig");
+    const Failure = enum { expired, revoked, unloaded, wrong_holder, wrong_task };
+    for (std.enums.values(Failure)) |failure| {
+        const fixture = try Fixture.init();
+        defer fixture.deinit();
+        fixture.channel.close(0);
+        fixture.open_request.signer = try fixture.signing_fixture.initWithClipboard(
+            .{ .kind = .user, .serial = 1 },
+            fixture.device.service.owner,
+            fixture.device.service.task_id,
+            durable.signer,
+            true,
+        );
+        var sessions = document_sessions.Sessions{};
+        defer sessions.deinit(10);
+        _ = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
+        try std.testing.expect(sessions.allowsClipboard(fixture.app_task_id, false, 9));
+        try std.testing.expect(sessions.allowsClipboard(fixture.app_task_id, true, 9));
+
+        const signing = &fixture.signing_fixture;
+        switch (failure) {
+            .expired => signing.service.findHandle(fixture.open_request.signer.key.handle_id).?.expires_at_ticks = 10,
+            .revoked => signing.service.findHandle(fixture.open_request.signer.key.handle_id).?.revoked = true,
+            .unloaded => signing.service.unload(),
+            .wrong_holder => signing.authority.holder.serial += 1,
+            .wrong_task => signing.authority.task_id += 1,
+        }
+        // The document grant remains usable. Revoked identity signing authority
+        // alone must stop both copying and pasting under that existing grant.
+        var authority = fixture.open_request.authority;
+        authority.now_ticks = 10;
+        var storage = storage_service.StoragePort.init(&fixture.device.service, &fixture.capabilities);
+        const entry = try storage.openEntry(authority, fixture.device.workspace_id, fixture.open_request.path, .read);
+        try storage.requireDocumentWrite(authority, fixture.device.workspace_id, fixture.open_request.path, entry.object_id.raw());
+        try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, false, 10));
+        try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, true, 10));
+    }
+}
+
 const Fixture = struct {
     device: *durable.Fixture,
     signing_fixture: @import("../../tests/fixtures/document_signer.zig").Fixture = .{},

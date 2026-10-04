@@ -11,10 +11,116 @@ const Directory = workspace_model.Directory;
 const Entry = workspace_model.Entry;
 const ExportPackage = workspace_model.ExportPackage;
 const MAX_WORKSPACE_ENTRIES = workspace_model.MAX_WORKSPACE_ENTRIES;
+const MAX_ENTRY_PATH_BYTES = workspace_model.MAX_ENTRY_PATH_BYTES;
 const MAX_WORKSPACE_ENTRY_MUTATIONS = workspace_model.MAX_WORKSPACE_ENTRY_MUTATIONS;
 const ResharePolicy = workspace_model.ResharePolicy;
 const ShareNetworkScope = workspace_model.ShareNetworkScope;
 const workspaceRootAddress = workspace_model.workspaceRootAddress;
+
+fn completeReplacementEntries(prefix: []const u8, version_base: u64) ![MAX_WORKSPACE_ENTRIES]Entry {
+    var entries: [MAX_WORKSPACE_ENTRIES]Entry = undefined;
+    for (&entries, 0..) |*entry, index| {
+        var path: [32]u8 = undefined;
+        const text = try std.fmt.bufPrint(&path, "{s}/{d:0>3}", .{ prefix, index });
+        entry.* = try Entry.init(text, ids.object(@intCast(index + 1)), ids.version(version_base + index), .blob);
+    }
+    return entries;
+}
+
+test "complete workspace replacement publishes disjoint full directories without capacity growth" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const workspace = try directory.create(.{ .owner = .{ .kind = .service, .serial = 1 }, .label = "complete" });
+    const old = try completeReplacementEntries("old", 1);
+    const next = try completeReplacementEntries("new", 101);
+    _ = try directory.replaceEntries(workspace.id, &old, 1);
+    const old_root = workspace.rootAddress();
+    const generation = workspace.generation;
+    try std.testing.expectEqual(generation + 1, try directory.replaceEntries(workspace.id, &next, 2));
+    try std.testing.expectEqual(@as(usize, MAX_WORKSPACE_ENTRIES), workspace.entryCount());
+    try std.testing.expectEqual(@as(usize, MAX_WORKSPACE_ENTRIES), workspace.counts.entry_mutation_count);
+    try std.testing.expect(!std.mem.eql(u8, &old_root, &workspace.rootAddress()));
+    try std.testing.expectEqualDeep(workspaceRootAddress(&next), workspace.rootAddress());
+    try std.testing.expectError(error.EntryNotFound, directory.resolve(workspace.id, old[0].pathSlice()));
+    for (next) |entry| {
+        try std.testing.expectEqualDeep(entry, try directory.resolve(workspace.id, entry.pathSlice()));
+        try std.testing.expectEqualDeep(entry, try directory.resolveObject(workspace.id, entry.object_id));
+    }
+    // Repeated complete checkpoints must not strand a full mutation log.
+    for (0..12) |round| {
+        const target = if (round % 2 == 0) &old else &next;
+        _ = try directory.replaceEntries(workspace.id, target, @intCast(round + 3));
+        try std.testing.expectEqual(@as(usize, MAX_WORKSPACE_ENTRIES), workspace.counts.entry_mutation_count);
+        try std.testing.expectEqualDeep(workspaceRootAddress(target), workspace.rootAddress());
+    }
+    // Same-path replacement fills the log exactly; subsequent ordinary writes
+    // must retain their staging capacity as they do after a normal commit.
+    const revised = try completeReplacementEntries("new", 201);
+    _ = try directory.replaceEntries(workspace.id, &revised, 20);
+    try std.testing.expectEqual(@as(usize, MAX_WORKSPACE_ENTRIES), workspace.counts.entry_mutation_count);
+    try directory.beginTransaction(workspace.id);
+    try directory.stagePut(workspace.id, revised[0].pathSlice(), revised[0].object_id, ids.version(1001), .blob);
+    _ = try directory.commit(workspace.id, 21);
+    try std.testing.expectEqual(ids.version(1001), (try directory.resolve(workspace.id, revised[0].pathSlice())).version_id);
+    _ = try directory.replaceEntries(workspace.id, &.{}, 22);
+    try std.testing.expectEqual(@as(usize, 0), workspace.entryCount());
+    try std.testing.expectEqualDeep(workspaceRootAddress(&.{}), workspace.rootAddress());
+    try std.testing.expectError(error.EntryNotFound, directory.resolveObject(workspace.id, revised[0].object_id));
+    _ = try directory.replaceEntries(workspace.id, &old, 23);
+    try std.testing.expectEqualDeep(old[0], try directory.resolve(workspace.id, old[0].pathSlice()));
+}
+
+test "complete workspace replacement preserves snapshots and rejects insufficient history untouched" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const workspace = try directory.create(.{ .owner = .{ .kind = .user, .serial = 1 }, .label = "snapshots" });
+    const old = try completeReplacementEntries("old", 1);
+    const next = try completeReplacementEntries("new", 101);
+    _ = try directory.replaceEntries(workspace.id, &old, 1);
+    const snapshot = try directory.snapshot(workspace.id, "full baseline", .{ .label = "replacement-test", .seed = signing.seedFromByte(0x6f) });
+    const generation = workspace.generation;
+    const root = workspace.rootAddress();
+    const log = workspace.mutation_log.entriesConst().*;
+    try std.testing.expectError(error.EntryTableFull, directory.replaceEntries(workspace.id, &next, 2));
+    try std.testing.expectEqual(generation, workspace.generation);
+    try std.testing.expectEqualDeep(root, workspace.rootAddress());
+    try std.testing.expectEqualDeep(log, workspace.mutation_log.entriesConst().*);
+    try std.testing.expectEqual(@as(usize, 0), workspace.deletedCount());
+    try std.testing.expectEqualDeep(old[0], try directory.resolve(workspace.id, old[0].pathSlice()));
+    // A replacement that fits the retained log keeps the signed snapshot valid.
+    var changed = old;
+    changed[0].version_id = ids.version(1001);
+    _ = try directory.replaceEntries(workspace.id, &changed, 3);
+    _ = try directory.restore(workspace.id, snapshot.id, 4);
+    try std.testing.expectEqualDeep(old[0], try directory.resolve(workspace.id, old[0].pathSlice()));
+    try std.testing.expectEqualDeep(root, workspace.rootAddress());
+}
+
+test "complete workspace replacement rejects invalid targets and active transactions before mutation" {
+    var directory = Directory.init();
+    defer directory.reset();
+    const workspace = try directory.create(.{ .owner = .{ .kind = .service, .serial = 1 }, .label = "preflight" });
+    const original = try Entry.init("record", ids.object(1), ids.version(1), .blob);
+    _ = try directory.replaceEntries(workspace.id, &.{original}, 1);
+    const generation = workspace.generation;
+    const root = workspace.rootAddress();
+    try std.testing.expectError(error.InvalidEntry, directory.replaceEntries(workspace.id, &.{ original, original }, 2));
+    var malformed = original;
+    malformed.path_len = MAX_ENTRY_PATH_BYTES + 1;
+    try std.testing.expectError(error.InvalidEntry, directory.replaceEntries(workspace.id, &.{malformed}, 2));
+    malformed = original;
+    malformed.version_id = ids.version(0);
+    try std.testing.expectError(error.InvalidEntry, directory.replaceEntries(workspace.id, &.{malformed}, 2));
+    try directory.beginTransaction(workspace.id);
+    try std.testing.expectError(error.TransactionAlreadyOpen, directory.replaceEntries(workspace.id, &.{}, 2));
+    try directory.abortTransaction(workspace.id);
+    try std.testing.expectEqual(generation, workspace.generation);
+    try std.testing.expectEqualDeep(root, workspace.rootAddress());
+    workspace.generation = std.math.maxInt(u32) - 1;
+    try std.testing.expectError(error.WorkspaceGenerationExhausted, directory.replaceEntries(workspace.id, &.{}, 3));
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32) - 1), workspace.generation);
+    try std.testing.expectEqualDeep(original, try directory.resolve(workspace.id, original.pathSlice()));
+}
 
 test "workspace transactions, snapshot restore, delete recovery, and signed export import work" {
     var store = object_store.Store.init();

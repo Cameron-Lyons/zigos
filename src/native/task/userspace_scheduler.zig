@@ -235,7 +235,7 @@ pub const SCHEDULER_SLOT_SIZE_CEILING_BYTES: usize = 176;
 pub const DISPATCH_ACCOUNTING_IS_COLD = true;
 pub const ACCELERATOR_CLAIM_SLOT_SIZE_CEILING_BYTES: usize = 56;
 pub const ACCELERATOR_CLAIM_BACKING_SIZE_CEILING_BYTES: usize = 15_888;
-pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_696 else 46_576;
+pub const SCHEDULER_SIZE_CEILING_BYTES: usize = if (heap_backed_accelerator_claims) 30_704 else 46_584;
 
 pub const AcceleratorClaimBacking = struct {
     claims: AcceleratorClaimArena = AcceleratorClaimArena.init(),
@@ -291,6 +291,7 @@ pub const Scheduler = struct {
     resource_telemetry_observed_tick: u64 = 0,
     resource_hardware_evidence_complete: bool = false,
     last_dispatch_tick: u64 = 0,
+    active_dispatch_task_id: u64 = 0,
     cold_note: ColdDispatchNote = .{},
     ready_marker_printed: bool = false,
     active_marker_printed: bool = false,
@@ -358,6 +359,8 @@ pub const Scheduler = struct {
 
     pub fn deinit(self: *Scheduler) void {
         requireRuntimeOwner();
+        if (self.active_dispatch_task_id != 0)
+            native_util.impossibleByInvariant("scheduler deinitialization follows active dispatch handoff");
         if (bound_preempt_scheduler == self) {
             bound_preempt_scheduler = null;
             userspace_executor.setPreemptCheck(null);
@@ -463,12 +466,17 @@ pub const Scheduler = struct {
     pub fn registerTask(self: *Scheduler, task_id: u64) bool {
         if (!smp.isRuntimeOwner()) return false;
         if (!self.initialized) return false;
+        if (task_id == self.active_dispatch_task_id) return false;
         const runtime = self.runtime_ptr orelse return false;
         const task = runtime.find(task_id) orelse return false;
+        if (task.state == .terminated) return false;
         const task_handle = runtime.taskHandleForResolved(task);
         const catalog = self.catalog_ptr orelse return false;
         const owns_ui_surface = taskUiPresentationEligible(catalog, task);
-        const slot_index = self.slots.reserveIndex(task_id) orelse return false;
+        const slot_index = self.slots.reserveIndex(task_id) orelse blk: {
+            self.pruneRetiredSlots(runtime);
+            break :blk self.slots.reserveIndex(task_id) orelse return false;
+        };
         const slot = &self.slots.slots[slot_index];
         slot.task_id = task_id;
         slot.task_handle = task_handle;
@@ -506,6 +514,7 @@ pub const Scheduler = struct {
 
     pub fn unregisterTask(self: *Scheduler, task_id: u64) bool {
         if (!smp.isRuntimeOwner()) return false;
+        if (task_id == self.active_dispatch_task_id) return false;
         const slot_index = self.slots.slotIndexOf(task_id) orelse return false;
         return self.unregisterSlotIndex(slot_index);
     }
@@ -715,17 +724,29 @@ pub const Scheduler = struct {
         if (!smp.isRuntimeOwner()) return null;
         if (!self.physicalEngineAvailable(engine)) return null;
         const backing = self.acceleratorClaimBacking() orelse return null;
-        const claim_index = self.popBestAcceleratorClaimIndex(backing, engine, now_ticks) orelse return null;
-        const record = backing.claims.slots[claim_index].record;
-        _ = backing.claims.removeIndex(claim_index);
-        if (self.slots.get(record.task_id)) |slot| {
-            if (slot.pending_accelerator_claim_id == record.id) {
-                slot.pending_accelerator_claim_id = 0;
-                slot.pending_accelerator_engine = .cpu;
+        const runtime = self.runtime_ptr orelse return null;
+        while (self.popBestAcceleratorClaimIndex(backing, engine, now_ticks)) |claim_index| {
+            const record = backing.claims.slots[claim_index].record;
+            _ = backing.claims.removeIndex(claim_index);
+            if (self.slots.get(record.task_id)) |slot| {
+                if (slot.pending_accelerator_claim_id == record.id) {
+                    slot.pending_accelerator_claim_id = 0;
+                    slot.pending_accelerator_engine = .cpu;
+                }
+                const task = runtime.findByHandle(slot.task_handle, record.task_id);
+                if (task == null or task.?.state == .terminated) {
+                    if (record.task_id != self.active_dispatch_task_id)
+                        _ = self.unregisterSlotIndex(self.slots.slotIndexOf(record.task_id).?);
+                    continue;
+                }
+                // Suspended tasks retain their slot; an eventual resume wake
+                // replans their engine request without consuming a live grant.
+                if (task.?.state != .active) continue;
+                _ = self.wakeTask(record.task_id, .accelerator_available, now_ticks, record.deadline_tick);
+                return record;
             }
         }
-        _ = self.wakeTask(record.task_id, .accelerator_available, now_ticks, record.deadline_tick);
-        return record;
+        return null;
     }
 
     pub fn acceleratorClaimQueueDepth(self: *const Scheduler, engine: accelerator_scheduler.Engine) usize {
@@ -745,17 +766,26 @@ pub const Scheduler = struct {
     }
 
     pub fn executeTask(self: *Scheduler, task_id: u64, now_ticks: u64) userspace_executor.ExecutionOutcome {
+        return self.executeTaskWithDispatch(task_id, now_ticks, self);
+    }
+
+    fn executeTaskWithDispatch(self: *Scheduler, task_id: u64, now_ticks: u64, dispatcher: anytype) userspace_executor.ExecutionOutcome {
         if (!smp.isRuntimeOwner()) return .unavailable;
-        if (!self.initialized) return .unavailable;
+        if (!self.initialized or self.active_dispatch_task_id != 0) return .unavailable;
         const runtime = self.runtime_ptr orelse return .unavailable;
         const task = runtime.find(task_id) orelse return .unavailable;
+        var borrow = self.beginTaskDispatch(runtime, task);
+        defer self.finishTaskDispatch(&borrow);
         var uncached_mapping_handle = userspace_executor.MappingHandle{};
         const mapping_handle = if (self.slots.get(task_id)) |slot|
             &slot.mapping_handle
         else
             &uncached_mapping_handle;
-        const outcome = self.executePreparedTask(task, mapping_handle, now_ticks);
+        const outcome = dispatcher.executePreparedTask(task, mapping_handle, now_ticks);
         if (outcome == .faulted) self.containUserException(runtime, task, now_ticks);
+        if (task.state == .terminated) {
+            if (self.slots.slotIndexOf(task_id)) |index| _ = self.unregisterSlotIndex(index);
+        }
         return outcome;
     }
 
@@ -773,7 +803,11 @@ pub const Scheduler = struct {
     }
 
     pub fn runNext(self: *Scheduler, now_ticks: u64) bool {
-        if (!self.initialized or !smp.isRuntimeOwner()) return false;
+        return self.runNextWithDispatch(now_ticks, self);
+    }
+
+    fn runNextWithDispatch(self: *Scheduler, now_ticks: u64, dispatcher: anytype) bool {
+        if (!self.initialized or !smp.isRuntimeOwner() or self.active_dispatch_task_id != 0) return false;
 
         self.wakeAvailableAcceleratorClaims(now_ticks);
         const runtime = self.runtime_ptr orelse return false;
@@ -796,6 +830,7 @@ pub const Scheduler = struct {
                 continue;
             };
             if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) {
+                if (task.state == .terminated) _ = self.unregisterSlotIndex(index);
                 continue;
             }
             if (!hasDispatchBudget(slot, task)) {
@@ -820,9 +855,12 @@ pub const Scheduler = struct {
 
             if (slot.pending_accelerator_claim_id == 0) slot.pending_accelerator_engine = .cpu;
 
+            var borrow = self.beginTaskDispatch(runtime, task);
+            defer self.finishTaskDispatch(&borrow);
+
             const dispatch_memory_bandwidth_units = memoryBandwidthUnitsFor(task);
             const missed_deadline = slot.deadline_tick != 0 and now_ticks > slot.deadline_tick;
-            const outcome = self.executePreparedTask(task, &slot.mapping_handle, now_ticks);
+            const outcome = dispatcher.executePreparedTask(task, &slot.mapping_handle, now_ticks);
             const yielded = outcome.handedOff();
             self.last_dispatch_tick = now_ticks;
             slot.dispatch_count += 1;
@@ -861,6 +899,10 @@ pub const Scheduler = struct {
                 self.active_marker_printed = true;
             }
             if (runtime.findByHandle(slot.task_handle, task_id)) |updated_task| {
+                if (updated_task.state == .terminated) {
+                    _ = self.unregisterSlotIndex(index);
+                    return yielded;
+                }
                 if (!taskEligibleForPostDispatchRequeue(task_id, updated_task, slot)) return yielded;
                 slot.resource_class = updated_task.resourceClass();
                 if (!slot.dispatch_request_configured) slot.dispatch_request = deriveDispatchRequest(updated_task);
@@ -878,6 +920,23 @@ pub const Scheduler = struct {
 
         self.last_dispatch_tick = now_ticks;
         return false;
+    }
+
+    fn beginTaskDispatch(self: *Scheduler, runtime: *task_runtime.Runtime, task: *const task_runtime.TaskRecord) task_runtime.TaskBorrow {
+        if (self.active_dispatch_task_id != 0)
+            native_util.impossibleByInvariant("scheduler dispatch is owned by one active task");
+        const borrow = runtime.borrowResolvedTask(task);
+        // The task pin and this identity jointly protect the TaskRecord, Slot,
+        // mapping handle, and accounting through the complete handoff path.
+        self.active_dispatch_task_id = task.id;
+        return borrow;
+    }
+
+    fn finishTaskDispatch(self: *Scheduler, borrow: *task_runtime.TaskBorrow) void {
+        if (self.active_dispatch_task_id != borrow.task_id)
+            native_util.impossibleByInvariant("scheduler finishes its exact active dispatch");
+        self.active_dispatch_task_id = 0;
+        borrow.release();
     }
 
     fn containUserException(
@@ -1414,6 +1473,16 @@ pub const Scheduler = struct {
         }
         if (self.dispatch_accounting) |storage| storage[slot_index] = .{};
         return self.slots.removeIndex(slot_index);
+    }
+
+    fn pruneRetiredSlots(self: *Scheduler, runtime: *task_runtime.Runtime) void {
+        // Parked tasks are absent from ready queues; registration pressure must
+        // also reclaim their terminal slots and any queued accelerator claims.
+        for (&self.slots.slots, 0..) |*slot, index| {
+            if (!slot.in_use or slot.task_id == self.active_dispatch_task_id) continue;
+            const task = runtime.findByHandle(slot.task_handle, slot.task_id);
+            if (task == null or task.?.state == .terminated) _ = self.unregisterSlotIndex(index);
+        }
     }
 
     fn insertAcceleratorClaimIndex(
@@ -3836,4 +3905,133 @@ test "request delayed heads preserve their place without blocking runnable tasks
     try std.testing.expect(scheduler.hasDispatchableTasks(4));
     _ = scheduler.runNext(4);
     try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(deferred.id).?.dispatch_count);
+}
+
+test "task reclamation scheduler pressure releases parked slots and accelerator claims" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer runtime.reset();
+    defer scheduler.deinit();
+    var first_id: u64 = 0;
+    for (0..task_runtime.MAX_TASKS * 3) |index| {
+        const task = try createRunnableSchedulerTask(&runtime, @intCast(index + 1), .background_light, "churn", "app.churn", null);
+        const task_id = task.id;
+        if (index == 0) first_id = task_id;
+        try std.testing.expect(scheduler.registerTask(task_id));
+        try std.testing.expect(scheduler.parkTaskUntilEvent(task_id));
+        try std.testing.expect(scheduler.enqueueAcceleratorClaim(.{
+            .task_id = task_id,
+            .engine = .gpu,
+            .resource_class = .background_light,
+            .requested_at_tick = @intCast(index),
+        }) != null);
+        try std.testing.expect(runtime.terminateResolvedTask(task, @intCast(index)));
+        try std.testing.expect(scheduler.slots.countInUse() <= task_runtime.MAX_TASKS);
+        try std.testing.expect(scheduler.acceleratorClaimQueueDepth(.gpu) <= task_runtime.MAX_TASKS);
+    }
+    try std.testing.expect(runtime.find(first_id) == null);
+    try std.testing.expect(scheduler.taskDispatchStats(first_id) == null);
+    const live = try createRunnableSchedulerTask(&runtime, 1001, .background_light, "live", "app.live", null);
+    try std.testing.expect(scheduler.registerTask(live.id));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.slots.countInUse());
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
+    try std.testing.expectEqual(@as(usize, 1), scheduler.readyQueueDepth(.background_light));
+}
+
+test "task reclamation scheduler skips terminal accelerator claims before granting live work" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    defer runtime.reset();
+    defer scheduler.deinit();
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .gpu_available = true,
+        .npu_available = true,
+        .media_available = true,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    const terminal = try createRunnableSchedulerTask(&runtime, 1, .foreground_interactive, "terminal", "app.terminal", null);
+    const terminal_id = terminal.id;
+    const live = try createRunnableSchedulerTask(&runtime, 2, .background_light, "live", "app.live", null);
+    try std.testing.expect(scheduler.registerTask(terminal_id));
+    try std.testing.expect(scheduler.registerTask(live.id));
+    _ = scheduler.enqueueAcceleratorClaim(.{ .task_id = terminal_id, .engine = .gpu, .resource_class = .foreground_interactive, .requested_at_tick = 1 }).?;
+    const live_claim = scheduler.enqueueAcceleratorClaim(.{ .task_id = live.id, .engine = .gpu, .resource_class = .background_light, .requested_at_tick = 2 }).?;
+    try std.testing.expect(runtime.terminateResolvedTask(terminal, 3));
+    const granted = scheduler.grantNextAcceleratorClaim(.gpu, 4).?;
+    try std.testing.expectEqual(live_claim, granted.id);
+    try std.testing.expectEqual(live.id, granted.task_id);
+    try std.testing.expect(scheduler.taskDispatchStats(terminal_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), scheduler.acceleratorClaimQueueDepth(.gpu));
+}
+
+test "task reclamation scheduler dispatch callbacks preserve slot through reentrant registration and handoff" {
+    const Dispatcher = struct {
+        scheduler: *Scheduler,
+        runtime: *task_runtime.Runtime,
+        task_ids: *const [task_runtime.MAX_TASKS]u64,
+        calls: usize = 0,
+
+        fn executePreparedTask(self: *@This(), task: *const task_runtime.TaskRecord, mapping_handle: *userspace_executor.MappingHandle, _: u64) userspace_executor.ExecutionOutcome {
+            const task_id = task.id;
+            const task_handle = self.runtime.taskHandleForResolved(task);
+            const slot = self.scheduler.slots.get(task_id).?;
+            const original_mapping = mapping_handle.*;
+            if (!(self.runtime.terminateTask(task_id, 0) catch false)) @panic("task reclamation fixture invariant failed");
+            if (!(!self.scheduler.unregisterTask(task_id))) @panic("task reclamation fixture invariant failed");
+            if (!(!self.scheduler.registerTask(task_id))) @panic("task reclamation fixture invariant failed");
+            if (!(!self.scheduler.runNext(0))) @panic("task reclamation fixture invariant failed");
+            if (!(self.scheduler.executeTask(self.task_ids[1], 0) == .unavailable)) @panic("task reclamation fixture invariant failed");
+            for (self.task_ids[1..], 1..) |id, index| if (!(self.runtime.terminateTask(id, @intCast(index)) catch false)) @panic("task reclamation fixture invariant failed");
+            for (0..task_runtime.MAX_TASKS + 3) |index| {
+                const replacement = createRunnableSchedulerTask(self.runtime, @intCast(index + 1000), .background_light, "replacement", "app.replacement", null) catch @panic("dispatch callback retains launch capacity");
+                if (!(self.scheduler.registerTask(replacement.id))) @panic("task reclamation fixture invariant failed");
+                if (!(self.runtime.terminateResolvedTask(replacement, @intCast(index + 1000)))) @panic("task reclamation fixture invariant failed");
+                if (!(self.scheduler.slots.get(task_id).? == slot)) @panic("task reclamation fixture invariant failed");
+                if (!(&self.scheduler.slots.get(task_id).?.mapping_handle == mapping_handle)) @panic("task reclamation fixture invariant failed");
+                if (!(mapping_handle.eql(original_mapping))) @panic("task reclamation fixture invariant failed");
+                if (!(self.runtime.findByHandle(task_handle, task_id).? == task)) @panic("task reclamation fixture invariant failed");
+            }
+            self.calls += 1;
+            return .yielded;
+        }
+    };
+    for ([_]bool{ false, true }) |direct| {
+        var executor = userspace_executor.Executor{};
+        var scheduler = Scheduler.init(&executor);
+        var catalog = userspace_loader.Catalog.init();
+        var runtime = task_runtime.Runtime.init();
+        var capabilities = capability.CapabilityTable.init();
+        scheduler.bind(&catalog, &runtime, &capabilities);
+        defer runtime.reset();
+        defer scheduler.deinit();
+        var task_ids: [task_runtime.MAX_TASKS]u64 = undefined;
+        for (&task_ids, 0..) |*id, index| {
+            const task = try createRunnableSchedulerTask(&runtime, @intCast(index + 1), .background_light, "dispatch", "app.dispatch", null);
+            id.* = task.id;
+            try std.testing.expect(scheduler.registerTask(task.id));
+        }
+        const task = runtime.find(task_ids[0]).?;
+        const handle = runtime.taskHandleForResolved(task);
+        var dispatcher = Dispatcher{ .scheduler = &scheduler, .runtime = &runtime, .task_ids = &task_ids };
+        if (direct) {
+            try std.testing.expectEqual(userspace_executor.ExecutionOutcome.yielded, scheduler.executeTaskWithDispatch(task_ids[0], 1, &dispatcher));
+        } else {
+            try std.testing.expect(scheduler.runNextWithDispatch(1, &dispatcher));
+        }
+        try std.testing.expectEqual(@as(usize, 1), dispatcher.calls);
+        try std.testing.expectEqual(@as(u64, 0), scheduler.active_dispatch_task_id);
+        try std.testing.expect(scheduler.slots.get(task_ids[0]) == null);
+        _ = try createRunnableSchedulerTask(&runtime, 9999, .background_light, "after-handoff", "app.after-handoff", null);
+        try std.testing.expect(runtime.findByHandle(handle, task_ids[0]) == null);
+    }
 }

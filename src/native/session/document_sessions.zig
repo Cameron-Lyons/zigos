@@ -71,6 +71,7 @@ pub const Sessions = struct {
             authority.now_ticks = now_ticks;
             const entry = server.storage.openEntry(authority, server.binding.workspace_id, server.binding.path, if (writing) .write else .read) catch return false;
             if (entry.object_id.raw() != server.binding.object_id or entry.object_type != .document) return false;
+            server.binding.signer.validateService(server.storage.core.owner, server.storage.core.task_id, now_ticks) catch return false;
             const context = server.binding.signer.key.authority orelse return false;
             var subjects = context.subjects;
             subjects.workspace_id = server.binding.workspace_id;

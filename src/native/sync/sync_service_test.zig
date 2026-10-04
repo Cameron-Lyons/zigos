@@ -2127,4 +2127,340 @@ test "default sync service initialization overwrites allocated storage" {
 
 test "sync service default state matches its exact size ceiling" {
     try std.testing.expectEqual(@as(usize, sync_service.SERVICE_SIZE_CEILING_BYTES), @sizeOf(sync_service.Service));
+    try std.testing.expect(@sizeOf(ResidentState) <= @import("sync_state_support.zig").RESIDENT_STATE_SIZE_CEILING_BYTES);
+}
+
+const SyncCheckpointFixture = struct {
+    const document_fixture = @import("../storage/document_save_test.zig");
+    const sync_owner = principal.PrincipalId{ .kind = .service, .serial = 9_701 };
+    const user = principal.PrincipalId{ .kind = .user, .serial = 1 };
+    const laptop = principal.PrincipalId{ .kind = .device, .serial = 9_703 };
+    const tablet = principal.PrincipalId{ .kind = .device, .serial = 9_704 };
+    storage_fixture: *document_fixture.Fixture,
+    resident: ResidentState = .{},
+    service: Service = undefined,
+    capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
+    port: sync_service.SyncPort = undefined,
+    authority: sync_service.AuthorityContext = undefined,
+    request: sync_service.TransportFrameRequest = undefined,
+
+    fn init(attach: bool) !*SyncCheckpointFixture {
+        const self = try std.testing.allocator.create(SyncCheckpointFixture);
+        errdefer std.testing.allocator.destroy(self);
+        self.* = .{ .storage_fixture = try document_fixture.Fixture.init(attach) };
+        errdefer self.storage_fixture.deinit();
+        const storage = &self.storage_fixture.service;
+        const workspace_id = self.storage_fixture.workspace_id;
+        const version = try storage.resolve(workspace_id, document_fixture.path);
+        try Service.initWithStorageInto(&self.service, 9_730, 9_731, sync_owner, storage, &self.resident);
+        const authority_capability = try mintSyncServiceAuthority(&self.capabilities, &self.service, sync_owner);
+        self.port = sync_service.SyncPort.init(&self.service, &self.capabilities);
+        self.authority = syncAuthority(&self.service, sync_owner, authority_capability, 20);
+        const user_signer = signing.SignerIdentity{ .label = "checkpoint-user", .seed = signing.seedFromByte(0xC2) };
+        const laptop_signer = signing.SignerIdentity{ .label = "checkpoint-laptop", .seed = signing.seedFromByte(0xC3) };
+        const tablet_signer = signing.SignerIdentity{ .label = "checkpoint-tablet", .seed = signing.seedFromByte(0xC4) };
+        _ = try self.port.ensureUserRoot(self.authority, user, "owner", user_signer);
+        _ = try self.port.enrollTrustedDevice(self.authority, user, laptop, "laptop", user_signer, laptop_signer, 21);
+        _ = try self.port.enrollTrustedDevice(self.authority, user, tablet, "tablet", user_signer, tablet_signer, 22);
+        const local_policy = try self.port.createNetworkPolicy(self.authority, .{
+            .owner = sync_owner,
+            .workspace_id = workspace_id,
+            .label = "local",
+            .mode = .local_network,
+        });
+        _ = try self.port.configureWorkspacePolicy(self.authority, .{
+            .workspace_id = workspace_id,
+            .owner = user,
+            .offline_first = true,
+            .personal_e2ee = true,
+            .require_shared_access = true,
+            .selective_prefixes = &.{"documents/"},
+            .device_to_device_policy_id = local_policy.id,
+        });
+        try storage.shareWorkspace(workspace_id, .{ .principal_id = tablet, .can_read = true, .network_scope = .local_only });
+        self.request = .{
+            .source_frame_id = 0,
+            .workspace_id = workspace_id,
+            .object_id = version.object_id.raw(),
+            .version_id = version.version_id.raw(),
+            .source_device = laptop,
+            .target_device = tablet,
+            .transport = .device_to_device,
+            .semantic = .mergeable_crdt,
+            .encrypted = true,
+            .workspace_generation = 1,
+            .path = document_fixture.path,
+        };
+        return self;
+    }
+
+    fn deinit(self: *SyncCheckpointFixture) void {
+        self.storage_fixture.deinit();
+        std.testing.allocator.destroy(self);
+    }
+};
+
+test "sync checkpoint failure preserves prior paths and retries orphan record heads" {
+    const fixture = try SyncCheckpointFixture.init(false);
+    defer fixture.deinit();
+    const storage = &fixture.storage_fixture.service;
+    const service = &fixture.service;
+    const port = &fixture.port;
+    const authority = fixture.authority;
+    var request = fixture.request;
+    const version = try storage.resolve(fixture.storage_fixture.workspace_id, SyncCheckpointFixture.document_fixture.path);
+
+    // Twenty-five unrelated entries plus the seventy-one live sync records
+    // exercise replacement at the complete workspace's ninety-six-entry bound.
+    try storage.beginTransaction(service.state_workspace_id);
+    for (0..25) |index| {
+        var path_buffer: [48]u8 = undefined;
+        const external_path = try std.fmt.bufPrint(&path_buffer, "external/{d}", .{index});
+        try storage.stagePut(service.state_workspace_id, external_path, version.object_id, version.version_id, .document);
+    }
+    _ = try storage.commit(service.state_workspace_id, 30);
+    var sfid: u64 = 1;
+    while (sfid <= sync_service.MAX_TRANSPORT_FRAMES) : (sfid += 1) {
+        request.source_frame_id = sfid;
+        _ = try port.acceptTransportFrame(authority, storage, request);
+    }
+    const state_workspace_id = service.state_workspace_id;
+    const before = storage.workspaces.find(object_store.ids.workspace(state_workspace_id)).?;
+    const before_generation = before.generation;
+    const before_root = before.rootAddress();
+    const before_versions = storage.versionCount();
+    try std.testing.expectEqual(@as(usize, workspace.MAX_WORKSPACE_ENTRIES), (try storage.entries(state_workspace_id)).len);
+    const before_entries = try std.testing.allocator.dupe(workspace.Entry, try storage.entries(state_workspace_id));
+    defer std.testing.allocator.free(before_entries);
+
+    // Reserve capacity without publishing versions. Releasing these exact
+    // fixture reservations models pressure clearing without deleting live data.
+    var pressure_indexes: [object_store.MAX_OBJECTS]usize = undefined;
+    var pressure_count: usize = 0;
+    while (storage.objectCount() < object_store.MAX_OBJECTS) : (pressure_count += 1) {
+        const object_id = object_store.ids.object(50_000 + pressure_count);
+        const index = storage.store.objects.reserveIndex(object_id) orelse return error.ObjectTableFull;
+        const slot = &storage.store.objects.slots[index];
+        slot.object.id = object_id;
+        slot.setArenaInUse(true);
+        pressure_indexes[pressure_count] = index;
+    }
+    defer for (pressure_indexes[0..pressure_count]) |index| {
+        _ = storage.store.objects.removeIndex(index);
+    };
+
+    request.source_frame_id = sync_service.MAX_TRANSPORT_FRAMES + 1;
+    request.workspace_generation = 2;
+    try std.testing.expectError(error.StateSigningFailed, port.acceptTransportFrame(authority, storage, request));
+    try std.testing.expect(storage.versionCount() > before_versions);
+    const failed = storage.workspaces.find(object_store.ids.workspace(state_workspace_id)).?;
+    try std.testing.expectEqual(before_generation, failed.generation);
+    try std.testing.expect(!failed.staging.transaction_open);
+    try std.testing.expectEqualSlices(u8, &before_root, &failed.rootAddress());
+    try std.testing.expectEqual(@as(usize, before_entries.len), (try storage.entries(state_workspace_id)).len);
+    for (before_entries) |entry| {
+        const retained = try storage.resolve(state_workspace_id, entry.pathSlice());
+        try std.testing.expectEqual(entry.object_id, retained.object_id);
+        try std.testing.expectEqual(entry.version_id, retained.version_id);
+    }
+    try std.testing.expectEqual(@as(storage_service.DeferredCheckpointCount, 0), storage.deferred_checkpoint_count);
+    try std.testing.expectEqual(@as(storage_service.CheckpointBatchDepth, 0), storage.checkpoint_batch_depth);
+    var restored = ResidentState{};
+    const state_store = @import("sync_state_store.zig");
+    try std.testing.expect(try state_store.load(storage, state_workspace_id, &restored));
+    try std.testing.expectEqual(@as(usize, sync_service.MAX_TRANSPORT_FRAMES), restored.inboundTransportFrameCount());
+    try std.testing.expect(restored.persisted_state.inbound_transport_frames.getConst(@import("sync_state_support.zig").transportFrameArenaKey(1)) != null);
+
+    for (pressure_indexes[0..pressure_count]) |index| _ = storage.store.objects.removeIndex(index);
+    pressure_count = 0;
+    // These were unpublished fixture reservations, not persistent objects;
+    // discard their synthetic removal journal before creating the real record.
+    storage.store.objects.clearDirty();
+    const retry = try port.acceptTransportFrame(authority, storage, request);
+    try std.testing.expectEqual(before_versions + 2, storage.versionCount());
+    try std.testing.expectEqual(request.source_frame_id, retry.source_frame_id);
+    var retried = ResidentState{};
+    try std.testing.expect(try state_store.load(storage, state_workspace_id, &retried));
+    try std.testing.expectEqual(@as(usize, sync_service.MAX_TRANSPORT_FRAMES), retried.inboundTransportFrameCount());
+    try std.testing.expect(retried.persisted_state.inbound_transport_frames.getConst(@import("sync_state_support.zig").transportFrameArenaKey(1)) == null);
+    try std.testing.expect(retried.persisted_state.inbound_transport_frames.getConst(@import("sync_state_support.zig").transportFrameArenaKey(retry.id)) != null);
+}
+
+test "sync checkpoint barrier failure remains retryable through a duplicate inbound frame" {
+    const fixture = try SyncCheckpointFixture.init(true);
+    defer fixture.deinit();
+    const storage = &fixture.storage_fixture.service;
+    const service = &fixture.service;
+    const resident = &fixture.resident;
+    const port = &fixture.port;
+    const authority = fixture.authority;
+    var request = fixture.request;
+
+    request.source_frame_id = 1;
+    _ = try port.acceptTransportFrame(authority, storage, request);
+    const durable_generation = fixture.storage_fixture.checkpoint.last_checkpoint_generation;
+    const prior_version_count = storage.versionCount();
+
+    fixture.storage_fixture.fail_flushes = true;
+    request.source_frame_id = 2;
+    try std.testing.expectError(error.StateCheckpointFailed, port.acceptTransportFrame(authority, storage, request));
+    try std.testing.expectEqual(durable_generation, fixture.storage_fixture.checkpoint.last_checkpoint_generation);
+    try std.testing.expect(storage.pendingCheckpointMutations());
+    try std.testing.expect(resident.checkpoint_retry_pending);
+    const failed_versions = storage.versionCount();
+    try std.testing.expect(failed_versions > prior_version_count);
+    const flushes = fixture.storage_fixture.flushes;
+    try std.testing.expectError(error.StateCheckpointFailed, port.acceptTransportFrame(authority, storage, request));
+    try std.testing.expect(fixture.storage_fixture.flushes > flushes);
+
+    fixture.storage_fixture.crash();
+    var previous = ResidentState{};
+    const state_store = @import("sync_state_store.zig");
+    try std.testing.expect(try state_store.load(storage, service.state_workspace_id, &previous));
+    try std.testing.expectEqual(@as(usize, 1), previous.inboundTransportFrameCount());
+    try std.testing.expectEqual(@as(u64, 2), previous.persisted_state.next_transport_frame_id);
+    fixture.storage_fixture.fail_flushes = false;
+    const retry = try port.acceptTransportFrame(authority, storage, request);
+    try std.testing.expectEqual(@as(u64, 2), retry.source_frame_id);
+    try std.testing.expect(!resident.checkpoint_retry_pending);
+    try std.testing.expect(!storage.pendingCheckpointMutations());
+    fixture.storage_fixture.crash();
+    var recovered = ResidentState{};
+    try std.testing.expect(try state_store.load(storage, service.state_workspace_id, &recovered));
+    try std.testing.expectEqual(@as(usize, 2), recovered.inboundTransportFrameCount());
+    try std.testing.expectEqual(@as(u64, 3), recovered.persisted_state.next_transport_frame_id);
+}
+
+test "sync checkpoint failed outbound acknowledgement retries without a remaining frame" {
+    const fixture = try SyncCheckpointFixture.init(true);
+    defer fixture.deinit();
+    const storage = &fixture.storage_fixture.service;
+    const service = &fixture.service;
+    const resident = &fixture.resident;
+    const port = &fixture.port;
+    const authority = fixture.authority;
+    const workspace_record = storage.workspaces.find(object_store.ids.workspace(fixture.storage_fixture.workspace_id)).?;
+    const laptop = SyncCheckpointFixture.laptop;
+    const tablet = SyncCheckpointFixture.tablet;
+    const path = SyncCheckpointFixture.document_fixture.path;
+
+    const summary = try port.replicateWorkspace(authority, storage, workspace_record.id.raw(), laptop, tablet, .device_to_device);
+    try std.testing.expectEqual(@as(u16, 1), summary.transport_frame_count);
+    const frame = service.latestTransportFrameForPath(workspace_record.id.raw(), tablet, path).?;
+    const durable_generation = fixture.storage_fixture.checkpoint.last_checkpoint_generation;
+    fixture.storage_fixture.fail_flushes = true;
+    try std.testing.expectError(error.StateCheckpointFailed, service.ackOutboundTransportFrames(&.{frame.id}));
+    try std.testing.expectEqual(@as(usize, 0), resident.outboundTransportFrameCount());
+    try std.testing.expect(resident.checkpoint_retry_pending);
+    // A fresh service around the same resident state must retain the pending
+    // durability obligation after the frame has already left the RAM queue.
+    try Service.initWithStorageInto(service, 9_730, 9_731, SyncCheckpointFixture.sync_owner, storage, resident);
+    try std.testing.expect(resident.checkpoint_retry_pending);
+    const flushes = fixture.storage_fixture.flushes;
+    try std.testing.expectError(error.StateCheckpointFailed, service.ackOutboundTransportFrames(&.{frame.id}));
+    try std.testing.expect(fixture.storage_fixture.flushes > flushes);
+    try std.testing.expectEqual(durable_generation, fixture.storage_fixture.checkpoint.last_checkpoint_generation);
+    fixture.storage_fixture.fail_flushes = false;
+    try std.testing.expectEqual(@as(usize, 0), try service.ackOutboundTransportFrames(&.{frame.id}));
+    try std.testing.expect(!resident.checkpoint_retry_pending);
+    fixture.storage_fixture.crash();
+    var recovered = ResidentState{};
+    try std.testing.expect(try @import("sync_state_store.zig").load(storage, service.state_workspace_id, &recovered));
+    try std.testing.expectEqual(@as(usize, 0), recovered.outboundTransportFrameCount());
+    try std.testing.expectEqual(@as(u64, 2), recovered.persisted_state.next_transport_frame_id);
+}
+
+test "sync checkpoint deferred by an outer storage batch withholds duplicate success" {
+    const fixture = try SyncCheckpointFixture.init(true);
+    defer fixture.deinit();
+    const storage = &fixture.storage_fixture.service;
+    const service = &fixture.service;
+    const resident = &fixture.resident;
+    const port = &fixture.port;
+    const authority = fixture.authority;
+    var request = fixture.request;
+
+    request.source_frame_id = 1;
+    _ = try port.acceptTransportFrame(authority, storage, request);
+    const durable_generation = fixture.storage_fixture.checkpoint.last_checkpoint_generation;
+    request.source_frame_id = 2;
+    const state_workspace = storage.workspaces.find(object_store.ids.workspace(service.state_workspace_id)).?;
+    const prior_generation = state_workspace.generation;
+    storage.checkpoint_batch_depth = std.math.maxInt(storage_service.CheckpointBatchDepth);
+    try std.testing.expectError(error.StateCheckpointFailed, port.acceptTransportFrame(authority, storage, request));
+    try std.testing.expectEqual(prior_generation, state_workspace.generation);
+    try std.testing.expectEqual(std.math.maxInt(storage_service.CheckpointBatchDepth), storage.checkpoint_batch_depth);
+    storage.checkpoint_batch_depth = 0;
+    storage.beginCheckpointBatch();
+    defer storage.endCheckpointBatch();
+    try std.testing.expectError(error.StateCheckpointFailed, port.acceptTransportFrame(authority, storage, request));
+    try std.testing.expectEqual(@as(storage_service.CheckpointBatchDepth, 1), storage.checkpoint_batch_depth);
+    try std.testing.expectEqual(durable_generation, fixture.storage_fixture.checkpoint.last_checkpoint_generation);
+    try std.testing.expect(resident.checkpoint_retry_pending);
+    try std.testing.expectError(error.StateCheckpointFailed, port.acceptTransportFrame(authority, storage, request));
+    storage.endCheckpointBatch();
+    const retry = try port.acceptTransportFrame(authority, storage, request);
+    try std.testing.expectEqual(request.source_frame_id, retry.source_frame_id);
+    try std.testing.expect(!resident.checkpoint_retry_pending);
+    fixture.storage_fixture.crash();
+    var recovered = ResidentState{};
+    try std.testing.expect(try @import("sync_state_store.zig").load(storage, service.state_workspace_id, &recovered));
+    try std.testing.expectEqual(@as(usize, 2), recovered.inboundTransportFrameCount());
+}
+
+test "first sync contract checkpoint remains pending across retained and fresh resident reinitialization" {
+    const Operation = enum { register, import };
+    for (std.enums.values(Operation)) |operation| {
+        for ([_]bool{ false, true }) |fresh_resident| {
+            const fixture = try @import("../storage/document_save_test.zig").Fixture.init(true);
+            defer fixture.deinit();
+            const storage = &fixture.service;
+            const owner = principal.PrincipalId{ .kind = .service, .serial = 9_951 };
+            const identity = signing.SignerIdentity{ .label = "first-contract", .seed = signing.seedFromByte(0xB3) };
+            var resident = ResidentState{};
+            var service: Service = undefined;
+            try Service.initWithStorageInto(&service, 9_950, 9_952, owner, storage, &resident);
+            var capabilities = capability.CapabilityTable.init();
+            const authority_capability = try mintSyncServiceAuthority(&capabilities, &service, owner);
+            var port = sync_service.SyncPort.init(&service, &capabilities);
+            const authority = syncAuthority(&service, owner, authority_capability, 10);
+            var source = Service.init(9_953, 9_954, owner);
+            const contract = (try source.registerDatabaseContract(fixture.workspace_id, "db.first", "first database", identity)).*;
+            try std.testing.expect(!resident.has_persisted_state);
+            const durable_generation = fixture.checkpoint.last_checkpoint_generation;
+            fixture.fail_flushes = true;
+            switch (operation) {
+                .register => try std.testing.expectError(error.StateCheckpointFailed, port.registerDatabaseContract(authority, fixture.workspace_id, "db.first", "first database", identity)),
+                .import => try std.testing.expectError(error.StateCheckpointFailed, service.importDatabaseContract(&contract)),
+            }
+            try std.testing.expect(resident.checkpoint_retry_pending);
+            const versions = storage.versionCount();
+            const flushes = fixture.flushes;
+            var fresh = ResidentState{};
+            const active_resident = if (fresh_resident) &fresh else &resident;
+            try Service.initWithStorageInto(&service, 9_950, 9_952, owner, storage, active_resident);
+            // An equivalent request must retry the still-failing barrier even
+            // though the RAM directory already contains the complete contract.
+            switch (operation) {
+                .register => try std.testing.expectError(error.StateCheckpointFailed, port.registerDatabaseContract(authority, fixture.workspace_id, "db.first", "first database", identity)),
+                .import => try std.testing.expectError(error.StateCheckpointFailed, service.importDatabaseContract(&contract)),
+            }
+            try std.testing.expect(fixture.flushes > flushes);
+            try std.testing.expectEqual(durable_generation, fixture.checkpoint.last_checkpoint_generation);
+            try std.testing.expectEqual(versions, storage.versionCount());
+            try std.testing.expect(active_resident.checkpoint_retry_pending);
+            fixture.fail_flushes = false;
+            const retried = switch (operation) {
+                .register => try port.registerDatabaseContract(authority, fixture.workspace_id, "db.first", "first database", identity),
+                .import => try service.importDatabaseContract(&contract),
+            };
+            try std.testing.expectEqual(@as(u64, 1), retried.id);
+            try std.testing.expect(!active_resident.checkpoint_retry_pending);
+            try std.testing.expectEqual(versions, storage.versionCount());
+            fixture.crash();
+            var restored = ResidentState{};
+            try std.testing.expect(try @import("sync_state_store.zig").load(storage, service.state_workspace_id, &restored));
+            try std.testing.expectEqual(@as(usize, 1), restored.persisted_state.database_contracts.countInUse());
+        }
+    }
 }

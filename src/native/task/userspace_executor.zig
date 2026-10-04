@@ -939,15 +939,17 @@ pub const Executor = struct {
         now_ticks: u64,
     ) ExecutionOutcome {
         if (builtin.target.os.tag != .freestanding) return .unavailable;
-        _ = xhci_driver_task.dispatchForTask(task.id);
         if (!self.initialized) return .unavailable;
         if (self.bound_runtime != runtime) return .unavailable;
+        var task_borrow = runtime.borrowResolvedTask(task);
+        defer task_borrow.release();
+        _ = xhci_driver_task.dispatchForTask(task.id);
         if (debugIndexChecksEnabled()) {
             const bound_task = runtime.findConst(task.id) orelse
                 native_util.impossibleByInvariant("prepared userspace task is absent from the bound runtime");
             if (bound_task != task) native_util.impossibleByInvariant("prepared userspace task does not belong to the bound runtime");
         }
-        if (!task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
+        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
 
         const mapping = self.resolveMappingForDispatch(mapping_handle, task.address_space_id) orelse blk: {
             const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
