@@ -83,6 +83,104 @@ test "session idle readiness respects future worker deadlines and resumes at the
     try std.testing.expect(manager.nextServiceWake() == null);
 }
 
+test "session network watchdog wakes silent transmits without polling or repeated containment" {
+    const network = @import("../drivers/network_driver_task.zig");
+    const tx = @import("../../kernel/drivers/intel_i225_tx.zig");
+    const Harness = struct {
+        var now: u64 = 0;
+        var queue: tx.Queue = .{};
+        var completion_pending: bool = false;
+        var active: bool = true;
+        var polls: usize = 0;
+        var contained: usize = 0;
+
+        fn send(_: [6]u8, _: []const u8) bool {
+            _ = queue.reserve(now) catch return false;
+            return true;
+        }
+
+        fn receive(_: []u8) network.ReceiveResult {
+            polls += 1;
+            if (completion_pending) {
+                _ = queue.reclaimCompleted(1);
+                completion_pending = false;
+            }
+            if (queue.oldestSubmissionExpired(now, 100)) {
+                active = false;
+                contained += 1;
+                return .{ .status = .failed };
+            }
+            return .{ .status = .empty };
+        }
+
+        fn pending() bool {
+            return active and (completion_pending or queue.oldestSubmissionExpired(now, 100));
+        }
+
+        fn nextWake() ?u64 {
+            return if (active) queue.nextWake(100) else null;
+        }
+
+        fn mac() [6]u8 {
+            return .{ 2, 0, 0, 0, 0, 1 };
+        }
+    };
+    const manager = try std.testing.allocator.create(session_manager.SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.initializeAllocated();
+    defer manager.reset();
+    network.reset();
+    defer network.reset();
+    Harness.queue = .{};
+    Harness.now = 107;
+    Harness.completion_pending = false;
+    Harness.active = true;
+    Harness.polls = 0;
+    Harness.contained = 0;
+    const device = network.NetworkDevice{
+        .send = Harness.send,
+        .receive = Harness.receive,
+        .workPending = Harness.pending,
+        .nextWake = Harness.nextWake,
+        .getMacAddress = Harness.mac,
+    };
+    try std.testing.expect(network.activateDeviceForTask(&device, 10, 99));
+    try std.testing.expect(device.send(Harness.mac(), "frame"));
+    try std.testing.expectEqual(@as(?u64, 207), manager.nextServiceWake());
+    Harness.now = 206;
+    try std.testing.expect(!manager.networkWorkPending());
+    try std.testing.expectEqual(@as(usize, 0), manager.servicePendingNetworkWork(Harness.now));
+    try std.testing.expectEqual(@as(usize, 0), Harness.polls);
+    Harness.now = 207;
+    try std.testing.expect(manager.networkWorkPending());
+    try std.testing.expectEqual(@as(usize, 0), manager.servicePendingNetworkWork(Harness.now));
+    try std.testing.expectEqual(@as(usize, 1), Harness.polls);
+    try std.testing.expectEqual(@as(usize, 1), Harness.contained);
+    try std.testing.expect(!manager.networkWorkPending());
+    try std.testing.expect(manager.nextServiceWake() == null);
+    _ = manager.servicePendingNetworkWork(Harness.now);
+    try std.testing.expectEqual(@as(usize, 1), Harness.contained);
+
+    // A completion before the interrupt drains its deadline through the same
+    // native service gate. Deactivation removes any remaining device deadline.
+    Harness.queue = .{};
+    Harness.active = true;
+    Harness.now = 300;
+    try std.testing.expect(device.send(Harness.mac(), "frame"));
+    Harness.now = 350;
+    Harness.completion_pending = true;
+    try std.testing.expect(manager.networkWorkPending());
+    _ = manager.servicePendingNetworkWork(Harness.now);
+    try std.testing.expect(manager.nextServiceWake() == null);
+    try std.testing.expect(!manager.networkWorkPending());
+    Harness.now = 400;
+    try std.testing.expect(device.send(Harness.mac(), "frame"));
+    try std.testing.expectEqual(@as(?u64, 500), manager.nextServiceWake());
+    try std.testing.expect(network.deactivateDevice(10));
+    try std.testing.expect(manager.nextServiceWake() == null);
+    try std.testing.expect(!manager.networkWorkPending());
+}
+
 test "session manager authentication deadlines wake and revoke without keyboard activity" {
     var backend = @import("../../tests/fixtures/authenticator.zig").Fixture{};
     var entry = @import("../platform/trusted_auth_entry.zig").Entry{ .authenticator = backend.authenticator(), .input_timeout_ticks = 20 };

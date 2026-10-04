@@ -23,6 +23,7 @@ test "driver host tests import native driver modules" {
     // entry points in a hosted Debug executable.
     _ = @import("../../kernel/drivers/xhci_hw.zig").keyboardContinuityEpoch;
     _ = @import("../../kernel/drivers/intel_i225_hw.zig").transmitCount;
+    _ = @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount;
     std.testing.refAllDecls(tpm2_crb_test);
     std.testing.refAllDecls(accelerator_driver_task);
     std.testing.refAllDecls(bootstrap_driver_port);

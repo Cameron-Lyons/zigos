@@ -610,6 +610,10 @@ service loop drains one atomic pending-work latch and rechecks it before idle.
 Idle checks use the dispatcher's eligibility rules: policy-delayed work remains
 queued while the CPU sleeps, and runnable work can pass a delayed queue head.
 Service deadlines still arm a wake timer even when no task can run yet.
+Outstanding I225 and VirtIO transmits contribute their earliest watchdog
+deadline, so stalled sends receive service even without receive traffic or an
+interrupt. Completed transmits are pending work; draining them cancels or advances
+the deadline, and contained or inactive controllers contribute no wake.
 Coalesced wakeups preserve the earliest queued deadline, so repeated events cannot
 postpone background or batch work indefinitely. Required accelerator tasks retain
 a bounded wait when claim reservation fails or policy denies an online engine;
@@ -691,7 +695,12 @@ microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
 The kernel heap uses per-CPU magazines for power-of-two size classes from
 32 bytes through 4 KiB, with eight cached spans per class. A locked span table
 handles cache misses, larger allocations, splitting, and adjacent-span
-coalescing. Payloads have no in-band header; a bounded address index validates
+coalescing. When free spans cannot satisfy a request or splitting needs a
+recycled span ID, it reclaims bounded magazine snapshots from every CPU and
+coalesces them before reporting exhaustion or consuming an oversized span.
+CPU locks protect cached spans and recent allocation identities; the shared
+allocator lock always precedes a CPU lock on the slow path. Payloads have no
+in-band header; a bounded address index validates
 allocation starts and rejects invalid or duplicate frees. Compact 16-bit span
 links keep allocator arrays at 100,370 bytes. Free spans have doubly linked
 class lists for constant-time removal during coalescing; the address index
@@ -700,7 +709,10 @@ with bounded backward shifts after deletion. Host tests exercise this same
 allocator in a bounded arena, including all 4096 span slots, payload
 preservation, arbitrary release orders, and randomized fragmentation.
 `./scripts/zig.sh build heap-allocator-benchmark` measures reuse and allocation
-under fragmentation, including exhaustion and page-sized allocation batches.
+under fragmentation, including exhaustion, page-sized allocation batches, and
+whole-arena reuse after all pages have entered magazines. Host regressions cover
+every cached size class, remote CPU caches, full span-table pressure, and
+concurrent cached reuse while another CPU requests large spans.
 
 ## Design Decisions
 

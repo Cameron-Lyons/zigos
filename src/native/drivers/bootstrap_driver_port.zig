@@ -367,6 +367,10 @@ pub fn networkWorkPending() bool {
     return network_driver_task.networkWorkPending();
 }
 
+pub fn nextNetworkWake() ?u64 {
+    return network_driver_task.nextNetworkWake();
+}
+
 pub fn activeNetworkTaskId() u64 {
     return network_driver_task.activeTaskId();
 }

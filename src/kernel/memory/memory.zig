@@ -4,6 +4,7 @@ const console = @import("../utils/console.zig");
 const heap_geometry = @import("heap_geometry.zig");
 const numfmt = @import("../utils/numfmt.zig");
 const spin = @import("../utils/spin.zig");
+const cpu_identity = @import("../cpu_identity.zig");
 const boot_handoff = @import("../boot/handoff.zig");
 const boot_image = @import("../../boot/image_info.zig");
 
@@ -13,8 +14,9 @@ const PAGE_SIZE: usize = 4096;
 const MAX_SPANS: usize = 4096;
 const SpanId = u16;
 const NO_SPAN: SpanId = std.math.maxInt(SpanId);
+const NO_CPU: u8 = std.math.maxInt(u8);
 const MAGAZINE_DEPTH: usize = 8;
-pub const MAGAZINE_CPUS = @import("../cpu_identity.zig").MAX_CPUS;
+pub const MAGAZINE_CPUS = cpu_identity.MAX_CPUS;
 const CLASS_COUNT = heap_geometry.free_list_class_count;
 
 extern var __kernel_end: u8;
@@ -34,6 +36,7 @@ const Span = struct {
     address_prev: SpanId = NO_SPAN,
     class_index: u8 = 0,
     state: u8 = SPAN_FREE,
+    recent_cpu: u8 = NO_CPU,
 };
 
 const SPAN_LOOKUP_SLOTS: usize = MAX_SPANS * 2;
@@ -44,8 +47,10 @@ const Magazine = struct {
 };
 
 const CpuHeap = struct {
+    lock: spin.Lock = .{},
     recent_span: SpanId = NO_SPAN,
     recent_payload: usize = 0,
+    cached_classes: u8 = 0,
     classes: [CLASS_COUNT]Magazine = @as([CLASS_COUNT]Magazine, @splat(.{})),
 };
 
@@ -56,6 +61,9 @@ const CpuHeapSlot = struct {
 comptime {
     if (MAX_SPANS >= NO_SPAN or !std.math.isPowerOfTwo(SPAN_LOOKUP_SLOTS)) {
         @compileError("heap span indices require a reserved sentinel and power-of-two lookup capacity");
+    }
+    if (MAGAZINE_CPUS >= NO_CPU or heap_geometry.size_classes.len > 8) {
+        @compileError("heap CPU owners and cached-class flags must fit their reserved byte fields");
     }
     if (@alignOf(CpuHeapSlot) < 128 or @sizeOf(CpuHeapSlot) % 128 != 0) {
         @compileError("per-CPU heap magazines must occupy distinct cache lines");
@@ -103,8 +111,7 @@ pub fn kernelEndAddress() usize {
 }
 
 fn currentCpu() usize {
-    if (comptime builtin.os.tag != .freestanding) return 0;
-    return @import("../cpu_identity.zig").currentIndex();
+    return cpu_identity.currentIndex();
 }
 
 fn pauseInterrupts() bool {
@@ -211,9 +218,7 @@ pub fn kmalloc(size: usize) ?*anyopaque {
     const aligned = heap_geometry.alignSize(size, GRANULE) orelse return null;
     const class_index = heap_geometry.freeListIndex(aligned, PAGE_SIZE);
     if (heap_geometry.sizeClassBytes(class_index)) |_| {
-        if (popMagazine(currentCpu(), class_index)) |span_id| {
-            return @ptrFromInt(payload_base + spans[span_id].offset);
-        }
+        if (popMagazine(currentCpu(), class_index)) |allocation| return allocation;
     }
     lockAllocator();
     defer unlockAllocator();
@@ -226,14 +231,12 @@ pub fn kfree(ptr: ?*anyopaque) void {
     defer resumeInterrupts(interrupts);
     const payload = @intFromPtr(ptr.?);
     const cpu = currentCpu();
-    if (recentSpan(cpu, payload)) |span_id| {
-        if (pushMagazine(cpu, span_id)) return;
-    }
+    if (freeRecentToMagazine(cpu, payload)) return;
     lockAllocator();
     defer unlockAllocator();
-    const span_id = spanForPayload(payload) orelse return;
+    const span_id = findSpan(payload) orelse return;
     if (!claimLiveSpan(span_id)) return;
-    invalidateRecent(cpu, span_id);
+    invalidateSpanRecent(span_id);
     releaseSpan(span_id);
 }
 
@@ -242,9 +245,15 @@ fn allocateLocked(size: usize) ?*anyopaque {
     const class_index = heap_geometry.freeListIndex(aligned, PAGE_SIZE);
     const request = heap_geometry.sizeClassBytes(class_index) orelse aligned;
     const cpu = currentCpu();
-    const span_id = popMagazine(cpu, class_index) orelse takeSpan(class_index, request) orelse return null;
-    storeSpanState(span_id, SPAN_LIVE);
-    noteRecent(cpu, span_id);
+    if (popMagazine(cpu, class_index)) |allocation| return allocation;
+    const span_id = takeSpan(class_index, request, false) catch |err| reclaimed: {
+        const reclaimed = reclaimMagazines();
+        if (!reclaimed and err == error.NoSpan) return null;
+        // Reclamation can coalesce and recycle the first candidate's ID. Find
+        // it again; if no metadata was recovered, retain the unsplit fallback.
+        break :reclaimed takeSpan(class_index, request, true) catch return null;
+    };
+    publishLive(cpu, span_id);
     return @ptrFromInt(payload_base + spans[span_id].offset);
 }
 
@@ -252,40 +261,99 @@ fn releaseSpan(span_id: SpanId) void {
     const class_index: usize = spans[span_id].class_index;
     if (heap_geometry.reusableMagazineBytes(class_index, @as(usize, spans[span_id].length)) != null) {
         const cpu = currentCpu();
-        var magazine = &cpuHeap(cpu).classes[class_index];
+        const heap = cpuHeap(cpu);
+        heap.lock.acquire();
+        defer heap.lock.release();
+        const magazine = &heap.classes[class_index];
         if (magazine.len < MAGAZINE_DEPTH) {
             storeSpanState(span_id, SPAN_MAGAZINE);
             magazine.slots[magazine.len] = span_id;
             magazine.len += 1;
+            setClassCached(heap, class_index, true);
             return;
         }
     }
     freeSpan(span_id);
 }
 
-fn pushMagazine(cpu: usize, span_id: SpanId) bool {
+// Fast paths take only their CPU lock. Slow paths take the allocator lock
+// first; no CPU lock may remain held while coalescing or taking that lock.
+fn freeRecentToMagazine(cpu: usize, payload: usize) bool {
+    const heap = cpuHeap(cpu);
+    if (@atomicLoad(usize, &heap.recent_payload, .monotonic) != payload) return false;
+    heap.lock.acquire();
+    defer heap.lock.release();
+    const span_id = recentSpanLocked(heap, payload) orelse return false;
     const class_index: usize = spans[span_id].class_index;
     if (heap_geometry.reusableMagazineBytes(class_index, @as(usize, spans[span_id].length)) == null) return false;
-    var magazine = &cpuHeap(cpu).classes[class_index];
+    const magazine = &heap.classes[class_index];
     if (magazine.len >= MAGAZINE_DEPTH) return false;
     if (!claimLiveSpan(span_id)) return true;
+    invalidateRecentLocked(heap, span_id);
+    spans[span_id].recent_cpu = NO_CPU;
     storeSpanState(span_id, SPAN_MAGAZINE);
     magazine.slots[magazine.len] = span_id;
     magazine.len += 1;
-    invalidateRecent(cpu, span_id);
+    setClassCached(heap, class_index, true);
     return true;
 }
 
-fn popMagazine(cpu: usize, class_index: usize) ?SpanId {
+fn popMagazine(cpu: usize, class_index: usize) ?*anyopaque {
     const class_bytes = heap_geometry.sizeClassBytes(class_index) orelse return null;
-    var magazine = &cpuHeap(cpu).classes[class_index];
+    const heap = cpuHeap(cpu);
+    const mask = @as(u8, 1) << @as(u3, @intCast(class_index));
+    if (@atomicLoad(u8, &heap.cached_classes, .monotonic) & mask == 0) return null;
+    heap.lock.acquire();
+    defer heap.lock.release();
+    const magazine = &heap.classes[class_index];
     if (magazine.len == 0) return null;
     magazine.len -= 1;
     const span_id = magazine.slots[magazine.len];
+    magazine.slots[magazine.len] = NO_SPAN;
+    if (loadSpanState(span_id) != SPAN_MAGAZINE) @panic("kernel heap magazine span ownership mismatch");
     if (@as(usize, spans[span_id].length) != class_bytes) @panic("kernel heap magazine span length mismatch");
+    if (magazine.len == 0) setClassCached(heap, class_index, false);
+    noteRecentLocked(cpu, heap, span_id);
     storeSpanState(span_id, SPAN_LIVE);
-    noteRecent(cpu, span_id);
-    return span_id;
+    return @ptrFromInt(payload_base + spans[span_id].offset);
+}
+
+fn setClassCached(heap: *CpuHeap, class_index: usize, cached: bool) void {
+    const mask = @as(u8, 1) << @as(u3, @intCast(class_index));
+    const previous = @atomicLoad(u8, &heap.cached_classes, .monotonic);
+    const next = if (cached) previous | mask else previous & ~mask;
+    if (next != previous) @atomicStore(u8, &heap.cached_classes, next, .monotonic);
+}
+
+// Called under the allocator lock only after its free lists cannot satisfy a
+// request. Extract a bounded snapshot before releasing each CPU lock, so
+// concurrent local reuse cannot race span recycling or remote recent invalidation.
+fn reclaimMagazines() bool {
+    var reclaimed = false;
+    for (0..MAGAZINE_CPUS) |cpu| {
+        const heap = cpuHeap(cpu);
+        if (@atomicLoad(u8, &heap.cached_classes, .monotonic) == 0) continue;
+        var retired: [MAGAZINE_DEPTH * heap_geometry.size_classes.len]SpanId = undefined;
+        var count: usize = 0;
+        heap.lock.acquire();
+        for (heap.classes[0..heap_geometry.size_classes.len]) |*magazine| {
+            for (magazine.slots[0..magazine.len]) |span_id| {
+                if (loadSpanState(span_id) != SPAN_MAGAZINE) @panic("kernel heap reclaimed an unowned magazine span");
+                storeSpanState(span_id, SPAN_CLAIMED);
+                retired[count] = span_id;
+                count += 1;
+            }
+            magazine.* = .{};
+        }
+        @atomicStore(u8, &heap.cached_classes, 0, .monotonic);
+        heap.lock.release();
+        for (retired[0..count]) |span_id| {
+            invalidateSpanRecent(span_id);
+            freeSpan(span_id);
+        }
+        reclaimed = reclaimed or count != 0;
+    }
+    return reclaimed;
 }
 
 fn createSpan(offset: u32, length: u32) ?SpanId {
@@ -308,7 +376,7 @@ fn createSpan(offset: u32, length: u32) ?SpanId {
 
 fn recycleSpan(id: SpanId) void {
     forgetSpan(id);
-    for (0..MAGAZINE_CPUS) |cpu| invalidateRecent(cpu, id);
+    invalidateSpanRecent(id);
     spans[id] = .{};
     spans[id].next_free = recycled;
     recycled = id;
@@ -343,12 +411,20 @@ fn unlinkFree(id: SpanId) void {
     spans[id].previous_free = NO_SPAN;
 }
 
-fn takeSpan(start_class: usize, request: usize) ?SpanId {
+fn takeSpan(start_class: usize, request: usize, allow_unsplit: bool) error{ NoSpan, NoSplitMetadata }!SpanId {
+    var needs_split_metadata = false;
     var class_index = start_class;
     while (class_index < CLASS_COUNT) : (class_index += 1) {
         var current = class_heads[class_index];
         while (current != NO_SPAN) {
             if (spans[current].length >= request) {
+                if (!allow_unsplit and recycled == NO_SPAN and span_used == MAX_SPANS and
+                    heap_geometry.splitRemainder(spans[current].length, request, 0, GRANULE) != null)
+                {
+                    needs_split_metadata = true;
+                    current = spans[current].next_free;
+                    continue;
+                }
                 unlinkFree(current);
                 splitRemainder(current, @intCast(request));
                 spans[current].class_index = @intCast(start_class);
@@ -357,7 +433,7 @@ fn takeSpan(start_class: usize, request: usize) ?SpanId {
             current = spans[current].next_free;
         }
     }
-    return null;
+    return if (needs_split_metadata) error.NoSplitMetadata else error.NoSpan;
 }
 
 fn splitRemainder(id: SpanId, request: u32) void {
@@ -413,31 +489,53 @@ fn freeSpan(id: SpanId) void {
     pushFree(current);
 }
 
-fn noteRecent(cpu: usize, span_id: SpanId) void {
+fn publishLive(cpu: usize, span_id: SpanId) void {
+    // Recent identities accelerate only cacheable frees. Larger allocations
+    // stay entirely on the shared path and cannot enter a CPU magazine.
+    if (heap_geometry.reusableMagazineBytes(spans[span_id].class_index, spans[span_id].length) == null) {
+        storeSpanState(span_id, SPAN_LIVE);
+        return;
+    }
     const heap = cpuHeap(cpu);
-    heap.recent_span = span_id;
-    heap.recent_payload = payload_base + spans[span_id].offset;
+    heap.lock.acquire();
+    defer heap.lock.release();
+    noteRecentLocked(cpu, heap, span_id);
+    storeSpanState(span_id, SPAN_LIVE);
 }
 
-fn invalidateRecent(cpu: usize, span_id: SpanId) void {
+// Exactly one CPU can publish a recent identity for a span. Publish its owner
+// before LIVE's release store, then keep it immutable until an acquire claim.
+// Local cached frees clear that owner; remote frees lock the last publisher
+// before changing/recycling metadata. An older owner whose CPU has since noted
+// another allocation is harmless: invalidation compares the exact span ID.
+fn noteRecentLocked(cpu: usize, heap: *CpuHeap, span_id: SpanId) void {
+    spans[span_id].recent_cpu = @intCast(cpu);
+    heap.recent_span = span_id;
+    @atomicStore(usize, &heap.recent_payload, payload_base + spans[span_id].offset, .monotonic);
+}
+
+fn invalidateSpanRecent(span_id: SpanId) void {
+    const cpu = spans[span_id].recent_cpu;
+    if (cpu == NO_CPU) return;
     const heap = cpuHeap(cpu);
+    heap.lock.acquire();
+    defer heap.lock.release();
+    invalidateRecentLocked(heap, span_id);
+    spans[span_id].recent_cpu = NO_CPU;
+}
+
+fn invalidateRecentLocked(heap: *CpuHeap, span_id: SpanId) void {
     if (heap.recent_span != span_id) return;
     heap.recent_span = NO_SPAN;
-    heap.recent_payload = 0;
+    @atomicStore(usize, &heap.recent_payload, 0, .monotonic);
 }
 
-fn recentSpan(cpu: usize, payload: usize) ?SpanId {
-    const heap = cpuHeap(cpu);
-    if (heap.recent_span == NO_SPAN or payload != heap.recent_payload) return null;
+fn recentSpanLocked(heap: *const CpuHeap, payload: usize) ?SpanId {
+    if (heap.recent_span == NO_SPAN or payload != @atomicLoad(usize, &heap.recent_payload, .monotonic)) return null;
     if (payload < payload_base) return null;
     const offset = payload - payload_base;
     if (spans[heap.recent_span].offset != offset) return null;
     return heap.recent_span;
-}
-
-fn spanForPayload(payload: usize) ?SpanId {
-    if (recentSpan(currentCpu(), payload)) |span_id| return span_id;
-    return findSpan(payload);
 }
 
 fn spanLookupSlot(offset: u32) usize {

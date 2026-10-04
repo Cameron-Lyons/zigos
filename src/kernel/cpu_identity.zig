@@ -3,7 +3,7 @@ const std = @import("std");
 
 pub const MAX_CPUS: usize = 8;
 pub const USES_RDPID = true;
-var test_cpu_index: u8 = 0;
+threadlocal var test_cpu_index: u8 = 0;
 
 pub fn indexFromSignature(signature: u32) ?u8 {
     return if (signature < MAX_CPUS) @intCast(signature) else null;

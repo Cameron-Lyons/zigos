@@ -44,6 +44,19 @@ pub const Queue = struct {
         return ring.used.index != self.used_index;
     }
 
+    pub fn nextTransmitWake(self: *const Queue, submitted_ticks: *const [CAPACITY]u64, timeout_ticks: u64) ?u64 {
+        if (timeout_ticks == 0) return null;
+        var occupied = self.occupied;
+        var wake: ?u64 = null;
+        while (occupied != 0) {
+            const index = @ctz(occupied);
+            occupied &= occupied - 1;
+            const deadline = submitted_ticks[index] +| timeout_ticks;
+            wake = if (wake) |current| @min(current, deadline) else deadline;
+        }
+        return wake;
+    }
+
     pub fn complete(self: *Queue, ring: *volatile Ring) Error!?Completion {
         const pending = ring.used.index -% self.used_index;
         if (pending == 0) return null;
@@ -166,4 +179,33 @@ test "virtio net bounds a single receive buffer and rejects unnegotiated offload
     buffer[11] = 0xFF;
     try std.testing.expectEqual(@as(usize, 60), (try receivedFrame(&buffer)).len);
     try std.testing.expectError(error.InvalidHeader, receivedFrame(buffer[0..11]));
+}
+
+test "virtio transmit wake tracks owned slots across out-of-order completion and reuse" {
+    var ring = std.mem.zeroes(Ring);
+    var queue = Queue{ .device_writable = false };
+    var submitted_ticks = @as([CAPACITY]u64, @splat(0));
+    try std.testing.expect(queue.nextTransmitWake(&submitted_ticks, 100) == null);
+    try queue.submit(&ring, 31, 0x1000, 128);
+    submitted_ticks[31] = 107;
+    try queue.submit(&ring, 0, 0x2000, 128);
+    submitted_ticks[0] = 108;
+    try std.testing.expectEqual(@as(?u64, 207), queue.nextTransmitWake(&submitted_ticks, 100));
+    ring.used.entries[0] = .{ .id = 31, .length = 0 };
+    ring.used.index = 1;
+    _ = try queue.complete(&ring);
+    try std.testing.expectEqual(@as(?u64, 208), queue.nextTransmitWake(&submitted_ticks, 100));
+    try queue.submit(&ring, 31, 0x1000, 128);
+    submitted_ticks[31] = 109;
+    ring.used.entries[1] = .{ .id = 0, .length = 0 };
+    ring.used.index = 2;
+    _ = try queue.complete(&ring);
+    try std.testing.expectEqual(@as(?u64, 209), queue.nextTransmitWake(&submitted_ticks, 100));
+    try std.testing.expect(queue.nextTransmitWake(&submitted_ticks, 0) == null);
+    submitted_ticks[31] = std.math.maxInt(u64) - 4;
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), queue.nextTransmitWake(&submitted_ticks, 100));
+    ring.used.entries[2] = .{ .id = 31, .length = 0 };
+    ring.used.index = 3;
+    _ = try queue.complete(&ring);
+    try std.testing.expect(queue.nextTransmitWake(&submitted_ticks, 100) == null);
 }

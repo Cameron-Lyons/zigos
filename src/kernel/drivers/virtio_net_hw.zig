@@ -230,31 +230,46 @@ fn contain(reason: []const u8) void {
 }
 
 fn service() bool {
+    timer.synchronize();
+    return serviceAt(HardwareService, timer.getTicks());
+}
+
+const HardwareService = struct {
+    fn fault() !bool {
+        return (try vtd.pollFaultForDevice(controller.device)) != null;
+    }
+
+    fn statusReady() bool {
+        return reg(u8, controller.common + 20).* == READY_STATUS | STATUS_DRIVER_OK;
+    }
+
+    fn containFailure(reason: []const u8) void {
+        contain(reason);
+    }
+};
+
+fn serviceAt(comptime Backend: type, now: u64) bool {
     if (!attached()) return false;
-    const fault = vtd.pollFaultForDevice(controller.device) catch |err| {
-        contain(@errorName(err));
+    const fault = Backend.fault() catch |err| {
+        Backend.containFailure(@errorName(err));
         return false;
     };
-    if (fault != null or reg(u8, controller.common + 20).* != READY_STATUS | STATUS_DRIVER_OK) {
-        contain(if (fault != null) "DMAFault" else "DeviceStatus");
+    if (fault or !Backend.statusReady()) {
+        Backend.containFailure(if (fault) "DMAFault" else "DeviceStatus");
         return false;
     }
     var progress = false;
     for (0..virtqueue.CAPACITY) |_| {
         const completion = controller.tx.state.complete(controller.tx.memory()) catch |err| {
-            contain(@errorName(err));
+            Backend.containFailure(@errorName(err));
             return false;
         };
         if (completion == null) break;
         progress = true;
     }
-    timer.synchronize();
-    const now = timer.getTicks();
-    for (controller.submitted_ticks, 0..) |submitted, index| {
-        if (controller.tx.state.occupied & (@as(u32, 1) << @as(u5, @intCast(index))) != 0 and
-            now -| submitted >= timer.TICKS_PER_SECOND)
-        {
-            contain("TransmitTimeout");
+    if (nextWake()) |deadline| {
+        if (now >= deadline) {
+            Backend.containFailure("TransmitTimeout");
             return false;
         }
     }
@@ -265,7 +280,7 @@ fn service() bool {
     if (@atomicRmw(bool, &interrupt_pending, .Xchg, false, .acq_rel)) {
         if (!progress and !rx_ready) empty_interrupts +|= 1;
         if (empty_interrupts >= 8) {
-            contain("EmptyInterruptStorm");
+            Backend.containFailure("EmptyInterruptStorm");
             return false;
         }
     }
@@ -316,7 +331,21 @@ pub fn pollReceive(output: []u8) ReceiveResult {
 }
 
 pub fn workPending() bool {
-    return attached() and (@atomicLoad(bool, &interrupt_pending, .acquire) or controller.rx.state.completionReady(controller.rx.memory()) or controller.tx.state.completionReady(controller.tx.memory()));
+    return workPendingAt(timer.getTicks());
+}
+
+fn workPendingAt(now_ticks: u64) bool {
+    if (!attached()) return false;
+    if (@atomicLoad(bool, &interrupt_pending, .acquire) or
+        controller.rx.state.completionReady(controller.rx.memory()) or
+        controller.tx.state.completionReady(controller.tx.memory())) return true;
+    const deadline = nextWake() orelse return false;
+    return now_ticks >= deadline;
+}
+
+pub fn nextWake() ?u64 {
+    if (!attached()) return null;
+    return controller.tx.state.nextTransmitWake(&controller.submitted_ticks, timer.TICKS_PER_SECOND);
 }
 
 pub fn interruptCount() u32 {
@@ -334,6 +363,115 @@ fn reg(comptime T: type, address: usize) *volatile T {
 fn writeAddress(address: usize, value: u64) void {
     reg(u32, address).* = @truncate(value);
     reg(u32, address + 4).* = @truncate(value >> 32);
+}
+
+test "VirtIO idle transmit watchdog drains completions and contains stalls or malformed ownership once" {
+    const Backend = struct {
+        var contained: usize = 0;
+        var reason: []const u8 = "";
+
+        fn fault() !bool {
+            return false;
+        }
+
+        fn statusReady() bool {
+            return true;
+        }
+
+        fn containFailure(value: []const u8) void {
+            contained += 1;
+            reason = value;
+            @atomicStore(bool, &active, false, .release);
+        }
+    };
+    const saved_prepared = prepared;
+    const saved_active = attached();
+    const saved_controller: ?Controller = if (prepared) controller else null;
+    const saved_pending = @atomicLoad(bool, &interrupt_pending, .acquire);
+    const saved_empty = empty_interrupts;
+    defer {
+        if (saved_controller) |previous| controller = previous;
+        prepared = saved_prepared;
+        @atomicStore(bool, &active, saved_active, .release);
+        @atomicStore(bool, &interrupt_pending, saved_pending, .release);
+        empty_interrupts = saved_empty;
+    }
+    var tx_ring = std.mem.zeroes(virtqueue.Ring);
+    var rx_ring = std.mem.zeroes(virtqueue.Ring);
+    controller = .{
+        .device = std.mem.zeroes(pci.PCIDevice),
+        .common = 0,
+        .isr = 0,
+        .msix = 0,
+        .msix_control = 0,
+        .mac = @splat(0),
+        .rx = .{ .state = .{ .device_writable = true }, .ring = @intFromPtr(&rx_ring), .buffers = 0, .buffer_physical = 0, .notification = 0 },
+        .tx = .{ .state = .{ .device_writable = false }, .ring = @intFromPtr(&tx_ring), .buffers = 0, .buffer_physical = 0x1000, .notification = 0 },
+        .windows = std.mem.zeroes([4]vtd.DmaWindow),
+    };
+    prepared = true;
+    @atomicStore(bool, &active, true, .release);
+    @atomicStore(bool, &interrupt_pending, false, .release);
+    empty_interrupts = 7;
+    Backend.contained = 0;
+    Backend.reason = "";
+    try std.testing.expect(nextWake() == null);
+    try controller.tx.submit(0, 128);
+    controller.submitted_ticks[0] = 107;
+    try controller.tx.submit(31, 128);
+    controller.submitted_ticks[31] = 108;
+    try std.testing.expectEqual(@as(?u64, 207), nextWake());
+    try std.testing.expect(!workPendingAt(206));
+    // Out-of-order completions are drained before checking an expired deadline.
+    tx_ring.used.entries[0] = .{ .id = 31, .length = 0 };
+    tx_ring.used.index = 1;
+    try std.testing.expect(workPendingAt(150));
+    try std.testing.expect(serviceAt(Backend, 150));
+    try std.testing.expectEqual(@as(?u64, 207), nextWake());
+    try std.testing.expectEqual(@as(u8, 0), empty_interrupts);
+    tx_ring.used.entries[1] = .{ .id = 0, .length = 0 };
+    tx_ring.used.index = 2;
+    try std.testing.expect(serviceAt(Backend, 207));
+    try std.testing.expect(nextWake() == null);
+    try std.testing.expect(!workPendingAt(207));
+    @atomicStore(bool, &interrupt_pending, true, .release);
+    try std.testing.expect(serviceAt(Backend, 208));
+    try std.testing.expectEqual(@as(u8, 1), empty_interrupts);
+    try std.testing.expectEqual(@as(usize, 0), Backend.contained);
+
+    try controller.tx.submit(0, 128);
+    controller.submitted_ticks[0] = 300;
+    try std.testing.expectEqual(@as(?u64, 400), nextWake());
+    try std.testing.expect(!workPendingAt(399));
+    try std.testing.expect(workPendingAt(400));
+    try std.testing.expect(!serviceAt(Backend, 400));
+    try std.testing.expectEqual(@as(usize, 1), Backend.contained);
+    try std.testing.expectEqualStrings("TransmitTimeout", Backend.reason);
+    try std.testing.expectEqual(@as(u32, 1), controller.tx.state.occupied);
+    try std.testing.expect(nextWake() == null);
+    try std.testing.expect(!workPendingAt(400));
+    try std.testing.expect(!serviceAt(Backend, 401));
+    try std.testing.expectEqual(@as(usize, 1), Backend.contained);
+
+    // A malformed completion at the deadline is an ownership failure, and
+    // containment must preserve its DMA buffers rather than reclaiming them.
+    controller.tx.state = .{ .device_writable = false };
+    tx_ring = std.mem.zeroes(virtqueue.Ring);
+    @atomicStore(bool, &active, true, .release);
+    try controller.tx.submit(0, 128);
+    controller.submitted_ticks[0] = 500;
+    tx_ring.used.entries[0] = .{ .id = virtqueue.CAPACITY, .length = 0 };
+    tx_ring.used.index = 1;
+    try std.testing.expect(workPendingAt(600));
+    try std.testing.expect(!serviceAt(Backend, 600));
+    try std.testing.expectEqualStrings("InvalidCompletion", Backend.reason);
+    try std.testing.expectEqual(@as(usize, 2), Backend.contained);
+    try std.testing.expectEqual(@as(u32, 1), controller.tx.state.occupied);
+    try std.testing.expectEqual(@as(u16, 0), controller.tx.state.used_index);
+    try std.testing.expect(nextWake() == null);
+    try std.testing.expect(!workPendingAt(600));
+    try std.testing.expect(!serviceAt(Backend, 601));
+    try std.testing.expectEqual(@as(usize, 2), Backend.contained);
 }
 
 fn mapRegion(physical: u64, length: usize, slot: usize) !usize {

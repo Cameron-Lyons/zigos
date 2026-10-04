@@ -364,9 +364,19 @@ pub fn failedReceivePollCount() u64 {
 }
 
 pub fn networkWorkPending() bool {
+    return networkWorkPendingAt(timer.getTicks());
+}
+
+fn networkWorkPendingAt(now_ticks: u64) bool {
     if (!controllerActive()) return false;
     if (@atomicLoad(u32, &pending_interrupt_causes, .monotonic) != 0) return true;
-    return receiveCompletionReady();
+    return receiveCompletionReady() or transmitCompletionReady() or
+        controller.tx_queue.oldestSubmissionExpired(now_ticks, TRANSMIT_TIMEOUT_TICKS);
+}
+
+pub fn nextWake() ?u64 {
+    if (!controllerActive()) return null;
+    return controller.tx_queue.nextWake(TRANSMIT_TIMEOUT_TICKS);
 }
 
 pub fn handleInterrupt() void {
@@ -522,11 +532,25 @@ fn observeReceiveCompletion(writeback: u64) i225_rx.Completion {
 }
 
 fn serviceTransmitQueue(now_ticks: u64) bool {
-    if (!servicePendingInterrupt()) return false;
+    return serviceTransmitQueueWith(TransmitService, now_ticks);
+}
+
+const TransmitService = struct {
+    fn serviceInterrupt() bool {
+        return servicePendingInterrupt();
+    }
+
+    fn contain() void {
+        containFailure("ZIGOS:I225:HW:TX_STALL_CONTAINED\n");
+    }
+};
+
+fn serviceTransmitQueueWith(comptime Backend: type, now_ticks: u64) bool {
+    if (!controllerActive() or !Backend.serviceInterrupt()) return false;
     _ = reapTransmitCompletions();
     if (!controller.tx_queue.oldestSubmissionExpired(now_ticks, TRANSMIT_TIMEOUT_TICKS)) return true;
     failed_transmit_frames +%= 1;
-    containFailure("ZIGOS:I225:HW:TX_STALL_CONTAINED\n");
+    Backend.contain();
     return false;
 }
 
@@ -568,6 +592,14 @@ fn servicePendingInterrupt() bool {
 fn receiveCompletionReady() bool {
     const descriptor: *volatile i225_rx.Descriptor = rxDescriptor(controller.rx_head);
     return i225_rx.decodeCompletion(descriptor.header_or_writeback).done;
+}
+
+fn transmitCompletionReady() bool {
+    if (controller.tx_queue.in_flight == 0) return false;
+    const descriptor: *volatile i225_tx.Descriptor = @ptrFromInt(
+        controller.tx_descriptor.offset(controller.tx_queue.head * i225_tx.DESCRIPTOR_BYTES).alias,
+    );
+    return i225_tx.completionDone(descriptor.olinfo_status);
 }
 
 fn rearmQueueInterrupts() void {
@@ -770,4 +802,80 @@ test "I225 receive progress includes dropped descriptors before delayed interrup
         empty_interrupt_streak = i225_irq.nextEmptyStreak(empty_interrupt_streak, false);
     }
     try std.testing.expect(i225_irq.shouldContain(empty_interrupt_streak));
+}
+
+test "I225 idle transmit deadlines service polled completion and contain one stalled submission" {
+    const Backend = struct {
+        var contained: usize = 0;
+
+        fn serviceInterrupt() bool {
+            return servicePendingInterrupt();
+        }
+
+        fn contain() void {
+            contained += 1;
+            // The policy test replaces only privileged containment operations.
+            // Published descriptors stay owned and pinned after containment.
+            publishControllerState(.prepared);
+        }
+    };
+    const saved_state = controllerState();
+    const saved_controller: ?Controller = if (controllerPrepared()) controller else null;
+    const saved_completed = completed_transmit_frames;
+    const saved_failed = failed_transmit_frames;
+    const saved_pending = @atomicLoad(u32, &pending_interrupt_causes, .monotonic);
+    const saved_streak = empty_interrupt_streak;
+    defer {
+        if (saved_controller) |previous| controller = previous;
+        publishControllerState(saved_state);
+        completed_transmit_frames = saved_completed;
+        failed_transmit_frames = saved_failed;
+        @atomicStore(u32, &pending_interrupt_causes, saved_pending, .monotonic);
+        empty_interrupt_streak = saved_streak;
+    }
+    var registers = std.mem.zeroes([BAR_MAP_BYTES / @sizeOf(u32)]u32);
+    var tx = std.mem.zeroes([i225_tx.DESCRIPTOR_COUNT]i225_tx.Descriptor);
+    var rx = std.mem.zeroes([i225_rx.DESCRIPTOR_COUNT]i225_rx.Descriptor);
+    controller = .{
+        .bar = @intFromPtr(&registers),
+        .tx_descriptor = .{ .physical = 0x1000, .alias = @intFromPtr(&tx) },
+        .tx_buffer = .{},
+        .rx_descriptor = .{ .physical = 0x2000, .alias = @intFromPtr(&rx) },
+        .rx_buffer = .{},
+        .mac = @splat(0),
+    };
+    Backend.contained = 0;
+    resetPendingInterruptCauses();
+    publishControllerState(.active);
+    empty_interrupt_streak = i225_irq.EMPTY_INTERRUPT_LIMIT - 1;
+    try std.testing.expect(nextWake() == null);
+    const first = try controller.tx_queue.reserve(107);
+    tx[first] = try i225_tx.submissionDescriptor(0x3000, 64);
+    try std.testing.expectEqual(@as(?u64, 207), nextWake());
+    try std.testing.expect(!networkWorkPendingAt(206));
+    // Lost or delayed MSI does not hide a completion or force periodic polling.
+    tx[first].olinfo_status |= 1;
+    try std.testing.expect(networkWorkPendingAt(150));
+    try std.testing.expect(serviceTransmitQueueWith(Backend, 150));
+    try std.testing.expect(nextWake() == null);
+    try std.testing.expect(!networkWorkPendingAt(150));
+    try std.testing.expectEqual(@as(u8, 0), empty_interrupt_streak);
+    @atomicStore(u32, &pending_interrupt_causes, PENDING_INTERRUPT_EVENT, .monotonic);
+    try std.testing.expect(serviceTransmitQueueWith(Backend, 151));
+    try std.testing.expectEqual(@as(u8, 1), empty_interrupt_streak);
+    try std.testing.expectEqual(@as(usize, 0), Backend.contained);
+
+    const stalled = try controller.tx_queue.reserve(200);
+    tx[stalled] = try i225_tx.submissionDescriptor(0x3000, 64);
+    try std.testing.expectEqual(@as(?u64, 300), nextWake());
+    try std.testing.expect(!networkWorkPendingAt(299));
+    try std.testing.expect(networkWorkPendingAt(300));
+    try std.testing.expect(!serviceTransmitQueueWith(Backend, 300));
+    try std.testing.expectEqual(@as(usize, 1), Backend.contained);
+    try std.testing.expectEqual(saved_failed + 1, failed_transmit_frames);
+    try std.testing.expectEqual(@as(u32, 1), controller.tx_queue.in_flight);
+    try std.testing.expect(nextWake() == null);
+    try std.testing.expect(!networkWorkPendingAt(300));
+    try std.testing.expect(!serviceTransmitQueueWith(Backend, 301));
+    try std.testing.expectEqual(@as(usize, 1), Backend.contained);
 }

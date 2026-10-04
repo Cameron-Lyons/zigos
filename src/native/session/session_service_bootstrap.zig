@@ -59,6 +59,7 @@ const network_bridge = if (builtin.target.os.tag == .freestanding)
             output_len: *usize,
         ) callconv(.c) u8;
         extern fn zigosNetworkBootstrapWorkPending() callconv(.c) bool;
+        extern fn zigosNetworkBootstrapNextWake(deadline: *u64) callconv(.c) bool;
         extern fn zigosNetworkBootstrapMac(output: [*]u8) callconv(.c) bool;
 
         pub fn attached() bool {
@@ -87,6 +88,11 @@ const network_bridge = if (builtin.target.os.tag == .freestanding)
             return zigosNetworkBootstrapWorkPending();
         }
 
+        pub fn nextWake() ?u64 {
+            var deadline: u64 = 0;
+            return if (zigosNetworkBootstrapNextWake(&deadline)) deadline else null;
+        }
+
         pub fn mac() ?[6]u8 {
             var address: [6]u8 = undefined;
             if (!zigosNetworkBootstrapMac(&address)) return null;
@@ -109,6 +115,10 @@ else
 
         pub fn workPending() bool {
             return false;
+        }
+
+        pub fn nextWake() ?u64 {
+            return null;
         }
 
         pub fn mac() ?[6]u8 {
@@ -134,6 +144,10 @@ const BootedNetworkDataPlane = struct {
         return network_bridge.attached() and network_bridge.workPending();
     }
 
+    fn nextWake() ?u64 {
+        return network_bridge.nextWake();
+    }
+
     fn getMacAddress() [6]u8 {
         if (network_bridge.mac()) |address| return address;
         return .{ 0x02, 0x5A, 0x47, 0x00, 0x00, 0x01 };
@@ -143,6 +157,7 @@ const BootedNetworkDataPlane = struct {
         .send = send,
         .receive = receive,
         .workPending = workPending,
+        .nextWake = nextWake,
         .getMacAddress = getMacAddress,
     };
 
@@ -152,6 +167,7 @@ const BootedNetworkDataPlane = struct {
         .send = network_bridge.send,
         .receive = network_bridge.receive,
         .workPending = network_bridge.workPending,
+        .nextWake = network_bridge.nextWake,
         .getMacAddress = hardwareMacAddress,
     };
 
