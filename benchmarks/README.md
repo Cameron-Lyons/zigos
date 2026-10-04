@@ -1,6 +1,6 @@
 # Kernel benchmarks
 
-Run `./scripts/zig.sh build -Doptimize=fast benchmark`. The checker
+Run `zig build -Doptimize=fast benchmark`. The checker
 requires complete results and quality checks under every accelerator. KVM
 also enforces cycle ceilings and baseline regression limits; TCG timing is
 informational. Baselines use the slowest of three consecutive KVM runs.
@@ -33,7 +33,7 @@ ReleaseFast build and KVM. All values are cycles per complete operation:
 The standard 50% regression allowance applies to both baselines. Other
 workloads retain their existing baselines and ceilings.
 
-`./scripts/zig.sh build ipc-ring-benchmark` measures an eight-slot ring with
+`zig build ipc-ring-benchmark` measures an eight-slot ring with
 88-byte payloads on the host. `single_receive` sends and receives one record;
 `split_receive` sends, peeks, pops, and copies the same record. Both use the
 current validation code, so this is a comparison of receive strategies, not a
@@ -42,7 +42,7 @@ slots remain occupied. Each result is the median of five 200,000-iteration
 samples after warmup. These host timings are informational; the QEMU kernel
 benchmark remains the integration gate.
 
-`./scripts/zig.sh build text-scanout-benchmark` measures 1280×720 text scanout
+`zig build text-scanout-benchmark` measures 1280×720 text scanout
 using ordinary host RAM. `full_redraw` alternates every cell's glyph;
 `single_cell` changes one glyph; `pool_only` moves unchanged combining
 graphemes within the frame's byte pool. Each result is the median of five
@@ -52,7 +52,7 @@ exclude device memory latency and supplement the QEMU and hardware display
 proofs. The tool also runs without `--check-damage` for comparison with an
 earlier implementation that redraws cells when pool offsets change.
 
-`./scripts/zig.sh build id-index-benchmark` measures 512-bucket ID tables with
+`zig build id-index-benchmark` measures 512-bucket ID tables with
 sequential keys, keys differing only in their high generation bits, misses
 after every home bucket has been occupied and emptied, and repeated insertion
 and deletion. It reports resident table bytes, lookup checksums, and the median
@@ -60,7 +60,7 @@ of five samples. The tool imports only the public ID-index functions so it can
 also measure an earlier core implementation. Deletion now shifts affected
 probe-chain entries; both lookup and deletion remain bounded by capacity.
 
-`./scripts/zig.sh build endpoint-readiness-benchmark` compares the original
+`zig build endpoint-readiness-benchmark` compares the original
 owner scan with maintained nonempty-queue counts in the same build. Owners
 hold 1, 8, 32, or 63 endpoints. Cases check empty queues, a pending message in
 the last visited endpoint, and send/drain with readiness checks. Both paths pay
@@ -68,7 +68,7 @@ the current send/drain accounting cost, making the scan comparison conservative.
 Each result is the median of five 200,000-iteration samples; unexpected
 readiness or message results fail the run.
 
-`./scripts/zig.sh build text-layout-benchmark` compares caret location followed
+`zig build text-layout-benchmark` compares caret location followed
 by a second row scan with one visible-window pass over 512-byte ASCII and
 Unicode documents. Cases place the caret at the head, middle, and end. Before
 timing, every case verifies identical caret locations, first visible rows,
@@ -80,7 +80,7 @@ document. It varies hard breaks, widths of 20 and 120 columns, wrap affinity,
 movement direction, and one-row versus 23-row page steps. Its checksum includes
 the resulting byte offset, row, and affinity; invalid caret results fail the run.
 
-`./scripts/zig.sh build heap-allocator-benchmark` uses a 16 MiB host arena.
+`zig build heap-allocator-benchmark` uses a 16 MiB host arena.
 It measures small-allocation reuse, successful and exhausted searches through
 1024 separated free blocks, and batches of 512 eight-KiB allocations freed in
 a permutation. The batch checks live payload bytes before release and exercises
@@ -88,7 +88,7 @@ allocation-start lookup and adjacent-span coalescing. Results report the median
 of five samples and allocator array metadata, excluding scalar globals.
 The same tool can import an earlier `heap_benchmark.zig` for comparison.
 
-`./scripts/zig.sh build workspace-index-benchmark` measures 192 path buckets
+`zig build workspace-index-benchmark` measures 192 path buckets
 and 96 object buckets with 64 live entries. Cases cover hits, empty misses after
 every home bucket has been occupied and retired, and steady insertion/deletion.
 Every replacement checks both indexes and rejects retained old entries. The
@@ -96,7 +96,7 @@ tables remain 288 bytes together; deletion closes affected probe chains.
 The tool accepts either the old or new object-removal signature to support
 comparison against the parent implementation.
 
-`./scripts/zig.sh build object-chunks-benchmark` compares prefix traversal with
+`zig build object-chunks-benchmark` compares prefix traversal with
 positioned cursors in the same executable. Both paths verify the immutable
 manifest and copy 181-byte transport ranges; one-time verification is warmed
 equally before timing. It reconstructs two-page, fourteen-page, and maximum
@@ -106,7 +106,7 @@ cursors remove prefix visits while retaining full manifest verification.
 Their setup can cost more for a range wholly within the first page, where
 there are no prefix visits to eliminate.
 
-`./scripts/zig.sh build surface-text-benchmark` compares the previous separate
+`zig build surface-text-benchmark` compares the previous separate
 UTF-8 and cursor/anchor boundary checks with combined canonical validation in
 the same executable. Full 512-byte ASCII and Unicode documents place collapsed
 and selected cursors at the head, middle, and end. Both paths retain metadata,

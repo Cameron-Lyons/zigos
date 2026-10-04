@@ -179,7 +179,7 @@ requests.
   one device page. Bounds checks, monotonic deadlines, bounded cancellation,
   locality handoff, and a permanent failure latch constrain device faults.
   Unsupported start methods, RAM buffers, and FIFO devices remain unavailable.
-  `./scripts/zig.sh build -Doptimize=fast tpm2-qemu-test` requires swtpm
+  `zig build -Doptimize=fast tpm2-qemu-test` requires swtpm
   (or `SWTPM_BIN`) and checks a CRB cold boot and emulator restart, plus FIFO and
   absent-device boots. It uses disposable emulator state and a separate test
   disk. A sealing client now wraps 32-byte keys under an ECC P-256 storage
@@ -443,7 +443,7 @@ requests.
   physical TPM persistence and trusted input validation, biometric verification,
   production enrollment binding for desktop sign-in, and userspace
   request dispatch remain open.
-  `./scripts/zig.sh build -Doptimize=fast tpm2-sealing-qemu-test` verifies
+  `zig build -Doptimize=fast tpm2-sealing-qemu-test` verifies
   interrupted initial enrollment, recovery from the native disk after restarting
   the VM and swtpm, lost first-write replies, altered enrollment commitments,
   a forged public WRITTEN status, missing-index refusal,
@@ -472,7 +472,7 @@ requests.
   both VM and TPM then completes that signed checkpoint, restores its credential
   counter, and resumes assertions. Catalog format v5 includes the authenticated
   device graph and predecessor digest and rejects older snapshots.
-  `./scripts/zig.sh build -Doptimize=fast tpm2-ownership-qemu-test` runs thirteen
+  `zig build -Doptimize=fast tpm2-ownership-qemu-test` runs thirteen
   disposable boots through native setup and the production provisioning service.
   The first boot types and confirms a PIN through modeled HID, checks mismatch
   and cancellation, reads the complete recovery record from native display cells,
@@ -802,7 +802,7 @@ ownership bitmap to skip fully reserved or allocated regions. The index adds
 below 17 MiB. Single-page reuse probes the allocation cursor directly, while
 sparse page and contiguous-run searches skip empty regions. DMA address bounds,
 immutable firmware reservations, and transactional release checks apply to both
-paths. `./scripts/zig.sh build frame-allocator-benchmark` measures these paths on
+paths. `zig build frame-allocator-benchmark` measures these paths on
 the host, including failed allocations in an exhausted physical range. These
 microbenchmarks supplement the QEMU kernel benchmarks and hardware proof runs.
 
@@ -822,7 +822,7 @@ hashes aligned span numbers across its full table and closes probe chains
 with bounded backward shifts after deletion. Host tests exercise this same
 allocator in a bounded arena, including all 4096 span slots, payload
 preservation, arbitrary release orders, and randomized fragmentation.
-`./scripts/zig.sh build heap-allocator-benchmark` measures reuse and allocation
+`zig build heap-allocator-benchmark` measures reuse and allocation
 under fragmentation, including exhaustion, page-sized allocation batches, and
 whole-arena reuse after all pages have entered magazines. Host regressions cover
 every cached size class, remote CPU caches, full span-table pressure, and
@@ -942,19 +942,19 @@ concurrent cached reuse while another CPU requests large spans.
 - Platform policy is data-driven where possible. Coverage and production
   readiness manifests record requirement evidence and track the gap between
   prototype enforcement and production confidence.
-- The build graph is the public workflow surface. `build.zig` and the shell
-  wrappers expose repeatable local and CI entrypoints instead of relying on
+- The build graph is the public workflow surface. `build.zig` and the native
+  Zig utilities expose repeatable local and CI entrypoints instead of relying on
   ad hoc commands.
 
 ## Requirements
 
 Use the pinned toolchain and repo entrypoints:
 
-- Zig (pinned in `.tool-versions` and `mise.toml`)
+- Preinstalled Zig 0.17.0 on `PATH` (pinned in `.tool-versions` and `mise.toml`)
 - Jujutsu `jj` (pinned in `.tool-versions` and `mise.toml`)
 - `nasm`
 - `qemu-system-x86_64`
-- Python 3 for the two-node network fault relay and its tests
+- Python 3 only for the external `virt-fw-vars` tool used by unified EFI tests
 - An x86-64 CPU with NX, SMEP, SMAP, UMIP, RDSEED, RDPID, PGE, PCID/INVPCID,
   x2APIC, XSAVE/XSAVES, CET IBT and shadow-stack support, FRED, LASS, LKGS,
   1 GiB pages, and a calibrated invariant TSC with deadline timers. Production
@@ -1128,21 +1128,19 @@ Use the pinned toolchain and repo entrypoints:
   `SET_PROTOCOL(Boot)` transfer, a real interrupt-IN report TD, matching hardware
   event-ring completion, and validated report bytes.
 - OVMF or edk2-ovmf firmware for every QEMU boot
-- ShellCheck for shell lint
 - Optional: `zlint` and `actionlint`; CI installs both, and local lint uses
   them when available
 
 For ISO and full disk-image workflows, install the tools verified by
-`scripts/setup-deps.sh`:
+`zig build setup-deps`:
 
 - x86-64 EFI-capable GRUB `mkrescue` and modules
 - `xorriso`
 - `mtools`
 - `dosfstools`
 
-`build.zig` and `./scripts/zig.sh` reject any Zig version other than the repo
-pin. Run Zig through `./scripts/zig.sh` so the repo can resolve `ZIG_BIN`, the
-active Zig, `mise`, or local fallback binaries in the right order.
+`build.zig` rejects any Zig version other than the repo pin. Install Zig 0.17.0
+before setup and invoke it directly as `zig` from `PATH`.
 
 The current pin is Zig 0.17.0. The source uses array `@splat`, the current
 `std.lang` reflection and optimization APIs, and typed ELF program headers.
@@ -1150,6 +1148,13 @@ Kernel and EFI byte helpers use logical `@bitCast` to preserve little-endian
 wire bytes on every target. Archive generation locks borrowed array-list
 elements while writing both archives. Build configuration remains cacheable
 under Zig 0.17's separate configuration and execution processes.
+
+EFI and ISO media timestamps default to 1980-01-01. Supply a reproducible epoch
+with `zig build -Dsource-date-epoch=SECONDS iso`; accepted values are
+nonnegative decimal seconds through the end of 2107, with earlier media dates
+clamped to 1980. Pass any `SOURCE_DATE_EPOCH` value explicitly through
+`-Dsource-date-epoch` so epoch changes invalidate Zig's cached configuration.
+Use the same value for both builds when checking reproducibility.
 
 The build accepts only the `x86_64-freestanding-none` target; 32-bit kernels and
 userspace images are not compatibility outputs.
@@ -1207,7 +1212,7 @@ exact selection, digest, attestation type, challenge, signature, and bounded
 framing. Verifier-owned challenges expire within one minute, reject clock
 rollback, and can succeed only once. Invalid quotes publish no accepted result;
 client failures clear output and clean up known transient keys and sessions.
-`./scripts/zig.sh build -Doptimize=fast tpm2-quote-qemu-test` exercises real
+`zig build -Doptimize=fast tpm2-quote-qemu-test` exercises real
 TPM commands, cold boot, recovered keys, replay, wrong authorization, substituted
 keys, damaged blobs/responses, and TPM replacement using disposable swtpm state.
 Its enrollment authority is a verification-only fixture. Operational attestation
@@ -1268,17 +1273,18 @@ root. Failed signing and provisioning leave committed service state unchanged.
 Verified service-identity connections also require the signed device identity to
 match the selected peer before opening a connection.
 
-`./scripts/zig.sh build unified-efi-qemu-test` checks firmware authorization of
+`zig build unified-efi-qemu-test` checks firmware authorization of
 the complete EFI image, rejection of changes to either embedded payload, and
 immunity to external kernel and command-line files. Successful boots must pass the
 live TPM measurement check; a TPM without an active SHA-256 bank must be rejected
 before kernel entry. This proof uses the production kernel with embedded QEMU
 test options; release media retain the hardware CPU baseline. It needs `swtpm`
-and `swtpm_setup`, Secure Boot capable OVMF, and the Python packages
-`virt-firmware` (tested with 26.9) and `pefile`.
+and `swtpm_setup`, Secure Boot capable OVMF, and `virt-fw-vars` from
+`virt-firmware` (tested with 26.9). The native Zig host utility computes the
+firmware image hash and prepares the tampered images.
 Set `OVMF_SECURE_BOOT_CODE` and matching `OVMF_SECURE_BOOT_VARS` (or `OVMF_VARS`);
-`EFI_TEST_PYTHON` and `EFI_VARS_TOOL`
-can select tools installed in an isolated virtual environment. The test enrolls
+`EFI_VARS_TOOL` can select the variables tool installed in an isolated Python
+virtual environment. The test enrolls
 only disposable VM variables and never accesses host firmware. CI supplies the
 isolated tools, and release-security-preflight includes this gate. The production
 hardware proof requires Secure Boot enabled, a firmware-authenticated image,
@@ -1309,30 +1315,37 @@ fetch protection fault before continuing its separate unmapped-memory proof.
 
 ## Setup
 
-```bash
-bash scripts/setup-deps.sh
+```sh
+zig build setup-deps
 ```
 
-The setup script supports macOS through Homebrew and Linux through `apt`, `dnf`,
-or `pacman`.
+The native setup command requires preinstalled Zig 0.17.0 and supports macOS
+through Homebrew and Linux through `apt`, `dnf`, or `pacman`. It installs and
+verifies the remaining dependencies and discovers GRUB and OVMF paths. It is
+also available as `zig build tool -- setup-deps`.
+
+```sh
+# Verify dependencies without installing packages.
+zig build setup-deps -- --check
+
+# Show installation commands without running them.
+zig build setup-deps -- --dry-run
+```
 
 ## Quick Start
 
-```bash
+```sh
 # Confirm the pinned Zig version.
-./scripts/zig.sh version
+zig version
 
 # Build the production kernel and embedded userspace archive.
-./scripts/zig.sh build kernel
+zig build kernel
 
 # Build or preserve the native storage image used by QEMU run targets.
-./scripts/zig.sh build native-store-image
+zig build native-store-image
 
 # Run the native bootstrap kernel in QEMU.
-./scripts/zig.sh build run
-
-# Equivalent convenience wrapper for the default run path.
-./scripts/zig.sh build run
+zig build run
 ```
 
 `run` and `run-zigos-native` attach `build/native-store.img`. Build targets that
@@ -1343,17 +1356,17 @@ registry before they consume the kernel artifact.
 
 The most common local gate is:
 
-```bash
-./scripts/zig.sh build verify
+```sh
+zig build verify
 ```
 
 The most common build artifacts are:
 
-```bash
-./scripts/zig.sh build -Doptimize=fast userspace-production-images
-./scripts/zig.sh build -Doptimize=fast kernel
-./scripts/zig.sh build native-store-image
-./scripts/zig.sh build -Doptimize=fast iso
+```sh
+zig build -Doptimize=fast userspace-production-images
+zig build -Doptimize=fast kernel
+zig build native-store-image
+zig build -Doptimize=fast iso
 ```
 
 `kernel-zigos-native.elf` and `build/os.iso` are production artifacts. Synthetic
@@ -1363,9 +1376,9 @@ desktop journeys live only in `kernel-zigos-native-verification.elf` and
 verification adds five proof or synthetic-journey images. Build and check that
 boundary with:
 
-```bash
-./scripts/zig.sh build kernel-role-check
-./scripts/zig.sh build iso-verification
+```sh
+zig build kernel-role-check
+zig build iso-verification
 ```
 
 The published `zig-out/bin/kernel-zigos-native.elf` is the exact ELF embedded
@@ -1382,8 +1395,8 @@ for when to use focused checks such as `host-tests`, `spec-tests`,
 
 Optional QEMU gates can be added to `verify`:
 
-```bash
-./scripts/zig.sh build -Dverify-smoke=true -Dverify-benchmark=true verify
+```sh
+zig build -Dverify-smoke=true -Dverify-benchmark=true verify
 ```
 
 The first real-machine gate is an Intel RNUC15CRSU7 proof bundle. First complete
@@ -1392,8 +1405,8 @@ returns, freeze the authenticated release bundle and the exact 17 signed target
 files; do not run any generator again. Prepare a fresh proof skeleton bound to
 that candidate:
 
-```bash
-./scripts/zig.sh build tool -- prepare-nuc15crsu7-hardware-proof \
+```sh
+zig build tool -- prepare-nuc15crsu7-hardware-proof \
   --nonce <fresh-verifier-issued-64-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -1408,8 +1421,8 @@ hashed `cycles/*.log`. After filling the stable device identity, sidecars, and
 two role-specific hardware quote/signature pairs, write the canonical capture
 statement and validate it with an external trusted verifier:
 
-```bash
-./scripts/zig.sh build tool -- write-nuc15crsu7-capture-statement build/hardware-proofs/<fresh-name>
+```sh
+zig build tool -- write-nuc15crsu7-capture-statement build/hardware-proofs/<fresh-name>
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
@@ -1418,10 +1431,10 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-  ./scripts/zig.sh build tool -- check-nuc15crsu7-hardware-proof build/hardware-proofs/<fresh-name>
+  zig build tool -- check-nuc15crsu7-hardware-proof build/hardware-proofs/<fresh-name>
 ```
 
-The same check is exposed as `./scripts/zig.sh build
+The same check is exposed as `zig build
 -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> hardware-proof` and is
 the only dependency of the final, verify-only `release-security-gate`. That
 phase uses the five root, state, and independently pinned verifier build
@@ -1441,7 +1454,7 @@ enforced prototype behavior toward production proof, such as real hardware,
 fault injection, scale, transport, and operational validation.
 
 The secure-by-design release gate is part of the production-readiness manifest
-and is validated by `./scripts/zig.sh build prod-readiness`, which also runs the
+and is validated by `zig build prod-readiness`, which also runs the
 fast `release-security-check` gate. A public release has two ordered phases.
 `release-security-preflight` runs every mutable audit, fixture, build, smoke,
 fault, recovery, sync, and UEFI-QEMU check. `release-bundle-check` depends on
@@ -1498,7 +1511,7 @@ export ZIGOS_RELEASE_HARDWARE_BACKED=true
 export ZIGOS_RELEASE_SEQUENCE='<strictly-increasing-sequence-for-this-new-candidate>'
 export ZIGOS_RELEASE_EXPIRES_AT='<future-unix-timestamp>'
 
-./scripts/zig.sh build -Doptimize=fast \
+zig build -Doptimize=fast \
   -Drelease-trust-root=/absolute/independent/root-metadata.json \
   -Drelease-trust-root-sha256=<pinned-lowercase-sha256> \
   -Drelease-trust-policy=/absolute/independent/release-trust-policy.dsse.json \
@@ -1527,7 +1540,7 @@ export ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex>
 export ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier
 export ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex>
 
-./scripts/zig.sh build \
+zig build \
   -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> \
   -Drelease-trust-root=/absolute/independent/root-metadata.json \
   -Drelease-trust-root-sha256=<pinned-lowercase-sha256> \
@@ -1574,7 +1587,7 @@ fi
 
 This hashes and executes the same private copy, avoiding a path replacement
 between pin verification and execution. The repository
-`./scripts/zig.sh build tool -- verify-release-bundle` wrapper automates that flow for maintainers,
+`zig build tool -- verify-release-bundle` wrapper automates that flow for maintainers,
 but it is not a signed OS target or trust bootstrap; customers must obtain the
 wrapper itself from a trusted, pinned source if they rely on it. The verifier
 rejects policy or release rollback, authenticated-payload equivocation, clock
@@ -1602,25 +1615,36 @@ checker independently recomputes every bound SHA-256, derives counts from
 unique cycle-manifest entries, rejects emulator-sourced logs, and requires an
 external nonce plus a verifier executable matching an externally pinned
 digest. The
-UEFI preflight entrypoints are `./scripts/zig.sh build uefi-qemu-test` for the
-production ISO and `./scripts/zig.sh build uefi-verification-qemu-test` for the
+UEFI preflight entrypoints are `zig build uefi-qemu-test` for the
+production ISO and `zig build uefi-verification-qemu-test` for the
 proof image; set `OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not
 installed in a standard path. Each QEMU process copies an available variables
 template beside its serial log so concurrent boots do not share firmware state.
 
 QEMU proof runs use the native Zig host utility:
 
-- `./scripts/zig.sh build tool -- run-zigos-native-smoke`
-- `./scripts/zig.sh build tool -- run-storage-durability-qemu`
-- `./scripts/zig.sh build tool -- run-sync-two-node-qemu` (drops two final confirmations by default;
+- `zig build tool -- run-zigos-native-smoke`
+- `zig build tool -- run-storage-durability-qemu`
+- `zig build tool -- run-sync-two-node-qemu` (drops two final confirmations by default;
   `SYNC_TWO_NODE_DROP_CONFIRMATIONS=0` runs without injected loss)
-- `./scripts/zig.sh build tool -- run-kernel-recovery`
-- `./scripts/zig.sh build tool -- capture-kernel-benchmark` (capture helper; `zig build benchmark` runs the strict gate)
-- `./scripts/zig.sh build tool -- run-uefi-boot-test`
-- `./scripts/zig.sh build tool -- qemu-harness`
+- `zig build tool -- run-kernel-recovery`
+- `zig build tool -- capture-kernel-benchmark` (capture helper; `zig build benchmark` runs the strict gate)
+- `zig build tool -- run-uefi-boot-test`
+- `zig build tool -- qemu-harness`
 
 Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 `src/kernel/boot/markers.zig`.
+
+The remaining data and test helpers also use the native host utility:
+
+- `zig build tool -- generate-unicode /path/to/sources` regenerates
+  the pinned Unicode tables and bitmap font offline.
+- `zig build tool -- prepare-unified-efi-test IMAGE KERNEL CMDLINE OUTPUT`
+  prepares the firmware-authentication fixtures.
+- `zig build tool -- qemu-peer-relay --upstream-port PORT --drop-confirmations 2`
+  runs the bounded localhost relay used by the two-node proof.
+- `zig build qemu-peer-relay-tests` runs its framing and live socket
+  tests; the two-node QEMU build gate runs them before starting the VMs.
 
 ## Repository Map
 
@@ -1663,9 +1687,8 @@ Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 - `src/tools/`: Zig helper binaries that need the `src/` module root.
 - `build_support/`: build graph helpers for kernels, QEMU, checks, userspace
   images, and shared build paths.
-- `scripts/`: dependency/toolchain bootstrap and external Python test helpers.
 - `tools/host/`: native Zig file, lint, media, QEMU, release, and hardware-proof
-  utilities, invoked with `./scripts/zig.sh build tool -- COMMAND [ARGUMENTS]`.
+  utilities, invoked with `zig build tool -- COMMAND [ARGUMENTS]`.
 - `tools/`: host-side Zig utilities for coverage, readiness, test root checks,
   and userspace archive generation.
 - `spec/`: machine-readable coverage and production-readiness manifests.
@@ -1684,5 +1707,6 @@ GitHub Actions run these primary jobs:
 - native benchmarks
 - ISO build
 
-CI uses `./scripts/zig.sh` and the shared `.github/actions/setup-zigos-ci`
-action to install or resolve the pinned toolchain and required dependencies.
+CI installs the pinned Zig toolchain first, then uses direct `zig` commands and
+the shared `.github/actions/setup-zigos-ci` action to install and verify the
+remaining dependencies.

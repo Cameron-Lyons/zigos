@@ -6,7 +6,7 @@ Grapheme_Cluster_Break (0..3), Indic_Conjunct_Break (4..5), Extended_Pictographi
 (6), East_Asian_Width W/F (7), and Emoji_Presentation (8). The preceding range
 end plus one determines the start. `unicode.zig` defines the property enums.
 
-Sources, pinned by SHA-256 in `scripts/generate-unicode.py`:
+Sources, pinned by SHA-256 in `tools/host/unicode.zig`:
 
 - https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakProperty.txt
 - https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakTest.txt
@@ -23,8 +23,8 @@ Download the pinned sources and the font inputs documented in
 `src/kernel/platform/fonts/README.md` into one directory, then run:
 
 ```
-python3 scripts/generate-unicode.py /path/to/sources
+zig build tool -- generate-unicode /path/to/sources
 ```
 
 Generation is offline and rejects any source whose digest changed. Normal
-builds use the checked-in binary tables, without network access or Python.
+builds use the checked-in binary tables, without network access.

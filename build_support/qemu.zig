@@ -215,6 +215,7 @@ pub fn addSyncTwoNodeQemuCommand(
         "build/native-store-sync-node-b.img",
     });
     command.step.dependOn(userspaceStepForKernel(kernel, userspace_images));
+    command.step.dependOn(&tools_build.addRelayTests(b).step);
     return command;
 }
 

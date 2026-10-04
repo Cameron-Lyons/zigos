@@ -22,6 +22,8 @@ pub fn addCheckSteps(
     const host_tests_step = b.step("host-tests", "Run host-side unit tests for native logic and userspace runtime");
     const host_tool_tests = host_tools.addTests(b);
     b.step("host-tool-tests", "Test native file, release, hardware and QEMU utilities").dependOn(&host_tool_tests.step);
+    const relay_tests = host_tools.addRelayTests(b);
+    b.step("qemu-peer-relay-tests", "Test QEMU relay framing, confirmation loss and live socket cleanup").dependOn(&relay_tests.step);
     host_tests_step.dependOn(&host_tool_tests.step);
     host_tests_step.dependOn(&zig_test_roots_cmd.step);
     host_tests_step.dependOn(&test_artifacts.run_host_tests.step);
@@ -35,10 +37,6 @@ pub fn addCheckSteps(
     const fmt_check_step = b.step("fmt-check", "Check Zig formatting for tracked source files");
     fmt_check_step.dependOn(&fmt_check_cmd.step);
 
-    const shell_lint_cmd = host_tools.addRun(b, "lint-shell");
-    const shell_lint_step = b.step("shell-lint", "Run ShellCheck over all repository shell scripts");
-    shell_lint_step.dependOn(&shell_lint_cmd.step);
-
     const zig_lint_cmd = host_tools.addRun(b, "lint-zig");
     const zig_lint_step = b.step("zig-lint", "Run zlint over Zig sources when zlint is installed");
     zig_lint_step.dependOn(&zig_lint_cmd.step);
@@ -47,10 +45,9 @@ pub fn addCheckSteps(
     const action_lint_step = b.step("action-lint", "Run actionlint over GitHub workflows when actionlint is installed");
     action_lint_step.dependOn(&action_lint_cmd.step);
 
-    const lint_step = b.step("lint", "Run local lint checks: Zig fmt, optional zlint, ShellCheck, and optional actionlint");
+    const lint_step = b.step("lint", "Run local lint checks: Zig fmt, optional zlint, and optional actionlint");
     lint_step.dependOn(&fmt_check_cmd.step);
     lint_step.dependOn(&zig_lint_cmd.step);
-    lint_step.dependOn(&shell_lint_cmd.step);
     lint_step.dependOn(&action_lint_cmd.step);
 
     const spec_coverage_cmd = addHostToolRun(b, optimize, "check-spec-coverage", "tools/check_spec_coverage.zig");

@@ -203,10 +203,10 @@ const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
     "tools/host/hardware/fixtures.zig",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_QEMU_PREFLIGHT_COMMANDS = [_][]const u8{
-    "./scripts/zig.sh build iso",
-    "./scripts/zig.sh build iso-verification",
-    "./scripts/zig.sh build uefi-qemu-test",
-    "./scripts/zig.sh build uefi-verification-qemu-test",
+    "zig build iso",
+    "zig build iso-verification",
+    "zig build uefi-qemu-test",
+    "zig build uefi-verification-qemu-test",
 };
 const FIRST_HARDWARE_TARGET_LIST_FIELDS = [_][]const u8{
     "required_subsystems",
@@ -461,7 +461,7 @@ fn validateBenchmarkEnvironmentGate(
 
     const workflow_path = ".github/workflows/ci.yml";
     const workflow_source = try readRequiredSource(allocator, io, errors, workflow_path) orelse return;
-    if (std.mem.indexOf(u8, workflow_source, "command: QEMU_ACCELERATOR=kvm ./scripts/zig.sh build -Doptimize=fast benchmark") == null) {
+    if (std.mem.indexOf(u8, workflow_source, "command: QEMU_ACCELERATOR=kvm zig build -Doptimize=fast benchmark") == null) {
         try common.addError(errors, allocator, "Hosted benchmark CI must require KVM for cycle-regression enforcement", .{});
     }
 
@@ -1621,7 +1621,7 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_compact_kernel_boot_snippets = [_][]const u8{
-        "const boot_link = b.addSystemCommand",
+        "const boot_link = b.addRunFile(std.Build.LazyPath.zig_exe)",
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
         "addEfiImage(b, .small, boot_kernel",
@@ -1691,12 +1691,23 @@ fn validateNuc11tnki5KernelProofSources(
     }
     const required_ci_kvm_snippets = [_][]const u8{
         "Enable KVM acceleration when available",
-        "sudo chmod 0666 /dev/kvm",
-        "test -w /dev/kvm",
+        "run: zig build tool -- ci-enable-kvm",
     };
     for (required_ci_kvm_snippets) |snippet| {
         if (std.mem.indexOf(u8, ci_setup_source, snippet) == null) {
             try common.addError(errors, allocator, "RNUC15CRSU7 CI setup must expose KVM to QEMU jobs when the runner supports it: {s}", .{snippet});
+        }
+    }
+    const ci_tools_source = try readRequiredSource(allocator, io, errors, "tools/host/ci.zig") orelse return;
+    const required_native_ci_kvm_snippets = [_][]const u8{
+        "if (std.mem.eql(u8, command, \"ci-enable-kvm\")) return enableKvm(ctx);",
+        "fn enableKvm(ctx: *common.Context)",
+        "try ctx.run(&.{ \"sudo\", \"chmod\", \"0666\", \"/dev/kvm\" });",
+        "try std.Io.Dir.cwd().access(ctx.io, \"/dev/kvm\", .{ .read = true, .write = true });",
+    };
+    for (required_native_ci_kvm_snippets) |snippet| {
+        if (std.mem.indexOf(u8, ci_tools_source, snippet) == null) {
+            try common.addError(errors, allocator, "RNUC15CRSU7 native CI setup must grant and verify KVM access: {s}", .{snippet});
         }
     }
     const retired_pit_timer_snippets = [_][]const u8{
@@ -4611,7 +4622,7 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
         \\      "spec/hardware/nuc15crsu7-required-markers.txt",
         \\      "tools/host/hardware.zig"
         \\    ],
-        \\    "qemu_preflight_commands": ["./scripts/zig.sh build iso"],
+        \\    "qemu_preflight_commands": ["zig build iso"],
         \\    "hardware_exit_criteria": ["self-test"],
         \\    "current_hardware_evidence": [],
         \\    "open_gaps": ["self-test"]

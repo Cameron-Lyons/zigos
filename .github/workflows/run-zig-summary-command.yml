@@ -40,22 +40,15 @@ jobs:
       uses: ./.github/actions/setup-zigos-ci
 
     - name: Run command
-      shell: bash
+      shell: sh
       run: ${{ inputs.command }}
 
     - name: Render summary
       if: always()
-      shell: bash
-      run: |
-        mkdir -p "$(dirname -- '${{ inputs.summary-path }}')"
-        if [ ! -s '${{ inputs.summary-path }}' ]; then
-          {
-            echo '## Command Summary'
-            echo
-            echo 'The command ended before it produced a validated summary.'
-          } > '${{ inputs.summary-path }}'
-        fi
-        cat '${{ inputs.summary-path }}' >> "$GITHUB_STEP_SUMMARY"
+      shell: sh
+      env:
+        ZIGOS_CI_SUMMARY_PATH: ${{ inputs.summary-path }}
+      run: zig build tool -- ci-render-summary "$ZIGOS_CI_SUMMARY_PATH"
 
     - name: Upload summary artifact
       if: always()

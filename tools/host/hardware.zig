@@ -601,7 +601,7 @@ fn utcNow(ctx: *Ctx) ![]const u8 {
     return ctx.fmt("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() });
 }
 // SOURCE_DATE_EPOCH must be an explicit configuration argument in nested builds,
-// just as in the bootstrap wrapper: ambient environment does not invalidate
+// because ambient environment does not invalidate
 // Zig's configure cache or override shared.addEfiIsoEpochArg's default.
 pub fn releaseBuildArgv(ctx: *Ctx) ![]const []const u8 {
     const envs = [_][]const u8{ "ZIGOS_RELEASE_TRUST_ROOT", "ZIGOS_RELEASE_TRUST_ROOT_SHA256", "ZIGOS_RELEASE_TRUST_POLICY", "ZIGOS_RELEASE_TRUST_STATE", "ZIGOS_RELEASE_VERIFIER", "ZIGOS_RELEASE_VERIFIER_SHA256", "ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE", "ZIGOS_RELEASE_SIGNING_KEY_ID", "ZIGOS_RELEASE_HARDWARE_BACKED", "ZIGOS_RELEASE_SEQUENCE", "ZIGOS_RELEASE_EXPIRES_AT" };

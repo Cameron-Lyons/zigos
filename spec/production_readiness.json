@@ -42,10 +42,10 @@
           "Keep release-running fuzz harnesses, checked seed corpora, deterministic mutation counts, crash redaction fixtures, and regression tests wired into release-security-check before tagging."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build release-security-check",
-          "./scripts/zig.sh build release-security-preflight",
-          "./scripts/zig.sh build spec-tests",
-          "./scripts/zig.sh build host-tests"
+          "zig build release-security-check",
+          "zig build release-security-preflight",
+          "zig build spec-tests",
+          "zig build host-tests"
         ],
         "cisa_alignment": [
           "Treat exploit-prone input handling as a manufacturer-owned defect class and block release when parser fuzz evidence is absent."
@@ -76,13 +76,13 @@
           "Keep service startup, permission review, storage, driver, recovery, sync, boot tamper, rollback, UEFI fault campaigns, and the RNUC15CRSU7 real-hardware proof bundle in the release matrix with deterministic artifacts and failure triage records."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build release-security-preflight",
-          "./scripts/zig.sh build zigos-native-smoke-test",
-          "./scripts/zig.sh build storage-durability-qemu-test",
-          "./scripts/zig.sh build driver-restart-qemu-test",
-          "./scripts/zig.sh build recovery-qemu-test",
-          "./scripts/zig.sh build sync-two-node-qemu-test",
-          "./scripts/zig.sh build uefi-qemu-test"
+          "zig build release-security-preflight",
+          "zig build zigos-native-smoke-test",
+          "zig build storage-durability-qemu-test",
+          "zig build driver-restart-qemu-test",
+          "zig build recovery-qemu-test",
+          "zig build sync-two-node-qemu-test",
+          "zig build uefi-qemu-test"
         ],
         "cisa_alignment": [
           "Exercise secure-by-default behavior under failure instead of depending on customer recovery workarounds."
@@ -98,7 +98,7 @@
         "implementation_anchors": [
           "build.zig",
           "mise.toml",
-          "scripts/zig.sh",
+          ".tool-versions",
           "tools/host/images.zig",
           "tools/host/release.zig",
           "tools/host/images.zig",
@@ -106,17 +106,17 @@
         ],
         "current_evidence": [
           "The repository pins the Zig toolchain entrypoint and keeps generated artifacts under build outputs.",
-          "EFI boot media uses a fixed FAT volume identity and UTC timestamps derived from a bounded SOURCE_DATE_EPOCH, with a deterministic 1980 default and all media dates clamped to 1980 for earlier epochs. ISO file and volume timestamps and ownership are normalized as well, so filesystem and image metadata do not encode the build clock, host timezone, or host ownership.",
+          "EFI boot media uses a fixed FAT volume identity and UTC timestamps derived from a bounded -Dsource-date-epoch input, with a deterministic 1980 default and all media dates clamped to 1980 for earlier epochs. SOURCE_DATE_EPOCH values must be passed explicitly through this option. ISO file and volume timestamps and ownership are normalized as well, so filesystem and image metadata do not encode the build clock, host timezone, or host ownership.",
           "The published production kernel and embedded EFI payload use the same debug-stripped ELF with static symbols retained for role checks. The role-gated full diagnostic ELF remains under zig-out/kernel-debug for source-line and type information, outside the 17-target release catalog. Optimized EFI images explicitly omit COFF/PDB debugging metadata, keeping build paths and diagnostic timestamps out of the shipped firmware image.",
-          "The reproducible-build-check target exports regular-file contents and executable bits from one immutable Jujutsu revision into two isolated workspaces and checks snapshot stability before building. Each tree uses separate local and global caches to build the exact 17-target production catalog independently with ReleaseFast, the signed evidence label for Zig 0.17 fast mode. It compares the ISO, kernel, seven policy manifests, and 8 userspace-image digests, and records repo_vcs=jj, repository, Jujutsu change ID, commit ID, dirty workspace count, toolchain, optimize mode, and result metadata under build/release-security. EFI media timestamps are explicit build inputs, so SOURCE_DATE_EPOCH changes invalidate cached media. The independently distributed host verifier is outside the OS target catalog."
+          "The reproducible-build-check target exports regular-file contents and executable bits from one immutable Jujutsu revision into two isolated workspaces and checks snapshot stability before building. Each tree uses separate local and global caches to build the exact 17-target production catalog independently with ReleaseFast, the signed evidence label for Zig 0.17 fast mode. It compares the ISO, kernel, seven policy manifests, and 8 userspace-image digests, and records repo_vcs=jj, repository, Jujutsu change ID, commit ID, dirty workspace count, toolchain, optimize mode, and result metadata under build/release-security. EFI media timestamps are explicit build inputs, so changing -Dsource-date-epoch invalidates cached media and build configuration. The independently distributed host verifier is outside the OS target catalog."
         ],
         "open_gaps": [],
         "graduation_criteria": [
           "Keep a reproducible-build release target that builds one frozen Jujutsu revision in two isolated workspaces, compares artifact digests, records repository, Jujutsu source identity, toolchain, and environment metadata, and fails on undocumented nondeterminism."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build reproducible-build-check",
-          "./scripts/zig.sh build release-security-preflight"
+          "zig build reproducible-build-check",
+          "zig build release-security-preflight"
         ],
         "cisa_alignment": [
           "Support supply-chain transparency and reduce unverified build inputs before customer distribution."
@@ -154,14 +154,14 @@
           "Keep zigos-verify-release validating the out-of-band root pin, first-use minimumPolicyVersion and minimumReleaseSequence checkpoints, threshold policy signature, release-manifest signature before parsing, exact 17 targets and ten evidence files, signed SLSA identity, zero dirty workspace evidence, revocation and validity, reproducibility, persistent rollback/equivocation state, post-quantum policy, and required ML-DSA coverage for every public release."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build release-security-preflight",
-          "./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance",
-          "./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-check",
-          "./scripts/zig.sh build -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-verify-existing",
-          "./scripts/zig.sh build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-security-gate",
-          "./scripts/zig.sh build verify-release-cli",
-          "./scripts/zig.sh build userspace-production-images",
-          "./scripts/zig.sh build prod-readiness"
+          "zig build release-security-preflight",
+          "zig build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance",
+          "zig build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-check",
+          "zig build -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-bundle-verify-existing",
+          "zig build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-security-gate",
+          "zig build verify-release-cli",
+          "zig build userspace-production-images",
+          "zig build prod-readiness"
         ],
         "cisa_alignment": [
           "Maintain SBOMs and transparent vulnerability/exploitability records for first- and third-party software."
@@ -193,9 +193,9 @@
           "Keep the threat-model matrix release-gated and require every P0/P1 release track to list abuse cases, mitigations, negative tests, and residual-risk decisions."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build release-security-check",
-          "./scripts/zig.sh build spec-tests",
-          "./scripts/zig.sh build spec-conformance"
+          "zig build release-security-check",
+          "zig build spec-tests",
+          "zig build spec-conformance"
         ],
         "cisa_alignment": [
           "Make security properties measurable across the product lifecycle and prevent dangerous defaults from shipping silently."
@@ -228,10 +228,10 @@
           "Keep an unsafe-surface inventory, required audit owner, reviewer checklist, and tests for every user-memory copy, pointer conversion, inline assembly block, and kernel allocator invariant."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build release-security-check",
-          "./scripts/zig.sh build host-tests",
-          "./scripts/zig.sh build spec-tests",
-          "./scripts/zig.sh build test-roots"
+          "zig build release-security-check",
+          "zig build host-tests",
+          "zig build spec-tests",
+          "zig build test-roots"
         ],
         "cisa_alignment": [
           "Treat memory-safety roadmaps and migration/mitigation evidence as mandatory for unsafe or kernel-adjacent code."
@@ -267,9 +267,9 @@
           "Keep explicit crash dump policy tests for raw memory capture denial, opt-in scoped diagnostics, capability token scrubbing, private object-name scrubbing, and reproducible redaction fixtures."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build release-security-check",
-          "./scripts/zig.sh build host-tests",
-          "./scripts/zig.sh build spec-tests"
+          "zig build release-security-check",
+          "zig build host-tests",
+          "zig build spec-tests"
         ],
         "cisa_alignment": [
           "Keep security-sensitive telemetry safe by default and avoid shifting diagnostic privacy risk to customers."
@@ -298,9 +298,9 @@
           "Keep the private intake channel published, maintainers on rotation, CVE issuance ownership documented, and end-to-end disclosure dry-run recorded before release."
         ],
         "verification_commands": [
-          "./scripts/zig.sh build release-security-check",
-          "./scripts/zig.sh build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance",
-          "./scripts/zig.sh build prod-readiness"
+          "zig build release-security-check",
+          "zig build -Doptimize=fast -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-policy=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> release-sbom-provenance",
+          "zig build prod-readiness"
         ],
         "cisa_alignment": [
           "Avoid the CISA bad practice of shipping without a scoped vulnerability disclosure policy and timely CVE/CWE process."
@@ -353,15 +353,15 @@
       "tools/host/qemu.zig"
     ],
     "qemu_preflight_commands": [
-      "./scripts/zig.sh build iso",
-      "./scripts/zig.sh build iso-verification",
-      "./scripts/zig.sh build uefi-qemu-test",
-      "./scripts/zig.sh build uefi-verification-qemu-test",
-      "./scripts/zig.sh build zigos-native-smoke-test",
-      "./scripts/zig.sh build storage-durability-qemu-test",
-      "./scripts/zig.sh build driver-restart-qemu-test",
-      "./scripts/zig.sh build sync-two-node-qemu-test",
-      "./scripts/zig.sh build recovery-qemu-test"
+      "zig build iso",
+      "zig build iso-verification",
+      "zig build uefi-qemu-test",
+      "zig build uefi-verification-qemu-test",
+      "zig build zigos-native-smoke-test",
+      "zig build storage-durability-qemu-test",
+      "zig build driver-restart-qemu-test",
+      "zig build sync-two-node-qemu-test",
+      "zig build recovery-qemu-test"
     ],
     "proof_bundle_requirements": [
       "proof-manifest.txt must use the v2 format and tie the bundle to a fresh externally issued 64-hex capture nonce, stable target/device identity, production-serial.log bound to build/os.iso and zig-out/bin/kernel-zigos-native.elf, verification-serial.log bound to build/os-verification.iso and zig-out/bin/kernel-zigos-native-verification.elf, the canonical cycle manifest, both checked marker contracts, both role-specific quote/signature pairs, all checked sidecars, repo_vcs=jj, the current Jujutsu change and commit IDs, repo_dirty_files=0, capture times, and operator.",
@@ -456,11 +456,11 @@
         "Continue raising the bounded envelope only with matching quota, replay, format-evolution, corruption, QEMU durability, and benchmark evidence."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build host-tests",
-        "./scripts/zig.sh build storage-durability-qemu-test",
-        "./scripts/zig.sh build benchmark",
-        "./scripts/zig.sh build prod-readiness",
-        "./scripts/zig.sh build zigos-native-smoke-test"
+        "zig build host-tests",
+        "zig build storage-durability-qemu-test",
+        "zig build benchmark",
+        "zig build prod-readiness",
+        "zig build zigos-native-smoke-test"
       ]
     },
     {
@@ -496,7 +496,7 @@
         "src/native/platform/tpm2_sealing.zig",
         "src/native/session/proofs/tpm2_quote_proof.zig",
         "tools/host/qemu.zig",
-        "scripts/prepare-unified-efi-test.py",
+        "tools/host/efi_fixture.zig",
         "src/native/platform/tpm_attestation.zig",
         "src/native/platform/tpm_attestation_wire.zig",
         "src/native/sync/peer_attestation.zig",
@@ -553,11 +553,11 @@
         "Capture the update rollback marker group in the RNUC15CRSU7 hardware proof bundle."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build spec-conformance",
-        "./scripts/zig.sh build zigos-native-smoke-test",
-        "./scripts/zig.sh build recovery-qemu-test",
-        "./scripts/zig.sh build unified-efi-qemu-test",
-        "./scripts/zig.sh build tpm2-quote-qemu-test"
+        "zig build spec-conformance",
+        "zig build zigos-native-smoke-test",
+        "zig build recovery-qemu-test",
+        "zig build unified-efi-qemu-test",
+        "zig build tpm2-quote-qemu-test"
       ]
     },
     {
@@ -671,20 +671,20 @@
         "Capture clean essential startup and native-ready from the production image, then capture service startup, compositor presentation-proof markers, permission review, sync, driver restart, crash persistence, and update rollback markers in the separate verification NUC proof run."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build prod-readiness",
-        "./scripts/zig.sh build hardware-proof-checker-test",
-        "./scripts/zig.sh build spec-tests",
-        "./scripts/zig.sh build iso-verification",
-        "./scripts/zig.sh build uefi-qemu-test",
-        "./scripts/zig.sh build uefi-verification-qemu-test",
-        "./scripts/zig.sh build zigos-native-smoke-test",
-        "./scripts/zig.sh build storage-durability-qemu-test",
-        "./scripts/zig.sh build driver-restart-qemu-test",
-        "./scripts/zig.sh build sync-two-node-qemu-test",
-        "./scripts/zig.sh build recovery-qemu-test",
-        "./scripts/zig.sh build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> hardware-proof",
+        "zig build prod-readiness",
+        "zig build hardware-proof-checker-test",
+        "zig build spec-tests",
+        "zig build iso-verification",
+        "zig build uefi-qemu-test",
+        "zig build uefi-verification-qemu-test",
+        "zig build zigos-native-smoke-test",
+        "zig build storage-durability-qemu-test",
+        "zig build driver-restart-qemu-test",
+        "zig build sync-two-node-qemu-test",
+        "zig build recovery-qemu-test",
+        "zig build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> hardware-proof",
         "tools/host/hardware.zig build/hardware-proofs/<fresh-name>",
-        "./scripts/zig.sh build tpm2-ownership-qemu-test"
+        "zig build tpm2-ownership-qemu-test"
       ]
     },
     {
@@ -751,10 +751,10 @@
         "Capture the service-startup marker group in the RNUC15CRSU7 hardware proof bundle."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build userspace-images",
-        "./scripts/zig.sh build zigos-native-smoke-test",
-        "./scripts/zig.sh build spec-tests",
-        "./scripts/zig.sh build spec-conformance"
+        "zig build userspace-images",
+        "zig build zigos-native-smoke-test",
+        "zig build spec-tests",
+        "zig build spec-conformance"
       ]
     },
     {
@@ -801,9 +801,9 @@
         "Capture permission review and xHCI keyboard full-flow markers in the authenticated build/hardware-proofs/<fresh-name>/verification-serial.log single boot."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build zigos-native-smoke-test",
-        "./scripts/zig.sh build spec-tests",
-        "./scripts/zig.sh build prod-readiness",
+        "zig build zigos-native-smoke-test",
+        "zig build spec-tests",
+        "zig build prod-readiness",
         "tools/host/hardware.zig build/hardware-proofs/<fresh-name>"
       ]
     },
@@ -907,9 +907,9 @@
         "Replace external-provider software callback fixtures for production remote sessions with provisioned TPM, secure-enclave, HSM, or KMS-backed attestation roots."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build sync-two-node-qemu-test",
-        "./scripts/zig.sh build host-tests",
-        "./scripts/zig.sh build spec-conformance"
+        "zig build sync-two-node-qemu-test",
+        "zig build host-tests",
+        "zig build spec-conformance"
       ]
     },
     {
@@ -982,10 +982,10 @@
         "Capture the complete Notes daily-driver marker group in the authenticated build/hardware-proofs/<fresh-name>/verification-serial.log single boot."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build host-tests",
-        "./scripts/zig.sh build spec-tests",
-        "./scripts/zig.sh build prod-readiness",
-        "./scripts/zig.sh build zigos-native-smoke-test",
+        "zig build host-tests",
+        "zig build spec-tests",
+        "zig build prod-readiness",
+        "zig build zigos-native-smoke-test",
         "tools/host/hardware.zig build/hardware-proofs/<fresh-name>"
       ]
     },
@@ -1056,8 +1056,8 @@
         "Capture the expanded driver restart/rebind marker group, including DMA-domain and brokered-buffer markers, in the RNUC15CRSU7 hardware proof bundle."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build driver-restart-qemu-test",
-        "./scripts/zig.sh build spec-conformance"
+        "zig build driver-restart-qemu-test",
+        "zig build spec-conformance"
       ]
     },
     {
@@ -1152,8 +1152,8 @@
         "Emit brokered queue owner, generation, completion-sequence, and hardware interrupt events from real GPU, NPU, and media drivers into the scheduler driver-event path."
       ],
       "verification_commands": [
-        "./scripts/zig.sh build host-tests",
-        "./scripts/zig.sh build benchmark"
+        "zig build host-tests",
+        "zig build benchmark"
       ]
     }
   ]

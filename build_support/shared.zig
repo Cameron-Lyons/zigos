@@ -44,8 +44,8 @@ pub fn addEfiIsoEpochArg(b: *std.Build, command: *std.Build.Step.Run) void {
     const name = "source-date-epoch";
     const default_epoch = "315532800";
     // Declare the option once even when several EFI images share this Build.
-    // The pinned wrapper translates SOURCE_DATE_EPOCH into this configuration
-    // input, which invalidates both the configure cache and the media Run step.
+    // Pass SOURCE_DATE_EPOCH as -Dsource-date-epoch explicitly. The configuration
+    // input invalidates both the configure cache and the media Run step.
     const epoch = if (!b.available_options_map.contains(name))
         b.option([]const u8, name, "EFI media timestamp in decimal Unix seconds (defaults to 1980-01-01 UTC)") orelse default_epoch
     else if (b.user_input_options.get(name)) |value|

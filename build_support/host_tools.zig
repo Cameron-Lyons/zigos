@@ -1,6 +1,7 @@
 const std = @import("std");
 
 var executable: ?*std.Build.Step.Compile = null;
+var relay_tests: ?*std.Build.Step.Run = null;
 
 pub fn module(b: *std.Build) *std.Build.Module {
     const root = b.createModule(.{
@@ -43,7 +44,7 @@ fn addCompilerArgument(run: *std.Build.Step.Run) void {
 
 pub fn addEnvironmentOverride(run: *std.Build.Step.Run, name: []const u8, value: []const u8) void {
     const graph = run.step.owner.graph;
-    // Keep wrapper options before the command and its unmodified arguments.
+    // Keep build options before the command and its unmodified arguments.
     run.argv.insertSlice(graph.arena, 1, &.{
         .{ .bytes = "--build-env" },
         .{ .bytes = graph.dupeString(name) },
@@ -55,6 +56,19 @@ pub fn addTests(b: *std.Build) *std.Build.Step.Run {
     const tests = b.addTest(.{ .name = "host-tool-tests", .root_module = module(b) });
     const run = b.addRunArtifact(tests);
     run.setCwd(b.path("."));
+    return run;
+}
+
+pub fn addRelayTests(b: *std.Build) *std.Build.Step.Run {
+    if (relay_tests) |value| return value;
+    const tests = b.addTest(.{
+        .name = "qemu-peer-relay-tests",
+        .root_module = module(b),
+        .filters = &.{"QEMU relay"},
+    });
+    const run = b.addRunArtifact(tests);
+    run.setCwd(b.path("."));
+    relay_tests = run;
     return run;
 }
 
