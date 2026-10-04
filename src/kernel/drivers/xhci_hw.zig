@@ -2801,6 +2801,89 @@ test "xHCI hotplug accepts queued late keyboard completion without publishing" {
     try std.testing.expectEqual(@as(u8, 1), fixture.states[1].slot_id);
 }
 
+test "xHCI pending work keeps idle report rings quiet and observes queued DMA events" {
+    var fixture = HotplugTestFixture.init();
+    try fixture.activate();
+    defer fixture.restore();
+    const saved_pending = @atomicRmw(u32, &pending_interrupts, .Xchg, 0, .monotonic);
+    defer @atomicStore(u32, &pending_interrupts, saved_pending, .monotonic);
+    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+    try std.testing.expect(!eventWorkPending());
+    try std.testing.expect(!lifecyclePending());
+    const address = active_dma_plan.?.ring_plan.event_ring_address;
+    const words: *[4]u32 = @ptrFromInt(try active_dma_memory.aliasFor(address, xhci.TRB_BYTES));
+    words.* = HotplugTestFixture.transferEvent(fixture.states[1].interrupt_report_trb_address, 3, 1);
+    try std.testing.expect(eventWorkPending());
+    try std.testing.expect(!lifecyclePending());
+    words.* = @splat(0);
+    try std.testing.expect(!eventWorkPending());
+    @atomicStore(u32, &pending_interrupts, 1, .monotonic);
+    try std.testing.expect(eventWorkPending());
+    @atomicStore(u32, &pending_interrupts, 0, .monotonic);
+    try std.testing.expect(!eventWorkPending());
+}
+
+test "xHCI pending work retains control and retirement watchdogs until owned completions drain" {
+    var fixture = HotplugTestFixture.init();
+    try fixture.activate();
+    defer fixture.restore();
+    try std.testing.expect(!lifecyclePending());
+    try submitDescriptorTransfer(.configuration_descriptor_header, 1, &fixture.states[1], &fixture);
+    try std.testing.expect(outstanding_transfer != null);
+    try std.testing.expect(lifecyclePending());
+    try fixture.portEvent(false);
+    try std.testing.expect(fixture.states[1].retiring);
+    try std.testing.expect(fixture.states[1].reset_deadline != null);
+    try std.testing.expect(lifecyclePending());
+    try submitNextPortAction(&fixture);
+    try std.testing.expect(outstanding_command != null);
+    try std.testing.expectEqual(PortAction.none, fixture.states[1].action);
+    try std.testing.expect(lifecyclePending());
+    try fixture.finishStop();
+    try std.testing.expect(outstanding_transfer == null and outstanding_command == null);
+    // Isolate the anchored retirement deadline from the next queued command.
+    const action = fixture.states[1].action;
+    fixture.states[1].action = .none;
+    try std.testing.expect(lifecyclePending());
+    fixture.states[1].action = action;
+    try submitNextPortAction(&fixture);
+    try fixture.finishStop();
+    try std.testing.expect(lifecyclePending());
+    try submitNextPortAction(&fixture);
+    try std.testing.expectEqual(xhci.CommandKind.disable_slot, outstanding_command.?.kind);
+    try std.testing.expect(lifecyclePending());
+    try fixture.queuedEvents(&.{HotplugTestFixture.commandEvent(outstanding_command.?, 1)});
+    try std.testing.expect(!fixture.states[1].retiring);
+    try std.testing.expect(!lifecyclePending());
+}
+
+test "xHCI pending work retains reset deadlines and queued attach actions without CQ events" {
+    var fixture = HotplugTestFixture.init();
+    try fixture.activate();
+    defer fixture.restore();
+    fixture.states[1] = .{};
+    outstanding_interrupt_reports = 0;
+    slot_to_port[1] = 0;
+    // A real reset-in-progress notification owns a watchdog even when the
+    // event ring is empty and no command or control TD has been submitted.
+    fixture.status = (1 << 17) | (1 << 9) | (1 << 4) | (3 << 10) | 1;
+    const notification = xhci.decodeEvent(.{ 1 << 24, 0, 1 << 24, (34 << 10) | 1 });
+    try handlePortStatusChange(notification, &fixture);
+    try std.testing.expect(fixture.states[1].reset_deadline != null);
+    try std.testing.expectEqual(PortAction.none, fixture.states[1].action);
+    try std.testing.expect(lifecyclePending());
+    // Successful reset completion clears the deadline and queues Enable Slot.
+    try fixture.portEvent(true);
+    try std.testing.expect(fixture.states[1].reset_deadline == null);
+    try std.testing.expectEqual(PortAction.enable_slot, fixture.states[1].action);
+    try std.testing.expect(outstanding_command == null and outstanding_transfer == null);
+    try std.testing.expect(lifecyclePending());
+    try submitNextPortAction(&fixture);
+    try std.testing.expectEqual(xhci.CommandKind.enable_slot, outstanding_command.?.kind);
+    try std.testing.expectEqual(PortAction.none, fixture.states[1].action);
+    try std.testing.expect(lifecyclePending());
+}
+
 test "xHCI hotplug reconnect cannot address the slot pending retirement" {
     var fixture = HotplugTestFixture.init();
     try fixture.activate();

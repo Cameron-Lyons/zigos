@@ -155,6 +155,9 @@ test "xhci driver task dispatches only for the bound task" {
     try std.testing.expectEqual(@as(usize, 0), dispatchForTask(7));
     bindTaskId(7);
     try std.testing.expectEqual(@as(usize, 0), dispatchForTask(8));
+    try std.testing.expect(!programmed);
+    try std.testing.expectEqual(@as(usize, 0), dispatchForTask(7));
+    try std.testing.expect(programmed);
     try std.testing.expectEqual(@as(u64, 7), boundTaskId());
     try std.testing.expect(KERNEL_LATCHES_ONLY);
     try std.testing.expect(DISPATCHES_FROM_BOUND_TASK);
