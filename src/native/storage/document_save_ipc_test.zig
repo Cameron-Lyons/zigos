@@ -22,7 +22,7 @@ test "clipboard document authorization rechecks signed workspace policy and exis
     defer fixture.deinit();
     fixture.channel.close(0);
     var sessions = document_sessions.Sessions{};
-    defer sessions.deinit(0);
+    defer sessions.deinit(0) catch unreachable;
     _ = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
     // The default signing fixture authorizes its key, not clipboard access.
     try std.testing.expect(!sessions.allowsClipboard(fixture.app_task_id, false, 10));
@@ -70,7 +70,7 @@ test "clipboard document authorization requires a live service signing lease" {
             true,
         );
         var sessions = document_sessions.Sessions{};
-        defer sessions.deinit(10);
+        defer sessions.deinit(10) catch unreachable;
         _ = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
         try std.testing.expect(sessions.allowsClipboard(fixture.app_task_id, false, 9));
         try std.testing.expect(sessions.allowsClipboard(fixture.app_task_id, true, 9));
@@ -217,6 +217,20 @@ const Fixture = struct {
         }
     }
 
+    fn queueCommit(self: *Fixture, text: []const u8) !void {
+        try self.client.start(text);
+        var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+        while (self.client.phase != .commit) {
+            const frame = (try self.client.nextFrame(&bytes)).?;
+            try self.send(frame, self.client.request_id);
+            self.client.sent();
+            try std.testing.expect(try self.server.runOnce(10));
+        }
+        const frame = (try self.client.nextFrame(&bytes)).?;
+        try self.send(frame, self.client.request_id);
+        self.client.sent();
+    }
+
     fn receive(self: *Fixture, deliver: bool) !abi.EndpointRecvResult {
         var out = std.mem.zeroes(abi.EndpointRecvResult);
         var response: abi.EndpointRecvResponse = undefined;
@@ -237,6 +251,314 @@ const Fixture = struct {
         return out;
     }
 };
+
+const PausedDocument = struct {
+    const sealing = @import("../platform/secret_sealing.zig");
+    const cooperative = @import("../task/cooperative_worker.zig");
+    fixture: *Fixture,
+    opens: usize = 0,
+    progressed: bool = false,
+    now_ticks: u64 = 10,
+    pause_signing: bool = true,
+    pause_flush: bool = false,
+    flush_paused: bool = false,
+    channel: ?*document_channel.Channel = null,
+
+    fn ticks(context: *anyopaque) @import("../platform/operation_guard.zig").Error!u64 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.now_ticks;
+    }
+
+    fn provider(self: *@This()) sealing.Provider {
+        return .{ .context = self, .operations = &.{ .seal = seal, .open = open } };
+    }
+    fn seal(_: ?*anyopaque, binding: *const sealing.Binding, raw: []const u8, out: *sealing.Blob) sealing.Error!void {
+        try @import("../../tests/fixtures/secret_provider.zig").provider().seal(binding, raw, out);
+    }
+    fn open(context: ?*anyopaque, binding: *const sealing.Binding, blob: []const u8, out: *sealing.Value) sealing.Error!usize {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.opens += 1;
+        if (self.pause_signing) cooperative.current().?.yield();
+        return @import("../../tests/fixtures/secret_provider.zig").provider().open(binding, blob, out);
+    }
+    fn run(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.progressed = (self.channel orelse &self.fixture.channel).runOnce(10);
+    }
+
+    fn flush(context: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.pause_flush and !self.flush_paused) {
+            self.flush_paused = true;
+            cooperative.current().?.yield();
+        }
+    }
+};
+
+test "document IPC rejects authority revoked while actual signing worker is suspended" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.queueCommit("cancelled while signing");
+    var paused = PausedDocument{ .fixture = fixture };
+    fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = PausedDocument.cooperative.Worker{ .stack = &stack };
+    try worker.start(&paused, PausedDocument.run);
+    try worker.step();
+    try std.testing.expect(worker.state == .suspended and paused.opens == 1);
+    var duplicate: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    try fixture.send(try protocol.encode(&duplicate, .{ .request_id = fixture.client.request_id, .body = .commit }), fixture.client.request_id);
+    try std.testing.expect(!fixture.channel.hasPendingWork());
+    try fixture.capabilities.revokeGrant(fixture.write_capability);
+    try worker.step();
+    try std.testing.expect(worker.state == .complete and paused.progressed);
+    try std.testing.expect(fixture.channel.hasPendingWork());
+    _ = try fixture.receive(true);
+    try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
+    try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+    try std.testing.expectEqualStrings("original", try fixture.device.text());
+}
+
+test "document IPC revalidates authority time task and signer after yielding signing" {
+    const Failure = enum { cancelled, suspended, membership, grant_expiry, share_expiry, signing_expiry, policy, clock_rollback, endpoint_revoked };
+    for (std.enums.values(Failure)) |failure| {
+        const fixture = try Fixture.init();
+        defer fixture.deinit();
+        if (failure == .grant_expiry) {
+            const original = fixture.capabilities.query(fixture.write_capability).?;
+            const shorter = try fixture.capabilities.mintBootRoot(.{ .holder = original.holder, .issuer = original.issuer, .target = original.target, .rights = original.rights, .scope = original.scope, .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 11 } });
+            try fixture.runtime.grantCapability(fixture.app_task_id, shorter.id);
+            fixture.write_capability = shorter.id;
+            fixture.server.binding.authority.capability_id = shorter.id;
+        }
+        try fixture.queueCommit("must remain unsaved");
+        var paused = PausedDocument{ .fixture = fixture };
+        const guard = @import("../platform/operation_guard.zig").Guard{ .context = &paused, .check_fn = PausedDocument.ticks };
+        fixture.signing_fixture.authority.publication_guard = &guard;
+        fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+        var stack: [128 * 1024]u8 align(16) = undefined;
+        var worker = PausedDocument.cooperative.Worker{ .stack = &stack };
+        try worker.start(&paused, PausedDocument.run);
+        try worker.step();
+        try std.testing.expect(worker.state == .suspended and fixture.server.running);
+        paused.now_ticks = 12;
+        switch (failure) {
+            .cancelled => worker.cancel(),
+            .suspended => try std.testing.expect(try fixture.runtime.suspendTask(fixture.app_task_id, 11)),
+            .membership => try std.testing.expect(try fixture.runtime.revokeCapability(fixture.app_task_id, fixture.write_capability)),
+            .grant_expiry => {},
+            .share_expiry => try fixture.device.service.shareWorkspace(fixture.device.workspace_id, try (workspace.ShareGrant{
+                .principal_id = fixture.open_request.authority.principal,
+                .can_read = true,
+                .can_write = true,
+                .expires_at_ticks = 11,
+                .network_scope = .local_only,
+            }).withObjectScope(ids.object(900), durable.path)),
+            .signing_expiry => fixture.signing_fixture.service.findHandle(fixture.open_request.signer.key.handle_id).?.expires_at_ticks = 12,
+            .policy => {
+                _ = try fixture.signing_fixture.policies.create(.{ .scope = .user, .subject_id = 1, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "deny document signature", .secret_vault_allowed = false }, durable.signer);
+            },
+            .clock_rollback => paused.now_ticks = 9,
+            .endpoint_revoked => try fixture.capabilities.revokeGrant(fixture.server.binding.server_endpoint_capability_id),
+        }
+        try worker.step();
+        try std.testing.expect(worker.state == .complete and paused.progressed);
+        if (failure == .suspended) try std.testing.expect(try fixture.runtime.resumeTask(fixture.app_task_id, 13));
+        if (failure == .endpoint_revoked) {
+            try std.testing.expect(fixture.channel.server == null);
+        } else {
+            _ = try fixture.receive(true);
+            try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
+        }
+        try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+        try std.testing.expectEqualStrings("original", try fixture.device.text());
+    }
+}
+
+test "document IPC rejects changed workspace pointer or object head after yielding signing" {
+    for ([_]bool{ false, true }) |move_workspace| {
+        const fixture = try Fixture.init();
+        defer fixture.deinit();
+        try fixture.queueCommit("stale editor");
+        var paused = PausedDocument{ .fixture = fixture };
+        fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+        var stack: [128 * 1024]u8 align(16) = undefined;
+        var worker = PausedDocument.cooperative.Worker{ .stack = &stack };
+        try worker.start(&paused, PausedDocument.run);
+        try worker.step();
+        const edited = try fixture.device.service.putVersion(.{
+            .preferred_object_id = ids.object(900),
+            .object_type = .document,
+            .parent_version_id = ids.version(fixture.device.original_version_id),
+            .payload = "other editor",
+            .metadata = try @import("object_store.zig").signMetadata(durable.signer, durable.path, "text/markdown", .document, "other editor", 11),
+        });
+        if (move_workspace) {
+            try fixture.device.service.beginTransaction(fixture.device.workspace_id);
+            try fixture.device.service.stagePut(fixture.device.workspace_id, durable.path, edited.object_id, edited.version_id, .document);
+            _ = try fixture.device.service.commit(fixture.device.workspace_id, 11);
+        }
+        try worker.step();
+        try std.testing.expect(worker.state == .complete);
+        _ = try fixture.receive(true);
+        try std.testing.expectEqual(protocol.Status.document_changed, fixture.client.last_status.?);
+        try std.testing.expectEqual(@as(usize, 2), fixture.device.service.versionCount());
+        try std.testing.expectEqualStrings(if (move_workspace) "other editor" else "original", try fixture.device.text());
+    }
+}
+
+test "document channel close retains suspended operation and refuses reentry until terminal cleanup" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    try fixture.queueCommit("closed while signing");
+    var paused = PausedDocument{ .fixture = fixture };
+    fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = PausedDocument.cooperative.Worker{ .stack = &stack };
+    try worker.start(&paused, PausedDocument.run);
+    try worker.step();
+    try std.testing.expectError(error.DocumentOperationBusy, fixture.server.runOnce(11));
+    var duplicate: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    try fixture.send(try protocol.encode(&duplicate, .{ .request_id = fixture.client.request_id, .body = .commit }), fixture.client.request_id);
+    try std.testing.expect(!fixture.channel.hasPendingWork());
+    try std.testing.expect(!fixture.channel.runOnce(11));
+    fixture.channel.close(11);
+    try std.testing.expect(fixture.channel.server != null and fixture.server.closing and fixture.server.running);
+    try std.testing.expectEqualStrings(durable.path, fixture.server.binding.path);
+    try std.testing.expectError(error.EndpointNotFound, fixture.endpoints.descriptor(ids.endpoint(fixture.app_endpoint_id)));
+    try std.testing.expectError(error.EndpointNotFound, fixture.endpoints.descriptor(ids.endpoint(fixture.server_endpoint_id)));
+    try std.testing.expectError(error.DocumentAlreadyOpen, fixture.channel.open(&fixture.port, &fixture.device.service, fixture.open_request, 11));
+    try worker.step();
+    try std.testing.expect(worker.state == .complete and fixture.channel.server == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&fixture.channel), 0));
+}
+
+test "document IPC withholds success after durable wait and preserves immutable pending retry" {
+    for ([_]bool{ false, true }) |retry_existing_pending| {
+        const fixture = try Fixture.init();
+        defer fixture.deinit();
+        if (retry_existing_pending) {
+            fixture.device.fail_flushes = true;
+            try fixture.client.start("recoverable draft");
+            try fixture.submit();
+            _ = try fixture.receive(true);
+            try std.testing.expectEqual(protocol.Status.durability_failed, fixture.client.last_status.?);
+            fixture.device.fail_flushes = false;
+            try std.testing.expect(fixture.client.retry());
+            var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+            const frame = (try fixture.client.nextFrame(&bytes)).?;
+            try fixture.send(frame, fixture.client.request_id);
+            fixture.client.sent();
+        } else try fixture.queueCommit("recoverable draft");
+        var paused = PausedDocument{ .fixture = fixture, .pause_signing = false, .pause_flush = true };
+        fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+        fixture.device.before_flush = .{ .context = &paused, .call = PausedDocument.flush };
+        var stack: [128 * 1024]u8 align(16) = undefined;
+        var worker = PausedDocument.cooperative.Worker{ .stack = &stack };
+        try worker.start(&paused, PausedDocument.run);
+        try worker.step();
+        try std.testing.expect(worker.state == .suspended and paused.flush_paused);
+        try std.testing.expectEqual(@as(usize, 2), fixture.device.service.versionCount());
+        const pending_version = fixture.server.saver.pending.?.version_id;
+        worker.cancel();
+        try worker.step();
+        try std.testing.expect(worker.state == .complete);
+        _ = try fixture.receive(true);
+        try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
+        try std.testing.expect(fixture.client.acknowledgedText() == null);
+        try std.testing.expectEqual(pending_version, fixture.server.saver.pending.?.version_id);
+        try std.testing.expect(fixture.server.attempt.?.saved == null);
+        try std.testing.expectEqualStrings("recoverable draft", try fixture.device.text());
+        const signing_calls = paused.opens;
+        // A new authorized dispatch retries the exact immutable version. The
+        // earlier device success is retained even though no success escaped.
+        try fixture.sendFrame(.commit);
+        _ = try fixture.receive(true);
+        try std.testing.expectEqual(protocol.Status.saved, fixture.client.last_status.?);
+        try std.testing.expectEqual(pending_version, fixture.client.version_id);
+        try std.testing.expectEqual(signing_calls, paused.opens);
+        try std.testing.expectEqual(@as(usize, 2), fixture.device.service.versionCount());
+        try std.testing.expect(fixture.server.saver.pending == null);
+        fixture.device.before_flush = null;
+        fixture.device.crash();
+        try std.testing.expectEqualStrings("recoverable draft", try fixture.device.text());
+    }
+}
+
+test "document sessions deinit refuses suspended work before any channel mutation" {
+    const fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.channel.close(0);
+    var sessions = @import("../session/document_sessions.zig").Sessions{};
+    defer sessions.deinit(99) catch unreachable;
+    const binding = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
+    const channel = &sessions.backing[0];
+    fixture.server = &channel.server.?;
+    fixture.app_endpoint_id = channel.client_endpoint_id;
+    fixture.app_endpoint_capability = binding.endpoint_capability_id;
+    fixture.server_endpoint_id = binding.service_endpoint_id;
+    fixture.client = .{ .service_endpoint_id = binding.service_endpoint_id, .object_id = binding.object_id, .version_id = binding.version_id };
+    try fixture.queueCommit("live borrowed save");
+    var paused = PausedDocument{ .fixture = fixture, .channel = channel };
+    fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+    var stack: [128 * 1024]u8 align(16) = undefined;
+    var worker = PausedDocument.cooperative.Worker{ .stack = &stack };
+    try worker.start(&paused, PausedDocument.run);
+    try worker.step();
+    try std.testing.expectError(error.DocumentOperationBusy, sessions.deinit(11));
+    try std.testing.expect(channel.server != null and !fixture.server.closing and fixture.server.running);
+    _ = try fixture.endpoints.descriptor(ids.endpoint(fixture.app_endpoint_id));
+    _ = try fixture.endpoints.descriptor(ids.endpoint(fixture.server_endpoint_id));
+    try std.testing.expectEqualStrings(durable.path, fixture.server.binding.path);
+    sessions.closeTask(fixture.app_task_id, 11);
+    try std.testing.expectError(error.DocumentOperationBusy, sessions.deinit(11));
+    try worker.step();
+    try std.testing.expect(worker.state == .complete and channel.server == null);
+    try sessions.deinit(12);
+    try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+}
+
+test "document IPC retained saved and read replies recheck authority at endpoint enqueue" {
+    const Failure = enum { revoked, expired, suspended, signer_revoked };
+    for ([_]bool{ false, true }) |reading| {
+        for (std.enums.values(Failure)) |failure| {
+            const fixture = try Fixture.init();
+            defer fixture.deinit();
+            var paused = PausedDocument{ .fixture = fixture, .pause_signing = false };
+            const guard = @import("../platform/operation_guard.zig").Guard{ .context = &paused, .check_fn = PausedDocument.ticks };
+            fixture.signing_fixture.authority.publication_guard = &guard;
+            for (0..endpoint.MAX_ENDPOINT_QUEUE) |index| {
+                _ = try fixture.endpoints.reply(ids.endpoint(fixture.server_endpoint_id), ids.endpoint(fixture.app_endpoint_id), ids.task(fixture.device.service.task_id), index, "queued", null, false);
+            }
+            if (reading) try fixture.client.open() else try fixture.client.start("backpressured saved draft");
+            try fixture.submit();
+            try std.testing.expect(fixture.server.pending_reply != null);
+            switch (failure) {
+                .revoked => try fixture.capabilities.revokeGrant(fixture.write_capability),
+                .expired => {
+                    fixture.signing_fixture.service.findHandle(fixture.open_request.signer.key.handle_id).?.expires_at_ticks = 12;
+                    paused.now_ticks = 12;
+                },
+                .suspended => try std.testing.expect(try fixture.runtime.suspendTask(fixture.app_task_id, 11)),
+                .signer_revoked => fixture.signing_fixture.service.findHandle(fixture.open_request.signer.key.handle_id).?.revoked = true,
+            }
+            // Drain queued noise without reauthorizing the saved/read payload.
+            var bytes: [abi.ENDPOINT_INLINE_BYTES]u8 = undefined;
+            for (0..endpoint.MAX_ENDPOINT_QUEUE) |_| _ = try fixture.endpoints.recvInto(ids.endpoint(fixture.app_endpoint_id), &bytes);
+            try std.testing.expect(try fixture.server.runOnce(11));
+            if (failure == .suspended) try std.testing.expect(try fixture.runtime.resumeTask(fixture.app_task_id, 12));
+            const received = try fixture.receive(false);
+            const response = try protocol.decode(received.payload[0..received.message.payload_len]);
+            try std.testing.expect(response.body == .receipt);
+            try std.testing.expectEqual(protocol.Status.permission_denied, response.body.receipt.status);
+            try std.testing.expectEqual(@as(u64, 0), response.body.receipt.version_id);
+            try std.testing.expect(fixture.server.pending_reply == null);
+            try std.testing.expectEqual(@as(usize, if (reading) 1 else 2), fixture.device.service.versionCount());
+            if (!reading) try std.testing.expect(fixture.server.attempt.?.saved != null);
+        }
+    }
+}
 
 test "document IPC saves a full bounded draft durably through client syscalls" {
     const fixture = try Fixture.init();
@@ -731,7 +1053,7 @@ test "document sessions bound dispatch and remain idle under reply backpressure"
     defer fixture.deinit();
     fixture.channel.close(1);
     var sessions = Sessions{};
-    defer sessions.deinit(99);
+    defer sessions.deinit(99) catch unreachable;
     const binding = try sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 2);
     try std.testing.expectError(error.DocumentAlreadyOpen, sessions.open(&fixture.port, &fixture.device.service, fixture.open_request, 2));
     try std.testing.expect(!sessions.hasPendingWork());
@@ -791,7 +1113,7 @@ test "document sessions enforce capacity and share each dispatch fairly" {
     defer fixture.deinit();
     fixture.channel.close(1);
     var sessions = sessions_mod.Sessions{};
-    defer sessions.deinit(99);
+    defer sessions.deinit(99) catch unreachable;
     const Binding = @import("../task/userspace_bootstrap_mailbox.zig").DocumentBinding;
     var bindings: [sessions_mod.MAX_CHANNELS]Binding = undefined;
     var requests: [sessions_mod.MAX_CHANNELS + 1]document_channel.OpenRequest = undefined;

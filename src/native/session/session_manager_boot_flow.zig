@@ -151,6 +151,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.documents.requireQuiescent() catch @panic("trusted reset requires document operations to finish");
         self.clearPeerAttestationWorker();
         // Revoke and drain authentication before any borrowed service is freed.
         self.clearIdentityOwner();
@@ -160,7 +161,7 @@ pub const SessionManager = struct {
         self.peers.deinit();
         self.launcher.deinit(self, 0);
         self.clipboard.deinit(0);
-        self.documents.deinit(0);
+        self.documents.deinit(0) catch unreachable;
         self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
         self.input_router.deinit();
@@ -607,6 +608,14 @@ pub const SessionManager = struct {
     }
 
     pub fn clearIdentityOwner(self: *SessionManager) void {
+        self.documents.requireQuiescent() catch @panic("trusted identity retirement requires document operations to finish");
+        if (self.identity_owner != null) {
+            // Picker offers and channels borrow the owner's signer. Retire them
+            // while their kernel, storage and compositor dependencies are live.
+            self.launcher.deinit(self, 0);
+            self.clipboard.deinit(0);
+            self.documents.deinit(0) catch unreachable;
+        }
         self.input_router.clearTrustedEntry();
         if (self.identity_owner) |owner| owner.destroy(owner.context);
         self.identity_owner = null;
@@ -1217,6 +1226,7 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.documents.requireQuiescent() catch @panic("trusted boot teardown requires document operations to finish");
         self.clearPeerAttestationWorker();
         self.clearIdentityOwner();
         self.peer_connections.deinit(&self.peer_handshakes, &self.peers);
@@ -1225,7 +1235,7 @@ pub const SessionManager = struct {
         network_driver.reserveReceivePrefix(null);
         self.launcher.deinit(self, 0);
         self.clipboard.deinit(0);
-        self.documents.deinit(0);
+        self.documents.deinit(0) catch unreachable;
         self.initialized = false;
         self.kernel_context.kernel_instance.clearFocusedInputReceiver();
         self.kernel_context.kernel_instance.clearSurfacePresentationReceiver();

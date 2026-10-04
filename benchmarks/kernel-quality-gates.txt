@@ -8,4 +8,4 @@ lower_class_service_debt.batch_tie_dispatch 1 1
 accelerator_claims.deadline_priority 1 1
 brokered_accelerator_queue.completion_release 1 1
 background_throttling.delayed_dispatches 1 1
-latency_under_load.max_foreground_wait_ticks 0 5
+latency_under_load.max_foreground_wait_ticks 0 6

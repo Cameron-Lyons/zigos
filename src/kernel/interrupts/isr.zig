@@ -11,14 +11,12 @@ const nvme_hw = @import("../drivers/nvme_hw.zig");
 const xhci_hw = @import("../drivers/xhci_hw.zig");
 const smp = @import("../smp.zig");
 const event_wake = @import("../event_wake.zig");
-const x86 = @import("../../arch/x86.zig");
 
 const GateHandler = *const fn () callconv(.c) void;
 
 const IDT_INTERRUPT_GATE: u8 = 0x8E;
 const EXCEPTION_VECTOR_COUNT: u32 = 32;
 const DOUBLE_FAULT_VECTOR: u8 = 8;
-const DEVICE_NOT_AVAILABLE_VECTOR: u8 = 7;
 const PAGE_FAULT_VECTOR: u32 = 14;
 const USERSPACE_YIELD_VECTOR: u8 = 129;
 const REQUESTED_PRIVILEGE_LEVEL_MASK: usize = 0x3;
@@ -168,10 +166,8 @@ pub export fn isrHandler(regs: *Registers) void {
     interrupt_context.enter();
     defer interrupt_context.leave();
     const vector = interruptVector(regs);
-    if (vector == DEVICE_NOT_AVAILABLE_VECTOR) {
-        x86.clearTaskSwitched();
-        return;
-    }
+    // Owned xstate never lazily arms TS. Unexpected #NM follows the registered
+    // user containment handler or the ordinary fatal kernel exception path.
     if (handlerForVector(vector)) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
@@ -398,4 +394,28 @@ comptime {
     {
         @compileError("x86-64 interrupt privilege-origin decoding diverged from the GDT selectors");
     }
+}
+
+test "owned state ISR dispatches registered device-not-available and ordinary handlers" {
+    const Handler = struct {
+        var called: usize = 0;
+        fn receive(frame: *InterruptFrame) void {
+            if (!interrupt_context.active()) @panic("registered ISR handler has no interrupt context");
+            called += 1;
+            frame.eax = 0xfeed;
+        }
+    };
+    const previous_handlers = exception_handlers;
+    defer exception_handlers = previous_handlers;
+    for ([_]u8{ 7, 13 }) |vector| {
+        registerHandler(vector, Handler.receive);
+        var frame = std.mem.zeroes(Registers);
+        frame.int_no = vector;
+        frame.cs = gdt.USER_CODE_SEG | USER_PRIVILEGE_LEVEL;
+        frame.eip = 0x4000_1008;
+        isrHandler(&frame);
+        try std.testing.expectEqual(@as(usize, 0xfeed), frame.eax);
+        try std.testing.expect(!interrupt_context.active());
+    }
+    try std.testing.expectEqual(@as(usize, 2), Handler.called);
 }

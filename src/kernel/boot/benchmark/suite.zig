@@ -1941,7 +1941,7 @@ fn qualityBatterySaverBatchDelay() u64 {
         kibibytes(64),
         null,
     );
-    if (!scheduler.registerTask(batch.id)) return 0;
+    if (!scheduler.registerTaskAt(batch.id, 0)) return 0;
     _ = scheduler.runNext(2);
 
     const stats = scheduler.taskDispatchStats(batch.id) orelse return 0;
@@ -1975,7 +1975,7 @@ fn qualityThermalCriticalBackgroundDelay() u64 {
         kibibytes(64),
         null,
     );
-    if (!scheduler.registerTask(background.id)) return 0;
+    if (!scheduler.registerTaskAt(background.id, 0)) return 0;
     _ = scheduler.runNext(2);
 
     const stats = scheduler.taskDispatchStats(background.id) orelse return 0;
@@ -2008,7 +2008,7 @@ fn qualityMemoryPressureBatchDelay() u64 {
         kibibytes(128),
         null,
     );
-    if (!scheduler.registerTask(batch.id)) return 0;
+    if (!scheduler.registerTaskAt(batch.id, 0)) return 0;
     if (!scheduler.configureTaskDispatchRequest(batch.id, .{
         .class = .batch_compute,
         .wants_npu = true,
@@ -2050,7 +2050,7 @@ fn qualitySchedulerFairnessRatioPercent() u64 {
             null,
         );
         task_id.* = task.id;
-        if (!scheduler.registerTask(task.id)) return std.math.maxInt(u64);
+        if (!scheduler.registerTaskAt(task.id, 0)) return std.math.maxInt(u64);
     }
 
     var round: u64 = 0;
@@ -2099,8 +2099,8 @@ fn qualityStarvationResistanceAfterPressure() u64 {
         kibibytes(64),
         null,
     );
-    if (!scheduler.registerTask(background.id)) return 0;
-    if (!scheduler.registerTask(batch.id)) return 0;
+    if (!scheduler.registerTaskAt(background.id, 0)) return 0;
+    if (!scheduler.registerTaskAt(batch.id, 0)) return 0;
 
     configureLoadTelemetry(&scheduler, 7_005, 705, 1, .{
         .total_cpu_budget_ticks = 200_000,
@@ -2156,8 +2156,8 @@ fn qualityLowerClassServiceDebtBatchTieDispatch() u64 {
         kibibytes(64),
         null,
     );
-    if (!scheduler.registerTask(background.id)) return 0;
-    if (!scheduler.registerTask(batch.id)) return 0;
+    if (!scheduler.registerTaskAt(background.id, 0)) return 0;
+    if (!scheduler.registerTaskAt(batch.id, 0)) return 0;
     if (!scheduler.wakeTask(background.id, .timer, 10, 20)) return 0;
     if (!scheduler.wakeTask(batch.id, .timer, 10, 100)) return 0;
 
@@ -2212,8 +2212,8 @@ fn qualityAcceleratorClaimDeadlinePriority() u64 {
         kibibytes(64),
         5,
     );
-    if (!scheduler.registerTask(batch.id)) return 0;
-    if (!scheduler.registerTask(foreground.id)) return 0;
+    if (!scheduler.registerTaskAt(batch.id, 0)) return 0;
+    if (!scheduler.registerTaskAt(foreground.id, 0)) return 0;
     if (!scheduler.parkTaskUntilEvent(batch.id)) return 0;
     if (!scheduler.parkTaskUntilEvent(foreground.id)) return 0;
 
@@ -2371,7 +2371,7 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
             null,
         );
         task_id.* = task.id;
-        if (!scheduler.registerTask(task.id)) return std.math.maxInt(u64);
+        if (!scheduler.registerTaskAt(task.id, 0)) return std.math.maxInt(u64);
     }
 
     const foreground = createLoadTask(
@@ -2384,7 +2384,7 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
         kibibytes(64),
         9,
     );
-    if (!scheduler.registerTask(foreground.id)) return std.math.maxInt(u64);
+    if (!scheduler.registerTaskAt(foreground.id, 0)) return std.math.maxInt(u64);
     if (!scheduler.parkTaskUntilEvent(foreground.id)) return std.math.maxInt(u64);
 
     var max_wait_ticks: u64 = 0;
@@ -2394,16 +2394,25 @@ fn qualityLatencyUnderLoadMaxWaitTicks() u64 {
         var load_round: usize = 0;
         while (load_round < 3) : (load_round += 1) {
             _ = scheduler.runNext(tick);
-            tick += 1;
+            tick += userspace_executor.DISPATCH_QUANTUM_TICKS;
         }
 
-        if (!scheduler.wakeTask(foreground.id, .ipc_message, tick, tick + 5)) return std.math.maxInt(u64);
-        _ = scheduler.runNext(tick + 1);
+        const dispatched_before_wake = (scheduler.taskDispatchStats(foreground.id) orelse return std.math.maxInt(u64)).dispatch_count;
+        const wake_tick = tick;
+        const deadline = wake_tick + units.millisecondsToTimerTicksCeil(50);
+        if (!scheduler.wakeTask(foreground.id, .ipc_message, wake_tick, deadline)) return std.math.maxInt(u64);
+        // Older lower-class activations may run until this foreground deadline
+        // becomes due. Advance by real quanta instead of assuming first choice.
+        while (tick <= deadline + userspace_executor.DISPATCH_QUANTUM_TICKS) : (tick += userspace_executor.DISPATCH_QUANTUM_TICKS) {
+            _ = scheduler.runNext(tick);
+            const current = scheduler.taskDispatchStats(foreground.id) orelse return std.math.maxInt(u64);
+            if (current.dispatch_count > dispatched_before_wake) break;
+        }
         const stats = scheduler.taskDispatchStats(foreground.id) orelse return std.math.maxInt(u64);
-        if (stats.last_dispatch_tick < stats.last_wake_tick) return std.math.maxInt(u64);
+        if (stats.dispatch_count == dispatched_before_wake or stats.last_dispatch_tick < stats.last_wake_tick) return std.math.maxInt(u64);
         max_wait_ticks = @max(max_wait_ticks, stats.last_dispatch_tick - stats.last_wake_tick);
         if (!scheduler.parkTaskUntilEvent(foreground.id)) return std.math.maxInt(u64);
-        tick += 2;
+        tick += userspace_executor.DISPATCH_QUANTUM_TICKS;
     }
 
     return max_wait_ticks;
@@ -2418,6 +2427,8 @@ fn configureLoadTelemetry(
     observed_tick: u64,
     counters: accelerator_scheduler.LivePlatformCounters,
 ) void {
+    // Isolated quality workloads use synthetic ticks for observations, task
+    // registration and dispatch, independently of the running kernel clock.
     var telemetry_counters = counters;
     if (!telemetry_counters.hardware_evidence.complete()) {
         telemetry_counters.hardware_evidence = .{
@@ -2497,7 +2508,7 @@ fn prepareSloIrqFixture() void {
         kibibytes(64),
         21,
     );
-    if (!slo_irq_context.scheduler.registerTask(task.id)) {
+    if (!slo_irq_context.scheduler.registerTaskAt(task.id, 0)) {
         benchmark_reporting.benchStepFailure("benchmark suite", error.TaskNotRunnable);
     }
     if (!slo_irq_context.scheduler.parkTaskUntilEvent(task.id)) {

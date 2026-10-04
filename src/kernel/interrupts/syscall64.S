@@ -137,6 +137,8 @@ zigos_syscall_benchmark_user_start:
     jne .benchmark_dispatch_loop
 
     movq %r13, %rdi
+    xorl %esi, %esi
+    xorl %edx, %edx
     movl $SYSCALL_CALL_YIELD, %eax
     syscall
     ud2

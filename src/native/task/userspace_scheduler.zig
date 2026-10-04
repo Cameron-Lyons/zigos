@@ -29,16 +29,18 @@ else
         pub fn printBootMarker(_: []const u8) void {}
     };
 
+// Resource-accounting credits are separate from the hardware timer clock.
 const DISPATCH_CPU_TICK_COST: u64 = 1_000;
 pub const RESOURCE_CLASS_COUNT: usize = @typeInfo(accelerator_scheduler.ResourceClass).@"enum".field_names.len;
 pub const ENGINE_COUNT: usize = @typeInfo(accelerator_scheduler.Engine).@"enum".field_names.len;
 pub const UNIFIED_RUNQUEUE = true;
 pub const MAX_ACCELERATOR_CLAIMS: usize = task_runtime.MAX_TASKS;
-const EMERGENCY_DEADLINE_DELTA_TICKS: u64 = 1_000;
-const FOREGROUND_DEADLINE_DELTA_TICKS: u64 = 5_000;
-const MEDIA_EXPORT_DEADLINE_DELTA_TICKS: u64 = 20_000;
-const BACKGROUND_DEADLINE_DELTA_TICKS: u64 = 50_000;
-const BATCH_DEADLINE_DELTA_TICKS: u64 = 100_000;
+// Aging targets use the canonical timer clock as actual user preemption and wakes.
+const EMERGENCY_DEADLINE_DELTA_TICKS = units.millisecondsToTimerTicksCeil(10);
+const FOREGROUND_DEADLINE_DELTA_TICKS = units.millisecondsToTimerTicksCeil(50);
+const MEDIA_EXPORT_DEADLINE_DELTA_TICKS = units.millisecondsToTimerTicksCeil(200);
+const BACKGROUND_DEADLINE_DELTA_TICKS = units.millisecondsToTimerTicksCeil(500);
+const BATCH_DEADLINE_DELTA_TICKS = units.millisecondsToTimerTicksCeil(1000);
 const USER_EXCEPTION_CRASH_SERVICE_ID: u64 = 0;
 const USER_EXCEPTION_REDACTION_POLICY_VERSION: u16 = 1;
 const TEST_TASK_MEMORY_BYTES: usize = 1024;
@@ -464,6 +466,11 @@ pub const Scheduler = struct {
     }
 
     pub fn registerTask(self: *Scheduler, task_id: u64) bool {
+        if (!smp.isRuntimeOwner() or !self.initialized) return false;
+        return self.registerTaskAt(task_id, registrationTimerTicks());
+    }
+
+    pub fn registerTaskAt(self: *Scheduler, task_id: u64, now_ticks: u64) bool {
         if (!smp.isRuntimeOwner()) return false;
         if (!self.initialized) return false;
         if (task_id == self.active_dispatch_task_id) return false;
@@ -486,8 +493,9 @@ pub const Scheduler = struct {
         slot.require_accelerator = false;
         slot.owns_ui_surface = owns_ui_surface;
         slot.cpu_budget_remaining_ticks = task.budget.cpu_time_ticks;
-        slot.deadline_tick = deadlineFromNow(slot.resource_class, 0);
+        slot.deadline_tick = deadlineFromNow(slot.resource_class, now_ticks);
         self.accountingStorage()[slot_index] = .{};
+        self.accountingStorage()[slot_index].last_wake_tick = now_ticks;
         self.accountingStorage()[slot_index].wake_event_count = 1;
         return self.enqueueReadyIndex(slot_index, slot.resource_class);
     }
@@ -1897,6 +1905,13 @@ fn engineIndex(engine: accelerator_scheduler.Engine) usize {
     };
 }
 
+fn registrationTimerTicks() u64 {
+    if (builtin.target.os.tag != .freestanding) return 0;
+    const clock = @import("../../kernel/timer/timer.zig");
+    clock.synchronize();
+    return clock.getTicks();
+}
+
 fn deadlineFromNow(class: accelerator_scheduler.ResourceClass, now_ticks: u64) u64 {
     const delta: u64 = switch (class) {
         .emergency_system_critical => EMERGENCY_DEADLINE_DELTA_TICKS,
@@ -1909,7 +1924,7 @@ fn deadlineFromNow(class: accelerator_scheduler.ResourceClass, now_ticks: u64) u
 }
 
 fn deadlineAfterDispatch(class: accelerator_scheduler.ResourceClass, now_ticks: u64) u64 {
-    const next_quantum_tick = std.math.add(u64, now_ticks, DISPATCH_CPU_TICK_COST) catch std.math.maxInt(u64);
+    const next_quantum_tick = std.math.add(u64, now_ticks, userspace_executor.DISPATCH_QUANTUM_TICKS) catch std.math.maxInt(u64);
     return deadlineFromNow(class, next_quantum_tick);
 }
 
@@ -2596,15 +2611,15 @@ test "userspace scheduler coalesces wakes at the earliest ready deadline" {
     const task = try createRunnableSchedulerTask(&runtime, 7, .background_light, "wake-deadline", "app.wake-deadline", null);
     try std.testing.expect(scheduler.registerTask(task.id));
     const slot = scheduler.slots.getConst(task.id).?;
-    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, 10_000, 0));
+    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, 10, 0));
     try std.testing.expectEqual(BACKGROUND_DEADLINE_DELTA_TICKS, slot.deadline_tick);
-    try std.testing.expect(scheduler.wakeTask(task.id, .timer, 11_000, 20_000));
-    try std.testing.expectEqual(@as(u64, 20_000), slot.deadline_tick);
-    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, 12_000, 80_000));
-    try std.testing.expectEqual(@as(u64, 20_000), slot.deadline_tick);
+    try std.testing.expect(scheduler.wakeTask(task.id, .timer, 11, 20));
+    try std.testing.expectEqual(@as(u64, 20), slot.deadline_tick);
+    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, 12, 80));
+    try std.testing.expectEqual(@as(u64, 20), slot.deadline_tick);
     try std.testing.expect(scheduler.parkTaskUntilEvent(task.id));
-    try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 90_000, 0));
-    try std.testing.expectEqual(@as(u64, 90_000) + BACKGROUND_DEADLINE_DELTA_TICKS, slot.deadline_tick);
+    try std.testing.expect(scheduler.wakeTask(task.id, .external_event, 90, 0));
+    try std.testing.expectEqual(@as(u64, 90) + BACKGROUND_DEADLINE_DELTA_TICKS, slot.deadline_tick);
 }
 
 test "userspace scheduler separates accelerator claim queues from cpu ready queues" {
@@ -3633,8 +3648,8 @@ test "userspace scheduler sustained load gate bounds background and batch starva
 
     var first_background_dispatch_tick: u64 = 0;
     var first_batch_dispatch_tick: u64 = 0;
-    var now_ticks: u64 = 1_000;
-    while (now_ticks <= BATCH_DEADLINE_DELTA_TICKS + 2_000) : (now_ticks += 1_000) {
+    var now_ticks: u64 = userspace_executor.DISPATCH_QUANTUM_TICKS;
+    while (now_ticks <= BATCH_DEADLINE_DELTA_TICKS + userspace_executor.DISPATCH_QUANTUM_TICKS * 2) : (now_ticks += userspace_executor.DISPATCH_QUANTUM_TICKS) {
         _ = scheduler.runNext(now_ticks);
         const background_stats = scheduler.taskDispatchStats(background.id).?;
         const batch_stats = scheduler.taskDispatchStats(batch.id).?;
@@ -3653,7 +3668,7 @@ test "userspace scheduler sustained load gate bounds background and batch starva
     try std.testing.expect(background_stats.dispatch_count > 0);
     try std.testing.expect(batch_stats.dispatch_count > 0);
     try std.testing.expect(first_background_dispatch_tick <= BACKGROUND_DEADLINE_DELTA_TICKS);
-    try std.testing.expect(first_batch_dispatch_tick <= BATCH_DEADLINE_DELTA_TICKS + 1_000);
+    try std.testing.expect(first_batch_dispatch_tick <= BATCH_DEADLINE_DELTA_TICKS + userspace_executor.DISPATCH_QUANTUM_TICKS);
     try std.testing.expectEqual(@as(u64, 0), background_stats.missed_deadline_count);
     try std.testing.expectEqual(@as(u64, 0), batch_stats.missed_deadline_count);
     try std.testing.expectEqual(accelerator_scheduler.Engine.npu, batch_stats.last_dispatch_engine);
@@ -3681,8 +3696,8 @@ test "userspace scheduler bounds lower class starvation despite coalesced wakes"
     try std.testing.expect(scheduler.registerTask(batch.id));
     var first_background_dispatch_tick: u64 = 0;
     var first_batch_dispatch_tick: u64 = 0;
-    var now_ticks: u64 = 1_000;
-    while (now_ticks <= BATCH_DEADLINE_DELTA_TICKS + 2_000) : (now_ticks += DISPATCH_CPU_TICK_COST) {
+    var now_ticks: u64 = userspace_executor.DISPATCH_QUANTUM_TICKS;
+    while (now_ticks <= BATCH_DEADLINE_DELTA_TICKS + userspace_executor.DISPATCH_QUANTUM_TICKS * 2) : (now_ticks += userspace_executor.DISPATCH_QUANTUM_TICKS) {
         if (first_background_dispatch_tick == 0) try std.testing.expect(scheduler.wakeTask(background.id, .ipc_message, now_ticks, 0));
         if (first_batch_dispatch_tick == 0) try std.testing.expect(scheduler.wakeTask(batch.id, .ipc_message, now_ticks, 0));
         _ = scheduler.runNext(now_ticks);
@@ -3694,7 +3709,146 @@ test "userspace scheduler bounds lower class starvation despite coalesced wakes"
     try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(background.id).?.dispatch_count);
     try std.testing.expectEqual(@as(u64, 1), scheduler.taskDispatchStats(batch.id).?.dispatch_count);
     try std.testing.expect(first_background_dispatch_tick <= BACKGROUND_DEADLINE_DELTA_TICKS);
-    try std.testing.expect(first_batch_dispatch_tick <= BATCH_DEADLINE_DELTA_TICKS + DISPATCH_CPU_TICK_COST);
+    try std.testing.expect(first_batch_dispatch_tick <= BATCH_DEADLINE_DELTA_TICKS + userspace_executor.DISPATCH_QUANTUM_TICKS);
+}
+
+test "userspace scheduler foreground wall-time deadline bounds an expired lower-class backlog" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .cpu_budget_ticks = DISPATCH_CPU_TICK_COST * 64,
+        .memory_bandwidth_units = 1024,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    var lower_ids: [4]u64 = undefined;
+    for (&lower_ids, 0..) |*task_id, index| {
+        const class: accelerator_scheduler.ResourceClass = if (index < 2) .background_light else .batch_compute;
+        const task = try createRunnableSchedulerTaskWithBudget(&runtime, 260 + index, class, "expired-lower", "app.expired-lower", null, DISPATCH_CPU_TICK_COST * 2);
+        task_id.* = task.id;
+        try std.testing.expect(scheduler.registerTaskAt(task.id, 0));
+    }
+    const foreground = try createRunnableSchedulerTaskWithBudget(&runtime, 264, .foreground_interactive, "new-foreground", "app.new-foreground", 264, DISPATCH_CPU_TICK_COST * 16);
+    const start: u64 = 1000;
+    try std.testing.expect(scheduler.registerTaskAt(foreground.id, start));
+    try std.testing.expect(scheduler.parkTaskUntilEvent(foreground.id));
+    try std.testing.expect(scheduler.wakeTask(foreground.id, .ipc_message, start, 0));
+    const quantum = userspace_executor.DISPATCH_QUANTUM_TICKS;
+    var first_foreground: ?u64 = null;
+    var now = start;
+    while (now <= start + quantum * 8) : (now += quantum) {
+        _ = scheduler.runNext(now);
+        const foreground_stats = scheduler.taskDispatchStats(foreground.id).?;
+        if (first_foreground == null and foreground_stats.dispatch_count != 0) first_foreground = foreground_stats.last_dispatch_tick;
+    }
+    try std.testing.expect(first_foreground != null);
+    try std.testing.expect(first_foreground.? - start <= units.millisecondsToTimerTicksCeil(50) + quantum);
+    // Foreground urgency does not discard the already-aged lower work.
+    for (lower_ids) |task_id| try std.testing.expect(scheduler.taskDispatchStats(task_id).?.dispatch_count != 0);
+}
+
+test "userspace scheduler aging deadlines use timer units and saturate" {
+    try std.testing.expectEqual(@as(u64, 1), deadlineFromNow(.emergency_system_critical, 0));
+    try std.testing.expectEqual(@as(u64, 5), deadlineFromNow(.foreground_interactive, 0));
+    try std.testing.expectEqual(@as(u64, 20), deadlineFromNow(.media_export, 0));
+    try std.testing.expectEqual(@as(u64, 50), deadlineFromNow(.background_light, 0));
+    try std.testing.expectEqual(@as(u64, 100), deadlineFromNow(.batch_compute, 0));
+    try std.testing.expectEqual(@as(u64, 152), deadlineAfterDispatch(.background_light, 100));
+    inline for (std.enums.values(accelerator_scheduler.ResourceClass)) |class| {
+        try std.testing.expectEqual(std.math.maxInt(u64), deadlineFromNow(class, std.math.maxInt(u64) - 1));
+        try std.testing.expectEqual(std.math.maxInt(u64), deadlineAfterDispatch(class, std.math.maxInt(u64) - 1));
+    }
+}
+
+test "userspace scheduler late registration ages from the current timer tick" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    const task = try createRunnableSchedulerTask(&runtime, 256, .background_light, "late-background", "app.late-background", null);
+    const now: u64 = 100_000;
+    try std.testing.expect(scheduler.registerTaskAt(task.id, now));
+    const slot = scheduler.slots.getConst(task.id).?;
+    try std.testing.expectEqual(now + 50, slot.deadline_tick);
+    try std.testing.expectEqual(now, scheduler.taskDispatchStats(task.id).?.last_wake_tick);
+    try std.testing.expect(scheduler.wakeTask(task.id, .ipc_message, now + 1, 0));
+    try std.testing.expectEqual(now + 50, slot.deadline_tick);
+    try std.testing.expect(scheduler.parkTaskUntilEvent(task.id));
+    try std.testing.expect(scheduler.unregisterTask(task.id));
+    try std.testing.expect(scheduler.registerTaskAt(task.id, std.math.maxInt(u64) - 1));
+    try std.testing.expectEqual(std.math.maxInt(u64), scheduler.slots.getConst(task.id).?.deadline_tick);
+}
+
+test "userspace scheduler wall-time aging bounds initial and repeated lower-class service" {
+    var executor = userspace_executor.Executor{};
+    var scheduler = Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var runtime = task_runtime.Runtime.init();
+    var capabilities = capability.CapabilityTable.init();
+    scheduler.bind(&catalog, &runtime, &capabilities);
+    scheduler.configureResourceTelemetry(.{
+        .source = .hardware,
+        .observed_tick = 1,
+        .cpu_budget_ticks = DISPATCH_CPU_TICK_COST * 512,
+        .memory_bandwidth_units = 4096,
+        .hardware_evidence = completeTestHardwareEvidence(),
+    });
+    const foreground = try createRunnableSchedulerTaskWithBudget(&runtime, 253, .foreground_interactive, "wall-time-foreground", "app.wall-time-foreground", 253, DISPATCH_CPU_TICK_COST * 512);
+    const background = try createRunnableSchedulerTaskWithBudget(&runtime, 254, .background_light, "wall-time-background", "app.wall-time-background", null, DISPATCH_CPU_TICK_COST * 16);
+    const batch = try createRunnableSchedulerTaskWithBudget(&runtime, 255, .batch_compute, "wall-time-batch", "app.wall-time-batch", null, DISPATCH_CPU_TICK_COST * 16);
+    try std.testing.expect(scheduler.registerTask(foreground.id));
+    try std.testing.expect(scheduler.registerTask(background.id));
+    try std.testing.expect(scheduler.registerTask(batch.id));
+
+    const quantum = userspace_executor.DISPATCH_QUANTUM_TICKS;
+    const background_wait = units.millisecondsToTimerTicksCeil(500);
+    const batch_wait = units.millisecondsToTimerTicksCeil(1000);
+    var first_background: u64 = 0;
+    var first_batch: u64 = 0;
+    var previous_background: u64 = 0;
+    var previous_batch: u64 = 0;
+    var max_background_gap: u64 = 0;
+    var max_batch_gap: u64 = 0;
+    var now: u64 = quantum;
+    while (now <= units.millisecondsToTimerTicksCeil(3000)) : (now += quantum) {
+        // Foreground traffic stays ready. Lower classes receive coalesced
+        // wakes before their first service, then remain ready without new
+        // events: their requeue deadlines must age in wall time too.
+        try std.testing.expect(scheduler.wakeTask(foreground.id, .ipc_message, now, 0));
+        if (first_background == 0) try std.testing.expect(scheduler.wakeTask(background.id, .ipc_message, now, 0));
+        if (first_batch == 0) try std.testing.expect(scheduler.wakeTask(batch.id, .ipc_message, now, 0));
+        _ = scheduler.runNext(now);
+        const background_tick = scheduler.taskDispatchStats(background.id).?.last_dispatch_tick;
+        const batch_tick = scheduler.taskDispatchStats(batch.id).?.last_dispatch_tick;
+        if (background_tick != previous_background) {
+            if (first_background == 0) first_background = background_tick;
+            if (previous_background != 0) max_background_gap = @max(max_background_gap, background_tick - previous_background);
+            previous_background = background_tick;
+        }
+        if (batch_tick != previous_batch) {
+            if (first_batch == 0) first_batch = batch_tick;
+            if (previous_batch != 0) max_batch_gap = @max(max_batch_gap, batch_tick - previous_batch);
+            previous_batch = batch_tick;
+        }
+    }
+    try std.testing.expect(first_background != 0);
+    try std.testing.expect(first_batch != 0);
+    try std.testing.expect(first_background <= background_wait + quantum);
+    try std.testing.expect(first_batch <= batch_wait + quantum * 2);
+    try std.testing.expect(scheduler.taskDispatchStats(background.id).?.dispatch_count >= 4);
+    try std.testing.expect(scheduler.taskDispatchStats(batch.id).?.dispatch_count >= 2);
+    // A completed quantum receives one quantum of slack before aging again;
+    // another expired class can take one quantum before this one is selected.
+    try std.testing.expect(max_background_gap <= background_wait + quantum * 3);
+    try std.testing.expect(max_batch_gap <= batch_wait + quantum * 3);
+    try std.testing.expect(scheduler.taskDispatchStats(foreground.id).?.dispatch_count > scheduler.taskDispatchStats(background.id).?.dispatch_count);
 }
 
 test "userspace scheduler breaks expired lower-class ties by service debt" {

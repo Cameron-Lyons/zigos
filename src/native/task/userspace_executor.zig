@@ -1935,15 +1935,21 @@ fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     const executor = registered_executor orelse return;
+    handleUserspaceYield(executor, frame);
+}
+
+fn handleUserspaceYield(executor: *Executor, frame: anytype) void {
     if (executor.active_task_id == 0) return;
     const mapping = executor.active_mapping orelse
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
     const instruction_pointer = frame.eip;
     const stack_pointer = frame.useresp;
     const counter = std.math.cast(u32, frame.eax) orelse
-        native_util.impossibleByInvariant("userspace trap counter exceeds its ABI width");
+        return containMalformedYield(executor, frame.eip);
     const disposition_raw = std.math.cast(u32, frame.esi) orelse
-        native_util.impossibleByInvariant("userspace yield disposition exceeds its ABI width");
+        return containMalformedYield(executor, frame.eip);
+    const disposition = userspace_bootstrap_mailbox.yieldDisposition(disposition_raw) orelse
+        return containMalformedYield(executor, frame.eip);
     const ui_revision: u64 = @intCast(frame.edx);
     @call(.never_inline, recordTrapState, .{
         executor,
@@ -1958,13 +1964,28 @@ fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
     captureUserContext64(mapping, frame);
     mapping.yield_count += 1;
     mapping.last_user_counter = executor.last_trap_counter;
-    executor.last_yield_disposition = userspace_bootstrap_mailbox.yieldDisposition(disposition_raw) orelse .runnable;
+    executor.last_yield_disposition = disposition;
     executor.last_yield_ui_revision = ui_revision;
 
     executor.handoff_completed = true;
     zigos_userspace_resume_requested = 1;
 
     captureMailbox(mapping);
+    freestanding.paging.switchToKernelAddressSpace();
+}
+
+fn containMalformedYield(executor: *Executor, instruction_pointer: u64) void {
+    requestUserExceptionHandoff(executor, .{
+        .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+        .error_code = 0,
+        .instruction_pointer = instruction_pointer,
+    });
+}
+
+fn requestUserExceptionHandoff(executor: *Executor, exception: UserException) void {
+    executor.last_user_exception = exception;
+    executor.handoff_completed = true;
+    zigos_userspace_resume_requested = 1;
     freestanding.paging.switchToKernelAddressSpace();
 }
 
@@ -1977,17 +1998,19 @@ fn userspaceExceptionHandler(frame: *freestanding.isr.InterruptFrame) void {
         native_util.impossibleByInvariant("active userspace task has no materialized mapping");
     const vector = std.math.cast(u8, frame.int_no) orelse
         native_util.impossibleByInvariant("userspace exception vector exceeds the IDT range");
-    if (!isContainableUserExceptionVector(vector)) {
+    if (!containUserException(executor, vector, @intCast(frame.err_code), @intCast(frame.eip))) {
         freestanding.isr.haltUnhandledException(frame);
     }
-    executor.last_user_exception = .{
+}
+
+fn containUserException(executor: *Executor, vector: u8, error_code: u32, instruction_pointer: u64) bool {
+    if (!isContainableUserExceptionVector(vector)) return false;
+    requestUserExceptionHandoff(executor, .{
         .vector = vector,
-        .error_code = @intCast(frame.err_code),
-        .instruction_pointer = @intCast(frame.eip),
-    };
-    executor.handoff_completed = true;
-    zigos_userspace_resume_requested = 1;
-    freestanding.paging.switchToKernelAddressSpace();
+        .error_code = error_code,
+        .instruction_pointer = instruction_pointer,
+    });
+    return true;
 }
 
 pub export fn zigos_handle_invalid_interrupt_return(frame: *freestanding.isr.InterruptFrame) void {
@@ -2294,7 +2317,7 @@ fn enterUserspaceWithClock(executor: *Executor, clock: anytype, entry: anytype) 
     return entry.enter(&executor.pending_user_context64, storage.state());
 }
 
-fn captureUserContext64(mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame) void {
+fn captureUserContext64(mapping: *MappingEntry, frame: anytype) void {
     mapping.user_context64 = .{
         .rax = frame.eax,
         .rbx = frame.ebx,
@@ -3111,6 +3134,133 @@ test "userspace exception containment excludes system-fatal and dedicated vector
     try std.testing.expect(!isContainableUserExceptionVector(8));
     try std.testing.expect(!isContainableUserExceptionVector(PAGE_FAULT_VECTOR));
     try std.testing.expect(!isContainableUserExceptionVector(18));
+}
+
+const YieldTestFrame = struct {
+    eax: u64,
+    ebx: u64 = 13,
+    ecx: u64 = 15,
+    edx: u64 = 14,
+    ebp: u64 = 11,
+    esi: u64,
+    edi: u64 = 9,
+    r8: u64 = 8,
+    r9: u64 = 7,
+    r10: u64 = 6,
+    r11: u64 = 5,
+    r12: u64 = 4,
+    r13: u64 = 3,
+    r14: u64 = 2,
+    r15: u64 = 1,
+    eip: u64 = 0x4000_1008,
+    eflags: u64 = DEFAULT_USER_RFLAGS,
+    useresp: u64 = 0x7fff_eff0,
+};
+
+fn expectYieldHandler(counter: u64, disposition: u64, expected: ?userspace_bootstrap_mailbox.YieldDisposition) !void {
+    var executor = Executor{};
+    const previous_executor = registered_executor;
+    const previous_requested = zigos_userspace_resume_requested;
+    const previous_esp = zigos_userspace_resume_esp;
+    const previous_eip = zigos_userspace_resume_eip;
+    defer {
+        executor.active_task_id = 0;
+        executor.active_mapping = null;
+        executor.reset();
+        registered_executor = previous_executor;
+        zigos_userspace_resume_requested = previous_requested;
+        zigos_userspace_resume_esp = previous_esp;
+        zigos_userspace_resume_eip = previous_eip;
+    }
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .yield_count = 8,
+        .last_user_counter = 9,
+    });
+    const mapping = &executor.mappingArena().?.getByHandle(handle).?.mapping;
+    executor.active_mapping = mapping;
+    executor.active_mapping_handle = handle;
+    executor.active_task_id = 7;
+    zigos_userspace_resume_requested = 0;
+    var frame = YieldTestFrame{ .eax = counter, .esi = disposition };
+    const before = frame;
+    // This is the production handler body; only the compiler-known frame type
+    // differs from the entry assembly's Registers pointer.
+    handleUserspaceYield(&executor, &frame);
+    try std.testing.expectEqualDeep(before, frame);
+    try std.testing.expect(executor.handoff_completed);
+    try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+    try std.testing.expectEqual(@as(u64, 7), executor.active_task_id);
+    try std.testing.expect(executor.active_mapping == mapping);
+    if (expected) |valid| {
+        try std.testing.expect(executor.last_user_exception == null);
+        try std.testing.expectEqual(valid, executor.last_yield_disposition);
+        try std.testing.expectEqual(@as(u32, @intCast(counter)), mapping.last_user_counter);
+        try std.testing.expectEqual(@as(u64, 9), mapping.yield_count);
+        try std.testing.expect(mapping.resume_valid);
+        try std.testing.expectEqual(frame.eip, mapping.resume_instruction_pointer);
+        try std.testing.expectEqual(frame.useresp, mapping.resume_stack_pointer);
+        try std.testing.expectEqual(frame.eax, mapping.user_context64.rax);
+        try std.testing.expectEqual(frame.esi, mapping.user_context64.rsi);
+        try std.testing.expectEqual(frame.r12, mapping.user_context64.r12);
+        try std.testing.expectEqual(frame.r13, mapping.user_context64.r13);
+        try std.testing.expectEqual(frame.eflags, mapping.user_context64.flags);
+        try std.testing.expectEqual(frame.edx, executor.last_yield_ui_revision);
+    } else {
+        try std.testing.expectEqualDeep(UserException{
+            .vector = GENERAL_PROTECTION_FAULT_VECTOR,
+            .error_code = 0,
+            .instruction_pointer = frame.eip,
+        }, executor.last_user_exception.?);
+        try std.testing.expectEqual(@as(u32, 9), mapping.last_user_counter);
+        try std.testing.expectEqual(@as(u64, 8), mapping.yield_count);
+        try std.testing.expect(!mapping.resume_valid);
+        try std.testing.expectEqual(UserContext64{}, mapping.user_context64);
+        try std.testing.expectEqual(@as(u32, 0), executor.last_trap_counter);
+        try std.testing.expectEqual(@as(u64, 0), executor.last_yield_ui_revision);
+    }
+}
+
+test "yield handler contains counter overflow before publishing a resume" {
+    try expectYieldHandler(@as(u64, std.math.maxInt(u32)) + 1, 0, null);
+    try expectYieldHandler(std.math.maxInt(u64), 1, null);
+}
+
+test "yield handler contains disposition overflow before publishing a resume" {
+    try expectYieldHandler(1, @as(u64, std.math.maxInt(u32)) + 1, null);
+    try expectYieldHandler(1, std.math.maxInt(u64), null);
+}
+
+test "yield handler contains unknown disposition enums" {
+    try expectYieldHandler(1, 2, null);
+    try expectYieldHandler(1, std.math.maxInt(u32), null);
+}
+
+test "yield handler preserves maximum valid counters and both dispositions" {
+    try expectYieldHandler(std.math.maxInt(u32), 0, .runnable);
+    try expectYieldHandler(std.math.maxInt(u32), 1, .wait_for_event);
+}
+
+test "owned state exceptions use user containment without lazy retry" {
+    var executor = Executor{ .active_task_id = 7 };
+    const previous_requested = zigos_userspace_resume_requested;
+    defer zigos_userspace_resume_requested = previous_requested;
+    for ([_]u8{ 7, GENERAL_PROTECTION_FAULT_VECTOR }) |vector| {
+        zigos_userspace_resume_requested = 0;
+        executor.handoff_completed = false;
+        try std.testing.expect(containUserException(&executor, vector, 0, 0x4000_1008));
+        try std.testing.expectEqual(vector, executor.last_user_exception.?.vector);
+        try std.testing.expect(executor.handoff_completed);
+        try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+    }
+    executor.last_user_exception = null;
+    executor.handoff_completed = false;
+    zigos_userspace_resume_requested = 0;
+    try std.testing.expect(!containUserException(&executor, 2, 0, 0x4000_1008));
+    try std.testing.expect(executor.last_user_exception == null);
+    try std.testing.expect(!executor.handoff_completed);
+    try std.testing.expectEqual(@as(u32, 0), zigos_userspace_resume_requested);
 }
 
 test "production address-space groups share page tables" {

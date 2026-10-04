@@ -3,6 +3,12 @@ const std = @import("std");
 extern fn zigos_fred_capture_probe(*const [15]u64, *const [8]u64, *[32]u64) callconv(.c) void;
 extern fn zigos_fred_return_probe(*const [24]u64, *const [8]u64, *[8]u64) callconv(.c) void;
 
+// The host fixture supplies diagnostic text bounds for the exported real ISR.
+// Import it only in test builds; registered-handler tests execute no MMIO.
+comptime {
+    if (@import("builtin").is_test) _ = @import("../../kernel/interrupts/isr.zig").Registers;
+}
+
 // Intel FRED rev5, section5.2.1: lowest-address error, RIP, augmented CS,
 // RFLAGS, RSP, augmented SS, event data, reserved zero. Vector/type are in SS.
 test "FRED captures every GPR from the architectural eight-qword event frame" {
@@ -62,4 +68,25 @@ test "FRED publishes handler return edits while retaining augmented event metada
     try std.testing.expectEqual(canonical[22], returned[4]);
     try std.testing.expectEqual((raw[5] & ~@as(u64, 0xffff)) | canonical[23], returned[5]);
     try std.testing.expectEqualSlices(u64, raw[6..], returned[6..]);
+}
+
+test "FRED yield capture preserves untrusted full-width counter and disposition" {
+    const frame = [8]u64{ 0, 0x4000_1008, 0x23, 0x202, 0x7fff_eff0, 0x1b | (@as(u64, 1) << 17) | (@as(u64, 1) << 32) | (@as(u64, 7) << 48), 0, 0 };
+    for ([_][2]u64{
+        .{ @as(u64, std.math.maxInt(u32)) + 1, 0 },
+        .{ std.math.maxInt(u32), @as(u64, std.math.maxInt(u32)) + 1 },
+        .{ std.math.maxInt(u64), std.math.maxInt(u64) },
+        .{ std.math.maxInt(u32), 1 },
+    }) |arguments| {
+        var seeds: [15]u64 = @splat(0);
+        seeds[6] = arguments[0]; // RDI is copied to canonical RAX for yields.
+        seeds[5] = arguments[1]; // RSI remains the full untrusted disposition.
+        var captured: [32]u64 = undefined;
+        zigos_fred_capture_probe(&seeds, &frame, &captured);
+        try std.testing.expectEqual(@as(u64, 129), captured[17]);
+        try std.testing.expectEqual(arguments[0], captured[16]);
+        try std.testing.expectEqual(arguments[1], captured[10]);
+        try std.testing.expectEqual(frame[1], captured[19]);
+        try std.testing.expectEqual(frame[4], captured[22]);
+    }
 }

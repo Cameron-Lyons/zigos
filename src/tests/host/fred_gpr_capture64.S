@@ -4,11 +4,19 @@
 #if defined(__APPLE__)
 #define PROBE_SYMBOL _zigos_fred_capture_probe
 #define RETURN_PROBE_SYMBOL _zigos_fred_return_probe
+#define HOST_TEXT_START ___kernel_start
+#define HOST_TEXT_END ___kernel_end
 #else
 #define PROBE_SYMBOL zigos_fred_capture_probe
 #define RETURN_PROBE_SYMBOL zigos_fred_return_probe
+#define HOST_TEXT_START __kernel_start
+#define HOST_TEXT_END __kernel_end
 #endif
 .text
+// Hosted ISR tests link the real dispatcher and its unreachable fatal path.
+// These diagnostic bounds describe only fixture text, never a production ELF.
+.globl HOST_TEXT_START
+HOST_TEXT_START:
 .globl PROBE_SYMBOL
 PROBE_SYMBOL:
     pushq %rbp
@@ -92,6 +100,8 @@ RETURN_PROBE_SYMBOL:
     addq $264, %rsp
     popq %rbx
     ret
+.globl HOST_TEXT_END
+HOST_TEXT_END:
 #if !defined(__APPLE__)
 .section .note.GNU-stack,"",@progbits
 #endif

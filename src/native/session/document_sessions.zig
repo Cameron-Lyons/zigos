@@ -64,6 +64,7 @@ pub const Sessions = struct {
         for (items) |*item| {
             const server = if (item.server) |*value| value else continue;
             if (item.taskId() != task_id) continue;
+            if (server.closing) return false;
             const task = server.kernel.kernel.runtime.findConst(task_id) orelse return false;
             if (task.state != .active or !task.owner.eql(server.binding.authority.principal) or
                 !task.hasCapability(server.binding.authority.capability_id)) return false;
@@ -100,7 +101,16 @@ pub const Sessions = struct {
         return false;
     }
 
-    pub fn deinit(self: *Sessions, now_ticks: u64) void {
+    pub fn requireQuiescent(self: *const Sessions) error{DocumentOperationBusy}!void {
+        const items = self.channelsConst() orelse return;
+        for (items) |*item| {
+            if (item.server) |*server| if (server.running) return error.DocumentOperationBusy;
+        }
+    }
+
+    pub fn deinit(self: *Sessions, now_ticks: u64) error{DocumentOperationBusy}!void {
+        // Refuse before any endpoint, channel or backing storage is changed.
+        try self.requireQuiescent();
         const items = self.channels() orelse return;
         for (items) |*item| item.close(now_ticks);
         if (comptime heap_backed) {

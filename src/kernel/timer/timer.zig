@@ -1,4 +1,5 @@
 const std = @import("std");
+const units = @import("../../native/core/units.zig");
 const console = @import("../utils/console.zig");
 const x2apic = @import("../interrupts/x2apic.zig");
 const x86 = @import("../../arch/x86.zig");
@@ -14,7 +15,7 @@ const X2APIC_TIMER_MODE_PERIODIC: u64 = 1 << 17;
 const X2APIC_TIMER_MODE_TSC_DEADLINE: u64 = 1 << 18;
 const X2APIC_TIMER_DIVIDE_BY_16: u64 = 0x3;
 
-pub const TICKS_PER_SECOND: u64 = 100;
+pub const TICKS_PER_SECOND: u64 = units.TIMER_FREQUENCY_HZ;
 pub const MILLISECONDS_PER_TICK: u64 = 1000 / TICKS_PER_SECOND;
 pub const NANOSECONDS_PER_TICK: u64 = 1_000_000_000 / TICKS_PER_SECOND;
 pub const INTERRUPT_VECTOR: u8 = 0x40;
@@ -147,12 +148,7 @@ pub fn getTicks() u64 {
 }
 
 pub fn millisecondsToTicksCeil(milliseconds: u64) u64 {
-    if (milliseconds == 0) return 0;
-
-    return @max(@as(u64, 1), @divFloor(
-        milliseconds + MILLISECONDS_PER_TICK - 1,
-        MILLISECONDS_PER_TICK,
-    ));
+    return units.millisecondsToTimerTicksCeil(milliseconds);
 }
 
 pub fn ticksToMilliseconds(tick_count: u64) u64 {

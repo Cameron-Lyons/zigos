@@ -23,6 +23,7 @@ pub const Fixture = struct {
     fail_flush_from: ?usize = null,
     writes: usize = 0,
     flushes: usize = 0,
+    before_flush: ?struct { context: *anyopaque, call: *const fn (*anyopaque) void } = null,
 
     pub fn init(attach: bool) !*Fixture {
         storage_volume.clearAttachedBackend();
@@ -116,6 +117,7 @@ pub const Fixture = struct {
     fn flush() callconv(.c) bool {
         const self = active.?;
         self.flushes += 1;
+        if (self.before_flush) |callback| callback.call(callback.context);
         if (self.fail_flushes) return false;
         if (self.fail_flush_from) |first| if (self.flushes >= first) return false;
         @memcpy(self.durable_image, self.image);

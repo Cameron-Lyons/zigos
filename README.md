@@ -61,6 +61,15 @@ requests.
   signing seed. Each new save checks current signing policy, lease expiry,
   revocation, service ownership, and key binding before publishing a version.
   The vault signs bounded canonical metadata without exporting its key.
+  A hardware wait cannot preserve stale document authority: the backend checks
+  current time, live tasks, held grants and scoped access again before mutation
+  and after checkpoint completion. Changed workspace pointers or object heads
+  reject the save. Backpressured saved receipts and read data are checked again
+  before delivery. Closing a suspended operation detaches its endpoints while
+  retaining borrowed bytes until it finishes; pool teardown refuses live work.
+  Actual cooperative host regressions exercise these boundaries. Production
+  sign-in, prepared Notes launch, approved grants and a document worker still
+  need an operational coordinator.
   A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels
   queued saves when either endpoint or task is retired. Editors keep their text
@@ -657,7 +666,10 @@ and augmented return field, and publishes handler edits back before ERETS or
 ERETU. Entry geometry, STAR selectors, GS ownership, 64-byte stack alignment,
 and AP initialization match that path; double faults retain the existing guarded
 emergency stack. Unsupported user software events cannot impersonate physical
-device interrupts. Native hardware execution still needs validation.
+device interrupts. Oversized yield arguments and unknown yield dispositions
+stop the offending task through ordinary exception containment. Unexpected #NM
+exceptions follow the registered handler rather than the retired lazy-state
+shortcut. Native hardware execution still needs validation.
 The service loop drains one atomic pending-work latch and rechecks it before idle.
 Idle checks use the dispatcher's eligibility rules: policy-delayed work remains
 queued while the CPU sleeps, and runnable work can pass a delayed queue head.
@@ -667,7 +679,16 @@ deadline, so stalled sends receive service even without receive traffic or an
 interrupt. Completed transmits are pending work; draining them cancels or advances
 the deadline, and contained or inactive controllers contribute no wake.
 Coalesced wakeups preserve the earliest queued deadline, so repeated events cannot
-postpone background or batch work indefinitely. Required accelerator tasks retain
+postpone background or batch work indefinitely. Aging uses the shared 100 Hz
+timer frequency: emergency, foreground, media, background, and batch targets are
+10, 50, 200, 500, and 1000 ms. Accounting charges stay separate from elapsed
+time, and requeue slack is one actual two-tick quantum. New registrations age
+from the current clock. Hosted load regressions advance by that quantum and
+check initial and repeated service under continuing foreground work. The
+benchmark foreground wait model now also allows due lower-class work before
+the foreground deadline, with a six-tick ceiling after quantum rounding.
+These selection targets do not establish measured hardware response latency.
+Required accelerator tasks retain
 a bounded wait when claim reservation fails or policy denies an online engine;
 eligibility checks allow other work to pass and resume the waiter after telemetry
 or request changes without an idle retry loop. Credential approval records the
