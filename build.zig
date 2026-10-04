@@ -20,9 +20,7 @@ pub fn build(b: *std.Build) void {
     const clean_step = b.step("clean", "Remove generated build outputs and Zig caches");
     clean_step.dependOn(&clean_cmd.step);
 
-    const host_tool_cmd = b.addRunArtifact(host_tools.tool(b));
-    host_tool_cmd.setCwd(b.path("."));
-    host_tool_cmd.setEnvironmentVariable("ZIG_BIN", b.graph.zig_exe);
+    const host_tool_cmd = host_tools.addInvocation(b);
     host_tool_cmd.addPassthruArgs();
     const host_tool_step = b.step("tool", "Run a native host utility: zig build tool -- COMMAND [ARGUMENTS]");
     host_tool_step.dependOn(&host_tool_cmd.step);
@@ -206,8 +204,8 @@ pub fn build(b: *std.Build) void {
         shared.native_store_smoke_image_path,
         .full,
     );
-    zigos_native_smoke_test_cmd.setEnvironmentVariable("QEMU_NATIVE_SMOKE_MEMORY", "2G");
-    zigos_native_smoke_test_cmd.setEnvironmentVariable("ZIGOS_REQUIRE_HIGH_MEMORY", "1");
+    host_tools.addEnvironmentOverride(zigos_native_smoke_test_cmd, "QEMU_NATIVE_SMOKE_MEMORY", "2G");
+    host_tools.addEnvironmentOverride(zigos_native_smoke_test_cmd, "ZIGOS_REQUIRE_HIGH_MEMORY", "1");
 
     const negative_smoke_cmds = [_]*std.Build.Step.Run{
         qemu_build.addNativeFaultSmokeCommand(b, kernels.zigos_native_tampered_artifact_manifest, userspace_images, .tampered_artifact_manifest),
@@ -405,23 +403,23 @@ pub fn build(b: *std.Build) void {
     const release_verifier_arg = release_verifier orelse "<missing-release-verifier>";
     const release_verifier_sha256_arg = release_verifier_sha256 orelse "<missing-release-verifier-sha256>";
     if (release_trust_root != null and release_trust_root_sha256 != null and release_trust_policy != null and release_verifier != null and release_verifier_sha256 != null) {
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
-        release_sbom_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        host_tools.addEnvironmentOverride(release_sbom_cmd, "ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_POLICY", trust_policy_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
     } else {
         const missing_trust_inputs = b.addFail("release generation requires -Drelease-trust-root=<absolute path>, -Drelease-trust-root-sha256=<lowercase sha256>, -Drelease-trust-policy=<absolute path>, -Drelease-verifier=<absolute path>, and -Drelease-verifier-sha256=<lowercase sha256>");
         release_sbom_cmd.step.dependOn(&missing_trust_inputs.step);
         release_manifest_finalize_cmd.step.dependOn(&missing_trust_inputs.step);
     }
     if (release_trust_state) |_| {
-        release_manifest_finalize_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
+        host_tools.addEnvironmentOverride(release_manifest_finalize_cmd, "ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
     } else {
         const missing_trust_state = b.addFail("release verification requires -Drelease-trust-state=<persistent external state path>");
         release_manifest_finalize_cmd.step.dependOn(&missing_trust_state.step);
@@ -448,11 +446,11 @@ pub fn build(b: *std.Build) void {
     release_bundle_existing_step.dependOn(&release_bundle_existing_cmd.step);
 
     if (release_trust_root != null and release_trust_root_sha256 != null and release_trust_state != null and release_verifier != null and release_verifier_sha256 != null) {
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
-        hardware_proof_cmd.setEnvironmentVariable("ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_TRUST_ROOT", trust_root_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_TRUST_ROOT_SHA256", trust_root_sha256_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_TRUST_STATE", trust_state_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_VERIFIER", release_verifier_arg);
+        host_tools.addEnvironmentOverride(hardware_proof_cmd, "ZIGOS_RELEASE_VERIFIER_SHA256", release_verifier_sha256_arg);
     }
 
     const release_security_preflight_step = b.step("release-security-preflight", "Run all mutable public-release build, audit, fixture, and QEMU gates before freezing a candidate");

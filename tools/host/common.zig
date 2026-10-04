@@ -8,6 +8,24 @@ pub const Context = struct {
     io: std.Io,
     environ: *std.process.Environ.Map,
 
+    /// Configure caches retain only explicit wrapper arguments. Ambient settings
+    /// come from this invocation, then the build's compiler and overrides apply.
+    pub fn buildCommandArgs(self: *Context, args: []const []const u8) ![]const []const u8 {
+        var remaining = args;
+        while (remaining.len != 0) {
+            if (std.mem.eql(u8, remaining[0], "--build-zig")) {
+                if (remaining.len < 2 or remaining[1].len == 0) return error.InvalidArguments;
+                try self.environ.put("ZIG_BIN", remaining[1]);
+                remaining = remaining[2..];
+            } else if (std.mem.eql(u8, remaining[0], "--build-env")) {
+                if (remaining.len < 3 or remaining[1].len == 0 or std.mem.indexOfScalar(u8, remaining[1], '=') != null) return error.InvalidArguments;
+                try self.environ.put(remaining[1], remaining[2]);
+                remaining = remaining[3..];
+            } else break;
+        }
+        return remaining;
+    }
+
     pub fn env(self: *Context, name: []const u8) ?[]const u8 {
         return self.environ.get(name);
     }

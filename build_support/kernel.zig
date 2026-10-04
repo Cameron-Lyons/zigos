@@ -108,8 +108,10 @@ pub fn addX86_64KernelBootCheck(
     kernel_object.link_function_sections = true;
     kernel_object.link_data_sections = true;
 
-    const link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    // Configure graphs survive cache relocation. Resolve the invoking compiler
+    // during execution rather than serializing its temporary installation path.
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
         "ld.lld",
         // LLVM emits probe calls after LTO dead-code elimination. Keep the
         // bundled routine alive so large frames still touch each stack page.
@@ -216,8 +218,8 @@ pub fn addX86_64LongModeEntryCheck(
         .root_module = module,
     });
 
-    const link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
         "ld.lld",
         "-m",
         "elf_x86_64",
@@ -525,8 +527,8 @@ pub fn addKernelArtifact(
     kernel_object.link_function_sections = true;
     kernel_object.link_data_sections = true;
 
-    const link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
         "ld.lld",
         "--undefined=__zig_probe_stack",
         "-mllvm",
@@ -548,8 +550,8 @@ pub fn addKernelArtifact(
     link.addFileArg(kernel_object.getEmittedBin());
     link.addFileArg(kernel_assembly.getEmittedBin());
 
-    const boot_link = b.addSystemCommand(&.{
-        b.graph.zig_exe,
+    const boot_link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    boot_link.addArgs(&.{
         "ld.lld",
         "--undefined=__zig_probe_stack",
         "-mllvm",

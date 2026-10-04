@@ -10,21 +10,22 @@ const Context = common.Context;
 const policy_type = "application/vnd.zigos.release-trust-policy.v1+json";
 
 pub fn main(init: std.process.Init) !void {
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
     var ctx: Context = .{ .allocator = init.arena.allocator(), .io = init.io, .environ = init.environ_map };
-    if (args.len == 2 and (std.mem.eql(u8, args[1], "sign") or std.mem.eql(u8, args[1], "wrong-sign"))) {
+    const args = try ctx.buildCommandArgs(argv[1..]);
+    if (args.len == 1 and (std.mem.eql(u8, args[0], "sign") or std.mem.eql(u8, args[0], "wrong-sign"))) {
         var reader = std.Io.File.stdin().reader(ctx.io, &.{});
         const input = try reader.interface.allocRemaining(ctx.allocator, .limited(16 * 1024 * 1024));
-        const pair = try Ed25519.KeyPair.generateDeterministic(@splat(if (std.mem.eql(u8, args[1], "sign")) @as(u8, 0x33) else 0x44));
+        const pair = try Ed25519.KeyPair.generateDeterministic(@splat(if (std.mem.eql(u8, args[0], "sign")) @as(u8, 0x33) else 0x44));
         try ctx.print("{s}\n", .{try base64(&ctx, &(try pair.sign(input, null)).toBytes())});
         return;
     }
     // A separately pinned synthetic verifier exercises withdrawal after a
     // candidate succeeds but verification of the published marker fails.
-    if (args.len >= 2 and (std.mem.eql(u8, args[1], "trust-info") or std.mem.eql(u8, args[1], "verify-candidate"))) return;
-    if (args.len >= 2 and std.mem.eql(u8, args[1], "verify")) std.process.exit(1);
-    if (args.len != 4 or !std.mem.eql(u8, args[1], "scenario")) return error.InvalidArguments;
-    try scenario(&ctx, try std.Io.Dir.cwd().realPathFileAlloc(ctx.io, args[2], ctx.allocator), args[3]);
+    if (args.len >= 1 and (std.mem.eql(u8, args[0], "trust-info") or std.mem.eql(u8, args[0], "verify-candidate"))) return;
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "verify")) std.process.exit(1);
+    if (args.len != 3 or !std.mem.eql(u8, args[0], "scenario")) return error.InvalidArguments;
+    try scenario(&ctx, try std.Io.Dir.cwd().realPathFileAlloc(ctx.io, args[1], ctx.allocator), args[2]);
 }
 
 fn json(ctx: *Context, value: anytype) ![]const u8 {
