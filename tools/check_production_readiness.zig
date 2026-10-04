@@ -1590,28 +1590,7 @@ fn validateNuc11tnki5KernelProofSources(
             try common.addError(errors, allocator, "RNUC15CRSU7 timer must use invariant TSC-deadline delivery: {s}", .{snippet});
         }
     }
-    const required_one_shot_scheduler_snippets = [_][]const u8{
-        "timer.synchronize()",
-        "xhci_driver_task.boundTaskId()",
-        "session_manager.bindHardwareInput",
-        "pollHardwareKeyboardReport",
-        "xhci_driver_task.pollKeyboardReport()",
-        "hardwareInputProof",
-        "xhci_driver_task.inputProof()",
-        "session_manager.servicePendingInputWork(now_ticks)",
-        "xhci_driver_task.lifecyclePending()",
-        "userspaceSchedulerHasDispatchableTasks(timer.getTicks())",
-        "timer.armSchedulerTick()",
-        "timer.disarmSchedulerTick()",
-        "x86.cli()",
-        "x86.sti()",
-        "smp.idle()",
-    };
-    for (required_one_shot_scheduler_snippets) |snippet| {
-        if (std.mem.indexOf(u8, native_profile_source, snippet) == null) {
-            try common.addError(errors, allocator, "native scheduler loop must retain one-shot idle deadline control: {s}", .{snippet});
-        }
-    }
+    try validateNativeSchedulerLoopSource(allocator, errors, native_profile_source);
     const required_emulator_countdown_timer_snippets = [_][]const u8{
         "TICKLESS_TSC_DEADLINE",
         "X2APIC_TIMER_MODE_TSC_DEADLINE",
@@ -4651,6 +4630,123 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
     }
 }
 
+fn validateNativeSchedulerLoopSource(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    source: []const u8,
+) !void {
+    const code = try allocator.dupeSentinel(u8, source, 0);
+    defer allocator.free(code);
+    var tokens = std.ArrayList(std.zig.Token).empty;
+    defer tokens.deinit(allocator);
+    var lexer = std.zig.Tokenizer.init(code);
+    while (true) {
+        const token = lexer.next();
+        if (token.tag == .eof) break;
+        if (token.tag == .invalid) {
+            try common.addError(errors, allocator, "native scheduler loop must remain valid Zig source", .{});
+            return;
+        }
+        if (token.tag != .doc_comment and token.tag != .container_doc_comment) try tokens.append(allocator, token);
+    }
+    const required_one_shot_scheduler_snippets = [_][:0]const u8{
+        "timer.synchronize()",
+        "session_manager.bindHardwareInput",
+        "pollHardwareKeyboardReport",
+        "xhci_driver_task.pollKeyboardReport()",
+        "hardwareInputProof",
+        "xhci_driver_task.inputProof()",
+        "session_manager.servicePendingInputWork(now_ticks)",
+        "xhci_driver_task.lifecyclePending()",
+        "userspaceSchedulerHasDispatchableTasks(timer.getTicks())",
+        "timer.armSchedulerTick()",
+        "timer.disarmSchedulerTick()",
+        "x86.cli()",
+        "x86.sti()",
+        "smp.idle()",
+    };
+    for (required_one_shot_scheduler_snippets) |snippet| {
+        if (!hasCodeTokens(code, tokens.items, snippet)) {
+            try common.addError(errors, allocator, "native scheduler loop must retain one-shot idle deadline control: {s}", .{snippet});
+        }
+    }
+    const run = topLevelFunctionBody(code, tokens.items, "run") orelse {
+        try common.addError(errors, allocator, "native scheduler loop must retain its actual run function", .{});
+        return;
+    };
+    const required_run_snippets = [_][:0]const u8{
+        "session_manager.system().serviceAuthenticationClock(now_ticks); wakeBoundXhciTask(xhci_driver_task, session_manager, pending, now_ticks);",
+        "if (xhci_driver_task.lifecyclePending()) { timer.armSchedulerTick(); } else if (session_manager.nextServiceWake()) |deadline| { timer.armWakeAt(deadline); } else { timer.disarmSchedulerTick();",
+    };
+    for (required_run_snippets) |snippet| {
+        if (!hasCodeTokens(code, run, snippet)) {
+            try common.addError(errors, allocator, "native scheduler run must retain bound xHCI wake, authority expiry and idle deadline control: {s}", .{snippet});
+        }
+    }
+    const helper = topLevelFunctionBody(code, tokens.items, "wakeBoundXhciTask") orelse {
+        try common.addError(errors, allocator, "native scheduler must retain its actual bound xHCI wake helper", .{});
+        return;
+    };
+    // Compare the whole executable body: test calls, quoted snippets, comments
+    // or an unreachable predicate must not replace the production wake guard.
+    const required_helper_body =
+        "if (pending.xhci or (pending.timer and driver.workPending())) { " ++
+        "const bound_task_id = driver.boundTaskId(); " ++
+        "if (bound_task_id != 0) _ = manager.wakeUserspaceTask(bound_task_id, now_ticks); }";
+    const matching_tokens = codeTokenSequenceLength(code, helper, required_helper_body);
+    if (matching_tokens == null or matching_tokens.? != helper.len) {
+        try common.addError(errors, allocator, "native scheduler xHCI helper must wake on IRQ or pending timer work through the exact nonzero bound task", .{});
+    }
+}
+
+fn topLevelFunctionBody(source: []const u8, tokens: []const std.zig.Token, name: []const u8) ?[]const std.zig.Token {
+    var depth: usize = 0;
+    for (tokens, 0..) |token, index| {
+        if (depth == 0 and token.tag == .keyword_fn and index + 1 < tokens.len and
+            tokens[index + 1].tag == .identifier and std.mem.eql(u8, source[tokens[index + 1].loc.start..tokens[index + 1].loc.end], name))
+        {
+            var start = index + 2;
+            while (start < tokens.len and tokens[start].tag != .l_brace) : (start += 1) {
+                if (tokens[start].tag == .semicolon) return null;
+            }
+            if (start == tokens.len) return null;
+            var nested: usize = 1;
+            var end = start + 1;
+            while (end < tokens.len) : (end += 1) {
+                if (tokens[end].tag == .l_brace) nested += 1;
+                if (tokens[end].tag == .r_brace) nested -= 1;
+                if (nested == 0) return tokens[start + 1 .. end];
+            }
+            return null;
+        }
+        if (token.tag == .l_brace) depth += 1;
+        if (token.tag == .r_brace) {
+            if (depth == 0) return null;
+            depth -= 1;
+        }
+    }
+    return null;
+}
+
+fn codeTokenSequenceLength(source: []const u8, tokens: []const std.zig.Token, pattern: [:0]const u8) ?usize {
+    var lexer = std.zig.Tokenizer.init(pattern);
+    var count: usize = 0;
+    while (true) {
+        const expected = lexer.next();
+        if (expected.tag == .eof) return count;
+        if (count == tokens.len) return null;
+        const actual = tokens[count];
+        if (actual.tag != expected.tag or
+            !std.mem.eql(u8, source[actual.loc.start..actual.loc.end], pattern[expected.loc.start..expected.loc.end])) return null;
+        count += 1;
+    }
+}
+
+fn hasCodeTokens(source: []const u8, tokens: []const std.zig.Token, pattern: [:0]const u8) bool {
+    for (tokens, 0..) |_, index| if (codeTokenSequenceLength(source, tokens[index..], pattern) != null) return true;
+    return false;
+}
+
 fn validateProductionBootFlags(
     allocator: std.mem.Allocator,
     errors: *std.ArrayList([]const u8),
@@ -4748,4 +4844,65 @@ test "hardware marker lookup ignores commented requirements" {
 test "hardware marker lookup requires a complete active line" {
     const source = "prefix ZIGOS:NATIVE:READY suffix\nZIGOS:NATIVE:READY_EXTRA\n";
     try std.testing.expect(!markerFileHasActiveLine(source, "ZIGOS:NATIVE:READY"));
+}
+
+test "native scheduler source gate accepts the actual bound wake helper and idle deadlines" {
+    const source = try common.readFileAlloc(std.testing.allocator, std.testing.io, "src/kernel/boot/profiles/zigos_native.zig", common.source_file_max_bytes);
+    defer std.testing.allocator.free(source);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var errors = std.ArrayList([]const u8).empty;
+    try validateNativeSchedulerLoopSource(arena.allocator(), &errors, source);
+    try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+}
+
+test "native scheduler source gate rejects broken driver binding pending predicate and idle deadlines" {
+    const source = try common.readFileAlloc(std.testing.allocator, std.testing.io, "src/kernel/boot/profiles/zigos_native.zig", common.source_file_max_bytes);
+    defer std.testing.allocator.free(source);
+    const mutations = [_]struct { needle: []const u8, replacement: []const u8 }{
+        .{ .needle = "wakeBoundXhciTask(xhci_driver_task, session_manager, pending, now_ticks);", .replacement = "wakeBoundXhciTask(other_driver, session_manager, pending, now_ticks);" },
+        .{ .needle = "pending.timer and driver.workPending()", .replacement = "pending.timer" },
+        .{ .needle = "pending.xhci or (pending.timer", .replacement = "false or (pending.timer" },
+        .{ .needle = "driver.boundTaskId()", .replacement = "unrelatedTaskId()" },
+        .{ .needle = "if (bound_task_id != 0)", .replacement = "if (true)" },
+        .{ .needle = "timer.armWakeAt(deadline);", .replacement = "timer.disarmSchedulerTick();" },
+        .{ .needle = "session_manager.system().serviceAuthenticationClock(now_ticks);", .replacement = "{}" },
+    };
+    for (mutations) |mutation| {
+        try std.testing.expect(std.mem.indexOf(u8, source, mutation.needle) != null);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const altered = try std.mem.replaceOwned(u8, arena.allocator(), source, mutation.needle, mutation.replacement);
+        var errors = std.ArrayList([]const u8).empty;
+        try validateNativeSchedulerLoopSource(arena.allocator(), &errors, altered);
+        try std.testing.expect(errors.items.len != 0);
+    }
+}
+
+test "native scheduler source gate ignores comments quoted calls and unreachable helper bodies" {
+    const source = try common.readFileAlloc(std.testing.allocator, std.testing.io, "src/kernel/boot/profiles/zigos_native.zig", common.source_file_max_bytes);
+    defer std.testing.allocator.free(source);
+    const call = "wakeBoundXhciTask(xhci_driver_task, session_manager, pending, now_ticks);";
+    const mutations = [_]struct { needle: []const u8, replacement: []const u8 }{
+        .{ .needle = call, .replacement = "// " ++ call },
+        .{ .needle = call, .replacement = "_ = \"" ++ call ++ "\";" },
+        .{ .needle = call, .replacement = "{}" },
+        .{ .needle = "if (pending.xhci or (pending.timer and driver.workPending()))", .replacement = "return; if (pending.xhci or (pending.timer and driver.workPending()))" },
+        .{
+            .needle = "    if (pending.xhci or (pending.timer and driver.workPending())) {\n" ++
+                "        const bound_task_id = driver.boundTaskId();\n" ++
+                "        if (bound_task_id != 0) _ = manager.wakeUserspaceTask(bound_task_id, now_ticks);\n" ++
+                "    }",
+            .replacement = "",
+        },
+    };
+    for (mutations) |mutation| {
+        try std.testing.expect(std.mem.indexOf(u8, source, mutation.needle) != null);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const altered = try std.mem.replaceOwned(u8, arena.allocator(), source, mutation.needle, mutation.replacement);
+        var errors = std.ArrayList([]const u8).empty;
+        try validateNativeSchedulerLoopSource(arena.allocator(), &errors, altered);
+        try std.testing.expect(errors.items.len != 0);
+    }
 }
