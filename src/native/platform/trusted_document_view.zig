@@ -71,7 +71,7 @@ pub const View = struct {
             else => true,
         };
     }
-    fn queue(self: *View, action: Action, sequence: u64) bool {
+    inline fn queue(self: *View, action: Action, sequence: u64) bool {
         if (self.pending != null or sequence == 0 or sequence <= self.last_report_sequence or
             self.token == 0 or self.presented_revision != self.revision) return false;
         self.pending = .{ .action = action, .token = self.token, .revision = self.revision, .report_sequence = sequence };
