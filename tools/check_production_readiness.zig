@@ -946,6 +946,7 @@ fn validateNuc11tnki5KernelProofSources(
     const kernel_linker_path = "src/arch/x86_64/linker.ld";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
     const production_cmdline_path = "src/boot/cmdline.txt";
+    const production_grub_path = "src/boot/grub-x86_64-kernel.cfg";
     const ci_setup_path = ".github/actions/setup-zigos-ci/action.yml";
     const cpu_baseline_path = "src/arch/cpu_baseline.zig";
     const x86_path = "src/arch/x86.zig";
@@ -1104,6 +1105,10 @@ fn validateNuc11tnki5KernelProofSources(
         try common.addError(errors, allocator, "production EFI command line is missing: {s}", .{production_cmdline_path});
         return;
     }
+    if (!common.pathExists(io, production_grub_path)) {
+        try common.addError(errors, allocator, "production GRUB configuration is missing: {s}", .{production_grub_path});
+        return;
+    }
     if (!common.pathExists(io, ci_setup_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 CI setup action is missing: {s}", .{ci_setup_path});
         return;
@@ -1232,6 +1237,7 @@ fn validateNuc11tnki5KernelProofSources(
     const kernel_linker_source = try common.readFileAlloc(allocator, io, kernel_linker_path, common.source_file_max_bytes);
     const qemu_grub_source = try common.readFileAlloc(allocator, io, qemu_grub_path, common.source_file_max_bytes);
     const production_cmdline_source = try common.readFileAlloc(allocator, io, production_cmdline_path, common.source_file_max_bytes);
+    const production_grub_source = try common.readFileAlloc(allocator, io, production_grub_path, common.source_file_max_bytes);
     const ci_setup_source = try common.readFileAlloc(allocator, io, ci_setup_path, common.source_file_max_bytes);
     const cpu_baseline_source = try common.readFileAlloc(allocator, io, cpu_baseline_path, common.source_file_max_bytes);
     const x86_source = try common.readFileAlloc(allocator, io, x86_path, common.source_file_max_bytes);
@@ -1656,9 +1662,8 @@ fn validateNuc11tnki5KernelProofSources(
     if (std.mem.indexOf(u8, qemu_grub_source, "qemu_software_cpu_fallback") == null) {
         try common.addError(errors, allocator, "QEMU boot configuration must explicitly request the software-emulator CPU fallback", .{});
     }
-    if (std.mem.indexOf(u8, production_cmdline_source, "qemu_software_cpu_fallback") != null) {
-        try common.addError(errors, allocator, "production EFI command line must not permit the software-emulator CPU fallback", .{});
-    }
+    try validateProductionBootFlags(allocator, errors, production_cmdline_path, production_cmdline_source);
+    try validateProductionBootFlags(allocator, errors, production_grub_path, production_grub_source);
     if (std.mem.indexOf(u8, kernel_build_source, "addEfiImage") == null or
         std.mem.indexOf(u8, kernel_build_source, ".os_tag = .uefi") == null)
     {
@@ -1889,7 +1894,9 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_process_context_snippets = [_][]const u8{
-        "softwareCpuFallbackRequested",
+        "cpuModelRequest",
+        "model_request.enabled()",
+        "model_request.resolveTscFrequency",
         "model_inventory",
         "qemu_software_cpu_fallback",
         "qemu_tsc_frequency_hz",
@@ -1912,7 +1919,8 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_boot_timer_snippets = [_][]const u8{
-        "softwareCpuFallbackRequested",
+        "cpuModelRequest",
+        "model_request.enabled()",
         "qemu_software_cpu_fallback",
         "software_cpu_fallback",
         "hardware_tsc_timer",
@@ -4638,11 +4646,45 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
     }
 }
 
+fn validateProductionBootFlags(
+    allocator: std.mem.Allocator,
+    errors: *std.ArrayList([]const u8),
+    path: []const u8,
+    source: []const u8,
+) !void {
+    for ([_][]const u8{ "model_inventory", "qemu_software_cpu_fallback", "qemu_tsc_frequency_hz" }) |flag| {
+        if (std.mem.indexOf(u8, source, flag) != null) {
+            try common.addError(errors, allocator, "production boot defaults must not enable modeled hardware or a fabricated clock ({s}): {s}", .{ path, flag });
+        }
+    }
+}
+
 fn isOneOf(value: []const u8, allowed: []const []const u8) bool {
     for (allowed) |candidate| {
         if (std.mem.eql(u8, value, candidate)) return true;
     }
     return false;
+}
+
+test "production boot defaults reject modeled hardware and fixed clock overrides" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    for ([_][]const u8{
+        "model_inventory",
+        "qemu_tsc_frequency_hz=2400000000",
+        "qemu_software_cpu_fallback",
+        "multiboot2 /boot/kernel.elf model_inventory qemu_tsc_frequency_hz=2400000000",
+    }) |source| {
+        var errors = std.ArrayList([]const u8).empty;
+        try validateProductionBootFlags(allocator, &errors, "production boot fixture", source);
+        try std.testing.expect(errors.items.len > 0);
+    }
+    for ([_][]const u8{ "", "\n", "multiboot2 /boot/kernel.elf\nboot\n" }) |source| {
+        var errors = std.ArrayList([]const u8).empty;
+        try validateProductionBootFlags(allocator, &errors, "production boot fixture", source);
+        try std.testing.expectEqual(@as(usize, 0), errors.items.len);
+    }
 }
 
 test "synthetic userspace marker gate rejects unmarked fixture" {

@@ -125,11 +125,11 @@ else
         };
 
         pub const isr = struct {
-            pub const InterruptFrame = opaque {};
+            pub const InterruptFrame = @import("../../kernel/interrupts/isr.zig").InterruptFrame;
             pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
             pub fn registerHandler(_: u8, _: InterruptHandler) void {}
-            pub fn setTimerPreemption(_: *const fn (regs: *InterruptFrame) void) void {}
+            pub fn setRuntimePreemption(_: *const fn (regs: *InterruptFrame) void) void {}
         };
 
         pub const paging = struct {
@@ -510,10 +510,10 @@ var registered_executor: ?*Executor = null;
 fn activeUserMemoryMapping(executor: *Executor, caller_task_id: u64) ?*MappingEntry {
     if (caller_task_id == 0 or executor.active_task_id != caller_task_id) return null;
     const mapping = executor.active_mapping orelse return null;
-    if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != caller_task_id) return null;
     const mappings = executor.mappingArena() orelse return null;
     const slot = mappings.getByHandle(executor.active_mapping_handle) orelse return null;
-    if (&slot.mapping != mapping or mapping.address_space == null) return null;
+    if (&slot.mapping != mapping) return null;
+    if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != caller_task_id or mapping.address_space == null) return null;
     return mapping;
 }
 
@@ -635,7 +635,7 @@ pub const Executor = struct {
                 freestanding.isr.registerHandler(vector, userspaceExceptionHandler);
             }
             freestanding.isr.registerHandler(PAGE_FAULT_VECTOR, userspacePageFaultHandler);
-            freestanding.isr.setTimerPreemption(userspaceTimerPreemption);
+            freestanding.isr.setRuntimePreemption(userspaceInterruptPreemption);
             trap_handler_registered = true;
         }
         const trap_stack_top = prepareKernelStack();
@@ -1921,6 +1921,32 @@ fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
     const executor = registered_executor orelse return;
     if (!shouldPreemptUserDispatch(executor, (frame.cs & 0x3) == 0x3, timer.getTicks(), preempt_check)) return;
     const mapping = executor.active_mapping orelse return;
+    handoffInterruptedUser(executor, mapping, frame);
+}
+
+fn userspaceInterruptPreemption(frame: *freestanding.isr.InterruptFrame) void {
+    if (frame.int_no == @import("../../kernel/timer/timer.zig").INTERRUPT_VECTOR) {
+        userspaceTimerPreemption(frame);
+    } else {
+        userspaceDevicePreemption(frame);
+    }
+}
+
+fn userspaceDevicePreemption(frame: *freestanding.isr.InterruptFrame) void {
+    const executor = registered_executor orelse return;
+    if ((frame.cs & 0x3) != 0x3 or executor.active_task_id == 0 or
+        executor.dispatch_quantum.task_id != executor.active_task_id) return;
+    // Dispatch pins this task until handoff. Monotonic task IDs and the exact
+    // live mapping handle authenticate its incarnation without scheduler work.
+    const mapping = activeUserMemoryMapping(executor, executor.active_task_id) orelse return;
+    if (mapping.owned_xstate == null) return;
+    handoffInterruptedUser(executor, mapping, frame);
+}
+
+fn handoffInterruptedUser(executor: *Executor, mapping: *MappingEntry, frame: anytype) void {
+    // Multiple device interrupts may be queued for one user frame. Preserve an
+    // earlier retirement/exception handoff and charge/capture this resume once.
+    if (executor.handoff_completed or zigos_userspace_resume_requested != 0) return;
     mapping.resume_valid = true;
     mapping.resume_instruction_pointer = frame.eip;
     mapping.resume_stack_pointer = frame.useresp;
@@ -3261,6 +3287,258 @@ test "owned state exceptions use user containment without lazy retry" {
     try std.testing.expect(executor.last_user_exception == null);
     try std.testing.expect(!executor.handoff_completed);
     try std.testing.expectEqual(@as(u32, 0), zigos_userspace_resume_requested);
+}
+
+const DeviceInterruptFixture = struct {
+    const isr = @import("../../kernel/interrupts/isr.zig");
+    const wake = @import("../../kernel/event_wake.zig");
+    executor: Executor = .{},
+    mapping: *MappingEntry = undefined,
+    frame: isr.Registers = undefined,
+    previous_executor: ?*Executor = null,
+    previous_requested: u32 = 0,
+    previous_esp: usize = 0,
+    previous_eip: usize = 0,
+    previous_wakes: wake.Pending = .{},
+
+    fn init(self: *@This()) !void {
+        const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
+        storage.initialize();
+        self.previous_executor = registered_executor;
+        self.previous_requested = zigos_userspace_resume_requested;
+        self.previous_esp = zigos_userspace_resume_esp;
+        self.previous_eip = zigos_userspace_resume_eip;
+        self.previous_wakes = wake.take();
+        const handle = installTestMappingAt(&self.executor, 0, .{
+            .state = .live,
+            .address_space_id = 42,
+            .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+            .dispatch_metadata = .{ .owner_task_id = 7, .image_id = 41 },
+            .owned_xstate = storage,
+            .last_user_counter = 9,
+            .yield_count = 8,
+        });
+        self.mapping = &self.executor.mappingArena().?.getByHandle(handle).?.mapping;
+        self.executor.active_task_id = 7;
+        self.executor.active_mapping = self.mapping;
+        self.executor.active_mapping_handle = handle;
+        self.executor.dispatch_quantum = DispatchQuantum.begin(7, 100);
+        registered_executor = &self.executor;
+        zigos_userspace_resume_requested = 0;
+        zigos_userspace_resume_esp = 0xfeed_1000;
+        zigos_userspace_resume_eip = 0xfeed_2000;
+        self.frame = std.mem.zeroes(isr.Registers);
+        inline for (.{ "eax", "ebx", "ecx", "edx", "ebp", "esi", "edi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }, 0..) |field, index|
+            @field(self.frame, field) = 0x1234_0000 + index * 0x101;
+        self.frame.eip = 0x4000_1008;
+        self.frame.cs = 0x23;
+        self.frame.eflags = 0x246;
+        self.frame.useresp = 0x7fff_eff0;
+        self.frame.ss = 0x1b;
+    }
+
+    fn deinit(self: *@This()) void {
+        self.executor.active_task_id = 0;
+        self.executor.active_mapping = null;
+        self.executor.reset();
+        registered_executor = self.previous_executor;
+        zigos_userspace_resume_requested = self.previous_requested;
+        zigos_userspace_resume_esp = self.previous_esp;
+        zigos_userspace_resume_eip = self.previous_eip;
+        _ = wake.take();
+        inline for (.{ "timer", "xhci", "network", "nvme", "scheduler" }) |field|
+            if (@field(self.previous_wakes, field)) wake.raise(@field(wake.Kind, field));
+    }
+
+    const Latch = struct {
+        var kind: ?wake.Kind = null;
+        fn receive(_: *isr.InterruptFrame) void {
+            if (!@import("../../kernel/interrupts/context.zig").active())
+                @panic("device fixture must execute in the real ISR context");
+            if (kind) |work| wake.raise(work);
+        }
+    };
+
+    fn dispatch(self: *@This(), vector: u8, kind: ?wake.Kind) !void {
+        const Case = struct {
+            fixture: *DeviceInterruptFixture,
+            vector: u8,
+            kind: ?wake.Kind,
+            fn run(self_case: *@This()) !void {
+                const previous_kind = Latch.kind;
+                defer Latch.kind = previous_kind;
+                Latch.kind = self_case.kind;
+                isr.registerHandler(self_case.vector, Latch.receive);
+                isr.setRuntimePreemption(userspaceInterruptPreemption);
+                self_case.fixture.frame.int_no = self_case.vector;
+                isr.isrHandler(&self_case.fixture.frame);
+            }
+        };
+        var case = Case{ .fixture = self, .vector = vector, .kind = kind };
+        try isr.withTestHandlers(&case, Case.run);
+        try std.testing.expect(!@import("../../kernel/interrupts/context.zig").active());
+    }
+
+    fn expectResume(self: *const @This()) !void {
+        try std.testing.expect(self.executor.handoff_completed);
+        try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+        try std.testing.expect(self.mapping.resume_valid);
+        try std.testing.expectEqual(@as(u64, 9), self.mapping.yield_count);
+        try std.testing.expectEqual(@as(u32, 9), self.mapping.last_user_counter);
+        try std.testing.expectEqual(self.frame.eip, self.mapping.resume_instruction_pointer);
+        try std.testing.expectEqual(self.frame.useresp, self.mapping.resume_stack_pointer);
+        inline for (.{ "rax", "rbx", "rcx", "rdx", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }, .{ "eax", "ebx", "ecx", "edx", "ebp", "esi", "edi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }) |user_field, frame_field|
+            try std.testing.expectEqual(@field(self.frame, frame_field), @field(self.mapping.user_context64, user_field));
+        try std.testing.expectEqual(self.frame.eflags, self.mapping.user_context64.flags);
+        try std.testing.expectEqual(self.frame.eip, self.mapping.user_context64.instruction_pointer);
+        try std.testing.expectEqual(self.frame.useresp, self.mapping.user_context64.stack_pointer);
+        try std.testing.expectEqual(userspace_bootstrap_mailbox.YieldDisposition.runnable, self.executor.last_yield_disposition);
+        try std.testing.expect(self.executor.last_user_exception == null);
+        try std.testing.expectEqual(DispatchQuantum.begin(7, 100), self.executor.dispatch_quantum);
+        try std.testing.expectEqual(@as(usize, 0xfeed_1000), zigos_userspace_resume_esp);
+        try std.testing.expectEqual(@as(usize, 0xfeed_2000), zigos_userspace_resume_eip);
+    }
+
+    fn expectNoResume(self: *const @This()) !void {
+        try std.testing.expect(!self.executor.handoff_completed);
+        try std.testing.expectEqual(@as(u32, 0), zigos_userspace_resume_requested);
+        try std.testing.expect(!self.mapping.resume_valid);
+        try std.testing.expectEqual(@as(u64, 8), self.mapping.yield_count);
+    }
+};
+
+test "device IRQ real ISR hands off allowlisted users before their watchdog" {
+    inline for (.{ .{ @as(u8, 65), DeviceInterruptFixture.wake.Kind.network }, .{ @as(u8, 66), DeviceInterruptFixture.wake.Kind.nvme }, .{ @as(u8, 67), DeviceInterruptFixture.wake.Kind.xhci } }) |case| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        const state_before = fixture.mapping.owned_xstate.?.*;
+        try std.testing.expect(!shouldPreemptUserDispatch(&fixture.executor, true, 100, null));
+        try fixture.dispatch(case[0], case[1]);
+        try fixture.expectResume();
+        try std.testing.expectEqualDeep(state_before, fixture.mapping.owned_xstate.?.*);
+        const pending = DeviceInterruptFixture.wake.peek();
+        try std.testing.expect(switch (case[1]) {
+            .network => pending.network,
+            .nvme => pending.nvme,
+            .xhci => pending.xhci,
+            else => false,
+        });
+        try std.testing.expect(shouldPreemptUserDispatch(&fixture.executor, true, 102, null));
+    }
+}
+
+test "device IRQ real ISR requires the matching latch and excludes other vectors" {
+    for ([_]u8{ 7, 13, 64, 112, 129, 255 }) |vector| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.dispatch(vector, .network);
+        try fixture.expectNoResume();
+        try std.testing.expect(DeviceInterruptFixture.wake.peek().network);
+    }
+    for ([_]?DeviceInterruptFixture.wake.Kind{ null, .network }) |kind| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.dispatch(67, kind);
+        try fixture.expectNoResume();
+    }
+}
+
+test "device IRQ real ISR preserves kernel continuation and missing active dispatch" {
+    const Absent = enum { kernel, executor, task, quantum, mapping, address_space, xstate };
+    for (std.enums.values(Absent)) |absent| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        const storage = fixture.mapping.owned_xstate;
+        defer fixture.mapping.owned_xstate = storage;
+        switch (absent) {
+            .kernel => fixture.frame.cs = 0x08,
+            .executor => registered_executor = null,
+            .task => fixture.executor.active_task_id = 0,
+            .quantum => fixture.executor.dispatch_quantum = .{},
+            .mapping => fixture.executor.active_mapping = null,
+            .address_space => fixture.mapping.address_space = null,
+            .xstate => fixture.mapping.owned_xstate = null,
+        }
+        try fixture.dispatch(67, .xhci);
+        try fixture.expectNoResume();
+        try std.testing.expect(DeviceInterruptFixture.wake.peek().xhci);
+    }
+}
+
+test "device IRQ real ISR rejects foreign retired and recycled mapping incarnations" {
+    const Invalid = enum { foreign_owner, retired, stale_handle, foreign_mapping };
+    for (std.enums.values(Invalid)) |invalid| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        switch (invalid) {
+            .foreign_owner => fixture.mapping.dispatch_metadata.owner_task_id = 8,
+            .retired => fixture.mapping.state = .retire_pending,
+            .stale_handle => {
+                const old_handle = fixture.executor.active_mapping_handle;
+                const mapping_copy = fixture.mapping.*;
+                try std.testing.expect(fixture.executor.mappingArena().?.removeHandle(old_handle));
+                const replacement = installTestMappingAt(&fixture.executor, 0, mapping_copy);
+                try std.testing.expect(!old_handle.eql(replacement));
+                fixture.mapping = &fixture.executor.mappingArena().?.getByHandle(replacement).?.mapping;
+                fixture.executor.active_mapping = fixture.mapping;
+            },
+            .foreign_mapping => {
+                const other = installTestMappingAt(&fixture.executor, 1, .{ .address_space_id = 43 });
+                fixture.executor.active_mapping = &fixture.executor.mappingArena().?.getByHandle(other).?.mapping;
+            },
+        }
+        try fixture.dispatch(65, .network);
+        try fixture.expectNoResume();
+        try std.testing.expect(DeviceInterruptFixture.wake.peek().network);
+    }
+}
+
+test "device IRQ real ISR coalesces duplicate handoffs and preserves existing containment" {
+    var fixture = DeviceInterruptFixture{};
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.dispatch(67, .xhci);
+    try fixture.expectResume();
+    const captured = fixture.mapping.user_context64;
+    fixture.frame.eip += 4;
+    fixture.frame.eax += 1;
+    try fixture.dispatch(67, .xhci);
+    try fixture.dispatch(65, .network);
+    try std.testing.expectEqual(captured, fixture.mapping.user_context64);
+    try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+    const wakes = DeviceInterruptFixture.wake.take();
+    try std.testing.expect(wakes.xhci and wakes.network);
+    try std.testing.expect(!DeviceInterruptFixture.wake.any());
+
+    fixture.executor.last_user_exception = .{ .vector = 13, .error_code = 0, .instruction_pointer = 0x4000_0000 };
+    fixture.mapping.state = .retire_pending;
+    try fixture.dispatch(66, .nvme);
+    try std.testing.expectEqual(@as(u8, 13), fixture.executor.last_user_exception.?.vector);
+    try std.testing.expectEqual(captured, fixture.mapping.user_context64);
+    try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+}
+
+test "device IRQ actual FRED captured context resumes through the shared ISR handler" {
+    const Probe = struct {
+        extern fn zigos_fred_capture_probe(*const [15]u64, *const [8]u64, *[32]u64) callconv(.c) void;
+    };
+    var fixture = DeviceInterruptFixture{};
+    try fixture.init();
+    defer fixture.deinit();
+    var seeds: [15]u64 = undefined;
+    for (&seeds, 0..) |*value, index| value.* = 0x1234_0000 + index * 0x101;
+    const raw = [8]u64{ 0, 0x4000_1008, 0x23, 0x246, 0x7fff_eff0, 0x1b | (@as(u64, 67) << 32) | (@as(u64, 1) << 57), 0, 0 };
+    var captured: [32]u64 = undefined;
+    Probe.zigos_fred_capture_probe(&seeds, &raw, &captured);
+    @memcpy(std.mem.asBytes(&fixture.frame), std.mem.sliceAsBytes(captured[0..24]));
+    try fixture.dispatch(67, .xhci);
+    try fixture.expectResume();
+    try std.testing.expectEqualSlices(u64, &seeds, std.mem.bytesAsSlice(u64, std.mem.asBytes(&fixture.mapping.user_context64))[0..15]);
 }
 
 test "production address-space groups share page tables" {

@@ -4,6 +4,7 @@ const channel = @import("../storage/document_channel.zig");
 const component_port = @import("../kernel_api/component_port.zig");
 const storage_service = @import("../storage/storage_service.zig");
 const mailbox = @import("../task/userspace_bootstrap_mailbox.zig");
+const object_signer = @import("../storage/sealed_object_signer.zig");
 const kernel_memory = if (builtin.target.os.tag == .freestanding) @import("../../kernel/memory/memory.zig") else struct {};
 
 pub const OpenRequest = channel.OpenRequest;
@@ -57,6 +58,21 @@ pub const Sessions = struct {
         }
     }
 
+    pub fn cancelForAuthority(self: *Sessions, authority: *const object_signer.Authority, now_ticks: u64) void {
+        const items = self.channels() orelse return;
+        for (items) |*item| {
+            if (item.server) |*server| if (server.binding.signer.key.authority == authority) item.close(now_ticks);
+        }
+    }
+
+    pub fn hasAuthority(self: *const Sessions, authority: *const object_signer.Authority) bool {
+        const items = self.channelsConst() orelse return false;
+        for (items) |*item| {
+            if (item.server) |*server| if (server.binding.signer.key.authority == authority) return true;
+        }
+        return false;
+    }
+
     // Explicit clipboard gestures use the document's existing authority and
     // session policy context. They never grant ambient clipboard observation.
     pub fn allowsClipboard(self: *Sessions, task_id: u64, writing: bool, now_ticks: u64) bool {
@@ -82,11 +98,20 @@ pub const Sessions = struct {
     }
 
     pub fn service(self: *Sessions, now_ticks: u64) bool {
+        return self.serviceOwned(null, now_ticks);
+    }
+
+    pub fn serviceForSigner(self: *Sessions, signer: object_signer.Signer, now_ticks: u64) bool {
+        return self.serviceOwned(signer, now_ticks);
+    }
+
+    fn serviceOwned(self: *Sessions, signer: ?object_signer.Signer, now_ticks: u64) bool {
         const items = self.channels() orelse return false;
         var progress: usize = 0;
         for (0..MAX_CHANNELS) |_| {
             const item = &items[self.cursor];
             self.cursor = @intCast((self.cursor + 1) % MAX_CHANNELS);
+            if (signer) |key| if (!matchesSigner(item, key)) continue;
             if (item.server != null and item.runOnce(now_ticks)) progress += 1;
             if (progress == DISPATCH_BUDGET) break;
         }
@@ -94,8 +119,17 @@ pub const Sessions = struct {
     }
 
     pub fn hasPendingWork(self: *const Sessions) bool {
+        return self.hasPendingOwned(null);
+    }
+
+    pub fn hasPendingForSigner(self: *const Sessions, signer: object_signer.Signer) bool {
+        return self.hasPendingOwned(signer);
+    }
+
+    fn hasPendingOwned(self: *const Sessions, signer: ?object_signer.Signer) bool {
         const items = self.channelsConst() orelse return false;
         for (items) |*item| {
+            if (signer) |key| if (!matchesSigner(item, key)) continue;
             if (item.hasPendingWork()) return true;
         }
         return false;
@@ -121,6 +155,13 @@ pub const Sessions = struct {
         self.cursor = 0;
     }
 };
+
+fn matchesSigner(item: *const channel.Channel, signer: object_signer.Signer) bool {
+    const server = if (item.server) |*value| value else return false;
+    const key = server.binding.signer.key;
+    return key.authority == signer.key.authority and key.handle_id == signer.key.handle_id and
+        std.mem.eql(u8, &key.sealed_digest, &signer.key.sealed_digest);
+}
 
 comptime {
     if (heap_backed and @sizeOf(Sessions) > 16) @compileError("document session handle exceeds its resident size bound");

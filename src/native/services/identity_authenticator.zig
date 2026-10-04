@@ -45,7 +45,7 @@ pub fn Adapter(comptime Io: type) type {
         publication_guard: operation_guard.Guard = undefined,
 
         pub fn authenticator(self: *Self) entry.Authenticator {
-            return .{ .context = self, .recovery_available = self.recovery_package != null, .recovery_characters = if (self.recovery_pin != null) recovery_record.CODE_BYTES else recovery_key.CODE_BYTES, .lock_fn = lock, .start_fn = start, .poll_fn = poll, .busy_fn = busy, .deadline_fn = deadline };
+            return .{ .context = self, .recovery_available = self.recovery_package != null, .recovery_characters = if (self.recovery_pin != null) recovery_record.CODE_BYTES else recovery_key.CODE_BYTES, .lock_fn = lock, .start_fn = start, .poll_fn = pollAuthentication, .busy_fn = authenticationBusy, .deadline_fn = deadline };
         }
 
         pub fn requests(self: *Self) request_mod.Backend {
@@ -96,6 +96,8 @@ pub fn Adapter(comptime Io: type) type {
             if (busy(self) or self.assertion_result != null) return error.WorkerBusy;
             if (!authorized(self, request.grant, now) or request.challenge.len == 0 or request.challenge.len > self.challenge.len)
                 return error.IdentityRequestDenied;
+            try self.session.beginOperation(&self.worker);
+            errdefer self.session.endOperation(&self.worker);
             if (self.stack == null) self.stack = try guarded.Stack.allocate();
             self.worker.stack = self.stack.?.bytes;
             self.assertion_grant = request.grant;
@@ -143,11 +145,9 @@ pub fn Adapter(comptime Io: type) type {
             const self: *Self = @ptrCast(@alignCast(context));
             if (self.operation != .assertion) return;
             if (busy(self)) {
-                self.worker.cancel();
-                self.session.replay.lock();
+                self.session.lock();
                 return;
             }
-            self.session.bindPublicationGuard(null);
             self.eraseAssertion();
         }
 
@@ -155,7 +155,7 @@ pub fn Adapter(comptime Io: type) type {
         // stores. Session.close separately releases its retained TPM parent.
         pub fn deinit(self: *Self) !void {
             lock(self);
-            if (busy(self)) return error.WorkerBusy;
+            if (authenticationBusy(self)) return error.WorkerBusy;
             self.session.bindPublicationGuard(null);
             if (self.stack) |*stack| stack.deinit();
             self.stack = null;
@@ -168,13 +168,28 @@ pub fn Adapter(comptime Io: type) type {
             return self.worker.state == .suspended or self.worker.state == .running;
         }
 
+        fn authenticationBusy(context: *anyopaque) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            return busy(self) or self.session.operation_worker != null;
+        }
+
+        fn pollAuthentication(context: *anyopaque, now: u64) !bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            // Trusted entry detach drains an exact canceled document owner.
+            // It cannot depend on the outer service loop while quiescing.
+            if (!busy(self)) {
+                if (self.session.operation_worker) |worker| {
+                    if (self.session.lock_pending) try worker.step();
+                }
+                return self.session.operation_worker == null;
+            }
+            return poll(self, now);
+        }
+
         fn lock(context: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(context));
-            if (busy(self)) {
-                self.worker.cancel();
-                self.session.replay.lock();
-            } else {
-                self.session.lock();
+            self.session.lock();
+            if (!authenticationBusy(self)) {
                 self.session.bindPublicationGuard(null);
                 self.eraseAssertion();
             }
@@ -183,9 +198,11 @@ pub fn Adapter(comptime Io: type) type {
         fn start(context: *anyopaque, method: entry.Method, value: []const u8, now_ticks: u64) !void {
             const self: *Self = @ptrCast(@alignCast(context));
             if (busy(self)) return error.WorkerBusy;
+            try self.session.beginOperation(&self.worker);
+            errdefer self.session.endOperation(&self.worker);
             self.eraseAssertion();
             self.operation = .authenticate;
-            self.session.lock();
+            self.session.lockOwned(&self.worker);
             std.crypto.secureZero(u8, &self.value);
             self.value_len = 0;
             self.method = .pin;
@@ -233,13 +250,13 @@ pub fn Adapter(comptime Io: type) type {
             self.now_ticks = now_ticks;
             try self.worker.step();
             if (busy(self)) return false;
-            self.session.bindPublicationGuard(null);
             if (self.failure) |err| return err;
             return true;
         }
 
         fn run(context: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(context));
+            defer self.session.endOperation(&self.worker);
             defer std.crypto.secureZero(u8, &self.value);
             defer self.value_len = 0;
             defer self.method = .pin;
@@ -251,7 +268,7 @@ pub fn Adapter(comptime Io: type) type {
             self.perform() catch |err| {
                 // Every borrowed command has returned. Close can yield for
                 // FlushContext; do not publish failure until cleanup completes.
-                self.session.close() catch |cleanup_error| {
+                self.session.closeOwned(&self.worker) catch |cleanup_error| {
                     self.failure = cleanup_error;
                     return;
                 };

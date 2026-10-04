@@ -151,6 +151,7 @@ pub const SessionManager = struct {
     }
 
     pub fn reset(self: *SessionManager) void {
+        self.quiesceDocumentOperations(0);
         self.documents.requireQuiescent() catch @panic("trusted reset requires document operations to finish");
         self.clearPeerAttestationWorker();
         // Revoke and drain authentication before any borrowed service is freed.
@@ -317,7 +318,7 @@ pub const SessionManager = struct {
             _ = self.provisionSurfacePresentationCapabilities(now_ticks);
         }
         const copied = self.clipboard.service(self, now_ticks);
-        const serviced = self.documents.service(now_ticks);
+        const serviced = if (self.identity_owner) |owner| owner.service_documents(owner.context, now_ticks) else self.documents.service(now_ticks);
         const launched = self.launcher.service(self, now_ticks);
         const identity_work = if (self.identity_owner) |owner| owner.service_requests(owner.context, now_ticks) else false;
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
@@ -337,7 +338,8 @@ pub const SessionManager = struct {
 
     fn hasReadyServiceWork(self: *const SessionManager, now_ticks: u64) bool {
         if (self.identity_owner) |owner| if (owner.requests_ready(owner.context)) return true;
-        return self.peerQuoteReady(now_ticks) or self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(now_ticks) or self.peer_handshakes.hasReadyWork(now_ticks) or self.peers.hasReadyWork(now_ticks) or self.peerFramesPending() or self.clipboard.hasPendingWork() or self.documents.hasPendingWork() or self.launcher.hasPendingWork();
+        const document_ready = if (self.identity_owner) |owner| owner.documents_ready(owner.context, now_ticks) else self.documents.hasPendingWork();
+        return self.peerQuoteReady(now_ticks) or self.peer_connections.hasReadyWork() or self.peer_connections.hasAttestationWork(now_ticks) or self.peer_handshakes.hasReadyWork(now_ticks) or self.peers.hasReadyWork(now_ticks) or self.peerFramesPending() or self.clipboard.hasPendingWork() or document_ready or self.launcher.hasPendingWork();
     }
 
     pub const DocumentTask = struct {
@@ -602,12 +604,14 @@ pub const SessionManager = struct {
     pub fn attachIdentityOwner(self: *SessionManager, io: anytype, config: identity_owner_mod.Config, now_ticks: u64) !*identity_owner_mod.Owner(@TypeOf(io.*)) {
         if (self.identity_owner != null) return error.IdentityOwnerAlreadyAttached;
         const owner = try identity_owner_mod.Owner(@TypeOf(io.*)).create(io, self.storageServicePtr(), config);
+        owner.bindDocuments(&self.documents);
         self.identity_owner = owner.attach(&self.input_router, now_ticks);
         _ = desktop_display.present(self.compositorSessionPtr());
         return owner;
     }
 
     pub fn clearIdentityOwner(self: *SessionManager) void {
+        self.quiesceDocumentOperations(0);
         self.documents.requireQuiescent() catch @panic("trusted identity retirement requires document operations to finish");
         if (self.identity_owner != null) {
             // Picker offers and channels borrow the owner's signer. Retire them
@@ -619,6 +623,10 @@ pub const SessionManager = struct {
         self.input_router.clearTrustedEntry();
         if (self.identity_owner) |owner| owner.destroy(owner.context);
         self.identity_owner = null;
+    }
+
+    fn quiesceDocumentOperations(self: *SessionManager, now: u64) void {
+        if (self.identity_owner) |owner| owner.quiesce_documents(owner.context, now);
     }
 
     // Native origin owners only. The app receives no endpoint until the trusted
@@ -1226,6 +1234,7 @@ pub const SessionManager = struct {
     }
 
     pub fn failBoot(self: *SessionManager) void {
+        self.quiesceDocumentOperations(0);
         self.documents.requireQuiescent() catch @panic("trusted boot teardown requires document operations to finish");
         self.clearPeerAttestationWorker();
         self.clearIdentityOwner();

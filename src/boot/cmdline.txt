@@ -1,1 +1,0 @@
-model_inventory qemu_tsc_frequency_hz=2400000000

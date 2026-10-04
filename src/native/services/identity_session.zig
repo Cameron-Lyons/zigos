@@ -18,6 +18,7 @@ const durable = @import("durable_identity_service.zig");
 const enrollment_mod = @import("identity_enrollment.zig");
 const recovery = @import("identity_recovery.zig");
 const operation_guard = @import("../platform/operation_guard.zig");
+const cooperative = @import("../task/cooperative_worker.zig");
 
 // Provisioning supplies this independently of the capsule/catalog being opened.
 // Secret IDs select keys; their public keys are checked against the NV pins.
@@ -54,6 +55,9 @@ pub fn Session(comptime Io: type) type {
         last_ticks: u64 = 0,
         expires_at_ticks: u64 = 0,
         publication_guard: ?*const operation_guard.Guard = null,
+        operation_worker: ?*cooperative.Worker = null,
+        revocation: ?struct { context: *anyopaque, call: *const fn (*anyopaque) void } = null,
+        lock_pending: bool = false,
 
         comptime {
             if (@sizeOf(Self) > 4096) @compileError("identity session exceeds bounded coordination state");
@@ -64,10 +68,50 @@ pub fn Session(comptime Io: type) type {
             self.signing_authority.publication_guard = guard;
         }
 
+        // Own session state before installing guards or entering any protocol.
+        // The token is the stable worker, including while it waits for TPM use.
+        pub fn beginOperation(self: *Self, worker: *cooperative.Worker) error{WorkerBusy}!void {
+            if (self.operation_worker != null) return error.WorkerBusy;
+            self.operation_worker = worker;
+            self.lock_pending = false;
+        }
+
+        pub fn endOperation(self: *Self, worker: *cooperative.Worker) void {
+            if (self.operation_worker != worker) @panic("identity operation releases its exact worker");
+            self.bindPublicationGuard(null);
+            if (self.lock_pending) self.lockNow();
+            self.operation_worker = null;
+            self.lock_pending = false;
+        }
+
+        pub fn lockOwned(self: *Self, worker: *cooperative.Worker) void {
+            if (self.operation_worker != worker) @panic("identity cleanup owns its session operation");
+            self.replay.lock();
+            if (self.revocation) |revoke| revoke.call(revoke.context);
+            self.lockNow();
+        }
+
+        pub fn closeOwned(self: *Self, worker: *cooperative.Worker) !void {
+            self.lockOwned(worker);
+            try self.client.close(self.io);
+            self.client = .{};
+        }
+
         // No I/O, allocation, audit or fallible policy check. Invalidate replay
         // authority first. Arenas retain generation history, even on failed
         // unlocks. Pending checkpoints are recovered from disk/NV next time.
         pub fn lock(self: *Self) void {
+            self.replay.lock();
+            if (self.revocation) |revoke| revoke.call(revoke.context);
+            if (self.operation_worker) |worker| {
+                self.lock_pending = true;
+                worker.cancel();
+                return;
+            }
+            self.lockNow();
+        }
+
+        fn lockNow(self: *Self) void {
             self.replay.lock();
             self.state.vault.unload();
             std.crypto.secureZero(u8, &self.authorization);
@@ -87,6 +131,7 @@ pub fn Session(comptime Io: type) type {
         // keep the session locked; retain the client so cleanup can be retried.
         pub fn close(self: *Self) !void {
             self.lock();
+            if (self.operation_worker != null) return error.WorkerBusy;
             try self.client.close(self.io);
             self.client = .{};
         }
@@ -130,7 +175,10 @@ pub fn Session(comptime Io: type) type {
             if (!self.policies.sessionLifetimeDecision(self.subjects, lifetime_ticks).allowed) return error.IdentityPolicyDenied;
             if (!self.state.vault.store.empty() or self.state.vault.handles.countInUse() != 0 or self.state.vault.store.handles.countInUse() != 0 or
                 self.state.identities.credential_count != 0 or !graph_snapshot.empty(devices)) return error.VaultNotEmpty;
-            try self.close();
+            if (self.operation_worker) |worker| {
+                if (cooperative.current() != worker) return error.WorkerBusy;
+                try self.closeOwned(worker);
+            } else try self.close();
             return deadline;
         }
 
@@ -407,7 +455,6 @@ test "identity session recovery authenticates enrollment before hardware and nev
 }
 
 test "identity session activation rechecks live authority after entropy yields without unloading borrows" {
-    const cooperative = @import("../task/cooperative_worker.zig");
     const Control = struct {
         ticks: u64 = 1,
         cancelled: bool = false,

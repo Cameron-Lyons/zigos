@@ -263,6 +263,7 @@ const PausedDocument = struct {
     pause_flush: bool = false,
     flush_paused: bool = false,
     channel: ?*document_channel.Channel = null,
+    retained_blob: bool = true,
 
     fn ticks(context: *anyopaque) @import("../platform/operation_guard.zig").Error!u64 {
         const self: *@This() = @ptrCast(@alignCast(context));
@@ -278,7 +279,12 @@ const PausedDocument = struct {
     fn open(context: ?*anyopaque, binding: *const sealing.Binding, blob: []const u8, out: *sealing.Value) sealing.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(context.?));
         self.opens += 1;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(blob, &digest, .{});
         if (self.pause_signing) cooperative.current().?.yield();
+        var current: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(blob, &current, .{});
+        self.retained_blob = std.mem.eql(u8, &digest, &current);
         return @import("../../tests/fixtures/secret_provider.zig").provider().open(binding, blob, out);
     }
     fn run(context: *anyopaque) void {
@@ -1161,4 +1167,345 @@ test "document sessions enforce capacity and share each dispatch fairly" {
     try std.testing.expect(!sessions.hasPendingWork());
     sessions.closeTask(requests[0].authority.task_id, 5);
     _ = try sessions.open(&fixture.port, &fixture.device.service, requests[bindings.len], 6);
+}
+
+// Explicit enrollment/sealing fixtures exercise the real session, worker,
+// IPC server and StoragePort. They do not provision a production account.
+const OwnedDocument = struct {
+    const Io = struct {
+        calls: usize = 0,
+        pub fn random(_: *@This(), out: []u8) !void {
+            @memset(out, 0x49);
+        }
+        pub fn execute(self: *@This(), _: []const u8, _: []u8, _: u32) ![]u8 {
+            self.calls += 1;
+            return error.UnexpectedHardwareCommand;
+        }
+    };
+    const session_mod = @import("../services/identity_session.zig");
+    const adapter_mod = @import("../services/identity_authenticator.zig");
+    const coordinator_mod = @import("../services/document_operation_worker.zig");
+    const identity = @import("../platform/os_identity.zig");
+    const sessions_mod = @import("../session/document_sessions.zig");
+    fixture: *Fixture,
+    io: Io = .{},
+    identities: identity.Store = .init(),
+    graph: @import("../sync/device_graph.zig").Graph = .init(),
+    documents: sessions_mod.Sessions = .{},
+    capsule: @import("../platform/tpm2_pin.zig").Capsule = undefined,
+    scratch: [@import("vault_catalog.zig").MAX_BYTES]u8 = undefined,
+    session: session_mod.Session(Io) = undefined,
+    adapter: adapter_mod.Adapter(Io) = undefined,
+    coordinator: coordinator_mod.Coordinator(Io) = undefined,
+
+    fn init() !*OwnedDocument {
+        const fixture = try Fixture.init();
+        errdefer fixture.deinit();
+        const self = try std.testing.allocator.create(OwnedDocument);
+        errdefer std.testing.allocator.destroy(self);
+        self.* = .{ .fixture = fixture };
+        var record = try @import("../../tests/fixtures/identity_enrollment.zig").record();
+        record.capsule.owner = fixture.signing_fixture.authority.owner;
+        record.enrollment.owner = record.capsule.owner;
+        record.enrollment.capsule_digest = try record.capsule.digest();
+        self.capsule = record.capsule;
+        self.session = .{
+            .io = &self.io,
+            .enrollment = record.enrollment,
+            .state = .{ .vault = &fixture.signing_fixture.service, .identities = &self.identities, .devices = &self.graph },
+            .storage = &fixture.device.service,
+            .policies = &fixture.signing_fixture.policies,
+            .subjects = fixture.signing_fixture.authority.subjects,
+            .replay = @import("../../tests/fixtures/identity_vault.zig").unlock_session,
+            .signing_authority = fixture.signing_fixture.authority,
+            .verified_at_ticks = 1,
+            .last_ticks = 1,
+            .expires_at_ticks = 100,
+        };
+        self.adapter = .{ .session = &self.session, .capsule = &self.capsule, .boot_instance = @splat(1), .lifetime_ticks = 100, .scratch = &self.scratch };
+        var signer = fixture.open_request.signer;
+        signer.key.authority = &self.session.signing_authority;
+        self.session.device_key = signer.key;
+        self.session.coordinator = .{ .state = self.session.state, .storage = &fixture.device.service, .signer = signer, .object_id = record.enrollment.catalog_object_id };
+        self.coordinator = .{ .session = &self.session, .documents = &self.documents, .timeout_ticks = 20 };
+        self.coordinator.bind();
+        fixture.channel.close(0);
+        fixture.open_request.signer = signer;
+        const binding = try self.documents.open(&fixture.port, &fixture.device.service, fixture.open_request, 0);
+        const channel = &self.documents.backing[0];
+        fixture.server = &channel.server.?;
+        fixture.app_endpoint_id = channel.client_endpoint_id;
+        fixture.server_endpoint_id = binding.service_endpoint_id;
+        fixture.app_endpoint_capability = binding.endpoint_capability_id;
+        fixture.client = .{ .service_endpoint_id = binding.service_endpoint_id, .object_id = binding.object_id, .version_id = binding.version_id };
+        return self;
+    }
+
+    fn deinit(self: *OwnedDocument) void {
+        self.session.lock();
+        self.coordinator.quiesce(self.coordinator.now_ticks);
+        self.adapter.deinit() catch unreachable;
+        self.session.close() catch unreachable;
+        self.coordinator.deinit() catch unreachable;
+        self.documents.deinit(99) catch unreachable;
+        self.fixture.deinit();
+        std.testing.allocator.destroy(self);
+    }
+
+    fn credential(self: *OwnedDocument) !u64 {
+        _ = try self.graph.ensureUserRoot(self.session.enrollment.owner, "owner", durable.signer);
+        _ = try self.graph.enrollDevice(self.session.enrollment.owner, self.session.enrollment.device, "device", durable.signer, durable.signer, 1);
+        const value = try self.identities.registerCredential(&self.graph, .{
+            .vault = self.session.state.vault,
+            .policies = self.session.policies,
+            .subjects = self.session.subjects,
+            .holder = self.session.storage.owner,
+            .task_id = self.session.storage.task_id,
+            .now_ticks = 1,
+            .unlock_session = &self.session.replay,
+        }, .{ .owner = self.session.enrollment.owner, .device = self.session.enrollment.device, .relying_party_id = "accounts.example", .label = "account", .key_handle_id = self.session.device_key.handle_id });
+        return value.id;
+    }
+};
+
+test "owned document worker excludes credential replacement and drains trusted entry detach" {
+    const owned = try OwnedDocument.init();
+    defer owned.deinit();
+    const fixture = owned.fixture;
+    const credential = try owned.credential();
+    try fixture.queueCommit("owned signing");
+    var paused = PausedDocument{ .fixture = fixture };
+    fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+    @memset(&owned.session.client.command, 0x91);
+    try std.testing.expect(owned.coordinator.ready(10) and owned.coordinator.stack == null);
+    try std.testing.expect(owned.coordinator.service(10));
+    try std.testing.expect(owned.coordinator.busy() and fixture.server.running and paused.opens == 1);
+    try std.testing.expect(!owned.coordinator.ready(10));
+    try std.testing.expectEqual(@as(?u64, 11), owned.coordinator.nextWake());
+    try std.testing.expect(!owned.coordinator.service(10));
+    const guard = owned.session.publication_guard;
+    const auth = owned.adapter.authenticator();
+    try std.testing.expectError(error.WorkerBusy, auth.start_fn(auth.context, .pin, "73019428", 10));
+    const requests = owned.adapter.requests();
+    try std.testing.expectError(error.WorkerBusy, requests.start(requests.context, .{ .grant = .{ .credential_id = credential, .relying_party_id = "accounts.example", .origin = "https://accounts.example", .session = try owned.session.replay.binding(), .expires_at_ticks = 50 }, .challenge = "nonce" }, 10));
+    try std.testing.expect(guard == owned.session.publication_guard and owned.adapter.stack == null);
+    try std.testing.expect(std.mem.allEqual(u8, &owned.session.client.command, 0x91));
+    try std.testing.expectError(error.WorkerBusy, owned.session.close());
+    try std.testing.expect(!owned.session.replay.active and owned.session.lock_pending);
+    try std.testing.expect(fixture.server.running and fixture.server.closing);
+    try std.testing.expectEqualStrings(durable.path, fixture.server.binding.path);
+    try std.testing.expect(!fixture.signing_fixture.service.store.empty());
+    try std.testing.expect(std.mem.allEqual(u8, &owned.session.client.command, 0x91));
+    try std.testing.expectError(error.WorkerBusy, owned.coordinator.deinit());
+    try std.testing.expectError(error.DocumentOperationBusy, owned.documents.deinit(11));
+    var entry = @import("../platform/trusted_auth_entry.zig").Entry{ .authenticator = auth, .input_timeout_ticks = 20, .last_ticks = 10 };
+    var router = @import("../platform/input_router.zig").Router{};
+    defer router.deinit();
+    router.trusted_entry = .{ .authentication = &entry };
+    router.clearTrustedEntry();
+    try std.testing.expect(router.trusted_entry == null and !entry.busy() and !owned.coordinator.busy());
+    try std.testing.expect(paused.retained_blob and owned.documents.backing[0].server == null);
+    try std.testing.expect(owned.session.operation_worker == null and owned.session.publication_guard == null);
+    try std.testing.expect(fixture.signing_fixture.service.store.empty());
+    try std.testing.expect(std.mem.allEqual(u8, &owned.session.client.command, 0));
+    try std.testing.expect(std.mem.allEqual(u8, owned.coordinator.stack.?.bytes, 0));
+    try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+    try std.testing.expectEqualStrings("original", try fixture.device.text());
+    try std.testing.expect(owned.coordinator.nextWake() == null);
+}
+
+test "owned document worker revokes expiry continuity and rollback before publication" {
+    const Reason = enum { expiry, continuity, rollback, epoch, policy, saturated };
+    for (std.enums.values(Reason)) |reason| {
+        const owned = try OwnedDocument.init();
+        defer owned.deinit();
+        const fixture = owned.fixture;
+        try fixture.queueCommit("unpublished owner draft");
+        var paused = PausedDocument{ .fixture = fixture };
+        fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+        try std.testing.expect(owned.coordinator.service(10));
+        var entry = @import("../platform/trusted_auth_entry.zig").Entry{ .authenticator = owned.adapter.authenticator(), .input_timeout_ticks = 20, .session_deadline = 100, .last_ticks = 10 };
+        var now: u64 = 11;
+        switch (reason) {
+            .expiry => entry.tick(100),
+            .continuity => entry.inputInterrupted(11),
+            .rollback => entry.tick(9),
+            .epoch => owned.session.replay.current.session_nonce[0] ^= 1,
+            .policy => {
+                _ = try fixture.signing_fixture.policies.create(.{ .scope = .user, .subject_id = 1, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "revoke unlocked session", .max_session_unlock_age_ticks = 3 }, durable.signer);
+            },
+            .saturated => now = std.math.maxInt(u64),
+        }
+        try std.testing.expect(owned.coordinator.service(now));
+        try std.testing.expect(!owned.coordinator.busy() and paused.retained_blob);
+        try std.testing.expect(owned.session.operation_worker == null and owned.session.publication_guard == null);
+        try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+        try std.testing.expectEqualStrings("original", try fixture.device.text());
+        if (reason == .epoch or reason == .policy) {
+            _ = try fixture.receive(true);
+            try std.testing.expectEqual(protocol.Status.permission_denied, fixture.client.last_status.?);
+        } else {
+            try std.testing.expect(owned.documents.backing[0].server == null and !owned.session.replay.active);
+            try std.testing.expect(owned.coordinator.nextWake() == null and !owned.coordinator.ready(now));
+        }
+    }
+}
+
+test "owned document worker cancels a queued TPM job without consuming its frame" {
+    const lease = @import("../task/tpm_worker_lease.zig");
+    const Holder = struct {
+        acquired: bool = false,
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.acquired = lease.tryAcquire() catch @panic("holder lease");
+            if (!self.acquired) @panic("fixture starts with no TPM job");
+            defer lease.release();
+            PausedDocument.cooperative.current().?.yield();
+        }
+    };
+    const owned = try OwnedDocument.init();
+    defer owned.deinit();
+    const fixture = owned.fixture;
+    try fixture.queueCommit("queued signing");
+    var paused = PausedDocument{ .fixture = fixture };
+    fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+    var holder = Holder{};
+    var stack: [32 * 1024]u8 align(16) = undefined;
+    var worker = PausedDocument.cooperative.Worker{ .stack = &stack };
+    try worker.start(&holder, Holder.run);
+    try worker.step();
+    try std.testing.expect(holder.acquired and owned.coordinator.service(10));
+    try std.testing.expect(owned.coordinator.busy() and !fixture.server.running and paused.opens == 0);
+    try std.testing.expectEqual(@as(u16, 1), (try fixture.endpoints.descriptor(ids.endpoint(fixture.server_endpoint_id))).queued_messages);
+    owned.session.lock();
+    try std.testing.expect(!owned.session.replay.active and owned.documents.backing[0].server == null);
+    try std.testing.expect(owned.coordinator.service(11));
+    try std.testing.expect(!owned.coordinator.busy() and paused.opens == 0 and owned.session.operation_worker == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+    try worker.step();
+    try std.testing.expect(worker.state == .complete and owned.coordinator.nextWake() == null);
+}
+
+test "owned document worker retains failed durability retry and respects reply backpressure" {
+    const owned = try OwnedDocument.init();
+    defer owned.deinit();
+    const fixture = owned.fixture;
+    try fixture.queueCommit("worker durable retry");
+    var paused = PausedDocument{ .fixture = fixture, .pause_signing = false };
+    fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+    fixture.device.fail_flushes = true;
+    try std.testing.expect(owned.coordinator.service(10));
+    _ = try fixture.receive(true);
+    try std.testing.expectEqual(protocol.Status.durability_failed, fixture.client.last_status.?);
+    const pending = fixture.server.saver.pending.?.version_id;
+    const opens = paused.opens;
+    fixture.device.fail_flushes = false;
+    try std.testing.expect(fixture.client.retry());
+    var bytes: [protocol.MAX_FRAME_BYTES]u8 = undefined;
+    const frame = (try fixture.client.nextFrame(&bytes)).?;
+    try fixture.send(frame, fixture.client.request_id);
+    fixture.client.sent();
+    for (0..endpoint.MAX_ENDPOINT_QUEUE) |index| {
+        _ = try fixture.endpoints.reply(ids.endpoint(fixture.server_endpoint_id), ids.endpoint(fixture.app_endpoint_id), ids.task(fixture.device.service.task_id), index, "queued", null, false);
+    }
+    try std.testing.expect(owned.coordinator.service(11));
+    try std.testing.expect(fixture.server.pending_reply != null and fixture.server.saver.pending == null);
+    try std.testing.expect(!owned.coordinator.ready(11) and !owned.coordinator.service(11));
+    try std.testing.expectEqual(@as(?u64, 100), owned.coordinator.nextWake());
+    try std.testing.expectEqual(opens, paused.opens);
+    try std.testing.expectEqual(@as(usize, 2), fixture.device.service.versionCount());
+    for (0..endpoint.MAX_ENDPOINT_QUEUE) |_| _ = try fixture.receive(false);
+    try std.testing.expect(owned.coordinator.ready(12) and owned.coordinator.service(12));
+    _ = try fixture.receive(true);
+    try std.testing.expectEqual(protocol.Status.saved, fixture.client.last_status.?);
+    try std.testing.expectEqual(pending, fixture.client.version_id);
+    fixture.device.crash();
+    try std.testing.expectEqualStrings("worker durable retry", try fixture.device.text());
+}
+
+test "owned document worker closes idle lifetime before immediate credential replacement" {
+    const owned = try OwnedDocument.init();
+    defer owned.deinit();
+    const fixture = owned.fixture;
+    try fixture.queueCommit("old lifetime request");
+    const auth = owned.adapter.authenticator();
+    try auth.start_fn(auth.context, .pin, "73019428", 10);
+    try std.testing.expect(owned.documents.backing[0].server == null);
+    try std.testing.expectError(error.EndpointNotFound, fixture.endpoints.descriptor(ids.endpoint(fixture.server_endpoint_id)));
+    try std.testing.expect(owned.coordinator.stack == null and !owned.coordinator.ready(10));
+    auth.lock_fn(auth.context);
+    try std.testing.expectError(error.Cancelled, auth.poll_fn(auth.context, 11));
+    try std.testing.expect(!auth.busy_fn(auth.context) and owned.session.operation_worker == null);
+    try std.testing.expectEqual(@as(usize, 0), owned.io.calls);
+    try std.testing.expectEqual(@as(usize, 1), fixture.device.service.versionCount());
+}
+
+test "owned document worker resumes actual storage signing and excludes foreign authority" {
+    const owned = try OwnedDocument.init();
+    defer owned.deinit();
+    const fixture = owned.fixture;
+    try fixture.queueCommit("completed cooperative document");
+    var paused = PausedDocument{ .fixture = fixture };
+    fixture.signing_fixture.service.attachHardwareProvider(paused.provider());
+    const authority = fixture.server.binding.signer.key.authority;
+    fixture.server.binding.signer.key.authority = &fixture.signing_fixture.authority;
+    try std.testing.expect(!owned.coordinator.ready(10) and !owned.coordinator.service(10));
+    try std.testing.expect(owned.coordinator.stack == null and paused.opens == 0);
+    fixture.server.binding.signer.key.authority = authority;
+    try std.testing.expect(owned.coordinator.service(10));
+    try std.testing.expect(owned.coordinator.busy() and owned.session.operation_worker == &owned.coordinator.worker);
+    const Independent = struct {
+        progressed: bool = false,
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.progressed = true;
+        }
+    };
+    var independent = Independent{};
+    var stack: [32 * 1024]u8 align(16) = undefined;
+    var other = PausedDocument.cooperative.Worker{ .stack = &stack };
+    try other.start(&independent, Independent.run);
+    try other.step();
+    try std.testing.expect(independent.progressed);
+    try std.testing.expect(owned.coordinator.service(11));
+    try std.testing.expect(!owned.coordinator.busy() and paused.retained_blob);
+    _ = try fixture.receive(true);
+    try std.testing.expectEqual(protocol.Status.saved, fixture.client.last_status.?);
+    try std.testing.expectEqualStrings("completed cooperative document", try fixture.device.text());
+    try std.testing.expect(owned.session.replay.active and owned.session.operation_worker == null);
+    try std.testing.expect(owned.session.publication_guard == null);
+    try std.testing.expect(std.mem.allEqual(u8, owned.coordinator.stack.?.bytes, 0));
+    // A broken native signer association is revocation work, never a worker
+    // submission that unwraps missing authority or reaches another TPM key.
+    owned.session.coordinator.?.signer.key.authority = &fixture.signing_fixture.authority;
+    const calls = paused.opens;
+    try std.testing.expect(owned.coordinator.ready(12) and owned.coordinator.service(12));
+    try std.testing.expect(!owned.session.replay.active and owned.documents.backing[0].server == null);
+    try std.testing.expectEqual(calls, paused.opens);
+}
+
+test "owned document worker leaves an already locked empty session idle" {
+    const owned = try OwnedDocument.init();
+    defer owned.deinit();
+    const Probe = struct {
+        coordinator: *OwnedDocument.coordinator_mod.Coordinator(OwnedDocument.Io),
+        calls: usize = 0,
+        fn revoke(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.coordinator.cancel(self.coordinator.now_ticks);
+        }
+    };
+    const original = owned.session.revocation;
+    var probe = Probe{ .coordinator = &owned.coordinator };
+    owned.session.revocation = .{ .context = &probe, .call = Probe.revoke };
+    defer owned.session.revocation = original;
+    owned.session.lock();
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    for ([_]u64{ 11, 12, 100, std.math.maxInt(u64) }) |now| {
+        try std.testing.expect(!owned.coordinator.service(now));
+        try std.testing.expect(!owned.coordinator.ready(now) and owned.coordinator.nextWake() == null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expect(owned.coordinator.stack == null);
 }

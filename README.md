@@ -67,9 +67,14 @@ requests.
   reject the save. Backpressured saved receipts and read data are checked again
   before delivery. Closing a suspended operation detaches its endpoints while
   retaining borrowed bytes until it finishes; pool teardown refuses live work.
-  Actual cooperative host regressions exercise these boundaries. Production
-  sign-in, prepared Notes launch, approved grants and a document worker still
-  need an operational coordinator.
+  Actual cooperative host regressions exercise these boundaries. The native
+  identity owner now runs document operations on a lazy guarded worker under
+  the shared TPM lease. Authentication, assertions and document work hold one
+  exact session operation token through provider cleanup. Lock retires idle
+  channels and cancels active work immediately, retaining borrowed buffers
+  until completion. Worker readiness and future wakes join the native loop;
+  detach and owner teardown drain work before releasing its backing. Production
+  still needs the Notes launch gesture and approved document grants.
   A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels
   queued saves when either endpoint or task is retired. Editors keep their text
@@ -653,9 +658,13 @@ Userspace dispatch and device interrupts share one explicit runtime owner on
 the bootstrap CPU. Each resource class has one ready queue; background, media,
 and batch work are serviced by the same dispatcher as interactive tasks. The
 executor arms the timer at every user entry and bounds every resource class to
-a two-tick quantum, nominally 20 ms, even when no priority callback or other
-ready task exists. This returns control to deferred device service so new work
-can become ready. Each materialized mapping owns an aligned x87/SSE image and
+a two-tick quantum, at most 20 ms in the nominal clock, even when no priority
+callback or other ready task exists. Latched network, NVMe and xHCI interrupts
+also hand an interrupted user back to the runtime owner, so its deferred
+network and input work can run before that quantum expires. The NVMe latch
+uses the same owner boundary; current completions still wait synchronously. Kernel-origin work
+remains uninterrupted. Both paths preserve the complete user context and keep
+the finite watchdog. Each materialized mapping owns an aligned x87/SSE image and
 PKRU state; allocation rollback, retirement, and reset erase and release it.
 Assembly preserves the kernel continuation and captures user state before
 entering compiled handlers. The current enabled state is XCR0=x87|SSE and
@@ -670,6 +679,14 @@ device interrupts. Oversized yield arguments and unknown yield dispositions
 stop the offending task through ordinary exception containment. Unexpected #NM
 exceptions follow the registered handler rather than the retired lazy-state
 shortcut. Native hardware execution still needs validation.
+Production clock frequency requires the complete architectural CPUID `0x15`
+ratio and crystal frequency. Advertised processor MHz is not a timer rate;
+Intel documents that distinction in its
+[CPUID reference](https://cdrdv2-public.intel.com/825745/252046-sdm-change-document.pdf).
+Normal boot defaults supply no modeled devices or fixed frequency, and missing
+network hardware cannot opt into a model implicitly. The fixed emulator clock
+and software controls require the complete explicit QEMU request. Actual feature
+flags still control privileged enablement, and every mode requires XSAVE/XSAVES.
 The service loop drains one atomic pending-work latch and rechecks it before idle.
 Idle checks use the dispatcher's eligibility rules: policy-delayed work remains
 queued while the CPU sleeps, and runnable work can pass a delayed queue head.

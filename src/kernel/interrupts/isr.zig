@@ -171,6 +171,14 @@ pub export fn isrHandler(regs: *Registers) void {
     if (handlerForVector(vector)) |handler| {
         const frame: *InterruptFrame = @ptrCast(regs);
         handler(frame);
+        // Device handlers only latch/acknowledge work. Return an interrupted
+        // user to the runtime owner so that deferred service can make receivers
+        // runnable before the next scheduler tick. Never interrupt kernel work.
+        if (frameOriginatesFromUserspace(frame.cs) and
+            (vector == timer.INTERRUPT_VECTOR or deviceWorkPending(vector)))
+        {
+            if (runtime_preemption) |hook| hook(frame);
+        }
         return;
     }
 
@@ -187,10 +195,36 @@ pub export fn isrHandler(regs: *Registers) void {
 pub const InterruptFrame = Registers;
 pub const InterruptHandler = *const fn (regs: *InterruptFrame) void;
 
-var timer_preemption: ?InterruptHandler = null;
+var runtime_preemption: ?InterruptHandler = null;
 
-pub fn setTimerPreemption(handler: InterruptHandler) void {
-    timer_preemption = handler;
+pub fn setRuntimePreemption(handler: InterruptHandler) void {
+    runtime_preemption = handler;
+}
+
+fn deviceWorkPending(vector: usize) bool {
+    return switch (vector) {
+        intel_i225_hw.INTERRUPT_VECTOR => event_wake.peek().network,
+        // NVMe also raises a deferred-work latch. Preserve the same owner
+        // boundary without processing completions in this interrupt hook.
+        nvme_hw.INTERRUPT_VECTOR => event_wake.peek().nvme,
+        xhci_hw.INTERRUPT_VECTOR => event_wake.peek().xhci,
+        else => false,
+    };
+}
+
+// Hosted integration fixtures use the real ISR dispatcher with registered
+// latch-only handlers; preserve its shared tables without fake device MMIO.
+pub fn withTestHandlers(context: anytype, callback: anytype) !void {
+    if (!@import("builtin").is_test) @compileError("ISR fixture state is test-only");
+    const saved_exceptions = exception_handlers;
+    const saved_external = external_handlers;
+    const saved_preemption = runtime_preemption;
+    defer {
+        exception_handlers = saved_exceptions;
+        external_handlers = saved_external;
+        runtime_preemption = saved_preemption;
+    }
+    try callback(context);
 }
 
 const external_handler_vectors = [_]u8{
@@ -269,11 +303,10 @@ fn doubleFaultInterrupt(frame: *InterruptFrame) void {
     );
 }
 
-fn timerInterrupt(frame: *InterruptFrame) void {
+fn timerInterrupt(_: *InterruptFrame) void {
     timer.handleInterrupt();
     event_wake.raise(.timer);
     event_wake.raise(.scheduler);
-    if (timer_preemption) |hook| hook(frame);
 }
 
 fn i225Interrupt(_: *InterruptFrame) void {
@@ -372,7 +405,9 @@ fn disableLegacyPic() void {
 }
 
 comptime {
-    if (@sizeOf(@TypeOf(exception_handlers)) + @sizeOf(@TypeOf(external_handlers)) > HANDLER_STORAGE_SIZE_CEILING_BYTES) {
+    if (@sizeOf(@TypeOf(exception_handlers)) + @sizeOf(@TypeOf(external_handlers)) +
+        @sizeOf(@TypeOf(runtime_preemption)) > HANDLER_STORAGE_SIZE_CEILING_BYTES)
+    {
         @compileError("interrupt handler storage exceeds its compact size ceiling");
     }
     for (external_handler_vectors, 0..) |vector, index| {

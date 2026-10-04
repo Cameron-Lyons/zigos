@@ -131,12 +131,16 @@ pub fn startGraphicsDataplane() bool {
 }
 
 fn shouldEnableModelDeviceInventory(model_via_cmdline: bool) bool {
-    if (config.smokeFaultMode() != .none or model_via_cmdline) return true;
+    // Missing hardware is an unavailable device, never implicit model consent.
+    return config.smokeFaultMode() != .none or model_via_cmdline;
+}
 
-    if (config.bootProfile() == .zigos_native) {
-        return !device_inventory.recordForClass(.network_adapter).detected;
-    }
-    return false;
+test "absent hardware does not implicitly enable modeled device inventory" {
+    device_inventory.reset();
+    defer device_inventory.reset();
+    try std.testing.expect(!device_inventory.recordForClass(.network_adapter).detected);
+    try std.testing.expect(!shouldEnableModelDeviceInventory(false));
+    try std.testing.expect(shouldEnableModelDeviceInventory(true));
 }
 
 noinline fn reportHardwareFailure(

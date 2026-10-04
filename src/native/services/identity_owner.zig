@@ -18,6 +18,8 @@ const identity = @import("../platform/os_identity.zig");
 const graph_mod = @import("../sync/device_graph.zig");
 const channel_mod = @import("identity_channel.zig");
 const kernel_port = @import("../kernel_api/component_port.zig");
+const document_sessions = @import("../session/document_sessions.zig");
+const document_worker = @import("document_operation_worker.zig");
 
 const consent_mod = @import("identity_consent.zig");
 
@@ -57,6 +59,9 @@ pub const Interface = struct {
     service_requests: *const fn (*anyopaque, u64) bool,
     requests_ready: *const fn (*anyopaque) bool,
     next_request_wake: *const fn (*anyopaque) ?u64,
+    service_documents: *const fn (*anyopaque, u64) bool,
+    documents_ready: *const fn (*anyopaque, u64) bool,
+    quiesce_documents: *const fn (*anyopaque, u64) void,
 };
 
 pub fn Owner(comptime Io: type) type {
@@ -81,6 +86,8 @@ pub fn Owner(comptime Io: type) type {
         channels: [4]channel_mod.Channel,
         channel_cursor: u8,
         consent: consent_mod.Pending,
+        documents: ?*document_sessions.Sessions,
+        document_operations: document_worker.Coordinator(Io),
 
         pub fn create(io: *Io, storage: *storage_mod.Service, config: Config) !*Self {
             if (config.owner.kind != .user or config.owner.serial == 0 or config.lifetime_ticks == 0 or
@@ -109,6 +116,8 @@ pub fn Owner(comptime Io: type) type {
             for (&self.channels) |*channel| channel.* = .{};
             self.channel_cursor = 0;
             self.consent = .{};
+            self.documents = null;
+            self.document_operations = undefined;
             return self;
         }
 
@@ -116,7 +125,33 @@ pub fn Owner(comptime Io: type) type {
             router.bindTrustedEntry(.{ .setup = &self.setup }, now);
             self.setup.discover(now);
             router.synchronizeTrustedInput();
-            return .{ .context = self, .service = service, .destroy = destroy, .review_credential = reviewCredential, .take_credential = takeCredential, .revoke_credential = revokeCredential, .service_requests = serviceRequests, .requests_ready = requestsReady, .next_request_wake = nextRequestWake };
+            return .{ .context = self, .service = service, .destroy = destroy, .review_credential = reviewCredential, .take_credential = takeCredential, .revoke_credential = revokeCredential, .service_requests = serviceRequests, .requests_ready = requestsReady, .next_request_wake = nextRequestWake, .service_documents = serviceDocuments, .documents_ready = documentsReady, .quiesce_documents = quiesceDocuments };
+        }
+
+        // The manager binds its stable channel collection once. No app receives
+        // a signer or document authority from this execution-only association.
+        pub fn bindDocuments(self: *Self, documents: *document_sessions.Sessions) void {
+            if (self.documents != null) @panic("native identity owner binds document storage once");
+            self.documents = documents;
+            self.document_operations = .{ .session = &self.session, .documents = documents, .timeout_ticks = self.config.operation_timeout_ticks };
+        }
+
+        fn serviceDocuments(context: *anyopaque, now: u64) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.authentication_ready or self.documents == null) return false;
+            return self.document_operations.service(now);
+        }
+
+        fn documentsReady(context: *anyopaque, now: u64) bool {
+            const self: *Self = @ptrCast(@alignCast(context));
+            return self.authentication_ready and self.documents != null and self.document_operations.ready(now);
+        }
+
+        fn quiesceDocuments(context: *anyopaque, now: u64) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (!self.authentication_ready or self.documents == null) return;
+            self.session.lock();
+            self.document_operations.quiesce(now);
         }
 
         fn reviewCredential(context: *anyopaque, kernel: *kernel_port.KernelPort, request: CredentialRequest, now: u64) !void {
@@ -184,6 +219,7 @@ pub fn Owner(comptime Io: type) type {
         fn nextRequestWake(context: *anyopaque) ?u64 {
             const self: *Self = @ptrCast(@alignCast(context));
             var wake: ?u64 = null;
+            if (self.authentication_ready and self.documents != null) wake = self.document_operations.nextWake();
             for (&self.channels) |*channel| if (channel.nextWake()) |deadline| {
                 wake = @min(wake orelse deadline, deadline);
             };
@@ -224,6 +260,7 @@ pub fn Owner(comptime Io: type) type {
             try self.setup_worker.deinit();
             try self.bundle.session_policy.attach(&self.policies, enrolled.owner, self.bundle.initial_anchor.device_root_pin.?);
             self.session = .{ .io = self.io, .enrollment = enrolled, .state = self.state(), .storage = self.storage, .policies = &self.policies, .subjects = .{ .user_id = enrolled.owner.serial } };
+            if (self.documents != null) self.document_operations.bind();
             self.adapter = .{ .session = &self.session, .capsule = &self.bundle.identity.capsule, .recovery_package = &self.bundle.package, .recovery_pin = trusted, .boot_instance = self.config.boot_instance, .lifetime_ticks = @min(self.config.lifetime_ticks, self.bundle.session_policy.max_session_ticks), .scratch = &self.scratch };
             self.authentication = .{ .authenticator = self.adapter.authenticator(), .input_timeout_ticks = self.config.input_timeout_ticks };
             self.authentication_ready = true;
@@ -232,6 +269,7 @@ pub fn Owner(comptime Io: type) type {
 
         fn destroy(context: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(context));
+            quiesceDocuments(self, if (self.authentication_ready) self.session.last_ticks else 0);
             for (&self.channels) |*channel| channel.close(0);
             if (self.authentication_ready) {
                 self.consent.clear(&self.authentication);
@@ -240,6 +278,7 @@ pub fn Owner(comptime Io: type) type {
                 self.session.close() catch {};
             } else self.setup.quiesce();
             self.setup_worker.deinit() catch unreachable;
+            if (self.documents != null) self.document_operations.deinit() catch unreachable;
             self.vault.unload();
             self.identities.reset();
             self.graph.reset();
@@ -282,8 +321,14 @@ test "identity owner discovers without input and drains borrowed commands before
         var router = router_mod.Router{};
         defer router.deinit();
         const owner = try Owner(Io).create(&io, &disk.service, config);
+        var documents = document_sessions.Sessions{};
+        defer documents.deinit(99) catch unreachable;
+        owner.bindDocuments(&documents);
         const interface = owner.attach(&router, 1);
         defer interface.destroy(interface.context);
+        try std.testing.expect(!interface.documents_ready(interface.context, 1));
+        try std.testing.expect(!interface.service_documents(interface.context, 1));
+        try std.testing.expect(owner.document_operations.stack == null);
         try std.testing.expect(owner.setup.capturing() and owner.setup.nextWake().? == 1);
         try std.testing.expect(owner.setup.prepareWork(1));
         owner.setup.runWork(1);
