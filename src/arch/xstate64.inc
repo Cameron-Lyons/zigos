@@ -7,11 +7,15 @@
 .equ XSTATE_STACK_BYTES, 648
 .equ XSTATE_PKRU, 576
 
-/* pointer must be a saved register other than rax/rcx/rdx/rdi. */
-.macro XSAVE_STATE pointer, full=0
+/* pointer must be a saved register other than rax/rcx/rdx/rdi. Prepared mode
+ * is valid only while the current runtime CPU owns the published userspace
+ * context: TS is clear and its entry captured the invariant CR4.PKE mode. */
+.macro XSAVE_STATE pointer, full=0, prepared=0
     cld
 #ifndef ZIGOS_XSTATE_HOST_TEST
+.if !\prepared
     clts
+.endif
 #endif
     leaq 512(\pointer), %rdi
     xorl %eax, %eax
@@ -34,8 +38,12 @@
     xsaves64 (\pointer)
 .endif
     movl $(0), XSTATE_PKRU(\pointer)
+.if \prepared
+    cmpl $(0), zigos_userspace_xstate_pku_enabled(%rip)
+.else
     movq %cr4, %rax
     testq $(1 << 22), %rax
+.endif
     jz .Lsave_no_pku\@
     xorl %ecx, %ecx
     rdpkru
@@ -47,15 +55,21 @@
 // Stack images may occupy an address last used by XRSTORS but overwritten
 // after unwinding. Full XSAVE prevents modified-state optimization from omitting
 // bytes in that ephemeral storage; persistent user images remain XSAVES-owned.
-.macro XSAVE_FULL_STATE pointer
-    XSAVE_STATE \pointer, 1
+.macro XSAVE_FULL_STATE pointer, prepared=0
+    XSAVE_STATE \pointer, 1, \prepared
 .endm
 
-.macro XRSTOR_STATE pointer, full=0
+.macro XRSTOR_STATE pointer, full=0, prepared=0
 #ifndef ZIGOS_XSTATE_HOST_TEST
+.if !\prepared
     clts
+.endif
+.if \prepared
+    cmpl $(0), zigos_userspace_xstate_pku_enabled(%rip)
+.else
     movq %cr4, %rax
     testq $(1 << 22), %rax
+.endif
     jz .Lrestore_no_pku\@
     movl XSTATE_PKRU(\pointer), %eax
     xorl %ecx, %ecx
@@ -77,14 +91,15 @@
 #endif
 .endm
 
-.macro XRSTOR_FULL_STATE pointer
-    XRSTOR_STATE \pointer, 1
+.macro XRSTOR_FULL_STATE pointer, prepared=0
+    XRSTOR_STATE \pointer, 1, \prepared
 .endm
 
 #ifndef ZIGOS_XSTATE_HOST_TEST
 .extern zigos_initial_kernel_xstate
 .extern zigos_userspace_xstate
 .extern zigos_kernel_xstate
+.extern zigos_userspace_xstate_pku_enabled
 /* r12 always points to the already-saved GP/return frame. Kernel entries
  * preserve their interrupted live SIMD state; user entries switch owners
  * before the first compiler-generated instruction. */
@@ -99,11 +114,13 @@
     movq zigos_userspace_xstate(%rip), %r13
     testq %r13, %r13
     jz .Lmissing_xstate\@
-    XSAVE_STATE %r13
+    # The prepared owner has TS clear and a CPU-bound PKE mode. Avoid
+    # serializing control-register instructions on every native operation.
+    XSAVE_STATE %r13, 0, 1
     movq zigos_kernel_xstate(%rip), %r13
     testq %r13, %r13
     jz .Lmissing_xstate\@
-    XRSTOR_FULL_STATE %r13
+    XRSTOR_FULL_STATE %r13, 1
     jmp .Lkernel_xstate_ready\@
 .Lsave_kernel_xstate\@:
     # Diagnostic faults may precede OSXSAVE initialization on this CPU.
@@ -135,7 +152,7 @@
     cmpq $0x23, \frame_cs(%r12)
     jne .Lrestore_saved_kernel_xstate\@
     movq zigos_userspace_xstate(%rip), %r13
-    XRSTOR_STATE %r13
+    XRSTOR_STATE %r13, 0, 1
     jmp .Lleave_xstate_done\@
 .Lrestore_saved_kernel_xstate\@:
     cmpq $(0), XSTATE_BYTES(%rsp)

@@ -4,6 +4,10 @@ const xstate = @import("../../arch/xstate.zig");
 const Image = extern struct { state: xstate.State align(xstate.alignment) };
 extern fn zigos_xstate_host_supported() callconv(.c) u32;
 extern fn zigos_xstate_host_roundtrip(*const [3]Image, *[3]Image) callconv(.c) void;
+extern const zigos_xstate_generic_probe: u8;
+extern const zigos_xstate_generic_probe_end: u8;
+extern const zigos_xstate_prepared_probe: u8;
+extern const zigos_xstate_prepared_probe_end: u8;
 
 comptime {
     if (@sizeOf(Image) != 640 or @alignOf(Image) != xstate.alignment)
@@ -31,7 +35,7 @@ fn initialize(image: *Image, owner: usize) void {
     }
 }
 
-test "xstate assembly preserves complete kernel and userspace FP owners" {
+test "prepared xstate assembly preserves complete kernel and userspace FP owners" {
     if (zigos_xstate_host_supported() == 0) return error.SkipZigTest;
     var inputs: [3]Image = undefined;
     var outputs: [3]Image = undefined;
@@ -51,4 +55,28 @@ test "xstate assembly preserves complete kernel and userspace FP owners" {
         try std.testing.expectEqual(xstate.enabled_mask, std.mem.readInt(u64, output.state.image[512..520], .little));
         try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, output.state.image[520..528], .little));
     }
+}
+
+fn probeBytes(start: *const u8, end: *const u8) []const u8 {
+    const bytes: [*]const u8 = @ptrCast(start);
+    return bytes[0 .. @intFromPtr(end) - @intFromPtr(start)];
+}
+
+test "prepared owner switch retains eager state operations without control-register exits" {
+    const generic = probeBytes(&zigos_xstate_generic_probe, &zigos_xstate_generic_probe_end);
+    const prepared = probeBytes(&zigos_xstate_prepared_probe, &zigos_xstate_prepared_probe_end);
+    // The probes use r13 exclusively; these three prefixes identify XSAVES,
+    // full XRSTOR and XRSTORS respectively, independent of branch offsets.
+    for ([_][]const u8{ generic, prepared }) |bytes| {
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xc7, 0x6d }));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xae, 0x6d }));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xc7, 0x5d }));
+    }
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, generic, &.{ 0x0f, 0x06 })); // CLTS
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, generic, &.{ 0x0f, 0x20, 0xe0 })); // CR4 -> RAX
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, prepared, &.{ 0x0f, 0x06 }));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, prepared, &.{ 0x0f, 0x20 }));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, prepared, &.{ 0x0f, 0x22 }));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prepared, &.{ 0x0f, 0x01, 0xee })); // RDPKRU
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, prepared, &.{ 0x0f, 0x01, 0xef })); // WRPKRU
 }

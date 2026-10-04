@@ -38,6 +38,13 @@ zigos_enter_userspace:
     cli
     movq %rdi, %r14
     movq %rsi, zigos_userspace_xstate(%rip)
+    # Capture this runtime owner's actual CPU mode for this prepared context.
+    # TS is cleared during XSAVE below and never armed by owned xstate; PKE
+    # stays enabled or disabled throughout the context's lifetime.
+    movq %cr4, %rax
+    shrl $22, %eax
+    andl $1, %eax
+    movl %eax, zigos_userspace_xstate_pku_enabled(%rip)
     movq %rsp, zigos_userspace_resume_esp(%rip)
     subq $XSTATE_STACK_BYTES, %rsp
     andq $-64, %rsp
@@ -45,9 +52,9 @@ zigos_enter_userspace:
     movq %r13, zigos_kernel_xstate(%rip)
     XSAVE_FULL_STATE %r13
     movq zigos_userspace_xstate(%rip), %r13
-    XRSTOR_STATE %r13
+    XRSTOR_STATE %r13, 0, 1
     movq %r14, %rdi
-    leaq .resume_from_userspace(%rip), %rax
+    leaq .Lresume_from_userspace(%rip), %rax
     movq %rax, zigos_userspace_resume_eip(%rip)
 
     movq %cr4, %rax
@@ -76,7 +83,7 @@ zigos_enter_userspace:
     swapgs
     iretq
 
-.resume_from_userspace:
+.Lresume_from_userspace:
     endbr64
     popfq
     popq %r15
@@ -94,7 +101,7 @@ zigos_resume_from_userspace_interrupt:
     # The handler ran with kernel state, but restore the continuation's exact
     # state before leaving the assembly boundary.
     movq zigos_kernel_xstate(%rip), %r13
-    XRSTOR_FULL_STATE %r13
+    XRSTOR_FULL_STATE %r13, 1
     movq zigos_userspace_resume_esp(%rip), %rsp
     jmp *zigos_userspace_resume_eip(%rip)
 
@@ -114,5 +121,8 @@ zigos_userspace_xstate:
 .global zigos_kernel_xstate
 zigos_kernel_xstate:
     .quad 0
+.global zigos_userspace_xstate_pku_enabled
+zigos_userspace_xstate_pku_enabled:
+    .long 0
 
 .section .note.GNU-stack,"",@progbits

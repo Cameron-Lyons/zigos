@@ -170,9 +170,10 @@ pub const Channel = struct {
         // Cancel and detach immediately, but a suspended command still borrows
         // this server, its path and upload bytes until its terminal return.
         if (server.running) return;
-        // Discard upload bytes and signing material before reusing the slot.
-        @memset(std.mem.asBytes(self), 0);
+        // Assign the inactive optional before erasing it: Debug assignments
+        // may poison its payload, which must not retain upload or signing bytes.
         self.server = null;
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
     }
 };
 

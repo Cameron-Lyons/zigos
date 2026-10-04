@@ -1,4 +1,5 @@
 const abi = @import("../core/abi.zig");
+const authorization_clock = @import("authorization_clock.zig");
 const bootstrap_capabilities = @import("bootstrap_capabilities.zig");
 const std = @import("std");
 const capability = @import("../kernel_api/capability.zig");
@@ -46,6 +47,12 @@ pub const LaunchServiceRequest = struct {
 };
 
 pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding {
+    // Contract ordinals order boot evidence. Endpoint auto grants must share
+    // the elapsed-time clock used by their userspace clients.
+    return launchContractServiceAt(request, authorization_clock.at(request.entry.boot_tick));
+}
+
+inline fn launchContractServiceAt(request: LaunchServiceRequest, now_ticks: u64) Error!ServiceBinding {
     const bundle_id = try userspace_boot_registry.bundleIdForServiceClass(request.entry.class);
     const catalog_image = service_catalog.imageForClass(request.entry.class) orelse return error.EmbeddedArtifactRequired;
     const bootstrap_rights = rightsForGrant(request.entry.bootstrap_grants, .service_task_authority) orelse return error.MissingBootstrapGrant;
@@ -74,8 +81,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
                 .broker_only = true,
             },
             .lease = .{
-                // Contract ticks order the boot graph; they are not the runtime
-                // timer domain used to authorize userspace syscalls.
+                // Trusted bootstrap roots are valid from the boot epoch.
                 .issued_at_ticks = 0,
                 .expires_at_ticks = std.math.maxInt(u64),
                 .renewable = false,
@@ -96,7 +102,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
                 .authority_capability_id = request.authority_capability_id,
                 .controller_task_id = request.controller_task_id,
                 .correlation_id = request.entry.boot_correlation_base,
-                .now_ticks = request.entry.boot_tick,
+                .now_ticks = now_ticks,
             },
             bundle_id,
             .{
@@ -129,7 +135,7 @@ pub fn launchContractService(request: LaunchServiceRequest) Error!ServiceBinding
             .local_only = true,
             .service_port = true,
         },
-    }, request.entry.boot_tick);
+    }, now_ticks);
     if (request.entry.class == .service_registry) {
         request.service_directory.bindBootstrap(.{
             .task_id = service_task_id,
@@ -180,7 +186,7 @@ pub fn attachDriver(
             .broker_only = true,
         },
         .lease = .{
-            // Boot contract ordinals do not establish the runtime clock.
+            // Trusted bootstrap roots are valid from the boot epoch.
             .issued_at_ticks = 0,
             .expires_at_ticks = std.math.maxInt(u64),
             .renewable = false,
@@ -343,6 +349,111 @@ test "contractsReady requires every ordered service contract" {
     }
 
     try std.testing.expect(contractsReady(&registry));
+}
+
+test "service boot connects at runtime time before contract ordinals without weakening leases" {
+    const endpoint = @import("../kernel_api/endpoint.zig");
+    const native_kernel = @import("../kernel_api/native_kernel.zig");
+    const shared_memory = @import("../kernel_api/shared_memory.zig");
+    const userspace_executor = @import("../task/userspace_executor.zig");
+    const Fixture = struct {
+        runtime: task_runtime.Runtime = .init(),
+        capabilities: capability.CapabilityTable = .init(),
+        endpoints: endpoint.Table = .init(),
+        shared: shared_memory.Table = .init(),
+        catalog: userspace_loader.Catalog = .init(),
+        executor: userspace_executor.Executor = .{},
+        scheduler: userspace_scheduler.Scheduler = undefined,
+        kernel: native_kernel.Kernel = undefined,
+        port: component_port.KernelPort = undefined,
+        directory: service_registry.Service = .init(),
+        supervisor: supervisor_mod.Supervisor = .init(),
+    };
+    const fixture = try std.testing.allocator.create(Fixture);
+    defer std.testing.allocator.destroy(fixture);
+    fixture.* = .{};
+    const policy_authority = principal.PrincipalId{ .kind = .policy_authority, .serial = 1 };
+    fixture.kernel.initInPlace(policy_authority, &fixture.runtime, &fixture.capabilities, &fixture.endpoints, &fixture.shared);
+    defer fixture.kernel.deinit();
+    defer fixture.endpoints.deinit();
+    defer fixture.shared.deinit();
+    defer fixture.runtime.reset();
+    fixture.port = component_port.KernelPort.init(&fixture.kernel);
+    fixture.scheduler = userspace_scheduler.Scheduler.init(&fixture.executor);
+    fixture.scheduler.bind(&fixture.catalog, &fixture.runtime, &fixture.capabilities);
+    defer fixture.scheduler.deinit();
+
+    const controller = try fixture.runtime.createTask(.{
+        .owner = .{ .kind = .service, .serial = 2 },
+        .component_class = .session_manager,
+        .budget = .{ .cpu_time_ticks = 10_000, .memory_bytes = kibibytes(512), .endpoint_slots = 4, .shared_memory_bytes = kibibytes(64) },
+        .local_only = true,
+    });
+    const controller_authority = try fixture.capabilities.mintBootRoot(.{
+        .holder = controller.owner,
+        .issuer = policy_authority,
+        .target = .{ .kind = .service, .id = 1 },
+        .rights = service_catalog.rightsForBootstrapGrant(.session_service_authority),
+        .scope = .{ .local_only = true, .broker_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
+    });
+    try task_runtime.grantCapabilityToTask(controller, controller_authority.id);
+
+    const now_ticks = 3;
+    for ([_]contract.ServiceClass{ .service_registry, .compositor_ui_session }) |class| {
+        const entry = service_contract.contractForClass(class).?;
+        try std.testing.expect(entry.boot_tick > now_ticks);
+        const service = try fixture.supervisor.register(class, .{ .kind = .service, .serial = 100 + @backingInt(class) });
+        const binding = try launchContractServiceAt(.{
+            .catalog = &fixture.catalog,
+            .kernel_port = &fixture.port,
+            .service_directory = &fixture.directory,
+            .supervisor = &fixture.supervisor,
+            .authority_capability_id = controller_authority.id,
+            .controller_task_id = if (class == .service_registry) controller.id else 0,
+            .schedule_task = &fixture.scheduler,
+            .owner = service.owner,
+            .service_id = service.id,
+            .entry = entry,
+        }, now_ticks);
+        const registered = try fixture.directory.connect(entry.interface_id);
+        const server_grant = try fixture.capabilities.requireUsable(registered.endpoint_capability_id, now_ticks);
+        try std.testing.expectEqual(@as(u64, now_ticks), server_grant.lease.issued_at_ticks);
+
+        const client_endpoint = try fixture.port.endpointCreate(.{
+            .header = component_port.makeHeader(.endpoint_create, controller.id),
+            .authority_capability_id = controller_authority.id,
+            .owner_task_id = controller.id,
+            .label = "clock-regression-client",
+            .flags = .{ .local_only = true },
+        }, now_ticks);
+        for ([_]capability.CapabilityLease{
+            .{ .issued_at_ticks = entry.boot_tick, .expires_at_ticks = std.math.maxInt(u64) },
+            .{ .issued_at_ticks = 0, .expires_at_ticks = now_ticks - 1 },
+        }) |unusable_lease| {
+            const unusable_peer = try fixture.capabilities.mintBootRoot(.{
+                .holder = service.owner,
+                .issuer = policy_authority,
+                .target = .{ .kind = .endpoint, .id = binding.endpoint_id },
+                .rights = .{ .endpoint = .{ .ipc_peer = true } },
+                .scope = .{ .local_only = true },
+                .lease = unusable_lease,
+            });
+            try std.testing.expectError(error.CapabilityRevoked, fixture.port.endpointConnect(.{
+                .header = component_port.makeHeader(.endpoint_connect, controller.id),
+                .endpoint_capability_id = client_endpoint.capability_id,
+                .peer_endpoint_capability_id = unusable_peer.id,
+                .peer_endpoint_id = binding.endpoint_id,
+            }, now_ticks));
+        }
+        const connected = try fixture.port.endpointConnect(.{
+            .header = component_port.makeHeader(.endpoint_connect, controller.id),
+            .endpoint_capability_id = client_endpoint.capability_id,
+            .peer_endpoint_capability_id = registered.endpoint_capability_id,
+            .peer_endpoint_id = binding.endpoint_id,
+        }, now_ticks);
+        try std.testing.expectEqual(binding.endpoint_id, connected.peer_endpoint_id);
+    }
 }
 
 test "bootstrap driver attachment rolls back authority when signer resolution fails" {

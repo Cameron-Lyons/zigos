@@ -1334,6 +1334,7 @@ test "vault signing enforces holder lease revocation and current policy without 
 
 test "vault signing and export revalidate authority after a yielding provider" {
     const cooperative = @import("../task/cooperative_worker.zig");
+    const guarded = @import("../task/guarded_worker_stack.zig");
     const sealing = @import("../platform/secret_sealing.zig");
     const provider_fixture = @import("../../tests/fixtures/secret_provider.zig");
     const signing = @import("../core/signing.zig");
@@ -1391,8 +1392,12 @@ test "vault signing and export revalidate authority after a yielding provider" {
             _ = try fixture.policies.create(.{ .scope = .user, .subject_id = Fixture.owner.serial, .issuer = .{ .kind = .policy_authority, .serial = 1 }, .label = "allow vault", .secret_vault_allowed = true, .deny_secret_raw_export = false }, .{ .label = "policy", .seed = @splat(0x74) });
             const handle = try fixture.addKey();
             fixture.request = .{ .holder = Fixture.holder, .task_id = 6, .handle_id = handle.id, .now_ticks = 3 };
-            var stack: [32 * 1024]u8 align(16) = undefined;
-            var worker = cooperative.Worker{ .stack = &stack };
+            // Exercise policy signature verification on the same bounded,
+            // guarded stack used by native operation workers.
+            var stack = try guarded.Stack.allocate();
+            defer stack.deinit();
+            try std.testing.expect(stack.guardsPresent());
+            var worker = cooperative.Worker{ .stack = stack.bytes };
             try worker.start(&fixture, Fixture.run);
             try worker.step();
             try std.testing.expect(worker.state == .suspended and fixture.signature == null and fixture.failure == null);
@@ -1411,7 +1416,7 @@ test "vault signing and export revalidate authority after a yielding provider" {
                 else => {},
             }
             try worker.step();
-            try std.testing.expect(worker.state == .complete and std.mem.allEqual(u8, &stack, 0));
+            try std.testing.expect(worker.state == .complete and std.mem.allEqual(u8, stack.bytes, 0));
             if (mode == 0) {
                 try std.testing.expect(fixture.failure == null);
                 if (exporting) try std.testing.expectEqualSlices(u8, &Fixture.seed, fixture.out[0..32]) else try std.testing.expect(signing.verify(fixture.signature.?, Fixture.message));

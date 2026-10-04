@@ -455,6 +455,7 @@ test "identity session recovery authenticates enrollment before hardware and nev
 }
 
 test "identity session activation rechecks live authority after entropy yields without unloading borrows" {
+    const guarded = @import("../task/guarded_worker_stack.zig");
     const Control = struct {
         ticks: u64 = 1,
         cancelled: bool = false,
@@ -500,8 +501,12 @@ test "identity session activation rechecks live authority after entropy yields w
         var session = Session(Io){ .io = &io, .enrollment = record.enrollment, .state = .{ .vault = &keys.service, .identities = &identities, .devices = &graph }, .storage = &device.service, .policies = &keys.policies, .subjects = keys.authority.subjects, .device_key = signer.key, .publication_guard = &guard };
         defer session.close() catch unreachable;
         var run = Run{ .session = &session, .key = signer.key };
-        var stack: [32 * 1024]u8 align(16) = undefined;
-        var worker = cooperative.Worker{ .stack = &stack };
+        // Policy verification needs the native operation worker's bounded,
+        // guarded stack before entropy acquisition can suspend activation.
+        var stack = try guarded.Stack.allocate();
+        defer stack.deinit();
+        try std.testing.expect(stack.guardsPresent());
+        var worker = cooperative.Worker{ .stack = stack.bytes };
         try worker.start(&run, Run.run);
         try worker.step();
         try std.testing.expectEqual(cooperative.Worker.State.suspended, worker.state);
@@ -520,6 +525,6 @@ test "identity session activation rechecks live authority after entropy yields w
         try std.testing.expectEqual(variant != .success, run.failure != null);
         try std.testing.expect(!keys.service.store.empty());
         try std.testing.expect(keys.service.findHandleConst(signer.key.handle_id) != null);
-        try std.testing.expect(std.mem.allEqual(u8, &stack, 0));
+        try std.testing.expect(std.mem.allEqual(u8, stack.bytes, 0));
     }
 }

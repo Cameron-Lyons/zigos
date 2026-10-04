@@ -67,14 +67,14 @@ SYMBOL(zigos_xstate_host_roundtrip):
     movl $128, %r15d
 .roundtrip:
     movq %r14, %r13
-    XRSTOR_FULL_STATE %r13
+    XRSTOR_FULL_STATE %r13, 1
     XSAVE_FULL_STATE %r13
     leaq 640(%r14), %r13
-    XRSTOR_STATE %r13
-    XSAVE_STATE %r13
+    XRSTOR_STATE %r13, 0, 1
+    XSAVE_STATE %r13, 0, 1
     leaq 1280(%r14), %r13
-    XRSTOR_STATE %r13
-    XSAVE_STATE %r13
+    XRSTOR_STATE %r13, 0, 1
+    XSAVE_STATE %r13, 0, 1
     decl %r15d
     jnz .roundtrip
 
@@ -88,6 +88,41 @@ SYMBOL(zigos_xstate_host_roundtrip):
     popq %rbx
     popq %rbp
     ret
+
+// Emit, but never execute, both production owner-switch sequences. Hosted
+// tests inspect these exact macros to catch privileged control instructions
+// returning to the prepared path while ensuring all three state operations
+// are retained. The ordinary sequence must keep its early-entry safeguards.
+.purgem XSAVE_STATE
+.purgem XSAVE_FULL_STATE
+.purgem XRSTOR_STATE
+.purgem XRSTOR_FULL_STATE
+#undef ZIGOS_XSTATE_HOST_TEST
+#undef ZIGOS_XSTATE64_INC
+#define zigos_userspace_xstate_pku_enabled SYMBOL(zigos_userspace_xstate_pku_enabled)
+#include "../../arch/xstate64.inc"
+
+.globl SYMBOL(zigos_xstate_generic_probe)
+.globl SYMBOL(zigos_xstate_generic_probe_end)
+SYMBOL(zigos_xstate_generic_probe):
+    XSAVE_STATE %r13
+    XRSTOR_FULL_STATE %r13
+    XRSTOR_STATE %r13
+SYMBOL(zigos_xstate_generic_probe_end):
+
+.globl SYMBOL(zigos_xstate_prepared_probe)
+.globl SYMBOL(zigos_xstate_prepared_probe_end)
+SYMBOL(zigos_xstate_prepared_probe):
+    XSAVE_STATE %r13, 0, 1
+    XRSTOR_FULL_STATE %r13, 1
+    XRSTOR_STATE %r13, 0, 1
+SYMBOL(zigos_xstate_prepared_probe_end):
+
+.bss
+.balign 4
+.globl SYMBOL(zigos_userspace_xstate_pku_enabled)
+SYMBOL(zigos_userspace_xstate_pku_enabled):
+    .long 0
 
 #if !defined(__APPLE__)
 .section .note.GNU-stack,"",@progbits
