@@ -69,8 +69,8 @@ pub fn build(b: *std.Build) void {
         usize,
         "maximum_production_symbol_count",
         // Native Notes selection, durable creation and exact document approval
-        // add about 36 KiB of loaded code/data and 97 symbols to the shipped
-        // identity path. Keep its bounded budget and proof exclusions explicit.
+        // belong to the shipped identity path. Keep its bounded production
+        // budget and verification workload exclusions explicit.
         if (optimize == .fast) 3600 else std.math.maxInt(usize),
     );
     kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .debug);

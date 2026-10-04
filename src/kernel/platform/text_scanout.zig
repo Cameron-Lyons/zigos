@@ -7,7 +7,7 @@ const font = @import("bitmap_font.zig");
 pub const MAX_COLUMNS = 120;
 pub const MAX_ROWS = 48;
 pub const MAX_CELLS = MAX_COLUMNS * MAX_ROWS;
-pub const CELL_WIDTH = 12;
+pub const CELL_WIDTH = unicode_font.CELL_WIDTH;
 pub const CELL_HEIGHT = 20;
 pub const BACKGROUND: u24 = 0x111923;
 
@@ -240,16 +240,13 @@ const Raster = struct {
             }
         } else {
             const glyph = if (cell.cluster_length == 0) unicode_font.glyph(cell.character) else unicode_font.cluster(clusterBytes(cell, pool));
-            const span: usize = if (cell.part == .single) CELL_WIDTH else CELL_WIDTH * 2;
             // Fit ambiguous-width source glyphs to one cell. Compute the
             // horizontal sampling once, rather than once per device pixel.
-            const ink_width = @min(@as(usize, glyph.width), span - 2);
-            const left = (span - ink_width) / 2;
+            const projection = unicode_font.Projection.init(glyph.width, if (cell.part == .single) 1 else 2);
             for (0..CELL_WIDTH) |x| {
                 const gx = x + @as(usize, if (cell.part == .right) CELL_WIDTH else 0);
-                if (gx < left or gx >= left + ink_width) continue;
-                const source_x = (gx - left) * glyph.width / ink_width;
-                const source_bit = @as(u16, 1) << @intCast(glyph.width - 1 - source_x);
+                const source_bit = projection.sourceBit(gx);
+                if (source_bit == 0) continue;
                 const target_bit = @as(u12, 1) << @intCast(x);
                 for (glyph.rows, 0..) |source, y| {
                     if (source & source_bit != 0) raster.rows[2 + y] |= target_bit;

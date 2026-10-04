@@ -208,6 +208,63 @@ test "scanout fits ambiguous-width source glyphs into a single cell" {
     try std.testing.expect(foreground != 0);
 }
 
+test "scanout shared projection preserves narrow wide and combining source pixels" {
+    const font = @import("unicode_font.zig");
+    const info = testInfo();
+    const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, 0);
+    var renderer = try scanout.Renderer.init(info, pixels);
+    var frame = try scanout.Frame.init(renderer.columns, renderer.rows);
+    for ([_][]const u8{ "é", "☃", "界", "e\u{301}", "界\u{301}", "界\u{732}" }) |text| {
+        frame.clear();
+        frame.put(0, 0, text, .body);
+        _ = try renderer.present(&frame);
+        const source = font.cluster(text);
+        const span: usize = if (frame.cells[0].part == .single) scanout.CELL_WIDTH else scanout.CELL_WIDTH * 2;
+        // Keep the pre-projection Raster formula as an independent pixel oracle.
+        const ink_width = @min(@as(usize, source.width), span - 2);
+        const left = (span - ink_width) / 2;
+        for (0..scanout.CELL_HEIGHT) |y| {
+            for (0..span) |x| {
+                const ink = y >= 2 and y < 18 and x >= left and x < left + ink_width and
+                    source.rows[y - 2] & (@as(u16, 1) << @intCast(@as(usize, source.width) - 1 - (x - left) * source.width / ink_width)) != 0;
+                const pixel = pixels[(renderer.origin_y + y) * info.pixels_per_scan_line + renderer.origin_x + x];
+                try std.testing.expectEqual(info.encodeColor(if (ink) 0xe5ebf2 else scanout.BACKGROUND), pixel);
+            }
+        }
+    }
+}
+
+test "scanout dropped mark and promoted base pixel aliases fail exact cluster admission" {
+    const font = @import("unicode_font.zig");
+    const info = testInfo();
+    const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);
+    defer std.testing.allocator.free(pixels);
+    const previous = try std.testing.allocator.alloc(u32, pixels.len);
+    defer std.testing.allocator.free(previous);
+    @memset(pixels, 0);
+    var renderer = try scanout.Renderer.init(info, pixels);
+    var frame = try scanout.Frame.init(renderer.columns, renderer.rows);
+    for ([_][2][]const u8{
+        .{ "e\u{732}", "e\u{738}" },
+        .{ "\u{1c0}\u{730}", "\u{16c1}\u{730}" },
+    }) |pair| {
+        frame.clear();
+        frame.put(0, 0, pair[0], .body);
+        _ = try renderer.present(&frame);
+        @memcpy(previous, pixels);
+        frame.clear();
+        frame.put(0, 0, pair[1], .body);
+        _ = try renderer.present(&frame);
+        try std.testing.expectEqualSlices(u32, previous, pixels);
+        try std.testing.expect(!font.supportsCluster(pair[0]));
+        try std.testing.expect(!font.supportsCluster(pair[1]));
+    }
+    // The same source mark remains admissible when a wide cell retains its ink.
+    try std.testing.expect(font.supportsCluster("界\u{732}"));
+}
+
 test "scanout ignores grapheme pool placement and retains the newest cache" {
     const info = testInfo();
     const pixels = try std.testing.allocator.alloc(u32, info.pixels_per_scan_line * info.height);

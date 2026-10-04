@@ -4,6 +4,7 @@ const std = @import("std");
 const input = @import("../drivers/input_driver_task.zig");
 const layout = @import("../core/text_layout.zig");
 const labels = @import("../../userspace/launcher_protocol.zig");
+const font = @import("../../kernel/platform/unicode_font.zig");
 
 pub const Kind = enum { new, open };
 pub const Phase = enum { disabled, home, requested, browsing, review, working, retry, failed };
@@ -15,6 +16,11 @@ pub const Label = struct {
 
     pub fn init(text: []const u8) !Label {
         if (!labels.validLabel(text)) return error.InvalidDocumentLabel;
+        if (text[0] == ' ' or text[text.len - 1] == ' ') return error.InvalidDocumentLabel;
+        var clusters = layout.unicode.Iterator{ .text = text };
+        while (clusters.next()) |cluster| {
+            if (!font.supportsCluster(text[cluster.start..cluster.end])) return error.InvalidDocumentLabel;
+        }
         var value = Label{ .len = @intCast(text.len) };
         @memcpy(value.bytes[0..text.len], text);
         return value;
@@ -128,6 +134,36 @@ pub const View = struct {
         return value;
     }
 };
+
+test "native document labels reject fallback stripped and blank path identities" {
+    const paths = [_][]const u8{
+        "notes/👩‍💻.md",
+        "notes/👨‍💻.md",
+        "notes/e\u{200c}.md",
+        "notes/e\u{200d}.md",
+        "notes/\u{10fffc}.md",
+        "notes/\u{10fffd}.md",
+        "notes/a\u{a0}b.md",
+        "notes/a\u{202f}b.md",
+        "notes/e\u{732}.md",
+        "notes/e\u{738}.md",
+        "notes/\u{1c0}\u{730}.md",
+        "notes/a.md ",
+        " notes/a.md",
+    };
+    for (paths) |path| try std.testing.expectError(error.InvalidDocumentLabel, Label.init(path));
+}
+
+test "native document labels retain supported narrow wide combining and internal space paths" {
+    for ([_][]const u8{ "notes/café.md", "草稿.md", "notes/e\u{301}.md", "two words.md", "草稿/界\u{732}.md" }) |path| {
+        const label = try Label.init(path);
+        try std.testing.expectEqualStrings(path, label.slice());
+        var view = View{ .phase = .review, .kind = .open, .token = 7, .path = label, .allow_selected = true };
+        view.presented(40, 20, true);
+        try std.testing.expect(view.handle(.{ .kind = .activate }, 1));
+        try std.testing.expect(view.take().?.action == .approve);
+    }
+}
 
 pub fn lines(text: []const u8, columns: usize) usize {
     var iterator = (layout.Layout{ .text = text, .columns = columns }).rows();

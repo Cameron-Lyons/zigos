@@ -79,7 +79,10 @@ requests.
   process read/edit access to that document until lock or session timeout.
   New documents reach durable storage before activation; a failed checkpoint
   retries the same candidate. These controls require fresh physical input and
-  complete scanout. Hosted tests exercise denial and cleanup; guest and physical
+  complete scanout. Review admits paths only when the current font can render
+  their glyphs; hidden characters, fallback glyphs and edge spaces are rejected.
+  Supported Unicode paths and normal internal spaces remain available.
+  Hosted tests exercise denial and cleanup; guest and physical
   execution of this production launch path still need capture.
   A lazy four-channel pool services at most
   two frames or replies per dispatch, preserves suspended sessions, and cancels

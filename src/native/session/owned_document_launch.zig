@@ -866,6 +866,82 @@ test "owned Notes browsing and exact approval leave prepared measured task witho
     try std.testing.expect(f.manager.userspaceSchedulerPtr().taskDispatchStats(prepared.task_id) == null);
 }
 
+test "owned Notes picker rejects ambiguous rendered paths and reviews supported Unicode without grants" {
+    const f = try LaunchTest.create();
+    defer f.destroy();
+    const rejected = [_][]const u8{
+        "notes/👩‍💻.md",
+        "notes/👨‍💻.md",
+        "notes/e\u{200c}.md",
+        "notes/e\u{200d}.md",
+        "notes/\u{10fffc}.md",
+        "notes/\u{10fffd}.md",
+        "notes/a\u{a0}b.md",
+        "notes/a\u{202f}b.md",
+        "notes/e\u{732}.md",
+        "notes/e\u{738}.md",
+        "notes/\u{1c0}\u{730}.md",
+        "notes/a.md ",
+        " notes/a.md",
+    };
+    const supported = [_][]const u8{ "café.md", "e\u{301}.md", "two words.md", "草稿.md" };
+    const storage = f.storageServicePtr();
+    storage.beginCheckpointBatch();
+    try storage.beginTransaction(f.workspace_id);
+    for (rejected) |path| {
+        const version = try storage.putVersion(.{ .object_type = .document, .payload = "note", .metadata = try f.access.signer.signMetadata(path, "note", f.now) });
+        try storage.stagePut(f.workspace_id, path, version.object_id, version.version_id, .document);
+    }
+    for (supported) |path| {
+        const version = try storage.putVersion(.{ .object_type = .document, .payload = "note", .metadata = try f.access.signer.signMetadata(path, "note", f.now) });
+        try storage.stagePut(f.workspace_id, path, version.object_id, version.version_id, .document);
+    }
+    _ = try storage.commit(f.workspace_id, f.now);
+    storage.endCheckpointBatch();
+    const grants_before = f.capabilityTablePtr().activeCount();
+    try f.beginOpen();
+    const screen = f.launch.view().?;
+    const prepared = f.launch.backing.?.prepared.?;
+    var sequence: u64 = 1;
+    var seen: [supported.len]bool = @splat(false);
+    var visible: usize = 0;
+    while (true) {
+        for (screen.paths[0..screen.count]) |*label| {
+            visible += 1;
+            for (rejected) |path| try std.testing.expect(!std.mem.eql(u8, path, label.slice()));
+            for (supported, 0..) |path, index| if (std.mem.eql(u8, path, label.slice())) {
+                seen[index] = true;
+            };
+        }
+        if (!screen.next) break;
+        sequence += 1;
+        screen.presented(80, 30, true);
+        f.report(sequence);
+        try std.testing.expect(screen.handle(.{ .kind = .page_down }, sequence));
+        try std.testing.expect(f.launch.service(f, f.access, f.now));
+    }
+    try std.testing.expectEqual(@as(usize, supported.len + 2), visible);
+    try std.testing.expect(std.mem.allEqual(bool, &seen, true));
+    try std.testing.expectEqualStrings("草稿.md", screen.paths[screen.count - 1].slice());
+    while (screen.selected != screen.count - 1) {
+        sequence += 1;
+        screen.presented(80, 30, true);
+        f.report(sequence);
+        try std.testing.expect(screen.handle(.{ .kind = .cursor_down }, sequence));
+        _ = f.launch.service(f, f.access, f.now);
+    }
+    sequence += 1;
+    screen.presented(80, 30, true);
+    f.report(sequence);
+    try std.testing.expect(screen.handle(.{ .kind = .activate }, sequence));
+    try std.testing.expect(f.launch.service(f, f.access, f.now));
+    try std.testing.expectEqual(document_view.Phase.review, screen.phase);
+    try std.testing.expectEqualStrings("草稿.md", screen.path.slice());
+    try std.testing.expectEqual(grants_before, f.capabilityTablePtr().activeCount());
+    try std.testing.expectEqual(@as(usize, 0), f.runtimePtr().findConst(prepared.task_id).?.capability_count);
+    try std.testing.expect(f.manager.userspaceSchedulerPtr().taskDispatchStats(prepared.task_id) == null);
+}
+
 test "owned Notes approved creation retains its actual worker backing through input cancellation" {
     const f = try LaunchTest.create();
     defer f.destroy();
