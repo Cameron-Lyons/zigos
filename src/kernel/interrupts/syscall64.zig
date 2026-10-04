@@ -9,7 +9,12 @@ const CpuState = extern struct {
     user_stack_pointer: usize = 0,
     kernel_port: usize = 0,
     active_task_id: u64 = 0,
+    native_entry_modes: u8 = 0,
 };
+
+const ENTRY_PKU: u8 = 1;
+const ENTRY_FRED: u8 = 2;
+const ENTRY_READY: u8 = 4;
 
 const USER_STAR_BASE_SELECTOR: u16 = (gdt.USER_DATA_SEG - 8) | 3;
 const SYSCALL_STAR_VALUE = (@as(u64, gdt.KERNEL_CODE_SEG) << 32) |
@@ -36,20 +41,22 @@ pub fn init() void {
     bindCpu(0, @intFromPtr(&stack_top));
     enableNativeEntry(cpu_states[0].kernel_stack_top);
     if (!enabled()) unreachable;
+    publishNativeEntryModes(0);
 }
 
 pub fn initApplicationProcessor(cpu_index: u8, stack_top_value: usize) void {
     bindCpu(cpu_index, stack_top_value);
     enableNativeEntry(stack_top_value);
     if (!enabled()) unreachable;
+    publishNativeEntryModes(cpu_index);
 }
 
 pub fn setKernelStack(stack_top_value: usize) void {
     const state = currentState();
     const stack_slot: *volatile usize = &state.kernel_stack_top;
     stack_slot.* = stack_top_value;
-    // Initialization verified the MSRs; dispatch needs only the per-CPU mode bit.
-    if ((x86.readCr4() & x86.CR4_FRED) != 0) {
+    // Keep pre-publication stack setup valid, then use this CPU's verified mode.
+    if (publishedFredMode(state) orelse ((x86.readCr4() & x86.CR4_FRED) != 0)) {
         x86.setFredRsp0(stack_top_value);
     }
 }
@@ -128,11 +135,30 @@ fn currentState() *CpuState {
     return &cpu_states[cpu_identity.currentIndex()];
 }
 
+inline fn publishNativeEntryModes(cpu_index: u8) void {
+    // Prepared entry never clears TS or re-reads immutable CPU controls. Publish
+    // only after this CPU's complete xstate and native-entry setup is verified.
+    if (!x86.xsavesEnabled() or x86.taskSwitched()) unreachable;
+    cpu_states[cpu_index].native_entry_modes = entryModesFromCr4(x86.readCr4());
+}
+
+inline fn entryModesFromCr4(cr4: usize) u8 {
+    return ENTRY_READY |
+        (if ((cr4 & x86.CR4_PKE) != 0) ENTRY_PKU else @as(u8, 0)) |
+        (if ((cr4 & x86.CR4_FRED) != 0) ENTRY_FRED else @as(u8, 0));
+}
+
+inline fn publishedFredMode(state: *const CpuState) ?bool {
+    if ((state.native_entry_modes & ENTRY_READY) == 0) return null;
+    return (state.native_entry_modes & ENTRY_FRED) != 0;
+}
+
 comptime {
     if (@offsetOf(CpuState, "kernel_stack_top") != 0 or
         @offsetOf(CpuState, "user_stack_pointer") != 8 or
         @offsetOf(CpuState, "kernel_port") != 16 or
-        @offsetOf(CpuState, "active_task_id") != 24)
+        @offsetOf(CpuState, "active_task_id") != 24 or
+        @offsetOf(CpuState, "native_entry_modes") != 32)
     {
         @compileError("x86-64 FRED CPU state layout diverged from GS-relative fields");
     }
@@ -141,5 +167,31 @@ comptime {
     }
     if (SYSCALL_STAR_VALUE != 0x0013_0008_0000_0000) {
         @compileError("x86-64 syscall selectors diverged from the STAR encoding");
+    }
+}
+
+test "native entry modes remain bound to each initialized logical CPU" {
+    const std = @import("std");
+    const previous_index = cpu_identity.currentIndex();
+    const previous_states = cpu_states;
+    defer {
+        cpu_states = previous_states;
+        cpu_identity.setIndexForTest(previous_index);
+    }
+    cpu_states = @splat(.{});
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expectEqual(@as(?bool, null), publishedFredMode(currentState()));
+        const cr4 = (if ((index & 1) != 0) x86.CR4_PKE else @as(usize, 0)) |
+            (if ((index & 2) != 0) x86.CR4_FRED else @as(usize, 0));
+        currentState().native_entry_modes = entryModesFromCr4(cr4 | x86.CR4_SMEP | x86.CR4_OSXSAVE);
+    }
+    // Interleave CPUs after publication: PKE or FRED on another CPU must not
+    // change the prepared mode read from the selected CPU's GS state.
+    for ([_]u8{ 7, 0, 3, 1, 6, 2, 5, 4, 0 }) |index| {
+        cpu_identity.setIndexForTest(index);
+        try std.testing.expectEqual(@as(?bool, (index & 2) != 0), publishedFredMode(currentState()));
+        try std.testing.expectEqual((index & 1) != 0, (currentState().native_entry_modes & ENTRY_PKU) != 0);
+        try std.testing.expectEqual(@as(u8, 0), currentState().native_entry_modes & ~(ENTRY_READY | ENTRY_PKU | ENTRY_FRED));
     }
 }

@@ -99,30 +99,29 @@ SYMBOL(zigos_xstate_host_roundtrip):
 .purgem XRSTOR_FULL_STATE
 #undef ZIGOS_XSTATE_HOST_TEST
 #undef ZIGOS_XSTATE64_INC
-#define zigos_userspace_xstate_pku_enabled SYMBOL(zigos_userspace_xstate_pku_enabled)
 #include "../../arch/xstate64.inc"
 
 .globl SYMBOL(zigos_xstate_generic_probe)
 .globl SYMBOL(zigos_xstate_generic_probe_end)
 SYMBOL(zigos_xstate_generic_probe):
+    XSAVE_FULL_STATE %r13
+    XRSTOR_STATE %r13
     XSAVE_STATE %r13
     XRSTOR_FULL_STATE %r13
     XRSTOR_STATE %r13
+    XRSTOR_FULL_STATE %r13
 SYMBOL(zigos_xstate_generic_probe_end):
 
 .globl SYMBOL(zigos_xstate_prepared_probe)
 .globl SYMBOL(zigos_xstate_prepared_probe_end)
 SYMBOL(zigos_xstate_prepared_probe):
+    XSAVE_FULL_STATE %r13, 1
+    XRSTOR_STATE %r13, 0, 1
     XSAVE_STATE %r13, 0, 1
     XRSTOR_FULL_STATE %r13, 1
     XRSTOR_STATE %r13, 0, 1
+    XRSTOR_FULL_STATE %r13, 1
 SYMBOL(zigos_xstate_prepared_probe_end):
-
-.bss
-.balign 4
-.globl SYMBOL(zigos_userspace_xstate_pku_enabled)
-SYMBOL(zigos_userspace_xstate_pku_enabled):
-    .long 0
 
 #if !defined(__APPLE__)
 .section .note.GNU-stack,"",@progbits

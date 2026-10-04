@@ -65,18 +65,21 @@ fn probeBytes(start: *const u8, end: *const u8) []const u8 {
 test "prepared owner switch retains eager state operations without control-register exits" {
     const generic = probeBytes(&zigos_xstate_generic_probe, &zigos_xstate_generic_probe_end);
     const prepared = probeBytes(&zigos_xstate_prepared_probe, &zigos_xstate_prepared_probe_end);
-    // The probes use r13 exclusively; these three prefixes identify XSAVES,
-    // full XRSTOR and XRSTORS respectively, independent of branch offsets.
+    // The probes include initial entry, one syscall, and continuation return.
+    // r13 prefixes identify their eager state operations independent of offsets.
     for ([_][]const u8{ generic, prepared }) |bytes| {
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xae, 0x65 }));
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xc7, 0x6d }));
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xae, 0x6d }));
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xc7, 0x5d }));
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xae, 0x6d }));
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bytes, &.{ 0x49, 0x0f, 0xc7, 0x5d }));
     }
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, generic, &.{ 0x0f, 0x06 })); // CLTS
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, generic, &.{ 0x0f, 0x20, 0xe0 })); // CR4 -> RAX
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, generic, &.{ 0x0f, 0x06 })); // CLTS
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, generic, &.{ 0x0f, 0x20, 0xe0 })); // CR4 -> RAX
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, prepared, &.{ 0x0f, 0x06 }));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, prepared, &.{ 0x0f, 0x20 }));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, prepared, &.{ 0x0f, 0x22 }));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prepared, &.{ 0x0f, 0x01, 0xee })); // RDPKRU
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, prepared, &.{ 0x0f, 0x01, 0xef })); // WRPKRU
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, prepared, &.{ 0x65, 0xf6, 0x04, 0x25, 0x20, 0, 0, 0, 1 })); // Per-CPU PKE
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, prepared, &.{ 0x0f, 0x01, 0xee })); // RDPKRU
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, prepared, &.{ 0x0f, 0x01, 0xef })); // WRPKRU
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, prepared, &.{ 0x0f, 0xae, 0xe8 })); // LFENCE
 }

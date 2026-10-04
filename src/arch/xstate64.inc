@@ -9,7 +9,8 @@
 
 /* pointer must be a saved register other than rax/rcx/rdx/rdi. Prepared mode
  * is valid only while the current runtime CPU owns the published userspace
- * context: TS is clear and its entry captured the invariant CR4.PKE mode. */
+ * context with kernel GS active: TS is clear and GS:32 holds this CPU's
+ * verified PKE/FRED mode (syscall64.zig CpuState.native_entry_modes). */
 .macro XSAVE_STATE pointer, full=0, prepared=0
     cld
 #ifndef ZIGOS_XSTATE_HOST_TEST
@@ -39,7 +40,7 @@
 .endif
     movl $(0), XSTATE_PKRU(\pointer)
 .if \prepared
-    cmpl $(0), zigos_userspace_xstate_pku_enabled(%rip)
+    testb $(1), %gs:32
 .else
     movq %cr4, %rax
     testq $(1 << 22), %rax
@@ -65,7 +66,7 @@
     clts
 .endif
 .if \prepared
-    cmpl $(0), zigos_userspace_xstate_pku_enabled(%rip)
+    testb $(1), %gs:32
 .else
     movq %cr4, %rax
     testq $(1 << 22), %rax
@@ -99,7 +100,6 @@
 .extern zigos_initial_kernel_xstate
 .extern zigos_userspace_xstate
 .extern zigos_kernel_xstate
-.extern zigos_userspace_xstate_pku_enabled
 /* r12 always points to the already-saved GP/return frame. Kernel entries
  * preserve their interrupted live SIMD state; user entries switch owners
  * before the first compiler-generated instruction. */
@@ -113,6 +113,8 @@
     jne .Lsave_kernel_xstate\@
     movq zigos_userspace_xstate(%rip), %r13
     testq %r13, %r13
+    jz .Lmissing_xstate\@
+    testb $(4), %gs:32
     jz .Lmissing_xstate\@
     # The prepared owner has TS clear and a CPU-bound PKE mode. Avoid
     # serializing control-register instructions on every native operation.

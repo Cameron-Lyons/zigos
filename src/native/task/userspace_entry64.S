@@ -38,28 +38,24 @@ zigos_enter_userspace:
     cli
     movq %rdi, %r14
     movq %rsi, zigos_userspace_xstate(%rip)
-    # Capture this runtime owner's actual CPU mode for this prepared context.
-    # TS is cleared during XSAVE below and never armed by owned xstate; PKE
-    # stays enabled or disabled throughout the context's lifetime.
-    movq %cr4, %rax
-    shrl $22, %eax
-    andl $1, %eax
-    movl %eax, zigos_userspace_xstate_pku_enabled(%rip)
+    # Kernel GS names this CPU's native-entry state. Its ready bit is published
+    # only after the actual xstate controls and TS-clear invariant are verified.
+    testb $(4), %gs:32
+    jz .Lunprepared_cpu
     movq %rsp, zigos_userspace_resume_esp(%rip)
     subq $XSTATE_STACK_BYTES, %rsp
     andq $-64, %rsp
     movq %rsp, %r13
     movq %r13, zigos_kernel_xstate(%rip)
-    XSAVE_FULL_STATE %r13
+    XSAVE_FULL_STATE %r13, 1
     movq zigos_userspace_xstate(%rip), %r13
     XRSTOR_STATE %r13, 0, 1
     movq %r14, %rdi
     leaq .Lresume_from_userspace(%rip), %rax
     movq %rax, zigos_userspace_resume_eip(%rip)
 
-    movq %cr4, %rax
-    btq $32, %rax
-    jnc .enter_user_idt
+    testb $(2), %gs:32
+    jz .enter_user_idt
     # Synthetic architectural FRED frame, RSP points to the error-code slot.
     # ERETU derives long-mode CS/SS from STAR; augmented CS bits must be zero.
     pushq $0
@@ -95,6 +91,9 @@ zigos_enter_userspace:
     popq %rbp
     ret
 
+.Lunprepared_cpu:
+    ud2
+
 .global zigos_resume_from_userspace_interrupt
 .type zigos_resume_from_userspace_interrupt, @function
 zigos_resume_from_userspace_interrupt:
@@ -121,8 +120,5 @@ zigos_userspace_xstate:
 .global zigos_kernel_xstate
 zigos_kernel_xstate:
     .quad 0
-.global zigos_userspace_xstate_pku_enabled
-zigos_userspace_xstate_pku_enabled:
-    .long 0
 
 .section .note.GNU-stack,"",@progbits

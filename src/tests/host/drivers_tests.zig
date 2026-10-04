@@ -25,6 +25,7 @@ test "driver host tests import native driver modules" {
     _ = @import("../../kernel/boot/profiles/zigos_native.zig").INTERRUPT_DRIVEN_IDLE;
     _ = @import("../../kernel/drivers/intel_i225_hw.zig").transmitCount;
     _ = @import("../../kernel/drivers/virtio_net_hw.zig").interruptCount;
+    _ = @import("../../kernel/interrupts/syscall64.zig").FRED_ONLY_TRAPS;
     std.testing.refAllDecls(tpm2_crb_test);
     std.testing.refAllDecls(@import("fred_gpr_capture_test.zig"));
     std.testing.refAllDecls(@import("xstate_roundtrip_test.zig"));
