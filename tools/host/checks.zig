@@ -20,20 +20,6 @@ pub fn run(ctx: *common.Context, command: []const u8, args: []const []const u8) 
         if (batch.items.len > 3) try ctx.run(batch.items);
         return;
     }
-    if (std.mem.eql(u8, command, "lint-shell")) {
-        if (try ctx.findExecutable("shellcheck") == null) return error.ShellcheckRequired;
-        var argv = std.ArrayList([]const u8).empty;
-        try argv.appendSlice(ctx.allocator, &.{ "shellcheck", "--shell=bash" });
-        var directory = try std.Io.Dir.cwd().openDir(ctx.io, "scripts", .{ .iterate = true });
-        defer directory.close(ctx.io);
-        var walker = try directory.walk(ctx.allocator);
-        defer walker.deinit();
-        while (try walker.next(ctx.io)) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".sh")) try argv.append(ctx.allocator, try ctx.fmt("scripts/{s}", .{entry.path}));
-        }
-        if (argv.items.len > 2) try ctx.run(argv.items);
-        return;
-    }
     if (std.mem.eql(u8, command, "lint-actions")) {
         if (try ctx.findExecutable("actionlint") == null) {
             if (std.mem.eql(u8, ctx.envDefault("ZIGOS_REQUIRE_ACTIONLINT", "0"), "1")) return error.ActionlintRequired;

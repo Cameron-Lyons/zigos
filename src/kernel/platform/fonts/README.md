@@ -11,7 +11,7 @@ Copyright (C) 1998–2026 Roman Czyborra, Paul Hardy, Qianqian Fang, Andrew Mill
 Johnnie Weaver, David Corbett, Ælla Chiana Moskopp, Rebecca Bettencourt, Minseo
 Lee, Ho-Seok Ee, et al.
 
-Pinned inputs for `scripts/generate-unicode.py`:
+Pinned inputs for `tools/host/unicode.zig`:
 
 - https://unifoundry.com/pub/unifont/unifont-18.0.01/font-builds/unifont-18.0.01.hex.gz
 - https://unifoundry.com/pub/unifont/unifont-18.0.01/font-builds/unifont_upper-18.0.01.hex.gz

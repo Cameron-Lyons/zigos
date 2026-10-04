@@ -4,7 +4,7 @@ inputs:
   zig-version:
     description: Zig version to install
     required: false
-    default: ""
+    default: "0.17.0"
   install-build-dependencies:
     description: Install and verify OS build dependencies after Zig is available
     required: false
@@ -12,25 +12,11 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Resolve Zig version
-      id: resolve-zig-version
-      shell: bash
-      run: |
-        version="${{ inputs.zig-version }}"
-        if [ -z "${version}" ]; then
-          version="$(awk '$1 == "zig" { print $2; exit }' .tool-versions)"
-        fi
-        if [ -z "${version}" ]; then
-          echo "Unable to resolve Zig version from input or .tool-versions" >&2
-          exit 1
-        fi
-        echo "version=${version}" >> "${GITHUB_OUTPUT}"
-
     - name: Install Zig
       uses: mlugg/setup-zig@v2.2.1
       with:
-        version: ${{ steps.resolve-zig-version.outputs.version }}
-        cache-key: zigos-ci-${{ steps.resolve-zig-version.outputs.version }}
+        version: ${{ inputs.zig-version }}
+        cache-key: zigos-ci-${{ inputs.zig-version }}
 
     - name: Install Jujutsu
       uses: jdx/mise-action@v4
@@ -38,76 +24,25 @@ runs:
         install_args: jujutsu@0.43.0
         cache: true
 
-    - name: Verify Zig version
-      shell: bash
-      run: |
-        version="${{ steps.resolve-zig-version.outputs.version }}"
-        actual="$(zig version)"
-        if [ "${actual}" != "${version}" ]; then
-          echo "Installed Zig version mismatch: expected ${version}, got ${actual}" >&2
-          exit 1
-        fi
-        echo "Using Zig ${actual}"
-
-    - name: Verify Jujutsu version
-      shell: bash
-      run: |
-        actual="$(jj --version)"
-        case "${actual}" in
-          "jj 0.43.0"|"jj 0.43.0-"*) ;;
-          *)
-            echo "Installed Jujutsu version mismatch: expected jj 0.43.0, got ${actual}" >&2
-            exit 1
-            ;;
-        esac
-        echo "Using ${actual}"
+    - name: Verify pinned toolchain
+      shell: sh
+      run: zig build tool -- ci-verify-toolchain
 
     - name: Initialize Jujutsu repository
-      shell: bash
-      run: |
-        if jj root >/dev/null 2>&1; then
-          exit 0
-        fi
-        if [ ! -d .git ] && [ ! -f .git ]; then
-          echo "Unable to initialize Jujutsu repository: no Git checkout found" >&2
-          exit 1
-        fi
-        jj git init --colocate
+      shell: sh
+      run: zig build tool -- ci-init-jj
 
     - name: Install build dependencies
       if: inputs.install-build-dependencies == 'true'
-      shell: bash
-      run: ./scripts/setup-deps.sh
+      shell: sh
+      run: zig build setup-deps
 
     - name: Enable KVM acceleration when available
       if: inputs.install-build-dependencies == 'true'
-      shell: bash
-      run: |
-        if [ ! -e /dev/kvm ]; then
-          echo "KVM is unavailable; the QEMU harness will use software emulation."
-          exit 0
-        fi
-        sudo chmod 0666 /dev/kvm
-        test -r /dev/kvm
-        test -w /dev/kvm
-        echo "KVM acceleration is available."
+      shell: sh
+      run: zig build tool -- ci-enable-kvm
 
     - name: Install isolated EFI authentication test tools
       if: inputs.install-build-dependencies == 'true'
-      shell: bash
-      run: |
-        python3 -m venv build/efi-test-tools
-        build/efi-test-tools/bin/pip install --disable-pip-version-check virt-firmware==26.9 pefile==2024.8.26
-        echo "EFI_TEST_PYTHON=$PWD/build/efi-test-tools/bin/python" >> "$GITHUB_ENV"
-        echo "EFI_VARS_TOOL=$PWD/build/efi-test-tools/bin/virt-fw-vars" >> "$GITHUB_ENV"
-        for suffix in _4M ''; do
-          code="/usr/share/OVMF/OVMF_CODE${suffix}.secboot.fd"
-          vars="/usr/share/OVMF/OVMF_VARS${suffix}.fd"
-          if [[ -f "$code" && -f "$vars" ]]; then
-            echo "OVMF_SECURE_BOOT_CODE=$code" >> "$GITHUB_ENV"
-            echo "OVMF_SECURE_BOOT_VARS=$vars" >> "$GITHUB_ENV"
-            exit 0
-          fi
-        done
-        echo "Missing matching Secure Boot OVMF code and variables" >&2
-        exit 1
+      shell: sh
+      run: zig build tool -- ci-setup-efi-tools

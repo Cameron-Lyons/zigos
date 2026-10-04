@@ -8,7 +8,7 @@ pub const Context = struct {
     io: std.Io,
     environ: *std.process.Environ.Map,
 
-    /// Configure caches retain only explicit wrapper arguments. Ambient settings
+    /// Configure caches retain only explicit build arguments. Ambient settings
     /// come from this invocation, then the build's compiler and overrides apply.
     pub fn buildCommandArgs(self: *Context, args: []const []const u8) ![]const []const u8 {
         var remaining = args;

@@ -4,6 +4,7 @@ const images = @import("images.zig");
 const markers = @import("native_smoke_markers");
 const process = @import("qemu/process.zig");
 const log = @import("qemu/log.zig");
+const efi_fixture = @import("efi_fixture.zig");
 
 const Args = std.ArrayList([]const u8);
 const success_exit = 33;
@@ -646,13 +647,13 @@ fn twoNode(h: Harness, args: []const []const u8) !void {
     const b_path = try fmt(ctx, "{s}.node-b.log", .{stem(args[1])});
     const relay_path = try fmt(ctx, "{s}.relay.log", .{stem(args[1])});
     for ([_][]const u8{ args[1], a_path, b_path, relay_path }) |path| try remove(ctx, path);
-    try ctx.run(&.{ "python3", "scripts/qemu_peer_relay_test.py" });
     try buildStore(ctx, args[2], true);
     try buildStore(ctx, args[3], true);
     const a_cmd = try nodeCommand(h, args[2], a_path, try fmt(ctx, "listen=127.0.0.1:{s}", .{port}), "02:5a:47:00:00:01");
     var a = try process.Child.start(ctx, a_cmd.items, try fmt(ctx, "{s}.qemu.log", .{stem(a_path)}));
     defer a.stop(ctx, process.grace(ctx));
-    var relay = try process.Child.start(ctx, &.{ "python3", "scripts/qemu-peer-relay.py", "--upstream-port", port, "--drop-confirmations", drops }, relay_path);
+    const executable = try std.process.executablePathAlloc(ctx.io, ctx.allocator);
+    var relay = try process.Child.start(ctx, &.{ executable, "qemu-peer-relay", "--upstream-port", port, "--drop-confirmations", drops }, relay_path);
     defer relay.stop(ctx, process.grace(ctx));
     var relay_port: ?[]const u8 = null;
     for (0..150) |_| {
@@ -980,7 +981,7 @@ fn unifiedEfi(initial: Harness, args: []const []const u8) !void {
     defer ctx.removeTree(work) catch {};
     const directory = args[3];
     try ctx.mkdir(directory);
-    try ctx.run(&.{ env(ctx, "EFI_TEST_PYTHON", "python3"), "scripts/prepare-unified-efi-test.py", args[0], args[1], args[2], directory });
+    try efi_fixture.run(ctx, &.{ args[0], args[1], args[2], directory });
     const authorized = try fmt(ctx, "{s}/authorized-vars.fd", .{directory});
     const image_hash = std.mem.trim(u8, try ctx.read(try fmt(ctx, "{s}/image.sha256", .{directory})), "\r\n");
     try ctx.run(&.{ env(ctx, "EFI_VARS_TOOL", "virt-fw-vars"), "--input", vars, "--output", authorized, "--enroll-generate", "Zigos disposable firmware test", "--no-microsoft", "--microsoft-kek", "none", "--add-db-hash", "4ea05883-5aa1-4b23-a876-0e36079efa1d", image_hash, "--secure-boot" });

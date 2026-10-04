@@ -105,7 +105,7 @@ evidence.
 ## Canonical capture statement and verifier
 
 After all inputs are final,
-`./scripts/zig.sh build tool -- write-nuc15crsu7-capture-statement` writes a fixed-order v1
+`zig build tool -- write-nuc15crsu7-capture-statement` writes a fixed-order v1
 statement. The statement binds:
 
 - the fresh nonce, fixed target/SKU, stable device ID, and Jujutsu IDs;
@@ -170,8 +170,8 @@ candidate. When it returns, the authenticated candidate is frozen: do not run
 the generator, finalizer, reproducibility checker, or `release-bundle-check`
 again. Prepare the proof skeleton from those existing artifacts:
 
-```bash
-./scripts/zig.sh build tool -- prepare-nuc15crsu7-hardware-proof \
+```sh
+zig build tool -- prepare-nuc15crsu7-hardware-proof \
   --nonce <64-lowercase-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -194,14 +194,14 @@ Fill the identity and sidecars, capture the two single boots, record and hash
 the cycle logs, and collect the two role-specific quotes/signatures. Once the
 manifest is final, write the statement:
 
-```bash
-./scripts/zig.sh build tool -- write-nuc15crsu7-capture-statement \
+```sh
+zig build tool -- write-nuc15crsu7-capture-statement \
   build/hardware-proofs/<fresh-name>
 ```
 
 Validate using only external trust configuration:
 
-```bash
+```sh
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<64-lowercase-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
@@ -210,7 +210,7 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-./scripts/zig.sh build tool -- check-nuc15crsu7-hardware-proof \
+zig build tool -- check-nuc15crsu7-hardware-proof \
   build/hardware-proofs/<fresh-name>
 ```
 

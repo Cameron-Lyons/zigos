@@ -37,5 +37,5 @@ jobs:
         install-build-dependencies: ${{ inputs.install-build-dependencies }}
 
     - name: Run command
-      shell: bash
+      shell: sh
       run: ${{ inputs.command }}

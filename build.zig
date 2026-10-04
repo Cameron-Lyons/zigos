@@ -27,6 +27,10 @@ pub fn build(b: *std.Build) void {
     const host_tool_install = b.addInstallArtifact(host_tools.tool(b), .{});
     b.step("host-tools", "Install the native zigos-tool executable").dependOn(&host_tool_install.step);
 
+    const setup_deps_cmd = host_tools.addRun(b, "setup-deps");
+    setup_deps_cmd.addPassthruArgs();
+    b.step("setup-deps", "Install and verify host dependencies with the preinstalled Zig toolchain").dependOn(&setup_deps_cmd.step);
+
     const verify_smoke = b.option(bool, "verify-smoke", "Include the QEMU native smoke test in `zig build verify`") orelse false;
     const verify_benchmark = b.option(bool, "verify-benchmark", "Include the QEMU benchmark suite in `zig build verify`") orelse false;
     const hardware_proof_dir_option = b.option([]const u8, "hardware-proof-dir", "Path to the completed RNUC15CRSU7 hardware proof bundle");
@@ -498,7 +502,7 @@ fn enforceZigVersion() void {
     if (std.mem.eql(u8, builtin.zig_version_string, required_zig_version)) return;
 
     std.debug.print(
-        "Zigos requires Zig {s}; found {s}. Use `./scripts/zig.sh build ...` or switch the repo toolchain before running `zig build`.\n",
+        "Zigos requires preinstalled Zig {s}; found {s}. Select the pinned compiler before running `zig build`.\n",
         .{ required_zig_version, builtin.zig_version_string },
     );
     std.process.exit(1);

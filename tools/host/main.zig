@@ -5,6 +5,11 @@ const checks = @import("checks.zig");
 const qemu = @import("qemu.zig");
 const release = @import("release.zig");
 const hardware = @import("hardware.zig");
+const unicode = @import("unicode.zig");
+const efi_fixture = @import("efi_fixture.zig");
+const relay = @import("qemu/relay.zig");
+const deps = @import("deps.zig");
+const ci = @import("ci.zig");
 
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
@@ -16,7 +21,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (args.len == 0 or std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "help")) {
-        try ctx.print("Usage: zig build tool -- COMMAND [ARGUMENTS]\n\nCommands use the former script names without .sh:\n  clean-build, build-native-store, check-efi-image, check-multiboot2-image\n  build-efi-iso, build-grub-iso, check-production-boot-log\n  test-production-boot-log-checker, fmt-check, lint-shell, lint-zig, lint-actions\n  qemu-harness, run-headless-qemu, run-zigos-native-smoke\n  run-with-qemu-boot-iso, run-uefi-boot-test\n  run-x86-64-kernel-smoke, run-long-mode-entry-smoke\n  run-storage-durability-qemu, run-sync-two-node-qemu, run-tpm2-qemu\n  run-unified-efi-qemu, run-kernel-recovery, capture-kernel-benchmark\n  generate-release-sbom-provenance, check-reproducible-build\n  finalize-release-manifest, verify-release-bundle\n  prepare-nuc15crsu7-hardware-proof, write-nuc15crsu7-capture-statement\n  check-nuc15crsu7-hardware-proof, test-nuc15crsu7-hardware-proof-checker\n", .{});
+        try ctx.print("Usage: zig build tool -- COMMAND [ARGUMENTS]\n\nCommands use the former script names without their extension:\n  clean-build, build-native-store, check-efi-image, check-multiboot2-image\n  build-efi-iso, build-grub-iso, check-production-boot-log\n  test-production-boot-log-checker, fmt-check, lint-zig, lint-actions\n  generate-unicode, prepare-unified-efi-test, qemu-peer-relay\n  setup-deps, ci-verify-toolchain, ci-init-jj, ci-enable-kvm\n  ci-setup-efi-tools, ci-install-linters, ci-render-summary\n  qemu-harness, run-headless-qemu, run-zigos-native-smoke\n  run-with-qemu-boot-iso, run-uefi-boot-test\n  run-x86-64-kernel-smoke, run-long-mode-entry-smoke\n  run-storage-durability-qemu, run-sync-two-node-qemu, run-tpm2-qemu\n  run-unified-efi-qemu, run-kernel-recovery, capture-kernel-benchmark\n  generate-release-sbom-provenance, check-reproducible-build\n  finalize-release-manifest, verify-release-bundle\n  prepare-nuc15crsu7-hardware-proof, write-nuc15crsu7-capture-statement\n  check-nuc15crsu7-hardware-proof, test-nuc15crsu7-hardware-proof-checker\n", .{});
         return;
     }
     dispatch(&ctx, args[0], args[1..]) catch |err| fail(args[0], err);
@@ -28,6 +33,11 @@ fn fail(command: []const u8, err: anyerror) noreturn {
 }
 
 fn dispatch(ctx: *common.Context, command: []const u8, args: []const []const u8) !void {
+    if (std.mem.eql(u8, command, "setup-deps")) return deps.run(ctx, args);
+    if (std.mem.startsWith(u8, command, "ci-")) return ci.run(ctx, command, args);
+    if (std.mem.eql(u8, command, "generate-unicode")) return unicode.run(ctx, args);
+    if (std.mem.eql(u8, command, "prepare-unified-efi-test")) return efi_fixture.run(ctx, args);
+    if (std.mem.eql(u8, command, "qemu-peer-relay")) return relay.run(ctx, args);
     if (std.mem.eql(u8, command, "clean-build") or std.mem.startsWith(u8, command, "build-") or std.mem.eql(u8, command, "check-efi-image") or std.mem.eql(u8, command, "check-multiboot2-image") or std.mem.eql(u8, command, "check-production-boot-log") or std.mem.eql(u8, command, "test-production-boot-log-checker")) return images.run(ctx, command, args);
     if (std.mem.startsWith(u8, command, "lint-") or std.mem.eql(u8, command, "fmt-check")) return checks.run(ctx, command, args);
     if (std.mem.eql(u8, command, "qemu-harness") or std.mem.startsWith(u8, command, "run-") or std.mem.eql(u8, command, "capture-kernel-benchmark")) return qemu.run(ctx, command, args);
@@ -42,9 +52,14 @@ test {
     std.testing.refAllDecls(qemu);
     std.testing.refAllDecls(release);
     std.testing.refAllDecls(hardware);
+    std.testing.refAllDecls(unicode);
+    std.testing.refAllDecls(efi_fixture);
+    std.testing.refAllDecls(relay);
+    std.testing.refAllDecls(deps);
+    std.testing.refAllDecls(ci);
 }
 
-test "build wrapper updates the compiler and explicit grants while preserving current environment and command args" {
+test "build invocation updates the compiler and explicit grants while preserving current environment and command args" {
     var environ = std.process.Environ.Map.init(std.testing.allocator);
     defer environ.deinit();
     try environ.put("ZIG_BIN", "/previous-run/zig");

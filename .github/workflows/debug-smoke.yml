@@ -24,4 +24,5 @@ jobs:
     - name: Run Debug native smoke test
       env:
         ZIGOS_NATIVE_SECONDS: "1800"
-      run: ./scripts/zig.sh build zigos-native-smoke-test
+      shell: sh
+      run: zig build zigos-native-smoke-test

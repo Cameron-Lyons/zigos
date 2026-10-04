@@ -35,38 +35,23 @@ jobs:
       with:
         install-build-dependencies: "false"
 
-    - name: Install zlint
-      run: |
-        curl -fsSL https://github.com/DonIsaac/zlint/releases/download/v0.7.9/zlint-linux-x86_64 -o /usr/local/bin/zlint
-        chmod +x /usr/local/bin/zlint
-
-    - name: Install actionlint
-      run: |
-        curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.11/actionlint_1.7.11_linux_amd64.tar.gz -o /tmp/actionlint.tar.gz
-        tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
-        install /tmp/actionlint /usr/local/bin/actionlint
-
-    - name: Install shellcheck
-      run: |
-        curl -fsSL --retry 4 --retry-all-errors --connect-timeout 15 --max-time 120 \
-          https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz \
-          -o /tmp/shellcheck.tar.xz
-        tar -xJf /tmp/shellcheck.tar.xz -C /tmp
-        install /tmp/shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+    - name: Install linters
+      shell: sh
+      run: zig build tool -- ci-install-linters
 
     - name: Run lint target
       env:
         ZIGOS_REQUIRE_ZLINT: "1"
         ZIGOS_REQUIRE_ACTIONLINT: "1"
-      run: |
-        ./scripts/zig.sh build lint
+      shell: sh
+      run: zig build lint
 
   kernel-build:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Kernel Build
-      command: ./scripts/zig.sh build -Doptimize=fast kernel
+      command: zig build -Doptimize=fast kernel
       install-build-dependencies: false
 
   spec-conformance:
@@ -74,14 +59,14 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Spec Conformance
-      command: ./scripts/zig.sh build -Doptimize=fast spec-conformance
+      command: zig build -Doptimize=fast spec-conformance
 
   host-tests:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Host Tests
-      command: ./scripts/zig.sh build host-tests
+      command: zig build host-tests
       install-build-dependencies: false
 
   native-smoke:
@@ -89,7 +74,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Native Smoke
-      command: ./scripts/zig.sh build -Doptimize=fast zigos-native-smoke-test
+      command: zig build -Doptimize=fast zigos-native-smoke-test
       timeout-minutes: 30
 
   long-mode-entry:
@@ -97,7 +82,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: x86-64 Boot Path
-      command: ./scripts/zig.sh build -Doptimize=fast x86_64-long-mode-entry-check x86_64-userspace-launch-check
+      command: zig build -Doptimize=fast x86_64-long-mode-entry-check x86_64-userspace-launch-check
       timeout-minutes: 30
 
   tpm-quotes:
@@ -105,7 +90,7 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: TPM Quotes
-      command: TPM2_QEMU_SECONDS=180 ./scripts/zig.sh build -Doptimize=fast tpm2-quote-qemu-test
+      command: TPM2_QEMU_SECONDS=180 zig build -Doptimize=fast tpm2-quote-qemu-test
       timeout-minutes: 20
 
   benchmark:
@@ -113,7 +98,7 @@ jobs:
     uses: ./.github/workflows/run-zig-summary-command.yml
     with:
       job-name: Native Benchmarks
-      command: QEMU_ACCELERATOR=kvm ./scripts/zig.sh build -Doptimize=fast benchmark
+      command: QEMU_ACCELERATOR=kvm zig build -Doptimize=fast benchmark
       log-path: build/kernel-benchmark.log
       summary-path: build/kernel-benchmark-summary.md
       artifact-name: kernel-benchmark
@@ -124,5 +109,5 @@ jobs:
     uses: ./.github/workflows/run-zig-command.yml
     with:
       job-name: Production and Verification ISO Build
-      command: ./scripts/zig.sh build -Doptimize=fast iso iso-verification
+      command: zig build -Doptimize=fast iso iso-verification
       timeout-minutes: 20
