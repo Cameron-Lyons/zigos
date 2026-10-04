@@ -41,7 +41,10 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build kernel-role-check` | You changed native boot composition and need to prove verification code and state are absent from production. |
 | `./scripts/zig.sh build kernel-recovery` | You need the freestanding recovery kernel profile. |
 | `./scripts/zig.sh build kernel-benchmark` | You need the benchmark kernel profile. |
-| `./scripts/zig.sh build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, and test-root reachability. |
+| `./scripts/zig.sh build host-tests` | You need host coverage; this includes the root host suite, userspace runtime tests, native host-tool tests, authenticated release-tool fixtures, and test-root reachability. |
+| `./scripts/zig.sh build host-tool-tests` | You changed native file/media, QEMU process/log, release, or hardware utilities. |
+| `./scripts/zig.sh build release-tool-fixture-test` | You changed release generation/publication or signer arguments and need the real independent verifier with disposable fixture keys. |
+| `./scripts/zig.sh build tool -- COMMAND [ARGUMENTS]` | Run one of the native utilities; use `--help` to list commands. |
 | `./scripts/zig.sh build spec-tests` | You need spec coverage and native spec tests without QEMU. |
 | `./scripts/zig.sh build prod-readiness` | You need production-readiness and secure-by-design release-gate checks without changing spec conformance status. |
 | `./scripts/zig.sh build release-security-check` | You touched parser, ABI, diagnostics, release-security policy, unsafe Zig, or disclosure gate inputs and need the fast release-security gate. |
@@ -83,7 +86,7 @@ Use the pinned toolchain and repo entrypoints:
 | `./scripts/zig.sh build native-store-image` | You need to build or preserve the native storage image used by run targets. |
 | `./scripts/zig.sh build iso` | You need a bootable ISO at `build/os.iso`. |
 | `./scripts/zig.sh build iso-verification` | You need bootable proof media at `build/os-verification.iso`. |
-| `./test_kernel.sh` | You want the optimized smoke-test convenience wrapper. |
+| `./scripts/zig.sh build -Doptimize=fast zigos-native-smoke-test` | You want the optimized smoke-test convenience wrapper. |
 | `./scripts/zig.sh build clean` | You want to remove local build outputs and Zig caches. |
 | `./scripts/zig.sh build -Dclean-dry-run=true clean` | You want to inspect what `clean` would remove. |
 
@@ -91,8 +94,8 @@ Keep the spec contract intact:
 
 - Treat `spec/coverage.json` as the architecture and coverage contract.
 - Treat `spec/production_readiness.json` as the separate manifest for prototype-to-production work; do not encode production readiness by weakening or overloading spec conformance status.
-- Keep `first_hardware_target` pinned to one real machine until it is boringly reliable. The current target is `asus-nuc15crsu7`; QEMU can be preflight evidence, but production readiness requires a real hardware proof bundle checked by `scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>`.
-- Prepare the NUC proof bundle with `scripts/prepare-nuc15crsu7-hardware-proof.sh --build --nonce <fresh-64-hex> --output build/hardware-proofs/<fresh-name>` after provisioning the authenticated release signer, root, policy, sequence, expiry, rollback state, and independently pinned verifier. The output must be a fresh empty direct child of `build/hardware-proofs`; acceptance requires two single-boot logs, individually hashed cycle evidence, a canonical capture statement, two role quote/signature pairs, an independently pinned hardware verifier and nonce, and an independently pinned release verifier, root, and persistent state path.
+- Keep `first_hardware_target` pinned to one real machine until it is boringly reliable. The current target is `asus-nuc15crsu7`; QEMU can be preflight evidence, but production readiness requires a real hardware proof bundle checked by `./scripts/zig.sh build tool -- check-nuc15crsu7-hardware-proof build/hardware-proofs/<fresh-name>`.
+- Prepare the NUC proof bundle with `./scripts/zig.sh build tool -- prepare-nuc15crsu7-hardware-proof --build --nonce <fresh-64-hex> --output build/hardware-proofs/<fresh-name>` after provisioning the authenticated release signer, root, policy, sequence, expiry, rollback state, and independently pinned verifier. The output must be a fresh empty direct child of `build/hardware-proofs`; acceptance requires two single-boot logs, individually hashed cycle evidence, a canonical capture statement, two role quote/signature pairs, an independently pinned hardware verifier and nonce, and an independently pinned release verifier, root, and persistent state path.
 - Keep the secure-by-design release gate in `spec/production_readiness.json` complete, release-blocking, and backed by `./scripts/zig.sh build release-security-check`. Updates that touch parsing, boot, storage, sync, kernel/user ABI, drivers, diagnostics, crypto, or release tooling should consider fuzzing, fault injection, reproducible builds, DSSE SBOM/provenance, hardware-backed TPM/secure-enclave/HSM/KMS release keys, rotation/revocation, `zigos-verify-release` customer verifier coverage, artifact measurements, threat-model tests, memory-safety audits, crash dump redaction, and the disclosure process in `SECURITY.md`.
 - Keep requirement ids stable when editing manifest prose or mappings so coverage references do not churn.
 - If you add, rename, or split spec tests, keep the test names and coverage references aligned.

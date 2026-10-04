@@ -1,4 +1,5 @@
 const std = @import("std");
+const host_tools = @import("host_tools.zig");
 const shared = @import("shared.zig");
 const userspace_build = @import("userspace.zig");
 
@@ -134,20 +135,17 @@ pub fn addX86_64KernelBootCheck(
     link.addFileArg(kernel_assembly.getEmittedBin());
 
     const efi_stub = addEfiImage(b, optimize, linked_kernel, b.path("src/boot/cmdline-qemu.txt"));
-    const validate_image = b.addSystemCommand(&.{"bash"});
-    validate_image.addFileArg(b.path("scripts/check-efi-image.sh"));
+    const validate_image = host_tools.addRun(b, "check-efi-image");
     validate_image.addFileArg(efi_stub.getEmittedBin());
 
-    const iso = b.addSystemCommand(&.{"bash"});
-    iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
+    const iso = host_tools.addRun(b, "build-efi-iso");
     iso.addFileArg(efi_stub.getEmittedBin());
     const iso_path = iso.addOutputFileArg("x86_64-kernel-core-boot.iso");
     _ = iso.addOutputDirectoryArg("x86_64-kernel-core-boot-staging");
     shared.addEfiIsoEpochArg(b, iso);
     iso.step.dependOn(&validate_image.step);
 
-    const run = b.addSystemCommand(&.{"bash"});
-    run.addFileArg(b.path("scripts/run-x86-64-kernel-smoke.sh"));
+    const run = host_tools.addRun(b, "run-x86-64-kernel-smoke");
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-kernel-core-boot.log");
 
@@ -235,12 +233,10 @@ pub fn addX86_64LongModeEntryCheck(
     const linked_probe = link.addOutputFileArg("x86_64-long-mode-entry-probe.elf");
     link.addFileArg(probe.getEmittedBin());
 
-    const validate_image = b.addSystemCommand(&.{"bash"});
-    validate_image.addFileArg(b.path("scripts/check-multiboot2-image.sh"));
+    const validate_image = host_tools.addRun(b, "check-multiboot2-image");
     validate_image.addFileArg(linked_probe);
 
-    const iso = b.addSystemCommand(&.{"bash"});
-    iso.addFileArg(b.path("scripts/build-grub-iso.sh"));
+    const iso = host_tools.addRun(b, "build-grub-iso");
     iso.addFileArg(linked_probe);
     const iso_path = iso.addOutputFileArg("x86_64-long-mode-entry.iso");
     _ = iso.addOutputDirectoryArg("x86_64-long-mode-entry-staging");
@@ -248,8 +244,7 @@ pub fn addX86_64LongModeEntryCheck(
     iso.addFileArg(addEfiImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt")).getEmittedBin());
     iso.step.dependOn(&validate_image.step);
 
-    const run = b.addSystemCommand(&.{"bash"});
-    run.addFileArg(b.path("scripts/run-long-mode-entry-smoke.sh"));
+    const run = host_tools.addRun(b, "run-long-mode-entry-smoke");
     run.addFileArg(iso_path);
     run.addArg("build/x86_64-long-mode-entry.log");
 
@@ -578,12 +573,10 @@ pub fn addKernelArtifact(
     boot_link.addFileArg(kernel_assembly.getEmittedBin());
 
     const efi_stub = addEfiImage(b, .small, boot_kernel, b.path("src/boot/cmdline-qemu.txt"));
-    const validate_qemu_image = b.addSystemCommand(&.{"bash"});
-    validate_qemu_image.addFileArg(b.path("scripts/check-efi-image.sh"));
+    const validate_qemu_image = host_tools.addRun(b, "check-efi-image");
     validate_qemu_image.addFileArg(efi_stub.getEmittedBin());
 
-    const qemu_iso = b.addSystemCommand(&.{"bash"});
-    qemu_iso.addFileArg(b.path("scripts/build-efi-iso.sh"));
+    const qemu_iso = host_tools.addRun(b, "build-efi-iso");
     qemu_iso.addFileArg(efi_stub.getEmittedBin());
     const qemu_iso_path = qemu_iso.addOutputFileArg(b.fmt("{s}.qemu.iso", .{name}));
     _ = qemu_iso.addOutputDirectoryArg(b.fmt("{s}.qemu-staging", .{name}));

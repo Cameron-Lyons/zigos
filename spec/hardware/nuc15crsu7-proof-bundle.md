@@ -105,7 +105,7 @@ evidence.
 ## Canonical capture statement and verifier
 
 After all inputs are final,
-`scripts/write-nuc15crsu7-capture-statement.sh` writes a fixed-order v1
+`./scripts/zig.sh build tool -- write-nuc15crsu7-capture-statement` writes a fixed-order v1
 statement. The statement binds:
 
 - the fresh nonce, fixed target/SKU, stable device ID, and Jujutsu IDs;
@@ -171,7 +171,7 @@ the generator, finalizer, reproducibility checker, or `release-bundle-check`
 again. Prepare the proof skeleton from those existing artifacts:
 
 ```bash
-scripts/prepare-nuc15crsu7-hardware-proof.sh \
+./scripts/zig.sh build tool -- prepare-nuc15crsu7-hardware-proof \
   --nonce <64-lowercase-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -180,7 +180,7 @@ The output must be a fresh empty direct child of `build/hardware-proofs`.
 Reusing a populated ceremony directory is rejected so old manifests, digests,
 or captures cannot be mixed into a new candidate. Candidate generation and
 verification are phase A; after preparation, keep the release bundle and exact
-33 signed target files private and quiescent while writing only the separate
+17 signed target files private and quiescent while writing only the separate
 hardware-proof directory, then run the final verify-only
 `release-security-gate` without regenerating authenticated inputs.
 
@@ -195,7 +195,7 @@ the cycle logs, and collect the two role-specific quotes/signatures. Once the
 manifest is final, write the statement:
 
 ```bash
-scripts/write-nuc15crsu7-capture-statement.sh \
+./scripts/zig.sh build tool -- write-nuc15crsu7-capture-statement \
   build/hardware-proofs/<fresh-name>
 ```
 
@@ -210,7 +210,7 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-scripts/check-nuc15crsu7-hardware-proof.sh \
+./scripts/zig.sh build tool -- check-nuc15crsu7-hardware-proof \
   build/hardware-proofs/<fresh-name>
 ```
 

@@ -1163,11 +1163,11 @@
         "src/main.zig",
         "src/native_smoke_markers.zig",
         "tools/generate_userspace_archive.zig",
-        "scripts/run-zigos-native-smoke.sh",
+        "tools/host/qemu.zig",
         "src/boot/efi_stub.zig",
         "src/boot/efi_elf.zig",
         "src/boot/image_info.zig",
-        "scripts/run-unified-efi-qemu.sh",
+        "tools/host/qemu.zig",
         "src/boot/efi_tcg2.zig",
         "src/boot/tcg_event_log.zig",
         "src/boot/tpm_pcr.zig",
@@ -2122,7 +2122,7 @@
         "src/native/session/trust_boot.zig",
         "src/native/session/native_store_mount.zig",
         "src/native_smoke_markers.zig",
-        "scripts/run-zigos-native-smoke.sh"
+        "tools/host/qemu.zig"
       ],
       "negative_tests": [
         {
@@ -2154,7 +2154,7 @@
         "src/native/session/service_path_proofs.zig",
         "src/native/session/trust_boot.zig",
         "src/native_smoke_markers.zig",
-        "scripts/run-zigos-native-smoke.sh"
+        "tools/host/qemu.zig"
       ],
       "negative_tests": [
         {

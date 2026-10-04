@@ -1,0 +1,13 @@
+target_id=asus-nuc15crsu7
+operator=TODO-fill-operator
+started_at_utc=TODO-fill-start-time
+completed_at_utc=TODO-fill-completion-time
+cold_boots=0
+warm_reboots=0
+storage_write_read_cycles=0
+network_frame_cycles=0
+suspend_resume_cycles=0
+crash_recovery_cycles=0
+crash_record_persistence_cycles=0
+update_rollback_cycles=0
+notes=TODO-record-observed-hangs-panics-retries-and-recovery-behavior

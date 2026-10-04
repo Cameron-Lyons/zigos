@@ -199,10 +199,8 @@ const FIRST_HARDWARE_TARGET_REQUIRED_REFERENCE_ARTIFACTS = [_][]const u8{
     "spec/hardware/nuc15crsu7-production-required-markers.txt",
     "spec/hardware/nuc15crsu7-required-markers.txt",
     "spec/hardware/nuc15crsu7-proof-bundle.md",
-    "scripts/prepare-nuc15crsu7-hardware-proof.sh",
-    "scripts/write-nuc15crsu7-capture-statement.sh",
-    "scripts/check-nuc15crsu7-hardware-proof.sh",
-    "scripts/test-nuc15crsu7-hardware-proof-checker.sh",
+    "tools/host/hardware.zig",
+    "tools/host/hardware/fixtures.zig",
 };
 const FIRST_HARDWARE_TARGET_REQUIRED_QEMU_PREFLIGHT_COMMANDS = [_][]const u8{
     "./scripts/zig.sh build iso",
@@ -434,12 +432,12 @@ fn validateBenchmarkEnvironmentGate(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const capture_path = "scripts/capture-kernel-benchmark.sh";
+    const capture_path = "tools/host/qemu.zig";
     const capture_source = try readRequiredSource(allocator, io, errors, capture_path) orelse return;
     const capture_snippets = [_][]const u8{
-        "qemu_harness_accelerator",
-        "guest output must not declare its host accelerator",
-        "BENCH:ENV:accelerator=%s",
+        "h.accelerator()",
+        "absentGroup(h.ctx, bytes, &.{\"BENCH:ENV:\"})",
+        "BENCH:ENV:accelerator={s}",
     };
     for (capture_snippets) |snippet| {
         if (std.mem.indexOf(u8, capture_source, snippet) == null) {
@@ -935,14 +933,14 @@ fn validateNuc11tnki5KernelProofSources(
     const runtime_init_path = "src/kernel/boot/init/runtime.zig";
     const native_profile_path = "src/kernel/boot/profiles/zigos_native.zig";
     const timer_path = "src/kernel/timer/timer.zig";
-    const qemu_harness_path = "scripts/qemu-harness.sh";
+    const qemu_harness_path = "tools/host/qemu.zig";
     const kernel_build_path = "build_support/kernel.zig";
     const bootloader_path = "src/boot/boot_x86_64.S";
     const efi_stub_path = "src/boot/efi_stub.zig";
     const efi_handoff_path = "src/boot/efi_handoff.zig";
     const efi_elf_path = "src/boot/efi_elf.zig";
-    const efi_iso_path = "scripts/build-efi-iso.sh";
-    const efi_image_check_path = "scripts/check-efi-image.sh";
+    const efi_iso_path = "tools/host/images.zig";
+    const efi_image_check_path = "tools/host/images.zig";
     const kernel_linker_path = "src/arch/x86_64/linker.ld";
     const qemu_grub_path = "src/boot/grub-x86_64-qemu.cfg";
     const production_cmdline_path = "src/boot/cmdline.txt";
@@ -1610,10 +1608,11 @@ fn validateNuc11tnki5KernelProofSources(
         }
     }
     const required_accelerated_qemu_snippets = [_][]const u8{
-        "qemu_harness_accelerator",
-        "-c /dev/kvm",
-        "QEMU_HARNESS_COMMAND+=(-accel",
-        "printf '%s\\n' \"host\"",
+        "fn accelerator(",
+        "/dev/kvm",
+        ".character_device",
+        "\"-accel\"",
+        "return \"host\"",
         "max,+x2apic,+pdpe1gb,+pcid,+invpcid,+smap,+smep,+umip,+pku,+xsaves,+cet,+fred,+lkgs,+lass,tsc-frequency=2400000000",
     };
     for (required_accelerated_qemu_snippets) |snippet| {
@@ -1626,8 +1625,8 @@ fn validateNuc11tnki5KernelProofSources(
         "--strip-debug",
         "const boot_kernel = boot_link.addOutputFileArg",
         "addEfiImage(b, .small, boot_kernel",
-        "scripts/build-efi-iso.sh",
-        "scripts/check-efi-image.sh",
+        "host_tools.addRun(b, \"build-efi-iso\")",
+        "host_tools.addRun(b, \"check-efi-image\")",
         "src/boot/cmdline-qemu.txt",
     };
     for (required_compact_kernel_boot_snippets) |snippet| {
@@ -2908,12 +2907,14 @@ fn validateNuc11tnki5ProofPreparation(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const prep_path = "scripts/prepare-nuc15crsu7-hardware-proof.sh";
+    const prep_path = "tools/host/hardware.zig";
     if (!common.pathExists(io, prep_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 proof preparation script is missing: {s}", .{prep_path});
         return;
     }
-    const source = try common.readFileAlloc(allocator, io, prep_path, common.source_file_max_bytes);
+    const implementation = try common.readFileAlloc(allocator, io, prep_path, common.source_file_max_bytes);
+    const template = try common.readFileAlloc(allocator, io, "tools/host/hardware/proof-manifest.template", common.source_file_max_bytes);
+    const source = try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ implementation, template });
     const required_snippets = [_][]const u8{
         "build/os.iso",
         "build/os-verification.iso",
@@ -2922,7 +2923,7 @@ fn validateNuc11tnki5ProofPreparation(
         "--nonce",
         "ZIGOS_HARDWARE_PROOF_NONCE",
         "zigos-nuc15crsu7-proof-v2",
-        "capture_nonce=$CAPTURE_NONCE",
+        "capture_nonce={s}",
         "device_identity=device-identity.txt",
         "production_serial_log=production-serial.log",
         "production_boot_medium=build/os.iso",
@@ -2939,22 +2940,22 @@ fn validateNuc11tnki5ProofPreparation(
         "verification_signature=verification-attestation.sig",
         "capture_statement=capture-statement.txt",
         "release-bundle-check",
-        "-Drelease-verifier=",
-        "-Drelease-verifier-sha256=",
-        "is_safe_proof_output_dir",
-        "use a fresh --output directory",
-        "write_new_file",
-        "Perform two separate single-boot captures",
+        "release-verifier",
+        "release-verifier-sha256",
+        "UnsafeProofOutput",
+        "ProofOutputNotEmpty",
+        "atomicWrite",
+        "Capture separate production and verification boots",
         "production-serial.log",
         "verification-serial.log",
         "cycle-manifest.txt",
         "operator-metadata-markers.txt",
-        "$TARGET_PREFIX:EVIDENCE_SOURCE:REAL_HARDWARE",
-        "$TARGET_PREFIX:BOARD_SKU:RNUC15CRSU7",
-        "$TARGET_PREFIX:PROOF_MANIFEST:RECORDED",
-        "$TARGET_PREFIX:FIRMWARE_SETTINGS:RECORDED",
-        "$TARGET_PREFIX:POWER_CYCLE_NOTES:RECORDED",
-        "$TARGET_PREFIX:ARTIFACT_DIGESTS:RECORDED",
+        ":EVIDENCE_SOURCE:REAL_HARDWARE",
+        ":BOARD_SKU:RNUC15CRSU7",
+        ":PROOF_MANIFEST:RECORDED",
+        ":FIRMWARE_SETTINGS:RECORDED",
+        ":POWER_CYCLE_NOTES:RECORDED",
+        ":ARTIFACT_DIGESTS:RECORDED",
     };
     for (required_snippets) |snippet| {
         if (std.mem.indexOf(u8, source, snippet) == null) {
@@ -2962,7 +2963,7 @@ fn validateNuc11tnki5ProofPreparation(
         }
     }
 
-    const statement_writer_path = "scripts/write-nuc15crsu7-capture-statement.sh";
+    const statement_writer_path = "tools/host/hardware.zig";
     if (!common.pathExists(io, statement_writer_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 capture-statement writer is missing: {s}", .{statement_writer_path});
         return;
@@ -2970,25 +2971,26 @@ fn validateNuc11tnki5ProofPreparation(
     const statement_source = try common.readFileAlloc(allocator, io, statement_writer_path, common.source_file_max_bytes);
     const statement_snippets = [_][]const u8{
         "format=zigos-nuc15crsu7-capture-statement-v1",
-        "capture_nonce=$nonce",
-        "device_identity_sha256=",
-        "production_serial_sha256=",
-        "verification_serial_sha256=",
-        "cycle_manifest_sha256=",
-        "production_iso_sha256=",
-        "production_kernel_sha256=",
-        "verification_iso_sha256=",
-        "verification_kernel_sha256=",
-        "production_marker_contract_sha256=",
-        "verification_marker_contract_sha256=",
-        "firmware_settings_sha256=",
-        "power_cycle_notes_sha256=",
-        "attestation_lifecycle_sha256=",
-        "artifact_digests_sha256=",
-        "production_quote_sha256=",
-        "production_signature_sha256=",
-        "verification_quote_sha256=",
-        "verification_signature_sha256=",
+        "capture_nonce",
+        "{s}_sha256={s}",
+        "device_identity",
+        "production_serial",
+        "verification_serial",
+        "cycle_manifest",
+        "production_iso",
+        "production_kernel",
+        "verification_iso",
+        "verification_kernel",
+        "production_marker_contract",
+        "verification_marker_contract",
+        "firmware_settings",
+        "power_cycle_notes",
+        "attestation_lifecycle",
+        "artifact_digests",
+        "production_quote",
+        "production_signature",
+        "verification_quote",
+        "verification_signature",
     };
     for (statement_snippets) |snippet| {
         if (std.mem.indexOf(u8, statement_source, snippet) == null) {
@@ -3002,12 +3004,14 @@ fn validateNuc11tnki5ProofChecker(
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
-    const checker_path = "scripts/check-nuc15crsu7-hardware-proof.sh";
+    const checker_path = "tools/host/hardware.zig";
     if (!common.pathExists(io, checker_path)) {
         try common.addError(errors, allocator, "RNUC15CRSU7 proof checker is missing: {s}", .{checker_path});
         return;
     }
-    const source = try common.readFileAlloc(allocator, io, checker_path, common.source_file_max_bytes);
+    const implementation = try common.readFileAlloc(allocator, io, checker_path, common.source_file_max_bytes);
+    const sidecar_template = try common.readFileAlloc(allocator, io, "tools/host/hardware/power-cycle-notes.template", common.source_file_max_bytes);
+    const source = try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ implementation, sidecar_template });
     const required_snippets = [_][]const u8{
         "zigos-nuc15crsu7-proof-v2",
         "proof-manifest.txt",
@@ -3023,35 +3027,34 @@ fn validateNuc11tnki5ProofChecker(
         "ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE",
         "ZIGOS_HARDWARE_PROOF_VERIFIER",
         "ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256",
-        "externally pinned lowercase SHA-256 digest",
-        "fresh externally issued 64-hex capture nonce",
-        "actual_verifier_sha256",
-        "trusted verifier executable digest does not match",
-        "trusted hardware verifier must be obtained independently of the proof bundle and artifact root",
-        "release verifier must be obtained independently of the proof bundle and artifact root",
+        "FreshNonceRequired",
+        "PinnedTrustDigestRequired",
+        "PinnedVerifierDigestMismatch",
+        "IndependentTrustRequired",
         "format=zigos-nuc15crsu7-capture-statement-v1",
-        "write_expected_statement",
-        "production_serial_sha256=",
-        "verification_serial_sha256=",
-        "cycle_manifest_sha256=",
-        "production_iso_sha256=",
-        "production_kernel_sha256=",
-        "verification_iso_sha256=",
-        "verification_kernel_sha256=",
-        "production_marker_contract_sha256=",
-        "verification_marker_contract_sha256=",
-        "production_quote_sha256=",
-        "production_signature_sha256=",
-        "verification_quote_sha256=",
-        "verification_signature_sha256=",
-        "capture statement is not the canonical statement recomputed",
+        "NonCanonicalCaptureStatement",
+        "production_serial",
+        "verification_serial",
+        "cycle_manifest",
+        "production_iso",
+        "production_kernel",
+        "verification_iso",
+        "verification_kernel",
+        "production_marker_contract",
+        "verification_marker_contract",
+        "production_quote",
+        "production_signature",
+        "verification_quote",
+        "verification_signature",
         "format=zigos-nuc15crsu7-cycle-manifest-v1",
         "zigos-nuc15crsu7-cycle-log-v1",
-        "cycle manifest is malformed, non-canonical, out of order, non-contiguous, or contains duplicate evidence",
-        "cycles directory must contain exactly the logs named",
-        "cycle log digest mismatch",
-        "valid unique",
-        "does not match $count valid cycle entries",
+        "NonCanonicalCycleManifest",
+        "NonCanonicalCyclePath",
+        "DuplicateCycleEvidence",
+        "UnlistedCycleEvidence",
+        "CycleDigestMismatch",
+        "InsufficientHardwareCycles",
+        "SpoofedCycleSummary",
         "COLD_BOOTS",
         "WARM_REBOOTS",
         "STORAGE_WRITE_READ_CYCLES",
@@ -3063,40 +3066,34 @@ fn validateNuc11tnki5ProofChecker(
         "BOOT:ROLE:production",
         "BOOT:ROLE:verification",
         "ZIGOS:NATIVE:READY",
-        "exactly one BOOT:ROLE marker",
         "ZIGOS:STORAGE:CHECKPOINT:FINAL",
         "enabled=true",
         "dirty=false",
-        "generation=[0-9]+",
+        "generation=",
         "error=none",
         "ZIGOS:TASK:SESSION_READY",
-        "require_marker_before",
+        "MarkerOrder",
         "EVIDENCE_SOURCE:REAL_HARDWARE",
         "BOARD_SKU:RNUC15CRSU7",
-        "APIC_TIMER_INTERRUPT:OBSERVED",
-        "FRAMEBUFFER_GOP_SCANOUT:OBSERVED",
-        "XHCI_BOOT_KEYBOARD_REPORT:OBSERVED",
-        "NVME_WRITE_READ_COMPLETION:OBSERVED",
-        "I225_LM_FRAME_INTERRUPT:OBSERVED",
-        "SUSPEND_RESUME_POWER:OBSERVED",
-        "CRASH_RECORD_REBOOT_PERSISTENCE:OBSERVED",
-        "active_marker_lines",
-        "production marker contract under artifact root differs",
-        "verification marker contract under artifact root differs",
+        "activeMarkers",
+        "for (try activeMarkers(ctx, try readEvidence(ctx, root, production_contract)))",
+        "for (try activeMarkers(ctx, try readEvidence(ctx, root, verification_contract)))",
+        "MarkerContractMismatch",
         "app.notes.daily",
         "userspace-notes-daily.elf",
-        "artifact digest mismatch",
+        "ArtifactDigestMismatch",
         "stale_generation_rejected",
         "revoked_generation_rejected",
         "verifier_rejected_stale_attestation",
         "format=zigos-trusted-hardware-verifier-response-v1",
         "assertion=signed-response",
-        "statement_sha256=$statement_sha256",
-        "nonce=$capture_nonce",
+        "statement_sha256={s}",
+        "nonce={s}",
         "production_role=verified",
         "verification_role=verified",
-        "cmp -s \"$expected_response\" \"$verifier_response\"",
-        "did not return the exact signed-response assertion",
+        "ExactVerifierResponseRequired",
+        "follow_symlinks = false",
+        "secureParent",
         "QEMU",
     };
     for (required_snippets) |snippet| {
@@ -4612,7 +4609,7 @@ fn runSelfTests(allocator: std.mem.Allocator, io: std.Io, errors: *std.ArrayList
         \\    "reference_artifacts": [
         \\      "src/native/platform/hardware_target.zig",
         \\      "spec/hardware/nuc15crsu7-required-markers.txt",
-        \\      "scripts/check-nuc15crsu7-hardware-proof.sh"
+        \\      "tools/host/hardware.zig"
         \\    ],
         \\    "qemu_preflight_commands": ["./scripts/zig.sh build iso"],
         \\    "hardware_exit_criteria": ["self-test"],

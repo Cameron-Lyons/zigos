@@ -61,9 +61,7 @@
         "implementation_anchors": [
           "build.zig",
           "build_support/qemu.zig",
-          "scripts/run-storage-durability-qemu.sh",
-          "scripts/run-kernel-recovery.sh",
-          "scripts/run-sync-two-node-qemu.sh",
+          "tools/host/qemu.zig",
           "src/native/session/booted_evidence.zig",
           "src/native_smoke_markers.zig",
           "src/tests/spec/backlog_gates.zig"
@@ -101,9 +99,9 @@
           "build.zig",
           "mise.toml",
           "scripts/zig.sh",
-          "scripts/clean-build.sh",
-          "scripts/check-reproducible-build.sh",
-          "scripts/build-efi-iso.sh",
+          "tools/host/images.zig",
+          "tools/host/release.zig",
+          "tools/host/images.zig",
           "spec/release_security/release_artifacts.json"
         ],
         "current_evidence": [
@@ -133,8 +131,7 @@
         ],
         "implementation_anchors": [
           "tools/generate_userspace_archive.zig",
-          "scripts/generate-release-sbom-provenance.sh",
-          "scripts/finalize-release-manifest.sh",
+          "tools/host/release.zig",
           "spec/release_security/release_artifacts.json",
           "src/tools/release_catalog.zig",
           "src/tools/release_trust.zig",
@@ -289,7 +286,7 @@
           "SECURITY.md",
           "CONTRIBUTING.md",
           "spec/release_security/vulnerability_disclosure.json",
-          "scripts/generate-release-sbom-provenance.sh",
+          "tools/host/release.zig",
           "src/check_release_security_gate.zig"
         ],
         "current_evidence": [
@@ -319,7 +316,7 @@
     "status": "hardware_required",
     "selection_reason": "Single commodity x86_64 UEFI target with ACPI, integrated display output, USB xHCI input path, M.2 NVMe storage, and wired Intel I225-LM Ethernet so the first hardware proof does not depend on Wi-Fi or dongles.",
     "boot_medium": "Two unified EFI ISO or USB boots: build/os.iso for the shipped production kernel and build/os-verification.iso for the exhaustive verification workload.",
-    "serial_capture": "Separate real-machine production-serial.log and verification-serial.log single-boot captures, plus individually hashed cycles/*.log files, archived under one fresh build/hardware-proofs/<fresh-name>/ ceremony directory as an authenticated proof bundle and checked by scripts/check-nuc15crsu7-hardware-proof.sh.",
+    "serial_capture": "Separate real-machine production-serial.log and verification-serial.log single-boot captures, plus individually hashed cycles/*.log files, archived under one fresh build/hardware-proofs/<fresh-name>/ ceremony directory as an authenticated proof bundle and checked by tools/host/hardware.zig.",
     "required_subsystems": [
       "uefi_boot",
       "acpi_tables",
@@ -351,11 +348,9 @@
       "spec/hardware/nuc15crsu7-production-required-markers.txt",
       "spec/hardware/nuc15crsu7-required-markers.txt",
       "spec/hardware/nuc15crsu7-proof-bundle.md",
-      "scripts/prepare-nuc15crsu7-hardware-proof.sh",
-      "scripts/write-nuc15crsu7-capture-statement.sh",
-      "scripts/check-nuc15crsu7-hardware-proof.sh",
-      "scripts/test-nuc15crsu7-hardware-proof-checker.sh",
-      "scripts/run-uefi-boot-test.sh"
+      "tools/host/hardware.zig",
+      "tools/host/hardware/fixtures.zig",
+      "tools/host/qemu.zig"
     ],
     "qemu_preflight_commands": [
       "./scripts/zig.sh build iso",
@@ -489,7 +484,7 @@
         "src/tools/zigos_sign.zig",
         "src/native/session/trust_boot.zig",
         "src/native_smoke_markers.zig",
-        "scripts/run-zigos-native-smoke.sh",
+        "tools/host/qemu.zig",
         "src/boot/efi_stub.zig",
         "src/boot/efi_elf.zig",
         "src/boot/image_info.zig",
@@ -500,7 +495,7 @@
         "src/native/platform/tpm2_quote.zig",
         "src/native/platform/tpm2_sealing.zig",
         "src/native/session/proofs/tpm2_quote_proof.zig",
-        "scripts/run-unified-efi-qemu.sh",
+        "tools/host/qemu.zig",
         "scripts/prepare-unified-efi-test.py",
         "src/native/platform/tpm_attestation.zig",
         "src/native/platform/tpm_attestation_wire.zig",
@@ -584,11 +579,10 @@
         "spec/hardware/nuc15crsu7-production-required-markers.txt",
         "spec/hardware/nuc15crsu7-required-markers.txt",
         "spec/hardware/nuc15crsu7-proof-bundle.md",
-        "scripts/check-nuc15crsu7-hardware-proof.sh",
-        "scripts/run-uefi-boot-test.sh",
-        "scripts/build-efi-iso.sh",
-        "scripts/build-grub-iso.sh",
-        "scripts/qemu-harness.sh",
+        "tools/host/hardware.zig",
+        "tools/host/qemu.zig",
+        "tools/host/images.zig",
+        "tools/host/qemu.zig",
         "src/kernel/platform/acpi.zig",
         "src/kernel/platform/apic.zig",
         "src/kernel/platform/dmar.zig",
@@ -671,7 +665,7 @@
       "next_actions": [
         "Make build/os.iso and build/os-verification.iso boot reliably through the RNUC15CRSU7 UEFI firmware and record separate production and verification logs with shared firmware settings.",
         "Capture the Multiboot memory-map, SMBIOS SKU, ACPI table, DMAR/VT-d segment-zero remapping, APIC hardware LAPIC timer interrupt-proof, and GOP hardware framebuffer scanout-proof markers from the RNUC15CRSU7 firmware.",
-        "Complete release-bundle-check once, freeze its authenticated inputs, obtain a fresh external challenge, use scripts/prepare-nuc15crsu7-hardware-proof.sh --nonce <64-hex> --output build/hardware-proofs/<fresh-name> before capture, then use scripts/write-nuc15crsu7-capture-statement.sh only after the logs, per-cycle manifest, sidecars, and role quotes/signatures are final.",
+        "Complete release-bundle-check once, freeze its authenticated inputs, obtain a fresh external challenge, use tools/host/hardware.zig --nonce <64-hex> --output build/hardware-proofs/<fresh-name> before capture, then use tools/host/hardware.zig only after the logs, per-cycle manifest, sidecars, and role quotes/signatures are final.",
         "Feed real GOP mode-info reads, framebuffer base/stride observations, framebuffer memory-read bytes, display scanout observations, expected-pixel observations, captured scanline bytes, and sink-signal observations into the productionHardwareVerified framebuffer proof; feed real APIC timer initial-count/divide/LVT register writes, current-count reads, ISR vector observations, interrupt-handler entries, EOI register writes, and TSC advancement into the productionHardwareVerified timer proof; feed real suspend/resume PM1 sleep writes, S-state entry observations, S0 resume observations, PM timer resume reads, SCI wake interrupts, and post-resume subsystem probes into the productionHardwareVerified suspend proof; feed real crash-handler entries, persistent record writes and flushes, reboot observations, recovery-boot reads, recovered-record validations, redacted report emissions, and persistent byte counts into the productionHardwareVerified crash persistence proof; feed real update candidate activation writes, selector-record flushes, power-cycle observations, failure-detector observations, rollback decision records, stable-slot boot observations, recovered-slot reads, persisted-state verifications, and service-start suppression observations into the productionHardwareVerified update rollback proof; feed real xHCI MMIO command submission, hardware-owned device-slot and endpoint context reads, ERST/event-ring DMA writes, interrupt assertions, port-status changes, and boot-keyboard report DMA bytes into the productionHardwareVerified input proof; feed real NVMe doorbell/MMIO queue submission, DMA/PRP read/write byte counts, controller-written completions, interrupts, and phase-tag observations into the productionHardwareVerified storage proof; and feed real Intel I225-LM tail-register writes, hardware-owned TX/RX descriptors, DMA byte counts, asserted interrupts, and PHY packet observations into the productionHardwareVerified network proof before emitting PASS markers.",
         "Add suspend/resume, induced crash-recovery, crash-record persistence, and update rollback power-cycle loops to the NUC proof runbook.",
         "Capture clean essential startup and native-ready from the production image, then capture service startup, compositor presentation-proof markers, permission review, sync, driver restart, crash persistence, and update rollback markers in the separate verification NUC proof run."
@@ -689,7 +683,7 @@
         "./scripts/zig.sh build sync-two-node-qemu-test",
         "./scripts/zig.sh build recovery-qemu-test",
         "./scripts/zig.sh build -Dhardware-proof-dir=build/hardware-proofs/<fresh-name> -Drelease-trust-root=<absolute-path> -Drelease-trust-root-sha256=<lowercase-sha256> -Drelease-trust-state=<absolute-path> -Drelease-verifier=<absolute-path> -Drelease-verifier-sha256=<lowercase-sha256> hardware-proof",
-        "scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>",
+        "tools/host/hardware.zig build/hardware-proofs/<fresh-name>",
         "./scripts/zig.sh build tpm2-ownership-qemu-test"
       ]
     },
@@ -810,7 +804,7 @@
         "./scripts/zig.sh build zigos-native-smoke-test",
         "./scripts/zig.sh build spec-tests",
         "./scripts/zig.sh build prod-readiness",
-        "scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>"
+        "tools/host/hardware.zig build/hardware-proofs/<fresh-name>"
       ]
     },
     {
@@ -992,7 +986,7 @@
         "./scripts/zig.sh build spec-tests",
         "./scripts/zig.sh build prod-readiness",
         "./scripts/zig.sh build zigos-native-smoke-test",
-        "scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>"
+        "tools/host/hardware.zig build/hardware-proofs/<fresh-name>"
       ]
     },
     {
@@ -1094,7 +1088,7 @@
         "benchmarks/kernel-quality-gates.txt",
         "benchmarks/kernel-baseline.txt",
         "benchmarks/kernel-thresholds.txt",
-        "scripts/capture-kernel-benchmark.sh",
+        "tools/host/qemu.zig",
         "tools/check_kernel_benchmarks.zig"
       ],
       "current_evidence": [

@@ -1332,7 +1332,7 @@ or `pacman`.
 ./scripts/zig.sh build run
 
 # Equivalent convenience wrapper for the default run path.
-./run.sh
+./scripts/zig.sh build run
 ```
 
 `run` and `run-zigos-native` attach `build/native-store.img`. Build targets that
@@ -1393,7 +1393,7 @@ files; do not run any generator again. Prepare a fresh proof skeleton bound to
 that candidate:
 
 ```bash
-scripts/prepare-nuc15crsu7-hardware-proof.sh \
+./scripts/zig.sh build tool -- prepare-nuc15crsu7-hardware-proof \
   --nonce <fresh-verifier-issued-64-hex> \
   --output build/hardware-proofs/<fresh-name>
 ```
@@ -1409,7 +1409,7 @@ two role-specific hardware quote/signature pairs, write the canonical capture
 statement and validate it with an external trusted verifier:
 
 ```bash
-scripts/write-nuc15crsu7-capture-statement.sh build/hardware-proofs/<fresh-name>
+./scripts/zig.sh build tool -- write-nuc15crsu7-capture-statement build/hardware-proofs/<fresh-name>
 ZIGOS_HARDWARE_PROOF_EXPECTED_NONCE=<fresh-verifier-issued-64-hex> \
 ZIGOS_HARDWARE_PROOF_VERIFIER=/absolute/path/to/trusted-verifier \
 ZIGOS_HARDWARE_PROOF_VERIFIER_SHA256=<externally-pinned-64-hex> \
@@ -1418,7 +1418,7 @@ ZIGOS_RELEASE_VERIFIER_SHA256=<externally-pinned-verifier-64-hex> \
 ZIGOS_RELEASE_TRUST_ROOT=/absolute/independent/root-metadata.json \
 ZIGOS_RELEASE_TRUST_ROOT_SHA256=<pinned-lowercase-sha256> \
 ZIGOS_RELEASE_TRUST_STATE=/absolute/persistent/zigos-release-state.json \
-  scripts/check-nuc15crsu7-hardware-proof.sh build/hardware-proofs/<fresh-name>
+  ./scripts/zig.sh build tool -- check-nuc15crsu7-hardware-proof build/hardware-proofs/<fresh-name>
 ```
 
 The same check is exposed as `./scripts/zig.sh build
@@ -1451,7 +1451,7 @@ target files and release bundle are frozen, the verify-only
 `release-security-gate` rechecks the existing bundle and seals it with the
 completed RNUC15CRSU7 proof; it has no generator or signer dependency. Public
 release provenance must be signed per
-DSSE payload through `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` by a
+DSSE payload through `ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE` by a
 hardware-backed TPM, secure enclave, HSM, or KMS key. The signer key must be
 delegated by a root-threshold-signed trust policy whose root metadata and
 lowercase SHA-256 digest were obtained independently of the release bundle. The
@@ -1472,7 +1472,9 @@ Ed25519 public keys are lowercase hex encodings of the raw 32-byte public key,
 and their key ID is the lowercase SHA-256 of those raw bytes. Root policy
 thresholds may use multiple distinct signers. The current production generator
 and finalizer emit one release signature, so `releaseRole.threshold` must be
-exactly `1`. `ZIGOS_RELEASE_DSSE_SIGN_COMMAND` receives the complete DSSE v1
+exactly `1`. `ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE` is an absolute executable path,
+invoked directly with the optional literal JSON string array
+`ZIGOS_RELEASE_DSSE_SIGN_ARGS_JSON` (default `[]`). It receives the complete DSSE v1
 pre-authentication encoding on standard input and must emit only the standard
 base64 Ed25519 signature.
 
@@ -1489,7 +1491,8 @@ consistency; the SBOM digest and `spdxVersion` are checked, but this verifier
 does not claim full SPDX graph-semantic validation.
 
 ```sh
-export ZIGOS_RELEASE_DSSE_SIGN_COMMAND='/absolute/path/to/hardware-signer'
+export ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE='/absolute/path/to/hardware-signer'
+export ZIGOS_RELEASE_DSSE_SIGN_ARGS_JSON='[]' # Literal arguments, e.g. ["--key","production"]
 export ZIGOS_RELEASE_SIGNING_KEY_ID='<derived-lowercase-sha256-key-id>'
 export ZIGOS_RELEASE_HARDWARE_BACKED=true
 export ZIGOS_RELEASE_SEQUENCE='<strictly-increasing-sequence-for-this-new-candidate>'
@@ -1513,7 +1516,7 @@ exact 17 target files and `build/release-security` inputs must be private,
 owner-controlled, and quiescent: no process outside the ceremony may replace
 them while they are being hashed. Prefer read-only or immutable staging for
 those inputs. The fresh hardware-proof sibling remains writable for capture;
-it is not one of the verifier's 15 target paths. Verification does not claim
+it is not one of the verifier's 17 target paths. Verification does not claim
 safety against a concurrent writer already authorized as the same host user.
 
 With the completed proof directory and external hardware-proof variables set,
@@ -1571,7 +1574,7 @@ fi
 
 This hashes and executes the same private copy, avoiding a path replacement
 between pin verification and execution. The repository
-`scripts/verify-release-bundle.sh` wrapper automates that flow for maintainers,
+`./scripts/zig.sh build tool -- verify-release-bundle` wrapper automates that flow for maintainers,
 but it is not a signed OS target or trust bootstrap; customers must obtain the
 wrapper itself from a trusted, pinned source if they rely on it. The verifier
 rejects policy or release rollback, authenticated-payload equivocation, clock
@@ -1605,16 +1608,16 @@ proof image; set `OVMF_CODE` and optionally `OVMF_VARS` if the firmware is not
 installed in a standard path. Each QEMU process copies an available variables
 template beside its serial log so concurrent boots do not share firmware state.
 
-QEMU proof runs are script-backed:
+QEMU proof runs use the native Zig host utility:
 
-- `scripts/run-zigos-native-smoke.sh`
-- `scripts/run-storage-durability-qemu.sh`
-- `scripts/run-sync-two-node-qemu.sh` (drops two final confirmations by default;
+- `./scripts/zig.sh build tool -- run-zigos-native-smoke`
+- `./scripts/zig.sh build tool -- run-storage-durability-qemu`
+- `./scripts/zig.sh build tool -- run-sync-two-node-qemu` (drops two final confirmations by default;
   `SYNC_TWO_NODE_DROP_CONFIRMATIONS=0` runs without injected loss)
-- `scripts/run-kernel-recovery.sh`
-- `scripts/capture-kernel-benchmark.sh` (capture helper; `zig build benchmark` runs the strict gate)
-- `scripts/run-uefi-boot-test.sh`
-- `scripts/qemu-harness.sh`
+- `./scripts/zig.sh build tool -- run-kernel-recovery`
+- `./scripts/zig.sh build tool -- capture-kernel-benchmark` (capture helper; `zig build benchmark` runs the strict gate)
+- `./scripts/zig.sh build tool -- run-uefi-boot-test`
+- `./scripts/zig.sh build tool -- qemu-harness`
 
 Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 `src/kernel/boot/markers.zig`.
@@ -1660,8 +1663,9 @@ Shared boot marker expectations live in `src/native_smoke_markers.zig` and
 - `src/tools/`: Zig helper binaries that need the `src/` module root.
 - `build_support/`: build graph helpers for kernels, QEMU, checks, userspace
   images, and shared build paths.
-- `scripts/`: setup, lint, build, QEMU, benchmark, smoke, ISO, and cleanup
-  entrypoints.
+- `scripts/`: dependency/toolchain bootstrap and external Python test helpers.
+- `tools/host/`: native Zig file, lint, media, QEMU, release, and hardware-proof
+  utilities, invoked with `./scripts/zig.sh build tool -- COMMAND [ARGUMENTS]`.
 - `tools/`: host-side Zig utilities for coverage, readiness, test root checks,
   and userspace archive generation.
 - `spec/`: machine-readable coverage and production-readiness manifests.

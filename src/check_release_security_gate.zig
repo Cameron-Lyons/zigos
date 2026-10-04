@@ -428,246 +428,82 @@ fn releaseArtifactPathAllowed(selection: ReleaseArtifactSelection, path: []const
     return release_catalog.isProductionTarget(path);
 }
 
-fn validateShellReleaseArtifactArray(
-    allocator: std.mem.Allocator,
-    errors: *std.ArrayList([]const u8),
-    source: []const u8,
-    variable_name: []const u8,
-    expected_paths: []const []const u8,
-) !void {
-    const marker = try std.fmt.allocPrint(allocator, "{s}=(", .{variable_name});
-    const marker_offset = std.mem.indexOf(u8, source, marker) orelse {
-        try common.addError(errors, allocator, "release script must declare {s} as a literal path array", .{variable_name});
-        return;
-    };
-    const body_start = marker_offset + marker.len;
-    const body_end_offset = std.mem.indexOf(u8, source[body_start..], "\n)") orelse {
-        try common.addError(errors, allocator, "release script {s} array must have a closing parenthesis", .{variable_name});
-        return;
-    };
-    const body = source[body_start .. body_start + body_end_offset];
-
-    var declared_paths = std.ArrayList([]const u8).empty;
-    var lines = std.mem.splitScalar(u8, body, '\n');
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0) continue;
-        if (line.len < 2 or line[0] != '"' or line[line.len - 1] != '"') {
-            try common.addError(errors, allocator, "release script {s} entries must be literal quoted paths: {s}", .{ variable_name, line });
-            continue;
-        }
-        try declared_paths.append(allocator, line[1 .. line.len - 1]);
-    }
-
-    var declared_set = try common.collectUniqueStrings(
-        allocator,
-        errors,
-        declared_paths.items,
-        try std.fmt.allocPrint(allocator, "release script {s} path", .{variable_name}),
-    );
-    for (expected_paths) |path| {
-        if (!declared_set.contains(path)) {
-            try common.addError(errors, allocator, "release script {s} must include {s}", .{ variable_name, path });
-        }
-    }
-    for (declared_paths.items) |path| {
-        if (!isOneOf(path, expected_paths)) {
-            try common.addError(errors, allocator, "release script {s} contains an unapproved path: {s}", .{ variable_name, path });
-        }
-    }
-}
-
 fn validateReleaseArtifacts(
     allocator: std.mem.Allocator,
     io: std.Io,
     errors: *std.ArrayList([]const u8),
 ) !void {
     const root = try parseJsonFile(allocator, io, errors, RELEASE_ARTIFACTS_PATH) orelse return;
-    const generator = try common.expectStringField(allocator, errors, root, "release artifacts", "generator") orelse "";
-    if (generator.len > 0 and !common.pathExists(io, generator)) {
-        try common.addError(errors, allocator, "release artifact generator is missing: {s}", .{generator});
-    }
-    if (generator.len > 0 and common.pathExists(io, generator)) {
-        const generator_source = try common.readFileAlloc(allocator, io, generator, common.source_file_max_bytes);
-        const required_generator_snippets = [_][]const u8{
-            "command -v jj",
-            "repo_vcs=\"jj\"",
-            "jj -R \"$ROOT_DIR\" git remote list",
-            "repo_change_id=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
-            "commit_sha=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
-            "dirty_count=\"$(jj -R \"$ROOT_DIR\" diff -r @ --name-only",
-            "sourceControl",
-            "changeId",
-            "RELEASE_OPTIMIZE_MODE",
-            "optimizeMode",
-            "buildType",
-            "https://github.com/Cameron-Lyons/zigos/release-security-gate",
-            "zigos-local-release-security-gate",
-            "require_artifact_path",
-            "missing_required_artifacts",
-            "missing required release artifact",
-            "REQUIRED_RELEASE_ARTIFACTS",
-            "PRODUCTION_USERSPACE_ARTIFACTS",
-            "is_forbidden_release_artifact",
-            "is_allowed_release_artifact",
-            "collect_production_userspace_artifacts",
-            "artifact is outside the production release allowlist",
-            "ZIGOS_RELEASE_TRUST_ROOT",
-            "ZIGOS_RELEASE_TRUST_ROOT_SHA256",
-            "ZIGOS_RELEASE_TRUST_POLICY",
-            "ZIGOS_RELEASE_VERIFIER",
-            "ZIGOS_RELEASE_VERIFIER_SHA256",
-            "ZIGOS_RELEASE_DSSE_SIGN_COMMAND",
-            "ZIGOS_RELEASE_SIGNING_KEY_ID",
-            "ZIGOS_RELEASE_HARDWARE_BACKED",
-            "trust-info",
-            "--trusted-root",
-            "--trusted-root-sha256",
-            "--release-key-id",
-            "root-metadata.json",
-            "release-trust-policy.dsse.json",
-            "verifier_bootstrap",
-            "minimumPolicyVersion",
-            "minimumReleaseSequence",
-            "produced malformed DSSE signature; expected non-empty standard base64",
-        };
-        for (required_generator_snippets) |snippet| {
-            if (std.mem.indexOf(u8, generator_source, snippet) == null) {
-                try common.addError(errors, allocator, "release artifact generator must enforce Jujutsu provenance snippet: {s}", .{snippet});
-            }
-        }
-        try validateShellReleaseArtifactArray(allocator, errors, generator_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_BASE_TARGET_PATHS);
-        try validateShellReleaseArtifactArray(allocator, errors, generator_source, "PRODUCTION_USERSPACE_ARTIFACTS", &REQUIRED_PRODUCTION_USERSPACE_PATHS);
-        for (REQUIRED_RELEASE_BASE_TARGET_PATHS) |path| {
-            if (std.mem.indexOf(u8, generator_source, path) == null) {
-                try common.addError(errors, allocator, "release artifact generator production allowlist must include {s}", .{path});
-            }
-        }
-        for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |path| {
-            if (std.mem.indexOf(u8, generator_source, path) == null) {
-                try common.addError(errors, allocator, "release artifact generator production userspace allowlist must include {s}", .{path});
-            }
-        }
-        if (std.mem.indexOf(u8, generator_source, "git -C \"$ROOT_DIR\"") != null) {
-            try common.addError(errors, allocator, "release artifact generator must use Jujutsu metadata instead of raw git -C provenance lookups", .{});
-        }
-        if (std.mem.indexOf(u8, generator_source, "require_artifact_path \"zig-out/bin\"") != null or
-            std.mem.indexOf(u8, generator_source, "find \"$absolute_path\" -type f") != null or
-            std.mem.indexOf(u8, generator_source, "find \"$userspace_dir\"") != null)
-        {
-            try common.addError(errors, allocator, "release artifact generator must not sweep an output directory into the production release", .{});
+    const implementation_fields = [_][]const u8{ "generator", "reproducible_build_checker", "release_manifest_finalizer", "pinned_verifier_runner" };
+    for (implementation_fields) |field_name| {
+        const path = try common.expectStringField(allocator, errors, root, "release artifacts", field_name) orelse continue;
+        if (!std.mem.eql(u8, path, "tools/host/release.zig") or !common.pathExists(io, path)) {
+            try common.addError(errors, allocator, "release {s} must name the native host implementation", .{field_name});
         }
     }
-    const repro_checker = try common.expectStringField(allocator, errors, root, "release artifacts", "reproducible_build_checker") orelse "";
-    if (repro_checker.len > 0 and !common.pathExists(io, repro_checker)) {
-        try common.addError(errors, allocator, "reproducible build checker is missing: {s}", .{repro_checker});
+    const native_source = try common.readFileAlloc(allocator, io, "tools/host/release.zig", common.source_file_max_bytes);
+    const native_support = try common.readFileAlloc(allocator, io, "tools/host/release/support.zig", common.source_file_max_bytes);
+    const required_native_snippets = [_][]const u8{
+        "@import(\"release_catalog\")",
+        "catalog.productionTargetPaths()",
+        "catalog.requireExactReleaseEvidenceNames",
+        "catalog.requireExactProductionTargets",
+        "ZIGOS_RELEASE_TRUST_ROOT",
+        "ZIGOS_RELEASE_TRUST_ROOT_SHA256",
+        "ZIGOS_RELEASE_TRUST_POLICY",
+        "ZIGOS_RELEASE_TRUST_STATE",
+        "ZIGOS_RELEASE_VERIFIER",
+        "ZIGOS_RELEASE_VERIFIER_SHA256",
+        "ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE",
+        "ZIGOS_RELEASE_DSSE_SIGN_ARGS_JSON",
+        "ZIGOS_RELEASE_SIGNING_KEY_ID",
+        "ZIGOS_RELEASE_HARDWARE_BACKED",
+        "ZIGOS_RELEASE_SEQUENCE",
+        "ZIGOS_RELEASE_EXPIRES_AT",
+        "signerArgv",
+        "captureInput",
+        "DSSEv1",
+        "signatureText",
+        "sourceControl",
+        "changeId",
+        "optimizeMode",
+        "buildType",
+        "https://github.com/Cameron-Lyons/zigos/release-security-gate",
+        "zigos-local-release-security-gate",
+        "ReleaseFast",
+        "--ignore-working-copy",
+        "file\", \"show",
+        "-Doptimize=fast",
+        "ZIG_LOCAL_CACHE_DIR",
+        "ZIG_GLOBAL_CACHE_DIR",
+        "support.same(source.commit",
+        "release-manifest.dsse.json",
+        "verify-candidate",
+        ".finalize.lock",
+        "ReleaseFinalizationAlreadyActive",
+        "exactEvidence",
+        "support.remove(ctx, marker)",
+        "--trusted-root",
+        "--trusted-root-sha256",
+        "--trust-state",
+        "minimumPolicyVersion",
+        "minimumReleaseSequence",
+        "verifier_bootstrap",
+    };
+    for (required_native_snippets) |snippet| {
+        if (std.mem.indexOf(u8, native_source, snippet) == null) try common.addError(errors, allocator, "native release tool must retain authenticated/frozen-source contract: {s}", .{snippet});
     }
-    if (repro_checker.len > 0 and common.pathExists(io, repro_checker)) {
-        const repro_source = try common.readFileAlloc(allocator, io, repro_checker, common.source_file_max_bytes);
-        const required_repro_snippets = [_][]const u8{
-            "command -v jj",
-            "jj --ignore-working-copy -R \"$ROOT_DIR\" file list -r \"$commit_sha\"",
-            "jj --ignore-working-copy -R \"$ROOT_DIR\" file show -r \"$commit_sha\" \"$path\"",
-            "repo_vcs=\"jj\"",
-            "jj --ignore-working-copy -R \"$ROOT_DIR\" git remote list",
-            "repo_change_id=\"$(jj --ignore-working-copy -R \"$ROOT_DIR\" log -r \"$commit_sha\" --no-graph",
-            "commit_sha=\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph",
-            "dirty_count=\"$(jj --ignore-working-copy -R \"$ROOT_DIR\" diff -r \"$commit_sha\" --name-only",
-            "\"$(jj -R \"$ROOT_DIR\" log -r @ --no-graph -T 'commit_id ++ \"\\n\"')\" != \"$commit_sha\"",
-            "Source revision changed while preparing reproducible builds",
-            "ZIG_LOCAL_CACHE_DIR=\"$tree/build/zig-cache\"",
-            "ZIG_GLOBAL_CACHE_DIR=\"$tree/build/zig-global-cache\"",
-            "\"repo_vcs\": \"$repo_vcs\"",
-            "\"repository\":",
-            "\"repo_change_id\":",
-            "\"dirty_workspace_file_count\":",
-            "\"optimize_mode\": \"ReleaseFast\"",
-            "-Doptimize=fast",
-            "REQUIRED_RELEASE_ARTIFACTS",
-            "PRODUCTION_USERSPACE_ARTIFACTS",
-            "is_forbidden_release_artifact",
-            "is_allowed_release_artifact",
-            "outside the production release allowlist",
-        };
-        for (required_repro_snippets) |snippet| {
-            if (std.mem.indexOf(u8, repro_source, snippet) == null) {
-                try common.addError(errors, allocator, "reproducible build checker must enforce frozen-source and isolated-build snippet: {s}", .{snippet});
-            }
-        }
-        try validateShellReleaseArtifactArray(allocator, errors, repro_source, "REQUIRED_RELEASE_ARTIFACTS", &REQUIRED_RELEASE_BASE_TARGET_PATHS);
-        try validateShellReleaseArtifactArray(allocator, errors, repro_source, "PRODUCTION_USERSPACE_ARTIFACTS", &REQUIRED_PRODUCTION_USERSPACE_PATHS);
-        for (REQUIRED_RELEASE_BASE_TARGET_PATHS) |path| {
-            if (std.mem.indexOf(u8, repro_source, path) == null) {
-                try common.addError(errors, allocator, "reproducible build production allowlist must include {s}", .{path});
-            }
-        }
-        for (REQUIRED_PRODUCTION_USERSPACE_PATHS) |path| {
-            if (std.mem.indexOf(u8, repro_source, path) == null) {
-                try common.addError(errors, allocator, "reproducible build production userspace allowlist must include {s}", .{path});
-            }
-        }
-        if (std.mem.indexOf(u8, repro_source, "git -C \"$ROOT_DIR\"") != null) {
-            try common.addError(errors, allocator, "reproducible build checker must use Jujutsu metadata instead of raw git -C provenance lookups", .{});
-        }
-        if (std.mem.indexOf(u8, repro_source, "find \"$tree/zig-out/bin\"") != null) {
-            try common.addError(errors, allocator, "reproducible build checker must not sweep the binary output directory into the production manifest", .{});
-        }
-        if (std.mem.indexOf(u8, repro_source, "cp -p \"$ROOT_DIR/$path\"") != null) {
-            try common.addError(errors, allocator, "reproducible build checker must export frozen revision contents instead of copying mutable workspace files", .{});
-        }
+    const required_support_snippets = [_][]const u8{
+        "ReleaseVerifierMustBeIndependent", "ReleaseVerifierPinMismatch", "pinned-release-verifier",
+        "follow_symlinks = false",          "resolve_beneath = true",     "sha256File(target)",
+        "renameAbsolute",                   "0o500",                      "0o700",
+        "isSafeRelativePath",
+    };
+    for (required_support_snippets) |snippet| {
+        if (std.mem.indexOf(u8, native_support, snippet) == null) try common.addError(errors, allocator, "native release support must retain containment and pinned-copy contract: {s}", .{snippet});
     }
-    const finalizer = try common.expectStringField(allocator, errors, root, "release artifacts", "release_manifest_finalizer") orelse "";
-    if (finalizer.len > 0 and !common.pathExists(io, finalizer)) {
-        try common.addError(errors, allocator, "release manifest finalizer is missing: {s}", .{finalizer});
-    }
-    if (finalizer.len > 0 and common.pathExists(io, finalizer)) {
-        const finalizer_source = try common.readFileAlloc(allocator, io, finalizer, common.source_file_max_bytes);
-        const required_finalizer_snippets = [_][]const u8{
-            "ZIGOS_RELEASE_TRUST_ROOT",
-            "ZIGOS_RELEASE_TRUST_ROOT_SHA256",
-            "ZIGOS_RELEASE_TRUST_POLICY",
-            "ZIGOS_RELEASE_TRUST_STATE",
-            "ZIGOS_RELEASE_VERIFIER",
-            "ZIGOS_RELEASE_VERIFIER_SHA256",
-            "ZIGOS_RELEASE_DSSE_SIGN_COMMAND",
-            "ZIGOS_RELEASE_SIGNING_KEY_ID",
-            "ZIGOS_RELEASE_SEQUENCE",
-            "ZIGOS_RELEASE_EXPIRES_AT",
-            "release-manifest.dsse.json",
-            "application/vnd.zigos.release-manifest.v1+json",
-            "trust-info",
-            "verify-candidate",
-            ".finalize.lock",
-            "mkdir -m 0700",
-            "--trusted-root",
-            "--trusted-root-sha256",
-            "--release-key-id",
-        };
-        for (required_finalizer_snippets) |snippet| {
-            if (std.mem.indexOf(u8, finalizer_source, snippet) == null) {
-                try common.addError(errors, allocator, "release manifest finalizer must enforce authenticated publication snippet: {s}", .{snippet});
-            }
-        }
-    }
-    const pinned_verifier_runner = try common.expectStringField(allocator, errors, root, "release artifacts", "pinned_verifier_runner") orelse "";
-    if (pinned_verifier_runner.len > 0 and !common.pathExists(io, pinned_verifier_runner)) {
-        try common.addError(errors, allocator, "pinned release verifier runner is missing: {s}", .{pinned_verifier_runner});
-    }
-    if (pinned_verifier_runner.len > 0 and common.pathExists(io, pinned_verifier_runner)) {
-        const runner_source = try common.readFileAlloc(allocator, io, pinned_verifier_runner, common.source_file_max_bytes);
-        const required_runner_snippets = [_][]const u8{
-            "VERIFIER_SHA256",
-            "mktemp -d",
-            "cp \"$VERIFIER\"",
-            "sha256_file \"$pinned_verifier\"",
-            "--trusted-root-sha256",
-            "--trust-state",
-        };
-        for (required_runner_snippets) |snippet| {
-            if (std.mem.indexOf(u8, runner_source, snippet) == null) {
-                try common.addError(errors, allocator, "pinned release verifier runner must enforce exact-copy execution snippet: {s}", .{snippet});
-            }
-        }
+    if (std.mem.indexOf(u8, native_source, "bash") != null or std.mem.indexOf(u8, native_source, "ZIGOS_RELEASE_DSSE_SIGN_COMMAND") != null) {
+        try common.addError(errors, allocator, "native release orchestration must pass signer arguments without shell evaluation", .{});
     }
     const customer_verifier_source = try common.expectStringField(allocator, errors, root, "release artifacts", "customer_verifier_source") orelse "";
     if (customer_verifier_source.len > 0 and !common.pathExists(io, customer_verifier_source)) {
@@ -962,7 +798,7 @@ fn validateReleaseArtifacts(
         "ZIGOS_RELEASE_TRUST_POLICY",
         "ZIGOS_RELEASE_VERIFIER",
         "ZIGOS_RELEASE_VERIFIER_SHA256",
-        "ZIGOS_RELEASE_DSSE_SIGN_COMMAND",
+        "ZIGOS_RELEASE_DSSE_SIGN_EXECUTABLE",
         "ZIGOS_RELEASE_SIGNING_KEY_ID",
         "ZIGOS_RELEASE_HARDWARE_BACKED",
     };
