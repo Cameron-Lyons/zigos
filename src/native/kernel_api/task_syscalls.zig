@@ -34,9 +34,9 @@ pub fn dispatchTaskTerminate(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.TaskTerminateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const terminated = component_port.invokeGeneratedFromValidatedSyscall(.task_terminate, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(terminated));
+    // Terminating the caller retires its address-space record during invocation.
+    // Acknowledge through the syscall status without copying into retired memory.
+    return dispatch.invokeNoResponse(.task_terminate, port, memory, now_ticks, request_addr, response_addr, response_len);
 }
 
 pub fn dispatchTimeQuery(

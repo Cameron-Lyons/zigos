@@ -1,7 +1,7 @@
 const std = @import("std");
 pub const text_layout = @import("text_layout.zig");
 
-pub const ABI_VERSION: u16 = 18;
+pub const ABI_VERSION: u16 = 19;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
@@ -441,7 +441,7 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 18), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 19), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
     try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
     try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));

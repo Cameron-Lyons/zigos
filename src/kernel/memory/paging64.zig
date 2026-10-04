@@ -677,6 +677,52 @@ pub const PagePermissions = struct {
     user: bool,
 };
 
+const OwnedUserTables = struct {
+    fn table(entry: PageTableEntry) ?*PageTable {
+        const address = directMapAddress(@intCast(entryAddress(entry))) orelse return null;
+        return @ptrFromInt(address);
+    }
+};
+
+pub fn ownedUserPagePermissions(space: *const UserAddressSpace, virtual_address: usize) ?PagePermissions {
+    return ownedUserPagePermissionsWith(OwnedUserTables, space.directory, virtual_address);
+}
+
+fn ownedUserPagePermissionsWith(comptime tables: type, directory: *PageDirectory, virtual_address: usize) ?PagePermissions {
+    if (virtual_address >= 0x0000_8000_0000_0000) return null;
+    var current = directory;
+    var writable = true;
+    var executable = true;
+    for ([_]u6{ PML4_SHIFT, PDPT_SHIFT, PAGE_DIRECTORY_SHIFT }, 0..) |shift, level| {
+        const entry = current[tableIndex(virtual_address, shift)];
+        if (!entryPresent(entry) or (entry & ENTRY_USER) == 0) return null;
+        writable = writable and (entry & ENTRY_WRITABLE) != 0;
+        executable = executable and table64.isExecutable(entry);
+        if (table64.isLargePage(entry)) {
+            // User mappers emit 2 MiB leaves only; inherited 1 GiB leaves and
+            // unsupported geometry must never become physical copy aliases.
+            if (level != 2) return null;
+            return ownedLeafPermissions(entry, writable, executable, @intCast(LARGE_2M_PAGE_SIZE));
+        }
+        if (entryOwner(entry) != TABLE_OWNER_USER_PRIVATE) return null;
+        current = tables.table(entry) orelse return null;
+    }
+    const leaf = current[tableIndex(virtual_address, PAGE_TABLE_SHIFT)];
+    if (table64.isLargePage(leaf)) return null;
+    return ownedLeafPermissions(leaf, writable, executable, PAGE_SIZE);
+}
+
+fn ownedLeafPermissions(entry: PageTableEntry, writable: bool, executable: bool, leaf_size: usize) ?PagePermissions {
+    if (!entryPresent(entry) or entryOwner(entry) != PAGE_OWNER_USER_PRIVATE or (entry & ENTRY_USER) == 0) return null;
+    const physical = entryAddress(entry);
+    if (physical % leaf_size != 0 or physical > MANAGED_PHYSICAL_BYTES - leaf_size) return null;
+    return .{
+        .writable = writable and (entry & ENTRY_WRITABLE) != 0,
+        .executable = executable and table64.isExecutable(entry),
+        .user = true,
+    };
+}
+
 pub fn currentPagePermissions(virt_addr: usize) ?PagePermissions {
     const entry = lookupLeaf(getCurrentPageDirectory(), virt_addr) orelse return null;
     if (!entryPresent(entry.*)) return null;
@@ -1793,6 +1839,64 @@ test "private-copy promotion changes only writable owned user data leaves" {
     }) |invalid| {
         try std.testing.expectError(error.PageNotOwned, writablePrivateUserLeaf(invalid));
     }
+}
+
+test "user copy permissions validate private hierarchy and effective leaf permissions" {
+    const Tables = struct {
+        var storage: [3]PageTable = @splat(@splat(0));
+
+        fn table(entry: PageTableEntry) ?*PageTable {
+            return switch (entryAddress(entry)) {
+                0x1000 => &storage[0],
+                0x2000 => &storage[1],
+                0x3000 => &storage[2],
+                else => null,
+            };
+        }
+    };
+    defer Tables.storage = @splat(@splat(0));
+    var directory: PageDirectory = @splat(0);
+    const virtual_address = 0x4040_3011;
+    const flags = ENTRY_PRESENT | ENTRY_USER | ENTRY_WRITABLE;
+    directory[0] = tableEntry(0x1000, flags, TABLE_OWNER_USER_PRIVATE);
+    Tables.storage[0][1] = tableEntry(0x2000, flags, TABLE_OWNER_USER_PRIVATE);
+    Tables.storage[1][2] = tableEntry(0x3000, flags, TABLE_OWNER_USER_PRIVATE);
+    const leaf = tableEntry(0x8000, flags | table64.NO_EXECUTE, PAGE_OWNER_USER_PRIVATE);
+    Tables.storage[2][3] = leaf;
+    try std.testing.expectEqualDeep(PagePermissions{ .writable = true, .executable = false, .user = true }, ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?);
+
+    directory[0] &= ~ENTRY_WRITABLE;
+    try std.testing.expect(!ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.writable);
+    directory[0] |= ENTRY_WRITABLE | table64.NO_EXECUTE;
+    Tables.storage[2][3] = leaf & ~table64.NO_EXECUTE;
+    try std.testing.expect(!ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.executable);
+    directory[0] &= ~table64.NO_EXECUTE;
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.executable);
+    directory[0] &= ~ENTRY_USER;
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    directory[0] |= ENTRY_USER;
+    Tables.storage[0][1] = table64.withOwner(Tables.storage[0][1], TABLE_OWNER_INHERITED);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    Tables.storage[0][1] = table64.withOwner(Tables.storage[0][1], TABLE_OWNER_USER_PRIVATE);
+
+    for ([_]PageTableEntry{
+        leaf & ~ENTRY_PRESENT,
+        leaf & ~ENTRY_USER,
+        table64.withOwner(leaf, PAGE_OWNER_BORROWED),
+        table64.withOwner(leaf, PAGE_OWNER_RETIRED_PRIVATE),
+        leaf | ENTRY_LARGE_PAGE,
+        tableEntry(MANAGED_PHYSICAL_BYTES, flags, PAGE_OWNER_USER_PRIVATE),
+    }) |invalid| {
+        Tables.storage[2][3] = invalid;
+        try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    }
+    Tables.storage[1][2] = tableEntry(0x400000, flags | ENTRY_LARGE_PAGE, PAGE_OWNER_USER_PRIVATE);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address).?.writable);
+    Tables.storage[1][2] = tableEntry(0x401000, flags | ENTRY_LARGE_PAGE, PAGE_OWNER_USER_PRIVATE);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    Tables.storage[0][1] = tableEntry(0x40000000, flags | ENTRY_LARGE_PAGE, PAGE_OWNER_USER_PRIVATE);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, virtual_address) == null);
+    try std.testing.expect(ownedUserPagePermissionsWith(Tables, &directory, 0x0000_8000_0000_0000) == null);
 }
 
 test "user range retirement batches invalidation before private frames are reused" {

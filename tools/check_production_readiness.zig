@@ -3900,7 +3900,7 @@ fn validateUserspaceDriverDataPathTrack(
         }
     }
     const device_abi_snippets = [_][]const u8{
-        "pub const ABI_VERSION: u16 = 18",
+        "pub const ABI_VERSION: u16 = 19",
         "pub const DEVICE_DESCRIPTOR_RESERVED_BYTES: usize = 7",
         "pub const DeviceDescriptor = ex" ++ "tern struct",
         "mmio_window_count: u8",
@@ -4002,15 +4002,17 @@ fn validateUserspaceDriverDataPathTrack(
     }{
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "pub fn copyUserSlice(" },
         .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user slice copies enforce source and destination bounds" },
-        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "if (request.payload.len != 0 and !dispatch.validateUserRange(" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "var payload: [endpoint.MAX_MESSAGE_BYTES]u8 = undefined" },
+        .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "request.payload = dispatch.copyUserSlice(memory, request.payload, &payload)" },
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user_memory.readUserMemory(memory.caller_task_id," },
+        .{ .path = syscall_dispatch_path, .source = syscall_dispatch_source, .snippet = "user_memory.writeUserMemory(memory.caller_task_id," },
         .{ .path = endpoint_syscalls_path, .source = endpoint_syscalls_source, .snippet = "component_port.invokeGeneratedFromValidatedSyscall(.endpoint_send, port, request, now_ticks)" },
         .{ .path = endpoint_path, .source = endpoint_source, .snippet = "ipc_ring.pushRecord(peer.data_ring, record)" },
-        .{ .path = endpoint_path, .source = endpoint_source, .snippet = "x86.allowSupervisorUserMemory()" },
         .{ .path = syscall_surface_path, .source = syscall_surface_source, .snippet = "invalid_payload_ptr[0..1]" },
     };
     for (protected_endpoint_send_snippets) |required| {
         if (std.mem.indexOf(u8, required.source, required.snippet) == null) {
-            try common.addError(errors, allocator, "SMAP-safe endpoint send path must retain snippet in {s}: {s}", .{ required.path, required.snippet });
+            try common.addError(errors, allocator, "Safe endpoint copy path must retain snippet in {s}: {s}", .{ required.path, required.snippet });
         }
     }
     if (std.mem.indexOf(u8, syscall_dispatch_source, "borrowImmediateUserSlice") != null or

@@ -6,13 +6,7 @@ const component_port = @import("component_port.zig");
 const debug_contract = @import("../security/debug_contract.zig");
 const task_runtime = @import("../task/task_runtime.zig");
 
-const x86 = if (builtin.target.os.tag == .freestanding)
-    @import("../../arch/x86.zig")
-else
-    struct {
-        pub fn allowSupervisorUserMemory() void {}
-        pub fn forbidSupervisorUserMemory() void {}
-    };
+const user_memory = if (builtin.target.os.tag == .freestanding) @import("../task/userspace_executor.zig") else struct {};
 
 const USER_POINTER_FLOOR: usize = 0x10000;
 pub const SINGLE_PASS_ADDRESS_SPACE_RANGE_VALIDATION = true;
@@ -33,6 +27,7 @@ pub const UserMemoryAccess = enum {
 
 pub const UserMemoryContext = struct {
     address_space: ?*const task_runtime.AddressSpaceRecord,
+    caller_task_id: u64 = 0,
 
     pub fn init(port: *const component_port.KernelPort, caller_task_id: u64) UserMemoryContext {
         const runtime = port.kernel.runtime;
@@ -41,7 +36,7 @@ pub const UserMemoryContext = struct {
             runtime.findAddressSpaceConst(caller_task.address_space_id)
         else
             null;
-        return .{ .address_space = address_space };
+        return .{ .address_space = address_space, .caller_task_id = caller_task_id };
     }
 };
 
@@ -51,9 +46,12 @@ pub fn readRequest(comptime T: type, memory: UserMemoryContext, request_addr: us
 
 pub fn readUserValue(comptime T: type, memory: UserMemoryContext, addr: usize) ?T {
     if (!validateUserRange(memory, addr, @sizeOf(T), @alignOf(T), .read)) return null;
+    if (comptime builtin.target.os.tag == .freestanding) {
+        var value: T = undefined;
+        if (!user_memory.readUserMemory(memory.caller_task_id, addr, std.mem.asBytes(&value))) return null;
+        return value;
+    }
     const ptr: *const T = @ptrFromInt(addr);
-    x86.allowSupervisorUserMemory();
-    defer x86.forbidSupervisorUserMemory();
     return ptr.*;
 }
 
@@ -61,9 +59,11 @@ pub fn copyUserSlice(memory: UserMemoryContext, slice: []const u8, dest: []u8) ?
     if (slice.len > dest.len) return null;
     if (slice.len == 0) return dest[0..0];
     if (!validateUserRange(memory, @intFromPtr(slice.ptr), slice.len, 1, .read)) return null;
-    x86.allowSupervisorUserMemory();
-    defer x86.forbidSupervisorUserMemory();
-    @memcpy(dest[0..slice.len], slice);
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (!user_memory.readUserMemory(memory.caller_task_id, @intFromPtr(slice.ptr), dest[0..slice.len])) return null;
+    } else {
+        @memcpy(dest[0..slice.len], slice);
+    }
     return dest[0..slice.len];
 }
 
@@ -71,8 +71,9 @@ pub fn copyToUser(memory: UserMemoryContext, destination: []u8, source: []const 
     if (source.len > destination.len) return false;
     if (source.len == 0) return true;
     if (!validateUserRange(memory, @intFromPtr(destination.ptr), source.len, 1, .write)) return false;
-    x86.allowSupervisorUserMemory();
-    defer x86.forbidSupervisorUserMemory();
+    if (comptime builtin.target.os.tag == .freestanding) {
+        return user_memory.writeUserMemory(memory.caller_task_id, @intFromPtr(destination.ptr), source);
+    }
     @memcpy(destination[0..source.len], source);
     return true;
 }
@@ -80,9 +81,10 @@ pub fn copyToUser(memory: UserMemoryContext, destination: []u8, source: []const 
 pub fn writeUserValue(memory: UserMemoryContext, destination: usize, value: anytype) bool {
     const T = @TypeOf(value);
     if (!validateUserRange(memory, destination, @sizeOf(T), @alignOf(T), .write)) return false;
+    if (comptime builtin.target.os.tag == .freestanding) {
+        return user_memory.writeUserMemory(memory.caller_task_id, destination, std.mem.asBytes(&value));
+    }
     const ptr: *T = @ptrFromInt(destination);
-    x86.allowSupervisorUserMemory();
-    defer x86.forbidSupervisorUserMemory();
     ptr.* = value;
     return true;
 }
@@ -101,6 +103,15 @@ pub fn validateUserRange(memory: UserMemoryContext, addr: usize, len: usize, ali
         }
         if (validateTerminalStackRange(address_space, addr, end_exclusive, access)) |valid| return valid;
         return validateAddressSpaceRange(address_space, addr, end_exclusive, access);
+    }
+    return builtin.target.os.tag != .freestanding;
+}
+
+pub fn prepareUserRange(memory: UserMemoryContext, addr: usize, len: usize, alignment: usize, access: UserMemoryAccess) bool {
+    if (!validateUserRange(memory, addr, len, alignment, access)) return false;
+    if (len == 0) return true;
+    if (comptime builtin.target.os.tag == .freestanding) {
+        return user_memory.prepareUserMemory(memory.caller_task_id, addr, len, access == .write);
     }
     return true;
 }
@@ -147,16 +158,33 @@ fn validateTerminalStackRange(
     return regionAllows(stack.access, access);
 }
 
+pub fn preflightResponse(memory: UserMemoryContext, response_addr: usize, response_len: usize, required_size: usize) ?DispatchResult {
+    if (required_size == 0) return null;
+    if (response_len < required_size) return .{ .status = .buffer_too_small };
+    // Validate the declared span, including any tail beyond the wire response,
+    // consistently with the final write after the operation has completed.
+    if (!validateUserRange(memory, response_addr, response_len, 1, .write)) {
+        return .{ .status = .invalid_response_buffer };
+    }
+    if (!prepareUserRange(memory, response_addr, required_size, 1, .write)) {
+        return .{ .status = .invalid_response_buffer };
+    }
+    return null;
+}
+
 pub fn writeResponse(memory: UserMemoryContext, response_addr: usize, response_len: usize, value: anytype) DispatchResult {
-    const buffer = responseBuffer(memory, response_addr, response_len) orelse return .{
-        .status = .invalid_response_buffer,
-    };
     const bytes = std.mem.asBytes(&value);
-    if (buffer.len < bytes.len) return .{
-        .status = .buffer_too_small,
-    };
-    x86.allowSupervisorUserMemory();
-    defer x86.forbidSupervisorUserMemory();
+    // The operation may have changed the caller's memory lifetime; never rely
+    // solely on dispatch's earlier preflight when writing the response.
+    if (preflightResponse(memory, response_addr, response_len, bytes.len)) |failure| return failure;
+    if (bytes.len == 0) return success();
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (!user_memory.writeUserMemory(memory.caller_task_id, response_addr, bytes)) {
+            return .{ .status = .invalid_response_buffer };
+        }
+        return .{ .status = .success, .bytes_written = @intCast(bytes.len) };
+    }
+    const buffer: [*]u8 = @ptrFromInt(response_addr);
     @memcpy(buffer[0..bytes.len], bytes);
     return .{
         .status = .success,
@@ -362,6 +390,10 @@ pub fn mapError(err: anyerror) DispatchResult {
         .status = .unavailable,
         .denial_reason = .unsupported_operation,
     };
+    if (err == error.MappingRegistrationFailed) return .{
+        .status = .unavailable,
+        .denial_reason = .unsupported_operation,
+    };
     if (err == error.StaleSurfacePresentation) return .{
         .status = .conflict,
         .denial_reason = .invalid_target,
@@ -390,13 +422,6 @@ pub fn mapError(err: anyerror) DispatchResult {
     }
 
     return .{ .status = .internal_error };
-}
-
-fn responseBuffer(memory: UserMemoryContext, response_addr: usize, response_len: usize) ?[]u8 {
-    if (response_len == 0) return &[_]u8{};
-    if (!validateUserRange(memory, response_addr, response_len, 1, .write)) return null;
-    const bytes: [*]u8 = @ptrFromInt(response_addr);
-    return bytes[0..response_len];
 }
 
 fn regionAllows(access: task_runtime.SegmentAccess, requested: UserMemoryAccess) bool {

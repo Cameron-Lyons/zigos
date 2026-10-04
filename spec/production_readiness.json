@@ -713,7 +713,7 @@
       "current_evidence": [
         "The build generates a userspace image archive and production artifact manifest for freestanding boot profiles.",
         "Launch provenance, component ABI metadata, signed bundle state, and syscall-dispatched task creation are enforced in native modules.",
-        "Task-create syscalls read-validate and bound all four embedded launch strings before borrowing them only through the synchronous runtime copy; source identity now rejects invalid or oversized user ranges, while the executable image descriptor remains snapshotted before dispatch.",
+        "Task-create syscalls snapshot all four bounded launch strings and the executable image descriptor into kernel scratch before dispatch. Native ABI 19 validates and prepares fixed request and response storage before mutation, checks the full declared output span, and performs freestanding copies through owned physical page aliases. Host regressions preserve endpoint quota and grants, queued input, and wait disposition on invalid outputs; self-termination acknowledges solely through syscall status after retiring its address-space record.",
         "Negative tests reject unsigned userspace launches and modeled runtime bypasses.",
         "The production-readiness gate rejects unmarked syntheticUserspaceImage fixtures in critical launch and service test paths; existing synthetic fixtures are marked model-only.",
         "The catalog registration path now uses an arena-backed image table with a bundle secondary index, rejects metadata-only executable registration, and rejects generated userspace artifacts when embedded ELF bytes are missing or malformed, when precomputed digests no longer match, or when generated ELF metadata and manifest state become stale.",

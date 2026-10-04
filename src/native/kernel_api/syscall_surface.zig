@@ -32,6 +32,7 @@ const DispatchHandler = *const fn (
 const SyscallDescriptor = struct {
     operation: abi.NativeOperation,
     request_size: usize,
+    request_alignment: usize,
     response_size: usize,
     domain: syscall_abi.Domain,
     request_copy: syscall_abi.RequestCopyRule,
@@ -48,6 +49,7 @@ fn syscallDescriptor(
     return .{
         .operation = declaration.operation,
         .request_size = declaration.requestSize(),
+        .request_alignment = @alignOf(declaration.Request),
         .response_size = declaration.responseSize(),
         .domain = declaration.domain,
         .request_copy = declaration.request_copy,
@@ -108,8 +110,24 @@ pub fn dispatch(
         now_ticks,
     );
 
+    // Check fixed request storage before outputs, then reject unusable outputs
+    // before a handler can consume input or publish resources. Embedded request
+    // buffers and operation authority remain the handler's responsibility.
+    const result = if (!syscall_dispatch.prepareUserRange(
+        memory,
+        request_addr,
+        descriptor.request_size,
+        descriptor.request_alignment,
+        .read,
+    ))
+        syscall_dispatch.invalidRequest()
+    else if (syscall_dispatch.preflightResponse(memory, response_addr, response_len, descriptor.response_size)) |failure|
+        failure
+    else
+        descriptor.handler(port, memory, now_ticks, request_addr, response_addr, response_len);
+
     return syscall_dispatch.withSyscallContract(
-        descriptor.handler(port, memory, now_ticks, request_addr, response_addr, response_len),
+        result,
         descriptor.operation,
         descriptor.required_right,
         caller_task_id,

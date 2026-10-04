@@ -164,12 +164,14 @@ pub const SessionManager = struct {
         self.kernel_context.resetPort();
         permission_review_service.clearSystemInputRouter();
         self.input_router.deinit();
+        // Retire object demand mappings while their executor spaces and
+        // generational mapping handles are still owned by the scheduler.
+        self.kernel_context.shared_memory_table.deinit();
         self.runtime_context.releaseUserspaceScheduler();
         self.runtime_context.runtime_checkpoint_store.reset();
         self.runtime_context.releaseTaskRuntime();
         self.runtime_context.releaseUserspaceCatalog();
         self.kernel_context.releaseEndpointTable();
-        self.kernel_context.shared_memory_table.deinit();
         self.kernel_context.releaseCapabilityTable();
         self.recovery_context.review_compositor_session.deinit();
         self.recovery_context.releaseReviewUxController();

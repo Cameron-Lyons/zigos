@@ -772,6 +772,21 @@ concurrent cached reuse while another CPU requests large spans.
   their epoch until they are removed.
   Services retire both temporary endpoints after their startup IPC check,
   including cleanup when a later startup step fails.
+  Native ABI 19 validates and prepares fixed request and result storage before
+  resource creation, input consumption, or wait changes. Result validation
+  covers the complete declared span; page preparation touches only copied
+  bytes. Freestanding copies use private user pages through kernel physical
+  aliases, including demand preparation for untouched stack pages. Endpoint
+  payloads and attached capabilities pass through bounded kernel scratch;
+  receive outputs must be disjoint before a queued message can be consumed.
+  Syscall buffers require authorized image or stack regions. Shared-object
+  apertures retain their separate object-mapping contract.
+  Task termination acknowledges through syscall status without a result copy,
+  so self-termination never writes through a retired address-space record.
+  Shared-memory unmap, revocation, and task retirement unregister their exact
+  demand regions before mapping identities can be reused; failed registration
+  rolls back the unpublished mapping. A user mapping requires a materialized
+  target address space; unavailable targets fail before publication.
   Idle services park instead of generating
   heartbeat work; a task with queued endpoint messages stays runnable. Production
   smoke tests require the scheduler to reach idle and stop its periodic tick.

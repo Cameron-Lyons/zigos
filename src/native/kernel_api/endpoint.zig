@@ -1,18 +1,10 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const abi = @import("../core/abi.zig");
 const ids = @import("../core/ids.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
 const table_backing = @import("../core/table_backing.zig");
 const ipc_ring = @import("ipc_ring.zig");
-const x86 = if (builtin.target.os.tag == .freestanding)
-    @import("../../arch/x86.zig")
-else
-    struct {
-        pub fn allowSupervisorUserMemory() void {}
-        pub fn forbidSupervisorUserMemory() void {}
-    };
 
 pub const MAX_ENDPOINTS: usize = 64;
 pub const MAX_ENDPOINT_QUEUE: usize = 8;
@@ -337,8 +329,6 @@ pub const Table = struct {
             .payload_len = @intCast(payload.len),
             .move_attached = if (move_attached_capability) 1 else 0,
         };
-        x86.allowSupervisorUserMemory();
-        defer x86.forbidSupervisorUserMemory();
         if (payload.len != 0) @memcpy(record.bytes[0..payload.len], payload);
         ipc_ring.pushRecord(peer.data_ring, record) catch |err| switch (err) {
             error.RingFull => return error.RingFull,
@@ -383,8 +373,6 @@ pub const Table = struct {
         }
         if (endpoint.data_ring.len == 0) return error.RingCorrupt;
 
-        x86.allowSupervisorUserMemory();
-        defer x86.forbidSupervisorUserMemory();
         const record = ipc_ring.receive(endpoint.data_ring, payload_out) catch |err| switch (err) {
             error.PayloadTooLarge => return error.ReceiveBufferTooSmall,
             else => return error.RingCorrupt,

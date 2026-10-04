@@ -111,7 +111,7 @@ pub const operations = [_]Descriptor{
         .operation = .task_terminate,
         .binding = .{
             .request_type_name = "TaskTerminateRequest",
-            .response_type_name = "BoolResponse",
+            .response_type_name = "void",
             .handler_name = "dispatchTaskTerminate",
             .port_method_name = "taskTerminate",
         },

@@ -471,6 +471,43 @@ const MappingResolution = struct {
 var trap_handler_registered = false;
 var registered_executor: ?*Executor = null;
 
+fn activeUserMemoryMapping(executor: *Executor, caller_task_id: u64) ?*MappingEntry {
+    if (caller_task_id == 0 or executor.active_task_id != caller_task_id) return null;
+    const mapping = executor.active_mapping orelse return null;
+    if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != caller_task_id) return null;
+    const mappings = executor.mappingArena() orelse return null;
+    const slot = mappings.getByHandle(executor.active_mapping_handle) orelse return null;
+    if (&slot.mapping != mapping or mapping.address_space == null) return null;
+    return mapping;
+}
+
+pub fn prepareUserMemory(caller_task_id: u64, addr: usize, len: usize, write: bool) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const executor = registered_executor orelse return false;
+    const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
+    return demand_paging.prepareUserRange(&mapping.address_space.?, addr, len, write);
+}
+
+pub fn readUserMemory(caller_task_id: u64, addr: usize, destination: []u8) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const executor = registered_executor orelse return false;
+    const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
+    const space = &mapping.address_space.?;
+    if (!demand_paging.prepareUserRange(space, addr, destination.len, false)) return false;
+    freestanding.paging.readOwnedUserRange(space, addr, destination) catch return false;
+    return true;
+}
+
+pub fn writeUserMemory(caller_task_id: u64, addr: usize, source: []const u8) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const executor = registered_executor orelse return false;
+    const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
+    const space = &mapping.address_space.?;
+    if (!demand_paging.prepareUserRange(space, addr, source.len, true)) return false;
+    freestanding.paging.writeOwnedUserRange(space, addr, source) catch return false;
+    return true;
+}
+
 pub fn activeTaskId() u64 {
     const executor = registered_executor orelse return 0;
     return executor.activeTaskId();
@@ -485,6 +522,8 @@ pub const Executor = struct {
     initialized: bool = false,
     binding_owner: ?*const anyopaque = null,
     bound_runtime: ?*task_runtime.Runtime = null,
+    mapped_object_table: ?*shared_memory.Table = null,
+    mapped_object_count: u16 = 0,
     probe_marker_printed: bool = false,
     resume_marker_printed: bool = false,
     active_task_id: u64 = 0,
@@ -545,7 +584,11 @@ pub const Executor = struct {
     }
 
     pub fn init(self: *Executor) void {
-        shared_memory.setMappedObjectHook(registerMappedObject);
+        if (comptime builtin.target.os.tag == .freestanding) shared_memory.setMappedObjectLifetime(.{
+            .context = self,
+            .register = registerMappedObject,
+            .unregister = unregisterMappedObject,
+        });
         if (builtin.target.os.tag != .freestanding) return;
         registered_executor = self;
         if (self.initialized) return;
@@ -647,6 +690,7 @@ pub const Executor = struct {
         zigos_userspace_resume_eip = 0;
         publishRootActiveTaskId(0);
         if (registered_executor == self) {
+            shared_memory.clearMappedObjectLifetime(self);
             registered_executor = null;
         }
     }
@@ -1248,6 +1292,11 @@ pub const Executor = struct {
     ) void {
         if (builtin.mode == .debug) {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
+        }
+        if (self.mapped_object_table) |table| {
+            const handle = mappings.handleForIndex(slot_index) orelse
+                native_util.impossibleByInvariant("shared-memory retirement retains its materialized mapping handle");
+            table.retireMappingLifetime(handle.value);
         }
         if (entry.address_space) |*space| {
             if (entry.image_regions) |regions| {
@@ -2100,34 +2149,72 @@ fn mapUniqueZeroedStack(
 }
 
 fn registerMappedObject(
-    virt_start: u64,
-    size_bytes: u64,
+    context: *anyopaque,
+    table: *shared_memory.Table,
+    descriptor: shared_memory.FreestandingMappingDescriptor,
     writable: bool,
-    physical_base: u64,
     copy_on_write: bool,
-    task_id: u64,
-) bool {
-    if (size_bytes == 0) return false;
-    const end = std.math.add(u64, virt_start, size_bytes) catch return false;
-    const mapping = mappingForDemandPagedObject(task_id) orelse return false;
-    const space = if (mapping.address_space) |*address_space| address_space else return false;
-    return demand_paging.registerForSpace(space, .{
-        .virt_start = virt_start,
+) ?u64 {
+    const executor: *Executor = @ptrCast(@alignCast(context));
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (registered_executor != executor) return null;
+    }
+    if (descriptor.size_bytes == 0 or descriptor.task_id.raw() == 0 or descriptor.target != null) return null;
+    if (executor.mapped_object_table) |bound_table| {
+        if (bound_table != table) return null;
+    }
+    if (executor.mapped_object_count >= shared_memory.MAX_SHARED_MEMORY_OBJECTS * shared_memory.MAX_MAPPINGS_PER_OBJECT) return null;
+    const mapped_size = std.math.mul(usize, descriptor.page_count, shared_memory.PAGE_SIZE) catch return null;
+    if (mapped_size == 0 or descriptor.size_bytes > mapped_size or (descriptor.virtual_base & (shared_memory.PAGE_SIZE - 1)) != 0) return null;
+    const mapped_end = std.math.add(u64, descriptor.virtual_base, mapped_size) catch return null;
+    const end = std.math.add(u64, descriptor.virtual_base, descriptor.size_bytes) catch return null;
+    const task_id = descriptor.task_id.raw();
+    const mapping = blk: {
+        if (executor.active_mapping) |active| {
+            if (active.dispatch_metadata.owner_task_id == task_id) break :blk active;
+        }
+        const runtime = executor.bound_runtime orelse return null;
+        const task = runtime.findConst(task_id) orelse return null;
+        break :blk executor.findMapping(task.address_space_id) orelse return null;
+    };
+    if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != task_id) return null;
+    const resolution = executor.findMappingWithHandle(mapping.address_space_id) orelse return null;
+    if (resolution.entry != mapping) return null;
+    const space = if (mapping.address_space) |*address_space| address_space else return null;
+    if (demand_paging.regionOverlapsSpace(space, descriptor.virtual_base, mapped_end)) return null;
+    freestanding.paging.validateUserRangeAvailable(space, @intCast(descriptor.virtual_base), mapped_size) catch return null;
+    if (!demand_paging.registerForSpace(space, .{
+        .virt_start = descriptor.virtual_base,
         .virt_end_exclusive = end,
         .writable = writable,
         .kind = if (copy_on_write) .object_cow else .object_physical,
-        .physical_base = physical_base,
-    });
+        .physical_base = descriptor.physical_base,
+    })) return null;
+    executor.mapped_object_table = table;
+    executor.mapped_object_count += 1;
+    return resolution.handle.value;
 }
 
-fn mappingForDemandPagedObject(task_id: u64) ?*MappingEntry {
-    const executor = registered_executor orelse return null;
-    if (executor.active_mapping) |mapping| {
-        if (mapping.dispatch_metadata.owner_task_id == task_id) return mapping;
-    }
-    const runtime = executor.bound_runtime orelse return null;
-    const task = runtime.findConst(task_id) orelse return null;
-    return executor.findMapping(task.address_space_id);
+fn unregisterMappedObject(
+    context: *anyopaque,
+    table: *shared_memory.Table,
+    registration_token: u64,
+    descriptor: shared_memory.FreestandingMappingDescriptor,
+) bool {
+    const executor: *Executor = @ptrCast(@alignCast(context));
+    if (registration_token == 0 or descriptor.size_bytes == 0 or descriptor.target != null) return false;
+    if (executor.mapped_object_table != table or executor.mapped_object_count == 0) return false;
+    const mappings = executor.mappingArena() orelse return false;
+    const slot = mappings.getByHandle(MappingHandle{ .value = registration_token }) orelse return false;
+    const mapping = &slot.mapping;
+    if (mapping.state != .live and mapping.state != .retire_pending) return false;
+    if (mapping.dispatch_metadata.owner_task_id != descriptor.task_id.raw()) return false;
+    const space = if (mapping.address_space) |*address_space| address_space else return false;
+    const end = std.math.add(u64, descriptor.virtual_base, descriptor.size_bytes) catch return false;
+    if (!demand_paging.unregisterRegionForSpace(space, descriptor.virtual_base, end)) return false;
+    executor.mapped_object_count -= 1;
+    if (executor.mapped_object_count == 0) executor.mapped_object_table = null;
+    return true;
 }
 
 fn enterUserspace(executor: *const Executor) u32 {
@@ -2712,6 +2799,41 @@ test "executor runtime binding has one owner and compare-release semantics" {
     try std.testing.expect(executor.releaseRuntimeBinding(&second_owner, &second_runtime));
 }
 
+test "user memory copies require the live active owner and exact mapping generation" {
+    var executor = Executor{};
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+        .dispatch_metadata = .{ .owner_task_id = 8 },
+    });
+    const mapping = &executor.mappingArena().?.getByHandle(handle).?.mapping;
+    executor.active_mapping = mapping;
+    executor.active_mapping_handle = handle;
+    executor.active_task_id = 8;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == mapping);
+    try std.testing.expect(activeUserMemoryMapping(&executor, 0) == null);
+    try std.testing.expect(activeUserMemoryMapping(&executor, 9) == null);
+
+    mapping.dispatch_metadata.owner_task_id = 9;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    mapping.dispatch_metadata.owner_task_id = 8;
+    mapping.state = .retire_pending;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    mapping.state = .live;
+    mapping.address_space = null;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    mapping.address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 };
+
+    const saved_mapping = mapping.*;
+    try std.testing.expect(executor.mappingArena().?.removeHandle(handle));
+    const replacement = installTestMappingAt(&executor, 0, saved_mapping);
+    try std.testing.expect(!handle.eql(replacement));
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
+    executor.active_mapping_handle = replacement;
+    try std.testing.expect(activeUserMemoryMapping(&executor, 8) == mapping);
+}
+
 test "zero-initialized mapping arenas preserve generational reuse" {
     var mappings: MappingArena = undefined;
     initializeMappingArena(&mappings);
@@ -2922,4 +3044,127 @@ test "production address-space groups share page tables" {
     try std.testing.expect(SHARES_GROUP_PAGE_TABLES);
     try std.testing.expect(!USES_PKU_WITHIN_SHARED_TABLES);
     try std.testing.expectEqual(@as(usize, 8), GROUP_SPACE_COUNT);
+}
+
+test "syscall failure wait response validation preserves the executor disposition" {
+    var executor = Executor{};
+    const previous = registered_executor;
+    defer registered_executor = previous;
+    registered_executor = &executor;
+    const failure_tests = if (builtin.is_test) @import("../kernel_api/syscall_failure_test.zig") else struct {};
+    try failure_tests.expectWaitResponseFailures(&executor);
+}
+
+test "shared lifetime registration rejects foreign tail ownership before publication" {
+    const ids = @import("../core/ids.zig");
+    demand_paging.reset();
+    defer demand_paging.reset();
+    var executor = Executor{};
+    defer executor.reset();
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+        .dispatch_metadata = .{ .owner_task_id = 7 },
+    });
+    const mapping = &executor.mappingArena().?.getByHandle(handle).?.mapping;
+    executor.active_mapping = mapping;
+    var table = shared_memory.Table.initWithMappingLifetime(.{
+        .context = &executor,
+        .register = registerMappedObject,
+        .unregister = unregisterMappedObject,
+    });
+    defer table.deinit();
+    const object = try table.create(ids.task(7), 1);
+    const first = userspace_layout.shared_start + shared_memory.PAGE_SIZE;
+    const foreign_start = first + 64;
+    try std.testing.expect(demand_paging.registerForSpace(&mapping.address_space.?, .{
+        .virt_start = foreign_start,
+        .virt_end_exclusive = foreign_start + 64,
+        .writable = true,
+    }));
+    try std.testing.expectError(error.MappingRegistrationFailed, table.map(object.id, ids.task(7)));
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(object.id)).mapped_task_count);
+    try std.testing.expectEqual(@as(usize, 0), table.activeFreestandingMappings(object.id));
+    try std.testing.expectEqual(@as(u16, 0), executor.mapped_object_count);
+    try std.testing.expect(executor.mapped_object_table == null);
+    try std.testing.expect(demand_paging.resolveFault(&mapping.address_space.?, foreign_start, 4));
+    try std.testing.expect(demand_paging.unregisterRegionForSpace(&mapping.address_space.?, foreign_start, foreign_start + 64));
+    try table.map(object.id, ids.task(7));
+    const registered = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
+    try std.testing.expectEqual(first, registered.virtual_base);
+    try std.testing.expect(try table.unmap(object.id, ids.task(7)));
+    try std.testing.expect(!demand_paging.resolveFault(&mapping.address_space.?, first, 4));
+    try std.testing.expect(executor.mapped_object_table == null);
+}
+
+test "shared lifetime executor retirement rejects recycled handles and preserves grouped peers" {
+    const ids = @import("../core/ids.zig");
+    demand_paging.reset();
+    defer demand_paging.reset();
+    var executor = Executor{};
+    defer executor.reset();
+    const space = freestanding.paging.UserAddressSpace{ .directory = @ptrFromInt(0x1000), .pcid = 1 };
+    executor.group_spaces[0] = space;
+    executor.group_refs[0] = 2;
+    const first_handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 7 },
+    });
+    const peer_handle = installTestMappingAt(&executor, 1, .{
+        .state = .live,
+        .address_space_id = 43,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 8 },
+    });
+    var table = shared_memory.Table.initWithMappingLifetime(.{
+        .context = &executor,
+        .register = registerMappedObject,
+        .unregister = unregisterMappedObject,
+    });
+    defer table.deinit();
+    const object = try table.create(ids.task(7), shared_memory.PAGE_SIZE);
+    executor.active_mapping = &executor.mappingArena().?.getByHandle(first_handle).?.mapping;
+    try table.map(object.id, ids.task(7));
+    const retired = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
+    executor.active_mapping = &executor.mappingArena().?.getByHandle(peer_handle).?.mapping;
+    try table.map(object.id, ids.task(8));
+    const peer = try table.freestandingTaskMappingDescriptor(object.id, ids.task(8));
+    executor.active_mapping = null;
+    try std.testing.expectEqual(@as(u16, 2), executor.mapped_object_count);
+    try std.testing.expect(!unregisterMappedObject(&executor, &table, peer_handle.value, retired));
+    executor.retireAddressSpace(.{ .address_space_id = 42, .reason = .snapshot_restore });
+    try std.testing.expectEqual(@as(u16, 1), executor.mapped_object_count);
+    try std.testing.expect(!table.hasMapping(object.id, ids.task(7)));
+    try std.testing.expect(table.hasMapping(object.id, ids.task(8)));
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expect(!demand_paging.resolveFault(&space, retired.virtual_base, 4));
+    try std.testing.expect(demand_paging.resolveFault(&space, peer.virtual_base, 4));
+    const replacement = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 44,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 7 },
+    });
+    executor.group_refs[0] += 1;
+    try std.testing.expect(!first_handle.eql(replacement));
+    executor.active_mapping = &executor.mappingArena().?.getByHandle(replacement).?.mapping;
+    try table.map(object.id, ids.task(7));
+    const remapped = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
+    executor.active_mapping = null;
+    try std.testing.expect(!unregisterMappedObject(&executor, &table, first_handle.value, retired));
+    try std.testing.expect(!unregisterMappedObject(&executor, &table, replacement.value, retired));
+    try std.testing.expectEqual(@as(u16, 2), executor.mapped_object_count);
+    try std.testing.expect(demand_paging.resolveFault(&space, remapped.virtual_base, 4));
+    try std.testing.expect(demand_paging.resolveFault(&space, peer.virtual_base, 4));
+    executor.reset();
+    try std.testing.expectEqual(@as(u16, 0), executor.mapped_object_count);
+    try std.testing.expect(executor.mapped_object_table == null);
+    try std.testing.expectEqual(@as(usize, 0), executor.materializedCount());
+    try std.testing.expectEqual(@as(usize, 1), table.activeCount());
+    try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(object.id)).mapped_task_count);
+    try std.testing.expect(!demand_paging.resolveFault(&space, remapped.virtual_base, 4));
+    try std.testing.expect(!demand_paging.resolveFault(&space, peer.virtual_base, 4));
 }
