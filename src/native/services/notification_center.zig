@@ -184,6 +184,12 @@ pub const Center = struct {
         return .{};
     }
 
+    // Admission stays valid only while the serialized caller prevents another
+    // notification mutation. This query neither reserves nor suppresses a slot.
+    pub fn canPost(self: *const Center, request: PostRequest) bool {
+        return self.availableNotificationSlotIndex(request) != null;
+    }
+
     pub fn post(self: *Center, request: PostRequest) Error!*Notification {
         var notification = Notification{};
         notification.reason = request.reason;
@@ -194,14 +200,9 @@ pub const Center = struct {
         notification.suppression_policy = request.suppression_policy;
         notification.detail_len = @intCast(copyText(&notification.detail, request.detail));
 
-        const slot_index = if (self.reserveNotificationSlotIndex()) |reserved_index| reserved: {
-            self.applySuppressionPolicy(request);
-            break :reserved reserved_index;
-        } else replacement: {
-            const retired_index = self.suppressionReplacementSlotIndex(request) orelse return error.NotificationTableFull;
-            self.applySuppressionPolicy(request);
-            break :replacement self.reuseSuppressedNotificationSlotIndex(retired_index);
-        };
+        const slot_index = self.availableNotificationSlotIndex(request) orelse return error.NotificationTableFull;
+        self.applySuppressionPolicy(request);
+        if (self.countNotifications() == MAX_NOTIFICATIONS) _ = self.reuseSuppressedNotificationSlotIndex(slot_index);
         notification.id = NotificationId.fromParts(slot_index, self.next_notification_sequence).value;
         if (slot_index == self.countNotifications()) self.notification_count += 1;
         const slot = &self.notifications[slot_index];
@@ -309,11 +310,10 @@ pub const Center = struct {
         return latest;
     }
 
-    fn reserveNotificationSlotIndex(self: *Center) ?usize {
+    fn availableNotificationSlotIndex(self: *const Center, request: PostRequest) ?usize {
         const count = self.countNotifications();
         if (count < MAX_NOTIFICATIONS) return count;
-        const retired_index = self.suppressedNotificationSlot() orelse return null;
-        return self.reuseSuppressedNotificationSlotIndex(retired_index);
+        return self.suppressedNotificationSlot() orelse self.suppressionReplacementSlotIndex(request);
     }
 
     fn reuseSuppressedNotificationSlotIndex(self: *Center, retired_index: usize) usize {
@@ -711,6 +711,64 @@ test "notification center reclaims suppressed slots when the table is full" {
         .urgency = .normal,
         .detail = "no capacity left",
     }));
+}
+
+test "notification admission is pure and matches fresh suppressed and exact replacement slots" {
+    var center = Center.init();
+    const request = PostRequest{
+        .source = .{ .kind = .service, .serial = 11 },
+        .reason = .policy_notice,
+        .urgency = .normal,
+        .task_id = 1,
+        .detail = "admission fixture",
+    };
+    const empty = center;
+    try std.testing.expect(center.canPost(request));
+    try std.testing.expectEqualDeep(empty, center);
+    for (0..MAX_NOTIFICATIONS) |index| {
+        var filler = request;
+        filler.task_id = index + 1;
+        _ = try center.post(filler);
+    }
+    const Case = struct { request: PostRequest, allowed: bool };
+    var exact = request;
+    exact.suppression_policy = .replace_same_source_reason_task;
+    var missing_task = exact;
+    missing_task.task_id = MAX_NOTIFICATIONS + 1;
+    var same_source = missing_task;
+    same_source.suppression_policy = .replace_same_source_reason;
+    var foreign_source = same_source;
+    foreign_source.source.serial += 1;
+    var foreign_reason = exact;
+    foreign_reason.reason = .media_export_complete;
+    const cases = [_]Case{
+        .{ .request = request, .allowed = false },
+        .{ .request = exact, .allowed = true },
+        .{ .request = missing_task, .allowed = false },
+        .{ .request = same_source, .allowed = true },
+        .{ .request = foreign_source, .allowed = false },
+        .{ .request = foreign_reason, .allowed = false },
+    };
+    for (cases) |case| {
+        const before = center;
+        try std.testing.expectEqual(case.allowed, center.canPost(case.request));
+        try std.testing.expectEqualDeep(before, center);
+        var trial = center;
+        if (case.allowed) {
+            _ = try trial.post(case.request);
+        } else {
+            try std.testing.expectError(error.NotificationTableFull, trial.post(case.request));
+            try std.testing.expectEqualDeep(before, trial);
+        }
+    }
+    const dismissed_id = center.notifications[7].id;
+    _ = try center.dismiss(dismissed_id);
+    const suppressed = center;
+    try std.testing.expect(center.canPost(foreign_source));
+    try std.testing.expectEqualDeep(suppressed, center);
+    const replacement = try center.post(foreign_source);
+    try std.testing.expectEqual(@as(usize, 7), (NotificationId{ .value = replacement.id }).slotIndex());
+    try std.testing.expect(center.find(dismissed_id) == null);
 }
 
 test "notification center enforces quiet mode and interruption budgets" {

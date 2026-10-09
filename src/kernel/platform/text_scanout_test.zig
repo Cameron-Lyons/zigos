@@ -137,7 +137,7 @@ test "framebuffer colors use exact byte order and scale contiguous bitmasks" {
     try std.testing.expectEqual(@as(u32, 0x563412), info.encodeColor(0x123456));
     info.format = .bitmask;
     info.pixel_mask = .{ .red = 0x3ff0_0000, .green = 0x000f_fc00, .blue = 0x0000_03ff, .reserved = 0xc000_0000 };
-    _ = try framebuffer.validate(info);
+    try framebuffer.validate(info);
     try std.testing.expectEqual(@as(u32, 0x3fff_ffff), info.encodeColor(0xffffff));
     try std.testing.expectEqual(@as(u32, 0x2020_0000), info.encodeColor(0x800000));
     info.pixel_mask.red = 0;

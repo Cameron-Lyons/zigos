@@ -9,6 +9,17 @@ pub const HEAD_OFFSET: usize = 64;
 pub const TAIL_OFFSET: usize = 128;
 pub const STORAGE_ALIGNMENT: usize = 64;
 
+pub const RecordHeader = extern struct {
+    sender_endpoint_id: u64 = 0,
+    sender_task_id: u64 = 0,
+    correlation_id: u64 = 0,
+    attached_capability_id: u64 = 0,
+    flags: u16 = 0,
+    payload_len: u16 = 0,
+    move_attached: u8 = 0,
+    _pad: [3]u8 = .{ 0, 0, 0 },
+};
+
 pub const Record = extern struct {
     sender_endpoint_id: u64 = 0,
     sender_task_id: u64 = 0,
@@ -38,6 +49,11 @@ const Preface = extern struct {
 
 comptime {
     if (@sizeOf(Record) != SLOT_BYTES) @compileError("ipc ring slots must occupy one fixed record");
+    if (@sizeOf(RecordHeader) != @offsetOf(Record, "bytes")) @compileError("ipc ring header must occupy the record prefix");
+    for (@typeInfo(RecordHeader).@"struct".field_names) |field_name| {
+        if (@FieldType(RecordHeader, field_name) != @FieldType(Record, field_name) or @offsetOf(RecordHeader, field_name) != @offsetOf(Record, field_name))
+            @compileError("ipc ring header fields must match the full record");
+    }
     if (HEAD_OFFSET + 64 != TAIL_OFFSET) @compileError("ipc ring indexes must sit on separate cache lines");
     if (HEADER_BYTES != TAIL_OFFSET + 64) @compileError("ipc ring slots must start on their own cache line");
 }
@@ -88,6 +104,42 @@ pub fn pushRecord(buffer: []u8, record: Record) Error!void {
     @atomicStore(u32, indexPtr(buffer, HEAD_OFFSET), head +% 1, .release);
 }
 
+// Build the sealed slot from small metadata and an already-owned payload.
+// Consume aliased source bytes before scrubbing the tail or writing metadata,
+// and publish only after validation and the complete record write.
+pub fn pushPayload(buffer: []u8, header: RecordHeader, payload: []const u8) Error!void {
+    const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
+    if (payload.len > PAYLOAD_BYTES or header.payload_len > PAYLOAD_BYTES) return error.PayloadTooLarge;
+    if (header.payload_len != payload.len or !validRecord(header)) return error.RingCorrupt;
+    const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .acquire);
+    const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .monotonic);
+    if (try occupancy(head, tail, preface.slot_count) == preface.slot_count) return error.RingFull;
+
+    const slot = slotPtr(buffer, head & (preface.slot_count - 1));
+    if (payload.len == PAYLOAD_BYTES) {
+        @memmove(&slot.bytes, payload[0..PAYLOAD_BYTES]);
+    } else if (payload.len == 0) {
+        @memset(&slot.bytes, 0);
+    } else {
+        const destination = @intFromPtr(&slot.bytes);
+        const source = @intFromPtr(payload.ptr);
+        const overlaps = if (source >= destination)
+            source - destination < PAYLOAD_BYTES
+        else
+            destination - source < payload.len;
+        if (overlaps) {
+            @memmove(slot.bytes[0..payload.len], payload);
+            @memset(slot.bytes[payload.len..], 0);
+        } else {
+            @memset(&slot.bytes, 0);
+            @memcpy(slot.bytes[0..payload.len], payload);
+        }
+    }
+    const slot_header: *RecordHeader = @ptrCast(slot);
+    slot_header.* = header;
+    @atomicStore(u32, indexPtr(buffer, HEAD_OFFSET), head +% 1, .release);
+}
+
 pub fn peekRecord(buffer: []u8) Error!Record {
     return (try readPending(buffer)).record;
 }
@@ -98,27 +150,35 @@ pub fn popRecord(buffer: []u8) Error!Record {
     return pending.record;
 }
 
-// Validate and snapshot once, and release the slot only after checking the
-// destination. A short receive must preserve the message and its capability.
-pub fn receive(buffer: []u8, out: []u8) Error!Record {
-    const pending = try readPending(buffer);
-    const record = pending.record;
-    if (record.payload_len > out.len) return error.PayloadTooLarge;
-    @memcpy(out[0..record.payload_len], record.bytes[0..record.payload_len]);
+// Snapshot metadata before copying from the still-owned slot. Overlapping
+// output is consumed before release; a short receive changes no bytes.
+pub fn receive(buffer: []u8, out: []u8) Error!RecordHeader {
+    const pending = try readPendingSlot(buffer);
+    const header = pending.header;
+    if (header.payload_len > out.len) return error.PayloadTooLarge;
+    @memmove(out[0..header.payload_len], pending.slot.bytes[0..header.payload_len]);
     @atomicStore(u32, indexPtr(buffer, TAIL_OFFSET), pending.tail +% 1, .release);
-    return record;
+    return header;
 }
 
 const Pending = struct { tail: u32, record: Record };
+const PendingSlot = struct { tail: u32, slot: *const Record, header: RecordHeader };
 
 inline fn readPending(buffer: []u8) Error!Pending {
+    const pending = try readPendingSlot(buffer);
+    return .{ .tail = pending.tail, .record = pending.slot.* };
+}
+
+inline fn readPendingSlot(buffer: []u8) Error!PendingSlot {
     const preface = prefaceOf(buffer) orelse return error.RingCorrupt;
     const head = @atomicLoad(u32, indexPtr(buffer, HEAD_OFFSET), .acquire);
     const tail = @atomicLoad(u32, indexPtr(buffer, TAIL_OFFSET), .monotonic);
     if (try occupancy(head, tail, preface.slot_count) == 0) return error.RingEmpty;
-    const record = slotPtr(buffer, tail & (preface.slot_count - 1)).*;
-    if (!validRecord(record)) return error.RingCorrupt;
-    return .{ .tail = tail, .record = record };
+    const slot = slotPtr(buffer, tail & (preface.slot_count - 1));
+    const header: *const RecordHeader = @ptrCast(slot);
+    const snapshot = header.*;
+    if (!validRecord(snapshot)) return error.RingCorrupt;
+    return .{ .tail = tail, .slot = slot, .header = snapshot };
 }
 
 pub fn push(buffer: []u8, bytes: []const u8) Error!void {
@@ -152,7 +212,7 @@ fn occupancy(head: u32, tail: u32, slot_count: u32) Error!u32 {
     return count;
 }
 
-fn validRecord(record: Record) bool {
+fn validRecord(record: anytype) bool {
     return record.payload_len <= PAYLOAD_BYTES and record.move_attached <= 1 and
         std.mem.eql(u8, &record._pad, &.{ 0, 0, 0 });
 }
@@ -234,6 +294,7 @@ test "ipc ring rejects impossible occupancy before reading or overwriting a slot
         var out: [PAYLOAD_BYTES]u8 = @splat(0xa5);
         try std.testing.expectError(error.RingCorrupt, queued(&storage));
         try std.testing.expectError(error.RingCorrupt, push(&storage, "overwrite"));
+        try std.testing.expectError(error.RingCorrupt, pushPayload(&storage, .{}, ""));
         try std.testing.expectError(error.RingCorrupt, peekRecord(&storage));
         try std.testing.expectError(error.RingCorrupt, popRecord(&storage));
         try std.testing.expectError(error.RingCorrupt, receive(&storage, &out));
@@ -280,4 +341,125 @@ test "ipc ring short receives preserve message capability and output" {
     try std.testing.expectEqual(@as(u64, 42), received.attached_capability_id);
     try std.testing.expectEqual(@as(u8, 1), received.move_attached);
     try std.testing.expectEqual(@as(u32, 0), try queued(&storage));
+}
+
+test "ipc ring receives overlapping payloads with original metadata before release" {
+    var storage: [minimumBytes(2)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    for ([_]usize{ 0, 1, 17, PAYLOAD_BYTES }) |length| {
+        for ([_]usize{ @sizeOf(RecordHeader) - 1, @sizeOf(RecordHeader) + 1, 0 }) |offset| {
+            _ = try init(&storage, SLOT_BYTES * 2);
+            var record = Record{
+                .sender_endpoint_id = 11,
+                .sender_task_id = 22,
+                .correlation_id = 33,
+                .attached_capability_id = 44,
+                .flags = 5,
+                .payload_len = @intCast(length),
+                .move_attached = 1,
+            };
+            for (&record.bytes, 0..) |*byte, index| byte.* = @truncate(index * 19 + 1);
+            try pushRecord(&storage, record);
+            const before = storage;
+            const destination = storage[HEADER_BYTES + offset ..][0..length];
+            const received = try receive(&storage, destination);
+            inline for (@typeInfo(RecordHeader).@"struct".field_names) |field_name| {
+                try std.testing.expectEqualDeep(@field(record, field_name), @field(received, field_name));
+            }
+            try std.testing.expectEqualSlices(u8, record.bytes[0..length], destination);
+            for (storage, 0..) |byte, index| {
+                if (index == TAIL_OFFSET or
+                    (index >= HEADER_BYTES + offset and index < HEADER_BYTES + offset + length)) continue;
+                try std.testing.expectEqual(before[index], byte);
+            }
+            try std.testing.expectEqual(@as(u32, 0), try queued(&storage));
+        }
+    }
+}
+
+test "ipc payload enqueue matches full record writes across lengths and rollover" {
+    var expected_storage: [minimumBytes(2)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    var actual_storage: [minimumBytes(2)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    _ = try init(&expected_storage, SLOT_BYTES * 2);
+    _ = try init(&actual_storage, SLOT_BYTES * 2);
+    const start = std.math.maxInt(u32) - 1;
+    inline for (.{ HEAD_OFFSET, TAIL_OFFSET }) |offset| {
+        @atomicStore(u32, indexPtr(&expected_storage, offset), start, .release);
+        @atomicStore(u32, indexPtr(&actual_storage, offset), start, .release);
+    }
+    var payload: [PAYLOAD_BYTES]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @truncate(index * 19 + 1);
+    for ([_]usize{ 0, 1, 17, PAYLOAD_BYTES }) |length| {
+        const header = RecordHeader{
+            .sender_endpoint_id = 11,
+            .sender_task_id = 22,
+            .correlation_id = 33,
+            .attached_capability_id = 44,
+            .flags = 5,
+            .payload_len = @intCast(length),
+            .move_attached = 1,
+        };
+        var record = Record{};
+        inline for (@typeInfo(RecordHeader).@"struct".field_names) |field_name| {
+            @field(record, field_name) = @field(header, field_name);
+        }
+        @memcpy(record.bytes[0..length], payload[0..length]);
+        try pushRecord(&expected_storage, record);
+        try pushPayload(&actual_storage, header, payload[0..length]);
+        try std.testing.expectEqualSlices(u8, &expected_storage, &actual_storage);
+        try std.testing.expectEqualDeep(try popRecord(&expected_storage), try popRecord(&actual_storage));
+    }
+}
+
+test "ipc payload enqueue validates metadata capacity and geometry before mutation" {
+    var storage: [minimumBytes(1)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    _ = try init(&storage, SLOT_BYTES);
+    for ([_]RecordHeader{
+        .{ .payload_len = 2 },
+        .{ .payload_len = 1, .move_attached = 2 },
+        .{ .payload_len = 1, ._pad = .{ 0, 1, 0 } },
+    }) |header| {
+        const before = storage;
+        try std.testing.expectError(error.RingCorrupt, pushPayload(&storage, header, "x"));
+        try std.testing.expectEqualSlices(u8, &before, &storage);
+    }
+    const before = storage;
+    try std.testing.expectError(error.PayloadTooLarge, pushPayload(&storage, .{ .payload_len = PAYLOAD_BYTES + 1 }, ""));
+    const oversized: [PAYLOAD_BYTES + 1]u8 = @splat('x');
+    try std.testing.expectError(error.PayloadTooLarge, pushPayload(&storage, .{}, &oversized));
+    try std.testing.expectEqualSlices(u8, &before, &storage);
+
+    try pushPayload(&storage, .{ .payload_len = 1 }, "x");
+    const full = storage;
+    try std.testing.expectError(error.RingFull, pushPayload(&storage, .{ .payload_len = 1 }, "y"));
+    try std.testing.expectEqualSlices(u8, &full, &storage);
+    storage[0] ^= 0xff;
+    const corrupt = storage;
+    try std.testing.expectError(error.RingCorrupt, pushPayload(&storage, .{ .payload_len = 1 }, "y"));
+    try std.testing.expectEqualSlices(u8, &corrupt, &storage);
+    try std.testing.expectError(error.RingCorrupt, pushPayload(storage[1..], .{}, ""));
+    try std.testing.expectEqualSlices(u8, &corrupt, &storage);
+}
+
+test "ipc payload enqueue consumes overlapping sources before replacing and scrubbing a slot" {
+    var storage: [minimumBytes(1)]u8 align(STORAGE_ALIGNMENT) = undefined;
+    for ([_]usize{ 0, 1, 40, 41, 70, 88, 100, 120 }) |source_offset| {
+        _ = try init(&storage, SLOT_BYTES);
+        const slot_bytes = storage[HEADER_BYTES..];
+        for (slot_bytes, 0..) |*byte, index| byte.* = @truncate(index * 13 + 1);
+        const length = @min(PAYLOAD_BYTES, slot_bytes.len - source_offset);
+        var expected: [PAYLOAD_BYTES]u8 = undefined;
+        @memcpy(expected[0..length], slot_bytes[source_offset..][0..length]);
+        try pushPayload(&storage, .{
+            .sender_endpoint_id = 11,
+            .attached_capability_id = 44,
+            .payload_len = @intCast(length),
+            .move_attached = 1,
+        }, slot_bytes[source_offset..][0..length]);
+        const record = try popRecord(&storage);
+        try std.testing.expectEqual(@as(u64, 11), record.sender_endpoint_id);
+        try std.testing.expectEqual(@as(u64, 44), record.attached_capability_id);
+        try std.testing.expectEqual(@as(u8, 1), record.move_attached);
+        try std.testing.expectEqualSlices(u8, expected[0..length], record.bytes[0..length]);
+        for (record.bytes[length..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
 }

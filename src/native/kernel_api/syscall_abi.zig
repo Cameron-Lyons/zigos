@@ -49,13 +49,6 @@ pub const Operation = struct {
     }
 };
 
-fn requestType(comptime type_name: []const u8) type {
-    if (!@hasDecl(component_port, type_name)) {
-        @compileError("missing component-port request type " ++ type_name);
-    }
-    return @field(component_port, type_name);
-}
-
 fn responseType(comptime type_name: []const u8) type {
     if (std.mem.eql(u8, type_name, "void")) return void;
     if (!@hasDecl(abi, type_name)) {
@@ -86,12 +79,12 @@ fn operationFromMetadata(comptime descriptor: operation_metadata.Descriptor) Ope
     return .{
         .operation = descriptor.operation,
         .domain = descriptor.domain,
-        .request_type_name = binding.request_type_name,
+        .request_type_name = binding.request_type_name[0 .. binding.request_type_name.len - "Request".len] ++ "WireRequest",
         .response_type_name = binding.response_type_name,
         .handler_name = binding.handler_name,
         .port_method_name = binding.port_method_name,
         .port_invocation = binding.port_invocation,
-        .Request = requestType(binding.request_type_name),
+        .Request = component_port.SyscallWireRequest(descriptor.operation),
         .Response = responseType(binding.response_type_name),
         .handler = handlerFor(descriptor),
         .request_copy = descriptor.request_copy,
@@ -120,6 +113,8 @@ pub fn declarationFor(comptime operation: abi.NativeOperation) Operation {
 }
 
 test "single syscall ABI declaration covers every native operation" {
+    // Exhaustive reflected type checks over the bounded operation table.
+    @setEvalBranchQuota(4096);
     try std.testing.expectEqual(@typeInfo(abi.NativeOperation).@"enum".field_names.len, operations.len);
     try std.testing.expectEqual(operation_metadata.operations.len, operations.len);
     inline for (@typeInfo(abi.NativeOperation).@"enum".field_values) |field| {
@@ -130,14 +125,17 @@ test "single syscall ABI declaration covers every native operation" {
         try std.testing.expectEqual(kernel_declaration.required_right, declaration.required_right);
         try std.testing.expectEqual(kernel_declaration.domain, declaration.domain);
         try std.testing.expectEqual(kernel_declaration.request_copy, declaration.request_copy);
-        try std.testing.expectEqualStrings(kernel_declaration.binding.request_type_name, declaration.request_type_name);
+        try std.testing.expect(std.mem.endsWith(u8, declaration.request_type_name, "WireRequest"));
         try std.testing.expectEqualStrings(kernel_declaration.binding.response_type_name, declaration.response_type_name);
         try std.testing.expectEqualStrings(kernel_declaration.binding.handler_name, declaration.handler_name);
         try std.testing.expectEqualStrings(kernel_declaration.binding.port_method_name, declaration.port_method_name);
         try std.testing.expectEqual(kernel_declaration.binding.port_invocation, declaration.port_invocation);
         try std.testing.expect(declaration.requestSize() >= @sizeOf(abi.RequestHeader));
         comptime {
-            if (declaration.Request != requestType(kernel_declaration.binding.request_type_name)) {
+            if (!@hasDecl(abi, declaration.request_type_name) or
+                @field(abi, declaration.request_type_name) != declaration.Request)
+                @compileError("syscall request name must identify its canonical ABI wire type");
+            if (declaration.Request != component_port.SyscallWireRequest(operation)) {
                 @compileError("request type mismatch for " ++ @tagName(operation));
             }
             if (declaration.Response != responseType(kernel_declaration.binding.response_type_name)) {
@@ -151,4 +149,50 @@ test "single syscall ABI declaration covers every native operation" {
     });
     try std.testing.expect(declarationFor(.task_create).scope_rule.local_scope_requires_request_local);
     try std.testing.expectEqual(@as(usize, 1), declarationFor(.shared_memory_create).auto_grants.len);
+}
+
+test "endpoint send syscall descriptor uses the scalar wire and keeps trusted Port requests" {
+    const declaration = comptime declarationFor(.endpoint_send);
+    try std.testing.expectEqual(@as(usize, 64), declaration.requestSize());
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(declaration.Request));
+    try std.testing.expectEqual(@as(usize, 0), declaration.responseSize());
+    comptime {
+        if (declaration.Request != abi.EndpointSendWireRequest or
+            component_port.PortRequest(.endpoint_send) != component_port.EndpointSendRequest or
+            declaration.Request == component_port.PortRequest(.endpoint_send))
+            @compileError("endpoint send wire and trusted Port request must remain distinct");
+    }
+}
+
+test "every ordinary syscall descriptor has a scalar wire without a typed ingress fallback" {
+    inline for (operations) |declaration| {
+        comptime abi.syscall_wire.requireScalarWire(declaration.Request);
+        const needs_decoder = switch (declaration.operation) {
+            .task_create,
+            .endpoint_create,
+            .endpoint_send,
+            .endpoint_recv,
+            .capability_mint,
+            .capability_derive,
+            .capability_pass,
+            .surface_present,
+            => true,
+            else => false,
+        };
+        try std.testing.expectEqual(needs_decoder, declaration.Request != component_port.PortRequest(declaration.operation));
+    }
+    try std.testing.expectEqual(@as(usize, 23), operations.len);
+}
+
+test "endpoint receive syscall descriptor uses scalar addresses and retains trusted Port buffers" {
+    const declaration = comptime declarationFor(.endpoint_recv);
+    try std.testing.expectEqual(@as(usize, 56), declaration.requestSize());
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(declaration.Request));
+    try std.testing.expectEqual(@as(usize, 56), declaration.responseSize());
+    comptime {
+        if (declaration.Request != abi.EndpointRecvWireRequest or
+            component_port.PortRequest(.endpoint_recv) != component_port.EndpointRecvRequest or
+            declaration.Request == component_port.PortRequest(.endpoint_recv))
+            @compileError("endpoint receive wire and trusted Port request must remain distinct");
+    }
 }

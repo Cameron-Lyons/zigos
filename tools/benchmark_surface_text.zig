@@ -4,6 +4,7 @@ const unicode = abi.text_layout.unicode;
 
 const DOCUMENT_BYTES = 512;
 const ITERATIONS = 20_000;
+const SAMPLE_COUNT = 5;
 const Position = enum { head, middle, end };
 const Method = enum { original, single_pass };
 
@@ -25,19 +26,25 @@ pub fn main(init: std.process.Init) !void {
                 var text = abi.SurfaceText{ .text_length = DOCUMENT_BYTES, .cursor = @intCast(cursor), .state = .{ .model = 1, .selection_anchor = @intCast(anchor) } };
                 @memcpy(&text.text, bytes);
                 if (!original(&text) or !text.isCanonical()) return error.InvalidWorkload;
-                inline for (comptime std.meta.tags(Method)) |method| {
-                    var samples: [5]u64 = undefined;
-                    var checksum: usize = 0;
-                    for (&samples) |*sample| {
-                        for (0..100) |_| _ = iteration(method, &text);
-                        const start = std.Io.Clock.awake.now(init.io);
-                        for (0..ITERATIONS) |_| checksum +%= @intFromBool(iteration(method, &text));
-                        sample.* = @intCast(start.durationTo(std.Io.Clock.awake.now(init.io)).toNanoseconds());
+                var samples: [2][SAMPLE_COUNT]u64 = undefined;
+                var checksums: [2]usize = @splat(0);
+                // Alternate first execution within each paired sample.
+                for (0..SAMPLE_COUNT) |sample_index| {
+                    for (0..2) |phase| {
+                        const method = (sample_index + phase) % 2;
+                        const result = if (method == 0)
+                            sample(.original, init.io, &text)
+                        else
+                            sample(.single_pass, init.io, &text);
+                        samples[method][sample_index] = result.elapsed;
+                        checksums[method] +%= result.checksum;
                     }
-                    std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
-                    if (checksum != samples.len * ITERATIONS) return error.ValidationMismatch;
-                    try output.interface.print("{s}_{s}/{s}/{s}: {d:.2} ns/iteration (median of 5), checksum={d}\n", .{
-                        kind, @tagName(position), if (selection) "selected" else "collapsed", @tagName(method), @as(f64, @floatFromInt(samples[2])) / ITERATIONS, checksum,
+                }
+                inline for (comptime std.meta.tags(Method), 0..) |method, index| {
+                    std.mem.sort(u64, &samples[index], {}, std.sort.asc(u64));
+                    if (checksums[index] != SAMPLE_COUNT * ITERATIONS) return error.ValidationMismatch;
+                    try output.interface.print("{s}_{s}/{s}/{s}: {d:.2} ns/iteration (median of {d}), checksum={d}\n", .{
+                        kind, @tagName(position), if (selection) "selected" else "collapsed", @tagName(method), @as(f64, @floatFromInt(samples[index][SAMPLE_COUNT / 2])) / ITERATIONS, SAMPLE_COUNT, checksums[index],
                     });
                 }
             }
@@ -58,6 +65,17 @@ fn iteration(comptime method: Method, text: *const abi.SurfaceText) bool {
     return switch (method) {
         .original => original(text),
         .single_pass => text.isCanonical(),
+    };
+}
+
+fn sample(comptime method: Method, io: std.Io, text: *const abi.SurfaceText) struct { elapsed: u64, checksum: usize } {
+    for (0..100) |_| _ = iteration(method, text);
+    var checksum: usize = 0;
+    const start = std.Io.Clock.awake.now(io);
+    for (0..ITERATIONS) |_| checksum +%= @intFromBool(iteration(method, text));
+    return .{
+        .elapsed = @intCast(start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds()),
+        .checksum = checksum,
     };
 }
 

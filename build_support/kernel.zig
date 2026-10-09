@@ -2,6 +2,7 @@ const std = @import("std");
 const host_tools = @import("host_tools.zig");
 const shared = @import("shared.zig");
 const userspace_build = @import("userspace.zig");
+const codegen_target = @import("../src/arch/codegen_target.zig");
 
 pub const KernelArtifacts = struct {
     zigos_native: shared.KernelArtifact,
@@ -34,13 +35,34 @@ pub fn addEfiImage(
     kernel: std.Build.LazyPath,
     cmdline: std.Build.LazyPath,
 ) *std.Build.Step.Compile {
+    return addEfiImageWithMode(b, optimize, kernel, cmdline, false);
+}
+
+fn addEfiProofImage(
+    b: *std.Build,
+    optimize: std.lang.Optimize,
+    kernel: std.Build.LazyPath,
+    cmdline: std.Build.LazyPath,
+) *std.Build.Step.Compile {
+    return addEfiImageWithMode(b, optimize, kernel, cmdline, true);
+}
+
+fn addEfiImageWithMode(
+    b: *std.Build,
+    optimize: std.lang.Optimize,
+    kernel: std.Build.LazyPath,
+    cmdline: std.Build.LazyPath,
+    isolated_low_proof: bool,
+) *std.Build.Step.Compile {
     const files = b.addWriteFiles();
     _ = files.addCopyFile(kernel, "kernel.elf");
     _ = files.addCopyFile(cmdline, "cmdline.txt");
-    const payload = files.add("payload.zig", "pub const kernel = @embedFile(\"kernel.elf\");\npub const cmdline = @embedFile(\"cmdline.txt\");\n");
-    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .uefi, .abi = .none });
+    const payload = files.add("payload.zig", b.fmt("pub const isolated_low_proof = {};\npub const kernel = @embedFile(\"kernel.elf\");\npub const cmdline = @embedFile(\"cmdline.txt\");\n", .{isolated_low_proof}));
+    // Firmware entry and its CPUID preflight must execute before the native
+    // floor is established. Keep this image on the architectural baseline.
+    const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .uefi, .abi = .none, .cpu_model = .baseline });
     const module = b.createModule(.{
-        .root_source_file = b.path("src/boot/efi_stub.zig"),
+        .root_source_file = b.path("src/efi_entry.zig"),
         .target = target,
         .optimize = optimize,
         .strip = optimize != .debug,
@@ -54,17 +76,15 @@ pub fn addX86_64ArchitectureCompileCheck(
     b: *std.Build,
     optimize: std.lang.Optimize,
 ) *std.Build.Step {
-    const target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
-        .os_tag = .freestanding,
-        .abi = .none,
-    });
+    const target = b.resolveTargetQuery(codegen_target.query());
     const object = b.addObject(.{
         .name = "x86_64-architecture-compile-check",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/arch/x86_compile_check.zig"),
             .target = target,
             .optimize = optimize,
+            .code_model = .kernel,
+            .red_zone = false,
         }),
     });
     const step = b.step("x86_64-architecture-compile-check", "Compile privileged helpers for the x86-64 target");
@@ -163,11 +183,7 @@ fn createX86_64KernelModule(
     optimize: std.lang.Optimize,
     userspace_images: userspace_build.ArtifactSet,
 ) *std.Build.Module {
-    const target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
-        .os_tag = .freestanding,
-        .abi = .none,
-    });
+    const target = b.resolveTargetQuery(codegen_target.query());
     const options = b.addOptions();
     options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
     options.addOption(shared.KernelRole, "kernel_role", .production);
@@ -180,15 +196,17 @@ fn createX86_64KernelModule(
         .strip = false,
 
         .red_zone = false,
+        .code_model = .kernel,
     });
     kernel_module.addImport("binary_cursor", b.createModule(.{
         .root_source_file = b.path("src/native/core/binary_cursor.zig"),
         .target = target,
         .optimize = optimize,
     }));
-    kernel_module.addImport("userspace_archive", userspace_images.production_archive_module);
-    kernel_module.addImport("production_artifact_manifest", userspace_images.production_manifest_module);
+    kernel_module.addImport("userspace_archive", kernelDataModule(b, target, optimize, userspace_images.production_archive_module));
+    kernel_module.addImport("production_artifact_manifest", kernelDataModule(b, target, optimize, userspace_images.production_manifest_module));
     kernel_module.addOptions("build_options", options);
+    configureKernelModuleGraph(kernel_module);
     return kernel_module;
 }
 
@@ -196,10 +214,12 @@ pub fn addX86_64LongModeEntryCheck(
     b: *std.Build,
     optimize: std.lang.Optimize,
 ) *std.Build.Step {
+    // This probe tests the transition itself, before the native codegen gate.
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .freestanding,
         .abi = .none,
+        .cpu_model = .baseline,
     });
     const module = b.createModule(.{
         .root_source_file = b.path("src/arch/x86_64/long_mode_probe.zig"),
@@ -243,7 +263,7 @@ pub fn addX86_64LongModeEntryCheck(
     const iso_path = iso.addOutputFileArg("x86_64-long-mode-entry.iso");
     _ = iso.addOutputDirectoryArg("x86_64-long-mode-entry-staging");
     iso.addFileArg(b.path("src/boot/grub-long-mode.cfg"));
-    iso.addFileArg(addEfiImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt")).getEmittedBin());
+    iso.addFileArg(addEfiProofImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt")).getEmittedBin());
     iso.step.dependOn(&validate_image.step);
 
     const run = host_tools.addRun(b, "run-long-mode-entry-smoke");
@@ -253,6 +273,251 @@ pub fn addX86_64LongModeEntryCheck(
     const step = b.step("x86_64-long-mode-entry-check", "Boot through PAE page tables and enter 64-bit Zig code in QEMU");
     step.dependOn(&run.step);
     return step;
+}
+
+pub fn addNativeCryptoCheck(
+    b: *std.Build,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
+    const target = b.resolveTargetQuery(codegen_target.query());
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/arch/x86_64/native_crypto_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = true,
+        .red_zone = false,
+    });
+    module.addImport("x86", b.createModule(.{
+        .root_source_file = b.path("src/arch/x86.zig"),
+        .target = target,
+        .optimize = optimize,
+        .red_zone = false,
+    }));
+    module.addImport("xstate_roundtrip_model", b.createModule(.{
+        .root_source_file = b.path("src/arch/xstate_roundtrip_model.zig"),
+        .target = target,
+        .optimize = optimize,
+        .red_zone = false,
+    }));
+    module.addAssemblyFile(b.path("src/arch/x86_64/native_crypto_entry.S"));
+    module.addImport("volume_checksum", b.createModule(.{
+        .root_source_file = b.path("src/native/storage/volume/checksum.zig"),
+        .target = target,
+        .optimize = optimize,
+        .red_zone = false,
+    }));
+    module.addAssemblyFile(b.path("src/tests/host/xstate_roundtrip64.S"));
+    const probe = b.addObject(.{
+        .name = "native-crypto-probe",
+        .root_module = module,
+    });
+    probe.bundle_compiler_rt = true;
+
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
+        "ld.lld",
+        "-m",
+        "elf_x86_64",
+        "--gc-sections",
+        "-z",
+        "common-page-size=4096",
+        "-z",
+        "max-page-size=4096",
+        "-T",
+    });
+    link.addFileArg(b.path("src/arch/x86_64/native_crypto_linker.ld"));
+    link.addArg("-o");
+    const linked_probe = link.addOutputFileArg("native-crypto-probe.elf");
+    link.addFileArg(probe.getEmittedBin());
+
+    const efi_stub = addEfiProofImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt"));
+    const validate_image = host_tools.addRun(b, "check-efi-image");
+    validate_image.addFileArg(efi_stub.getEmittedBin());
+    const iso = host_tools.addRun(b, "build-efi-iso");
+    iso.addFileArg(efi_stub.getEmittedBin());
+    const iso_path = iso.addOutputFileArg("native-crypto.iso");
+    _ = iso.addOutputDirectoryArg("native-crypto-staging");
+    shared.addEfiIsoEpochArg(b, iso);
+    iso.step.dependOn(&validate_image.step);
+
+    // The dedicated checker requires every proof marker in execution order,
+    // including default FP controls and complete x87/SSE/YMM owner round trips.
+    const run = host_tools.addRun(b, "run-native-crypto-smoke");
+    run.addFileArg(iso_path);
+    run.addArg("build/native-crypto.log");
+    const step = b.step("native-crypto-check", "Boot native hardware AES, SHA, GHASH, and complete AVX2 state round trips in QEMU");
+    step.dependOn(&run.step);
+    return step;
+}
+
+pub fn addHighHalfEntryCheck(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step {
+    const image = addUpperHalfProbeImage(b, optimize, .entry);
+    const run = host_tools.addRun(b, "run-high-half-smoke");
+    run.addFileArg(image.iso);
+    run.addArg("build/high-half-entry.log");
+    const step = b.step("high-half-entry-check", "Boot isolated 16-CPU entry/SIPI, copied syscall broker, descriptor, SMAP, standard-xstate IPI and global-TLB proof in QEMU");
+    step.dependOn(&run.step);
+    return step;
+}
+
+pub fn addMappingXstateProof(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step {
+    const image = addUpperHalfProbeImage(b, optimize, .mapping_xstate);
+    const artifact_step = b.step("mapping-xstate-proof-image", "Build the isolated fixed-topology Mapping-owned compacted-state probe without running it");
+    artifact_step.dependOn(&b.addInstallFile(image.elf, "bin/mapping-xstate-probe.elf").step);
+    artifact_step.dependOn(&b.addInstallFile(image.efi, "bin/mapping-xstate-probe.efi").step);
+    artifact_step.dependOn(&b.addInstallFile(image.iso, "mapping-xstate.iso").step);
+
+    const positive = host_tools.addRun(b, "run-mapping-xstate-smoke");
+    positive.addFileArg(image.iso);
+    positive.addArg("build/mapping-xstate.log");
+    positive.addArg("positive");
+    const step = b.step("mapping-xstate-proof-check", "Require actual Mapping-owned XSAVES/XRSTORS, independent register readback and acknowledged lifetime; reject unsupported targets");
+    step.dependOn(&positive.step);
+
+    const unsupported = host_tools.addRun(b, "run-mapping-xstate-smoke");
+    unsupported.addFileArg(image.iso);
+    unsupported.addArg("build/mapping-xstate-unsupported.log");
+    unsupported.addArg("unsupported");
+    const unsupported_step = b.step("mapping-xstate-unsupported-check", "Require explicit unsupported compacted-state admission before any privileged state operation");
+    unsupported_step.dependOn(&unsupported.step);
+    return step;
+}
+
+const UpperHalfProbeKind = enum { entry, mapping_xstate };
+const UpperHalfProbeImage = struct { elf: std.Build.LazyPath, efi: std.Build.LazyPath, iso: std.Build.LazyPath };
+
+fn addUpperHalfProbeImage(b: *std.Build, optimize: std.lang.Optimize, kind: UpperHalfProbeKind) UpperHalfProbeImage {
+    const name = switch (kind) {
+        .entry => "high-half-entry",
+        .mapping_xstate => "mapping-xstate",
+    };
+    const target = b.resolveTargetQuery(codegen_target.query());
+    const module = b.createModule(.{
+        .root_source_file = b.path(switch (kind) {
+            .entry => "src/high_half_entry.zig",
+            .mapping_xstate => "src/mapping_xstate_entry.zig",
+        }),
+        .target = target,
+        .optimize = optimize,
+        .strip = true,
+        .red_zone = false,
+        .code_model = .kernel,
+    });
+    const options = b.addOptions();
+    options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
+    options.addOption(shared.KernelRole, "kernel_role", .production);
+    options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", .none);
+    module.addOptions("build_options", options);
+    configureKernelModuleGraph(module);
+    // Exercise the production entry and linker through the production EFI
+    // address contract. Only the separately admitted Mapping probe executes
+    // compacted state operations; the ordinary entry proof uses standard state.
+    module.addAssemblyFile(b.path("src/boot/boot_x86_64.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/invpcid.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/xsaves.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/user_access.S"));
+    module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
+    module.addAssemblyFile(b.path("src/kernel/smp/ap_trampoline.S"));
+    module.addAssemblyFile(b.path("src/arch/x86_64/high_half_ipi_probe.S"));
+    // Execute the unchanged kernel-origin ISR on the selected guarded stack.
+    // The entry object supplies its real initial kernel xstate and continuation
+    // symbols; this CPL0 fixture never takes the native userspace branches.
+    module.addAssemblyFile(b.path("src/kernel/interrupts/interrupt64.S"));
+    // The cold stack transaction authenticates the real FRED entry address.
+    // This isolated guest keeps FRED off and rejects any native syscall path.
+    module.addAssemblyFile(b.path("src/kernel/interrupts/fred64.S"));
+    module.addAssemblyFile(b.path("src/native/task/userspace_entry64.S"));
+    if (kind == .mapping_xstate)
+        module.addAssemblyFile(b.path("src/arch/x86_64/mapping_xstate_probe.S"));
+    const probe = b.addObject(.{ .name = b.fmt("{s}-probe", .{name}), .root_module = module });
+    probe.bundle_compiler_rt = true;
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{
+        "ld.lld", "-m",                    "elf_x86_64", "--gc-sections",
+        "-z",     "common-page-size=4096", "-z",         "max-page-size=4096",
+        "-T",
+    });
+    link.addFileArg(b.path("src/arch/x86_64/linker.ld"));
+    link.addArg("-o");
+    const linked_probe = link.addOutputFileArg(b.fmt("{s}-probe.elf", .{name}));
+    link.addFileArg(probe.getEmittedBin());
+    const efi_stub = addEfiImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt"));
+    const validate_image = host_tools.addRun(b, "check-efi-image");
+    validate_image.addFileArg(efi_stub.getEmittedBin());
+    const iso = host_tools.addRun(b, "build-efi-iso");
+    iso.addFileArg(efi_stub.getEmittedBin());
+    const iso_path = iso.addOutputFileArg(b.fmt("{s}.iso", .{name}));
+    _ = iso.addOutputDirectoryArg(b.fmt("{s}-staging", .{name}));
+    shared.addEfiIsoEpochArg(b, iso);
+    iso.step.dependOn(&validate_image.step);
+    return .{ .elf = linked_probe, .efi = efi_stub.getEmittedBin(), .iso = iso_path };
+}
+
+const ApCacheFault = enum { none, version, default_reserved, mask_reserved };
+
+pub fn addApCacheRejectionCheck(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step {
+    const step = b.step("ap-cache-rejection-check", "Verify production pre-paging AP cache rejection and a successful high-entry control in QEMU");
+    inline for (.{ ApCacheFault.none, ApCacheFault.version, ApCacheFault.default_reserved, ApCacheFault.mask_reserved }) |fault| {
+        const name = b.fmt("ap-cache-rejection-{s}", .{@tagName(fault)});
+        const iso = addApCacheProofImage(b, optimize, name, "src/ap_cache_rejection_entry.zig", "src/kernel/smp/ap_trampoline.S", fault);
+        const run = host_tools.addRun(b, "run-ap-cache-rejection-smoke");
+        run.addFileArg(iso);
+        run.addArg(b.fmt("build/{s}.log", .{name}));
+        run.addArg(@tagName(fault));
+        step.dependOn(&run.step);
+    }
+    return step;
+}
+
+pub fn addSmpCacheEnabledMatchCheck(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step {
+    const iso = addApCacheProofImage(b, optimize, "smp-cache-enabled-match", "src/smp_cache_enabled_entry.zig", "src/arch/x86_64/smp_cache_enabled_probe.S", null);
+    const run = host_tools.addRun(b, "run-smp-cache-enabled-match-smoke");
+    run.addFileArg(iso);
+    run.addArg("build/smp-cache-enabled-match.log");
+    const step = b.step("smp-cache-enabled-match-check", "Execute the actual AP MTRR macro twice without reset and verify the enabled-match branch in QEMU");
+    step.dependOn(&run.step);
+    return step;
+}
+
+fn addApCacheProofImage(b: *std.Build, optimize: std.lang.Optimize, name: []const u8, source: []const u8, ap_assembly: []const u8, fault: ?ApCacheFault) std.Build.LazyPath {
+    const module = b.createModule(.{
+        .root_source_file = b.path(source),
+        .target = b.resolveTargetQuery(codegen_target.query()),
+        .optimize = optimize,
+        .strip = true,
+        .red_zone = false,
+        .code_model = .kernel,
+    });
+    const options = b.addOptions();
+    options.addOption(shared.BootProfile, "boot_profile", .zigos_native);
+    options.addOption(shared.KernelRole, "kernel_role", .production);
+    options.addOption(shared.SmokeFaultMode, "smoke_fault_mode", .none);
+    if (fault) |selected| options.addOption(ApCacheFault, "ap_cache_fault", selected);
+    module.addOptions("build_options", options);
+    configureKernelModuleGraph(module);
+    module.addAssemblyFile(b.path("src/boot/boot_x86_64.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/invpcid.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/user_access.S"));
+    module.addAssemblyFile(b.path("src/kernel/interrupts/gdt_flush64.S"));
+    module.addAssemblyFile(b.path(ap_assembly));
+    const probe = b.addObject(.{ .name = name, .root_module = module });
+    probe.bundle_compiler_rt = true;
+    const link = b.addRunFile(std.Build.LazyPath.zig_exe);
+    link.addArgs(&.{ "ld.lld", "-m", "elf_x86_64", "--gc-sections", "-z", "common-page-size=4096", "-z", "max-page-size=4096", "-T" });
+    link.addFileArg(b.path("src/arch/x86_64/linker.ld"));
+    link.addArg("-o");
+    const linked_probe = link.addOutputFileArg(b.fmt("{s}.elf", .{name}));
+    link.addFileArg(probe.getEmittedBin());
+    const efi_stub = addEfiImage(b, optimize, linked_probe, b.path("src/boot/cmdline-qemu.txt"));
+    const validate_image = host_tools.addRun(b, "check-efi-image");
+    validate_image.addFileArg(efi_stub.getEmittedBin());
+    const iso = host_tools.addRun(b, "build-efi-iso");
+    iso.addFileArg(efi_stub.getEmittedBin());
+    const path = iso.addOutputFileArg(b.fmt("{s}.iso", .{name}));
+    _ = iso.addOutputDirectoryArg(b.fmt("{s}-staging", .{name}));
+    shared.addEfiIsoEpochArg(b, iso);
+    iso.step.dependOn(&validate_image.step);
+    return path;
 }
 
 pub fn addKernelProfiles(
@@ -496,6 +761,7 @@ pub fn addKernelArtifact(
         .strip = false,
 
         .red_zone = false,
+        .code_model = .kernel,
     });
     const binary_cursor_module = b.createModule(.{
         .root_source_file = b.path("src/native/core/binary_cursor.zig"),
@@ -504,13 +770,14 @@ pub fn addKernelArtifact(
     });
     kernel_module.addImport("binary_cursor", binary_cursor_module);
     if (userspace_archive) |archive_module| {
-        kernel_module.addImport("userspace_archive", archive_module);
+        kernel_module.addImport("userspace_archive", kernelDataModule(b, target, optimize, archive_module));
     }
     if (production_manifest) |manifest_module| {
-        kernel_module.addImport("production_artifact_manifest", manifest_module);
+        kernel_module.addImport("production_artifact_manifest", kernelDataModule(b, target, optimize, manifest_module));
     }
 
     kernel_module.addOptions("build_options", options);
+    configureKernelModuleGraph(kernel_module);
 
     const kernel_object = b.addObject(.{
         .name = name,
@@ -606,9 +873,36 @@ pub fn addKernelArtifact(
 }
 
 fn addKernelAssemblyObject(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Step.Compile {
-    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    const module = b.createModule(.{ .target = target, .optimize = optimize, .code_model = .kernel, .red_zone = false });
     addKernelAssemblyFiles(b, module);
     return b.addObject(.{ .name = "kernel-assembly", .root_module = module });
+}
+
+fn kernelDataModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    source: *std.Build.Module,
+) *std.Build.Module {
+    // Generated archives/manifests also serve host tests. Give the kernel its
+    // own module so their pointers use the signed upper-half code model.
+    std.debug.assert(source.root_source_file != null and source.import_table.count() == 0);
+    return b.createModule(.{
+        .root_source_file = source.root_source_file,
+        .target = target,
+        .optimize = optimize,
+        .code_model = .kernel,
+        .red_zone = false,
+    });
+}
+
+fn configureKernelModuleGraph(root: *std.Build.Module) void {
+    // Code model is a per-module setting, including options and future imports.
+    // All graph members are private to this kernel compilation.
+    for (root.getGraph().modules) |module| {
+        module.code_model = .kernel;
+        module.red_zone = false;
+    }
 }
 
 fn addKernelAssemblyFiles(

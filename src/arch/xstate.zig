@@ -1,9 +1,9 @@
 const std = @import("std");
 
-// The native baseline deliberately enables XCR0=x87|SSE, IA32_XSS=0.
+// The native baseline deliberately enables XCR0=x87|SSE|YMM, IA32_XSS=0.
 // Future enabled components must change this bounded layout and assembly mask.
-pub const enabled_mask: u64 = 3;
-pub const image_bytes: usize = 576;
+pub const enabled_mask: u64 = 7;
+pub const image_bytes: usize = 832;
 pub const alignment: usize = 64;
 pub const State = extern struct {
     image: [image_bytes]u8 = @splat(0),
@@ -12,7 +12,7 @@ pub const State = extern struct {
 
     pub fn initialize(self: *State) void {
         self.* = .{};
-        // Init-state XRSTORS loads the architectural initial x87/SSE state.
+        // Init-state XRSTORS loads the architectural initial x87/SSE/YMM state.
         std.mem.writeInt(u64, self.image[520..528], (1 << 63) | enabled_mask, .little);
         // Retain the architectural MXCSR value in the initialized image too.
         std.mem.writeInt(u32, self.image[24..28], 0x1f80, .little);
@@ -39,7 +39,7 @@ pub const Storage = struct {
 };
 
 comptime {
-    if (@sizeOf(State) != 584 or @offsetOf(State, "pkru") != 576)
+    if (@sizeOf(State) != 840 or @offsetOf(State, "pkru") != 832)
         @compileError("xstate layout must match xstate64.inc");
 }
 

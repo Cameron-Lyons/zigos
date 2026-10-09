@@ -39,7 +39,7 @@ pub fn addUserspaceArtifacts(
     const verification_step = b.step("userspace-verification-images", "Build production and verification userspace image artifacts");
     const userspace_modules = native_modules.addUserspaceRuntimeModules(b, target, optimize);
     const native_archive_deps_module = b.createModule(.{
-        .root_source_file = b.path("src/native/archive_generator_deps.zig"),
+        .root_source_file = b.path("src/archive_generator_deps.zig"),
     });
     const archive_generator = addArchiveGenerator(b, native_archive_deps_module);
     const production_archive_run = b.addRunArtifact(archive_generator);

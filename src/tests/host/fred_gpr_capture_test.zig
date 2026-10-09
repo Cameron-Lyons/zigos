@@ -2,6 +2,7 @@ const std = @import("std");
 
 extern fn zigos_fred_capture_probe(*const [15]u64, *const [8]u64, *[32]u64) callconv(.c) void;
 extern fn zigos_fred_return_probe(*const [24]u64, *const [8]u64, *[8]u64) callconv(.c) void;
+extern fn zigos_idt_return_probe(*[24]u64) callconv(.c) u32;
 
 // The host fixture supplies diagnostic text bounds for the exported real ISR.
 // Import it only in test builds; registered-handler tests execute no MMIO.
@@ -88,5 +89,125 @@ test "FRED yield capture preserves untrusted full-width counter and disposition"
         try std.testing.expectEqual(arguments[1], captured[10]);
         try std.testing.expectEqual(frame[1], captured[19]);
         try std.testing.expectEqual(frame[4], captured[22]);
+    }
+}
+
+fn idtReturnFrame(rip: u64, cs: u64) [24]u64 {
+    var frame: [24]u64 = @splat(0x1234_5678_9abc_def0);
+    frame[19] = rip;
+    frame[20] = cs;
+    frame[21] = 0x202;
+    frame[22] = 0x7fff_eff0;
+    frame[23] = 0x1b;
+    return frame;
+}
+
+// These calls execute the same macros as interrupt64.S. Descriptor-rights
+// lookup and IRETQ remain production-only; no hosted GDT assumptions are made.
+test "IDT return assembly accepts both canonical kernel halves without user fields" {
+    for ([_]u64{
+        0,
+        0x0010_0000,
+        0x0000_7fff_ffff_ffff,
+        0xffff_8000_0000_0000,
+        0xffff_ffff_8200_0000,
+        0xffff_ffff_ffff_ffff,
+    }) |rip| {
+        var frame = idtReturnFrame(rip, 0x08);
+        // A kernel interrupt has no user RSP/SS. Even invalid sentinel values
+        // must remain unread and unchanged by admission.
+        frame[22] = 0x0000_8000_0000_0000;
+        frame[23] = 0xffff_ffff_ffff_ffff;
+        const before = frame;
+        try std.testing.expectEqual(@as(u32, 1), zigos_idt_return_probe(&frame));
+        try std.testing.expectEqualSlices(u64, &before, &frame);
+    }
+}
+
+test "IDT return assembly rejects both noncanonical RIP holes" {
+    for ([_]u64{
+        0x0000_8000_0000_0000,
+        0x0000_ffff_ffff_ffff,
+        0x0001_0000_0000_0000,
+        0xffff_0000_0000_0000,
+        0xffff_7fff_ffff_ffff,
+    }) |rip| {
+        for ([_]u64{ 0x08, 0x23 }) |cs| {
+            var frame = idtReturnFrame(rip, cs);
+            const before = frame;
+            try std.testing.expectEqual(@as(u32, 0), zigos_idt_return_probe(&frame));
+            try std.testing.expectEqualSlices(u64, &before, &frame);
+        }
+    }
+}
+
+test "IDT return assembly keeps user RIP and RSP in the lower canonical half" {
+    for ([_]u64{ 0, 0x4000_1000, 0x0000_7fff_ffff_ffff }) |address| {
+        var frame = idtReturnFrame(address, 0x23);
+        frame[22] = address;
+        const before = frame;
+        try std.testing.expectEqual(@as(u32, 1), zigos_idt_return_probe(&frame));
+        try std.testing.expectEqualSlices(u64, &before, &frame);
+    }
+    for ([_]u64{
+        0x0000_8000_0000_0000,
+        0x0001_0000_0000_0000,
+        0xffff_7fff_ffff_ffff,
+        0xffff_8000_0000_0000,
+        0xffff_ffff_8200_0000,
+        0xffff_ffff_ffff_ffff,
+    }) |address| {
+        var bad_rip = idtReturnFrame(address, 0x23);
+        try std.testing.expectEqual(@as(u32, 0), zigos_idt_return_probe(&bad_rip));
+        var bad_rsp = idtReturnFrame(0x4000_1000, 0x23);
+        bad_rsp[22] = address;
+        try std.testing.expectEqual(@as(u32, 0), zigos_idt_return_probe(&bad_rsp));
+    }
+}
+
+test "IDT return assembly admits exact selectors and normalizes only user SS RPL" {
+    for ([_]u64{ 0, 0x0b, 0x10, 0x1b, 0x20, 0x2b, 0x0001_0008, 0x0001_0023, 0xffff_ffff_ffff_0023 }) |cs| {
+        var frame = idtReturnFrame(0x4000_1000, cs);
+        const before = frame;
+        try std.testing.expectEqual(@as(u32, 0), zigos_idt_return_probe(&frame));
+        try std.testing.expectEqualSlices(u64, &before, &frame);
+    }
+    for ([_]u64{ 0x18, 0x19, 0x1a, 0x1b }) |ss| {
+        var frame = idtReturnFrame(0x4000_1000, 0x23);
+        frame[23] = ss;
+        var expected = frame;
+        expected[23] = 0x1b;
+        try std.testing.expectEqual(@as(u32, 1), zigos_idt_return_probe(&frame));
+        try std.testing.expectEqualSlices(u64, &expected, &frame);
+    }
+    for ([_]u64{ 0, 0x10, 0x20, 0x0001_0018, 0xffff_ffff_ffff_001b }) |ss| {
+        var frame = idtReturnFrame(0x4000_1000, 0x23);
+        frame[23] = ss;
+        const before = frame;
+        try std.testing.expectEqual(@as(u32, 0), zigos_idt_return_probe(&frame));
+        try std.testing.expectEqualSlices(u64, &before, &frame);
+    }
+}
+
+test "IDT return assembly retains RFLAGS admission for high kernel and user RIP" {
+    for ([_][2]u64{
+        .{ 0xffff_ffff_8200_0000, 0x08 },
+        .{ 0x4000_1000, 0x23 },
+    }) |return_site| {
+        for ([_]u64{ 0x2, 0x102, 0x202, 0x246, 0x602 }) |flags| {
+            var frame = idtReturnFrame(return_site[0], return_site[1]);
+            frame[21] = flags;
+            const before = frame;
+            try std.testing.expectEqual(@as(u32, 1), zigos_idt_return_probe(&frame));
+            try std.testing.expectEqualSlices(u64, &before, &frame);
+        }
+        // Reserved bit1 is mandatory; each IOPL, NT and VM bit is forbidden.
+        for ([_]u64{ 0, 0x200, 0x246 & ~@as(u64, 2), 0x202 | 0x1000, 0x202 | 0x2000, 0x202 | 0x4000, 0x202 | 0x20000 }) |flags| {
+            var frame = idtReturnFrame(return_site[0], return_site[1]);
+            frame[21] = flags;
+            const before = frame;
+            try std.testing.expectEqual(@as(u32, 0), zigos_idt_return_probe(&frame));
+            try std.testing.expectEqualSlices(u64, &before, &frame);
+        }
     }
 }

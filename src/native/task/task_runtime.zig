@@ -3,6 +3,9 @@ const address_space_retirement = @import("address_space_retirement.zig");
 const builtin = @import("builtin");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const debug_contract = @import("../security/debug_contract.zig");
+const dispatch_ownership = @import("dispatch_ownership.zig");
+const dispatch_transport = @import("dispatch_transport.zig");
+const cpu_identity = @import("../../kernel/cpu_identity.zig");
 const generated_image_fixtures = if (builtin.is_test) @import("generated_image_fixtures.zig") else struct {};
 const indexed_arena = @import("../core/indexed_arena.zig");
 const manifest = @import("../policy/manifest.zig");
@@ -17,6 +20,7 @@ const kernel_memory = if (builtin.target.os.tag == .freestanding)
     root.kernel_memory
 else
     struct {};
+const x86 = if (builtin.target.os.tag == .freestanding) @import("../../arch/x86.zig") else struct {};
 
 pub const MAX_TASKS = model.MAX_TASKS;
 pub const MAX_TASK_CAPABILITIES = model.MAX_TASK_CAPABILITIES;
@@ -48,8 +52,10 @@ pub const RESOLVED_TASK_HANDLE_INDEX_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_HANDLE_SLOT_LOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_AUDIT_INDEX_RELOOKUPS: u8 = 0;
 pub const RESOLVED_TASK_STATE_TRANSITION_INDEX_RELOOKUPS: u8 = 0;
-pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 604_936;
-pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 69_008;
+// Sixteen lease-bound syscall mailboxes add exactly 64 bytes per isolated
+// CPU slot. Keep this explicit layout allowance rather than a loose budget.
+pub const HOST_RUNTIME_SIZE_CEILING_BYTES: usize = 608_680;
+pub const FREESTANDING_RUNTIME_SIZE_CEILING_BYTES: usize = 72_752;
 pub const RUNTIME_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding)
     FREESTANDING_RUNTIME_SIZE_CEILING_BYTES
 else
@@ -84,6 +90,8 @@ pub const LaunchProvenanceRecord = model.LaunchProvenanceRecord;
 pub const TaskCreateRequest = model.TaskCreateRequest;
 pub const TaskRecord = model.TaskRecord;
 pub const Error = model.Error;
+pub const ExecutionError = Error || dispatch_ownership.Error || dispatch_transport.Error;
+pub const ExecutionTicket = dispatch_ownership.Ticket;
 pub const Snapshot = model.Snapshot;
 pub const syntheticUserspaceImage = model.syntheticUserspaceImage;
 
@@ -100,6 +108,17 @@ pub const TaskRetirementSink = struct {
 
     pub fn eql(self: TaskRetirementSink, other: TaskRetirementSink) bool {
         return self.context == other.context and self.retire == other.retire;
+    }
+};
+
+pub const ExecutionStopSink = struct {
+    context: *anyopaque,
+    // STOP is already visible. This synchronous notification may only nudge
+    // the exact owner; it confers no return or resource-retirement authority.
+    notify: *const fn (*anyopaque, ExecutionTicket) void,
+
+    pub fn eql(self: ExecutionStopSink, other: ExecutionStopSink) bool {
+        return self.context == other.context and self.notify == other.notify;
     }
 };
 
@@ -312,11 +331,15 @@ pub const Runtime = struct {
     task_state_counts: [TASK_STATE_COUNT]TaskStateCount = @as([TASK_STATE_COUNT]TaskStateCount, @splat(0)),
     task_lifecycle_generation: u64 = 1,
     task_borrow_counts: [MAX_TASKS]u8 = @as([MAX_TASKS]u8, @splat(0)),
+    execution: dispatch_ownership.Coordinator = .{},
+    execution_borrows: [cpu_identity.MAX_CPUS]?TaskBorrow = @splat(null),
+    execution_retirement_ticks: [cpu_identity.MAX_CPUS]u64 = @splat(0),
     lifecycle_transition_active: bool = false,
     task_cold: TaskColdBacking = if (heap_backed_task_cold) null else @as([MAX_TASKS]TaskColdRecord, @splat(zeroTaskCold())),
     address_spaces: AddressSpaceBacking = if (heap_backed_address_spaces) null else model.AddressSpaceArena.init(),
     address_space_retirement_sink: ?AddressSpaceRetirementSink = null,
     task_retirement_sink: ?TaskRetirementSink = null,
+    execution_stop_sink: ?ExecutionStopSink = null,
 
     comptime {
         if (@sizeOf(@This()) > RUNTIME_SIZE_CEILING_BYTES) {
@@ -335,6 +358,7 @@ pub const Runtime = struct {
         self.next_address_space_id = 1;
         self.next_namespace_id = 1;
         self.next_component_id = 1;
+        self.execution.next_epoch = 1;
         self.tasks.free_head = indexed_arena.reusableNoIndex(MAX_TASKS);
         initializeTaskMultimapIndex(&self.task_owner_index);
         initializeTaskMultimapIndex(&self.task_initial_component_label_index);
@@ -352,12 +376,15 @@ pub const Runtime = struct {
     }
 
     pub fn bindAddressSpaceRetirementSink(self: *Runtime, sink: AddressSpaceRetirementSink) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return false;
         if (self.address_space_retirement_sink != null) return false;
         self.address_space_retirement_sink = sink;
         return true;
     }
 
     pub fn unbindAddressSpaceRetirementSink(self: *Runtime, expected: AddressSpaceRetirementSink) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active or self.hasExecutionLeases() or
+            dispatch_transport.global.hasOutstandingForIssuer(&self.execution)) return false;
         const current = self.address_space_retirement_sink orelse return false;
         if (!current.eql(expected)) return false;
         self.address_space_retirement_sink = null;
@@ -365,15 +392,34 @@ pub const Runtime = struct {
     }
 
     pub fn bindTaskRetirementSink(self: *Runtime, sink: TaskRetirementSink) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return false;
         if (self.task_retirement_sink != null) return false;
         self.task_retirement_sink = sink;
         return true;
     }
 
     pub fn unbindTaskRetirementSink(self: *Runtime, expected: TaskRetirementSink) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active or self.hasExecutionLeases() or
+            dispatch_transport.global.hasOutstandingForIssuer(&self.execution)) return false;
         const current = self.task_retirement_sink orelse return false;
         if (!current.eql(expected)) return false;
         self.task_retirement_sink = null;
+        return true;
+    }
+
+    pub fn bindExecutionStopSink(self: *Runtime, sink: ExecutionStopSink) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active or self.execution.hasLeases()) return false;
+        if (self.execution_stop_sink != null) return false;
+        self.execution_stop_sink = sink;
+        return true;
+    }
+
+    pub fn unbindExecutionStopSink(self: *Runtime, expected: ExecutionStopSink) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active or self.execution.hasLeases() or
+            dispatch_transport.global.hasOutstandingForIssuer(&self.execution)) return false;
+        const current = self.execution_stop_sink orelse return false;
+        if (!current.eql(expected)) return false;
+        self.execution_stop_sink = null;
         return true;
     }
 
@@ -452,7 +498,7 @@ pub const Runtime = struct {
     }
 
     pub fn reset(self: *Runtime) void {
-        if (self.hasTaskBorrows() or self.lifecycle_transition_active)
+        self.requireExecutionQuiescent() catch
             native_util.impossibleByInvariant("runtime reset follows every task borrow and lifecycle callback");
         self.lifecycle_transition_active = true;
         defer self.lifecycle_transition_active = false;
@@ -489,9 +535,16 @@ pub const Runtime = struct {
                 native_util.impossibleByInvariant("live tasks retain cold runtime state");
             // Checkpoints contain execution metadata, never live authority.
             out.tasks[dense_index].task.capability_count = 0;
+            // A terminating lease retains live cold state only until owner
+            // return. A checkpoint records the logical dead state, so restoring
+            // it later cannot recreate execution metadata already retired.
+            if (slot.task.state == .terminated) {
+                out.tasks[dense_index].task.execution_component_count = 0;
+                @memset(std.mem.asBytes(&out.task_cold[dense_index].execution_components), 0);
+            }
             @memset(&out.task_cold[dense_index].capability_ids, 0);
             out.task_cold[dense_index].capability_generation = 1;
-            copyTaskCheckpointCold(&out.task_cold[dense_index], &cold_records[slot_index], &slot.task);
+            copyTaskCheckpointCold(&out.task_cold[dense_index], &cold_records[slot_index], &out.tasks[dense_index].task);
             out.task_count += 1;
         }
         bindTaskColdStates(out.tasks[0..out.task_count], out.task_cold[0..out.task_count]);
@@ -500,6 +553,9 @@ pub const Runtime = struct {
         if (self.addressSpaceArenaConst()) |address_spaces| {
             for (address_spaces.slots[0..address_spaces.claimedCount()]) |*slot| {
                 if (!slot.in_use) continue;
+                if (self.findConst(slot.address_space.owner_task_id)) |owner| {
+                    if (owner.state == .terminated) continue;
+                }
                 out.address_spaces[out.address_space_count] = slot.*;
                 out.address_space_count += 1;
             }
@@ -507,7 +563,7 @@ pub const Runtime = struct {
     }
 
     pub fn restoreFromSnapshot(self: *Runtime, state: *const Snapshot) error{ NoSpaceLeft, TaskRuntimeBorrowed }!void {
-        if (self.hasTaskBorrows() or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
+        self.requireExecutionQuiescent() catch return error.TaskRuntimeBorrowed;
         self.lifecycle_transition_active = true;
         defer self.lifecycle_transition_active = false;
         const task_cold = if (state.task_count == 0) null else try self.ensureTaskColdRecords();
@@ -632,7 +688,7 @@ pub const Runtime = struct {
     }
 
     pub fn rebuildIndexes(self: *Runtime) error{ HandleGenerationExhausted, TaskRuntimeBorrowed }!void {
-        if (self.hasTaskBorrows() or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
+        self.requireExecutionQuiescent() catch return error.TaskRuntimeBorrowed;
         try self.tasks.rebuildPrimaryIndex();
         self.task_owner_index.reset();
         self.task_initial_component_label_index.reset();
@@ -797,6 +853,102 @@ pub const Runtime = struct {
         return false;
     }
 
+    fn hasExecutionLeases(self: *const Runtime) bool {
+        for (self.execution_borrows) |borrow| if (borrow != null) return true;
+        return false;
+    }
+
+    pub inline fn requireExecutionQuiescent(self: *Runtime) error{ WrongCpu, TaskRuntimeBorrowed }!void {
+        if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+        if (self.hasTaskBorrows() or self.lifecycle_transition_active or self.execution.hasLeases() or
+            dispatch_transport.global.hasOutstandingForIssuer(&self.execution)) return error.TaskRuntimeBorrowed;
+    }
+
+    // Runtime metadata, ordinary borrows and retirement callbacks remain BSP
+    // owned. APs receive copied dispatch identities and only touch Coordinator
+    // atomics; they never release the retained TaskBorrow themselves.
+    pub fn reserveExecution(self: *Runtime, task: *const TaskRecord, cpu: u8) ExecutionError!ExecutionTicket {
+        var ticket: ExecutionTicket = undefined;
+        try self.reserveExecutionInto(task, cpu, &ticket);
+        return ticket;
+    }
+
+    pub fn reserveExecutionInto(self: *Runtime, task: *const TaskRecord, cpu: u8, out: *ExecutionTicket) ExecutionError!void {
+        if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+        if (self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
+        const index: usize = task.arena_slot_index;
+        if (index >= MAX_TASKS) return error.TaskNotFound;
+        const slot = self.tasks.slotAtConst(index);
+        if (!slot.in_use or &slot.task != task or task.state != .active) return error.TaskNotFound;
+        if (self.task_borrow_counts[index] == std.math.maxInt(u8)) return error.TaskRuntimeBorrowed;
+        var ticket: ExecutionTicket = undefined;
+        try self.execution.prepareInto(cpu, .{
+            .task_handle = self.tasks.handleForClaimedIndex(index).value,
+            .task_id = task.id,
+            .process_generation = task.process_generation,
+            .address_space_id = task.address_space_id,
+        }, &ticket);
+        self.execution_borrows[ticket.cpu] = self.borrowResolvedTask(task);
+        self.execution_retirement_ticks[ticket.cpu] = 0;
+        out.* = ticket;
+    }
+
+    // Cancellation proves that execution never began, but still requires the
+    // same BSP collection path before releasing task/resource ownership.
+    pub fn cancelUnstartedExecution(self: *Runtime, ticket: ExecutionTicket) dispatch_ownership.Error!void {
+        if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+        if (self.lifecycle_transition_active) return error.WrongPhase;
+        try self.execution.cancelUnstarted(ticket);
+    }
+
+    pub fn requestExecutionStop(self: *Runtime, ticket: ExecutionTicket) ExecutionError!void {
+        if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+        if (self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
+        const running = try self.execution.requestStop(ticket);
+        if (!running or ticket.cpu == 0) return;
+        const sink = self.execution_stop_sink orelse return;
+        // Protect the callback's bound context and the retained execution from
+        // nested notifications or lifecycle replacement until it returns.
+        self.lifecycle_transition_active = true;
+        defer self.lifecycle_transition_active = false;
+        sink.notify(sink.context, ticket);
+    }
+
+    pub fn collectExecution(self: *Runtime, ticket: ExecutionTicket) ExecutionError!void {
+        if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+        const restore_interrupts = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_interrupts) x86.sti();
+        };
+        if (self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
+        var identity: dispatch_ownership.Identity = undefined;
+        try self.execution.identityInto(ticket, &identity);
+        const borrow = self.execution_borrows[ticket.cpu] orelse return error.StaleTicket;
+        const task = self.findByHandle(borrow.handle, borrow.task_id) orelse return error.StaleTicket;
+        if (identity.task_handle != borrow.handle.value or identity.task_id != borrow.task_id or
+            identity.process_generation != task.process_generation or identity.address_space_id != task.address_space_id)
+            return error.StaleTicket;
+        // The execution ACK ends source access inside the owner body. A queued
+        // transport also retains that source until its independent completion.
+        // Keep the static channel exclusive through every resource callback.
+        var channel: dispatch_transport.Key = undefined;
+        const channel_held = try dispatch_transport.global.beginCollectionInto(ticket, &channel);
+        errdefer if (channel_held) dispatch_transport.global.abortCollection(channel) catch
+            native_util.impossibleByInvariant("execution collection releases its exact collecting slot");
+        try self.execution.beginCollectInto(ticket, &identity);
+        // Keep both the CPU slot and record pinned throughout synchronous Kernel
+        // and address-space callbacks, including reentrant capacity pressure.
+        if (task.state == .terminated) self.finalizeTerminatedTask(task, self.execution_retirement_ticks[ticket.cpu]);
+        self.execution_borrows[ticket.cpu].?.release();
+        self.execution_borrows[ticket.cpu] = null;
+        self.execution_retirement_ticks[ticket.cpu] = 0;
+        self.execution.finishCollect(ticket) catch
+            native_util.impossibleByInvariant("execution collection releases its exact collecting slot");
+        if (channel_held) dispatch_transport.global.finishCollection(channel) catch
+            native_util.impossibleByInvariant("execution collection releases its exact collecting slot");
+    }
+
     pub fn findByHandle(self: *Runtime, handle: TaskHandle, expected_task_id: u64) ?*TaskRecord {
         const slot = self.tasks.getByHandle(handle) orelse return null;
         if (slot.task.id != expected_task_id) return null;
@@ -826,6 +978,21 @@ pub const Runtime = struct {
         }
         self.debugAssertOwnerIndexMissAbsent(owner);
         return null;
+    }
+
+    // Caller-zero authorization cannot identify which task holds an unscoped
+    // grant. A retained attachment on an exact stopped holder therefore denies
+    // that ambiguous admission until collection; explicit live callers retain
+    // their usual task-bound authority checks.
+    pub fn hasTerminatedCapabilityHolder(self: *const Runtime, capability_id: u64, owner: principal.PrincipalId) bool {
+        var slot_index = self.task_owner_index.head(taskOwnerIndexKey(owner));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.task_owner_index.next(slot_index)) {
+            if (slot_index >= MAX_TASKS) native_util.impossibleByInvariant("task owner index points outside task slots");
+            const slot = self.tasks.slotAtConst(slot_index);
+            if (!slot.in_use) native_util.impossibleByInvariant("task owner index points at a free slot");
+            if (slot.task.state == .terminated and slot.task.owner.eql(owner) and slot.task.hasCapability(capability_id)) return true;
+        }
+        return false;
     }
 
     pub fn findByInitialComponentLabel(self: *Runtime, label: []const u8) ?*TaskRecord {
@@ -963,7 +1130,17 @@ pub const Runtime = struct {
         self.next_component_id = nextComponentIdAfter(component_id);
     }
 
-    pub fn installAddressSpaceRecord(self: *Runtime, replace_address_space_id: ?u64, address_space: AddressSpaceRecord) bool {
+    pub fn installAddressSpaceRecord(self: *Runtime, replace_address_space_id: ?u64, address_space: AddressSpaceRecord) Error!void {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
+        if (replace_address_space_id) |old_id| {
+            for (self.execution_borrows) |optional_borrow| {
+                if (optional_borrow) |borrow| {
+                    const task = self.findConstByHandle(borrow.handle, borrow.task_id) orelse
+                        native_util.impossibleByInvariant("execution retains its task record");
+                    if (task.address_space_id == old_id) return error.TaskRuntimeBorrowed;
+                }
+            }
+        }
         const address_spaces = self.addressSpaceArena() orelse
             native_util.impossibleByInvariant("address-space installation follows arena allocation");
         if (replace_address_space_id) |old_id| {
@@ -973,13 +1150,12 @@ pub const Runtime = struct {
                     native_util.impossibleByInvariant("removed address-space slot is immediately reusable");
                 };
                 address_spaces.slots[new_slot_index].address_space = address_space;
-                return true;
+                return;
             }
         }
 
-        const slot = address_spaces.reserve(address_space.id) orelse return false;
+        const slot = address_spaces.reserve(address_space.id) orelse return error.AddressSpaceTableFull;
         slot.address_space = address_space;
-        return true;
     }
 
     fn debugAssertIndexIntegrity(self: *const Runtime) void {
@@ -990,7 +1166,7 @@ pub const Runtime = struct {
             if (!slot.in_use) continue;
             _ = self.indexedTaskSlotConst(slot.task.id) orelse
                 native_util.impossibleByInvariant("task index missing a live task");
-            if (slot.task.execution_component_count != 0) {
+            if (slot.task.state != .terminated and slot.task.execution_component_count != 0) {
                 const key = taskInitialComponentLabelKey(slot.task.executionComponents()[0].labelSlice());
                 var found = false;
                 var label_slot_index = self.task_initial_component_label_index.head(key);
@@ -1024,7 +1200,7 @@ pub const Runtime = struct {
         var slot_index: usize = 0;
         while (slot_index < MAX_TASKS) : (slot_index += 1) {
             const slot = self.tasks.slotAt(slot_index);
-            if (!slot.in_use or slot.task.execution_component_count == 0) continue;
+            if (!slot.in_use or slot.task.state == .terminated or slot.task.execution_component_count == 0) continue;
             if (std.mem.eql(u8, slot.task.executionComponents()[0].labelSlice(), label)) {
                 native_util.impossibleByInvariant("task label index missed a live task");
             }
@@ -1080,6 +1256,7 @@ pub const Runtime = struct {
         tick: u64,
     ) Error!ExecutionComponentRecord {
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        if (task.state == .terminated) return error.TaskNotFound;
         const cold = taskCold(task);
         if (task.execution_component_count >= MAX_TASK_COMPONENTS) return error.ComponentTableFull;
 
@@ -1123,7 +1300,9 @@ pub const Runtime = struct {
     }
 
     pub fn rehostTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
         const task = self.find(task_id) orelse return error.TaskNotFound;
+        if (self.execution.hasLeaseForTask(task_id)) return error.TaskRuntimeBorrowed;
         if (task.state == .terminated) return false;
         const retired_address_space_id = task.address_space_id;
         const retired_address_space = self.findAddressSpaceConst(retired_address_space_id) orelse
@@ -1263,6 +1442,7 @@ pub const Runtime = struct {
     }
 
     pub fn terminateTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
         const task = self.find(task_id) orelse return error.TaskNotFound;
         return self.terminateResolvedTask(task, tick);
     }
@@ -1272,37 +1452,49 @@ pub const Runtime = struct {
         task: *TaskRecord,
         tick: u64,
     ) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return false;
         if (builtin.mode == .debug) _ = self.taskHandleForResolved(task);
         const slot_index: usize = task.arena_slot_index;
         if (task.state == .terminated) return false;
         var borrow = self.borrowResolvedTask(task);
         defer borrow.release();
-        const retired_address_space_id = task.address_space_id;
-
         self.removeInitialComponentLabelIndex(slot_index, task);
         self.setTaskState(task, .terminated);
-        self.notifyTaskRetirement(task, tick);
-        clearTerminatedTaskResources(task);
-        task.execution_component_count = 0;
-        task.capability_count = 0;
         task.appendAudit(.{
             .kind = .terminated,
             .tick = tick,
         });
+        if (self.execution.taskTicket(task.id)) |ticket| {
+            self.execution_retirement_ticks[ticket.cpu] = tick;
+            self.requestExecutionStop(ticket) catch
+                native_util.impossibleByInvariant("termination requests its exact retained execution");
+        } else {
+            self.finalizeTerminatedTask(task, tick);
+        }
+        return true;
+    }
+
+    fn finalizeTerminatedTask(self: *Runtime, task: *TaskRecord, tick: u64) void {
+        const retired_address_space_id = task.address_space_id;
+        self.notifyTaskRetirement(task, tick);
+        clearTerminatedTaskResources(task);
+        task.execution_component_count = 0;
+        task.capability_count = 0;
         self.removeAddressSpaceRecord(retired_address_space_id);
         self.notifyAddressSpaceRetirement(.{
             .address_space_id = retired_address_space_id,
             .reason = .terminate,
         });
-        return true;
     }
 
     pub fn suspendTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
         const task = self.find(task_id) orelse return error.TaskNotFound;
         return self.suspendResolvedTask(task, tick);
     }
 
     pub fn suspendResolvedTask(self: *Runtime, task: *TaskRecord, tick: u64) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return false;
         if (task.state != .active) return false;
 
         self.setTaskState(task, .suspended);
@@ -1310,15 +1502,19 @@ pub const Runtime = struct {
             .kind = .suspended,
             .tick = tick,
         });
+        if (self.execution.taskTicket(task.id)) |ticket| self.requestExecutionStop(ticket) catch
+            native_util.impossibleByInvariant("suspension requests its exact retained execution");
         return true;
     }
 
     pub fn resumeTask(self: *Runtime, task_id: u64, tick: u64) Error!bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active) return error.TaskRuntimeBorrowed;
         const task = self.find(task_id) orelse return error.TaskNotFound;
         return self.resumeResolvedTask(task, tick);
     }
 
     pub fn resumeResolvedTask(self: *Runtime, task: *TaskRecord, tick: u64) bool {
+        if (cpu_identity.currentIndex() != 0 or self.lifecycle_transition_active or self.execution.hasLeaseForTask(task.id)) return false;
         if (task.state != .suspended) return false;
 
         self.setTaskState(task, .active);
@@ -1365,7 +1561,11 @@ pub const Runtime = struct {
     }
 };
 
+// Capability/component metadata remains BSP authoritative even during a lease.
+// A dispatch owner consumes copied execution metadata, never these mutable cold
+// slices. Kernel retirement callbacks may legitimately revoke BSP-owned grants.
 pub fn grantCapabilityToTask(task: *TaskRecord, capability_id: u64) Error!void {
+    if (task.state == .terminated) return error.TaskNotFound;
     const cold = taskCold(task);
     if (capability_id == 0) {
         native_util.impossibleByInvariant("task capability attachments never use the reserved zero id");
@@ -1500,6 +1700,9 @@ test "allocated runtime initialization preserves empty indexes and id sequences"
     }
 
     const task = try createTaskIdTestTask(&runtime, 42);
+    const execution_ticket = try runtime.reserveExecution(task, 0);
+    try runtime.cancelUnstartedExecution(execution_ticket);
+    try runtime.collectExecution(execution_ticket);
     try std.testing.expectEqual(@as(u64, 1), task.id);
     try std.testing.expectEqual(task.id, runtime.findByOwner(task.owner).?.id);
     const initial_label = task.executionComponents()[0].labelSlice();
@@ -3007,6 +3210,758 @@ test "task reclamation respects nested borrows and exhausted generations" {
     try std.testing.expect(replacement.arena_slot_index != handle.slotIndex());
     try std.testing.expect(replacement.id > while_borrowed.id);
     runtime.debugAssertIndexIntegrity();
+}
+
+test "execution leases pin all CPUs exclusively and preserve epochs across reset" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    var tasks: [cpu_identity.MAX_CPUS]*TaskRecord = undefined;
+    var tickets: [cpu_identity.MAX_CPUS]ExecutionTicket = undefined;
+    for (&tasks, &tickets, 0..) |*task, *ticket, index| {
+        task.* = try createTaskIdTestTask(&runtime, index + 1);
+        ticket.* = try runtime.reserveExecution(task.*, @intCast(index));
+        try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[task.*.arena_slot_index]);
+        try std.testing.expectError(error.Busy, runtime.reserveExecution(task.*, @intCast((index + 1) % cpu_identity.MAX_CPUS)));
+    }
+    const extra = try createTaskIdTestTask(&runtime, 1000);
+    try std.testing.expectError(error.Busy, runtime.reserveExecution(extra, 0));
+    try std.testing.expectError(error.InvalidCpu, runtime.reserveExecution(extra, cpu_identity.MAX_CPUS));
+    var ordinary = runtime.borrowResolvedTask(tasks[0]);
+    ordinary.release();
+    try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[tasks[0].arena_slot_index]);
+    for (tasks, tickets, 0..) |task, ticket, index| {
+        try runtime.execution.bindOwnedRoot(ticket, index + 1, (index + 1) * 4096);
+        cpu_identity.setIndexForTest(@intCast(index));
+        const bound = try runtime.execution.start(ticket);
+        try std.testing.expectEqual(task.id, bound.identity.task_id);
+        try std.testing.expect(!runtime.execution.stopRequested(ticket));
+        try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+        if (index != 0) try std.testing.expectError(error.WrongCpu, runtime.collectExecution(ticket));
+        cpu_identity.setIndexForTest(0);
+        try runtime.collectExecution(ticket);
+        try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expectEqual(TaskState.active, task.state);
+    }
+    const reused = try runtime.reserveExecution(extra, 0);
+    try std.testing.expect(reused.epoch > tickets[0].epoch);
+    try std.testing.expectError(error.StaleTicket, runtime.cancelUnstartedExecution(tickets[0]));
+    try runtime.cancelUnstartedExecution(reused);
+    try runtime.collectExecution(reused);
+    runtime.reset();
+    const fresh = try createTaskIdTestTask(&runtime, 2000);
+    const fresh_ticket = try runtime.reserveExecution(fresh, 0);
+    try std.testing.expect(fresh_ticket.epoch > reused.epoch);
+    try runtime.cancelUnstartedExecution(fresh_ticket);
+    try runtime.collectExecution(fresh_ticket);
+}
+
+test "execution leases reject replacement before host and lifecycle metadata change" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const task = try createTaskIdTestTask(&runtime, 1);
+    const ticket = try runtime.reserveExecution(task, 7);
+    const original = runtime.findAddressSpaceConst(task.address_space_id).?.*;
+    const generation = runtime.taskLifecycleGeneration();
+    const process_generation = task.process_generation;
+    const process_cursor = runtime.next_process_id;
+    const address_cursor = runtime.next_address_space_id;
+    const namespace_cursor = runtime.next_namespace_id;
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+    runtime.writeSnapshot(snapshot);
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.rehostTask(task.id, 1));
+    var replacement = original;
+    replacement.id = address_cursor;
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.installAddressSpaceRecord(original.id, replacement));
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.restoreFromSnapshot(snapshot));
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.rebuildIndexes());
+    try std.testing.expectEqual(generation, runtime.taskLifecycleGeneration());
+    try std.testing.expectEqual(process_generation, task.process_generation);
+    try std.testing.expectEqual(process_cursor, runtime.next_process_id);
+    try std.testing.expectEqual(address_cursor, runtime.next_address_space_id);
+    try std.testing.expectEqual(namespace_cursor, runtime.next_namespace_id);
+    try std.testing.expect(std.meta.eql(original, runtime.findAddressSpaceConst(original.id).?.*));
+    cpu_identity.setIndexForTest(7);
+    try std.testing.expectError(error.WrongCpu, runtime.reserveExecution(task, 7));
+    try std.testing.expectError(error.WrongCpu, runtime.cancelUnstartedExecution(ticket));
+    try std.testing.expectError(error.WrongCpu, runtime.collectExecution(ticket));
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.terminateTask(task.id, 1));
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.suspendTask(task.id, 1));
+    try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.resumeTask(task.id, 1));
+    try std.testing.expect(!runtime.terminateResolvedTask(task, 1));
+    try std.testing.expect(!runtime.suspendResolvedTask(task, 1));
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expect(runtime.suspendResolvedTask(task, 1));
+    try std.testing.expect(!runtime.resumeResolvedTask(task, 2));
+    try runtime.cancelUnstartedExecution(ticket);
+    try runtime.collectExecution(ticket);
+    try std.testing.expect(runtime.resumeResolvedTask(task, 2));
+    try std.testing.expect(try runtime.rehostTask(task.id, 3));
+}
+
+test "execution stop notifications preserve exact remote ownership through every phase" {
+    const Observer = struct {
+        runtime: *Runtime,
+        task: ?*TaskRecord = null,
+        ticket: ?ExecutionTicket = null,
+        notifications: [cpu_identity.MAX_CPUS]usize = @splat(0),
+        retirements: usize = 0,
+
+        fn notify(context: *anyopaque, ticket: ExecutionTicket) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.testing.expectEqual(@as(u8, 0), cpu_identity.currentIndex()) catch @panic("BSP notifies the owner");
+            std.testing.expect(self.runtime.lifecycle_transition_active) catch @panic("notification retains its callback context");
+            std.testing.expect(std.meta.eql(self.ticket.?, ticket)) catch @panic("notification copies the exact ticket");
+            std.testing.expectEqual(dispatch_ownership.Phase.running, self.runtime.execution.phase(ticket) catch unreachable) catch @panic("only running owners are notified");
+            const identity = self.runtime.execution.identity(ticket) catch unreachable;
+            std.testing.expectEqual(self.task.?.id, identity.task_id) catch @panic("task identity remains published");
+            std.testing.expectEqual(self.task.?.process_generation, identity.process_generation) catch @panic("process generation remains published");
+            std.testing.expect(self.runtime.task_borrow_counts[self.task.?.arena_slot_index] != 0) catch @panic("notification never unpins execution");
+            cpu_identity.setIndexForTest(ticket.cpu);
+            const stopped = self.runtime.execution.stopRequested(ticket);
+            cpu_identity.setIndexForTest(0);
+            std.testing.expect(stopped) catch @panic("STOP is visible before notification");
+            self.notifications[ticket.cpu] += 1;
+        }
+
+        fn retire(context: *anyopaque, event: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const ticket = self.ticket.?;
+            std.testing.expectEqual(self.task.?.id, event.task_id) catch @panic("collection retires the exact task");
+            std.testing.expectEqual(@as(u64, 77), event.capability_ids[0]) catch @panic("authority is retained until collection");
+            std.testing.expectEqual(dispatch_ownership.Phase.collecting, self.runtime.execution.phase(ticket) catch unreachable) catch @panic("retirement follows acquired return");
+            const before = self.notifications;
+            self.runtime.requestExecutionStop(ticket) catch @panic("collecting STOP is harmless");
+            std.testing.expectEqualSlices(usize, &before, &self.notifications) catch @panic("collecting never sends a notification");
+            std.testing.expect(!self.runtime.unbindExecutionStopSink(.{ .context = self, .notify = notify })) catch @panic("collecting retains the callback binding");
+            self.retirements += 1;
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    var observer = Observer{ .runtime = &runtime };
+    var other = Observer{ .runtime = &runtime };
+    const sink = ExecutionStopSink{ .context = &observer, .notify = Observer.notify };
+    const foreign_sink = ExecutionStopSink{ .context = &other, .notify = Observer.notify };
+    const retire_sink = TaskRetirementSink{ .context = &observer, .retire = Observer.retire };
+    try std.testing.expect(runtime.bindExecutionStopSink(sink));
+    try std.testing.expect(!runtime.bindExecutionStopSink(sink));
+    try std.testing.expect(!runtime.unbindExecutionStopSink(foreign_sink));
+    try std.testing.expect(runtime.bindTaskRetirementSink(retire_sink));
+    cpu_identity.setIndexForTest(1);
+    try std.testing.expect(!runtime.bindExecutionStopSink(foreign_sink));
+    try std.testing.expect(!runtime.unbindExecutionStopSink(sink));
+    cpu_identity.setIndexForTest(0);
+
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const task = try createTaskIdTestTask(&runtime, index + 1);
+        try runtime.grantCapability(task.id, 77);
+        observer.task = task;
+        const reserved = try runtime.reserveExecution(task, @intCast(index));
+        try runtime.requestExecutionStop(reserved);
+        try runtime.requestExecutionStop(reserved);
+        try std.testing.expectError(error.StopRequested, runtime.execution.bindOwnedRoot(reserved, index + 1, (index + 1) * 4096));
+        try std.testing.expectEqual(@as(usize, 0), observer.notifications[index]);
+        try std.testing.expect(!runtime.unbindExecutionStopSink(sink));
+        try std.testing.expect(!runtime.bindExecutionStopSink(foreign_sink));
+        try runtime.cancelUnstartedExecution(reserved);
+        try runtime.collectExecution(reserved);
+
+        const ready = try runtime.reserveExecution(task, @intCast(index));
+        try runtime.execution.bindOwnedRoot(ready, index + 1, (index + 1) * 4096);
+        try runtime.requestExecutionStop(ready);
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expectError(error.StopRequested, runtime.execution.start(ready));
+        cpu_identity.setIndexForTest(0);
+        try std.testing.expectEqual(@as(usize, 0), observer.notifications[index]);
+        try runtime.cancelUnstartedExecution(ready);
+        try runtime.requestExecutionStop(ready);
+        try runtime.collectExecution(ready);
+
+        const running = try runtime.reserveExecution(task, @intCast(index));
+        observer.ticket = running;
+        try runtime.execution.bindOwnedRoot(running, index + 1, (index + 1) * 4096);
+        cpu_identity.setIndexForTest(@intCast(index));
+        _ = try runtime.execution.start(running);
+        cpu_identity.setIndexForTest(if (index == 0) 1 else @intCast(index));
+        try std.testing.expectError(error.WrongCpu, runtime.requestExecutionStop(running));
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expect(!runtime.execution.stopRequested(running));
+        cpu_identity.setIndexForTest(0);
+        try runtime.requestExecutionStop(running);
+        try runtime.requestExecutionStop(running);
+        if (index % 2 == 0) {
+            try std.testing.expect(try runtime.terminateTask(task.id, 29));
+        } else {
+            try std.testing.expect(try runtime.suspendTask(task.id, 29));
+        }
+        const expected: usize = if (index == 0) 0 else 3;
+        try std.testing.expectEqual(expected, observer.notifications[index]);
+        try std.testing.expectEqual(dispatch_ownership.Phase.running, try runtime.execution.phase(running));
+        try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expectEqual(@as(u8, 1), task.capability_count);
+        try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id) != null);
+        try std.testing.expectError(error.WrongPhase, runtime.collectExecution(running));
+        cpu_identity.setIndexForTest(@intCast(index));
+        try runtime.execution.acknowledgeOwnedRootReturn(running);
+        cpu_identity.setIndexForTest(0);
+        try runtime.requestExecutionStop(running);
+        if (index % 2 != 0) try std.testing.expect(try runtime.terminateTask(task.id, 30));
+        try std.testing.expectEqual(expected, observer.notifications[index]);
+        try runtime.collectExecution(running);
+        try std.testing.expectEqual(index + 1, observer.retirements);
+        try std.testing.expectEqual(@as(u8, 0), task.capability_count);
+        try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id) == null);
+        try std.testing.expectError(error.StaleTicket, runtime.requestExecutionStop(running));
+        try std.testing.expectEqual(expected, observer.notifications[index]);
+    }
+    var foreign: dispatch_ownership.Coordinator = .{};
+    const foreign_ticket = try foreign.prepare(1, .{ .task_handle = 1, .task_id = 1, .process_generation = 1, .address_space_id = 1 });
+    const notifications = observer.notifications;
+    try std.testing.expectError(error.WrongCoordinator, runtime.requestExecutionStop(foreign_ticket));
+    try std.testing.expectEqualSlices(usize, &notifications, &observer.notifications);
+    try std.testing.expect(runtime.unbindTaskRetirementSink(retire_sink));
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+    runtime.writeSnapshot(snapshot);
+    runtime.reset();
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(sink));
+    try runtime.restoreFromSnapshot(snapshot);
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(sink));
+    try std.testing.expect(runtime.unbindExecutionStopSink(sink));
+    try std.testing.expect(!runtime.unbindExecutionStopSink(sink));
+
+    // An absent platform binding still publishes STOP and retains execution.
+    const task = try createTaskIdTestTask(&runtime, 1000);
+    const unbound = try runtime.reserveExecution(task, 1);
+    try runtime.execution.bindOwnedRoot(unbound, 1, 4096);
+    cpu_identity.setIndexForTest(1);
+    _ = try runtime.execution.start(unbound);
+    cpu_identity.setIndexForTest(0);
+    try runtime.requestExecutionStop(unbound);
+    cpu_identity.setIndexForTest(1);
+    try std.testing.expect(runtime.execution.stopRequested(unbound));
+    try runtime.execution.acknowledgeOwnedRootReturn(unbound);
+    cpu_identity.setIndexForTest(0);
+    try runtime.collectExecution(unbound);
+}
+
+test "execution stop notification rejects callback lifecycle reentry before mutation" {
+    const Callback = struct {
+        runtime: *Runtime,
+        task: *TaskRecord,
+        other: *TaskRecord,
+        idle: *TaskRecord,
+        ticket: ExecutionTicket,
+        other_ticket: ExecutionTicket,
+        reserved: ExecutionTicket,
+        snapshot: *const Snapshot,
+        notifications: usize = 0,
+
+        fn notify(context: *anyopaque, ticket: ExecutionTicket) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.testing.expect(std.meta.eql(self.ticket, ticket)) catch @panic("notification keeps exact owner");
+            const old_task = self.task.*;
+            const old_other = self.other.*;
+            const old_idle = self.idle.*;
+            const lifecycle_generation = self.runtime.taskLifecycleGeneration();
+            const next_task = self.runtime.next_task_id;
+            const next_process = self.runtime.next_process_id;
+            const next_address = self.runtime.next_address_space_id;
+            const sink = ExecutionStopSink{ .context = self, .notify = notify };
+            std.testing.expect(!self.runtime.bindExecutionStopSink(sink)) catch @panic("notification cannot replace itself");
+            std.testing.expect(!self.runtime.unbindExecutionStopSink(sink)) catch @panic("notification context remains bound");
+            std.testing.expect(!self.runtime.bindTaskRetirementSink(.{ .context = self, .retire = retire })) catch @panic("notification cannot install lifecycle callback");
+            std.testing.expect(!self.runtime.bindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(@This(), self))) catch @panic("notification cannot install address callback");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.requestExecutionStop(ticket)) catch @panic("notification cannot recurse");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.requestExecutionStop(self.other_ticket)) catch @panic("notification cannot stop another owner");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.collectExecution(ticket)) catch @panic("notification cannot collect execution");
+            std.testing.expectError(error.WrongPhase, self.runtime.cancelUnstartedExecution(self.reserved)) catch @panic("notification cannot cancel a reservation");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.reserveExecution(self.idle, 4)) catch @panic("notification cannot reserve execution");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.terminateTask(self.other.id, 100)) catch @panic("notification cannot terminate another task");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.suspendTask(self.other.id, 100)) catch @panic("notification cannot suspend another task");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.resumeTask(self.idle.id, 100)) catch @panic("notification cannot resume another task");
+            std.testing.expect(!self.runtime.terminateResolvedTask(self.other, 100)) catch @panic("resolved termination is guarded");
+            std.testing.expect(!self.runtime.suspendResolvedTask(self.other, 100)) catch @panic("resolved suspension is guarded");
+            std.testing.expect(!self.runtime.resumeResolvedTask(self.idle, 100)) catch @panic("resolved resume is guarded");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.rehostTask(self.idle.id, 100)) catch @panic("notification cannot rehost a task");
+            const address = self.runtime.findAddressSpaceConst(self.idle.address_space_id).?.*;
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.installAddressSpaceRecord(address.id, address)) catch @panic("notification cannot replace an address space");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.restoreFromSnapshot(self.snapshot)) catch @panic("notification cannot restore runtime");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.rebuildIndexes()) catch @panic("notification cannot replace indexes");
+            std.testing.expectError(error.TaskTableFull, createTaskIdTestTask(self.runtime, 1000)) catch @panic("notification cannot create a task");
+            std.testing.expect(std.meta.eql(old_task, self.task.*)) catch @panic("notified task metadata remains unchanged");
+            std.testing.expect(std.meta.eql(old_other, self.other.*)) catch @panic("other task metadata remains unchanged");
+            std.testing.expect(std.meta.eql(old_idle, self.idle.*)) catch @panic("idle task metadata remains unchanged");
+            std.testing.expectEqual(lifecycle_generation, self.runtime.taskLifecycleGeneration()) catch @panic("notification does not advance lifecycle");
+            std.testing.expectEqual(next_task, self.runtime.next_task_id) catch @panic("notification does not issue task IDs");
+            std.testing.expectEqual(next_process, self.runtime.next_process_id) catch @panic("notification does not issue process IDs");
+            std.testing.expectEqual(next_address, self.runtime.next_address_space_id) catch @panic("notification does not issue address-space IDs");
+            self.notifications += 1;
+        }
+
+        fn retire(_: *anyopaque, _: TaskRetirement) void {}
+        pub fn retireAddressSpace(_: *@This(), _: AddressSpaceRetirementEvent) void {}
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const task = try createTaskIdTestTask(&runtime, 1);
+    const other = try createTaskIdTestTask(&runtime, 2);
+    const unstarted = try createTaskIdTestTask(&runtime, 3);
+    const idle = try createTaskIdTestTask(&runtime, 4);
+    try std.testing.expect(runtime.suspendResolvedTask(idle, 0));
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+    runtime.writeSnapshot(snapshot);
+    var callback = Callback{ .runtime = &runtime, .task = task, .other = other, .idle = idle, .ticket = undefined, .other_ticket = undefined, .reserved = undefined, .snapshot = snapshot };
+    const sink = ExecutionStopSink{ .context = &callback, .notify = Callback.notify };
+    try std.testing.expect(runtime.bindExecutionStopSink(sink));
+    callback.ticket = try runtime.reserveExecution(task, 1);
+    callback.other_ticket = try runtime.reserveExecution(other, 2);
+    callback.reserved = try runtime.reserveExecution(unstarted, 3);
+    for ([_]ExecutionTicket{ callback.ticket, callback.other_ticket }) |ticket| {
+        try runtime.execution.bindOwnedRoot(ticket, ticket.cpu, @as(u64, ticket.cpu) * 4096);
+        cpu_identity.setIndexForTest(ticket.cpu);
+        _ = try runtime.execution.start(ticket);
+        cpu_identity.setIndexForTest(0);
+    }
+    try runtime.requestExecutionStop(callback.ticket);
+    try std.testing.expectEqual(@as(usize, 1), callback.notifications);
+    try std.testing.expect(!runtime.lifecycle_transition_active);
+    try std.testing.expect(runtime.execution_stop_sink.?.eql(sink));
+    for ([_]ExecutionTicket{ callback.ticket, callback.other_ticket }) |ticket| {
+        cpu_identity.setIndexForTest(ticket.cpu);
+        try std.testing.expectEqual(ticket.cpu == 1, runtime.execution.stopRequested(ticket));
+        try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+        cpu_identity.setIndexForTest(0);
+        try std.testing.expectEqual(@as(u8, 1), runtime.task_borrow_counts[(if (ticket.cpu == 1) task else other).arena_slot_index]);
+        try runtime.collectExecution(ticket);
+    }
+    // Reentrant cancellation and notification did not publish STOP here.
+    try runtime.execution.bindOwnedRoot(callback.reserved, 3, 3 * 4096);
+    try runtime.cancelUnstartedExecution(callback.reserved);
+    try runtime.collectExecution(callback.reserved);
+    try std.testing.expect(runtime.unbindExecutionStopSink(sink));
+    try std.testing.expect(runtime.resumeResolvedTask(idle, 101));
+    try runtime.restoreFromSnapshot(snapshot);
+    runtime.debugAssertIndexIntegrity();
+}
+
+test "execution retirement checkpoints logical death without publishing retained resources" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const task = try createTaskIdTestTask(&runtime, 1);
+    const task_id = task.id;
+    const address_space_id = task.address_space_id;
+    const label = task.executionComponents()[0].labelSlice();
+    try runtime.grantCapability(task_id, 77);
+    const ticket = try runtime.reserveExecution(task, 1);
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+    try std.testing.expect(runtime.terminateResolvedTask(task, 19));
+    try std.testing.expect(runtime.findByInitialComponentLabel(label) == null);
+    runtime.debugAssertIndexIntegrity();
+    runtime.writeSnapshot(snapshot);
+    try std.testing.expectEqual(@as(u8, 1), task.execution_component_count);
+    try std.testing.expectEqual(@as(u8, 1), task.capability_count);
+    try std.testing.expect(runtime.findAddressSpaceConst(address_space_id) != null);
+    try std.testing.expectEqual(@as(u8, 0), snapshot.tasks[0].task.execution_component_count);
+    try std.testing.expectEqual(@as(u8, 0), snapshot.tasks[0].task.capability_count);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.address_space_count);
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&snapshot.task_cold[0].execution_components), 0));
+    try runtime.cancelUnstartedExecution(ticket);
+    try runtime.collectExecution(ticket);
+    try runtime.restoreFromSnapshot(snapshot);
+    const restored = runtime.find(task_id).?;
+    try std.testing.expectEqual(TaskState.terminated, restored.state);
+    try std.testing.expectEqual(@as(u8, 0), restored.execution_component_count);
+    try std.testing.expectEqual(@as(u8, 0), restored.capability_count);
+    try std.testing.expect(runtime.findAddressSpaceConst(address_space_id) == null);
+    runtime.debugAssertIndexIntegrity();
+}
+
+test "execution admission indexes exact stopped holders despite owner key collisions" {
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const owner = principal.PrincipalId{ .kind = .app, .serial = 7 };
+    const collision = try createTaskIdTestTask(&runtime, owner.serial + (@as(u64, 1) << 56));
+    try std.testing.expectEqual(taskOwnerIndexKey(owner), taskOwnerIndexKey(collision.owner));
+    try runtime.grantCapability(collision.id, 777);
+    const collision_ticket = try runtime.reserveExecution(collision, 1);
+    try std.testing.expect(runtime.terminateResolvedTask(collision, 1));
+    try std.testing.expect(!runtime.hasTerminatedCapabilityHolder(777, owner));
+    const exact = try createTaskIdTestTask(&runtime, owner.serial);
+    try runtime.grantCapability(exact.id, 777);
+    try std.testing.expect(!runtime.hasTerminatedCapabilityHolder(777, owner));
+    const exact_ticket = try runtime.reserveExecution(exact, 2);
+    try std.testing.expect(runtime.terminateResolvedTask(exact, 2));
+    try std.testing.expect(runtime.hasTerminatedCapabilityHolder(777, owner));
+    try std.testing.expect(!runtime.hasTerminatedCapabilityHolder(778, owner));
+    try runtime.cancelUnstartedExecution(collision_ticket);
+    try runtime.collectExecution(collision_ticket);
+    try std.testing.expect(runtime.hasTerminatedCapabilityHolder(777, owner));
+    try runtime.cancelUnstartedExecution(exact_ticket);
+    try runtime.collectExecution(exact_ticket);
+    try std.testing.expect(!runtime.hasTerminatedCapabilityHolder(777, owner));
+    runtime.debugAssertIndexIntegrity();
+}
+
+test "execution collection holds its slot and borrow through reentrant retirement callbacks" {
+    const Callback = struct {
+        runtime: *Runtime,
+        task: *TaskRecord,
+        ticket: ExecutionTicket,
+        task_id: u64,
+        address_space_id: u64,
+        notifications: usize = 0,
+
+        fn churn(self: *@This()) void {
+            std.testing.expect(self.runtime.execution.hasLeaseForTask(self.task_id)) catch @panic("collecting identity remains published");
+            std.testing.expectEqual(@as(u8, 1), self.runtime.task_borrow_counts[self.task.arena_slot_index]) catch @panic("collecting record remains pinned");
+            std.testing.expectError(error.WrongPhase, self.runtime.collectExecution(self.ticket)) catch @panic("collection cannot reenter");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.rebuildIndexes()) catch @panic("callback cannot replace indexes");
+            for (0..MAX_TASKS + 3) |index| {
+                const child = createTaskIdTestTask(self.runtime, index + 1000) catch @panic("callback retains spare capacity");
+                std.testing.expectError(error.Busy, self.runtime.reserveExecution(child, self.ticket.cpu)) catch @panic("collecting CPU cannot be reused");
+                if (!self.runtime.terminateResolvedTask(child, index + 1000)) @panic("callback child terminates");
+                std.testing.expectEqual(self.task_id, self.task.id) catch @panic("borrowed incarnation remains resident");
+            }
+            self.notifications += 1;
+        }
+
+        fn retire(context: *anyopaque, event: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (event.task_id != self.task_id) return;
+            std.testing.expectEqual(@as(u64, 77), event.capability_ids[0]) catch @panic("attachments survive until callback");
+            std.testing.expectEqual(@as(u64, 29), event.now_ticks) catch @panic("termination tick retained");
+            const sink = TaskRetirementSink{ .context = self, .retire = retire };
+            std.testing.expect(!self.runtime.unbindTaskRetirementSink(sink)) catch @panic("callback owner remains bound");
+            self.churn();
+            std.testing.expectEqual(@as(u64, 77), event.capability_ids[0]) catch @panic("borrowed attachment slice remains valid");
+        }
+
+        pub fn retireAddressSpace(self: *@This(), event: AddressSpaceRetirementEvent) void {
+            if (event.address_space_id != self.address_space_id) return;
+            std.testing.expect(self.runtime.findAddressSpaceConst(self.address_space_id) == null) catch @panic("address metadata detached before callback");
+            std.testing.expect(!self.runtime.unbindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(@This(), self))) catch @panic("address callback remains bound");
+            self.churn();
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var runtime = Runtime.init();
+    defer runtime.reset();
+    const task = try createTaskIdTestTask(&runtime, 1);
+    try runtime.grantCapability(task.id, 77);
+    const ticket = try runtime.reserveExecution(task, 4);
+    var callback = Callback{ .runtime = &runtime, .task = task, .task_id = task.id, .address_space_id = task.address_space_id, .ticket = ticket };
+    const task_sink = TaskRetirementSink{ .context = &callback, .retire = Callback.retire };
+    const address_sink = AddressSpaceRetirementSink.init(Callback, &callback);
+    try std.testing.expect(runtime.bindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(address_sink));
+    try std.testing.expect(runtime.terminateResolvedTask(task, 29));
+    const audit_count = task.audit_count;
+    try std.testing.expect(!runtime.terminateResolvedTask(task, 30));
+    try std.testing.expectEqual(audit_count, task.audit_count);
+    try std.testing.expectEqual(@as(usize, 0), callback.notifications);
+    try std.testing.expectEqual(@as(u16, 1), task.capability_count);
+    try runtime.cancelUnstartedExecution(ticket);
+    try runtime.collectExecution(ticket);
+    try std.testing.expectEqual(@as(usize, 2), callback.notifications);
+    try std.testing.expectEqual(@as(u16, 0), task.capability_count);
+    try std.testing.expect(!runtime.execution.hasLeaseForTask(task.id));
+    try std.testing.expect(runtime.unbindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(address_sink));
+}
+
+test "execution transport collection retains every owner until independent completion and callbacks finish" {
+    const Observer = struct {
+        runtime: *Runtime,
+        task: *TaskRecord,
+        ticket: ExecutionTicket,
+        key: dispatch_transport.Key,
+        notifications: usize = 0,
+
+        fn held(self: *@This()) void {
+            std.testing.expect(dispatch_transport.global.hasOutstandingForIssuer(&self.runtime.execution)) catch @panic("collecting channel retains its issuer");
+            std.testing.expectEqual(@as(u8, 1), self.runtime.task_borrow_counts[self.task.arena_slot_index]) catch @panic("transport collection retains its task");
+            std.testing.expectError(error.Busy, self.runtime.collectExecution(self.ticket)) catch @panic("transport collection cannot reenter");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.runtime.requireExecutionQuiescent()) catch @panic("collecting callbacks cannot reset runtime");
+            var completion: dispatch_transport.Completion = .unstarted;
+            std.testing.expectError(error.WrongPhase, dispatch_transport.global.completionInto(self.key, &completion)) catch @panic("channel remains exclusively collecting");
+            std.testing.expectEqual(dispatch_transport.Completion.unstarted, completion) catch @panic("rejected completion read preserves output");
+            self.notifications += 1;
+        }
+
+        fn retire(context: *anyopaque, event: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            std.testing.expectEqual(self.task.id, event.task_id) catch @panic("exact transport task retires");
+            std.testing.expectEqual(@as(u64, 77), event.capability_ids[0]) catch @panic("attachment survives through task callback");
+            self.held();
+        }
+
+        pub fn retireAddressSpace(self: *@This(), event: AddressSpaceRetirementEvent) void {
+            std.testing.expectEqual(self.task.address_space_id, event.address_space_id) catch @panic("exact transport address space retires");
+            self.held();
+        }
+
+        fn rejected(runtime: *Runtime, ticket: ExecutionTicket, expected: anyerror) !void {
+            const before = try std.testing.allocator.dupe(u8, std.mem.asBytes(runtime));
+            defer std.testing.allocator.free(before);
+            const channels_before = dispatch_transport.global;
+            try std.testing.expectError(expected, runtime.collectExecution(ticket));
+            try std.testing.expectEqualSlices(u8, before, std.mem.asBytes(runtime));
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&channels_before), std.mem.asBytes(&dispatch_transport.global));
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_pool = dispatch_transport.global;
+    defer {
+        dispatch_transport.global = previous_pool;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    cpu_identity.setIndexForTest(0);
+    dispatch_transport.global = .{};
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.initializeAllocated();
+    defer runtime.reset();
+    var foreign: dispatch_ownership.Coordinator = .{};
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const cpu: u8 = @intCast(index);
+        const task = try createTaskIdTestTask(runtime, index + 1);
+        try runtime.grantCapability(task.id, 77);
+        const ticket = try runtime.reserveExecution(task, cpu);
+        try runtime.execution.bindPrepared(ticket, index + 1, (index + 1) * 4096);
+        var key: dispatch_transport.Key = undefined;
+        try dispatch_transport.global.publishInto(.{ .ticket = ticket, .trap_stack_top = 0x8000_0000 + index * 0x10000 }, &key);
+        try Observer.rejected(runtime, ticket, error.Busy);
+        var forged = ticket;
+        forged.issuer = &foreign;
+        try Observer.rejected(runtime, forged, error.WrongCoordinator);
+
+        cpu_identity.setIndexForTest(cpu);
+        var claimed: dispatch_transport.ClaimedCommand = undefined;
+        try dispatch_transport.global.claimKeyInto(key, &claimed);
+        var bound: dispatch_ownership.BoundIdentity = undefined;
+        try runtime.execution.startPreparedInto(claimed.command.ticket, &bound);
+        cpu_identity.setIndexForTest(0);
+        var observer = Observer{ .runtime = runtime, .task = task, .ticket = ticket, .key = key };
+        const task_sink = TaskRetirementSink{ .context = &observer, .retire = Observer.retire };
+        const address_sink = AddressSpaceRetirementSink.init(Observer, &observer);
+        try std.testing.expect(runtime.bindTaskRetirementSink(task_sink));
+        try std.testing.expect(runtime.bindAddressSpaceRetirementSink(address_sink));
+        try std.testing.expect(runtime.terminateResolvedTask(task, 29));
+        cpu_identity.setIndexForTest(cpu);
+        try runtime.execution.ackPreparedReturn(ticket, .{ .outcome = .yielded, .ui_revision = index + 100 });
+        cpu_identity.setIndexForTest(0);
+        var record: dispatch_ownership.ReturnRecord = undefined;
+        try runtime.execution.consumePreparedReturnInto(ticket, &record);
+        try std.testing.expectEqual(@as(u64, index + 100), record.ui_revision);
+        // The owner ACK and consumed receipt do not imply that its durable
+        // holder has stopped using the prepared source or command shell.
+        try Observer.rejected(runtime, ticket, error.Busy);
+        try std.testing.expectEqual(@as(usize, 0), observer.notifications);
+        try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id) != null);
+        try std.testing.expectEqual(@as(u16, 1), task.capability_count);
+        if (cpu != 0) {
+            cpu_identity.setIndexForTest(cpu);
+            try Observer.rejected(runtime, ticket, error.WrongCpu);
+            cpu_identity.setIndexForTest(0);
+        }
+        cpu_identity.setIndexForTest(cpu);
+        try dispatch_transport.global.complete(key, .owner_returned);
+        cpu_identity.setIndexForTest(0);
+        try runtime.collectExecution(ticket);
+        try std.testing.expectEqual(@as(usize, 2), observer.notifications);
+        try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+        try std.testing.expectEqual(@as(u16, 0), task.capability_count);
+        try std.testing.expect(runtime.findAddressSpaceConst(task.address_space_id) == null);
+        try std.testing.expect(!dispatch_transport.global.hasOutstandingForIssuer(&runtime.execution));
+        try runtime.requireExecutionQuiescent();
+        try Observer.rejected(runtime, ticket, error.StaleTicket);
+        try std.testing.expect(runtime.unbindTaskRetirementSink(task_sink));
+        try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(address_sink));
+    }
+}
+
+test "execution transport collection aborts failed receipt admission and preserves unrelated synchronous leases" {
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_pool = dispatch_transport.global;
+    defer {
+        dispatch_transport.global = previous_pool;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    cpu_identity.setIndexForTest(0);
+    dispatch_transport.global = .{};
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.initializeAllocated();
+    defer runtime.reset();
+    const unrelated = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(unrelated);
+    unrelated.initializeAllocated();
+    defer unrelated.reset();
+    const task = try createTaskIdTestTask(runtime, 1);
+    const ticket = try runtime.reserveExecution(task, 1);
+    try runtime.execution.bindPrepared(ticket, 1, 4096);
+    var key: dispatch_transport.Key = undefined;
+    try dispatch_transport.global.publishInto(.{ .ticket = ticket, .trap_stack_top = 0x8000_0000 }, &key);
+
+    // A channel with the same CPU/epoch and another issuer does not change
+    // the existing synchronous collection semantics of an unrelated Runtime.
+    const other_task = try createTaskIdTestTask(unrelated, 2);
+    const other_ticket = try unrelated.reserveExecution(other_task, 1);
+    try std.testing.expectEqual(ticket.cpu, other_ticket.cpu);
+    try std.testing.expectEqual(ticket.epoch, other_ticket.epoch);
+    try unrelated.cancelUnstartedExecution(other_ticket);
+    const channels_before = dispatch_transport.global;
+    try unrelated.collectExecution(other_ticket);
+    try unrelated.requireExecutionQuiescent();
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&channels_before), std.mem.asBytes(&dispatch_transport.global));
+
+    try dispatch_transport.global.withdraw(key);
+    try runtime.cancelUnstartedExecution(ticket);
+    const runtime_before = try std.testing.allocator.dupe(u8, std.mem.asBytes(runtime));
+    defer std.testing.allocator.free(runtime_before);
+    const completed_before = dispatch_transport.global;
+    // Prepared cancellation still needs its canonical receipt consumed. Failed
+    // Coordinator admission must restore the exact completed channel kind.
+    try std.testing.expectError(error.WrongPhase, runtime.collectExecution(ticket));
+    try std.testing.expectEqualSlices(u8, runtime_before, std.mem.asBytes(runtime));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&completed_before), std.mem.asBytes(&dispatch_transport.global));
+    var completion: dispatch_transport.Completion = .owner_returned;
+    try dispatch_transport.global.completionInto(key, &completion);
+    try std.testing.expectEqual(dispatch_transport.Completion.unstarted, completion);
+    var record: dispatch_ownership.ReturnRecord = undefined;
+    try runtime.execution.consumePreparedReturnInto(ticket, &record);
+    try std.testing.expectEqualDeep(dispatch_ownership.ReturnRecord{}, record);
+    try runtime.collectExecution(ticket);
+    try runtime.requireExecutionQuiescent();
+    try std.testing.expectError(error.StaleKey, dispatch_transport.global.completionInto(key, &completion));
+}
+
+test "execution transport retained shells preserve snapshot resources indexes and sink owners" {
+    const Observer = struct {
+        task_notifications: usize = 0,
+        address_notifications: usize = 0,
+        stop_notifications: usize = 0,
+
+        fn retire(context: *anyopaque, _: TaskRetirement) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.task_notifications += 1;
+        }
+        pub fn retireAddressSpace(self: *@This(), _: AddressSpaceRetirementEvent) void {
+            self.address_notifications += 1;
+        }
+        fn stop(context: *anyopaque, _: ExecutionTicket) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.stop_notifications += 1;
+        }
+        fn rejected(self: *@This(), runtime: *Runtime, snapshot: *const Snapshot) !void {
+            const before = try std.testing.allocator.dupe(u8, std.mem.asBytes(runtime));
+            defer std.testing.allocator.free(before);
+            const channels_before = dispatch_transport.global;
+            const observer_before = self.*;
+            try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.restoreFromSnapshot(snapshot));
+            try std.testing.expectError(error.TaskRuntimeBorrowed, runtime.rebuildIndexes());
+            try std.testing.expect(!runtime.unbindTaskRetirementSink(.{ .context = self, .retire = retire }));
+            try std.testing.expect(!runtime.unbindAddressSpaceRetirementSink(AddressSpaceRetirementSink.init(@This(), self)));
+            try std.testing.expect(!runtime.unbindExecutionStopSink(.{ .context = self, .notify = stop }));
+            try std.testing.expectEqualSlices(u8, before, std.mem.asBytes(runtime));
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&channels_before), std.mem.asBytes(&dispatch_transport.global));
+            try std.testing.expectEqualDeep(observer_before, self.*);
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_pool = dispatch_transport.global;
+    defer {
+        dispatch_transport.global = previous_pool;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    cpu_identity.setIndexForTest(0);
+    dispatch_transport.global = .{};
+    const runtime = try std.testing.allocator.create(Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.initializeAllocated();
+    defer runtime.reset();
+    const snapshot = try std.testing.allocator.create(Snapshot);
+    defer std.testing.allocator.destroy(snapshot);
+    snapshot.* = Runtime.initSnapshot();
+    const task = try createTaskIdTestTask(runtime, 1);
+    try runtime.grantCapability(task.id, 77);
+    var observer: Observer = .{};
+    const task_sink = TaskRetirementSink{ .context = &observer, .retire = Observer.retire };
+    const address_sink = AddressSpaceRetirementSink.init(Observer, &observer);
+    const stop_sink = ExecutionStopSink{ .context = &observer, .notify = Observer.stop };
+    try std.testing.expect(runtime.bindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.bindAddressSpaceRetirementSink(address_sink));
+    try std.testing.expect(runtime.bindExecutionStopSink(stop_sink));
+
+    // Exercise the raw Coordinator boundary without a retained TaskBorrow:
+    // reset/restore must also reject the independently retained static shell.
+    const ticket = try runtime.execution.prepare(1, .{
+        .task_handle = runtime.taskHandleForResolved(task).value,
+        .task_id = task.id,
+        .process_generation = task.process_generation,
+        .address_space_id = task.address_space_id,
+    });
+    try runtime.execution.bindPrepared(ticket, 1, 4096);
+    var key: dispatch_transport.Key = undefined;
+    try dispatch_transport.global.publishInto(.{ .ticket = ticket, .trap_stack_top = 0x8000_0000 }, &key);
+    cpu_identity.setIndexForTest(1);
+    var claimed: dispatch_transport.ClaimedCommand = undefined;
+    try dispatch_transport.global.claimKeyInto(key, &claimed);
+    cpu_identity.setIndexForTest(0);
+    try runtime.execution.cancelUnstarted(ticket);
+    var record: dispatch_ownership.ReturnRecord = undefined;
+    try runtime.execution.consumePreparedReturnInto(ticket, &record);
+    _ = try runtime.execution.beginCollect(ticket);
+    try runtime.execution.finishCollect(ticket);
+    try std.testing.expect(!runtime.execution.hasLeases() and !runtime.hasTaskBorrows());
+    try observer.rejected(runtime, snapshot);
+
+    cpu_identity.setIndexForTest(1);
+    try dispatch_transport.global.complete(key, .unstarted);
+    cpu_identity.setIndexForTest(0);
+    try observer.rejected(runtime, snapshot);
+    var guard: dispatch_transport.Key = undefined;
+    try std.testing.expect(try dispatch_transport.global.beginCollectionInto(ticket, &guard));
+    try observer.rejected(runtime, snapshot);
+    try dispatch_transport.global.finishCollection(guard);
+
+    // The same destructive operations now succeed, proving the guard does not
+    // merely disable snapshot restoration, index rebuilding or exact unbind.
+    try runtime.rebuildIndexes();
+    try runtime.restoreFromSnapshot(snapshot);
+    try std.testing.expectEqual(@as(usize, 1), observer.task_notifications);
+    try std.testing.expectEqual(@as(usize, 1), observer.address_notifications);
+    try std.testing.expectEqual(@as(usize, 0), observer.stop_notifications);
+    try std.testing.expectEqual(@as(usize, 0), runtime.taskCount());
+    try std.testing.expect(runtime.unbindTaskRetirementSink(task_sink));
+    try std.testing.expect(runtime.unbindAddressSpaceRetirementSink(address_sink));
+    try std.testing.expect(runtime.unbindExecutionStopSink(stop_sink));
 }
 
 test "task reclamation preserves session service suspended and live records" {

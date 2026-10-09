@@ -177,15 +177,16 @@ fn expectRootKernelCallerDenied(
     tick: u64,
 ) !void {
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
-    const request = component_port.EndpointCreateRequest{
+    const request = abi.EndpointCreateWireRequest{
         .header = component_port.makeHeader(.endpoint_create, 0),
         .authority_capability_id = endpoint_capability_id,
         .owner_task_id = owner_task_id,
-        .label = "kernel.data-plane.export",
-        .flags = .{
+        .label_address = @intFromPtr("kernel.data-plane.export".ptr),
+        .label_bytes = "kernel.data-plane.export".len,
+        .flags = @as(u16, @bitCast(endpoint.EndpointFlags{
             .local_only = true,
             .service_port = true,
-        },
+        })),
     };
     const result = syscall_surface.dispatch(
         kernel_port,

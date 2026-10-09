@@ -16,6 +16,163 @@ const image_bytes = storage_volume.image_bytes;
 const saveToImage = storage_volume.saveToImage;
 const loadFromImage = storage_volume.loadFromImage;
 const DELTA_PAYLOAD_BUFFER_BYTES: usize = 32;
+const root_fixed_checksum_offset = volume_layout.root_magic.len + 2 + 8 + 4 + 4 + 8 * 4 + 2 + 2 + 8 + 2;
+
+fn rootChecksumOffset(root: volume_root_slot.RootState) usize {
+    return root_fixed_checksum_offset + @as(usize, root.workspace_summary_count) * (8 + 4 + 8);
+}
+
+// The prior root format uses the same framing but FNV checksums for both the
+// root and its log records. Build a real prior-format fixture, not just an
+// invalid current root with a changed version field.
+fn writePriorRoot(image: []u8, sector_index: u32, root: volume_root_slot.RootState) !void {
+    try volume_root_slot.writeImageRoot(image, sector_index, root);
+    const sector = image[@as(usize, sector_index) * volume_layout.sector_size ..][0..volume_layout.sector_size];
+    std.mem.writeInt(u16, sector[volume_layout.root_magic.len..][0..2], 5, .little);
+    const checksum_offset = rootChecksumOffset(root);
+    const fnv = @import("../core/util.zig").fnv1a64;
+    std.mem.writeInt(u64, sector[checksum_offset..][0..8], fnv(sector[0..checksum_offset]), .little);
+
+    const log = image[volume_layout.data_start_byte + root.data_offset ..][0..root.log_bytes];
+    var offset: usize = 0;
+    while (offset < log.len) {
+        const length = std.mem.readInt(u32, log[offset + volume_layout.log_record_payload_len_offset ..][0..4], .little);
+        const payload = log[offset + volume_log.recordHeaderLen() ..][0..length];
+        std.mem.writeInt(u64, log[offset + volume_layout.log_record_checksum_offset ..][0..8], fnv(payload), .little);
+        offset += volume_log.recordHeaderLen() + length;
+    }
+    try std.testing.expectEqual(log.len, offset);
+}
+
+test "prior volume roots are rejected before changing live storage" {
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+    defer store.reset();
+    const directory = try allocator.create(workspace.Directory);
+    defer allocator.destroy(directory);
+    directory.* = workspace.Directory.init();
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.* = Volume.init();
+    const image = try allocator.alloc(u8, image_bytes);
+    defer allocator.free(image);
+    @memset(image, 0);
+
+    const address = object_store.computeChunkAddress("retain-live-data");
+    _ = try store.putChunk(address, "retain-live-data");
+    const revision = store.dirty_revision;
+    try volume_root_slot.writeImageRoot(image, 0, .{ .generation = 7, .log_record_count = 1 });
+    std.mem.writeInt(u16, image[volume_layout.root_magic.len..][0..2], 5, .little);
+    const before = try allocator.dupe(u8, image);
+    defer allocator.free(before);
+
+    try std.testing.expectError(error.CorruptImage, volume.loadFromImage(image, store, directory));
+    try std.testing.expectEqualSlices(u8, "retain-live-data", store.chunk(address).?.chunkSlice());
+    try std.testing.expectEqual(revision, store.dirty_revision);
+    try std.testing.expectEqualSlices(u8, before, image);
+}
+
+fn expectPriorRootSaveRejected(backend: bool, valid_peer: bool, prior_sector: u32) !void {
+    var fixture = try SuspendedVolumeFixture.init();
+    defer fixture.deinit();
+    WriteBackBackend.attach(fixture.volume, fixture.visible, fixture.durable);
+    _ = try fixture.version("previous-format disk data");
+    _ = try fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory);
+    var prior = (try volume_root_slot.findLatestImageRoot(fixture.visible)).?.root;
+    if (valid_peer) {
+        var current = prior;
+        current.generation = 2;
+        try volume_root_slot.writeImageRoot(fixture.visible, 1 - prior_sector, current);
+        // Keep the supported peer's XXH64 log separate from the prior FNV log.
+        prior.data_offset = volume_layout.alternate_data_region_offset;
+        @memcpy(fixture.visible[volume_layout.data_start_byte + prior.data_offset ..][0..prior.log_bytes], fixture.visible[volume_layout.data_start_byte..][0..prior.log_bytes]);
+    } else {
+        @memset(fixture.visible[@as(usize, 1 - prior_sector) * volume_layout.sector_size ..][0..volume_layout.sector_size], 0);
+    }
+    try writePriorRoot(fixture.visible, prior_sector, prior);
+    @memcpy(fixture.durable, fixture.visible);
+    const before = try std.testing.allocator.dupe(u8, fixture.visible);
+    defer std.testing.allocator.free(before);
+    if (valid_peer) {
+        // The supported peer and its separate log are fully loadable.
+        try std.testing.expectEqual(@as(u64, 2), try fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory));
+    }
+    const live = try fixture.version("live draft after unsupported load");
+    const revision = fixture.store.dirtyRevision();
+    const workspace_revision = fixture.directory.dirtyRevision();
+    WriteBackBackend.beginAttempt(0);
+
+    if (!valid_peer) {
+        if (backend) {
+            try std.testing.expect(!fixture.volume.loadFromVolume(fixture.store, fixture.directory));
+        } else {
+            try std.testing.expectError(error.CorruptImage, fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory));
+        }
+    } else {
+        // A current root can be parsed; its presence never authorizes replacing
+        // an unsupported peer, regardless of which sector is examined first.
+        try std.testing.expectEqual(@as(u64, 2), (try volume_root_slot.readImageRoot(fixture.visible, 1 - prior_sector)).root.generation);
+    }
+    if (backend) {
+        try std.testing.expectError(error.UnsupportedVersion, fixture.volume.saveToVolume(fixture.store, fixture.directory));
+    } else {
+        try std.testing.expectError(error.UnsupportedVersion, fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory));
+    }
+    try std.testing.expectEqualSlices(u8, before, fixture.visible);
+    try std.testing.expectEqualSlices(u8, before, fixture.durable);
+    try std.testing.expectEqual(@as(usize, 0), WriteBackBackend.event_count);
+    try std.testing.expectEqual(@as(usize, 0), WriteBackBackend.written_bytes);
+    try std.testing.expectEqual(revision, fixture.store.dirtyRevision());
+    try std.testing.expectEqual(workspace_revision, fixture.directory.dirtyRevision());
+    try std.testing.expectEqual(live.version_id, fixture.store.latestVersion(0xB900).?.id);
+    try std.testing.expectEqual(live.version_id, (try fixture.directory.resolve(fixture.workspace_id, "documents/paused.md")).version_id);
+    try std.testing.expect(!fixture.volume.operationBusy());
+}
+
+test "storage format image save preserves prior root and log after unsupported load" {
+    for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(false, false, @intCast(sector));
+}
+
+test "storage format backend save preserves prior root and log after unsupported load" {
+    for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(true, false, @intCast(sector));
+}
+
+test "storage format saves reject unsupported roots even with a valid peer in either sector" {
+    for ([_]bool{ false, true }) |backend| {
+        for (0..volume_layout.root_sector_count) |sector| try expectPriorRootSaveRejected(backend, true, @intCast(sector));
+    }
+}
+
+test "storage format saves recover malformed current roots through image and backend compaction" {
+    for ([_]bool{ false, true }) |backend| {
+        var fixture = try SuspendedVolumeFixture.init();
+        defer fixture.deinit();
+        WriteBackBackend.attach(fixture.volume, fixture.visible, fixture.durable);
+        _ = try fixture.version("malformed-root disk data");
+        _ = try fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory);
+        const root = (try volume_root_slot.findLatestImageRoot(fixture.visible)).?;
+        fixture.visible[@as(usize, root.sector_index) * volume_layout.sector_size + rootChecksumOffset(root.root)] ^= 1;
+        @memcpy(fixture.durable, fixture.visible);
+        const live = try fixture.version("recovered live draft");
+        const saved = if (backend)
+            try fixture.volume.saveToVolume(fixture.store, fixture.directory)
+        else
+            try fixture.volume.saveToImage(fixture.visible, fixture.store, fixture.directory);
+        try std.testing.expect(saved.snapshot_current);
+        fixture.store.reset();
+        fixture.directory.reset();
+        if (backend) {
+            try std.testing.expect(fixture.volume.loadFromVolume(fixture.store, fixture.directory));
+        } else {
+            _ = try fixture.volume.loadFromImage(fixture.visible, fixture.store, fixture.directory);
+        }
+        try std.testing.expectEqual(live.version_id, fixture.store.latestVersion(0xB900).?.id);
+        var bytes: [64]u8 = undefined;
+        try std.testing.expectEqualSlices(u8, "recovered live draft", try fixture.store.versionPayloadInto(fixture.store.latestVersion(0xB900).?, &bytes));
+    }
+}
 
 // Device callbacks retain the actual Volume scratch borrow while the worker
 // suspends. The main test thread can then exercise another storage caller.

@@ -262,7 +262,10 @@ pub fn kernelRemainsTypedAndNativeOnly() !void {
     try std.testing.expect(abi.opcode(.task_create) >= 0x100);
     try std.testing.expect(abi.policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(abi.reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 19), abi.ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 23), abi.ABI_VERSION);
+    try std.testing.expectEqual(@as(usize, 23), @typeInfo(abi.NativeOperation).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(u16, 0x116), abi.opcode(.surface_present));
+    try std.testing.expect(std.enums.fromInt(abi.NativeOperation, 0x117) == null);
     const storage_interface_id = typed_component_abi.interfaceIdForService(.storage_object);
     try registry.register(55, 101, 201, storage_interface_id, service_registry.REQUIRED_BINDING_FLAGS);
     const connection = try registry.connect(storage_interface_id);
@@ -394,7 +397,7 @@ fn invariantNoRightsEscalationThroughDeriveOrPass() !void {
                 .rights = rights,
                 .scope = parent.scope,
                 .lease = .{ .issued_at_ticks = 11, .expires_at_ticks = 90, .renewable = false },
-            });
+            }, 11);
             try std.testing.expect(parent.rights.containsAll(derived.rights));
         } else {
             try std.testing.expectError(error.RightsEscalation, table.derive(.{
@@ -403,7 +406,7 @@ fn invariantNoRightsEscalationThroughDeriveOrPass() !void {
                 .rights = rights,
                 .scope = parent.scope,
                 .lease = .{ .issued_at_ticks = 11, .expires_at_ticks = 90, .renewable = false },
-            }));
+            }, 11));
         }
 
         const passed = try table.pass(.{
@@ -445,7 +448,7 @@ fn invariantRevocationAlwaysWins() !void {
             .rights = capability.CapabilityRights.single(.capability_query).retarget(target.kind),
             .scope = parent.scope,
             .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 900, .renewable = false },
-        });
+        }, 2);
         const passed = try table.pass(.{
             .capability_id = parent.id,
             .new_holder = spec_support.app(50 + index),
@@ -483,7 +486,7 @@ fn invariantExpiredLeasesFailEverywhere() !void {
         .rights = .{ .service = .{ .capability_query = true } },
         .scope = expiring.scope,
         .lease = .{ .issued_at_ticks = 21, .expires_at_ticks = 21, .renewable = false },
-    }));
+    }, 21));
     try std.testing.expectError(error.CapabilityRevoked, table.pass(.{
         .capability_id = expiring.id,
         .new_holder = spec_support.app(72),
@@ -508,7 +511,7 @@ fn invariantTaskScopedCapabilitiesCannotCrossTaskBoundaries() !void {
         .rights = .{ .endpoint = .{ .endpoint_send = true } },
         .scope = .{ .task_id = 82, .local_only = true },
         .lease = .{ .issued_at_ticks = 2, .expires_at_ticks = 90, .renewable = false },
-    }));
+    }, 2));
     try std.testing.expectError(error.ScopeEscalation, table.pass(.{
         .capability_id = parent.id,
         .new_holder = spec_support.app(82),
@@ -678,7 +681,7 @@ pub fn kernelMediatedLaunchesCarryUserspaceProvenance() !void {
                 .renewable = false,
             },
         },
-    });
+    }, 2);
 
     const service_endpoint = try port.endpointCreate(.{
         .header = component_port.makeHeader(.endpoint_create, launched.task_id),

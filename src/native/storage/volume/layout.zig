@@ -22,7 +22,8 @@ pub const data_region_bytes: usize = data_capacity_bytes / data_region_count;
 pub const alternate_data_region_offset: u32 = @intCast(data_region_bytes);
 
 pub const root_magic = "ZG4LOG1";
-pub const root_format_version: u16 = 5;
+// Version 6 fixes seed-zero XXH64 for root and log corruption checksums.
+pub const root_format_version: u16 = 6;
 pub const USES_CHECKPOINT_ONLY_COLD_LOAD = true;
 pub const COMPACTS_IN_BACKGROUND = true;
 pub const max_replay_log_records: u16 = 512;

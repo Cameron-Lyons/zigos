@@ -30,6 +30,14 @@ pub fn run() noreturn {
         timer.synchronize();
         const now_ticks = timer.getTicks();
         const pending = event_wake.take();
+        if (pending.scheduler) {
+            // Only the BSP drains copied requests. Keep mapping admission,
+            // fixed input copy and invocation within one serialized interval.
+            const restore_interrupts = x86.interruptsEnabled();
+            x86.cli();
+            _ = session_manager.servicePendingSyscalls(now_ticks);
+            if (restore_interrupts) x86.sti();
+        }
         // Expiry revokes input/identity authority before a userspace task can
         // consume another event, including wakes without keyboard activity.
         session_manager.system().serviceAuthenticationClock(now_ticks);

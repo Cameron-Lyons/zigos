@@ -485,17 +485,20 @@ pub fn tpmDiscovery() ?tpm2_crb.Discovery {
 
 var facts = ProbeFacts{};
 var dmar_table_physical: u64 = 0;
-var captured_madt_table: []const u8 = &.{};
+var madt_table_physical: u64 = 0;
 var printed = PrintedMarkers{};
 
+/// The borrowed entry window is valid until the next ACPI entry mapping.
+/// The synchronous topology consumer must finish before another table probe.
 pub fn madtTable() []const u8 {
-    return captured_madt_table;
+    return validatedMadtMapping(mappedPhysicalTableBytes);
 }
 
 pub fn resetForTest() void {
     tpm_discovery = null;
     facts = .{};
-    captured_madt_table = &.{};
+    madt_table_physical = 0;
+    dmar_table_physical = 0;
     printed = .{};
 }
 
@@ -519,6 +522,8 @@ pub fn vtdSummary() ?dmar.Summary {
 
 /// Firmware support for DMA isolation is useful on virtual machines as well.
 /// Returning it does not assert the physical target's hardware proof.
+/// The borrowed entry window is valid until the next ACPI entry mapping;
+/// callers must finish parsing it before another firmware-table probe.
 pub fn dmaIsolationTable() ?[]const u8 {
     if (!facts.acpi_dmar or dmar_table_physical == 0) return null;
     return mappedPhysicalTableBytes(dmar_table_physical, mmio_windows.acpi_entry.base);
@@ -582,6 +587,7 @@ pub fn countersReady(probe: *const ProbeFacts) bool {
 }
 
 pub fn captureEarlyBootEvidence() void {
+    facts.real_target_sku = false;
     if (handoff.capturedInfo()) |info| {
         facts.multiboot_handoff = true;
         if (handoff.capturedMemoryMapSummary(info)) |summary| {
@@ -593,19 +599,19 @@ pub fn captureEarlyBootEvidence() void {
             }
         }
         _ = handoff.framebufferInfo(info) catch {};
+        // Firmware system/configuration tables may occupy boot-services pages.
+        // Snapshot the validated identity before the frame allocator reclaims
+        // them; later platform probes consume only this kernel-owned result.
+        if (handoff.efi64SystemTableAddress(info)) |address| {
+            smbios.captureTargetSku(address);
+            facts.real_target_sku = smbios.efiSystemTableContainsTargetSku(address, smbios.NUC15CRSU7_SKU);
+        }
     }
 
     printNewMarkers();
 }
 
 pub fn capturePlatformFirmwareEvidence() void {
-    facts.real_target_sku = if (handoff.capturedInfo()) |info|
-        if (handoff.efi64SystemTableAddress(info)) |address|
-            smbios.efiSystemTableContainsTargetSku(address, smbios.NUC15CRSU7_SKU)
-        else
-            false
-    else
-        false;
     captureAcpiEvidence();
     printNewMarkers();
 }
@@ -765,6 +771,8 @@ pub fn recordGridCarbonIntensitySample(sample: GridCarbonIntensitySample) void {
 
 fn captureAcpiEvidence() void {
     dmar_table_physical = 0;
+    madt_table_physical = 0;
+    facts.acpi_madt = false;
     tpm_discovery = null;
     var tpm_table_seen = false;
     const rsdp = capturedRsdp() orelse return;
@@ -772,9 +780,11 @@ fn captureAcpiEvidence() void {
     const count = acpi.xsdtEntryCount(xsdt) catch return;
     facts.acpi_xsdt = true;
     var found_madt = false;
+    var madt_table_seen = false;
     var found_fadt = false;
     var found_mcfg: ?mcfg.Allocation = null;
-    var found_dmar: ?dmar.Summary = null;
+    var found_dmar: dmar.Summary = undefined;
+    var found_dmar_valid = false;
     var dmar_table_seen = false;
     var index: u32 = 0;
     while (index < count) : (index += 1) {
@@ -789,13 +799,19 @@ fn captureAcpiEvidence() void {
             tpm_table_seen = true;
             continue;
         }
-        const header = acpi.parseSdtHeader(table) catch continue;
-        if (std.mem.eql(u8, header.signature[0..], apic.MADT_SIGNATURE)) {
-            if (apic.parseMadt(table)) |summary| {
+        if (std.mem.eql(u8, table[0..4], apic.MADT_SIGNATURE)) {
+            if (madt_table_seen) {
+                found_madt = false;
+                madt_table_physical = 0;
+            } else if (apic.parseMadt(table)) |summary| {
                 found_madt = summary.local_apic_address != 0 and summary.enabled_processor_count > 0;
-                if (found_madt) captured_madt_table = table;
+                if (found_madt) madt_table_physical = table_address;
             } else |_| {}
-        } else if (std.mem.eql(u8, header.signature[0..], fadt.FADT_SIGNATURE)) {
+            madt_table_seen = true;
+            continue;
+        }
+        const header = acpi.parseSdtHeader(table) catch continue;
+        if (std.mem.eql(u8, header.signature[0..], fadt.FADT_SIGNATURE)) {
             const firmware = fadt.parseFadt(table) catch continue;
             facts.fadt_firmware = firmware;
             found_fadt = true;
@@ -803,17 +819,18 @@ fn captureAcpiEvidence() void {
             found_mcfg = mcfg.segmentZeroAllocation(table) catch continue;
         } else if (std.mem.eql(u8, header.signature[0..], dmar.DMAR_SIGNATURE)) {
             if (dmar_table_seen) {
-                found_dmar = null;
+                found_dmar_valid = false;
                 dmar_table_physical = 0;
                 continue;
             }
             dmar_table_seen = true;
-            found_dmar = dmar.parseDmar(table) catch |err| {
+            dmar.parseDmarInto(table, &found_dmar) catch |err| {
                 console.print("ZIGOS:DMAR:REJECTED ");
                 console.print(@errorName(err));
                 console.print("\n");
                 continue;
             };
+            found_dmar_valid = true;
             dmar_table_physical = table_address;
         }
     }
@@ -822,8 +839,8 @@ fn captureAcpiEvidence() void {
     facts.acpi_fadt = found_fadt;
     facts.acpi_mcfg = found_mcfg != null;
     facts.mcfg_allocation = found_mcfg;
-    facts.acpi_dmar = found_dmar != null;
-    facts.dmar_summary = found_dmar;
+    facts.acpi_dmar = found_dmar_valid;
+    facts.dmar_summary = if (found_dmar_valid) found_dmar else null;
 }
 
 fn acceptTelemetryGeneration(reader_generation: u32) bool {
@@ -861,7 +878,7 @@ fn mappedPhysicalTableBytes(physical_address: u64, virtual_base: usize) ?[]const
     const page_offset = address & PAGE_MASK;
     const header_span = std.math.add(usize, page_offset, acpi.SDT_HEADER_LENGTH) catch return null;
     const header_pages = (header_span + PAGE_MASK) / PAGE_SIZE;
-    mapAcpiPages(physical_page, virtual_base, header_pages);
+    if (!mapAcpiPages(physical_page, virtual_base, header_pages)) return null;
 
     const table_virtual_address = virtual_base + page_offset;
     const header_bytes = @as([*]const u8, @ptrFromInt(table_virtual_address))[0..acpi.SDT_HEADER_LENGTH];
@@ -871,20 +888,75 @@ fn mappedPhysicalTableBytes(physical_address: u64, virtual_base: usize) ?[]const
     if (last_physical_address > MAX_X86_PHYSICAL_ADDRESS) return null;
     const table_span = std.math.add(usize, page_offset, length) catch return null;
     const page_count = std.math.add(usize, table_span, PAGE_MASK) catch return null;
-    mapAcpiPages(physical_page, virtual_base, page_count / PAGE_SIZE);
+    if (!mapAcpiPages(physical_page, virtual_base, page_count / PAGE_SIZE)) return null;
     return @as([*]const u8, @ptrFromInt(table_virtual_address))[0..length];
 }
 
-fn mapAcpiPages(physical_base: usize, virtual_base: usize, page_count: usize) void {
-    var page_index: usize = 0;
-    while (page_index < page_count) : (page_index += 1) {
-        const page_offset = page_index * PAGE_SIZE;
-        paging.mapKernelBorrowedPage(
-            virtual_base + page_offset,
-            physical_base + page_offset,
-            paging.PAGE_PRESENT | paging.PAGE_CACHE_DISABLE,
-        );
+fn mapAcpiPages(physical_base: usize, virtual_base: usize, page_count: usize) bool {
+    paging.mapKernelFirmwareRange(virtual_base, physical_base, page_count * PAGE_SIZE) catch return false;
+    return true;
+}
+
+inline fn validatedMadtMapping(comptime map_table: fn (u64, usize) ?[]const u8) []const u8 {
+    const result: ?[]const u8 = result: {
+        if (madt_table_physical == 0) break :result null;
+        const table = map_table(madt_table_physical, mmio_windows.acpi_entry.base) orelse break :result null;
+        const summary = apic.parseMadt(table) catch break :result null;
+        if (summary.local_apic_address == 0 or summary.enabled_processor_count == 0) break :result null;
+        break :result table;
+    };
+    if (result) |table| return table;
+    madt_table_physical = 0;
+    facts.acpi_madt = false;
+    return &.{};
+}
+
+test "retained MADT remaps firmware after scratch reuse and rejects changed backing" {
+    const endian = @import("../utils/endian.zig");
+    const checksum = @import("../utils/checksum.zig");
+    const Fixture = struct {
+        const physical: u64 = 0x200000;
+        var backing: [52]u8 = undefined;
+        var scratch: [52]u8 = undefined;
+        var mappings: usize = 0;
+
+        fn map(address: u64, virtual: usize) ?[]const u8 {
+            if (address != physical or virtual != mmio_windows.acpi_entry.base) return null;
+            @memcpy(&scratch, &backing);
+            mappings += 1;
+            return &scratch;
+        }
+    };
+    resetForTest();
+    defer resetForTest();
+    Fixture.backing = @splat(0);
+    Fixture.mappings = 0;
+    @memcpy(Fixture.backing[0..4], apic.MADT_SIGNATURE);
+    endian.writeU32Le(Fixture.backing[4..8], Fixture.backing.len);
+    Fixture.backing[8] = 5;
+    endian.writeU32Le(Fixture.backing[36..40], 0xfee00000);
+    Fixture.backing[44] = 0;
+    Fixture.backing[45] = 8;
+    Fixture.backing[47] = 1;
+    endian.writeU32Le(Fixture.backing[48..52], 1);
+    checksum.finishSum8Prefix(&Fixture.backing, 9, Fixture.backing.len);
+    madt_table_physical = Fixture.physical;
+    facts.acpi_madt = true;
+    _ = validatedMadtMapping(Fixture.map);
+
+    for ([_][]const u8{ "DMAR", "XSDT" }) |signature| {
+        @memcpy(Fixture.scratch[0..4], signature);
+        const table = validatedMadtMapping(Fixture.map);
+        try std.testing.expectEqualStrings(apic.MADT_SIGNATURE, table[0..4]);
+        try std.testing.expectEqual(@as(u32, 1), (try apic.parseMadt(table)).enabled_processor_count);
     }
+    try std.testing.expectEqual(@as(usize, 3), Fixture.mappings);
+    Fixture.backing[47] ^= 1;
+    try std.testing.expectEqual(@as(usize, 0), validatedMadtMapping(Fixture.map).len);
+    try std.testing.expect(!facts.acpi_madt);
+    try std.testing.expectEqual(@as(u64, 0), madt_table_physical);
+    _ = validatedMadtMapping(Fixture.map);
+    try std.testing.expectEqual(@as(usize, 4), Fixture.mappings);
 }
 
 fn printNewMarkers() void {
@@ -1229,14 +1301,15 @@ test "hardware proof records APIC timer only from verified interrupt proof" {
 }
 
 test "hardware proof records GOP framebuffer only from verified scanout proof" {
-    const info = try framebuffer.validate(.{
+    const info = framebuffer.Info{
         .physical_address = 0x8000_0000,
         .width = 64,
         .height = 16,
         .pixels_per_scan_line = 64,
         .format = .bgrx8888,
         .buffer_bytes = 64 * 16 * 4,
-    });
+    };
+    try framebuffer.validate(info);
     const expected_pixel: u32 = 0x00FF_00FF;
     var scanline = @as([64 * 4]u8, @splat(0));
     std.mem.writeInt(u32, scanline[0..4], expected_pixel, .little);

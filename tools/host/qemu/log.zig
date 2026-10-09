@@ -100,6 +100,25 @@ pub fn ordered(log: []const u8, group: []const []const u8) !void {
     }
 }
 
+/// Proofs must appear once as complete lines, in the required order. A prefix
+/// or suffix containing a known marker cannot stand in for executed evidence.
+pub fn exactOrdered(log: []const u8, group: []const []const u8) !void {
+    var remaining = log;
+    for (group) |marker| {
+        if (!exact(log, marker)) return error.MissingMarker;
+        if (countContaining(log, marker) != 1) return error.DuplicateMarker;
+        var lines = std.mem.splitScalar(u8, remaining, '\n');
+        var found = false;
+        while (lines.next()) |line| {
+            if (!std.mem.eql(u8, line, marker)) continue;
+            remaining = lines.rest();
+            found = true;
+            break;
+        }
+        if (!found) return error.MarkersOutOfOrder;
+    }
+}
+
 test "exact and prefix proof checks distinguish forged suffixes and duplicates" {
     const bytes = "PROOF:VERIFIED forged\nPROOF:VERIFIED\nPROOF:FAILED\n";
     try std.testing.expect(exact(bytes, "PROOF:VERIFIED"));
@@ -125,4 +144,15 @@ test "ordered proof rejects reversed or same-line evidence" {
     try ordered("START\nBEFORE\nAFTER\n", &.{ "START", "BEFORE", "AFTER" });
     try std.testing.expectError(error.MarkersOutOfOrder, ordered("AFTER\nBEFORE\n", &.{ "BEFORE", "AFTER" }));
     try std.testing.expectError(error.MarkersOutOfOrder, ordered("BEFORE AFTER\n", &.{ "BEFORE", "AFTER" }));
+}
+
+test "exact ordered proofs reject omitted, forged, repeated and reversed evidence" {
+    const group = &.{ "FIRST:PASS", "SECOND:PASS", "COMPLETE:PASS" };
+    try exactOrdered("firmware output\nFIRST:PASS\nSECOND:PASS\nCOMPLETE:PASS\n", group);
+    try std.testing.expectError(error.MissingMarker, exactOrdered("COMPLETE:PASS\n", group));
+    try std.testing.expectError(error.MissingMarker, exactOrdered("FIRST:PASS forged\nSECOND:PASS\nCOMPLETE:PASS\n", group));
+    try std.testing.expectError(error.MissingMarker, exactOrdered("prefix FIRST:PASS\nSECOND:PASS\nCOMPLETE:PASS\n", group));
+    try std.testing.expectError(error.DuplicateMarker, exactOrdered("FIRST:PASS\nFIRST:PASS\nSECOND:PASS\nCOMPLETE:PASS\n", group));
+    try std.testing.expectError(error.DuplicateMarker, exactOrdered("FIRST:PASS\nFIRST:PASS forged\nSECOND:PASS\nCOMPLETE:PASS\n", group));
+    try std.testing.expectError(error.MarkersOutOfOrder, exactOrdered("SECOND:PASS\nFIRST:PASS\nCOMPLETE:PASS\n", group));
 }

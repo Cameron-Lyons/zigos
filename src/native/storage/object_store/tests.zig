@@ -26,6 +26,88 @@ const computeChunkAddress = object_store.computeChunkAddress;
 const ids = object_store.ids;
 const signMetadata = object_store.signMetadata;
 
+test "object hash scratch preserves independent SHA answers and initialized live prefixes" {
+    // Independent Python hashlib answers encode each field with its canonical
+    // little-endian tag/length framing, including every odd-tree duplication.
+    const vectors = [_]struct { length: usize, root: []const u8, blob: []const u8 }{
+        .{ .length = 0, .root = "e027cbf4ad42d2ca20d0a0e1709052aa783bcabc3665558e6e26c7c7765ad3d6", .blob = "e8b18f92aa2338fb4f3d5719e986854f279c1e80250c2c2f0b09ef2b8e67efe1" },
+        .{ .length = 1, .root = "bcc7b5de1afce74ac4a5e53b3be0a8482f56405270a37463d2077541dc888c90", .blob = "7af5a2bdfd4547b34b8f7b2d0fbbb535142c63ea54653e915ecde83c178064b3" },
+        .{ .length = 63, .root = "f369d218606a65cac8bce291b31603b997785b36bdbe6019d98110eadba911e5", .blob = "761a23e9455782dde2e1603e88d666bb1de945fa4f1f9cee22de2204e096529d" },
+        .{ .length = 4096, .root = "65989c2e4e5e936700d09105abaed93ab043bb12ef587cfe3d77e626a3524b2b", .blob = "a23c798703cb5d19a51859b9aa31fc289a8153017834a9b2e6800751cf38da1e" },
+        .{ .length = 4097, .root = "44c07003890fd11dae59cbbdea027dbcda646d120b8bbd111f4c671706bf7e06", .blob = "194bd25599d073d9551ea26da5b1d0d3ccba4718eca94ae8b436fe0496f5d577" },
+        .{ .length = 12281, .root = "618166ed32cfec853726ba17d31b12ceae3374d95634b24b8b07da2e18fea2f3", .blob = "ef0f38ff0e38d5f19363e3b55eb1b8982e8aac71f1171f5cfed01c1b86caf028" },
+        .{ .length = 20480, .root = "3c9067d380eb4deb86d595e7719a02779989df02c7919e30413483bccc463575", .blob = "6bddd1019e8839a9fc35214623ec5af81679aa8fc202e3c059c09360480310e9" },
+        .{ .length = 28689, .root = "6125a099040e3ff7e7fc042abbced4030c9bd0b80b8d3c46f15105c4a3bbc194", .blob = "c49365ae3e0175d975f08c2cdf631711349eab0265e62c04e93c508e82c8dfcb" },
+        .{ .length = 57361, .root = "d8c3aa324c6cdcf55d6919faa45ab6f8626bcc111ecbe3b42590332ff305cf9c", .blob = "303e12f89d2698d66695020d7dfb4646a6d9f621f46a31e8ab5584f31e1684dc" },
+        .{ .length = 110592, .root = "63e3cb9bc71cefb7deddb736edb44f68c8fd077cd1185b45bc066eea4ad54717", .blob = "faa7f8bb1162bd34eacac3f07fab0c39774b365babebffe6bf8be56954d3692d" },
+        .{ .length = 114688, .root = "9d3882e0ad866d9fcb97844751e3f5e897add7aa89c6e8a08d2d9494514c008c", .blob = "940ea6edc4dfe5b0f5640de212a70589500729d46ae046f9567c7162fd5d99af" },
+    };
+    const TestStore = StoreWith(.{
+        .max_objects = 4,
+        .max_versions = 16,
+        .max_blobs = 64,
+        .max_chunks = 64,
+        .object_index_capacity = 8,
+        .version_index_capacity = 32,
+        .blob_index_capacity = 128,
+        .chunk_index_capacity = 128,
+    });
+    const store = try std.testing.allocator.create(TestStore);
+    defer std.testing.allocator.destroy(store);
+    store.* = TestStore.init();
+    defer store.reset();
+    var payload: [MAX_PAYLOAD_BYTES]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @truncate(index * 19 + index / MAX_CHUNK_BYTES);
+    for (vectors) |vector| {
+        var expected_root: object_store.BlobAddress = undefined;
+        var expected_blob: object_store.BlobAddress = undefined;
+        _ = try std.fmt.hexToBytes(&expected_root, vector.root);
+        _ = try std.fmt.hexToBytes(&expected_blob, vector.blob);
+        const bytes = payload[0..vector.length];
+        try std.testing.expectEqual(expected_blob, computeBlobAddress(bytes));
+        const inserted = try store.putLocallySignedVersion(.{
+            .preferred_object_id = ids.object(1),
+            .object_type = .blob,
+            .payload = bytes,
+            .signer = .{ .label = "hash-scratch", .seed = signing.seedFromByte(0x5A) },
+            .label = "scratch-prefix",
+            .content_type = "application/octet-stream",
+            .created_at_ticks = 1,
+        });
+        try std.testing.expectEqual(expected_blob, inserted.blob_address);
+        const version = store.version(inserted.version_id).?;
+        const blob = store.versionBlob(version).?;
+        try std.testing.expectEqual(@as(usize, version.blob_slot_index), try store.putBlob(expected_blob, bytes));
+        const count = object_store.chunkCountForPayloadLen(bytes.len);
+        try std.testing.expect(std.mem.allEqual(BlobChunkSlotIndex, blob.chunk_slot_indexes[count..], 0));
+
+        var refs: [MAX_BLOB_CHUNKS]ChunkRef = undefined;
+        @memset(std.mem.asBytes(&refs), 0xa5);
+        const live = try store.copyBlobChunkRefs(blob, &refs);
+        try std.testing.expectEqual(count, live.len);
+        try std.testing.expectEqual(expected_root, object_store.computeBlobMerkleRoot(live));
+        try std.testing.expectEqual(expected_blob, computeBlobManifestAddress(bytes.len, live));
+        try std.testing.expect(std.mem.allEqual(u8, std.mem.sliceAsBytes(refs[count..]), 0xa5));
+        // Complete verification consumes another initialized local prefix.
+        var cursor = try store.versionChunkCursor(version);
+        var copied: usize = 0;
+        while (try cursor.next()) |chunk| {
+            try std.testing.expectEqualSlices(u8, bytes[chunk.offset..][0..chunk.bytes.len], chunk.bytes);
+            copied += chunk.bytes.len;
+        }
+        try std.testing.expectEqual(bytes.len, copied);
+    }
+}
+
+test "object hashes reject oversized manifests before using bounded Merkle scratch" {
+    const zero_digest = @import("../../core/crypto_hash.zig").zero_digest;
+    const refs: [MAX_BLOB_CHUNKS + 1]ChunkRef = @splat(ChunkRef{});
+    try std.testing.expectEqual(zero_digest, object_store.computeBlobMerkleRoot(&refs));
+    try std.testing.expectEqual(zero_digest, computeBlobManifestAddress(MAX_PAYLOAD_BYTES, &refs));
+    try std.testing.expectEqual(zero_digest, computeBlobManifestAddress(MAX_PAYLOAD_BYTES + 1, refs[0..MAX_BLOB_CHUNKS]));
+    try std.testing.expectEqual(zero_digest, computeBlobManifestAddress(std.math.maxInt(usize), &.{}));
+}
+
 test "blob manifests store compact chunk slot edges" {
     try std.testing.expect(object_store.CAPACITY_SIZED_BLOB_CHUNK_SLOT_INDEXES);
     try std.testing.expectEqual(@sizeOf(std.math.IntFittingRange(0, object_store.MAX_CHUNKS - 1)), @sizeOf(BlobChunkSlotIndex));

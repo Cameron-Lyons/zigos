@@ -6,6 +6,7 @@ const uefi = std.os.uefi;
 const image = @import("image_info.zig");
 const tpm_info = @import("tpm_info.zig");
 const log = tpm_info.log;
+const cache_policy = @import("../arch/cache_policy.zig");
 const Version = extern struct { major: u8, minor: u8 };
 const Capability = extern struct {
     size: u8,
@@ -53,7 +54,7 @@ pub const Capture = struct {
 
 const final_guid align(8) = uefi.Guid{ .time_low = 0x1e2ed096, .time_mid = 0x30e2, .time_high_and_version = 0x4254, .clock_seq_high_and_reserved = 0xbd, .clock_seq_low = 0x89, .node = .{ 0x86, 0x3b, 0xbe, 0xf8, 0x23, 0x25 } };
 
-pub fn capture(boot: *uefi.tables.BootServices, system: *const uefi.tables.SystemTable, info: image.Info) !?Capture {
+pub fn capture(boot: *uefi.tables.BootServices, system: *const uefi.tables.SystemTable, info: image.Info, cache_view: cache_policy.ValidatedMtrrView, framebuffer_span: ?@import("paging_info.zig").Span) !?Capture {
     const protocol = try boot.locateProtocol(Protocol, null) orelse return null;
     var capability: Capability = std.mem.zeroes(Capability);
     capability.size = @sizeOf(Capability);
@@ -68,6 +69,12 @@ pub fn capture(boot: *uefi.tables.BootServices, system: *const uefi.tables.Syste
     if (protocol.active_banks(protocol, &active) != .success or active & 2 == 0) return error.UnsupportedTpmMeasurement;
     const pages = try boot.allocatePages(.{ .max_address = @ptrFromInt(image.IDENTITY_LIMIT) }, .loader_data, log.MAX_BYTES / 4096);
     errdefer boot.freePages(pages) catch {};
+    if (framebuffer_span) |device| {
+        const start = @intFromPtr(pages.ptr);
+        const end = try std.math.add(u64, start, log.MAX_BYTES);
+        if (start < device.end and device.start < end) return error.InvalidTpmEventLog;
+    }
+    try cache_view.requireWriteBack(@intFromPtr(pages.ptr), log.MAX_BYTES);
     const buffer: []u8 = @as([*]u8, @ptrCast(pages.ptr))[0..log.MAX_BYTES];
     const description = log.description(info);
     const event = log.event(info);

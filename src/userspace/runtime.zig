@@ -8,28 +8,6 @@ const document_editor = @import("document_editor.zig");
 
 pub const ServiceKind = mailbox.ServiceKind;
 
-const TimeQueryRequest = extern struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-};
-
-const WaitRequest = extern struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-};
-
-const ResourceQueryRequest = extern struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    task_id: u64,
-};
-
-const AccountingQueryRequest = extern struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    task_id: u64,
-};
-
 const EndpointFlags = packed struct(u16) {
     local_only: bool = false,
     service_port: bool = false,
@@ -37,69 +15,13 @@ const EndpointFlags = packed struct(u16) {
     _reserved: u13 = 0,
 };
 
-const EndpointCreateRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    owner_task_id: u64,
-    label: []const u8,
-    flags: EndpointFlags,
-};
-
-const EndpointConnectRequest = extern struct {
-    header: abi.RequestHeader,
-    endpoint_capability_id: u64,
-    peer_endpoint_capability_id: u64,
-    peer_endpoint_id: u64,
-};
-
-const EndpointSendRequest = struct {
-    header: abi.RequestHeader,
-    correlation_id: u64 = 0,
-    endpoint_capability_id: u64,
-    payload: []const u8,
-    reply_endpoint_id: u64 = 0,
-    attached_capability_id: ?u64 = null,
-    move_attached_capability: bool = false,
-};
-
-const EndpointRecvRequest = struct {
-    header: abi.RequestHeader,
-    endpoint_capability_id: u64,
-    receiver_task_id: u64,
-    payload_out: []u8,
-    attached_capability_out: *abi.CapabilityDescriptor,
-};
-
-const EndpointCloseRequest = extern struct {
-    header: abi.RequestHeader,
-    endpoint_capability_id: u64,
-};
-
 pub fn closeEndpoint(endpoint_capability_id: u64) abi.SyscallStatus {
-    var request = EndpointCloseRequest{
+    var request = abi.EndpointCloseWireRequest{
         .header = makeHeader(.endpoint_close, zigos_userspace_bootstrap.task_id),
         .endpoint_capability_id = endpoint_capability_id,
     };
     return trapCallNoResponse(&request);
 }
-
-const InputRecvRequest = extern struct {
-    header: abi.RequestHeader,
-    input_capability_id: u64,
-    receiver_task_id: u64,
-};
-
-const SurfacePresentRequest = struct {
-    header: abi.RequestHeader,
-    presentation_capability_id: u64,
-    presenter_task_id: u64,
-    surface_id: u64,
-    fence: u64,
-    buffer_object_id: u64,
-    buffer_offset: u32,
-    buffer_bytes: u32,
-    text: ?*const abi.SurfaceText = null,
-};
 
 const INPUT_EVENTS_PER_DISPATCH: usize = 8;
 
@@ -455,7 +377,7 @@ fn invalidSyscallPointerStatus() abi.SyscallStatus {
 
 fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = abi.TimeQueryResponse{ .now_ticks = 0 };
-    var request = TimeQueryRequest{
+    var request = abi.TimeQueryWireRequest{
         .header = makeHeader(.time_query, task_id),
         .authority_capability_id = authority_capability_id,
     };
@@ -464,21 +386,9 @@ fn queryTime(authority_capability_id: u64, task_id: u64, mask: *mailbox.Resource
     return true;
 }
 
-fn parkUntilEvent() void {
-    const authority = zigos_userspace_bootstrap.authority_capability_id;
-    const task_id = zigos_userspace_bootstrap.task_id;
-    if (authority == 0 or task_id == 0) return;
-    var response = std.mem.zeroes(abi.BoolResponse);
-    var request = WaitRequest{
-        .header = makeHeader(.wait, task_id),
-        .authority_capability_id = authority,
-    };
-    _ = trapCall(&request, &response);
-}
-
 fn queryResource(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = std.mem.zeroes(abi.ResourceDescriptor);
-    var request = ResourceQueryRequest{
+    var request = abi.ResourceQueryWireRequest{
         .header = makeHeader(.resource_query, task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
@@ -490,7 +400,7 @@ fn queryResource(authority_capability_id: u64, task_id: u64, mask: *mailbox.Reso
 
 fn queryAccounting(authority_capability_id: u64, task_id: u64, mask: *mailbox.ResourceMask) bool {
     var response = std.mem.zeroes(abi.AccountingDescriptor);
-    var request = AccountingQueryRequest{
+    var request = abi.AccountingQueryWireRequest{
         .header = makeHeader(.accounting_query, task_id),
         .authority_capability_id = authority_capability_id,
         .task_id = task_id,
@@ -507,13 +417,18 @@ fn endpointCreate(
     flags: EndpointFlags,
     failure_code: *u8,
 ) ?abi.EndpointCreateResponse {
+    const label_bytes = std.math.cast(u32, label.len) orelse {
+        failure_code.* = 0x80 | @as(u8, @truncate(@backingInt(abi.SyscallStatus.invalid_request_pointer)));
+        return null;
+    };
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
-    var request = EndpointCreateRequest{
+    var request = abi.EndpointCreateWireRequest{
         .header = makeHeader(.endpoint_create, task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = task_id,
-        .label = label,
-        .flags = flags,
+        .label_address = if (label.len == 0) 0 else @intFromPtr(label.ptr),
+        .label_bytes = label_bytes,
+        .flags = @bitCast(flags),
     };
     const result = freestanding_syscall.call(
         .endpoint_create,
@@ -538,7 +453,7 @@ fn endpointConnect(
     peer_endpoint_id: u64,
 ) ?abi.EndpointDescriptor {
     var response = std.mem.zeroes(abi.EndpointDescriptor);
-    var request = EndpointConnectRequest{
+    var request = abi.EndpointConnectWireRequest{
         .header = makeHeader(.endpoint_connect, zigos_userspace_bootstrap.task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
@@ -550,11 +465,13 @@ fn endpointConnect(
 }
 
 fn endpointSend(endpoint_capability_id: u64, payload: []const u8, reply_endpoint_id: u64, correlation_id: u64) bool {
-    var request = EndpointSendRequest{
+    if (payload.len > abi.ENDPOINT_INLINE_BYTES) return false;
+    var request = abi.EndpointSendWireRequest{
         .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
         .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
-        .payload = payload,
+        .payload_address = @intFromPtr(payload.ptr),
+        .payload_bytes = @intCast(payload.len),
         .reply_endpoint_id = reply_endpoint_id,
     };
     return trapCallNoResponse(&request) == .success;
@@ -563,12 +480,13 @@ fn endpointSend(endpoint_capability_id: u64, payload: []const u8, reply_endpoint
 fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResult {
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
-    var request = EndpointRecvRequest{
+    var request = abi.EndpointRecvWireRequest{
         .header = makeHeader(.endpoint_recv, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = task_id,
-        .payload_out = &received.payload,
-        .attached_capability_out = &received.attached_capability,
+        .payload_address = @intFromPtr(&received.payload),
+        .payload_capacity = received.payload.len,
+        .attached_capability_address = @intFromPtr(&received.attached_capability),
     };
     if (trapCall(&request, &response) != .success) return null;
     received.present = response.present;
@@ -579,7 +497,7 @@ fn endpointRecv(endpoint_capability_id: u64, task_id: u64) ?abi.EndpointRecvResu
 
 fn inputRecv(input_capability_id: u64, task_id: u64) ?abi.InputRecvResponse {
     var response = std.mem.zeroes(abi.InputRecvResponse);
-    var request = InputRecvRequest{
+    var request = abi.InputRecvWireRequest{
         .header = makeHeader(.input_recv, task_id),
         .input_capability_id = input_capability_id,
         .receiver_task_id = task_id,
@@ -600,7 +518,7 @@ fn surfacePresent(
     text: *const abi.SurfaceText,
 ) SurfacePresentOutcome {
     var response = std.mem.zeroes(abi.BoolResponse);
-    var request = SurfacePresentRequest{
+    var request = abi.SurfacePresentWireRequest{
         .header = makeHeader(.surface_present, task_id),
         .presentation_capability_id = presentation_capability_id,
         .presenter_task_id = task_id,
@@ -609,7 +527,7 @@ fn surfacePresent(
         .buffer_object_id = presentation.buffer_object_id,
         .buffer_offset = presentation.buffer_offset,
         .buffer_bytes = presentation.buffer_bytes,
-        .text = text,
+        .text_address = @intFromPtr(text),
     };
     const status = trapCall(&request, &response);
     return .{
@@ -717,11 +635,13 @@ fn presentUiState(state: *mailbox.Mailbox, surface: *const ui_surface_state.Stat
 
 const DocumentTransport = struct {
     pub fn send(_: @This(), endpoint_capability_id: u64, correlation_id: u64, payload: []const u8) document_editor.SendResult {
-        var request = EndpointSendRequest{
+        if (payload.len > abi.ENDPOINT_INLINE_BYTES) return .failed;
+        var request = abi.EndpointSendWireRequest{
             .header = makeHeader(.endpoint_send, zigos_userspace_bootstrap.task_id),
             .correlation_id = correlation_id,
             .endpoint_capability_id = endpoint_capability_id,
-            .payload = payload,
+            .payload_address = @intFromPtr(payload.ptr),
+            .payload_bytes = @intCast(payload.len),
         };
         return switch (trapCallNoResponse(&request)) {
             .success => .sent,
@@ -763,15 +683,11 @@ fn runSteadyState(ui: *UiRuntime, detail: mailbox.Detail, heartbeat_increment: u
             } else false;
             if (zigos_userspace_bootstrap.ui_state_revision != ui.surface.revision) publishUiState(&zigos_userspace_bootstrap, &ui.surface);
             _ = presentUiState(&zigos_userspace_bootstrap, &ui.surface);
-            break :wait if (input.exhausted and !document_work and !clipboard_work and !launcher_work and !identity_work and !ui.launcher.hasUnsentDecision()) blk: {
-                parkUntilEvent();
-                break :blk .wait_for_event;
-            } else .runnable;
-        } else wait: {
-            if (identity_work) break :wait .runnable;
-            parkUntilEvent();
-            break :wait .wait_for_event;
-        };
+            break :wait if (input.exhausted and !document_work and !clipboard_work and !launcher_work and !identity_work and !ui.launcher.hasUnsentDecision())
+                .wait_for_event
+            else
+                .runnable;
+        } else if (identity_work) .runnable else .wait_for_event;
         publishStateWithDisposition(.steady, detail, pulse, disposition);
         pulse +%= increment;
     }

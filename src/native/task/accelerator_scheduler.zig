@@ -363,6 +363,10 @@ pub const MAX_ENGINE_CLAIMS: usize = 16;
 const ENGINE_COUNT: usize = @typeInfo(Engine).@"enum".field_names.len;
 const CLAIM_INDEX_CAPACITY: usize = MAX_ENGINE_CLAIMS * 2;
 
+comptime {
+    if (MAX_ENGINE_CLAIMS > @bitSizeOf(u16)) @compileError("accelerator retirement mask must cover every claim slot");
+}
+
 pub const EngineAvailability = struct {
     gpu: bool = true,
     npu: bool = true,
@@ -395,7 +399,13 @@ pub const ClaimRecord = struct {
     zero_copy: bool,
     reason: DecisionReason,
     shared_memory_object_id: ?ids.SharedMemoryId,
+    // The exact backing owner remains alive until completion-qualified release.
+    // Object generations are local to a Table and cannot authenticate another.
+    shared_memory_table: ?*shared_memory.Table = null,
     active: bool,
+    // Cancellation withdraws task authority, but does not prove that a device
+    // has stopped using the claim's queue or shared-memory attachment.
+    cancelled: bool = false,
     queue_generation: u32,
     queue_completion_sequence: u64,
 };
@@ -452,6 +462,7 @@ pub const Error = shared_memory.Error || error{
     ClaimIdExhausted,
     ClaimNotFound,
     ClaimTableFull,
+    ClaimsPending,
     EngineBusy,
     EngineQueueNotOwned,
     EngineQueueGenerationMismatch,
@@ -459,6 +470,7 @@ pub const Error = shared_memory.Error || error{
     QueueCompletionMissing,
     QueueCompletionStale,
     SharedMemoryTableRequired,
+    SharedMemoryTableMismatch,
     ZeroCopyUnavailable,
 };
 
@@ -526,6 +538,9 @@ pub const Controller = struct {
     ) bool {
         if (engine == .cpu) return false;
         if (!queue.readyFor(queue.owner_task_id)) return false;
+        // A live claim owns its original queue until verified completion.
+        // Completion updates use the checked event/completion paths below.
+        if (self.activeEngineClaimId(engine) != 0) return false;
         self.brokered_engine_queues_required = true;
         self.brokered_engine_queues[engineIndex(engine)] = queue;
         return true;
@@ -544,6 +559,7 @@ pub const Controller = struct {
         if (active_claim_id != 0) {
             const active_claim = self.findActiveClaim(active_claim_id) orelse return error.ClaimNotFound;
             if (active_claim.task_id != event.owner_task_id) return error.EngineQueueNotOwned;
+            if (self.brokeredQueueFor(event.engine).broker_task_id != event.broker_task_id) return error.EngineQueueNotOwned;
             if (active_claim.queue_generation != event.generation) return error.EngineQueueGenerationMismatch;
             if (event.completion_sequence <= active_claim.queue_completion_sequence) return error.QueueCompletionStale;
         }
@@ -651,6 +667,7 @@ pub const Controller = struct {
         record.zero_copy = decision.zero_copy_allowed and request.shared_memory_object_id != null;
         record.reason = decision.reason;
         record.shared_memory_object_id = request.shared_memory_object_id;
+        record.shared_memory_table = if (attached_object_id != null) shared else null;
         record.active = true;
         if (record.engine != .cpu and self.brokered_engine_queues_required) {
             const queue = self.brokeredQueueFor(record.engine);
@@ -674,10 +691,12 @@ pub const Controller = struct {
         if (!slot.claim.active) return false;
 
         const record = slot.claim;
-        try self.requireCompletionBeforeRelease(record);
+        try self.preflightClaimRelease(record, shared);
         if (record.shared_memory_object_id) |object_id| {
             const shared_table = shared orelse return error.SharedMemoryTableRequired;
-            _ = try shared_table.detachAccelerator(object_id, computeTargetFor(record.engine));
+            if (!(try shared_table.detachAccelerator(object_id, computeTargetFor(record.engine)))) {
+                native_util.impossibleByInvariant("preflighted accelerator release retains its exact target attachment");
+            }
         }
         self.markClaimInactive(record);
         _ = self.claim_task_index.remove(claimTaskKey(record.task_id), slot_index);
@@ -686,27 +705,78 @@ pub const Controller = struct {
     }
 
     pub fn revokeTaskClaims(self: *Controller, task_id: u64, shared: ?*shared_memory.Table) Error!u16 {
-        var released: u16 = 0;
         const task_key = claimTaskKey(task_id);
+        // Reject the whole operation before any completed claim or attachment
+        // is removed when one sibling still belongs to the device.
         var slot_index = self.claim_task_index.head(task_key);
-        while (slot_index != indexed_arena.no_index) {
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.claim_task_index.next(slot_index)) {
             if (slot_index >= MAX_ENGINE_CLAIMS) native_util.impossibleByInvariant("claim task index points outside claim slots");
-            const next_slot_index = self.claim_task_index.next(slot_index);
             const slot = &self.claims.slots[slot_index];
-            if (slot.in_use and slot.claim.active and slot.claim.task_id == task_id) {
-                const record = slot.claim;
-                if (record.shared_memory_object_id) |object_id| {
-                    const shared_table = shared orelse return error.SharedMemoryTableRequired;
-                    _ = try shared_table.detachAccelerator(object_id, computeTargetFor(record.engine));
-                }
-                self.markClaimInactive(record);
-                _ = self.claim_task_index.remove(task_key, slot_index);
-                _ = self.claims.removeIndex(slot_index);
-                released += 1;
+            if (!slot.in_use or !slot.claim.active or slot.claim.task_id != task_id) {
+                native_util.impossibleByInvariant("claim task index identifies a live claim owned by its task");
             }
+            try self.preflightClaimRelease(slot.claim, shared);
+        }
+        var released: u16 = 0;
+        slot_index = self.claim_task_index.head(task_key);
+        while (slot_index != indexed_arena.no_index) {
+            const next_slot_index = self.claim_task_index.next(slot_index);
+            const claim_id = self.claims.slots[slot_index].claim.id;
+            if (!(try self.releaseClaim(claim_id, shared))) {
+                native_util.impossibleByInvariant("preflighted task revocation releases a live claim");
+            }
+            released += 1;
             slot_index = next_slot_index;
         }
         return released;
+    }
+
+    pub fn cancelTaskClaims(self: *Controller, task_id: u64) u16 {
+        var cancelled: u16 = 0;
+        var slot_index = self.claim_task_index.head(claimTaskKey(task_id));
+        while (slot_index != indexed_arena.no_index) : (slot_index = self.claim_task_index.next(slot_index)) {
+            if (slot_index >= MAX_ENGINE_CLAIMS) native_util.impossibleByInvariant("claim task index points outside claim slots");
+            const slot = &self.claims.slots[slot_index];
+            if (!slot.in_use or !slot.claim.active or slot.claim.task_id != task_id) {
+                native_util.impossibleByInvariant("claim task index identifies a live claim owned by its task");
+            }
+            if (!slot.claim.cancelled) {
+                slot.claim.cancelled = true;
+                cancelled += 1;
+            }
+        }
+        return cancelled;
+    }
+
+    // Called by the serialized resource owner after task cancellation and
+    // verified queue completion. Missing completion retains the claim/pin;
+    // mismatched queue or backing identity rejects the batch without mutation.
+    pub fn drainCancelledClaims(self: *Controller, shared: ?*shared_memory.Table) Error!u16 {
+        var releasable: u16 = 0;
+        for (self.claims.slots, 0..) |slot, index| {
+            if (!slot.in_use or !slot.claim.active or !slot.claim.cancelled) continue;
+            self.preflightClaimRelease(slot.claim, shared) catch |err| switch (err) {
+                error.QueueCompletionMissing => continue,
+                else => return err,
+            };
+            releasable |= @as(u16, 1) << @intCast(index);
+        }
+        var released: u16 = 0;
+        for (0..MAX_ENGINE_CLAIMS) |index| {
+            if ((releasable & (@as(u16, 1) << @intCast(index))) == 0) continue;
+            if (!(try self.releaseClaim(self.claims.slots[index].claim.id, shared))) {
+                native_util.impossibleByInvariant("preflighted cancellation drain releases a live claim");
+            }
+            released += 1;
+        }
+        return released;
+    }
+
+    // Claim metadata and its paired shared-memory owner must remain alive until
+    // this succeeds. Cancellation, task retirement, and session reset alone do
+    // not establish device quiescence.
+    pub fn requireQuiescent(self: *const Controller) error{ClaimsPending}!void {
+        if (self.active_claim_count != 0) return error.ClaimsPending;
     }
 
     pub fn findActiveClaim(self: *const Controller, claim_id: u64) ?ClaimRecord {
@@ -766,6 +836,15 @@ pub const Controller = struct {
         if (queue.owner_task_id != record.task_id) return error.EngineQueueNotOwned;
         if (queue.generation != record.queue_generation) return error.EngineQueueGenerationMismatch;
         if (queue.completion_sequence <= record.queue_completion_sequence) return error.QueueCompletionMissing;
+    }
+
+    fn preflightClaimRelease(self: *const Controller, record: ClaimRecord, shared: ?*shared_memory.Table) Error!void {
+        try self.requireCompletionBeforeRelease(record);
+        if (record.shared_memory_object_id) |object_id| {
+            const shared_table = shared orelse return error.SharedMemoryTableRequired;
+            if (record.shared_memory_table != shared_table) return error.SharedMemoryTableMismatch;
+            try shared_table.validateAcceleratorRelease(object_id, computeTargetFor(record.engine));
+        }
     }
 
     fn hardwareQueueTelemetryReady(self: *const Controller) bool {
@@ -1679,6 +1758,152 @@ test "accelerator scheduler reuses released claim slots and revokes through task
     try std.testing.expectEqual(@as(u16, 3), controller.activeClaimCount());
     try std.testing.expectEqual(@as(u16, 2), try controller.revokeTaskClaims(71, null));
     try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
+}
+
+fn configureRetirementTestQueue(controller: *Controller, engine: Engine, task_id: u64) void {
+    std.debug.assert(controller.configureBrokeredEngineQueue(engine, .{
+        .broker_task_id = 700,
+        .owner_task_id = task_id,
+        .generation = 7,
+        .completion_sequence = 100,
+        .completion_interrupts_observed = 1,
+        .accepts_work = true,
+    }));
+}
+
+fn createRetirementTestClaim(controller: *Controller, shared: *shared_memory.Table, task_id: u64, engine: Engine) Error!ClaimRecord {
+    configureRetirementTestQueue(controller, engine, task_id);
+    const object = try shared.createWithAccess(ids.task(task_id), shared_memory.PAGE_SIZE, .{
+        .gpu = engine == .gpu,
+        .npu = engine == .npu,
+        .media = engine == .media,
+    });
+    return controller.claimWithSharedMemory(.{
+        .task_id = task_id,
+        .request = .{
+            .class = if (engine == .media) .media_export else .background_light,
+            .wants_gpu = engine == .gpu,
+            .wants_npu = engine == .npu,
+            .wants_media_engine = engine == .media,
+            .shared_memory_bytes = shared_memory.PAGE_SIZE,
+        },
+        .require_accelerator = true,
+        .shared_memory_object_id = object.id,
+    }, shared);
+}
+
+test "accelerator task revocation preflights pending siblings before detaching any pin" {
+    var controller = Controller.init();
+    var shared = shared_memory.Table.init();
+    defer shared.deinit();
+    const media = try createRetirementTestClaim(&controller, &shared, 71, .media);
+    const cpu = try controller.claim(.{ .task_id = 71, .request = .{ .class = .foreground_interactive } });
+    const gpu = try createRetirementTestClaim(&controller, &shared, 71, .gpu);
+    const original_queue = controller.brokeredQueueFor(.media);
+    var replacement_queue = original_queue;
+    replacement_queue.owner_task_id = 72;
+    replacement_queue.generation = 8;
+    try std.testing.expect(!controller.configureBrokeredEngineQueue(.media, replacement_queue));
+    try std.testing.expectError(error.EngineQueueNotOwned, controller.observeBrokeredEngineQueueEvent(.{
+        .engine = .media,
+        .broker_task_id = original_queue.broker_task_id + 1,
+        .owner_task_id = 71,
+        .generation = 7,
+        .completion_sequence = 101,
+        .completion_interrupts_observed = 2,
+        .accepts_work = true,
+    }));
+    try std.testing.expectEqualDeep(original_queue, controller.brokeredQueueFor(.media));
+    try controller.completeBrokeredEngineQueue(.gpu, 71, 7, 101);
+    try std.testing.expectError(error.QueueCompletionMissing, controller.revokeTaskClaims(71, &shared));
+    try std.testing.expectEqual(@as(u16, 3), controller.activeClaimCount());
+    try std.testing.expect(controller.findActiveClaim(cpu.id) != null);
+    try shared.validateAcceleratorRelease(media.shared_memory_object_id.?, .media);
+    try shared.validateAcceleratorRelease(gpu.shared_memory_object_id.?, .gpu);
+    try std.testing.expectError(error.ClaimsPending, controller.requireQuiescent());
+
+    try controller.completeBrokeredEngineQueue(.media, 71, 7, 101);
+    try std.testing.expectEqual(@as(u16, 3), try controller.revokeTaskClaims(71, &shared));
+    try controller.requireQuiescent();
+    try std.testing.expectError(error.AcceleratorNotAttached, shared.validateAcceleratorRelease(media.shared_memory_object_id.?, .media));
+    try std.testing.expectError(error.AcceleratorNotAttached, shared.validateAcceleratorRelease(gpu.shared_memory_object_id.?, .gpu));
+}
+
+test "accelerator cancellation retains revoked backing through late exact completion" {
+    var controller = Controller.init();
+    var shared = shared_memory.Table.init();
+    defer shared.deinit();
+    const claim = try createRetirementTestClaim(&controller, &shared, 71, .media);
+    const object_id = claim.shared_memory_object_id.?;
+    try std.testing.expectEqual(@as(u16, 1), controller.cancelTaskClaims(71));
+    try std.testing.expectEqual(@as(u16, 0), controller.cancelTaskClaims(71));
+    _ = try shared.revoke(object_id);
+    try std.testing.expectError(error.SharedMemoryNotFound, shared.descriptor(object_id));
+    try shared.validateAcceleratorRelease(object_id, .media);
+    try std.testing.expectError(error.AcceleratorStillAttached, shared.requireQuiescent());
+    try std.testing.expectEqual(@as(u16, 0), try controller.drainCancelledClaims(&shared));
+    try std.testing.expect(controller.findActiveClaim(claim.id).?.cancelled);
+    try std.testing.expectError(error.ClaimsPending, controller.requireQuiescent());
+    try std.testing.expectError(error.EngineQueueNotOwned, controller.completeBrokeredEngineQueue(.media, 72, 7, 101));
+    try std.testing.expectError(error.EngineQueueGenerationMismatch, controller.completeBrokeredEngineQueue(.media, 71, 8, 101));
+    try std.testing.expectError(error.QueueCompletionStale, controller.completeBrokeredEngineQueue(.media, 71, 7, 100));
+
+    for (0..shared_memory.MAX_SHARED_MEMORY_OBJECTS - 1) |_| _ = try shared.create(ids.task(72), shared_memory.PAGE_SIZE);
+    try std.testing.expectError(error.TableFull, shared.create(ids.task(72), shared_memory.PAGE_SIZE));
+    try controller.completeBrokeredEngineQueue(.media, 71, 7, 101);
+    try std.testing.expectEqual(@as(u16, 1), try controller.drainCancelledClaims(&shared));
+    try controller.requireQuiescent();
+    try shared.requireQuiescent();
+    try std.testing.expectError(error.ClaimNotFound, controller.releaseClaim(claim.id, &shared));
+    const replacement = try shared.create(ids.task(72), shared_memory.PAGE_SIZE);
+    try std.testing.expect(!replacement.id.eql(object_id));
+    try std.testing.expectError(error.SharedMemoryNotFound, shared.validateAcceleratorRelease(object_id, .media));
+}
+
+test "accelerator release preflight rejects stale target generations without partial retirement" {
+    var controller = Controller.init();
+    var shared = shared_memory.Table.init();
+    defer shared.deinit();
+    const claim = try createRetirementTestClaim(&controller, &shared, 71, .media);
+    const old_id = claim.shared_memory_object_id.?;
+    const sibling = try controller.claim(.{ .task_id = 71, .request = .{ .class = .foreground_interactive } });
+    // Model an out-of-contract target owner releasing/reusing a pin. A stale
+    // controller record must never detach the replacement generation.
+    try std.testing.expect(try shared.detachAccelerator(old_id, .media));
+    _ = try shared.revoke(old_id);
+    const replacement = try shared.createWithAccess(ids.task(72), shared_memory.PAGE_SIZE, .{ .media = true });
+    try shared.attachAccelerator(replacement.id, .media);
+    try controller.completeBrokeredEngineQueue(.media, 71, 7, 101);
+    try std.testing.expectError(error.SharedMemoryNotFound, controller.revokeTaskClaims(71, &shared));
+    try std.testing.expectEqual(@as(u16, 2), controller.activeClaimCount());
+    try std.testing.expect(controller.findActiveClaim(sibling.id) != null);
+    try shared.validateAcceleratorRelease(replacement.id, .media);
+    _ = controller.cancelTaskClaims(71);
+    try std.testing.expectError(error.SharedMemoryNotFound, controller.drainCancelledClaims(&shared));
+    try std.testing.expectEqual(@as(u16, 2), controller.activeClaimCount());
+    try std.testing.expect(try shared.detachAccelerator(replacement.id, .media));
+}
+
+test "accelerator claim release authenticates its exact shared table despite colliding object ids" {
+    var controller = Controller.init();
+    var original = shared_memory.Table.init();
+    defer original.deinit();
+    var foreign = shared_memory.Table.init();
+    defer foreign.deinit();
+    const claim = try createRetirementTestClaim(&controller, &original, 71, .media);
+    const same_id = try foreign.createWithAccess(ids.task(72), shared_memory.PAGE_SIZE, .{ .media = true });
+    try std.testing.expect(same_id.id.eql(claim.shared_memory_object_id.?));
+    try foreign.attachAccelerator(same_id.id, .media);
+    try controller.completeBrokeredEngineQueue(.media, 71, 7, 101);
+    try std.testing.expectError(error.SharedMemoryTableMismatch, controller.releaseClaim(claim.id, &foreign));
+    try std.testing.expectError(error.SharedMemoryTableMismatch, controller.revokeTaskClaims(71, &foreign));
+    try std.testing.expectEqual(@as(u16, 1), controller.activeClaimCount());
+    try original.validateAcceleratorRelease(claim.shared_memory_object_id.?, .media);
+    try foreign.validateAcceleratorRelease(same_id.id, .media);
+    try std.testing.expect(try controller.releaseClaim(claim.id, &original));
+    try controller.requireQuiescent();
+    try foreign.validateAcceleratorRelease(same_id.id, .media);
+    try std.testing.expect(try foreign.detachAccelerator(same_id.id, .media));
 }
 
 test "accelerator scheduler claim ids stop at exhaustion" {

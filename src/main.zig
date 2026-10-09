@@ -3,6 +3,7 @@ pub const isr = @import("kernel/interrupts/isr.zig");
 pub const panic = @import("kernel/utils/builtin.zig").panic;
 pub const kernel_random = @import("kernel/platform/secure_random.zig");
 pub const kernel_memory = @import("kernel/memory/memory.zig");
+pub const kernel_paging = @import("kernel/memory/paging64.zig");
 pub const session_manager = if (config.isNativeProfile())
     @import("native/session/session_manager.zig")
 else
@@ -83,6 +84,14 @@ export fn kernel_main() void {
 
 export fn syscall_handler(context: *anyopaque) callconv(.c) void {
     const frame: *isr.Registers = @ptrCast(@alignCast(context));
+    if (!@import("kernel/smp.zig").isRuntimeOwner()) {
+        if (!userspace_executor.remoteSyscall(frame)) {
+            frame.eax = @backingInt(abi.SyscallStatus.unavailable);
+            frame.edx = 0;
+            frame.r10 = @backingInt(abi.DenialReason.none);
+        }
+        return;
+    }
     const port = currentKernelPort() orelse {
         frame.eax = @backingInt(abi.SyscallStatus.unavailable);
         frame.edx = 0;

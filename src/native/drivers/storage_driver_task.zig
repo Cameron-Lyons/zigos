@@ -101,7 +101,7 @@ pub fn bringUp() bool {
         return false;
     };
     if (pci.firstXhciController()) |usb| {
-        if (xhci_hw.isolationDomain() == null) _ = xhci_hw.probe(usb) catch return false;
+        if (xhci_hw.isolationDomain() == null) xhci_hw.probe(usb) catch return false;
     }
     var isolation_domains: [2]intel_vtd.DmaDomain = undefined;
     var isolation_domain_count: usize = 0;

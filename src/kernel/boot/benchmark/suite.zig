@@ -1,8 +1,8 @@
 const std = @import("std");
 const x86 = @import("../../../arch/x86.zig");
+const native_entry = @import("../../../arch/x86_64/native_entry_state.zig");
 const abi = @import("../../../native/core/abi.zig");
 const console = @import("../../utils/console.zig");
-const gdt = @import("../../interrupts/gdt64.zig");
 const isr = @import("../../interrupts/isr.zig");
 const syscall64 = @import("../../interrupts/syscall64.zig");
 const paging = @import("../../memory/paging64.zig");
@@ -299,12 +299,12 @@ var navigation_text: [abi.SURFACE_TEXT_BYTES]u8 = initial: {
 
 fn benchmarkTextNavigation(iteration: u32) u64 {
     // Vary the document, viewport, caret and direction. One measured operation
-    // includes locating the old caret, moving it, and locating its new cell.
+    // uses Notes' initial vertical movement path to establish the preferred
+    // column and move the caret, then locates the resulting cell.
     navigation_text[255] = if (iteration & 1 == 0) '\n' else 'b';
     const layout = abi.text_layout.Layout{ .text = &navigation_text, .columns = if (iteration & 2 == 0) 20 else 120 };
     const caret = abi.text_layout.Caret{ .offset = iteration % (navigation_text.len + 1), .upstream = iteration & 4 != 0 };
-    const before = layout.locate(caret);
-    const next = layout.vertical(caret, before.column, iteration & 8 != 0, if (iteration & 16 == 0) 1 else 23);
+    const next = layout.moveVertical(caret, null, iteration & 8 != 0, if (iteration & 16 == 0) 1 else 23).caret;
     const after = layout.locate(next);
     if (after.row.start + after.column != next.offset or next.offset > navigation_text.len) {
         benchmark_reporting.benchStepFailure("text layout navigation", error.InvalidCaret);
@@ -562,6 +562,9 @@ fn prepareAddressSpaceBenchmarkFixture() void {
 
 fn prepareSyscallBenchmarkFixture() void {
     if (syscall_benchmark_context.prepared) return;
+    // Install and verify the owned entry stack before the measured batches.
+    if (!syscall64.setKernelStack(userspace_executor.prepareKernelStack()))
+        benchmark_reporting.benchStepFailure("syscall benchmark entry stack", error.InvalidState);
     var space = paging.createUserAddressSpace() catch |err|
         benchmark_reporting.benchStepFailure("syscall benchmark address space", err);
     paging.mapOwnedUserRange(&space, SYSCALL_BENCHMARK_CODE_ADDRESS, SYSCALL_BENCHMARK_PAGE_BYTES, .{
@@ -1177,7 +1180,7 @@ fn benchmarkCapabilityDerive(iteration: u32) u64 {
             .policy_generation = 1,
             .source_task_id = 700 + iteration,
         },
-    }) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
+    }, 20) catch |err| benchmark_reporting.benchStepFailure("benchmark suite", err);
     return derived.id + derived.target.id + derived.scope.workspace_id.?;
 }
 
@@ -1390,10 +1393,7 @@ fn benchmarkFrameAllocateRelease(iteration: u32) u64 {
 
 fn benchmarkSyscallFastEntryRoundtrip(iteration: u32) u64 {
     const space = &syscall_benchmark_context.space.?;
-    const kernel_stack_top = userspace_executor.prepareKernelStack();
-    gdt.setKernelStack(kernel_stack_top);
-    syscall64.setKernelStack(kernel_stack_top);
-    userspace_executor.zigos_userspace_resume_requested = 0;
+    native_entry.current().resume_requested = 0;
     syscall_benchmark_context.last_counter = 0;
 
     var context = userspace_executor.UserContext64{
@@ -1408,13 +1408,13 @@ fn benchmarkSyscallFastEntryRoundtrip(iteration: u32) u64 {
     if (paging.getCurrentPageDirectory() == space.directory) {
         paging.switchToKernelAddressSpace();
     }
-    userspace_executor.zigos_userspace_resume_requested = 0;
+    native_entry.current().resume_requested = 0;
     return syscall_benchmark_context.last_counter;
 }
 
 fn syscallBenchmarkYield(frame: *isr.InterruptFrame) void {
     syscall_benchmark_context.last_counter = frame.eax;
-    userspace_executor.zigos_userspace_resume_requested = 1;
+    native_entry.current().resume_requested = 1;
     paging.switchToKernelAddressSpace();
 }
 

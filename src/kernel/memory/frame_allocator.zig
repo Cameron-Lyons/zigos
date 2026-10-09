@@ -429,14 +429,14 @@ fn FixedWithReservationCapacity(
             };
         }
 
-        pub fn isReserved(self: *const Self, frame_address: PhysicalAddress) bool {
+        pub inline fn isReserved(self: *const Self, frame_address: PhysicalAddress) bool {
             if (frame_address % page_size != 0 or frame_address >= memory_bytes) return false;
             const frame: u32 = @intCast(frame_address / page_size);
             if (!self.reservations_sealed) return self.bitIsSet(&self.storage.unavailable_bitmap, frame);
             return self.frameIsReserved(frame);
         }
 
-        pub fn isAllocated(self: *const Self, frame_address: PhysicalAddress) bool {
+        pub inline fn isAllocated(self: *const Self, frame_address: PhysicalAddress) bool {
             if (frame_address % page_size != 0 or frame_address >= memory_bytes) return false;
             if (!self.reservations_sealed) return false;
             const frame: u32 = @intCast(frame_address / page_size);

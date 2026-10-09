@@ -2,6 +2,8 @@ const std = @import("std");
 const endian = @import("bytes.zig");
 pub const image_info = @import("image_info.zig");
 pub const tpm_info = @import("tpm_info.zig");
+pub const memory_kind = @import("memory_kind.zig");
+pub const paging_info = @import("paging_info.zig");
 
 const writeU32 = endian.writeU32Le;
 const writeU64 = endian.writeU64Le;
@@ -16,7 +18,7 @@ pub const TAG_HEADER_BYTES: usize = 8;
 pub const INFO_HEADER_BYTES: usize = 8;
 pub const TAG_ALIGNMENT: usize = 8;
 pub const MEMORY_MAP_HEADER_BYTES: usize = 16;
-pub const MEMORY_MAP_ENTRY_BYTES: usize = 24;
+pub const MEMORY_MAP_ENTRY_BYTES: usize = 32;
 pub const FRAMEBUFFER_COMMON_BYTES: usize = 32;
 pub const FRAMEBUFFER_RGB_BYTES: usize = 6;
 pub const EFI64_SYSTEM_TABLE_TAG_BYTES: usize = 16;
@@ -43,11 +45,15 @@ pub const MULTIBOOT_MEMORY_RESERVED: u32 = 2;
 pub const MULTIBOOT_MEMORY_ACPI_RECLAIMABLE: u32 = 3;
 pub const MULTIBOOT_MEMORY_NVS: u32 = 4;
 pub const MULTIBOOT_MEMORY_BADRAM: u32 = 5;
+pub const NATIVE_MEMORY_MMIO: u32 = @backingInt(memory_kind.Kind.device_mmio);
+pub const NATIVE_MEMORY_FIRMWARE_RUNTIME_RAM: u32 = @backingInt(memory_kind.Kind.firmware_runtime_ram);
 
 pub const MmapEntry = struct {
     base: u64,
     length: u64,
     kind: u32,
+    firmware_type: u32 = std.math.maxInt(u32),
+    attributes: u64 = 0,
 };
 
 pub const Framebuffer = struct {
@@ -67,6 +73,7 @@ pub const Request = struct {
     acpi_rsdp: []const u8 = &.{},
     boot_image: ?image_info.Info = null,
     boot_tpm: ?tpm_info.Info = null,
+    boot_paging: ?paging_info.Info = null,
 };
 
 pub const USES_NATIVE_EFI_STUB = true;
@@ -85,6 +92,10 @@ pub fn kindFromEfiMemoryType(efi_type: u32) u32 {
         EFI_MEMORY_TYPE_ACPI_RECLAIM => MULTIBOOT_MEMORY_ACPI_RECLAIMABLE,
         EFI_MEMORY_TYPE_ACPI_NVS => MULTIBOOT_MEMORY_NVS,
         EFI_MEMORY_TYPE_UNUSABLE => MULTIBOOT_MEMORY_BADRAM,
+        EFI_MEMORY_TYPE_MMIO => NATIVE_MEMORY_MMIO,
+        EFI_MEMORY_TYPE_RUNTIME_SERVICES_CODE,
+        EFI_MEMORY_TYPE_RUNTIME_SERVICES_DATA,
+        => NATIVE_MEMORY_FIRMWARE_RUNTIME_RAM,
         else => MULTIBOOT_MEMORY_RESERVED,
     };
 }
@@ -104,6 +115,7 @@ pub fn encodedSize(request: Request) usize {
     var size: usize = INFO_HEADER_BYTES;
     if (request.boot_image != null) size += TAG_HEADER_BYTES + image_info.PAYLOAD_BYTES;
     if (request.boot_tpm != null) size += TAG_HEADER_BYTES + tpm_info.PAYLOAD_BYTES;
+    if (request.boot_paging != null) size += TAG_HEADER_BYTES + paging_info.PAYLOAD_BYTES;
     if (request.cmdline.len != 0) {
         size = alignTag(size + TAG_HEADER_BYTES + request.cmdline.len + 1);
     }
@@ -140,6 +152,11 @@ pub fn encode(buffer: []u8, request: Request) error{BufferTooSmall}![]u8 {
         info.encode(buffer[offset..][0..tpm_info.PAYLOAD_BYTES]);
         offset += tpm_info.PAYLOAD_BYTES;
     }
+    if (request.boot_paging) |info| {
+        writeTagHeader(buffer, &offset, paging_info.TAG, TAG_HEADER_BYTES + paging_info.PAYLOAD_BYTES);
+        info.encode(buffer[offset..][0..paging_info.PAYLOAD_BYTES]);
+        offset += paging_info.PAYLOAD_BYTES;
+    }
     if (request.cmdline.len != 0) {
         const payload = request.cmdline.len + 1;
         writeTagHeader(buffer, &offset, TAG_COMMAND_LINE, TAG_HEADER_BYTES + payload);
@@ -155,6 +172,8 @@ pub fn encode(buffer: []u8, request: Request) error{BufferTooSmall}![]u8 {
             writeU64(buffer[offset .. offset + 8], entry.base);
             writeU64(buffer[offset + 8 .. offset + 16], entry.length);
             writeU32(buffer[offset + 16 .. offset + 20], entry.kind);
+            writeU32(buffer[offset + 20 .. offset + 24], entry.firmware_type);
+            writeU64(buffer[offset + 24 .. offset + 32], entry.attributes);
             offset += MEMORY_MAP_ENTRY_BYTES;
         }
         offset = alignTag(offset);
@@ -196,6 +215,31 @@ fn alignTag(value: usize) usize {
     return std.mem.alignForward(usize, value, TAG_ALIGNMENT);
 }
 
+test "EFI paging tag emits exact unequal v3 arena capacities without touching trailing storage" {
+    const info = paging_info.Info{
+        .transition_pages = 3,
+        .final_pages = 31,
+        .transition_base = 0x1000000,
+        .final_base = 0x2000000,
+        .framebuffer_base = 0x1_0000_0001,
+        .framebuffer_bytes = 4096,
+    };
+    var storage: [80]u8 = @splat(0xa5);
+    const request = Request{ .boot_paging = info };
+    const encoded = try encode(&storage, request);
+    try std.testing.expectEqual(@as(usize, 72), encoded.len);
+    try std.testing.expectEqual(encoded.len, encodedSize(request));
+    try std.testing.expectEqual(paging_info.TAG, endian.readU32Le(encoded[8..12]));
+    try std.testing.expectEqual(@as(u32, 56), endian.readU32Le(encoded[12..16]));
+    try std.testing.expectEqualDeep(info, try paging_info.Info.decode(encoded[16..64]));
+    try std.testing.expectEqual(TAG_END, endian.readU32Le(encoded[64..68]));
+    try std.testing.expectEqual(@as(u32, 8), endian.readU32Le(encoded[68..72]));
+    for (storage[72..]) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+    @memset(&storage, 0xa5);
+    try std.testing.expectError(error.BufferTooSmall, encode(storage[0..71], request));
+    for (storage) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+}
+
 test "EFI embedded command line rejects truncation and control bytes" {
     try std.testing.expectEqualStrings("model_inventory", try embeddedCommandLine("model_inventory\n"));
     try std.testing.expectEqualStrings("", try embeddedCommandLine("\r\n"));
@@ -203,11 +247,14 @@ test "EFI embedded command line rejects truncation and control bytes" {
         try std.testing.expectError(error.InvalidCommandLine, embeddedCommandLine(invalid));
 }
 
-test "EFI memory types become Multiboot2 map kinds" {
+test "native EFI memory kinds preserve device and runtime RAM ownership" {
     try std.testing.expectEqual(MULTIBOOT_MEMORY_AVAILABLE, kindFromEfiMemoryType(EFI_MEMORY_TYPE_CONVENTIONAL));
     try std.testing.expectEqual(MULTIBOOT_MEMORY_AVAILABLE, kindFromEfiMemoryType(EFI_MEMORY_TYPE_LOADER_DATA));
     try std.testing.expectEqual(MULTIBOOT_MEMORY_ACPI_RECLAIMABLE, kindFromEfiMemoryType(EFI_MEMORY_TYPE_ACPI_RECLAIM));
     try std.testing.expectEqual(MULTIBOOT_MEMORY_NVS, kindFromEfiMemoryType(EFI_MEMORY_TYPE_ACPI_NVS));
-    try std.testing.expectEqual(MULTIBOOT_MEMORY_RESERVED, kindFromEfiMemoryType(EFI_MEMORY_TYPE_RUNTIME_SERVICES_CODE));
-    try std.testing.expectEqual(MULTIBOOT_MEMORY_RESERVED, kindFromEfiMemoryType(EFI_MEMORY_TYPE_MMIO));
+    try std.testing.expectEqual(NATIVE_MEMORY_FIRMWARE_RUNTIME_RAM, kindFromEfiMemoryType(EFI_MEMORY_TYPE_RUNTIME_SERVICES_CODE));
+    try std.testing.expectEqual(NATIVE_MEMORY_FIRMWARE_RUNTIME_RAM, kindFromEfiMemoryType(EFI_MEMORY_TYPE_RUNTIME_SERVICES_DATA));
+    try std.testing.expectEqual(NATIVE_MEMORY_MMIO, kindFromEfiMemoryType(EFI_MEMORY_TYPE_MMIO));
+    for ([_]u32{ EFI_MEMORY_TYPE_RESERVED, EFI_MEMORY_TYPE_MMIO_PORT_SPACE, EFI_MEMORY_TYPE_PAL_CODE, 0xffff }) |efi_type|
+        try std.testing.expectEqual(MULTIBOOT_MEMORY_RESERVED, kindFromEfiMemoryType(efi_type));
 }

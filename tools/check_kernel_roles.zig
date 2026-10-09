@@ -33,6 +33,14 @@ const shf_execinstr: u64 = 1 << 2;
 const pt_load: u32 = 1;
 const pf_execute: u32 = 1 << 0;
 const pf_write: u32 = 1 << 1;
+const pf_read: u32 = 1 << 2;
+
+// Independent checks of the load contract in arch/x86_64/linker.ld.
+const kernel_page_size: u64 = 4096;
+const kernel_image_bias: u64 = 0xffff_ffff_8000_0000;
+const kernel_physical_start: u64 = 32 * 1024 * 1024;
+const kernel_physical_limit: u64 = 1024 * 1024 * 1024;
+const kernel_load_permissions = [_]u32{ pf_read | pf_execute, pf_read, pf_read | pf_write };
 
 const shn_undef: u16 = 0;
 const shn_loreserve: u16 = 0xff00;
@@ -57,7 +65,21 @@ const verification_orchestration_symbol_prefixes = [_][]const u8{
     // Hosted assembly probes must never become loaded production kernel code.
     "zigos_fred_capture_probe",
     "zigos_fred_return_probe",
+    "zigos_idt_return_probe",
     "zigos_xstate_host_roundtrip",
+    "native_crypto_probe_main",
+    "zigos_arch_smp_",
+    "zigos_arch_smp_cache_",
+    "kernel.smp.ArchitectureProof",
+    "arch.x86_64.high_half_shared_probe",
+    "arch.x86_64.high_half_smp_probe",
+    "arch.x86_64.ap_cache_probe_support",
+    "arch.x86_64.ap_cache_rejection_probe",
+    "arch.x86_64.smp_cache_enabled_probe",
+    "native.task.userspace_executor.proveSharedSyscallCopyPath",
+    "native.task.userspace_executor.Executor.installPreparedMappingForArchitectureProof",
+    "native.task.userspace_scheduler.ArchitectureProof",
+    "kernel.memory.paging64.drainFrameCachesForArchitectureProof",
 };
 const verification_only_signatures = [_][]const u8{
     "ZIGOS:RUNTIME_PROOF:PROCESS_ISOLATION:PASS",
@@ -155,6 +177,7 @@ const RoleError = error{
     ProductionBootPayloadTooLarge,
     ProductionSymbolCountTooLarge,
     ProductionLoadSegmentCountInvalid,
+    ProductionLoadLayoutInvalid,
     ProductionContainsRuntimeProofSymbols,
     ProductionContainsBootedEvidenceSymbols,
     ProductionContainsDemoSymbols,
@@ -168,6 +191,7 @@ const RoleError = error{
     VerificationMissingWritableEvidence,
     VerificationBootPayloadNotLarger,
     VerificationLoadSegmentCountInvalid,
+    VerificationLoadLayoutInvalid,
 };
 
 const CliError = error{
@@ -194,6 +218,7 @@ const ElfClass = enum {
 
 const Header = struct {
     elf_class: ElfClass,
+    entry: u64,
     program_offset: u64,
     section_offset: u64,
     header_size: u16,
@@ -208,6 +233,7 @@ const ProgramHeader = struct {
     segment_type: u32,
     offset: u64,
     virtual_address: u64,
+    physical_address: u64,
     file_size: u64,
     memory_size: u64,
     flags: u32,
@@ -250,6 +276,7 @@ const Analysis = struct {
     data_size: u64,
     boot_payload_size: u64,
     load_segment_count: usize,
+    native_load_layout_valid: bool,
     symbol_count: usize,
     runtime_proof_symbols: usize,
     booted_evidence_symbols: usize,
@@ -358,7 +385,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [768]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     try stdout_writer.interface.print(
-        "Kernel role check passed: production boot-payload={d} bytes in one load segment (.data={d}, maximum={d}, {d} symbols, no verification workloads); verification boot-payload={d} bytes in one load segment (.data={d}, {d} symbols, runtime-proof={d}, booted-evidence={d}, signatures={d}, named-writable-evidence={d} bytes); delta={d} bytes; userspace production={d} clean, verification-only={d}, MMU-proof machine-code sentinels={d}.\n",
+        "Kernel role check passed: production boot-payload={d} bytes in three contiguous RX/RO/RW load segments (.data={d}, maximum={d}, {d} symbols, no verification workloads); verification boot-payload={d} bytes in three contiguous RX/RO/RW load segments (.data={d}, {d} symbols, runtime-proof={d}, booted-evidence={d}, signatures={d}, named-writable-evidence={d} bytes); delta={d} bytes; userspace production={d} clean, verification-only={d}, MMU-proof machine-code sentinels={d}.\n",
         .{
             production.boot_payload_size,
             production.data_size,
@@ -434,6 +461,7 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
     var recovery_symbols: usize = 0;
     var verification_orchestration_symbols: usize = 0;
     var verification_evidence_writable_bytes: u64 = 0;
+    var native_load_layout_valid = nativeKernelLoadLayoutValid(bytes, header, programs);
 
     var section_index: usize = 0;
     while (section_index < sections.count) : (section_index += 1) {
@@ -442,9 +470,12 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
         const section_name = try readString(section_names, section.name_offset);
 
         try validateKernelSectionPolicy(section_name, section);
+        if (native_load_layout_valid and !nativeKernelSectionCoveredByLoad(bytes, programs, section_name, section)) {
+            native_load_layout_valid = false;
+        }
 
         if (section.flags & shf_alloc != 0 and
-            !sectionCoveredByLoad(bytes, programs, section))
+            !sectionCoveredByLoad(bytes, programs, section, section.flags & shf_write != 0 and !immutableRelocatedSection(section_name)))
         {
             return error.InvalidLoadSegment;
         }
@@ -495,6 +526,7 @@ fn analyzeElf(bytes: []const u8) ParseError!Analysis {
         .data_size = data_size.?,
         .boot_payload_size = program_analysis.boot_payload_size,
         .load_segment_count = program_analysis.load_segment_count,
+        .native_load_layout_valid = native_load_layout_valid,
         .symbol_count = symbol_count,
         .runtime_proof_symbols = runtime_proof_symbols,
         .booted_evidence_symbols = booted_evidence_symbols,
@@ -599,7 +631,7 @@ fn inspectSymbolTable(
         if (symbol.section_index == shn_undef or symbol.section_index >= shn_loreserve) continue;
         const defining_section = try parseSection(bytes, sections, symbol.section_index);
         if (defining_section.flags & shf_alloc == 0 or
-            !sectionCoveredByLoad(bytes, programs, defining_section))
+            !sectionCoveredByLoad(bytes, programs, defining_section, false))
         {
             continue;
         }
@@ -611,7 +643,9 @@ fn inspectSymbolTable(
         if (is_booted_evidence) {
             booted_evidence_symbols += 1;
         }
-        if ((is_runtime_proof or is_booted_evidence) and defining_section.flags & shf_write != 0) {
+        if ((is_runtime_proof or is_booted_evidence) and defining_section.flags & shf_write != 0 and
+            sectionCoveredByLoad(bytes, programs, defining_section, true))
+        {
             verification_evidence_writable_bytes = std.math.add(
                 u64,
                 verification_evidence_writable_bytes,
@@ -748,6 +782,7 @@ fn parseHeader(bytes: []const u8) ParseError!Header {
             if (raw.e_version != elf_current_version) return error.UnsupportedElfVersion;
             break :header Header{
                 .elf_class = .elf32,
+                .entry = raw.e_entry,
                 .program_offset = raw.e_phoff,
                 .section_offset = raw.e_shoff,
                 .header_size = raw.e_ehsize,
@@ -763,6 +798,7 @@ fn parseHeader(bytes: []const u8) ParseError!Header {
             if (raw.e_version != elf_current_version) return error.UnsupportedElfVersion;
             break :header Header{
                 .elf_class = .elf64,
+                .entry = raw.e_entry,
                 .program_offset = raw.e_phoff,
                 .section_offset = raw.e_shoff,
                 .header_size = raw.e_ehsize,
@@ -812,6 +848,7 @@ fn parseProgramHeader(
                 .segment_type = @backingInt(raw.type),
                 .offset = raw.offset,
                 .virtual_address = raw.vaddr,
+                .physical_address = raw.paddr,
                 .file_size = raw.filesz,
                 .memory_size = raw.memsz,
                 .flags = @bitCast(raw.flags),
@@ -824,6 +861,7 @@ fn parseProgramHeader(
                 .segment_type = @backingInt(raw.type),
                 .offset = raw.offset,
                 .virtual_address = raw.vaddr,
+                .physical_address = raw.paddr,
                 .file_size = raw.filesz,
                 .memory_size = raw.memsz,
                 .flags = @bitCast(raw.flags),
@@ -872,7 +910,7 @@ fn validateKernelSectionPolicy(name: []const u8, section: Section) ParseError!vo
     const permission_flags = section.flags & (shf_write | shf_alloc | shf_execinstr);
     if (std.mem.eql(u8, name, ".zigos_userspace_archive")) {
         // Zig varies SHF_WRITE on custom const sections by optimization mode.
-        // The precise identity mapper seals the archive read-only before use.
+        // The ELF load permissions seal the archive read-only before use.
         if (permission_flags != shf_alloc and permission_flags != shf_alloc | shf_write) {
             return error.InvalidKernelSectionPermissions;
         }
@@ -933,6 +971,59 @@ fn analyzeProgramHeaders(bytes: []const u8, table: ProgramTable) ParseError!Prog
     };
 }
 
+fn nativeKernelLoadLayoutValid(bytes: []const u8, header: Header, table: ProgramTable) bool {
+    if (header.elf_class != .elf64) return false;
+
+    var load_index: usize = 0;
+    var next_physical_address = kernel_physical_start;
+    var next_file_offset: ?u64 = null;
+    var entry_in_file_backed_text = false;
+    var index: usize = 0;
+    while (index < table.count) : (index += 1) {
+        const program = parseProgramHeader(bytes, table, index) catch return false;
+        if (program.segment_type != pt_load) continue;
+        if (load_index >= kernel_load_permissions.len or
+            program.flags != kernel_load_permissions[load_index] or
+            program.alignment != kernel_page_size or
+            program.offset % kernel_page_size != 0 or
+            program.physical_address % kernel_page_size != 0 or
+            program.virtual_address % kernel_page_size != 0 or
+            program.file_size == 0 or program.memory_size == 0 or
+            program.file_size % kernel_page_size != 0 or
+            program.memory_size % kernel_page_size != 0 or
+            program.file_size > program.memory_size)
+        {
+            return false;
+        }
+
+        // Only the last, writable load may contain a zero-filled tail.
+        if (load_index < kernel_load_permissions.len - 1 and
+            program.file_size != program.memory_size) return false;
+        if (program.physical_address != next_physical_address) return false;
+        const physical_end = std.math.add(u64, program.physical_address, program.memory_size) catch return false;
+        if (physical_end > kernel_physical_limit) return false;
+        const expected_virtual = std.math.add(u64, kernel_image_bias, program.physical_address) catch return false;
+        if (program.virtual_address != expected_virtual) return false;
+        _ = std.math.add(u64, program.virtual_address, program.memory_size) catch return false;
+
+        if (next_file_offset) |expected_offset| {
+            if (program.offset != expected_offset) return false;
+        } else {
+            const program_table_end = std.math.add(u64, header.program_offset, std.math.mul(u64, table.count, programHeaderSize(table.elf_class)) catch return false) catch return false;
+            if (program.offset < program_table_end or program.offset < header.header_size) return false;
+        }
+        _ = checkedSlice(bytes, program.offset, program.file_size) catch return false;
+        next_file_offset = std.math.add(u64, program.offset, program.file_size) catch return false;
+        next_physical_address = physical_end;
+        if (load_index == 0) {
+            const virtual_file_end = std.math.add(u64, program.virtual_address, program.file_size) catch return false;
+            entry_in_file_backed_text = header.entry >= program.virtual_address and header.entry < virtual_file_end;
+        }
+        load_index += 1;
+    }
+    return load_index == kernel_load_permissions.len and entry_in_file_backed_text;
+}
+
 fn validatePackedUserspaceLayout(bytes: []const u8, table: ProgramTable) ParseError!void {
     var loadable_file_bytes: u64 = 0;
     var index: usize = 0;
@@ -954,7 +1045,40 @@ fn validatePackedUserspaceLayout(bytes: []const u8, table: ProgramTable) ParseEr
     }
 }
 
-fn sectionCoveredByLoad(bytes: []const u8, table: ProgramTable, section: Section) bool {
+fn immutableRelocatedSection(name: []const u8) bool {
+    return std.mem.eql(u8, name, ".relro") or std.mem.eql(u8, name, ".zigos_userspace_archive");
+}
+
+fn nativeKernelSectionCoveredByLoad(bytes: []const u8, table: ProgramTable, name: []const u8, section: Section) bool {
+    if (section.flags & shf_alloc == 0 or section.size == 0) return true;
+    const expected_permissions: u32 = if (std.mem.eql(u8, name, ".text"))
+        pf_read | pf_execute
+    else if (std.mem.eql(u8, name, ".rodata") or immutableRelocatedSection(name))
+        pf_read
+    else if (std.mem.eql(u8, name, ".data") or std.mem.eql(u8, name, ".bss"))
+        pf_read | pf_write
+    else
+        return false;
+
+    const section_end = std.math.add(u64, section.address, section.size) catch return false;
+    var index: usize = 0;
+    while (index < table.count) : (index += 1) {
+        const program = parseProgramHeader(bytes, table, index) catch return false;
+        if (program.segment_type != pt_load or program.flags != expected_permissions) continue;
+        const memory_end = std.math.add(u64, program.virtual_address, program.memory_size) catch return false;
+        if (section.address < program.virtual_address or section_end > memory_end) continue;
+        if (section.section_type != sht_nobits) {
+            const file_end = std.math.add(u64, program.virtual_address, program.file_size) catch return false;
+            if (section_end > file_end) return false;
+            const expected_offset = std.math.add(u64, program.offset, section.address - program.virtual_address) catch return false;
+            if (section.offset != expected_offset) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+fn sectionCoveredByLoad(bytes: []const u8, table: ProgramTable, section: Section, require_write: bool) bool {
     if (section.size == 0) return true;
     const section_start: u64 = section.address;
     const section_end = std.math.add(u64, section_start, section.size) catch return false;
@@ -962,7 +1086,7 @@ fn sectionCoveredByLoad(bytes: []const u8, table: ProgramTable, section: Section
     while (index < table.count) : (index += 1) {
         const program = parseProgramHeader(bytes, table, index) catch return false;
         if (program.segment_type != pt_load) continue;
-        if (section.flags & shf_write != 0 and program.flags & pf_write == 0) continue;
+        if (require_write and program.flags & pf_write == 0) continue;
         const load_start: u64 = program.virtual_address;
         const load_end = std.math.add(u64, load_start, program.memory_size) catch return false;
         if (section_start >= load_start and section_end <= load_end) return true;
@@ -1202,8 +1326,10 @@ fn printUserspaceRoleFailure(
 }
 
 fn validateRoles(production: Analysis, verification: Analysis) RoleError!void {
-    if (production.load_segment_count != 1) return error.ProductionLoadSegmentCountInvalid;
-    if (verification.load_segment_count != 1) return error.VerificationLoadSegmentCountInvalid;
+    if (production.load_segment_count != kernel_load_permissions.len) return error.ProductionLoadSegmentCountInvalid;
+    if (verification.load_segment_count != kernel_load_permissions.len) return error.VerificationLoadSegmentCountInvalid;
+    if (!production.native_load_layout_valid) return error.ProductionLoadLayoutInvalid;
+    if (!verification.native_load_layout_valid) return error.VerificationLoadLayoutInvalid;
     if (production.boot_payload_size > maximum_production_boot_payload_size) {
         return error.ProductionBootPayloadTooLarge;
     }
@@ -1290,8 +1416,12 @@ fn printRoleFailure(err: RoleError, production: Analysis, verification: Analysis
             .{ production.symbol_count, maximum_production_symbol_count },
         ),
         error.ProductionLoadSegmentCountInvalid => std.debug.print(
-            "Kernel role check failed: production ELF has {d} load segments; exactly one contiguous boot payload is required.\n",
+            "Kernel role check failed: production ELF has {d} load segments; exactly three contiguous RX/RO/RW segments are required.\n",
             .{production.load_segment_count},
+        ),
+        error.ProductionLoadLayoutInvalid => std.debug.print(
+            "Kernel role check failed: production ELF must have page-aligned, contiguous RX/RO/RW loads at the kernel VMA/LMA bias with entry in file-backed RX text.\n",
+            .{},
         ),
         error.ProductionContainsRuntimeProofSymbols => std.debug.print(
             "Kernel role check failed: production ELF contains {d} runtime-negative-proof symbol(s) with prefix '{s}'.\n",
@@ -1342,8 +1472,12 @@ fn printRoleFailure(err: RoleError, production: Analysis, verification: Analysis
             .{ verification.boot_payload_size, production.boot_payload_size },
         ),
         error.VerificationLoadSegmentCountInvalid => std.debug.print(
-            "Kernel role check failed: verification ELF has {d} load segments; exactly one contiguous boot payload is required.\n",
+            "Kernel role check failed: verification ELF has {d} load segments; exactly three contiguous RX/RO/RW segments are required.\n",
             .{verification.load_segment_count},
+        ),
+        error.VerificationLoadLayoutInvalid => std.debug.print(
+            "Kernel role check failed: verification ELF must have page-aligned, contiguous RX/RO/RW loads at the kernel VMA/LMA bias with entry in file-backed RX text.\n",
+            .{},
         ),
     }
     std.process.exit(1);
@@ -1353,7 +1487,8 @@ test "role validation accepts isolated named proof evidence with compact writabl
     const production = Analysis{
         .data_size = 1024,
         .boot_payload_size = 2048,
-        .load_segment_count = 1,
+        .load_segment_count = 3,
+        .native_load_layout_valid = true,
         .symbol_count = 10,
         .runtime_proof_symbols = 0,
         .booted_evidence_symbols = 0,
@@ -1367,7 +1502,8 @@ test "role validation accepts isolated named proof evidence with compact writabl
     const verification = Analysis{
         .data_size = production.data_size + 1,
         .boot_payload_size = production.boot_payload_size + 1,
-        .load_segment_count = 1,
+        .load_segment_count = 3,
+        .native_load_layout_valid = true,
         .symbol_count = 20,
         .runtime_proof_symbols = 4,
         .booted_evidence_symbols = 1,
@@ -1385,7 +1521,8 @@ test "role validation rejects leaked and undersized proof kernels" {
     const clean = Analysis{
         .data_size = 4096,
         .boot_payload_size = 8192,
-        .load_segment_count = 1,
+        .load_segment_count = 3,
+        .native_load_layout_valid = true,
         .symbol_count = 1,
         .runtime_proof_symbols = 0,
         .booted_evidence_symbols = 0,
@@ -1431,6 +1568,17 @@ test "role validation rejects leaked and undersized proof kernels" {
     try std.testing.expectError(
         error.ProductionLoadSegmentCountInvalid,
         validateRoles(split_payload, clean),
+    );
+
+    var invalid_layout = clean;
+    invalid_layout.native_load_layout_valid = false;
+    try std.testing.expectError(
+        error.ProductionLoadLayoutInvalid,
+        validateRoles(invalid_layout, clean),
+    );
+    try std.testing.expectError(
+        error.VerificationLoadLayoutInvalid,
+        validateRoles(clean, invalid_layout),
     );
 
     var leaked_signature = clean;
@@ -1690,6 +1838,7 @@ test "ELF parser reads loaded state, defined symbols, and workload signatures" {
     try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
     try std.testing.expectEqual(@as(u64, bytes.len + 48), analysis.boot_payload_size);
     try std.testing.expectEqual(@as(usize, 2), analysis.load_segment_count);
+    try std.testing.expect(!analysis.native_load_layout_valid);
     try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
     try std.testing.expectEqual(@as(usize, 1), analysis.runtime_proof_symbols);
     try std.testing.expectEqual(@as(usize, 1), analysis.booted_evidence_symbols);
@@ -1787,6 +1936,7 @@ test "ELF64 parser reads the same loaded-state and symbol contract" {
     try std.testing.expectEqual(@as(u64, 16), analysis.data_size);
     try std.testing.expectEqual(@as(u64, bytes.len + 48), analysis.boot_payload_size);
     try std.testing.expectEqual(@as(usize, 2), analysis.load_segment_count);
+    try std.testing.expect(!analysis.native_load_layout_valid);
     try std.testing.expectEqual(@as(usize, 3), analysis.symbol_count);
     try std.testing.expectEqual(@as(usize, 1), analysis.runtime_proof_symbols);
     try std.testing.expectEqual(@as(usize, 1), analysis.booted_evidence_symbols);
@@ -1798,11 +1948,291 @@ test "ELF64 parser reads the same loaded-state and symbol contract" {
     try std.testing.expectEqual(@as(u8, 0x1f), userspace.verification_identity_mask);
 }
 
-test "ELF64 role analysis detects defined hosted assembly probes" {
+test "native kernel load gate accepts exactly contiguous page-aligned RX RO RW loads" {
+    var storage: [5 * kernel_page_size]u8 = undefined;
+    const bytes = buildNativeLoadTestElf(&storage);
+    const header = try parseHeader(bytes);
+    const programs = try resolveProgramTable(bytes, header);
+    const analysis = try analyzeProgramHeaders(bytes, programs);
+    try std.testing.expectEqual(@as(usize, 3), analysis.load_segment_count);
+    try std.testing.expectEqual(@as(u64, 4 * kernel_page_size), analysis.boot_payload_size);
+    try std.testing.expect(nativeKernelLoadLayoutValid(bytes, header, programs));
+    const complete_analysis = try analyzeElf(bytes);
+    try std.testing.expect(complete_analysis.native_load_layout_valid);
+    try std.testing.expectEqual(@as(usize, 1), complete_analysis.runtime_proof_symbols);
+    // SHF_WRITE relocation metadata is immutable under its RO load.
+    try std.testing.expectEqual(@as(u64, 0), complete_analysis.verification_evidence_writable_bytes);
+
+    var adjusted_header = header;
+    adjusted_header.entry += kernel_page_size - 1;
+    try std.testing.expect(nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
+    adjusted_header.entry += 1;
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
+    adjusted_header.entry += kernel_page_size;
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
+    adjusted_header.entry = header.entry - 1;
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
+    adjusted_header = header;
+    adjusted_header.elf_class = .elf32;
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, adjusted_header, programs));
+}
+
+test "native kernel load gate rejects permission substitution and unknown flags on every load" {
+    var storage: [5 * kernel_page_size]u8 = undefined;
+    for (0..kernel_load_permissions.len) |index| {
+        for ([_]u32{ 0, pf_execute, pf_write, pf_write | pf_execute, pf_read | pf_write | pf_execute, 0x8000_0004 }) |invalid_flags| {
+            const bytes = buildNativeLoadTestElf(&storage);
+            const offset = @sizeOf(elf.Elf64_Ehdr) + index * @sizeOf(elf.Elf64.Phdr);
+            writeU32(&storage, offset + 4, invalid_flags);
+            const header = try parseHeader(bytes);
+            try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, header, try resolveProgramTable(bytes, header)));
+        }
+        for (kernel_load_permissions) |other_flags| {
+            if (other_flags == kernel_load_permissions[index]) continue;
+            const bytes = buildNativeLoadTestElf(&storage);
+            const offset = @sizeOf(elf.Elf64_Ehdr) + index * @sizeOf(elf.Elf64.Phdr);
+            writeU32(&storage, offset + 4, other_flags);
+            const header = try parseHeader(bytes);
+            try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, header, try resolveProgramTable(bytes, header)));
+        }
+    }
+
+    const bytes = buildNativeLoadTestElf(&storage);
+    for (0..kernel_load_permissions.len) |index| {
+        writeU32(&storage, @sizeOf(elf.Elf64_Ehdr) + index * @sizeOf(elf.Elf64.Phdr) + 4, pf_read | pf_write);
+    }
+    const header = try parseHeader(bytes);
+    const programs = try resolveProgramTable(bytes, header);
+    try std.testing.expectEqual(@as(usize, 3), (try analyzeProgramHeaders(bytes, programs)).load_segment_count);
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, header, programs));
+    try std.testing.expect(!(try analyzeElf(bytes)).native_load_layout_valid);
+}
+
+test "native kernel load gate rejects overlaps gaps wrong bias and non-file-backed entry" {
+    const Rejection = enum {
+        physical_overlap,
+        physical_gap,
+        wrong_physical_start,
+        wrong_virtual_bias,
+        file_overlap,
+        file_gap,
+        header_overlap,
+        partial_file_page,
+        partial_memory_page,
+        wrong_alignment,
+        zero_file,
+        readonly_zero_tail,
+        physical_aperture,
+        integer_overflow,
+    };
+    var storage: [5 * kernel_page_size]u8 = undefined;
+    for (std.meta.tags(Rejection)) |rejection| {
+        const bytes = buildNativeLoadTestElf(&storage);
+        const offset = @sizeOf(elf.Elf64_Ehdr) + @sizeOf(elf.Elf64.Phdr);
+        var program = try readStruct(elf.Elf64.Phdr, bytes, offset);
+        switch (rejection) {
+            .physical_overlap => {
+                program.paddr -= kernel_page_size;
+                program.vaddr -= kernel_page_size;
+            },
+            .physical_gap => {
+                program.paddr += kernel_page_size;
+                program.vaddr += kernel_page_size;
+            },
+            .wrong_physical_start => {
+                const text_offset = @sizeOf(elf.Elf64_Ehdr);
+                var text_program = try readStruct(elf.Elf64.Phdr, bytes, text_offset);
+                text_program.paddr += kernel_page_size;
+                text_program.vaddr += kernel_page_size;
+                writeStruct(elf.Elf64.Phdr, &storage, text_offset, text_program);
+            },
+            .wrong_virtual_bias => program.vaddr -= kernel_image_bias,
+            .file_overlap => program.offset -= kernel_page_size,
+            .file_gap => program.offset += kernel_page_size,
+            .header_overlap => program.offset = 0,
+            .partial_file_page => program.filesz -= 1,
+            .partial_memory_page => program.memsz += 1,
+            .wrong_alignment => program.@"align" = 8192,
+            .zero_file => program.filesz = 0,
+            .readonly_zero_tail => program.memsz += kernel_page_size,
+            .physical_aperture => program.memsz = kernel_physical_limit,
+            .integer_overflow => program.memsz = std.math.maxInt(u64) - kernel_page_size + 1,
+        }
+        writeStruct(elf.Elf64.Phdr, &storage, offset, program);
+        const header = try parseHeader(bytes);
+        try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, header, try resolveProgramTable(bytes, header)));
+    }
+
+    const bytes = buildNativeLoadTestElf(&storage);
+    const header = try parseHeader(bytes);
+    const programs = try resolveProgramTable(bytes, header);
+    var fewer_programs = programs;
+    fewer_programs.count = 2;
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, header, fewer_programs));
+    var extra_programs = programs;
+    extra_programs.count = 4;
+    const last_program = try readStruct(elf.Elf64.Phdr, bytes, programs.offset + 2 * @sizeOf(elf.Elf64.Phdr));
+    writeStruct(elf.Elf64.Phdr, &storage, programs.offset + 3 * @sizeOf(elf.Elf64.Phdr), last_program);
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, header, extra_programs));
+    // An executable zero-filled tail cannot confer entry authority.
+    var text_program = try readStruct(elf.Elf64.Phdr, bytes, @sizeOf(elf.Elf64_Ehdr));
+    text_program.memsz += kernel_page_size;
+    writeStruct(elf.Elf64.Phdr, &storage, @sizeOf(elf.Elf64_Ehdr), text_program);
+    var bss_entry = header;
+    bss_entry.entry += kernel_page_size;
+    try std.testing.expect(!nativeKernelLoadLayoutValid(bytes, bss_entry, programs));
+}
+
+test "native kernel role metadata rejects misplaced immutable sections and mismatched file offsets" {
+    var storage: [5 * kernel_page_size]u8 = undefined;
+    for ([_]bool{ false, true }) |wrong_offset| {
+        const bytes = buildNativeLoadTestElf(&storage);
+        const relro_offset = 512 + 5 * @sizeOf(elf.Elf64_Shdr);
+        var relro = try readStruct(elf.Elf64_Shdr, bytes, relro_offset);
+        if (wrong_offset) {
+            relro.sh_offset -= kernel_page_size;
+        } else {
+            relro.sh_addr += kernel_page_size;
+            relro.sh_offset += kernel_page_size;
+        }
+        writeStruct(elf.Elf64_Shdr, &storage, relro_offset, relro);
+        const header = try parseHeader(bytes);
+        try std.testing.expect(nativeKernelLoadLayoutValid(bytes, header, try resolveProgramTable(bytes, header)));
+        try std.testing.expect(!(try analyzeElf(bytes)).native_load_layout_valid);
+    }
+}
+
+fn buildNativeLoadTestElf(storage: []u8) []u8 {
+    @memset(storage, 0);
+    var header = std.mem.zeroes(elf.Elf64_Ehdr);
+    @memcpy(header.e_ident[0..4], "\x7fELF");
+    header.e_ident[ei_class] = elf_class_64;
+    header.e_ident[ei_data] = elf_data_little_endian;
+    header.e_ident[ei_version] = elf_current_version;
+    header.e_version = elf_current_version;
+    header.e_entry = kernel_image_bias + kernel_physical_start;
+    header.e_phoff = @sizeOf(elf.Elf64_Ehdr);
+    header.e_phentsize = @sizeOf(elf.Elf64.Phdr);
+    header.e_phnum = kernel_load_permissions.len;
+    header.e_ehsize = @sizeOf(elf.Elf64_Ehdr);
+    header.e_shoff = 512;
+    header.e_shentsize = @sizeOf(elf.Elf64_Shdr);
+    header.e_shnum = 6;
+    header.e_shstrndx = 1;
+    writeStruct(elf.Elf64_Ehdr, storage, 0, header);
+    for (kernel_load_permissions, 0..) |permissions, index| {
+        const physical = kernel_physical_start + index * kernel_page_size;
+        writeStruct(elf.Elf64.Phdr, storage, @sizeOf(elf.Elf64_Ehdr) + index * @sizeOf(elf.Elf64.Phdr), .{
+            .type = .LOAD,
+            .flags = @bitCast(permissions),
+            .offset = (index + 1) * kernel_page_size,
+            .vaddr = kernel_image_bias + physical,
+            .paddr = physical,
+            .filesz = kernel_page_size,
+            .memsz = if (index == 2) 2 * kernel_page_size else kernel_page_size,
+            .@"align" = kernel_page_size,
+        });
+    }
+    const section_names = "\x00.shstrtab\x00.data\x00.symtab\x00.strtab\x00.relro\x00";
+    const symbol_names = "\x00native.session.proofs.runtime_negative_proofs.readonly_fixture\x00";
+    @memcpy(storage[1024..][0..section_names.len], section_names);
+    @memcpy(storage[1248..][0..symbol_names.len], symbol_names);
+    writeStruct(elf.Elf64_Shdr, storage, 512 + @sizeOf(elf.Elf64_Shdr), .{
+        .sh_name = 1,
+        .sh_type = sht_strtab,
+        .sh_flags = 0,
+        .sh_addr = 0,
+        .sh_offset = 1024,
+        .sh_size = section_names.len,
+        .sh_link = 0,
+        .sh_info = 0,
+        .sh_addralign = 1,
+        .sh_entsize = 0,
+    });
+    writeStruct(elf.Elf64_Shdr, storage, 512 + 2 * @sizeOf(elf.Elf64_Shdr), .{
+        .sh_name = 11,
+        .sh_type = sht_progbits,
+        .sh_flags = shf_alloc | shf_write,
+        .sh_addr = kernel_image_bias + kernel_physical_start + 2 * kernel_page_size,
+        .sh_offset = 3 * kernel_page_size,
+        .sh_size = kernel_page_size,
+        .sh_link = 0,
+        .sh_info = 0,
+        .sh_addralign = kernel_page_size,
+        .sh_entsize = 0,
+    });
+    writeStruct(elf.Elf64_Shdr, storage, 512 + 3 * @sizeOf(elf.Elf64_Shdr), .{
+        .sh_name = 17,
+        .sh_type = sht_symtab,
+        .sh_flags = 0,
+        .sh_addr = 0,
+        .sh_offset = 1152,
+        .sh_size = 2 * @sizeOf(elf.Elf64_Sym),
+        .sh_link = 4,
+        .sh_info = 1,
+        .sh_addralign = 8,
+        .sh_entsize = @sizeOf(elf.Elf64_Sym),
+    });
+    writeStruct(elf.Elf64_Shdr, storage, 512 + 4 * @sizeOf(elf.Elf64_Shdr), .{
+        .sh_name = 25,
+        .sh_type = sht_strtab,
+        .sh_flags = 0,
+        .sh_addr = 0,
+        .sh_offset = 1248,
+        .sh_size = symbol_names.len,
+        .sh_link = 0,
+        .sh_info = 0,
+        .sh_addralign = 1,
+        .sh_entsize = 0,
+    });
+    writeStruct(elf.Elf64_Shdr, storage, 512 + 5 * @sizeOf(elf.Elf64_Shdr), .{
+        .sh_name = 33,
+        .sh_type = sht_progbits,
+        .sh_flags = shf_alloc | shf_write,
+        .sh_addr = kernel_image_bias + kernel_physical_start + kernel_page_size,
+        .sh_offset = 2 * kernel_page_size,
+        .sh_size = kernel_page_size,
+        .sh_link = 0,
+        .sh_info = 0,
+        .sh_addralign = kernel_page_size,
+        .sh_entsize = 0,
+    });
+    writeStruct(elf.Elf64_Sym, storage, 1152 + @sizeOf(elf.Elf64_Sym), .{
+        .st_name = 1,
+        .st_info = 0,
+        .st_other = 0,
+        .st_shndx = 5,
+        .st_value = kernel_image_bias + kernel_physical_start + kernel_page_size,
+        .st_size = 8,
+    });
+    return storage;
+}
+
+test "ELF64 role analysis detects defined architecture proof symbols" {
     for ([_][]const u8{
         "zigos_fred_capture_probe",
         "zigos_fred_return_probe",
+        "zigos_idt_return_probe",
         "zigos_xstate_host_roundtrip",
+        "native_crypto_probe_main",
+        "zigos_arch_smp_",
+        "kernel.smp.ArchitectureProof",
+        "arch.x86_64.high_half_shared_probe",
+        "arch.x86_64.high_half_smp_probe",
+        "arch.x86_64.ap_cache_probe_support.initializeBsp",
+        "arch.x86_64.ap_cache_rejection_probe.snapshotBytes",
+        "arch.x86_64.smp_cache_enabled_probe.main",
+        "zigos_arch_smp_cache_start",
+        "zigos_arch_smp_cache_end",
+        "zigos_arch_smp_cache_snapshot",
+        "zigos_arch_smp_cache_result",
+        "zigos_arch_smp_cache_initialize",
+        "zigos_arch_smp_cache_first_call",
+        "zigos_arch_smp_cache_second_call",
+        "native.task.userspace_executor.proveSharedSyscallCopyPath",
+        "native.task.userspace_executor.Executor.installPreparedMappingForArchitectureProof",
+        "native.task.userspace_scheduler.ArchitectureProof.bindDomain",
+        "kernel.memory.paging64.drainFrameCachesForArchitectureProof",
     }) |probe| {
         var storage: [4096]u8 = @splat(0);
         const bytes = buildTestElf64(&storage);
@@ -1942,6 +2372,7 @@ fn buildTestElf(storage: []u8) []u8 {
         .segment_type = pt_load,
         .offset = 0,
         .virtual_address = 0,
+        .physical_address = 0,
         .file_size = @intCast(file_size),
         .memory_size = @intCast(file_size),
         .flags = 4,
@@ -1951,6 +2382,7 @@ fn buildTestElf(storage: []u8) []u8 {
         .segment_type = pt_load,
         .offset = data_offset,
         .virtual_address = 0x2000,
+        .physical_address = 0x2000,
         .file_size = 16,
         .memory_size = 48,
         .flags = 4 | pf_write,
@@ -1966,7 +2398,8 @@ fn buildTestElf64(storage: []u8) []u8 {
     const program_table_offset = @sizeOf(elf.Elf64_Ehdr);
     const section_table_offset = program_table_offset + program_count * @sizeOf(elf.Elf64.Phdr);
     const section_names = "\x00.shstrtab\x00.data\x00.bss\x00.strtab\x00.symtab\x00";
-    const symbol_names = "\x00native.session.proofs.runtime_negative_proofs.fixture\x00native.session.booted_evidence.runProduction\x00";
+    const proof_name = "native.session.proofs.runtime_negative_proofs.fixture_for_architecture_symbol_admission";
+    const symbol_names = "\x00" ++ proof_name ++ "\x00native.session.booted_evidence.runProduction\x00";
     const section_names_offset = section_table_offset + section_count * @sizeOf(elf.Elf64_Shdr);
     const data_offset = section_names_offset + section_names.len;
     const strings_offset = data_offset + 16;
@@ -2085,7 +2518,7 @@ fn buildTestElf64(storage: []u8) []u8 {
         .st_value = 0x2000,
         .st_size = 4,
     });
-    const booted_name_offset = 1 + "native.session.proofs.runtime_negative_proofs.fixture".len + 1;
+    const booted_name_offset = 1 + proof_name.len + 1;
     writeStruct(elf.Elf64_Sym, storage, symbols_offset + 2 * @sizeOf(elf.Elf64_Sym), .{
         .st_name = booted_name_offset,
         .st_info = 0,
@@ -2126,6 +2559,7 @@ fn writeProgramHeader(bytes: []u8, offset: anytype, program: ProgramHeader) void
     writeU32(bytes, start, program.segment_type);
     writeU32(bytes, start + 4, program.offset);
     writeU32(bytes, start + 8, program.virtual_address);
+    writeU32(bytes, start + 12, program.physical_address);
     writeU32(bytes, start + 16, program.file_size);
     writeU32(bytes, start + 20, program.memory_size);
     writeU32(bytes, start + 24, program.flags);

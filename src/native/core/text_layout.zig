@@ -58,6 +58,7 @@ pub const Row = struct {
     }
 };
 pub const Location = struct { row: Row, index: usize, column: usize };
+pub const VerticalMovement = struct { caret: Caret, column: usize };
 
 pub const VisibleWindow = struct {
     storage: []const Row,
@@ -84,12 +85,17 @@ pub const Layout = struct {
     }
 
     pub fn locate(self: Layout, caret: Caret) Location {
-        const offset = @min(caret.offset, self.text.len);
         var iterator = self.rows();
+        const position = self.locateRow(caret, &iterator);
+        return .{ .row = position.row, .index = position.index, .column = position.row.columnAt(self.text, @min(caret.offset, self.text.len)) };
+    }
+
+    fn locateRow(self: Layout, caret: Caret, iterator: *Iterator) struct { row: Row, index: usize } {
+        const offset = @min(caret.offset, self.text.len);
         var index: usize = 0;
         while (iterator.next()) |row| : (index += 1) {
             if (row.contains(.{ .offset = offset, .upstream = caret.upstream }))
-                return .{ .row = row, .index = index, .column = row.columnAt(self.text, offset) };
+                return .{ .row = row, .index = index };
         }
         unreachable;
     }
@@ -102,8 +108,25 @@ pub const Layout = struct {
     }
 
     pub fn vertical(self: Layout, caret: Caret, column: usize, down: bool, count: usize) Caret {
-        const index = self.locate(caret).index;
-        return self.rowAt(if (down) index +| count else index -| count).atColumn(self.text, column);
+        return self.moveVertical(caret, column, down, count).caret;
+    }
+
+    // A null column starts a vertical sequence at the caret's visual column.
+    // Locate once and resume the same iterator for downward movement. Upward
+    // movement restarts row traversal using the already-classified iterator.
+    pub fn moveVertical(self: Layout, caret: Caret, column: ?usize, down: bool, count: usize) VerticalMovement {
+        var iterator = self.rows();
+        var preceding = iterator;
+        const location = self.locateRow(caret, &iterator);
+        const preferred = column orelse location.row.columnAt(self.text, @min(caret.offset, self.text.len));
+        var row = location.row;
+        if (down) {
+            for (0..count) |_| row = iterator.next() orelse break;
+        } else if (count != 0 and location.index != 0) {
+            row = preceding.next().?;
+            for (0..location.index -| count) |_| row = preceding.next().?;
+        }
+        return .{ .caret = row.atColumn(self.text, preferred), .column = preferred };
     }
 
     // The caller provides one row slot per visible line. Retain preceding rows
@@ -237,6 +260,39 @@ test "text layout distinguishes wrap affinity and avoids a phantom row before ne
     try std.testing.expectEqual(@as(usize, 5), layout.locate(.{ .offset = 10 }).column);
     try std.testing.expectEqual(Caret{ .offset = 13 }, layout.vertical(.{ .offset = 10 }, 5, true, 1));
     try std.testing.expectEqual(Caret{ .offset = 10 }, layout.vertical(.{ .offset = 13 }, 5, false, 1));
+}
+
+test "vertical movement matches independent row lookup across graphemes wrap affinity and page limits" {
+    for ([_][]const u8{
+        "", "\n", "\n\n", "abc", "abc\n", "abcdefghij\nxy\n",
+        "Ae\u{301}界Z\r\n\t猫\u{2028}x\u{2029}",
+        "👩‍💻🇺🇸☃\u{fe0f}\tक्‍ष\r\nend",
+    }) |text| {
+        for ([_]usize{ 0, 1, 2, 4, 5, 20 }) |columns| {
+            const layout = Layout{ .text = text, .columns = columns };
+            // Also exercise the bounded caret behavior beyond the document.
+            for (0..text.len + 2) |offset| {
+                if (offset <= text.len and !unicode.isBoundary(text, offset)) continue;
+                for ([_]bool{ false, true }) |upstream| {
+                    const caret = Caret{ .offset = offset, .upstream = upstream };
+                    const location = layout.locate(caret);
+                    for ([_]?usize{ null, 0, 1, 3, 7, std.math.maxInt(usize) }) |preferred| {
+                        const column = preferred orelse location.column;
+                        for ([_]bool{ false, true }) |down| {
+                            for ([_]usize{ 0, 1, 2, 7, std.math.maxInt(usize) }) |count| {
+                                const target = if (down) location.index +| count else location.index -| count;
+                                const expected = layout.rowAt(target).atColumn(text, column);
+                                const actual = layout.moveVertical(caret, preferred, down, count);
+                                try std.testing.expectEqualDeep(expected, actual.caret);
+                                try std.testing.expectEqual(column, actual.column);
+                                try std.testing.expect(unicode.isBoundary(text, actual.caret.offset));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 test "text layout covers every cursor boundary without allocation across narrow and full widths" {

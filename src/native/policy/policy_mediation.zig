@@ -1244,7 +1244,7 @@ test "policy mediation seals sensory grants against transitive delegation" {
         .rights = .{ .device = .{ .device_use = true } },
         .scope = camera_capability.scope,
         .lease = .{ .issued_at_ticks = 11, .expires_at_ticks = 40, .renewable = false },
-    }));
+    }, 11));
 }
 
 test "policy mediation requires finite leases for sensory grants" {

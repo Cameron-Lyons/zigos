@@ -215,3 +215,21 @@ test "storage root summary metadata stays compact" {
     try std.testing.expectEqual(@as(usize, 256), @sizeOf(RootState));
     try std.testing.expectEqual(@as(usize, 264), @sizeOf(LoadedRoot));
 }
+
+test "storage roots bind the checksum algorithm and reject prior format versions" {
+    var buffer: [volume_layout.sector_size]u8 = @splat(0);
+    const root = RootState{ .generation = 7, .log_record_count = 1 };
+    try encodeRoot(&buffer, root);
+    try std.testing.expectEqual(root.generation, (try parseRoot(&buffer)).generation);
+
+    // The root version is checked before parsing data or accepting a checksum.
+    std.mem.writeInt(u16, buffer[volume_layout.root_magic.len..][0..2], 5, .little);
+    try std.testing.expectError(error.UnsupportedVersion, parseRoot(&buffer));
+
+    try encodeRoot(&buffer, root);
+    // No workspace summaries: the checksum follows the fixed root fields.
+    const checksum_offset = volume_layout.root_magic.len + 2 + 8 + 4 + 4 + 8 * 4 + 2 + 2 + 8 + 2;
+    const prior_checksum = @import("../../core/util.zig").fnv1a64(buffer[0..checksum_offset]);
+    std.mem.writeInt(u64, buffer[checksum_offset..][0..8], prior_checksum, .little);
+    try std.testing.expectError(error.ChecksumMismatch, parseRoot(&buffer));
+}

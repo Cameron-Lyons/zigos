@@ -351,7 +351,7 @@ pub const Volume = struct {
         if (!self.beginOperation()) return error.VolumeOperationBusy;
         defer self.endOperation();
         if (image.len < image_bytes) return error.ImageTooSmall;
-        const selection = selectImageSaveRoot(image);
+        const selection = try selectImageSaveRoot(image);
         return saveIncremental(self, selection.current, selection.force_compaction, store, workspaces, ImageWriteFns{ .image = image });
     }
 
@@ -582,14 +582,17 @@ fn saveIncremental(
     return .{ .generation = next_generation, .snapshot_current = dirty_snapshot.acknowledge(store, workspaces) };
 }
 
-fn selectImageSaveRoot(image: []const u8) SaveRootSelection {
+fn selectImageSaveRoot(image: []const u8) Error!SaveRootSelection {
     var selection = SaveRootSelection{};
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
         const offset = @as(usize, sector_index) * sector_size;
         const sector = image[offset .. offset + sector_size];
         if (!volume_root_slot.hasRootMagic(sector)) continue;
-        const loaded = volume_root_slot.readImageRoot(image, sector_index) catch {
+        const loaded = volume_root_slot.readImageRoot(image, sector_index) catch |err| {
+            // An unsupported volume is never a fresh or damaged current-format
+            // volume. Preserve it even when its peer root could be loaded.
+            if (err == error.UnsupportedVersion) return err;
             selection.force_compaction = true;
             continue;
         };
@@ -605,7 +608,7 @@ fn selectBackendSaveRoot(self: *Volume) Error!SaveRootSelection {
     var sector_index: u32 = 0;
     while (sector_index < volume_layout.root_sector_count) : (sector_index += 1) {
         const loaded = volume_root_slot.readBackendRoot(self, sector_index) catch |err| {
-            if (err == error.DeviceReadFailed) return err;
+            if (err == error.DeviceReadFailed or err == error.UnsupportedVersion) return err;
             if (volume_root_slot.hasRootMagic(self.sector_buffer[0..])) selection.force_compaction = true;
             continue;
         };
@@ -1281,7 +1284,7 @@ fn applyBlobRecord(store: *object_store.Store, payload: []const u8) Error!void {
     const ref_count = try reader.readU16();
     if (payload_len > object_store.MAX_PAYLOAD_BYTES or ref_count > object_store.MAX_VERSIONS) return error.CorruptImage;
     const chunk_count = object_store.chunkCountForPayloadLen(payload_len);
-    var chunk_refs = @as([object_store.MAX_BLOB_CHUNKS]object_store.ChunkRef, @splat(object_store.ChunkRef{}));
+    var chunk_refs: [object_store.MAX_BLOB_CHUNKS]object_store.ChunkRef = undefined;
     var chunk_slot_indexes = @as([object_store.MAX_BLOB_CHUNKS]object_store.BlobChunkSlotIndex, @splat(0));
     var chunk_index: usize = 0;
     while (chunk_index < chunk_count) : (chunk_index += 1) {
@@ -1311,9 +1314,8 @@ fn applyChunkRecord(store: *object_store.Store, payload: []const u8) Error!void 
     try reader.readBytes(&address);
     const payload_len: usize = @intCast(try reader.readU16());
     if (payload_len > object_store.MAX_CHUNK_BYTES) return error.CorruptImage;
-    var bytes: [object_store.MAX_CHUNK_BYTES]u8 = @as([object_store.MAX_CHUNK_BYTES]u8, @splat(0));
-    try reader.readBytes(bytes[0..payload_len]);
-    _ = store.putChunk(address, bytes[0..payload_len]) catch return error.CorruptImage;
+    const bytes = try reader.readSlice(payload_len);
+    _ = store.putChunk(address, bytes) catch return error.CorruptImage;
 }
 
 fn applyWorkspaceRecord(workspaces: *workspace.Directory, payload: []const u8) Error!u64 {
@@ -1559,9 +1561,8 @@ fn deserializeState(
         try reader.readBytes(&address);
         const payload_len: usize = @intCast(try reader.readU16());
         if (payload_len > object_store.MAX_CHUNK_BYTES) return error.CorruptImage;
-        var bytes: [object_store.MAX_CHUNK_BYTES]u8 = @as([object_store.MAX_CHUNK_BYTES]u8, @splat(0));
-        try reader.readBytes(bytes[0..payload_len]);
-        _ = store.putChunk(address, bytes[0..payload_len]) catch return error.CorruptImage;
+        const bytes = try reader.readSlice(payload_len);
+        _ = store.putChunk(address, bytes) catch return error.CorruptImage;
     }
 
     for (0..@as(usize, blob_count)) |_| {
@@ -1942,6 +1943,94 @@ test "checkpoint records accept exact capacity and reject one byte less" {
         serializeCheckpointRecord(store, workspaces, record_storage[0 .. exact_record_len - 1]),
     );
     try std.testing.expectEqual(@as(u8, 0x5A), record_storage[exact_record_len - 1]);
+}
+
+test "chunk replay owns its input and rejects truncated oversized and corrupt payloads" {
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(object_store.Store);
+    defer allocator.destroy(store);
+    store.* = object_store.Store.init();
+    defer store.reset();
+
+    var expected: [object_store.MAX_CHUNK_BYTES]u8 = undefined;
+    for (&expected, 0..) |*byte, index| byte.* = @truncate(index * 19 + index / 13);
+    var record: [32 + 2 + object_store.MAX_CHUNK_BYTES]u8 = undefined;
+    for ([_]usize{ 0, 17, object_store.MAX_CHUNK_BYTES }) |payload_len| {
+        store.reset();
+        const address = object_store.computeChunkAddress(expected[0..payload_len]);
+        var writer = CursorWriter{ .buffer = &record };
+        try writer.writeBytes(&address);
+        try writer.writeU16(@intCast(payload_len));
+        try writer.writeBytes(expected[0..payload_len]);
+        try applyChunkRecord(store, record[0..writer.offset]);
+        try std.testing.expectEqual(@as(usize, 1), store.chunkCount());
+
+        @memset(record[32 + 2 .. writer.offset], 0xFF);
+        try std.testing.expectEqualSlices(u8, expected[0..payload_len], store.chunk(address).?.chunkSlice());
+    }
+
+    store.reset();
+    const address = object_store.computeChunkAddress(&expected);
+    var writer = CursorWriter{ .buffer = &record };
+    try writer.writeBytes(&address);
+    try writer.writeU16(object_store.MAX_CHUNK_BYTES);
+    try writer.writeBytes(&expected);
+    try std.testing.expectError(error.CorruptImage, applyChunkRecord(store, record[0 .. writer.offset - 1]));
+    try std.testing.expectEqual(@as(usize, 0), store.chunkCount());
+
+    record[32 + 2] ^= 1;
+    try std.testing.expectError(error.CorruptImage, applyChunkRecord(store, record[0..writer.offset]));
+    try std.testing.expectEqual(@as(usize, 0), store.chunkCount());
+
+    writer.offset = 32;
+    try writer.writeU16(object_store.MAX_CHUNK_BYTES + 1);
+    try std.testing.expectError(error.CorruptImage, applyChunkRecord(store, record[0..writer.offset]));
+    try std.testing.expectEqual(@as(usize, 0), store.chunkCount());
+}
+
+test "checkpoint chunk replay owns its input and preserves payload validation" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.create(object_store.Store);
+    defer allocator.destroy(source);
+    source.* = object_store.Store.init();
+    defer source.reset();
+    const restored = try allocator.create(object_store.Store);
+    defer allocator.destroy(restored);
+    restored.* = object_store.Store.init();
+    defer restored.reset();
+    const workspaces = try allocator.create(workspace.Directory);
+    defer allocator.destroy(workspaces);
+    workspaces.* = workspace.Directory.init();
+    const volume = try allocator.create(Volume);
+    defer allocator.destroy(volume);
+    volume.* = Volume.init();
+
+    var expected: [object_store.MAX_CHUNK_BYTES]u8 = undefined;
+    for (&expected, 0..) |*byte, index| byte.* = @truncate(index * 23 + index / 17);
+    const address = object_store.computeChunkAddress(&expected);
+    _ = try source.putChunk(address, &expected);
+    var payload: [object_store.MAX_CHUNK_BYTES + 256]u8 = undefined;
+    const payload_len = try serializeState(source, workspaces, &payload);
+    const bytes_offset = payload_len - expected.len;
+    var bounds = ReplayIdBounds{};
+
+    try std.testing.expectError(error.CorruptImage, deserializeState(volume, restored, workspaces, payload[0 .. payload_len - 1], &bounds));
+    try std.testing.expectEqual(@as(usize, 0), restored.chunkCount());
+
+    payload[bytes_offset] ^= 1;
+    try std.testing.expectError(error.CorruptImage, deserializeState(volume, restored, workspaces, payload[0..payload_len], &bounds));
+    try std.testing.expectEqual(@as(usize, 0), restored.chunkCount());
+    payload[bytes_offset] ^= 1;
+
+    std.mem.writeInt(u16, payload[bytes_offset - 2 ..][0..2], object_store.MAX_CHUNK_BYTES + 1, .little);
+    try std.testing.expectError(error.CorruptImage, deserializeState(volume, restored, workspaces, payload[0..payload_len], &bounds));
+    try std.testing.expectEqual(@as(usize, 0), restored.chunkCount());
+    std.mem.writeInt(u16, payload[bytes_offset - 2 ..][0..2], object_store.MAX_CHUNK_BYTES, .little);
+
+    try deserializeState(volume, restored, workspaces, payload[0..payload_len], &bounds);
+    @memset(payload[bytes_offset..payload_len], 0xFF);
+    try std.testing.expectEqual(@as(usize, 1), restored.chunkCount());
+    try std.testing.expectEqualSlices(u8, &expected, restored.chunk(address).?.chunkSlice());
 }
 
 test "storage replay requires exactly one leading checkpoint" {

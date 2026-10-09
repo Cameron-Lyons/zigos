@@ -2,6 +2,7 @@ const std = @import("std");
 const endian = @import("../utils/endian.zig");
 pub const image_info = @import("../../boot/image_info.zig");
 pub const tpm_info = @import("../../boot/tpm_info.zig");
+pub const paging_info = @import("../../boot/paging_info.zig");
 
 const readU32Le = endian.readU32Le;
 const readU64Le = endian.readU64Le;
@@ -39,6 +40,7 @@ pub const ParsedInfo = struct {
     total_size: u32,
     boot_image: ?image_info.Info = null,
     boot_tpm: ?tpm_info.Info = null,
+    boot_paging: ?paging_info.Info = null,
     has_basic_memory: bool = false,
     has_command_line: bool = false,
     has_memory_map: bool = false,
@@ -114,6 +116,10 @@ pub fn parse(bytes: []const u8, physical_base: u32) Error!ParsedInfo {
             tpm_info.TAG => {
                 if (parsed.boot_tpm != null) return error.DuplicateTag;
                 parsed.boot_tpm = tpm_info.Info.decode(bytes[header_end..tag_end]) catch return error.InvalidTag;
+            },
+            paging_info.TAG => {
+                if (parsed.boot_paging != null) return error.DuplicateTag;
+                parsed.boot_paging = paging_info.Info.decode(bytes[header_end..tag_end]) catch return error.InvalidTag;
             },
             TAG_COMMAND_LINE => {
                 if (seen_command_line) return error.DuplicateTag;
@@ -382,8 +388,8 @@ test "EFI stub handoff round-trips through the Multiboot2 parser" {
     try std.testing.expect(parsed.has_framebuffer);
     try std.testing.expect(parsed.has_efi64_system_table);
     try std.testing.expect(parsed.has_acpi2_rsdp);
-    try std.testing.expectEqual(@as(u32, 24), parsed.mmap_entry_size);
-    try std.testing.expectEqual(@as(u32, 48), parsed.mmap_length);
+    try std.testing.expectEqual(@as(u32, 32), parsed.mmap_entry_size);
+    try std.testing.expectEqual(@as(u32, 64), parsed.mmap_length);
     try std.testing.expectEqual(@as(u64, 0x8000_0000), parsed.framebuffer_addr);
     try std.testing.expectEqual(@as(u64, 0x1234_0000), parsed.efi64_system_table_addr);
     try std.testing.expectEqual(@as(u32, efi_handoff.ACPI_RSDP_V2_MIN_BYTES), parsed.acpi2_rsdp_length);
@@ -420,4 +426,32 @@ test "EFI TPM log handoff rejects duplicate and malformed measurement tags" {
     _ = try efi_handoff.encode(&bytes, .{ .boot_tpm = info });
     writeU32(bytes[20..24], 1);
     try std.testing.expectError(error.InvalidTag, parse(bytes[0..encoded.len], 0x1000));
+}
+
+test "native variable paging ownership rejects obsolete malformed and duplicate receipts" {
+    const efi_handoff = @import("../../boot/efi_handoff.zig");
+    const info = paging_info.Info{ .transition_pages = 31, .final_pages = 3, .transition_base = 0x1000000, .final_base = 0x2000000 };
+    var storage: [128]u8 = undefined;
+    const encoded = try efi_handoff.encode(&storage, .{ .boot_paging = info });
+    try std.testing.expectEqualDeep(info, (try parse(encoded, 0x1000)).boot_paging.?);
+    const Attack = enum { old_v1, old_v2, reserved_bit, zero_transition, excessive_final, overlapping_arenas, wrapping_extent };
+    for (std.enums.values(Attack)) |attack| {
+        _ = try efi_handoff.encode(&storage, .{ .boot_paging = info });
+        switch (attack) {
+            .old_v1 => writeU32(storage[16..20], 1),
+            .old_v2 => writeU32(storage[16..20], 2),
+            .reserved_bit => writeU32(storage[28..32], 1),
+            .zero_transition => writeU32(storage[20..24], 0),
+            .excessive_final => writeU32(storage[24..28], paging_info.MAX_ARENA_PAGES + 1),
+            .overlapping_arenas => writeU64(storage[40..48], info.transition_base + info.transitionBytes() - 4096),
+            .wrapping_extent => writeU64(storage[32..40], std.math.maxInt(u64) - 4095),
+        }
+        try std.testing.expectError(error.InvalidTag, parse(storage[0..encoded.len], 0x1000));
+    }
+    _ = try efi_handoff.encode(&storage, .{ .boot_paging = info });
+    @memcpy(storage[64..120], storage[8..64]);
+    @memset(storage[120..128], 0);
+    writeU32(storage[124..128], 8);
+    writeU32(storage[0..4], storage.len);
+    try std.testing.expectError(error.DuplicateTag, parse(&storage, 0x1000));
 }

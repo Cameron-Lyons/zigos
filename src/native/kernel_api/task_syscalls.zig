@@ -2,8 +2,10 @@ const abi = @import("../core/abi.zig");
 const component_port = @import("component_port.zig");
 const dispatch = @import("syscall_dispatch.zig");
 const task_runtime = @import("../task/task_runtime.zig");
+const task_create_wire = @import("task_create_wire.zig");
 
 const TaskCreateScratch = struct {
+    image_wire: abi.ExecutableImageWireSpec = undefined,
     image: task_runtime.ExecutableImageSpec = .{},
     bundle_id: [task_runtime.MAX_TASK_BUNDLE_ID_BYTES]u8 = undefined,
     source_identity: [task_runtime.MAX_TASK_SOURCE_IDENTITY_BYTES]u8 = undefined,
@@ -19,11 +21,19 @@ pub fn dispatchTaskCreate(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    var request = dispatch.readRequest(component_port.TaskCreateRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    const wire = dispatch.readRequest(abi.TaskCreateWireRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    if (!task_create_wire.taskCreateWireValid(&wire)) return dispatch.invalidRequest();
     var scratch = TaskCreateScratch{};
-    if (!sanitizeTaskCreateRequest(memory, &request, &scratch)) return dispatch.invalidRequest();
-    const task = component_port.invokeGeneratedFromValidatedSyscall(.task_create, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, task);
+    var request = component_port.TaskCreateRequest{
+        .header = wire.header,
+        .authority_capability_id = wire.authority_capability_id,
+        .request = undefined,
+    };
+    if (!sanitizeTaskCreateRequest(memory, &wire, &scratch, &request.request)) return dispatch.invalidRequest();
+    // Keep this single-operation decode and forwarding boundary together;
+    // shared image validation and bounded byte copying remain outlined.
+    const task = @call(.always_inline, component_port.invokeGeneratedFromValidatedSyscall, .{ .task_create, port, request, now_ticks }) catch |err| return dispatch.mapError(err);
+    return @call(.always_inline, dispatch.writeResponse, .{ memory, response_addr, response_len, task });
 }
 
 pub fn dispatchTaskTerminate(
@@ -102,58 +112,53 @@ pub fn dispatchSurfacePresent(
     response_addr: usize,
     response_len: usize,
 ) dispatch.DispatchResult {
-    var request = dispatch.readRequest(component_port.SurfacePresentRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    const wire = dispatch.readRequest(abi.SurfacePresentWireRequest, memory, request_addr) orelse return dispatch.invalidRequest();
+    @import("../core/request_header.zig").validateHeader(wire.header, abi.opcode(.surface_present)) catch |err| return dispatch.mapError(err);
+    var request = component_port.SurfacePresentRequest{
+        .header = wire.header,
+        .presentation_capability_id = wire.presentation_capability_id,
+        .presenter_task_id = wire.presenter_task_id,
+        .surface_id = wire.surface_id,
+        .fence = wire.fence,
+        .buffer_object_id = wire.buffer_object_id,
+        .buffer_offset = wire.buffer_offset,
+        .buffer_bytes = wire.buffer_bytes,
+    };
     var text: abi.SurfaceText = undefined;
-    if (request.text) |address| {
-        text = dispatch.readUserValue(abi.SurfaceText, memory, @intFromPtr(address)) orelse return dispatch.invalidRequest();
+    if (wire.text_address != 0) {
+        const address = @import("std").math.cast(usize, wire.text_address) orelse return dispatch.invalidRequest();
+        const encoded = dispatch.readUserValue(abi.SurfaceTextWire, memory, address) orelse return dispatch.invalidRequest();
+        text = .{
+            .window_id = encoded.window_id,
+            .text_length = encoded.text_length,
+            .cursor = encoded.cursor,
+            .state = @bitCast(encoded.state),
+            .text = encoded.text,
+        };
         request.text = &text;
     }
     const presented = component_port.invokeGeneratedFromValidatedSyscall(.surface_present, port, request, now_ticks) catch |err| return dispatch.mapError(err);
     return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(presented));
 }
 
-pub fn dispatchWait(
-    port: *component_port.KernelPort,
+inline fn sanitizeTaskCreateRequest(
     memory: dispatch.UserMemoryContext,
-    now_ticks: u64,
-    request_addr: usize,
-    response_addr: usize,
-    response_len: usize,
-) dispatch.DispatchResult {
-    const request = dispatch.readRequest(component_port.WaitRequest, memory, request_addr) orelse return dispatch.invalidRequest();
-    const parked = component_port.invokeGeneratedFromValidatedSyscall(.wait, port, request, now_ticks) catch |err| return dispatch.mapError(err);
-    return dispatch.writeResponse(memory, response_addr, response_len, abi.boolResponse(parked));
-}
-
-fn sanitizeTaskCreateRequest(
-    memory: dispatch.UserMemoryContext,
-    request: *component_port.TaskCreateRequest,
+    wire: *const abi.TaskCreateWireRequest,
     scratch: *TaskCreateScratch,
+    out: *task_runtime.TaskCreateRequest,
 ) bool {
-    request.request.launch.bundle_id = dispatch.copyUserSlice(
-        memory,
-        request.request.launch.bundle_id,
-        &scratch.bundle_id,
-    ) orelse return false;
-    request.request.launch.source_identity = dispatch.copyUserSlice(
-        memory,
-        request.request.launch.source_identity,
-        &scratch.source_identity,
-    ) orelse return false;
-    request.request.initial_component.label = dispatch.copyUserSlice(
-        memory,
-        request.request.initial_component.label,
-        &scratch.component_label,
-    ) orelse return false;
-    request.request.initial_component.entry = dispatch.copyUserSlice(
-        memory,
-        request.request.initial_component.entry,
-        &scratch.component_entry,
-    ) orelse return false;
-
-    if (request.request.userspace_image) |image_ptr| {
-        scratch.image = dispatch.readUserValue(task_runtime.ExecutableImageSpec, memory, @intFromPtr(image_ptr)) orelse return false;
-        request.request.userspace_image = &scratch.image;
+    const staged = task_create_wire.StagedStrings{
+        .bundle_id = dispatch.copyUserBytes(memory, wire.bundle_id_address, wire.bundle_id_bytes, &scratch.bundle_id) orelse return false,
+        .source_identity = dispatch.copyUserBytes(memory, wire.source_identity_address, wire.source_identity_bytes, &scratch.source_identity) orelse return false,
+        .component_label = dispatch.copyUserBytes(memory, wire.component_label_address, wire.component_label_bytes, &scratch.component_label) orelse return false,
+        .component_entry = dispatch.copyUserBytes(memory, wire.component_entry_address, wire.component_entry_bytes, &scratch.component_entry) orelse return false,
+    };
+    var image: ?*const task_runtime.ExecutableImageSpec = null;
+    if (wire.userspace_image_address != 0) {
+        if (wire.userspace_image_address % @alignOf(abi.ExecutableImageWireSpec) != 0) return false;
+        _ = dispatch.copyUserBytes(memory, wire.userspace_image_address, @sizeOf(abi.ExecutableImageWireSpec), @import("std").mem.asBytes(&scratch.image_wire)) orelse return false;
+        if (!task_create_wire.executableImageFromWireInto(&scratch.image_wire, &scratch.image)) return false;
+        image = &scratch.image;
     }
-    return true;
+    return task_create_wire.taskCreateFromWireInto(wire, staged, image, out);
 }

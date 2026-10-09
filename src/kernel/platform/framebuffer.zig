@@ -129,7 +129,8 @@ pub const ScanoutProof = struct {
     hardware_scanout: HardwareScanoutEvidence = .{},
 
     pub fn verified(self: ScanoutProof) bool {
-        const framebuffer = validate(self.info) catch return false;
+        const framebuffer = self.info;
+        validate(framebuffer) catch return false;
         const bpp = framebuffer.bytesPerPixel() catch return false;
         const minimum_scanline = @as(u64, framebuffer.width) * @as(u64, bpp);
         const minimum_buffer = framebuffer.minimumBufferBytes() catch return false;
@@ -148,7 +149,7 @@ pub const ScanoutProof = struct {
     }
 };
 
-pub fn validate(info: ?Info) Error!Info {
+pub fn validate(info: ?Info) Error!void {
     const framebuffer = info orelse return error.MissingFramebuffer;
     if (framebuffer.physical_address == 0) return error.InvalidAddress;
     if (framebuffer.physical_address % 4 != 0) return error.InvalidAddress;
@@ -159,11 +160,11 @@ pub fn validate(info: ?Info) Error!Info {
     const minimum_bytes = try framebuffer.minimumBufferBytes();
     if (framebuffer.buffer_bytes < minimum_bytes) return error.BufferTooSmall;
     _ = std.math.add(u64, framebuffer.physical_address, framebuffer.buffer_bytes) catch return error.InvalidAddress;
-    return framebuffer;
 }
 
 pub fn proveScanout(info: Info, sample: []const u8, expected_pixel: u32) Error!ScanoutProof {
-    const framebuffer = try validate(info);
+    const framebuffer = info;
+    try validate(framebuffer);
     if (expected_pixel == 0) return error.InvalidExpectedPixel;
     const bpp = try framebuffer.bytesPerPixel();
     const minimum_scanline = @as(u64, framebuffer.width) * @as(u64, bpp);
@@ -198,7 +199,7 @@ pub fn proveScanout(info: Info, sample: []const u8, expected_pixel: u32) Error!S
 }
 
 pub fn textGrid(info: Info, glyph_width: u32, glyph_height: u32) Error!struct { columns: u32, rows: u32 } {
-    _ = try validate(info);
+    try validate(info);
     if (glyph_width == 0 or glyph_height == 0) return error.InvalidResolution;
     return .{
         .columns = info.width / glyph_width,
@@ -264,27 +265,29 @@ fn hashU64(digest: u64, value: anytype) u64 {
 }
 
 test "framebuffer validation accepts UEFI GOP-style linear modes" {
-    const info = try validate(.{
+    const info = Info{
         .physical_address = TEST_FRAMEBUFFER_ADDRESS,
         .width = GOP_TEST_WIDTH,
         .height = GOP_TEST_HEIGHT,
         .pixels_per_scan_line = GOP_TEST_STRIDE_PIXELS,
         .format = .bgrx8888,
         .buffer_bytes = testLinearBufferBytes(GOP_TEST_STRIDE_PIXELS, GOP_TEST_HEIGHT),
-    });
+    };
+    try validate(info);
     try std.testing.expectEqual(FRAMEBUFFER_32BPP_BYTES, try info.bytesPerPixel());
     try std.testing.expectEqual(testLinearBufferBytes(GOP_TEST_STRIDE_PIXELS, GOP_TEST_HEIGHT), try info.minimumBufferBytes());
 }
 
 test "framebuffer scanout proof requires nonblank expected pixels" {
-    const info = try validate(.{
+    const info = Info{
         .physical_address = TEST_FRAMEBUFFER_ADDRESS,
         .width = 64,
         .height = 16,
         .pixels_per_scan_line = 64,
         .format = .bgrx8888,
         .buffer_bytes = testLinearBufferBytes(64, 16),
-    });
+    };
+    try validate(info);
     const expected_pixel: u32 = 0x00FF_00FF;
     var scanline = @as([64 * @as(usize, FRAMEBUFFER_32BPP_BYTES)]u8, @splat(0));
     std.mem.writeInt(u32, scanline[0..4], expected_pixel, .little);

@@ -2,6 +2,7 @@ const native_util = @import("../../core/util.zig");
 const principal = @import("../../core/principal.zig");
 const volume_errors = @import("errors.zig");
 const workspace = @import("../workspace.zig");
+pub const checksumBytes = @import("checksum.zig").checksumBytes;
 
 pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_errors.Error!u64 {
     var hash = native_util.FNV1A_64_OFFSET_BASIS;
@@ -32,10 +33,6 @@ pub fn workspaceStateHash(record: *const workspace.WorkspaceRecord) volume_error
         hash = hashEntry(hash, entry);
     }
     return hash;
-}
-
-pub fn checksumBytes(bytes: []const u8) u64 {
-    return native_util.fnv1a64(bytes);
 }
 
 fn hashBytes(hash: u64, bytes: []const u8) u64 {

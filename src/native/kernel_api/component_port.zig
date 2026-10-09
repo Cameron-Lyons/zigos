@@ -14,6 +14,7 @@ pub const Error = native_kernel.Error || error{
     UnexpectedOperation,
     SubjectTaskRequired,
     UnsupportedAbiVersion,
+    InvalidRequestFlags,
 };
 const TEST_PORT_TASK_BYTES: usize = 512;
 pub const PREVALIDATED_SYSCALL_HEADER_RECHECKS: u8 = 0;
@@ -26,10 +27,7 @@ pub const TaskCreateRequest = struct {
     request: task_runtime.TaskCreateRequest,
 };
 
-pub const TaskTerminateRequest = struct {
-    header: abi.RequestHeader,
-    task_capability_id: u64,
-};
+pub const TaskTerminateRequest = abi.TaskTerminateWireRequest;
 
 pub const EndpointCreateRequest = struct {
     header: abi.RequestHeader,
@@ -39,12 +37,7 @@ pub const EndpointCreateRequest = struct {
     flags: endpoint.EndpointFlags,
 };
 
-pub const EndpointConnectRequest = struct {
-    header: abi.RequestHeader,
-    endpoint_capability_id: u64,
-    peer_endpoint_capability_id: u64,
-    peer_endpoint_id: u64,
-};
+pub const EndpointConnectRequest = abi.EndpointConnectWireRequest;
 
 pub const EndpointSendRequest = struct {
     header: abi.RequestHeader,
@@ -56,6 +49,22 @@ pub const EndpointSendRequest = struct {
     move_attached_capability: bool = false,
 };
 
+// payload is already a bounded kernel-owned snapshot. Never turn the wire's
+// address scalar into a pointer here or retain a userspace buffer in the Port.
+pub inline fn endpointSendFromWireInto(wire: abi.EndpointSendWireRequest, payload: []const u8, out: *EndpointSendRequest) bool {
+    if (!wire.validEncoding() or payload.len != wire.payload_bytes) return false;
+    out.* = .{
+        .header = wire.header,
+        .correlation_id = wire.correlation_id,
+        .endpoint_capability_id = wire.endpoint_capability_id,
+        .payload = payload,
+        .reply_endpoint_id = wire.reply_endpoint_id,
+        .attached_capability_id = if (wire.attached_capability_id == 0) null else wire.attached_capability_id,
+        .move_attached_capability = wire.flags & abi.ENDPOINT_SEND_MOVE_ATTACHMENT != 0,
+    };
+    return true;
+}
+
 pub const EndpointRecvRequest = struct {
     header: abi.RequestHeader,
     endpoint_capability_id: u64,
@@ -64,10 +73,21 @@ pub const EndpointRecvRequest = struct {
     attached_capability_out: *abi.CapabilityDescriptor,
 };
 
-pub const EndpointCloseRequest = extern struct {
-    header: abi.RequestHeader,
-    endpoint_capability_id: u64,
-};
+// Only validated, kernel-owned output storage enters the trusted Port request.
+// The wire addresses remain scalars and are never dereferenced by this decoder.
+pub inline fn endpointRecvFromWireInto(wire: abi.EndpointRecvWireRequest, payload: []u8, attached: *abi.CapabilityDescriptor, out: *EndpointRecvRequest) bool {
+    if (!wire.validEncoding() or wire.receiver_task_id != wire.header.subject_task_id or payload.len != wire.payload_capacity) return false;
+    out.* = .{
+        .header = wire.header,
+        .endpoint_capability_id = wire.endpoint_capability_id,
+        .receiver_task_id = wire.receiver_task_id,
+        .payload_out = payload,
+        .attached_capability_out = attached,
+    };
+    return true;
+}
+
+pub const EndpointCloseRequest = abi.EndpointCloseWireRequest;
 
 pub const CapabilityMintRequest = struct {
     header: abi.RequestHeader,
@@ -87,64 +107,25 @@ pub const CapabilityPassRequest = struct {
     revoke_source: bool = false,
 };
 
-pub const CapabilityRevokeRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    capability_id: u64,
-};
+pub const CapabilityRevokeRequest = abi.CapabilityRevokeWireRequest;
 
-pub const CapabilityQueryRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    capability_id: u64,
-};
+pub const CapabilityQueryRequest = abi.CapabilityQueryWireRequest;
 
-pub const SharedMemoryCreateRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    owner_task_id: u64,
-    size_bytes: usize,
-};
+pub const SharedMemoryCreateRequest = abi.SharedMemoryCreateWireRequest;
 
-pub const SharedMemoryMapRequest = struct {
-    header: abi.RequestHeader,
-    shared_memory_capability_id: u64,
-    task_id: u64,
-};
+pub const SharedMemoryMapRequest = abi.SharedMemoryMapWireRequest;
 
-pub const SharedMemoryUnmapRequest = struct {
-    header: abi.RequestHeader,
-    shared_memory_capability_id: u64,
-    task_id: u64,
-};
+pub const SharedMemoryUnmapRequest = abi.SharedMemoryUnmapWireRequest;
 
-pub const SharedMemoryRevokeRequest = struct {
-    header: abi.RequestHeader,
-    shared_memory_capability_id: u64,
-};
+pub const SharedMemoryRevokeRequest = abi.SharedMemoryRevokeWireRequest;
 
-pub const TimeQueryRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-};
+pub const TimeQueryRequest = abi.TimeQueryWireRequest;
 
-pub const ResourceQueryRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    task_id: u64,
-};
+pub const ResourceQueryRequest = abi.ResourceQueryWireRequest;
 
-pub const AccountingQueryRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-    task_id: u64,
-};
+pub const AccountingQueryRequest = abi.AccountingQueryWireRequest;
 
-pub const InputRecvRequest = struct {
-    header: abi.RequestHeader,
-    input_capability_id: u64,
-    receiver_task_id: u64,
-};
+pub const InputRecvRequest = abi.InputRecvWireRequest;
 
 pub const SurfacePresentRequest = struct {
     header: abi.RequestHeader,
@@ -158,21 +139,9 @@ pub const SurfacePresentRequest = struct {
     text: ?*const abi.SurfaceText = null,
 };
 
-pub const DeviceDescribeRequest = struct {
-    header: abi.RequestHeader,
-    device_capability_id: u64,
-};
+pub const DeviceDescribeRequest = abi.DeviceDescribeWireRequest;
 
-pub const DeviceMmioWindowRequest = struct {
-    header: abi.RequestHeader,
-    device_capability_id: u64,
-    window_index: u8,
-};
-
-pub const WaitRequest = struct {
-    header: abi.RequestHeader,
-    authority_capability_id: u64,
-};
+pub const DeviceMmioWindowRequest = abi.DeviceMmioWindowWireRequest;
 
 pub const KernelPort = struct {
     kernel: *native_kernel.Kernel,
@@ -302,11 +271,12 @@ pub const KernelPort = struct {
         );
     }
 
-    pub fn capabilityDerive(self: *KernelPort, request: CapabilityDeriveRequest) Error!abi.CapabilityDescriptor {
+    pub fn capabilityDerive(self: *KernelPort, request: CapabilityDeriveRequest, now_ticks: u64) Error!abi.CapabilityDescriptor {
         try self.validateIncomingHeader(request.header, .capability_derive);
         return self.kernel.capabilityDerive(
             self.callContext(request.header, request.request.parent_capability_id, .none),
             request.request,
+            now_ticks,
         );
     }
 
@@ -480,11 +450,6 @@ pub const KernelPort = struct {
             now_ticks,
         );
     }
-
-    pub fn wait(self: *KernelPort, request: WaitRequest, now_ticks: u64) Error!bool {
-        try self.validateIncomingHeader(request.header, .wait);
-        return self.kernel.wait(self.callContext(request.header, request.authority_capability_id, .none), now_ticks);
-    }
 };
 
 pub const GeneratedWrapper = struct {
@@ -515,6 +480,36 @@ fn wireResponseTypeForName(comptime type_name: []const u8) type {
 pub fn PortRequest(comptime operation: abi.NativeOperation) type {
     const descriptor = comptime operation_metadata.declarationFor(operation);
     return requestTypeForName(descriptor.binding.request_type_name);
+}
+
+pub fn SyscallWireRequest(comptime operation: abi.NativeOperation) type {
+    const Wire = switch (operation) {
+        .task_create => abi.TaskCreateWireRequest,
+        .task_terminate => abi.TaskTerminateWireRequest,
+        .endpoint_create => abi.EndpointCreateWireRequest,
+        .endpoint_connect => abi.EndpointConnectWireRequest,
+        .endpoint_send => abi.EndpointSendWireRequest,
+        .endpoint_recv => abi.EndpointRecvWireRequest,
+        .endpoint_close => abi.EndpointCloseWireRequest,
+        .capability_mint => abi.CapabilityMintWireRequest,
+        .capability_derive => abi.CapabilityDeriveWireRequest,
+        .capability_pass => abi.CapabilityPassWireRequest,
+        .capability_revoke => abi.CapabilityRevokeWireRequest,
+        .capability_query => abi.CapabilityQueryWireRequest,
+        .shared_memory_create => abi.SharedMemoryCreateWireRequest,
+        .shared_memory_map => abi.SharedMemoryMapWireRequest,
+        .shared_memory_unmap => abi.SharedMemoryUnmapWireRequest,
+        .shared_memory_revoke => abi.SharedMemoryRevokeWireRequest,
+        .time_query => abi.TimeQueryWireRequest,
+        .resource_query => abi.ResourceQueryWireRequest,
+        .accounting_query => abi.AccountingQueryWireRequest,
+        .device_describe => abi.DeviceDescribeWireRequest,
+        .device_mmio_window => abi.DeviceMmioWindowWireRequest,
+        .input_recv => abi.InputRecvWireRequest,
+        .surface_present => abi.SurfacePresentWireRequest,
+    };
+    abi.syscall_wire.requireScalarWire(Wire);
+    return Wire;
 }
 
 pub fn PortWireResponse(comptime operation: abi.NativeOperation) type {
@@ -573,6 +568,9 @@ pub fn invokeGeneratedFromValidatedSyscall(
     request: PortRequest(operation),
     now_ticks: u64,
 ) PortCallResult(operation) {
+    // Admit the complete copied header once for every generated syscall path.
+    // The trusted Port then skips this same check, without rereading user bytes.
+    try request_header.validateHeader(request.header, abi.opcode(operation));
     var validated_port = self.*;
     validated_port.syscall_header_prevalidated = true;
     return invokeGenerated(operation, &validated_port, request, now_ticks);
@@ -633,7 +631,107 @@ test "kernel port generated wrappers cover operation metadata" {
         const Response = PortWireResponse(descriptor.operation);
         try std.testing.expectEqual(if (Response == void) @as(usize, 0) else @sizeOf(Response), wrapper.wire_response_size);
     }
-    try std.testing.expectEqual(operation_metadata.PortInvocation.without_now_ticks, generatedWrapperFor(.capability_derive).port_invocation);
+    try std.testing.expectEqual(operation_metadata.PortInvocation.with_now_ticks, generatedWrapperFor(.capability_derive).port_invocation);
+}
+
+test "endpoint send wire decoding publishes only a validated local snapshot" {
+    const local_payload: []const u8 = "staged bytes";
+    const sentinel = EndpointSendRequest{
+        .header = makeHeader(.endpoint_send, 101),
+        .correlation_id = 103,
+        .endpoint_capability_id = 107,
+        .payload = "unchanged",
+        .reply_endpoint_id = 109,
+        .attached_capability_id = 113,
+        .move_attached_capability = true,
+    };
+    const wire = abi.EndpointSendWireRequest{
+        .header = makeHeader(.endpoint_send, 7),
+        .correlation_id = 11,
+        .endpoint_capability_id = 13,
+        .payload_address = 0x10000,
+        .payload_bytes = local_payload.len,
+        .reply_endpoint_id = 17,
+    };
+    var decoded = sentinel;
+    try std.testing.expect(endpointSendFromWireInto(wire, local_payload, &decoded));
+    try std.testing.expectEqual(wire.header, decoded.header);
+    try std.testing.expectEqual(wire.correlation_id, decoded.correlation_id);
+    try std.testing.expectEqual(wire.endpoint_capability_id, decoded.endpoint_capability_id);
+    try std.testing.expectEqual(wire.reply_endpoint_id, decoded.reply_endpoint_id);
+    try std.testing.expectEqual(@intFromPtr(local_payload.ptr), @intFromPtr(decoded.payload.ptr));
+    try std.testing.expectEqualStrings(local_payload, decoded.payload);
+    try std.testing.expectEqual(@as(?u64, null), decoded.attached_capability_id);
+    try std.testing.expect(!decoded.move_attached_capability);
+
+    var moved = wire;
+    moved.attached_capability_id = 19;
+    moved.flags = abi.ENDPOINT_SEND_MOVE_ATTACHMENT;
+    try std.testing.expect(endpointSendFromWireInto(moved, local_payload, &decoded));
+    try std.testing.expectEqual(@as(?u64, 19), decoded.attached_capability_id);
+    try std.testing.expect(decoded.move_attached_capability);
+
+    var malformed = moved;
+    malformed.reserved = 1;
+    decoded = sentinel;
+    try std.testing.expect(!endpointSendFromWireInto(malformed, local_payload, &decoded));
+    try std.testing.expectEqualDeep(sentinel, decoded);
+    try std.testing.expect(!endpointSendFromWireInto(wire, local_payload[0..1], &decoded));
+    try std.testing.expectEqualDeep(sentinel, decoded);
+    malformed = wire;
+    malformed.flags = abi.ENDPOINT_SEND_MOVE_ATTACHMENT;
+    try std.testing.expect(!endpointSendFromWireInto(malformed, local_payload, &decoded));
+    try std.testing.expectEqualDeep(sentinel, decoded);
+    var empty = wire;
+    empty.payload_address = std.math.maxInt(u64);
+    empty.payload_bytes = 0;
+    try std.testing.expect(endpointSendFromWireInto(empty, local_payload[0..0], &decoded));
+    try std.testing.expectEqual(@as(usize, 0), decoded.payload.len);
+}
+
+test "endpoint receive wire decoding uses only validated local output storage" {
+    var local_payload: [3]u8 = @splat(0xa5);
+    var local_attached = std.mem.zeroes(abi.CapabilityDescriptor);
+    var prior_payload: [1]u8 = .{0x5a};
+    var prior_attached = std.mem.zeroes(abi.CapabilityDescriptor);
+    const sentinel = EndpointRecvRequest{
+        .header = makeHeader(.endpoint_recv, 101),
+        .endpoint_capability_id = 103,
+        .receiver_task_id = 101,
+        .payload_out = &prior_payload,
+        .attached_capability_out = &prior_attached,
+    };
+    const wire = abi.EndpointRecvWireRequest{
+        .header = makeHeader(.endpoint_recv, 7),
+        .endpoint_capability_id = 13,
+        .receiver_task_id = 7,
+        .payload_address = std.math.maxInt(u64),
+        .payload_capacity = local_payload.len,
+        .attached_capability_address = std.math.maxInt(u64),
+    };
+    var decoded = sentinel;
+    try std.testing.expect(endpointRecvFromWireInto(wire, &local_payload, &local_attached, &decoded));
+    try std.testing.expectEqualDeep(wire.header, decoded.header);
+    try std.testing.expectEqual(wire.endpoint_capability_id, decoded.endpoint_capability_id);
+    try std.testing.expectEqual(wire.receiver_task_id, decoded.receiver_task_id);
+    try std.testing.expect(decoded.payload_out.ptr == local_payload[0..].ptr);
+    try std.testing.expect(decoded.attached_capability_out == &local_attached);
+    try std.testing.expect(std.mem.allEqual(u8, &local_payload, 0xa5));
+    decoded = sentinel;
+    try std.testing.expect(!endpointRecvFromWireInto(wire, local_payload[0..2], &local_attached, &decoded));
+    try std.testing.expectEqualDeep(sentinel, decoded);
+    var malformed = wire;
+    malformed.reserved = 1;
+    try std.testing.expect(!endpointRecvFromWireInto(malformed, &local_payload, &local_attached, &decoded));
+    try std.testing.expectEqualDeep(sentinel, decoded);
+    malformed = wire;
+    malformed.receiver_task_id += 1;
+    try std.testing.expect(!endpointRecvFromWireInto(malformed, &local_payload, &local_attached, &decoded));
+    try std.testing.expectEqualDeep(sentinel, decoded);
+    malformed = wire;
+    malformed.payload_capacity = 0;
+    try std.testing.expect(endpointRecvFromWireInto(malformed, local_payload[0..0], &local_attached, &decoded));
+    try std.testing.expectEqual(@as(usize, 0), decoded.payload_out.len);
 }
 
 test "kernel port enforces operation ids and forwards typed task create requests" {

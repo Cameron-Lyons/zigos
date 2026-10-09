@@ -513,14 +513,15 @@ pub fn firstHardwareTargetGate() !void {
     var hardware_i225_missing_interrupt = hardware_i225_proof;
     hardware_i225_missing_interrupt.mmio.interrupt_cause_reads = 0;
     try std.testing.expect(!hardware_i225_missing_interrupt.verified());
-    const framebuffer_info = try kernel_framebuffer.validate(.{
+    const framebuffer_info = kernel_framebuffer.Info{
         .physical_address = 0x8000_0000,
         .width = 64,
         .height = 16,
         .pixels_per_scan_line = 64,
         .format = .bgrx8888,
         .buffer_bytes = 64 * 16 * 4,
-    });
+    };
+    try kernel_framebuffer.validate(framebuffer_info);
     const framebuffer_expected_pixel: u32 = 0x00FF_00FF;
     var framebuffer_scanline = @as([64 * 4]u8, @splat(0));
     std.mem.writeInt(u32, framebuffer_scanline[0..4], framebuffer_expected_pixel, .little);
@@ -1029,14 +1030,13 @@ pub fn kernelBootstrapShimBoundaryGate() !void {
     try std.testing.expect(kernel_paging.USES_RUNTIME_2M_PAGES);
     try std.testing.expect(kernel_virtual_layout.USES_RUNTIME_2M_PAGES);
     try std.testing.expect(kernel_virtual_layout.DIRECT_MAP_USES_1G_PAGES);
-    try std.testing.expect(kernel_paging.PRECISE_IDENTITY_LIMIT_MATCHES_LINKER);
-    try std.testing.expectEqual(@as(usize, 32), kernel_paging.PRECISE_IDENTITY_PAGE_TABLES);
-    try std.testing.expectEqual(@as(u32, 64 * 1024 * 1024), kernel_paging.PRECISE_IDENTITY_BYTES);
+    try std.testing.expect(kernel_paging.PRECISE_IMAGE_LIMIT_MATCHES_LINKER);
+    try std.testing.expectEqual(@as(usize, 32), kernel_paging.PRECISE_IMAGE_PAGE_TABLES);
+    try std.testing.expectEqual(@as(u32, 64 * 1024 * 1024), kernel_paging.PRECISE_IMAGE_BYTES);
     try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), kernel_paging.LOW_IDENTITY_PHYSICAL_LIMIT);
     try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024 * 1024), kernel_paging.MANAGED_PHYSICAL_BYTES);
     try std.testing.expectEqual(@as(usize, 512), kernel_paging.DIRECT_MAP_PDPT_ENTRIES);
-    try std.testing.expectEqual(@as(usize, 511), kernel_paging.DIRECT_MAP_1G_LEAF_COUNT);
-    try std.testing.expectEqual(@as(usize, 1), kernel_paging.DIRECT_MAP_PAGE_DIRECTORY_COUNT);
+    try std.testing.expect(kernel_paging.SPARSE_CACHE_AWARE_RAM_MAP);
     try std.testing.expect(kernel_mmio_windows.validLayout(&kernel_mmio_windows.all));
     try std.testing.expect(
         kernel_mmio_windows.pci_ecam.endExclusive().? <= kernel_mmio_windows.intel_i225.base,

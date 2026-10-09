@@ -20,7 +20,7 @@ pub const Mapping = struct {
 };
 
 pub fn mappingFor(info: framebuffer.Info) !Mapping {
-    _ = try framebuffer.validate(info);
+    try framebuffer.validate(info);
     const bytes = try info.minimumBufferBytes();
     const last = std.math.add(u64, info.physical_address, bytes - 1) catch return error.InvalidAddress;
     if (!table64.physicalAddressFits(last)) return error.InvalidAddress;
@@ -46,14 +46,7 @@ pub fn init() !void {
     const boot = handoff.capturedInfo() orelse return error.MissingFramebuffer;
     const info = try handoff.framebufferInfo(boot);
     const mapping = try mappingFor(info);
-    var offset: usize = 0;
-    while (offset < mapping.page_bytes) : (offset += mmio.PAGE_BYTES) {
-        paging.mapKernelBorrowedPage(
-            mmio.framebuffer.base + offset,
-            mapping.physical_base + offset,
-            paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE | paging.PAGE_WRITE_THROUGH,
-        );
-    }
+    try paging.mapKernelDeviceRange(mmio.framebuffer.base, mapping.physical_base, mapping.page_bytes, true);
     const pixels: [*]volatile u32 = @ptrFromInt(mmio.framebuffer.base + mapping.pixel_offset);
     renderer = try scanout.Renderer.init(info, pixels[0..mapping.pixel_count]);
     composed_frame = try scanout.Frame.init(renderer.columns, renderer.rows);

@@ -1,8 +1,9 @@
 const std = @import("std");
 const table64 = @import("page_table64.zig");
+const kernel_address = @import("../../arch/kernel_address.zig");
 
 pub const PAGE_BYTES: usize = 4096;
-pub const PHYSICAL_WINDOW_CAPACITY_BYTES: u64 = 512 * 1024 * 1024 * 1024;
+pub const PHYSICAL_WINDOW_CAPACITY_BYTES = kernel_address.direct_map_capacity;
 pub const USES_RUNTIME_2M_PAGES = true;
 pub const DIRECT_MAP_USES_1G_PAGES = true;
 
@@ -21,7 +22,7 @@ pub const Region = struct {
 };
 
 pub const physical_memory = Region{
-    .base = 0xFFFF_8000_0000_0000,
+    .base = kernel_address.direct_map_base,
     .bytes = @intCast(PHYSICAL_WINDOW_CAPACITY_BYTES),
 };
 
@@ -43,18 +44,8 @@ pub fn regionsDisjoint(first: Region, second: Region) bool {
     return first_end <= second.base or second_end <= first.base;
 }
 
-pub fn directMappedAddress(physical_address: u64, mapped_bytes: u64) ?usize {
-    if (mapped_bytes > PHYSICAL_WINDOW_CAPACITY_BYTES or physical_address >= mapped_bytes) return null;
-    const offset = std.math.cast(usize, physical_address) orelse return null;
-    return std.math.add(usize, physical_memory.base, offset) catch null;
-}
-
-pub fn directMappedPhysicalAddress(virtual_address: usize, mapped_bytes: u64) ?u64 {
-    if (mapped_bytes > PHYSICAL_WINDOW_CAPACITY_BYTES or virtual_address < physical_memory.base) return null;
-    const offset = virtual_address - physical_memory.base;
-    if (@as(u64, @intCast(offset)) >= mapped_bytes) return null;
-    return @intCast(offset);
-}
+pub const directMappedAddress = kernel_address.directMappedAddress;
+pub const directMappedPhysicalAddress = kernel_address.directMappedPhysicalAddress;
 
 comptime {
     const physical_end = physical_memory.endExclusive() orelse

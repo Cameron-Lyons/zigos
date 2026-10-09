@@ -168,13 +168,15 @@ fn syscallEndpointCreate(
     flags: endpoint.EndpointFlags,
     now_ticks: u64,
 ) Error!abi.EndpointCreateResponse {
+    const label_bytes = std.math.cast(u32, label.len) orelse return error.SyscallFailed;
     var response = std.mem.zeroes(abi.EndpointCreateResponse);
-    var request = component_port.EndpointCreateRequest{
+    var request = abi.EndpointCreateWireRequest{
         .header = component_port.makeHeader(.endpoint_create, task_id),
         .authority_capability_id = authority_capability_id,
         .owner_task_id = task_id,
-        .label = label,
-        .flags = flags,
+        .label_address = if (label.len == 0) 0 else @intFromPtr(label.ptr),
+        .label_bytes = label_bytes,
+        .flags = @bitCast(flags),
     };
     const result = syscall_surface.dispatch(
         port,
@@ -198,7 +200,7 @@ fn syscallEndpointConnect(
     now_ticks: u64,
 ) Error!abi.EndpointDescriptor {
     var response = std.mem.zeroes(abi.EndpointDescriptor);
-    var request = component_port.EndpointConnectRequest{
+    var request = abi.EndpointConnectWireRequest{
         .header = component_port.makeHeader(.endpoint_connect, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .peer_endpoint_capability_id = peer_endpoint_capability_id,
@@ -226,11 +228,13 @@ fn syscallEndpointSend(
     correlation_id: u64,
     now_ticks: u64,
 ) Error!void {
-    var request = component_port.EndpointSendRequest{
+    if (payload.len > abi.ENDPOINT_INLINE_BYTES) return error.SyscallFailed;
+    var request = abi.EndpointSendWireRequest{
         .header = component_port.makeHeader(.endpoint_send, task_id),
         .correlation_id = correlation_id,
         .endpoint_capability_id = endpoint_capability_id,
-        .payload = payload,
+        .payload_address = if (payload.len == 0) 0 else @intFromPtr(payload.ptr),
+        .payload_bytes = @intCast(payload.len),
         .reply_endpoint_id = reply_endpoint_id,
     };
     const result = syscall_surface.dispatch(
@@ -253,12 +257,13 @@ fn syscallEndpointRecv(
 ) Error!abi.EndpointRecvResult {
     var response = std.mem.zeroes(abi.EndpointRecvResponse);
     var received = std.mem.zeroes(abi.EndpointRecvResult);
-    var request = component_port.EndpointRecvRequest{
+    var request = abi.EndpointRecvWireRequest{
         .header = component_port.makeHeader(.endpoint_recv, task_id),
         .endpoint_capability_id = endpoint_capability_id,
         .receiver_task_id = task_id,
-        .payload_out = &received.payload,
-        .attached_capability_out = &received.attached_capability,
+        .payload_address = @intFromPtr(&received.payload),
+        .payload_capacity = received.payload.len,
+        .attached_capability_address = @intFromPtr(&received.attached_capability),
     };
     const result = syscall_surface.dispatch(
         port,

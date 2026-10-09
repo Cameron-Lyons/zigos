@@ -213,8 +213,8 @@ pub fn prepare(device_info: pci.PCIDevice) Error!void {
 
     const bar_phys = barPhysicalAddress(device_info) orelse return error.BarUnmappable;
     if (bar_phys == 0) return error.BarUnmappable;
+    const bar = try mapBar(bar_phys);
     published_bar_physical = bar_phys;
-    const bar = mapBar(bar_phys);
     var pending = Controller{
         .bar = bar,
         .tx_descriptor = .{},
@@ -316,11 +316,10 @@ pub fn activate() Error!void {
     }) catch return error.MsiEnableFailed;
     var msi_enabled = true;
     errdefer if (msi_enabled) pci.disableMsi(active_device) catch {};
-    pci.enableMemoryBusMastering(active_device);
-    if (!pci.busMasteringEnabled(active_device)) {
+    pci.enableMemoryBusMastering(active_device) catch {
         pci.disableBusMastering(active_device);
         return error.BusMasterEnableFailed;
-    }
+    };
     resetPendingInterruptCauses();
     empty_interrupt_streak = 0;
     _ = controller.reg32(REG_ICR);
@@ -689,18 +688,14 @@ fn containFailure(marker: []const u8) void {
 }
 
 fn barPhysicalAddress(device_info: pci.PCIDevice) ?usize {
-    return (pci.memoryBar0(device_info) orelse return null).address;
+    const bar = pci.memoryBar0(device_info) orelse return null;
+    const aperture = (pci.probeMemoryBars(device_info) catch return null)[0];
+    if (aperture.address != bar.address or aperture.length < BAR_MAP_BYTES) return null;
+    return bar.address;
 }
 
-fn mapBar(physical: usize) usize {
-    var offset: u32 = 0;
-    while (offset < BAR_MAP_BYTES) : (offset += PAGE_SIZE) {
-        paging.mapKernelBorrowedPage(
-            mmio_windows.intel_i225.base + offset,
-            physical + offset,
-            paging.PAGE_PRESENT | paging.PAGE_WRITABLE | paging.PAGE_CACHE_DISABLE,
-        );
-    }
+fn mapBar(physical: usize) Error!usize {
+    paging.mapKernelDeviceRange(mmio_windows.intel_i225.base, physical, BAR_MAP_BYTES, true) catch return error.BarUnmappable;
     return mmio_windows.intel_i225.base;
 }
 

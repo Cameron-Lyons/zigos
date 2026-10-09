@@ -1,17 +1,19 @@
+const cache_policy = @import("cache_policy.zig");
+
 pub inline fn hlt() void {
     asm volatile ("hlt");
 }
 
 pub inline fn cli() void {
-    asm volatile ("cli");
+    asm volatile ("cli" ::: .{ .memory = true });
 }
 
 pub inline fn sti() void {
-    asm volatile ("sti");
+    asm volatile ("sti" ::: .{ .memory = true });
 }
 
 pub inline fn stiHlt() void {
-    asm volatile ("sti; hlt");
+    asm volatile ("sti; hlt" ::: .{ .memory = true });
 }
 
 pub inline fn interruptsEnabled() bool {
@@ -127,6 +129,8 @@ pub const CR0_MP: usize = 1 << 1;
 pub const CR0_TS: usize = 1 << 3;
 pub const CR0_WP: usize = 1 << 16;
 pub const CR0_PG: usize = 1 << 31;
+pub const CR0_CD = cache_policy.CR0_CD;
+pub const CR0_NW = cache_policy.CR0_NW;
 pub const OWNED_XSTATE = true;
 
 pub const CR4_PGE: usize = 1 << 7;
@@ -144,6 +148,7 @@ pub const CR4_FRED: usize = 1 << 32;
 
 pub const XCR0_X87: u64 = 1 << 0;
 pub const XCR0_SSE: u64 = 1 << 1;
+pub const XCR0_YMM: u64 = 1 << 2;
 
 pub const CR3_PCID_MASK: usize = 0x0FFF;
 pub const CR3_ADDRESS_MASK: usize = 0x000F_FFFF_FFFF_F000;
@@ -155,6 +160,7 @@ const InvpcidDescriptor = extern struct {
 };
 
 extern fn x86_invalidate_pcid(descriptor: *const InvpcidDescriptor) callconv(.c) void;
+extern fn x86_invalidate_all(descriptor: *const InvpcidDescriptor) callconv(.c) void;
 extern fn x86_allow_supervisor_user_memory() callconv(.c) void;
 extern fn x86_forbid_supervisor_user_memory() callconv(.c) void;
 extern fn x86_write_xcr0(value: u64) callconv(.c) void;
@@ -170,6 +176,9 @@ pub const IA32_GS_BASE_MSR: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
 pub const IA32_TSC_AUX_MSR: u32 = 0xC000_0103;
 pub const IA32_XSS_MSR: u32 = 0xDA0;
+pub const IA32_PAT_MSR = cache_policy.PAT_MSR;
+pub const IA32_MTRR_CAP_MSR: u32 = 0xFE;
+pub const IA32_MTRR_DEFAULT_TYPE_MSR: u32 = 0x2FF;
 pub const IA32_U_CET_MSR: u32 = 0x6A0;
 pub const IA32_S_CET_MSR: u32 = 0x6A2;
 pub const CET_SH_STK_EN: u64 = 1 << 0;
@@ -209,6 +218,96 @@ pub inline fn readCr0() usize {
     return asm volatile ("mov %%cr0, %[value]"
         : [value] "=r" (-> usize),
     );
+}
+
+inline fn cacheFeatureFlags() u32 {
+    var eax: u32 = undefined;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+    asm volatile ("cpuid"
+        : [eax] "={eax}" (eax),
+          [ebx] "={ebx}" (ebx),
+          [ecx] "={ecx}" (ecx),
+          [edx] "={edx}" (edx),
+        : [leaf] "{eax}" (@as(u32, 1)),
+          [subleaf] "{ecx}" (@as(u32, 0)),
+        : .{ .memory = true });
+    return edx;
+}
+
+pub inline fn readPat() ?u64 {
+    if (cacheFeatureFlags() & cache_policy.CPUID_PAT == 0) return null;
+    return readMsr(IA32_PAT_MSR);
+}
+
+pub inline fn readBootstrapCacheState() cache_policy.BootstrapState {
+    const pat = readPat();
+    return .{ .pat_supported = pat != null, .cr0 = readCr0(), .pat = pat orelse 0 };
+}
+
+// MTRR interpretation remains separate from PAT selection. These gated reads
+// expose firmware state without changing package-shared cache configuration.
+pub inline fn readMtrrCapabilities() ?u64 {
+    if (cacheFeatureFlags() & (1 << 12) == 0) return null;
+    return readMsr(IA32_MTRR_CAP_MSR);
+}
+
+pub inline fn readMtrrDefaultType() ?u64 {
+    if (cacheFeatureFlags() & (1 << 12) == 0) return null;
+    return readMsr(IA32_MTRR_DEFAULT_TYPE_MSR);
+}
+
+inline fn cacheCpuIdEax(leaf: u32) u32 {
+    var eax: u32 = undefined;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+    asm volatile ("cpuid"
+        : [eax] "={eax}" (eax),
+          [ebx] "={ebx}" (ebx),
+          [ecx] "={ecx}" (ecx),
+          [edx] "={edx}" (edx),
+        : [leaf] "{eax}" (leaf),
+          [subleaf] "{ecx}" (@as(u32, 0)),
+        : .{ .memory = true });
+    return eax;
+}
+
+// Fill caller-owned bounded storage. No large error-union snapshot is copied
+// on rejection; the caller may publish or query it only after success.
+pub inline fn readMtrrStateInto(state: *cache_policy.MtrrState) cache_policy.MtrrError!void {
+    const capabilities = readMtrrCapabilities() orelse return error.MtrrUnsupported;
+    const count: usize = @as(u8, @truncate(capabilities));
+    // Reject before any unimplemented pair is addressed. Future variable
+    // counts need an explicit bounded contract rather than partial admission.
+    if (count > cache_policy.MAX_VARIABLE_MTRRS) return error.UnsupportedVariableMtrrCount;
+    if (cacheCpuIdEax(0x8000_0000) < 0x8000_0008) return error.UnsupportedPhysicalAddressWidth;
+    const physical_bits: u8 = @truncate(cacheCpuIdEax(0x8000_0008));
+    if (physical_bits < 32 or physical_bits > 52) return error.UnsupportedPhysicalAddressWidth;
+    @memset(@import("std").mem.asBytes(state), 0);
+    state.physical_bits = physical_bits;
+    state.capabilities = capabilities;
+    state.default_type = readMsr(IA32_MTRR_DEFAULT_TYPE_MSR);
+    if (capabilities & cache_policy.MTRR_FIXED_SUPPORTED != 0) {
+        inline for (cache_policy.FIXED_MTRR_MSRS, 0..) |msr, index| state.fixed[index] = readMsr(msr);
+    }
+    for (state.variable[0..count], 0..) |*pair, index| {
+        const msr = cache_policy.MTRR_VARIABLE_BASE_MSR + @as(u32, @intCast(index)) * 2;
+        pair.* = .{ .base = readMsr(msr), .mask = readMsr(msr + 1) };
+    }
+    try state.validate();
+}
+
+pub inline fn writeBackInvalidateCaches() void {
+    asm volatile ("wbinvd" ::: .{ .memory = true });
+}
+
+pub inline fn flushCacheLine(address: usize) void {
+    asm volatile ("clflush (%[address])"
+        :
+        : [address] "r" (address),
+        : .{ .memory = true });
 }
 
 pub inline fn writeCr0(value: usize) void {
@@ -263,6 +362,24 @@ pub inline fn invalidatePcid(pcid: u16) void {
     x86_invalidate_pcid(&descriptor);
 }
 
+pub inline fn invalidateAllTranslations() void {
+    if (processContextIdentifiersEnabled()) {
+        const descriptor = InvpcidDescriptor{ .pcid = 0, .linear_address = 0 };
+        x86_invalidate_all(&descriptor);
+        return;
+    }
+    // The explicit model may lack INVPCID, but still requires real PGE.
+    // A CR3 reload alone retains global entries. Changing PGE invalidates
+    // every context, including globals, before restoring this CPU's controls.
+    const cr4 = readCr4();
+    if (cr4 & CR4_PGE != 0) {
+        writeCr4(cr4 & ~CR4_PGE);
+        writeCr4(cr4);
+    } else {
+        writeCr3(readCr3());
+    }
+}
+
 pub inline fn readCr4() usize {
     return asm volatile ("mov %%cr4, %[value]"
         : [value] "=r" (-> usize),
@@ -273,7 +390,7 @@ pub inline fn writeCr4(value: usize) void {
     asm volatile ("mov %[value], %%cr4"
         :
         : [value] "r" (value),
-    );
+        : .{ .memory = true });
 }
 
 pub inline fn enableProcessContextIdentifiers() void {
@@ -314,28 +431,21 @@ pub fn enableSse() void {
 
 pub fn enableXsaves() void {
     writeCr4(readCr4() | CR4_OSXSAVE);
-    writeXcr0(XCR0_X87 | XCR0_SSE);
+    writeXcr0(XCR0_X87 | XCR0_SSE | XCR0_YMM);
     // Bound every XSAVES/XRSTORS owner to the enabled native image.
     writeMsr(IA32_XSS_MSR, 0);
     clearTaskSwitched();
 }
 
 pub fn xsavesEnabled() bool {
-    return (readCr4() & CR4_OSXSAVE) != 0 and readXcr0() == (XCR0_X87 | XCR0_SSE) and
+    return (readCr4() & CR4_OSXSAVE) != 0 and readXcr0() == (XCR0_X87 | XCR0_SSE | XCR0_YMM) and
         readMsr(IA32_XSS_MSR) == 0;
 }
-
-var cet_programmed = false;
 
 pub fn enableCet() void {
     writeMsr(IA32_S_CET_MSR, CET_ENDBR_EN);
     writeMsr(IA32_U_CET_MSR, 0);
     writeCr4(readCr4() | CR4_CET);
-    cet_programmed = true;
-}
-
-pub fn enableCetOnApplicationProcessor() void {
-    if (cet_programmed) enableCet();
 }
 
 pub fn cetEnabled() bool {
@@ -372,8 +482,44 @@ pub fn pkuEnabled() bool {
     return (readCr4() & CR4_PKE) != 0;
 }
 
-pub fn enableLass() void {
+extern var __kernel_data_start: u8;
+
+const DescriptorTableRegister = extern struct {
+    limit: u16 align(1),
+    base: usize align(1),
+};
+
+pub inline fn lassAddressPartitionSupported() bool {
+    const instruction = asm volatile ("lea 0(%%rip), %[value]"
+        : [value] "=r" (-> usize),
+    );
+    var gdtr: DescriptorTableRegister = undefined;
+    var idtr: DescriptorTableRegister = undefined;
+    asm volatile ("sgdt (%[table])"
+        :
+        : [table] "r" (&gdtr),
+        : .{ .memory = true });
+    asm volatile ("sidt (%[table])"
+        :
+        : [table] "r" (&idtr),
+        : .{ .memory = true });
+    return @import("cpu_baseline.zig").lassAddressPartitionSupported(.{
+        .instruction = instruction,
+        .stack = stackPointer(),
+        .kernel_data = @intFromPtr(&__kernel_data_start),
+        .gdt = .{ .base = gdtr.base, .limit = gdtr.limit },
+        .idt = .{ .base = idtr.base, .limit = idtr.limit },
+    });
+}
+
+pub inline fn enableLass() error{UnsupportedKernelAddressPartition}!void {
+    if (!lassAddressPartitionSupported()) return error.UnsupportedKernelAddressPartition;
     writeCr4(readCr4() | CR4_LASS);
+}
+
+comptime {
+    if (@sizeOf(DescriptorTableRegister) != 10 or @alignOf(DescriptorTableRegister) != 1)
+        @compileError("SGDT/SIDT operands require an unpadded ten-byte layout");
 }
 
 pub fn lassEnabled() bool {
@@ -397,21 +543,53 @@ pub fn enableFred(kernel_stack_top: usize, double_fault_stack_top: usize) void {
     writeCr4(readCr4() | CR4_FRED);
 }
 
-pub fn fredEnabled() bool {
-    return (readCr4() & CR4_FRED) != 0 and
-        readMsr(IA32_FRED_CONFIG_MSR) == @intFromPtr(&zigos_fred_entry) and
-        readMsr(IA32_FRED_STKLVLS_MSR) == FRED_DOUBLE_FAULT_STACK_LEVELS and
-        validFredStackTop(@intCast(readMsr(IA32_FRED_RSP0_MSR))) and
-        validFredStackTop(@intCast(readMsr(IA32_FRED_RSP3_MSR)));
+pub inline fn fredEntryAddress() usize {
+    return @intFromPtr(&zigos_fred_entry);
 }
 
-pub fn setFredRsp0(kernel_stack_top: usize) void {
+pub inline fn fredEnabled(kernel_stack_top: usize, emergency_stack_top: usize) bool {
+    return fredEnabledWith(kernel_stack_top, emergency_stack_top, fredEntryAddress(), struct {
+        inline fn readCr4(_: @This()) usize {
+            return @import("x86.zig").readCr4();
+        }
+        inline fn readMsr(_: @This(), msr: u32) u64 {
+            return @import("x86.zig").readMsr(msr);
+        }
+    }{});
+}
+
+pub inline fn fredEnabledWith(kernel_stack_top: usize, emergency_stack_top: usize, entry: usize, hardware: anytype) bool {
+    return validFredStackTop(kernel_stack_top) and validFredStackTop(emergency_stack_top) and
+        fredControlMatchesWith(emergency_stack_top, entry, hardware) and
+        hardware.readMsr(IA32_FRED_RSP0_MSR) == kernel_stack_top and
+        hardware.readMsr(IA32_FRED_RSP1_MSR) == kernel_stack_top and
+        hardware.readMsr(IA32_FRED_RSP2_MSR) == kernel_stack_top;
+}
+
+pub inline fn fredControlMatchesWith(emergency_stack_top: usize, entry: usize, hardware: anytype) bool {
+    return (hardware.readCr4() & CR4_FRED) != 0 and
+        hardware.readMsr(IA32_FRED_CONFIG_MSR) == entry and
+        hardware.readMsr(IA32_FRED_STKLVLS_MSR) == FRED_DOUBLE_FAULT_STACK_LEVELS and
+        hardware.readMsr(IA32_FRED_RSP3_MSR) == emergency_stack_top;
+}
+
+pub inline fn updateFredStack(kernel_stack_top: usize) void {
+    updateFredStackWith(kernel_stack_top, struct {
+        inline fn writeMsr(_: @This(), msr: u32, value: u64) void {
+            @import("x86.zig").writeMsr(msr, value);
+        }
+    }{});
+}
+
+pub inline fn updateFredStackWith(kernel_stack_top: usize, hardware: anytype) void {
     if (!validFredStackTop(kernel_stack_top)) unreachable;
-    writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
+    hardware.writeMsr(IA32_FRED_RSP0_MSR, kernel_stack_top);
+    hardware.writeMsr(IA32_FRED_RSP1_MSR, kernel_stack_top);
+    hardware.writeMsr(IA32_FRED_RSP2_MSR, kernel_stack_top);
 }
 
-fn validFredStackTop(stack_top: usize) bool {
-    return stack_top != 0 and stack_top % FRED_STACK_ALIGNMENT == 0;
+pub inline fn validFredStackTop(stack_top: usize) bool {
+    return stack_top >= 0xFFFF_8000_0000_0000 and stack_top % FRED_STACK_ALIGNMENT == 0;
 }
 
 pub fn writeXcr0(value: u64) void {

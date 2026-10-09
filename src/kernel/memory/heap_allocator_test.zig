@@ -32,6 +32,8 @@ test "heap rejects interior pointers duplicate frees and overflowing requests" {
     heap.kfree(null);
     try std.testing.expect(heap.kmalloc(0) == null);
     try std.testing.expect(heap.kmalloc(std.math.maxInt(usize)) == null);
+    try std.testing.expect(heap.kmalloc(std.math.maxInt(u32)) == null);
+    try std.testing.expect(heap.kmalloc(arena.len + 1) == null);
     for (payload(ptr, 256)) |byte| try std.testing.expectEqual(@as(u8, 0xc7), byte);
     heap.kfree(ptr);
     heap.kfree(ptr);
@@ -95,9 +97,9 @@ test "heap reclaims every cached class while preserving a live neighbor" {
 test "heap reclaims remote CPU magazines and retires old recent identities" {
     const previous_cpu = cpu_identity.currentIndex();
     defer cpu_identity.setIndexForTest(previous_cpu);
-    var arena: [8 * 4096]u8 align(32) = undefined;
+    var arena: [heap.MAGAZINE_CPUS * 4096]u8 align(32) = undefined;
     try heap.initHostArena(&arena);
-    var blocks: [8]*anyopaque = undefined;
+    var blocks: [heap.MAGAZINE_CPUS]*anyopaque = undefined;
     for (&blocks, 0..) |*block, index| {
         cpu_identity.setIndexForTest(@intCast(index));
         block.* = heap.kmalloc(4096) orelse return error.OutOfMemory;
@@ -214,7 +216,8 @@ test "heap finds a later exact fit before reclaiming split metadata" {
     const exact = heap.kmalloc(8192) orelse return error.OutOfMemory;
     const separator = heap.kmalloc(32) orelse return error.OutOfMemory;
     // Both free spans remain isolated, and all 4096 metadata IDs stay used.
-    // The oversized span is now first in the shared overflow-class list.
+    // Metadata pressure must choose the exact span without consuming a larger
+    // free bin merely because that span was freed most recently.
     heap.kfree(exact);
     heap.kfree(larger);
     const chosen = heap.kmalloc(8192) orelse return error.OutOfMemory;
@@ -385,8 +388,70 @@ test "heap keeps compact links within its metadata budget" {
     try std.testing.expect(heap.metadata_layout.array_bytes <= 101 * 1024);
 }
 
+test "heap searches exact lengths inside the starting large bin" {
+    var arena: [8192 + 12288 + 2 * 32]u8 align(32) = undefined;
+    try heap.initHostArena(&arena);
+    const larger = heap.kmalloc(12288) orelse return error.OutOfMemory;
+    const separator = heap.kmalloc(32) orelse return error.OutOfMemory;
+    const smaller = heap.kmalloc(8192) orelse return error.OutOfMemory;
+    const guard = heap.kmalloc(32) orelse return error.OutOfMemory;
+    @memset(payload(separator, 32), 0xc7);
+    @memset(payload(guard, 32), 0xa5);
+    heap.kfree(larger);
+    heap.kfree(smaller);
+    // Both spans share the 8..16 KiB bin, but its head cannot satisfy 12 KiB.
+    const chosen = heap.kmalloc(12288) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(larger), @intFromPtr(chosen));
+    const remaining = heap.kmalloc(8192) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(smaller), @intFromPtr(remaining));
+    try std.testing.expect(heap.kmalloc(32) == null);
+    for (payload(separator, 32)) |byte| try std.testing.expectEqual(@as(u8, 0xc7), byte);
+    for (payload(guard, 32)) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+    heap.kfree(remaining);
+    heap.kfree(chosen);
+    heap.kfree(separator);
+    heap.kfree(guard);
+    const entire = heap.kmalloc(arena.len) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(&arena), @intFromPtr(entire));
+    heap.kfree(entire);
+}
+
+test "heap skips undersized large spans and preserves them across failed larger fits" {
+    const count = 32;
+    const hole_bytes = count / 2 * (8192 + 16384);
+    var arena: [hole_bytes + count * 32 + 32768 + 32]u8 align(32) = undefined;
+    try heap.initHostArena(&arena);
+    const candidate = heap.kmalloc(32768) orelse return error.OutOfMemory;
+    const candidate_guard = heap.kmalloc(32) orelse return error.OutOfMemory;
+    var holes: [count]*anyopaque = undefined;
+    var guards: [count]*anyopaque = undefined;
+    for (&holes, &guards, 0..) |*hole, *guard, index| {
+        hole.* = heap.kmalloc(if (index % 2 == 0) 8192 else 16384) orelse return error.OutOfMemory;
+        guard.* = heap.kmalloc(32) orelse return error.OutOfMemory;
+        @memset(payload(guard.*, 32), @truncate(index));
+    }
+    heap.kfree(candidate);
+    for (holes) |hole| heap.kfree(hole);
+    const selected = heap.kmalloc(32768) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(candidate), @intFromPtr(selected));
+    for (0..16) |_| try std.testing.expect(heap.kmalloc(32768) == null);
+    for (&holes, guards, 0..) |*hole, guard, index| {
+        hole.* = heap.kmalloc(if (index % 2 == 0) 8192 else 16384) orelse return error.OutOfMemory;
+        for (payload(guard, 32)) |byte| try std.testing.expectEqual(@as(u8, @truncate(index)), byte);
+    }
+    heap.kfree(selected);
+    heap.kfree(candidate_guard);
+    for (holes, guards) |hole, guard| {
+        heap.kfree(hole);
+        heap.kfree(guard);
+    }
+    const entire = heap.kmalloc(arena.len) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(&arena), @intFromPtr(entire));
+    heap.kfree(entire);
+}
+
 test "heap preserves live payloads and free indexes under randomized fragmentation" {
-    var arena: [128 * 1024]u8 align(16) = undefined;
+    var arena: [256 * 1024]u8 align(32) = undefined;
     try heap.initHostArena(&arena);
     const Live = struct { ptr: *anyopaque, size: usize, pattern: u8 };
     var live = @as([128]?Live, @splat(null));
@@ -399,7 +464,7 @@ test "heap preserves live payloads and free indexes under randomized fragmentati
             heap.kfree(allocation.ptr);
             live[index] = null;
         } else {
-            const size = random.intRangeAtMost(usize, 1, 8192);
+            const size = random.intRangeAtMost(usize, 1, if (iteration % 5 == 0) 65536 else 8192);
             if (heap.kmalloc(size)) |ptr| {
                 const pattern = random.int(u8);
                 @memset(payload(ptr, size), pattern);
@@ -416,4 +481,7 @@ test "heap preserves live payloads and free indexes under randomized fragmentati
         for (payload(allocation.ptr, allocation.size)) |byte| try std.testing.expectEqual(allocation.pattern, byte);
         heap.kfree(allocation.ptr);
     };
+    const entire = heap.kmalloc(arena.len) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(&arena), @intFromPtr(entire));
+    heap.kfree(entire);
 }

@@ -7,6 +7,7 @@ const spin = @import("../utils/spin.zig");
 const cpu_identity = @import("../cpu_identity.zig");
 const boot_handoff = @import("../boot/handoff.zig");
 const boot_image = @import("../../boot/image_info.zig");
+const kernel_address = @import("../../arch/kernel_address.zig");
 
 pub const HEAP_SIZE: usize = boot_image.KERNEL_HEAP_BYTES;
 const GRANULE = heap_geometry.granule;
@@ -51,7 +52,7 @@ const CpuHeap = struct {
     recent_span: SpanId = NO_SPAN,
     recent_payload: usize = 0,
     cached_classes: u8 = 0,
-    classes: [CLASS_COUNT]Magazine = @as([CLASS_COUNT]Magazine, @splat(.{})),
+    classes: [heap_geometry.size_classes.len]Magazine = @splat(.{}),
 };
 
 const CpuHeapSlot = struct {
@@ -65,11 +66,15 @@ comptime {
     if (MAGAZINE_CPUS >= NO_CPU or heap_geometry.size_classes.len > 8) {
         @compileError("heap CPU owners and cached-class flags must fit their reserved byte fields");
     }
+    if (CLASS_COUNT > @bitSizeOf(u32)) {
+        @compileError("heap free-list availability must fit one bitmap word");
+    }
     if (@alignOf(CpuHeapSlot) < 128 or @sizeOf(CpuHeapSlot) % 128 != 0) {
         @compileError("per-CPU heap magazines must occupy distinct cache lines");
     }
 }
 
+var early_heap_admitted: bool = false;
 var heap_base_address: usize = 0;
 var payload_base: usize = 0;
 var payload_bytes: usize = 0;
@@ -81,6 +86,7 @@ var span_used: SpanId = 0;
 var recycled: SpanId = NO_SPAN;
 var address_head: SpanId = NO_SPAN;
 var class_heads: [CLASS_COUNT]SpanId = @splat(NO_SPAN);
+var nonempty_classes: u32 = 0;
 var cpu_heaps: [MAGAZINE_CPUS]CpuHeapSlot = @as([MAGAZINE_CPUS]CpuHeapSlot, @splat(.{}));
 var span_lookup: [SPAN_LOOKUP_SLOTS]SpanId = @splat(NO_SPAN);
 
@@ -96,18 +102,36 @@ fn alignUp(addr: usize, alignment: usize) usize {
     return (addr + alignment - 1) & ~(alignment - 1);
 }
 
-pub fn heapStartAddress() usize {
+pub fn heapPhysicalStartAddress() usize {
     const info = boot_handoff.capturedInfo() orelse @panic("missing EFI heap handoff");
     const image = info.boot_image orelse @panic("missing EFI heap reservation");
     return @intCast(image.heap_base);
 }
 
-pub fn kernelStartAddress() usize {
-    return @intFromPtr(&__kernel_start);
+pub fn heapStartAddress() usize {
+    if (!early_heap_admitted) {
+        const info = boot_handoff.capturedInfo() orelse @panic("missing EFI heap handoff");
+        const map = boot_handoff.capturedMemoryMap(info) orelse @panic("missing EFI memory authority");
+        const cache = @import("../../arch/cache_policy.zig").admittedMtrrView() catch @panic("missing admitted cache policy");
+        const info_address = boot_handoff.capturedInfoAddress() orelse @panic("missing EFI handoff extent");
+        @import("firmware_memory_map.zig").validateBootOwnedRanges(map, info_address, info, kernelPhysicalStartAddress(), kernelPhysicalEndAddress(), cache) catch
+            @panic("invalid native boot memory ownership");
+        early_heap_admitted = true;
+    }
+    return kernel_address.directMappedAddress(heapPhysicalStartAddress(), kernel_address.image_physical_limit) orelse
+        @panic("EFI heap lies outside the bootstrap direct map");
 }
 
-pub fn kernelEndAddress() usize {
-    return alignUp(@intFromPtr(&__kernel_end), PAGE_SIZE);
+pub fn kernelPhysicalStartAddress() usize {
+    return @intCast(kernel_address.imagePhysicalAddress(@intFromPtr(&__kernel_start)) orelse
+        @panic("kernel start lies outside the image window"));
+}
+
+pub fn kernelPhysicalEndAddress() usize {
+    const end = @intFromPtr(&__kernel_end);
+    const last = kernel_address.imagePhysicalAddress(end - 1) orelse
+        @panic("kernel end lies outside the image window");
+    return alignUp(@intCast(last + 1), PAGE_SIZE);
 }
 
 fn currentCpu() usize {
@@ -202,6 +226,7 @@ fn resetArena() void {
     recycled = NO_SPAN;
     address_head = NO_SPAN;
     class_heads = @splat(NO_SPAN);
+    nonempty_classes = 0;
     cpu_heaps = @as([MAGAZINE_CPUS]CpuHeapSlot, @splat(.{}));
     span_lookup = @splat(NO_SPAN);
 
@@ -216,7 +241,8 @@ pub fn kmalloc(size: usize) ?*anyopaque {
     const interrupts = pauseInterrupts();
     defer resumeInterrupts(interrupts);
     const aligned = heap_geometry.alignSize(size, GRANULE) orelse return null;
-    const class_index = heap_geometry.freeListIndex(aligned, PAGE_SIZE);
+    if (aligned > payload_bytes) return null;
+    const class_index = heap_geometry.freeListIndex(aligned);
     if (heap_geometry.sizeClassBytes(class_index)) |_| {
         if (popMagazine(currentCpu(), class_index)) |allocation| return allocation;
     }
@@ -242,7 +268,8 @@ pub fn kfree(ptr: ?*anyopaque) void {
 
 fn allocateLocked(size: usize) ?*anyopaque {
     const aligned = heap_geometry.alignSize(size, GRANULE) orelse return null;
-    const class_index = heap_geometry.freeListIndex(aligned, PAGE_SIZE);
+    if (aligned > payload_bytes) return null;
+    const class_index = heap_geometry.freeListIndex(aligned);
     const request = heap_geometry.sizeClassBytes(class_index) orelse aligned;
     const cpu = currentCpu();
     if (popMagazine(cpu, class_index)) |allocation| return allocation;
@@ -383,12 +410,16 @@ fn recycleSpan(id: SpanId) void {
 }
 
 fn pushFree(id: SpanId) void {
-    const class_index = heap_geometry.freeListIndex(spans[id].length, PAGE_SIZE);
+    const class_index = heap_geometry.freeListIndex(spans[id].length);
     spans[id].class_index = @intCast(class_index);
     storeSpanState(id, SPAN_FREE);
     spans[id].next_free = class_heads[class_index];
     spans[id].previous_free = NO_SPAN;
-    if (class_heads[class_index] != NO_SPAN) spans[class_heads[class_index]].previous_free = id;
+    if (class_heads[class_index] != NO_SPAN) {
+        spans[class_heads[class_index]].previous_free = id;
+    } else {
+        nonempty_classes |= @as(u32, 1) << @intCast(class_index);
+    }
     class_heads[class_index] = id;
 }
 
@@ -399,6 +430,8 @@ fn unlinkFree(id: SpanId) void {
     if (previous == NO_SPAN) {
         if (class_heads[class_index] != id) @panic("kernel heap free-list head mismatch");
         class_heads[class_index] = next;
+        if (next == NO_SPAN)
+            nonempty_classes &= ~(@as(u32, 1) << @intCast(class_index));
     } else {
         if (spans[previous].next_free != id) @panic("kernel heap free-list predecessor mismatch");
         spans[previous].next_free = next;
@@ -413,8 +446,9 @@ fn unlinkFree(id: SpanId) void {
 
 fn takeSpan(start_class: usize, request: usize, allow_unsplit: bool) error{ NoSpan, NoSplitMetadata }!SpanId {
     var needs_split_metadata = false;
-    var class_index = start_class;
-    while (class_index < CLASS_COUNT) : (class_index += 1) {
+    var candidates = nonempty_classes & (@as(u32, std.math.maxInt(u32)) << @intCast(start_class));
+    while (candidates != 0) : (candidates &= candidates - 1) {
+        const class_index = @ctz(candidates);
         var current = class_heads[class_index];
         while (current != NO_SPAN) {
             if (spans[current].length >= request) {
@@ -647,4 +681,71 @@ test "heap address hashing distributes page-aligned spans across the table" {
         for (occupied) |used| count += @intFromBool(used);
         try std.testing.expect(count >= MAX_SPANS / 2);
     }
+}
+
+test "heap free-bin availability survives arbitrary unlink coalescing and empty reuse" {
+    const Check = struct {
+        fn lists() !void {
+            var expected: u32 = 0;
+            var seen: [MAX_SPANS]bool = @splat(false);
+            for (class_heads, 0..) |head, index| {
+                if (head != NO_SPAN) expected |= @as(u32, 1) << @intCast(index);
+                var previous = NO_SPAN;
+                var current = head;
+                while (current != NO_SPAN) {
+                    try std.testing.expect(current < span_used);
+                    try std.testing.expect(!seen[current]);
+                    seen[current] = true;
+                    try std.testing.expectEqual(SPAN_FREE, loadSpanState(current));
+                    try std.testing.expectEqual(index, @as(usize, spans[current].class_index));
+                    try std.testing.expectEqual(previous, spans[current].previous_free);
+                    previous = current;
+                    current = spans[current].next_free;
+                }
+            }
+            try std.testing.expectEqual(expected, nonempty_classes);
+        }
+    };
+    var arena: [128 * 1024]u8 align(32) = undefined;
+    try initHostArena(&arena);
+    try Check.lists();
+    const sizes = [_]usize{ 6144, 12288, 24576, 40960 };
+    var blocks: [sizes.len]*anyopaque = undefined;
+    var prefix_bytes: usize = 0;
+    for (sizes, 0..) |size, index| {
+        blocks[index] = kmalloc(size) orelse return error.OutOfMemory;
+        prefix_bytes += size;
+        try Check.lists();
+    }
+    const tail = kmalloc(arena.len - prefix_bytes) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@as(u32, 0), nonempty_classes);
+    const neighbor: [*]u8 = @ptrCast(blocks[3]);
+    neighbor[0] = 0xc7;
+    neighbor[sizes[3] - 1] = 0xa5;
+    for ([_]usize{ 2, 0, 1 }) |index| {
+        kfree(blocks[index]);
+        try Check.lists();
+    }
+    const joined_bytes = sizes[0] + sizes[1] + sizes[2];
+    var joined = kmalloc(joined_bytes) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(&arena), @intFromPtr(joined));
+    try std.testing.expectEqual(@as(u32, 0), nonempty_classes);
+    for (0..8) |_| {
+        kfree(joined);
+        try Check.lists();
+        joined = kmalloc(joined_bytes) orelse return error.OutOfMemory;
+        try Check.lists();
+        try std.testing.expectEqual(@as(u32, 0), nonempty_classes);
+    }
+    try std.testing.expectEqual(@as(u8, 0xc7), neighbor[0]);
+    try std.testing.expectEqual(@as(u8, 0xa5), neighbor[sizes[3] - 1]);
+    kfree(blocks[3]);
+    kfree(joined);
+    kfree(tail);
+    try Check.lists();
+    const complete = kmalloc(arena.len) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@intFromPtr(&arena), @intFromPtr(complete));
+    try std.testing.expectEqual(@as(u32, 0), nonempty_classes);
+    kfree(complete);
+    try Check.lists();
 }

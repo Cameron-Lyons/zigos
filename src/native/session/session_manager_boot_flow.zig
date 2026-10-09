@@ -154,7 +154,19 @@ pub const SessionManager = struct {
         return true;
     }
 
+    inline fn requireResetExecutionQuiescent(self: *SessionManager) error{ WrongCpu, TaskRuntimeBorrowed }!void {
+        // This accessor never constructs or allocates session state.
+        if (self.runtime_context.taskRuntime()) |runtime| try runtime.requireExecutionQuiescent();
+    }
+
     pub fn reset(self: *SessionManager) void {
+        self.requireResetExecutionQuiescent() catch
+            @panic("trusted reset requires returned execution and completed owner transport");
+        // Revoking a task or object removes CPU authority but cannot establish
+        // that a device has stopped accessing its physical backing. Keep the
+        // complete session owned until every accelerator attachment is drained.
+        self.kernel_context.shared_memory_table.requireQuiescent() catch
+            @panic("trusted reset requires accelerator shared-memory attachments to finish");
         self.quiesceDocumentOperations(0);
         self.documents.requireQuiescent() catch @panic("trusted reset requires document operations to finish");
         self.clearPeerAttestationWorker();
@@ -331,6 +343,12 @@ pub const SessionManager = struct {
         const dispatched = self.runtime_context.userspaceScheduler().?.runNext(now_ticks);
         if (copied or serviced or launched or owned_launch or dispatched or pruned != 0) _ = desktop_display.present(self.compositorSessionPtr());
         return copied or serviced or launched or owned_launch or dispatched or identity_work or peer_work != 0 or quote_work;
+    }
+
+    pub fn servicePendingSyscalls(self: *SessionManager, now_ticks: u64) usize {
+        if (!self.runtime_context.constructed) return 0;
+        const port = self.kernelPort() orelse return 0;
+        return self.runtime_context.userspaceScheduler().?.servicePendingSyscalls(port, now_ticks);
     }
 
     pub fn userspaceSchedulerHasReadyTasks(self: *const SessionManager) bool {
@@ -1634,4 +1652,126 @@ fn smokeFaultModeIs(comptime mode_name: []const u8) bool {
     if (builtin.target.os.tag != .freestanding) return false;
     const config = @import("../../kernel/config.zig");
     return std.mem.eql(u8, @tagName(config.smokeFaultMode()), mode_name);
+}
+
+test "session reset execution preflight preserves owned services until durable transport drains" {
+    const cpu_identity = @import("../../kernel/cpu_identity.zig");
+    const transport = @import("../task/dispatch_transport.zig");
+    const ownership = @import("../task/dispatch_ownership.zig");
+    const Observer = struct {
+        quiesced: usize = 0,
+
+        fn ready(_: *anyopaque, _: peer_quote.Owner, _: u64) bool {
+            return false;
+        }
+        fn service(_: *anyopaque, _: peer_quote.Owner, _: u64) bool {
+            return false;
+        }
+        fn nextWake(_: *anyopaque) ?u64 {
+            return null;
+        }
+        fn quiesce(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.quiesced += 1;
+        }
+        const operations = peer_quote.Interface.Operations{
+            .ready = ready,
+            .service = service,
+            .next_wake = nextWake,
+            .quiesce = quiesce,
+        };
+
+        fn rejected(self: *@This(), manager: *SessionManager, expected: anyerror) !void {
+            const before = try std.testing.allocator.dupe(u8, std.mem.asBytes(manager));
+            defer std.testing.allocator.free(before);
+            const channels_before = transport.global;
+            try std.testing.expectError(expected, manager.requireResetExecutionQuiescent());
+            try std.testing.expectEqualSlices(u8, before, std.mem.asBytes(manager));
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&channels_before), std.mem.asBytes(&transport.global));
+            try std.testing.expectEqual(@as(usize, 0), self.quiesced);
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_pool = transport.global;
+    defer {
+        transport.global = previous_pool;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    cpu_identity.setIndexForTest(0);
+    transport.global = .{};
+    const manager = try std.testing.allocator.create(SessionManager);
+    defer std.testing.allocator.destroy(manager);
+    manager.initializeAllocated();
+    defer manager.reset();
+    const runtime = manager.runtimePtr();
+    var observer = Observer{};
+    manager.bindPeerAttestationWorker(.{ .context = &observer, .operations = &Observer.operations });
+    manager.input_repeat_lifecycle = 0xfeed_1234;
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 1 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 256, .endpoint_slots = 2, .shared_memory_bytes = 512 },
+        .local_only = true,
+    });
+    var borrow = runtime.borrowResolvedTask(task);
+    try observer.rejected(manager, error.TaskRuntimeBorrowed);
+    borrow.release();
+    runtime.lifecycle_transition_active = true;
+    try observer.rejected(manager, error.TaskRuntimeBorrowed);
+    runtime.lifecycle_transition_active = false;
+    cpu_identity.setIndexForTest(1);
+    try observer.rejected(manager, error.WrongCpu);
+    cpu_identity.setIndexForTest(0);
+
+    const ticket = try runtime.reserveExecution(task, 1);
+    try observer.rejected(manager, error.TaskRuntimeBorrowed);
+    try runtime.execution.bindPrepared(ticket, 1, 4096);
+    var key: transport.Key = undefined;
+    try transport.global.publishInto(.{ .ticket = ticket, .trap_stack_top = 0x8000_0000 }, &key);
+    try observer.rejected(manager, error.TaskRuntimeBorrowed);
+    cpu_identity.setIndexForTest(1);
+    var command: transport.ClaimedCommand = undefined;
+    try transport.global.claimKeyInto(key, &command);
+    var bound: ownership.BoundIdentity = undefined;
+    try runtime.execution.startPreparedInto(command.command.ticket, &bound);
+    try runtime.execution.ackPreparedReturn(ticket, .{});
+    cpu_identity.setIndexForTest(0);
+    var record: ownership.ReturnRecord = undefined;
+    try runtime.execution.consumePreparedReturnInto(ticket, &record);
+    try observer.rejected(manager, error.TaskRuntimeBorrowed);
+    try std.testing.expectError(error.Busy, runtime.collectExecution(ticket));
+    cpu_identity.setIndexForTest(1);
+    try transport.global.complete(key, .owner_returned);
+    cpu_identity.setIndexForTest(0);
+    try observer.rejected(manager, error.TaskRuntimeBorrowed);
+    try runtime.collectExecution(ticket);
+    try manager.requireResetExecutionQuiescent();
+
+    // Even a caller bypassing Runtime collection cannot destroy an issuer
+    // retained by a completed channel. This withdrawn command never ran.
+    const unretained = try runtime.execution.prepare(1, .{
+        .task_handle = runtime.taskHandleForResolved(task).value,
+        .task_id = task.id,
+        .process_generation = task.process_generation,
+        .address_space_id = task.address_space_id,
+    });
+    try runtime.execution.bindPrepared(unretained, 1, 4096);
+    var unretained_key: transport.Key = undefined;
+    try transport.global.publishInto(.{ .ticket = unretained, .trap_stack_top = 0x8000_0000 }, &unretained_key);
+    try transport.global.withdraw(unretained_key);
+    try runtime.execution.cancelUnstarted(unretained);
+    try runtime.execution.consumePreparedReturnInto(unretained, &record);
+    _ = try runtime.execution.beginCollect(unretained);
+    try runtime.execution.finishCollect(unretained);
+    try std.testing.expect(!runtime.execution.hasLeases());
+    try std.testing.expectEqual(@as(u8, 0), runtime.task_borrow_counts[task.arena_slot_index]);
+    try observer.rejected(manager, error.TaskRuntimeBorrowed);
+    var channel: transport.Key = undefined;
+    try std.testing.expect(try transport.global.beginCollectionInto(unretained, &channel));
+    try transport.global.finishCollection(channel);
+    try manager.requireResetExecutionQuiescent();
+    manager.reset();
+    try std.testing.expectEqual(@as(usize, 1), observer.quiesced);
+    try std.testing.expectEqual(@as(u64, 0), manager.input_repeat_lifecycle);
+    try std.testing.expect(manager.peer_quote_worker == null);
 }

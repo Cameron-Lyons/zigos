@@ -103,8 +103,7 @@ pub fn installAddressSpace(
     replace_address_space_id: ?u64,
     address_space: anytype,
 ) ErrorSet!void {
-    if (runtime.installAddressSpaceRecord(replace_address_space_id, address_space)) return;
-    return error.AddressSpaceTableFull;
+    try runtime.installAddressSpaceRecord(replace_address_space_id, address_space);
 }
 
 fn assignHost(

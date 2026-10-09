@@ -38,9 +38,8 @@ pub const Stack = struct {
         const run = paging.allocGeneralFrames(STACK_BYTES / PAGE_BYTES) orelse return error.OutOfMemory;
         errdefer paging.releaseGeneralFrames(run) catch @panic("worker stack frame accounting");
         var mapped: usize = 0;
-        errdefer for (0..mapped) |page| {
-            if (!paging.unmapBorrowedCurrentPage(base + PAGE_BYTES + page * PAGE_BYTES)) @panic("worker stack unmap failed");
-        };
+        errdefer if (mapped != 0)
+            paging.unmapBorrowedKernelRange(base + PAGE_BYTES, mapped * PAGE_BYTES) catch @panic("worker stack unmap failed");
         for (0..STACK_BYTES / PAGE_BYTES) |page| {
             try paging.tryMapKernelBorrowedPage(base + PAGE_BYTES + page * PAGE_BYTES, @intCast(run.base + page * PAGE_BYTES), paging.PAGE_PRESENT | paging.PAGE_WRITABLE);
             mapped += 1;
@@ -56,9 +55,7 @@ pub const Stack = struct {
         requireContext() catch @panic("worker stack released outside its owner context");
         std.crypto.secureZero(u8, self.bytes);
         if (freestanding) {
-            for (0..STACK_BYTES / PAGE_BYTES) |page| {
-                if (!paging.unmapBorrowedCurrentPage(@intFromPtr(self.bytes.ptr) + page * PAGE_BYTES)) @panic("worker stack unmap failed");
-            }
+            paging.unmapBorrowedKernelRange(@intFromPtr(self.bytes.ptr), STACK_BYTES) catch @panic("worker stack unmap failed");
             paging.releaseGeneralFrames(self.allocation) catch @panic("worker stack frame accounting");
             occupied[self.slot] = false;
         } else std.posix.munmap(self.allocation);

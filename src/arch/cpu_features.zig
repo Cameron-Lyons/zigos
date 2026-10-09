@@ -1,5 +1,26 @@
 const x86 = @import("x86.zig");
 pub const baseline = @import("cpu_baseline.zig");
+pub const cache_policy = @import("cache_policy.zig");
+
+pub inline fn validateBootstrapCache() cache_policy.AdmissionError!void {
+    try cache_policy.validateBootstrap(x86.readBootstrapCacheState());
+}
+
+pub const CacheAdmissionError = cache_policy.CacheAdmissionError;
+
+pub inline fn initializeNativeCachePolicy() CacheAdmissionError!void {
+    try validateBootstrapCache();
+    var state: cache_policy.MtrrState = undefined;
+    try x86.readMtrrStateInto(&state);
+    try cache_policy.initializeBsp(&state);
+}
+
+pub inline fn admitApplicationProcessorCache() CacheAdmissionError!void {
+    try validateBootstrapCache();
+    var state: cache_policy.MtrrState = undefined;
+    try x86.readMtrrStateInto(&state);
+    try cache_policy.admitApplicationProcessor(&state);
+}
 
 const CpuidResult = struct {
     eax: u32,
@@ -69,12 +90,22 @@ pub fn detect() baseline.Features {
         }
     }
     if (registers.max_basic_leaf >= 0xD) {
+        const leaf13 = cpuid(0xD, 0);
+        registers.leaf13_0_eax = leaf13.eax;
         registers.leaf13_1_eax = cpuid(0xD, 1).eax;
+        if (leaf13.eax & (1 << 2) != 0) {
+            const ymm = cpuid(0xD, 2);
+            registers.leaf13_2_eax = ymm.eax;
+            registers.leaf13_2_ebx = ymm.ebx;
+            registers.leaf13_2_ecx = ymm.ecx;
+        }
     }
 
     registers.max_extended_leaf = cpuid(0x8000_0000, 0).eax;
     if (registers.max_extended_leaf >= 0x8000_0001) {
-        registers.extended1_edx = cpuid(0x8000_0001, 0).edx;
+        const extended1 = cpuid(0x8000_0001, 0);
+        registers.extended1_ecx = extended1.ecx;
+        registers.extended1_edx = extended1.edx;
     }
     if (registers.max_extended_leaf >= 0x8000_0007) {
         registers.extended7_edx = cpuid(0x8000_0007, 0).edx;
@@ -143,6 +174,9 @@ pub fn enableModernFeatures(
     cr4 |= x86.CR4_SMAP;
     cr4 |= x86.CR4_UMIP;
     x86.writeCr4(cr4);
+    // UEFI specifies DF, but leaves AC undefined. Close inherited user-memory
+    // access before treating SMAP or later LASS activation as enforced.
+    x86.forbidSupervisorUserMemory();
     if (!x86.globalPagesEnabled()) unreachable;
     if (!x86.supervisorAccessPreventionEnabled()) unreachable;
     if (process_context_mode == .hardware_pcid) {
@@ -162,10 +196,9 @@ pub fn enableModernFeatures(
         x86.enablePku();
         if (!x86.pkuEnabled()) unreachable;
     }
-    if (features.lass) {
-        x86.enableLass();
-        if (!x86.lassEnabled()) unreachable;
-    }
+    // LASS still belongs to the mandatory hardware admission floor. Its CR4
+    // activation waits until this CPU owns upper-half descriptor/native entry
+    // state; inherited firmware GDTR/IDTR addresses may remain in the low half.
 }
 
 test "explicit model enablement accepts only its selected software controls" {
@@ -205,7 +238,7 @@ test "hardware enablement rejects missing mandatory controls and software policy
 test "every enablement mode requires real XSAVES and a selected clock" {
     const std = @import("std");
     for ([_]FeatureMode{ .hardware, .explicit_model }) |mode| {
-        inline for ([_]baseline.MissingFeature{ .cpuid, .sse2, .long_mode, .syscall, .nx, .smep, .smap, .umip, .pge, .x2apic, .xsave, .xsaves, .pages_1g, .rdseed, .rdpid }) |required| {
+        inline for ([_]baseline.MissingFeature{ .cpuid, .sse2, .long_mode, .sse3, .ssse3, .sse4_1, .sse4_2, .popcnt, .cx16, .lahf_sahf, .avx, .avx2, .f16c, .fma, .movbe, .bmi1, .bmi2, .lzcnt, .aes, .pclmul, .sha, .ymm_state, .syscall, .nx, .smep, .smap, .umip, .pge, .x2apic, .xsave, .xsaves, .pages_1g, .rdseed, .rdpid }) |required| {
             var missing = baseline.completeFeatures();
             @field(missing, @tagName(required)) = false;
             try std.testing.expectEqual(@as(?baseline.MissingFeature, required), firstMissingForEnablement(missing, .hardware_pcid, .hardware, mode));

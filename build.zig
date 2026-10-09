@@ -8,6 +8,7 @@ const host_tools = @import("build_support/host_tools.zig");
 const qemu_build = @import("build_support/qemu.zig");
 const tests_build = @import("build_support/tests.zig");
 const userspace_build = @import("build_support/userspace.zig");
+const codegen_target = @import("src/arch/codegen_target.zig");
 
 const required_zig_version = "0.17.0";
 
@@ -42,26 +43,20 @@ pub fn build(b: *std.Build) void {
     const release_verifier = b.option([]const u8, "release-verifier", "Absolute path to an independently provisioned release verifier");
     const release_verifier_sha256 = b.option([]const u8, "release-verifier-sha256", "Pinned lowercase SHA-256 digest of the independent release verifier");
 
-    const target = b.standardTargetOptions(.{
-        .default_target = .{
-            .cpu_arch = .x86_64,
-            .os_tag = .freestanding,
-            .abi = .none,
-        },
-    });
-    if (target.result.cpu.arch != .x86_64 or
-        target.result.os.tag != .freestanding or
-        target.result.abi != .none)
-    {
-        @panic("Zigos supports only the x86_64-freestanding-none target");
-    }
+    const target = codegen_target.select(b);
     const optimize = b.standardOptimizeOption(.{});
     benchmarks_build.addHostBenchmarks(b);
     const userspace_images = userspace_build.addUserspaceArtifacts(b, target, optimize);
+    benchmarks_build.addSyscallDispatchBenchmark(b, userspace_images);
     const test_artifacts = tests_build.addTestArtifacts(b, optimize, userspace_images);
     const x86_64_architecture_compile_check = kernel_build.addX86_64ArchitectureCompileCheck(b, optimize);
     const x86_64_kernel_compile_check = kernel_build.addX86_64KernelCompileCheck(b, optimize, userspace_images);
     const x86_64_long_mode_entry_check = kernel_build.addX86_64LongModeEntryCheck(b, optimize);
+    const native_crypto_check = kernel_build.addNativeCryptoCheck(b, optimize);
+    const high_half_entry_check = kernel_build.addHighHalfEntryCheck(b, optimize);
+    const mapping_xstate_proof_check = kernel_build.addMappingXstateProof(b, optimize);
+    const ap_cache_rejection_check = kernel_build.addApCacheRejectionCheck(b, optimize);
+    const smp_cache_enabled_match_check = kernel_build.addSmpCacheEnabledMatchCheck(b, optimize);
     const x86_64_kernel_core_boot_check = kernel_build.addX86_64KernelBootCheck(b, optimize, userspace_images);
     const kernels = kernel_build.addKernelProfiles(b, target, optimize, userspace_images);
     const kernel_steps = kernel_build.addKernelProfileSteps(b, kernels, userspace_images);
@@ -77,10 +72,10 @@ pub fn build(b: *std.Build) void {
     kernel_role_options.addOption(
         usize,
         "maximum_production_symbol_count",
-        // Native Notes selection, durable creation and exact document approval
-        // belong to the shipped identity path. Keep its bounded production
-        // budget and verification workload exclusions explicit.
-        if (optimize == .fast) 3600 else std.math.maxInt(usize),
+        // The checked cold entry-stack transaction measures 3611 resident
+        // symbols, including five newly outlined functions and one extra
+        // 4 KiB text page. Keep one symbol of headroom and exclude verification.
+        if (optimize == .fast) 3612 else std.math.maxInt(usize),
     );
     kernel_role_options.addOption(bool, "enforce_packed_userspace", optimize != .debug);
     const kernel_role_check_module = b.createModule(.{
@@ -297,6 +292,11 @@ pub fn build(b: *std.Build) void {
     );
     verify_step.dependOn(kernel_role_check_step);
     verify_step.dependOn(x86_64_long_mode_entry_check);
+    verify_step.dependOn(native_crypto_check);
+    verify_step.dependOn(high_half_entry_check);
+    verify_step.dependOn(mapping_xstate_proof_check);
+    verify_step.dependOn(ap_cache_rejection_check);
+    verify_step.dependOn(smp_cache_enabled_match_check);
     verify_step.dependOn(x86_64_kernel_core_boot_check);
 
     const efi_stub = kernel_build.addEfiImage(b, optimize, kernels.zigos_native.boot_payload, b.path("src/boot/cmdline.txt"));
@@ -463,6 +463,10 @@ pub fn build(b: *std.Build) void {
     release_security_preflight_step.dependOn(check_steps.spec_tests);
     release_security_preflight_step.dependOn(release_bundle_fixture_test_step);
     release_security_preflight_step.dependOn(kernel_role_check_step);
+    release_security_preflight_step.dependOn(native_crypto_check);
+    release_security_preflight_step.dependOn(high_half_entry_check);
+    release_security_preflight_step.dependOn(ap_cache_rejection_check);
+    release_security_preflight_step.dependOn(smp_cache_enabled_match_check);
     release_security_preflight_step.dependOn(zigos_native_production_smoke_step);
     release_security_preflight_step.dependOn(zigos_native_smoke_test_step);
     release_security_preflight_step.dependOn(storage_durability_qemu_step);

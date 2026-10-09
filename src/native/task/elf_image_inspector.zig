@@ -1,17 +1,17 @@
 const std = @import("std");
 const crypto_hash = @import("../core/crypto_hash.zig");
 const embedded_file = @import("embedded_file.zig");
-const task_runtime = @import("task_runtime.zig");
+const task_model = @import("task_runtime_model.zig");
 const userspace_bootstrap_mailbox = @import("userspace_bootstrap_mailbox.zig");
 const userspace_layout = @import("../core/userspace_layout.zig");
 
 pub const Inspection = struct {
     entry_point: u64,
     loadable_segment_count: u16,
-    byte_len: task_runtime.UserImageByteLength,
+    byte_len: task_model.UserImageByteLength,
     bootstrap_mailbox_address: u64,
     file_sha256: crypto_hash.Digest,
-    executable_image: task_runtime.ExecutableImageSpec,
+    executable_image: task_model.ExecutableImageSpec,
 };
 
 pub const Error = error{
@@ -93,11 +93,11 @@ fn inspectTyped(
         userspace_bootstrap_mailbox.SECTION_NAME,
     );
 
-    var executable_image = task_runtime.ExecutableImageSpec{};
+    var executable_image = task_model.ExecutableImageSpec{};
     executable_image.entry_point = @intCast(header.entry);
     executable_image.bootstrap_mailbox_address = bootstrap_mailbox_address;
-    executable_image.stack_top = task_runtime.DEFAULT_USER_STACK_TOP;
-    executable_image.stack_size_bytes = task_runtime.DEFAULT_USER_STACK_SIZE_BYTES;
+    executable_image.stack_top = task_model.DEFAULT_USER_STACK_TOP;
+    executable_image.stack_size_bytes = task_model.DEFAULT_USER_STACK_SIZE_BYTES;
     executable_image.file_size_bytes = file.byte_len;
 
     var loadable_segment_count: usize = 0;
@@ -110,7 +110,7 @@ fn inspectTyped(
         if (program_end > file.byte_len) return error.InvalidProgramHeaderTable;
         if (!reader.readInto(offset, std.mem.asBytes(&program_header))) return error.InvalidProgramHeaderTable;
         if (program_header.type == .LOAD) {
-            if (loadable_segment_count >= task_runtime.MAX_EXECUTABLE_SEGMENTS) {
+            if (loadable_segment_count >= task_model.MAX_EXECUTABLE_SEGMENTS) {
                 return error.TooManyLoadableSegments;
             }
             if (program_header.vaddr == 0 or program_header.memsz == 0) {
@@ -238,7 +238,7 @@ fn findRequiredMailboxSectionAddress(
     return error.MissingBootstrapMailbox;
 }
 
-fn mailboxFitsWritableLoad(image: *const task_runtime.ExecutableImageSpec, mailbox_address: u64) bool {
+fn mailboxFitsWritableLoad(image: *const task_model.ExecutableImageSpec, mailbox_address: u64) bool {
     const mailbox_end = std.math.add(
         u64,
         mailbox_address,

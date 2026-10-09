@@ -41,6 +41,8 @@ pub const Error = xhci.Error || error{
     BarUnmappable,
     BarMisaligned,
     BarRangeOverflow,
+    BarRangeOutsideAperture,
+    MmioMappingFailed,
     InvariantClockUnavailable,
     AlreadyPrepared,
     BusMasteringNotRevoked,
@@ -93,6 +95,7 @@ var active_dma_frame_count: u32 = 0;
 var active_dma_windows: [xhci.MAX_CONTROLLER_DMA_REGIONS]intel_vtd.DmaWindow = undefined;
 var active_dma_window_count: usize = 0;
 var active_bar_address: usize = 0;
+var active_bar_bytes: u64 = 0;
 var active = false;
 var event_consumer = xhci.EventRingConsumer{};
 var command_producer = xhci.TrbRingProducer{};
@@ -271,7 +274,7 @@ fn supportedProtocolsOffsetFor(max_ports: u8) usize {
 
 fn allocateControllerRuntimeState(
     max_ports: u8,
-    protocols: xhci.SupportedProtocols,
+    protocols: *const xhci.SupportedProtocols,
 ) Error!ControllerRuntimeStateAllocation {
     const state_count = @as(usize, max_ports) + 1;
     const publisher_offset = keyboardReportPublisherOffsetFor(max_ports);
@@ -293,7 +296,7 @@ fn allocateControllerRuntimeState(
     keyboard_reports.* = .{};
     const protocol_state: *xhci.SupportedProtocols =
         @ptrFromInt(@as(usize, base) + protocols_offset);
-    protocol_state.* = protocols;
+    protocol_state.* = protocols.*;
     return .{
         .frames = frames,
         .states = states,
@@ -311,7 +314,7 @@ inline fn keyboardReports() *xhci.BootKeyboardReportPublisher {
     return active_keyboard_reports orelse unreachable;
 }
 
-pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
+pub fn probe(device_info: pci.PCIDevice) Error!void {
     if (active_dma_plan != null) return error.AlreadyPrepared;
     if (pci.busMasteringEnabled(device_info)) return error.BusMasteringNotRevoked;
     active_capabilities = null;
@@ -321,6 +324,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_enabled_slots = 0;
     active_dma_memory = .{};
     active_bar_address = 0;
+    active_bar_bytes = 0;
     publishControllerActive(false);
     event_consumer = .{};
     command_producer = .{};
@@ -349,36 +353,48 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     interrupt_report_submission_count = 0;
     keyboard_report_count = 0;
     const bar = try validateBar(device_info);
-    paging.mapKernelBorrowedPage(
+    const aperture = (pci.probeMemoryBars(device_info) catch return error.BarUnmappable)[0];
+    if (aperture.address != bar.address or aperture.length < PAGE_BYTES) return error.BarUnmappable;
+    paging.mapKernelDeviceRange(
         mmio_windows.xhci.base,
         bar.address,
-        paging.PAGE_PRESENT | paging.PAGE_CACHE_DISABLE,
-    );
+        PAGE_BYTES,
+        false,
+    ) catch return error.MmioMappingFailed;
     const snapshot = readCapabilitySnapshot(mmio_windows.xhci.base);
-    const capabilities = try xhci.parseCapabilityRegisters(&snapshot);
+    var capabilities: xhci.CapabilityRegisters = undefined;
+    try xhci.parseCapabilityRegistersInto(&capabilities, &snapshot);
     try validateExtendedCapabilityRange(bar.address, capabilities.extended_capability_offset);
     try validateControllerRegisterRanges(bar.address, capabilities);
+    try validateControllerAperture(aperture.length, capabilities);
     if (!tsc_clock.initialized()) return error.InvariantClockUnavailable;
-    var reader = ExtendedCapabilityReader{ .bar_address = bar.address };
-    const protocols = try xhci.parseSupportedProtocols(
+    var reader = ExtendedCapabilityReader{ .bar_address = bar.address, .bar_bytes = aperture.length };
+    var protocols: xhci.SupportedProtocols = undefined;
+    xhci.parseSupportedProtocolsInto(
+        &protocols,
         capabilities,
         capabilities.extended_capability_offset,
         &reader,
-    );
-    const legacy = try xhci.findLegacySupport(capabilities.extended_capability_offset, &reader);
+    ) catch |err| return reader.mapping_error orelse err;
+    if (reader.mapping_error) |err| return err;
+    const legacy = xhci.findLegacySupport(capabilities.extended_capability_offset, &reader) catch |err| return reader.mapping_error orelse err;
+    if (reader.mapping_error) |err| return err;
     const legacy_ownership = if (legacy) |support| ownership: {
-        break :ownership try xhci.claimLegacyOwnership(
+        break :ownership xhci.claimLegacyOwnership(
             support,
             &reader,
             tsc_clock.afterMilliseconds(OWNERSHIP_TIMEOUT_MILLISECONDS),
-        );
+        ) catch |err| return reader.mapping_error orelse err;
     } else xhci.LegacyOwnership.not_present;
-    try xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{});
-    const enabled_slots = try xhci.configureDeviceSlots(capabilities, &reader);
+    if (reader.mapping_error) |err| return err;
+    xhci.resetOwnedController(capabilities.capability_length, &reader, InvariantClock{}) catch |err| return reader.mapping_error orelse err;
+    if (reader.mapping_error) |err| return err;
+    const enabled_slots = xhci.configureDeviceSlots(capabilities, &reader) catch |err| return reader.mapping_error orelse err;
+    if (reader.mapping_error) |err| return err;
 
     const controller_runtime_state = try allocateControllerRuntimeState(
         capabilities.max_ports,
-        protocols,
+        &protocols,
     );
     var retain_controller_runtime_state = false;
     errdefer if (!retain_controller_runtime_state) paging.releaseGeneralFrames(
@@ -399,7 +415,8 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     };
     try xhci.initializeControllerDma(dma_plan, dma_memory.bytes());
     publishDmaStructures();
-    try xhci.programControllerDmaRegisters(capabilities, dma_plan, &reader);
+    xhci.programControllerDmaRegisters(capabilities, dma_plan, &reader) catch |err| return reader.mapping_error orelse err;
+    if (reader.mapping_error) |err| return err;
     const dma_window_count = try buildDmaWindows(dma_plan, &active_dma_windows);
 
     active_device = device_info;
@@ -408,6 +425,7 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_dma_frame_count = dma_frame_count;
     active_dma_window_count = dma_window_count;
     active_bar_address = bar.address;
+    active_bar_bytes = aperture.length;
     active_capabilities = capabilities;
     active_protocols = controller_runtime_state.protocols;
     active_legacy_ownership = legacy_ownership;
@@ -418,7 +436,6 @@ pub fn probe(device_info: pci.PCIDevice) Error!xhci.CapabilityRegisters {
     active_controller_runtime_state_frames = controller_runtime_state.frames;
     retain_controller_runtime_state = true;
     retain_dma_frames = true;
-    return capabilities;
 }
 
 pub fn validated() bool {
@@ -496,7 +513,7 @@ pub fn activate() Error!void {
     if (!intel_vtd.interruptIsolationEnabled()) return error.InterruptIsolationUnavailable;
 
     const capabilities = active_capabilities.?;
-    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
+    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address, .bar_bytes = active_bar_bytes };
     const remapped = intel_vtd.routeInterrupt(
         active_device,
         INTERRUPT_VECTOR,
@@ -515,12 +532,8 @@ pub fn activate() Error!void {
         if (bus_master_enabled) pci.disableBusMastering(active_device);
     }
 
-    pci.enableMemoryBusMastering(active_device);
-    if (!pci.busMasteringEnabled(active_device)) {
-        pci.disableBusMastering(active_device);
-        return error.BusMasterEnableFailed;
-    }
     bus_master_enabled = true;
+    pci.enableMemoryBusMastering(active_device) catch return error.BusMasterEnableFailed;
 
     event_consumer = .{};
     command_producer = .{};
@@ -547,7 +560,8 @@ pub fn activate() Error!void {
     interrupt_report_submission_count = 0;
     keyboard_report_count = 0;
     publishControllerActive(true);
-    try xhci.startOwnedController(capabilities, &reader, InvariantClock{});
+    xhci.startOwnedController(capabilities, &reader, InvariantClock{}) catch |err| return reader.mapping_error orelse err;
+    if (reader.mapping_error) |err| return err;
     msi_enabled = false;
     bus_master_enabled = false;
 }
@@ -594,11 +608,13 @@ pub fn servicePendingEvents() usize {
     if (interrupt_wakes == 0 and !event_ready and !lifecyclePending()) return 0;
     if (pollDmaFault()) return 0;
     if (lifecycleTimedOut()) return 0;
-    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
+    var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address, .bar_bytes = active_bar_bytes };
     if (interrupt_wakes == 0 and !event_ready) {
         submitNextPortAction(&reader) catch {
             containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
+            return 0;
         };
+        if (reader.mapping_error != null) containFailure("ZIGOS:XHCI:HW:MMIO_MAPPING_CONTAINED\n");
         return 0;
     }
 
@@ -623,6 +639,10 @@ pub fn servicePendingEvents() usize {
             });
             return processed + 1;
         };
+        if (reader.mapping_error != null) {
+            containFailure("ZIGOS:XHCI:HW:MMIO_MAPPING_CONTAINED\n");
+            return processed + 1;
+        }
     }
 
     const dequeue_address = event_consumer.dequeueAddress(
@@ -646,7 +666,9 @@ pub fn servicePendingEvents() usize {
     }
     submitNextPortAction(&reader) catch {
         containFailure("ZIGOS:XHCI:HW:COMMAND_SUBMIT_CONTAINED\n");
+        return processed;
     };
+    if (reader.mapping_error != null) containFailure("ZIGOS:XHCI:HW:MMIO_MAPPING_CONTAINED\n");
     return processed;
 }
 
@@ -910,6 +932,9 @@ fn handlePortStatusChange(event: xhci.Event, reader: anytype) Error!void {
     const protocol = protocols.forPort(event.port_id) orelse return error.MissingPortProtocol;
     const register_offset = try xhci.portRegisterOffset(capabilities, event.port_id);
     const raw_status = reader.readReg32(register_offset);
+    if (comptime @hasField(@TypeOf(reader.*), "mapping_error")) {
+        if (reader.mapping_error) |err| return err;
+    }
     const status = xhci.decodePortStatus(raw_status);
     if (status.over_current) return error.InvalidPortStatus;
     // A previously acknowledged change can have another queued notification.
@@ -1430,6 +1455,9 @@ fn authenticatePortRetirement(port_id: u8, state: *PortRuntimeState, reader: any
         const capabilities = active_capabilities orelse return error.InvalidPortStatus;
         const register_offset = try xhci.portRegisterOffset(capabilities, port_id);
         const raw_status = reader.readReg32(register_offset);
+        if (comptime @hasField(@TypeOf(reader.*), "mapping_error")) {
+            if (reader.mapping_error) |err| return err;
+        }
         const status = xhci.decodePortStatus(raw_status);
         if (status.over_current or (status.connected and (status.change_bits & 1) == 0)) {
             return error.TrbRingStateInvalid;
@@ -1667,6 +1695,9 @@ fn submitNextPortAction(reader: anytype) Error!void {
                 const protocol = protocols.forPort(port_id) orelse return error.MissingPortProtocol;
                 const register_offset = try xhci.portRegisterOffset(capabilities, port_id);
                 const raw_status = reader.readReg32(register_offset);
+                if (comptime @hasField(@TypeOf(reader.*), "mapping_error")) {
+                    if (reader.mapping_error) |err| return err;
+                }
                 const status = xhci.decodePortStatus(raw_status);
                 if (status.over_current) return error.InvalidPortStatus;
                 if (!status.connected) {
@@ -2259,7 +2290,7 @@ fn containFailure(marker: []const u8) void {
     resetControllerRuntimeState();
     if (active_capabilities) |capabilities| {
         if (active_bar_address != 0) {
-            var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address };
+            var reader = ExtendedCapabilityReader{ .bar_address = active_bar_address, .bar_bytes = active_bar_bytes };
             xhci.quiesceOwnedController(capabilities, &reader);
         }
     }
@@ -2333,26 +2364,46 @@ fn validateBarRange(bar_address: usize, offset: u64, byte_count: u64) Error!void
     if (bar_address > std.math.maxInt(usize) - end_offset) return error.BarRangeOverflow;
 }
 
+inline fn validateControllerAperture(bar_bytes: u64, capabilities: xhci.CapabilityRegisters) Error!void {
+    const operational_end = @as(u64, capabilities.capability_length) + 0x400 + @as(u64, capabilities.max_ports) * 0x10;
+    const doorbell_end = @as(u64, capabilities.doorbell_offset) + (@as(u64, capabilities.max_device_slots) + 1) * @sizeOf(u32);
+    const runtime_end = @as(u64, capabilities.runtime_register_offset) + 0x40;
+    if (operational_end > bar_bytes or doorbell_end > bar_bytes or runtime_end > bar_bytes) return error.BarRangeOutsideAperture;
+}
+
 const ExtendedCapabilityReader = struct {
     bar_address: usize,
+    bar_bytes: u64,
     mapped_page_offset: ?usize = null,
     mapped_writable: bool = false,
+    mapping_error: ?Error = null,
+
+    inline fn validAccess(self: *@This(), offset: u64, bytes: u64) bool {
+        if (self.mapping_error != null) return false;
+        if (offset > self.bar_bytes or bytes > self.bar_bytes - offset) {
+            self.mapping_error = error.BarRangeOutsideAperture;
+            return false;
+        }
+        return true;
+    }
 
     pub fn readDword(self: *@This(), offset: u32) u32 {
+        if (!self.validAccess(offset, @sizeOf(u32))) return 0;
         const byte_offset: usize = @intCast(offset);
         const page_offset = byte_offset & ~(PAGE_BYTES - 1);
-        self.mapPage(page_offset, false);
+        if (!self.mapPage(page_offset, false)) return 0;
         const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
         return @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).*;
     }
 
     pub fn writeOsOwnedByte(self: *@This(), legacy_offset: u32, value: u8) void {
         const byte_offset = @as(usize, legacy_offset) + OS_OWNED_BYTE_OFFSET;
+        if (!self.validAccess(byte_offset, 1)) return;
         const page_offset = byte_offset & ~(PAGE_BYTES - 1);
-        self.mapPage(page_offset, true);
+        if (!self.mapPage(page_offset, true)) return;
         const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
         @as(*volatile u8, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
-        self.mapPage(page_offset, false);
+        _ = self.mapPage(page_offset, false);
     }
 
     pub fn readReg32(self: *@This(), offset: u32) u32 {
@@ -2360,41 +2411,52 @@ const ExtendedCapabilityReader = struct {
     }
 
     pub fn readReg64(self: *@This(), offset: u32) u64 {
+        if (!self.validAccess(offset, @sizeOf(u64))) return 0;
         const low = self.readDword(offset);
         const high = self.readDword(offset + @sizeOf(u32));
         return @as(u64, low) | (@as(u64, high) << 32);
     }
 
     pub fn writeReg32(self: *@This(), offset: u32, value: u32) void {
+        if (!self.validAccess(offset, @sizeOf(u32))) return;
         const byte_offset: usize = @intCast(offset);
         const page_offset = byte_offset & ~(PAGE_BYTES - 1);
-        self.mapPage(page_offset, true);
+        if (!self.mapPage(page_offset, true)) return;
         const page_byte_offset = byte_offset & (PAGE_BYTES - 1);
         @as(*volatile u32, @ptrFromInt(mmio_windows.xhci.base + page_byte_offset)).* = value;
-        self.mapPage(page_offset, false);
+        _ = self.mapPage(page_offset, false);
     }
 
     pub fn writeReg64(self: *@This(), offset: u32, value: u64) void {
+        if (!self.validAccess(offset, @sizeOf(u64))) return;
         self.writeReg32(offset, @truncate(value));
         self.writeReg32(offset + @sizeOf(u32), @truncate(value >> 32));
     }
 
-    fn mapPage(self: *@This(), page_offset: usize, writable: bool) void {
+    fn mapPage(self: *@This(), page_offset: usize, writable: bool) bool {
+        return self.mapPageWith(paging, page_offset, writable);
+    }
+
+    inline fn mapPageWith(self: *@This(), comptime Mapper: type, page_offset: usize, writable: bool) bool {
+        if (!self.validAccess(page_offset, PAGE_BYTES)) return false;
         if (self.mapped_page_offset != null and
             self.mapped_page_offset.? == page_offset and
             self.mapped_writable == writable)
         {
-            return;
+            return true;
         }
-        paging.mapKernelBorrowedPage(
+        Mapper.mapKernelDeviceRange(
             mmio_windows.xhci.base,
             self.bar_address + page_offset,
-            paging.PAGE_PRESENT |
-                paging.PAGE_CACHE_DISABLE |
-                (if (writable) paging.PAGE_WRITABLE else 0),
-        );
+            PAGE_BYTES,
+            writable,
+        ) catch {
+            self.mapping_error = error.MmioMappingFailed;
+            return false;
+        };
         self.mapped_page_offset = page_offset;
         self.mapped_writable = writable;
+        return true;
     }
 };
 
@@ -2492,6 +2554,63 @@ test "xHCI hardware probe bounds extended capability BAR arithmetic" {
         error.BarRangeOverflow,
         validateBarRange(0, std.math.maxInt(u64), 2),
     );
+}
+
+test "xHCI register ranges must fit the sized BAR aperture" {
+    var capabilities = try xhci.parseCapabilityRegisters(&validTestSnapshot());
+    try validateControllerAperture(0x2084, capabilities);
+    try std.testing.expectError(error.BarRangeOutsideAperture, validateControllerAperture(0x2083, capabilities));
+    capabilities.runtime_register_offset = 0x3000;
+    try std.testing.expectError(error.BarRangeOutsideAperture, validateControllerAperture(0x3000, capabilities));
+    try validateControllerAperture(0x3040, capabilities);
+    capabilities.capability_length = 0x40;
+    capabilities.max_ports = 255;
+    capabilities.runtime_register_offset = 0;
+    capabilities.doorbell_offset = 0;
+    try std.testing.expectError(error.BarRangeOutsideAperture, validateControllerAperture(0x142f, capabilities));
+    try validateControllerAperture(0x1430, capabilities);
+}
+
+test "xHCI scratch mapping failure preserves prior metadata and suppresses later accesses" {
+    const Mapper = struct {
+        var calls: usize = 0;
+        var fail: bool = false;
+        var last_physical: u64 = 0;
+        var last_writable: bool = false;
+
+        pub fn mapKernelDeviceRange(virtual: usize, physical: u64, bytes: usize, writable: bool) error{Rejected}!void {
+            std.debug.assert(virtual == mmio_windows.xhci.base and bytes == PAGE_BYTES);
+            calls += 1;
+            if (fail) return error.Rejected;
+            last_physical = physical;
+            last_writable = writable;
+        }
+    };
+    Mapper.calls = 0;
+    Mapper.fail = false;
+    var reader = ExtendedCapabilityReader{ .bar_address = 0xfeb00000, .bar_bytes = PAGE_BYTES * 3 };
+    try std.testing.expect(reader.mapPageWith(Mapper, 0, false));
+    try std.testing.expect(reader.mapPageWith(Mapper, 0, false));
+    try std.testing.expectEqual(@as(usize, 1), Mapper.calls);
+    try std.testing.expect(reader.mapPageWith(Mapper, PAGE_BYTES, true));
+    try std.testing.expectEqual(@as(u64, 0xfeb01000), Mapper.last_physical);
+    try std.testing.expect(Mapper.last_writable);
+    Mapper.fail = true;
+    try std.testing.expect(!reader.mapPageWith(Mapper, PAGE_BYTES, false));
+    try std.testing.expectEqual(@as(?usize, PAGE_BYTES), reader.mapped_page_offset);
+    try std.testing.expect(reader.mapped_writable);
+    try std.testing.expectEqual(@as(?Error, error.MmioMappingFailed), reader.mapping_error);
+    try std.testing.expect(!reader.mapPageWith(Mapper, PAGE_BYTES * 2, true));
+    try std.testing.expectEqual(@as(u32, 0), reader.readDword(0));
+    reader.writeReg32(0, 1);
+    reader.writeOsOwnedByte(0, 1);
+    try std.testing.expectEqual(@as(usize, 3), Mapper.calls);
+
+    var out_of_bounds = ExtendedCapabilityReader{ .bar_address = 0, .bar_bytes = PAGE_BYTES };
+    try std.testing.expectEqual(@as(u32, 0), out_of_bounds.readDword(PAGE_BYTES));
+    try std.testing.expectEqual(@as(?Error, error.BarRangeOutsideAperture), out_of_bounds.mapping_error);
+    out_of_bounds.writeReg64(0, 1);
+    try std.testing.expectEqual(@as(?usize, null), out_of_bounds.mapped_page_offset);
 }
 
 test "xHCI hardware DMA windows retain page-granular access directions" {
@@ -2784,6 +2903,32 @@ const HotplugTestFixture = struct {
         }), self);
     }
 };
+
+test "xHCI failed MMIO read cannot authenticate a detached device lifetime" {
+    const Reader = struct {
+        mapping_error: ?Error = error.MmioMappingFailed,
+        writes: usize = 0,
+
+        fn readReg32(_: *@This(), _: u32) u32 {
+            return 0;
+        }
+
+        fn writeReg32(self: *@This(), _: u32, _: u32) void {
+            self.writes += 1;
+        }
+    };
+    var fixture = HotplugTestFixture.init();
+    try fixture.activate();
+    defer fixture.restore();
+    const previous = fixture.states[1];
+    const epoch = keyboard_continuity_epoch;
+    var reader = Reader{};
+    try std.testing.expectError(error.MmioMappingFailed, authenticatePortRetirement(1, &fixture.states[1], &reader));
+    try std.testing.expectEqualDeep(previous, fixture.states[1]);
+    try std.testing.expectEqual(epoch, keyboard_continuity_epoch);
+    try std.testing.expectEqual(@as(usize, 0), reader.writes);
+    try std.testing.expectEqual(@as(usize, 1), outstanding_interrupt_reports);
+}
 
 test "xHCI hotplug accepts queued late keyboard completion without publishing" {
     var fixture = HotplugTestFixture.init();

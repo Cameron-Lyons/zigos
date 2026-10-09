@@ -64,7 +64,7 @@ pub fn proveResourceAccountingSyscalls(
     try std.testing.expectEqual(@as(u16, 1), accounting.shared_memory_mappings);
 
     var spoofed_resource_response = std.mem.zeroes(abi.ResourceDescriptor);
-    const spoofed_resource_request = component_port.ResourceQueryRequest{
+    const spoofed_resource_request = abi.ResourceQueryWireRequest{
         .header = component_port.makeHeader(.resource_query, probe.task_id),
         .authority_capability_id = session_authority_id,
         .task_id = probe.task_id,
@@ -185,8 +185,20 @@ pub fn proveBootedSharedMemoryMappingRevocation(
         .gpu = true,
         .media = true,
     });
+    // This verification fixture models only attachment metadata: it never
+    // submits a device command. Its quiescent attachment must still retire on
+    // both success and assertion failure, including after public revocation.
+    var modeled_gpu_attached = false;
+    defer {
+        if (modeled_gpu_attached) {
+            _ = kernel_port.kernel.shared_memory_table.detachAccelerator(accelerated.id, .gpu) catch
+                @panic("verification attachment retains its exact release identity");
+        }
+        _ = kernel_port.kernel.shared_memory_table.revoke(accelerated.id) catch {};
+    }
     try kernel_port.kernel.shared_memory_table.map(accelerated.id, ids.task(owner.task_id));
     try kernel_port.kernel.shared_memory_table.attachAccelerator(accelerated.id, .gpu);
+    modeled_gpu_attached = true;
     const task_mapping = try kernel_port.kernel.shared_memory_table.taskMappingDescriptor(accelerated.id, ids.task(owner.task_id));
     const gpu_mapping = try kernel_port.kernel.shared_memory_table.acceleratorMappingDescriptor(accelerated.id, .gpu);
     const task_mmu_mapping = try kernel_port.kernel.shared_memory_table.freestandingTaskMappingDescriptor(accelerated.id, ids.task(owner.task_id));
@@ -214,6 +226,8 @@ pub fn proveBootedSharedMemoryMappingRevocation(
     try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateAcceleratorMappingDescriptor(gpu_mapping, .gpu));
     try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateFreestandingTaskMappingDescriptor(task_mmu_mapping));
     try std.testing.expectError(error.SharedMemoryNotFound, kernel_port.kernel.shared_memory_table.validateFreestandingAcceleratorMappingDescriptor(gpu_mmu_mapping, .gpu));
+    try std.testing.expect(try kernel_port.kernel.shared_memory_table.detachAccelerator(accelerated.id, .gpu));
+    modeled_gpu_attached = false;
 }
 
 pub fn proveBootedDriverPermissions(

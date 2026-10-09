@@ -116,7 +116,7 @@ pub const Renderer = struct {
     painted: bool = false,
 
     pub fn init(info: framebuffer.Info, pixels: []volatile u32) !Renderer {
-        _ = try framebuffer.validate(info);
+        try framebuffer.validate(info);
         const count: usize = @intCast((try info.minimumBufferBytes()) / 4);
         if (pixels.len < count) return error.BufferTooSmall;
         const columns: usize = @min(MAX_COLUMNS, (info.width -| 48) / CELL_WIDTH);

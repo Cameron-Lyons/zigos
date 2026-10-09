@@ -85,6 +85,22 @@ jobs:
       command: zig build -Doptimize=fast x86_64-long-mode-entry-check x86_64-userspace-launch-check
       timeout-minutes: 30
 
+  native-crypto:
+    needs: zig-toolchain
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Native CPU and Crypto
+      command: zig build -Doptimize=fast native-crypto-check
+      timeout-minutes: 10
+
+  high-half-entry:
+    needs: zig-toolchain
+    uses: ./.github/workflows/run-zig-command.yml
+    with:
+      job-name: Upper-Half Kernel Entry
+      command: zig build -Doptimize=fast high-half-entry-check
+      timeout-minutes: 10
+
   tpm-quotes:
     needs: zig-toolchain
     uses: ./.github/workflows/run-zig-command.yml

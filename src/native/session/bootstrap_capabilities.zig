@@ -53,7 +53,7 @@ pub fn deriveTaskCapability(
                 .broker_service_id = parent.audit.broker_service_id,
             },
         },
-    });
+    }, now_ticks);
     return derived.capability_id;
 }
 

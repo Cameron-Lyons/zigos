@@ -1,15 +1,18 @@
 #ifndef ZIGOS_XSTATE64_INC
 #define ZIGOS_XSTATE64_INC
-/* XCR0 is exactly x87|SSE and IA32_XSS is zero on every CPU. PKRU is
+#include "x86_64/native_entry_state.inc"
+/* XCR0 is exactly x87|SSE|YMM and IA32_XSS is zero on every CPU. PKRU is
  * separately owned because CR4.PKE does not imply XCR0.PKRU. */
-.equ XSTATE_IMAGE_BYTES, 576
-.equ XSTATE_BYTES, 584
-.equ XSTATE_STACK_BYTES, 648
-.equ XSTATE_PKRU, 576
+.equ XSTATE_MASK, 7
+.equ XSTATE_IMAGE_BYTES, 832
+.equ XSTATE_BYTES, 840
+.equ XSTATE_STACK_BYTES, XSTATE_BYTES + 64
+.equ XSTATE_ALIGNED_BYTES, (XSTATE_BYTES + 63) & -64
+.equ XSTATE_PKRU, XSTATE_IMAGE_BYTES
 
 /* pointer must be a saved register other than rax/rcx/rdx/rdi. Prepared mode
  * is valid only while the current runtime CPU owns the published userspace
- * context with kernel GS active: TS is clear and GS:32 holds this CPU's
+ * context with kernel GS active: TS is clear and CPU_NATIVE_ENTRY_MODES holds this CPU's
  * verified PKE/FRED mode (syscall64.zig CpuState.native_entry_modes). */
 .macro XSAVE_STATE pointer, full=0, prepared=0
     cld
@@ -24,11 +27,11 @@
     rep stosq
 #ifndef ZIGOS_XSTATE_HOST_TEST
 .if !\full
-    movabsq $0x8000000000000003, %rax
+    movabsq $(0x8000000000000000 | XSTATE_MASK), %rax
     movq %rax, 520(\pointer)
 .endif
 #endif
-    movl $3, %eax
+    movl $XSTATE_MASK, %eax
     xorl %edx, %edx
 #ifdef ZIGOS_XSTATE_HOST_TEST
     xsave64 (\pointer)
@@ -40,7 +43,7 @@
 .endif
     movl $(0), XSTATE_PKRU(\pointer)
 .if \prepared
-    testb $(1), %gs:32
+    testb $(CPU_ENTRY_PKU), %gs:CPU_NATIVE_ENTRY_MODES
 .else
     movq %cr4, %rax
     testq $(1 << 22), %rax
@@ -66,7 +69,7 @@
     clts
 .endif
 .if \prepared
-    testb $(1), %gs:32
+    testb $(CPU_ENTRY_PKU), %gs:CPU_NATIVE_ENTRY_MODES
 .else
     movq %cr4, %rax
     testq $(1 << 22), %rax
@@ -79,7 +82,7 @@
     lfence
 .Lrestore_no_pku\@:
 #endif
-    movl $3, %eax
+    movl $XSTATE_MASK, %eax
     xorl %edx, %edx
 #ifdef ZIGOS_XSTATE_HOST_TEST
     xrstor64 (\pointer)
@@ -98,11 +101,11 @@
 
 #ifndef ZIGOS_XSTATE_HOST_TEST
 .extern zigos_initial_kernel_xstate
-.extern zigos_userspace_xstate
-.extern zigos_kernel_xstate
 /* r12 always points to the already-saved GP/return frame. Kernel entries
  * preserve their interrupted live SIMD state; user entries switch owners
- * before the first compiler-generated instruction. */
+ * before the first compiler-generated instruction. The user-origin path needs
+ * kernel GS already active. Kernel-origin paths intentionally avoid GS, even
+ * for early diagnostics or the model SWAPGS/return NMI window. */
 .macro ENTER_KERNEL_XSTATE frame_cs
     cli
     subq $XSTATE_STACK_BYTES, %rsp
@@ -111,15 +114,15 @@
     movq $(0), XSTATE_BYTES(%rsp)
     cmpq $0x23, \frame_cs(%r12)
     jne .Lsave_kernel_xstate\@
-    movq zigos_userspace_xstate(%rip), %r13
+    movq %gs:CPU_USERSPACE_XSTATE, %r13
     testq %r13, %r13
     jz .Lmissing_xstate\@
-    testb $(4), %gs:32
+    testb $(CPU_ENTRY_READY), %gs:CPU_NATIVE_ENTRY_MODES
     jz .Lmissing_xstate\@
     # The prepared owner has TS clear and a CPU-bound PKE mode. Avoid
     # serializing control-register instructions on every native operation.
     XSAVE_STATE %r13, 0, 1
-    movq zigos_kernel_xstate(%rip), %r13
+    movq %gs:CPU_KERNEL_XSTATE, %r13
     testq %r13, %r13
     jz .Lmissing_xstate\@
     XRSTOR_FULL_STATE %r13, 1
@@ -131,7 +134,7 @@
     jz .Lkernel_xstate_ready\@
     xorl %ecx, %ecx
     xgetbv
-    cmpl $3, %eax
+    cmpl $XSTATE_MASK, %eax
     jne .Lkernel_xstate_ready\@
     testl %edx, %edx
     jne .Lkernel_xstate_ready\@
@@ -153,7 +156,7 @@
     movq %rsp, %r13
     cmpq $0x23, \frame_cs(%r12)
     jne .Lrestore_saved_kernel_xstate\@
-    movq zigos_userspace_xstate(%rip), %r13
+    movq %gs:CPU_USERSPACE_XSTATE, %r13
     XRSTOR_STATE %r13, 0, 1
     jmp .Lleave_xstate_done\@
 .Lrestore_saved_kernel_xstate\@:

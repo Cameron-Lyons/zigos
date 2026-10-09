@@ -79,7 +79,7 @@ pub fn bringUp() bool {
     if (builtin.target.os.tag == .freestanding) {
         const pci = @import("../../kernel/drivers/pci.zig");
         if (pci.firstXhciController()) |dev| {
-            _ = xhci_hw.probe(dev) catch |err| switch (err) {
+            xhci_hw.probe(dev) catch |err| switch (err) {
                 error.AlreadyPrepared => {},
                 else => return false,
             };

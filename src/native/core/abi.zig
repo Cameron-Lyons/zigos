@@ -1,11 +1,10 @@
 const std = @import("std");
 pub const text_layout = @import("text_layout.zig");
 
-pub const ABI_VERSION: u16 = 19;
+pub const ABI_VERSION: u16 = 23;
 pub const ENDPOINT_INLINE_BYTES: usize = 88;
 pub const INPUT_PACKET_BYTES: usize = 8;
 pub const SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE = true;
-pub const WAIT_PLUS_SEALED_RINGS = true;
 
 pub const InputByte = struct {
     // bytes[1..length] carries one supported UTF-8 scalar (1..4 bytes).
@@ -71,7 +70,6 @@ pub const NativeOperation = enum(u16) {
     device_mmio_window,
     input_recv,
     surface_present,
-    wait,
 };
 
 pub const PolicyOperation = enum(u16) {
@@ -131,10 +129,68 @@ pub const ScopeFlags = packed struct(u32) {
     _reserved: u27 = 0,
 };
 
-pub const RequestHeader = extern struct {
-    operation: u16,
+pub const RequestHeader = @import("request_header_wire.zig").RequestHeader;
+pub const syscall_wire = @import("syscall_wire.zig");
+pub const TaskTerminateWireRequest = syscall_wire.TaskTerminateWireRequest;
+pub const EndpointCreateWireRequest = syscall_wire.EndpointCreateWireRequest;
+pub const EndpointConnectWireRequest = syscall_wire.EndpointConnectWireRequest;
+pub const EndpointCloseWireRequest = syscall_wire.EndpointCloseWireRequest;
+pub const CapabilityRevokeWireRequest = syscall_wire.CapabilityRevokeWireRequest;
+pub const CapabilityQueryWireRequest = syscall_wire.CapabilityQueryWireRequest;
+pub const SharedMemoryCreateWireRequest = syscall_wire.SharedMemoryCreateWireRequest;
+pub const SharedMemoryMapWireRequest = syscall_wire.SharedMemoryMapWireRequest;
+pub const SharedMemoryUnmapWireRequest = syscall_wire.SharedMemoryUnmapWireRequest;
+pub const SharedMemoryRevokeWireRequest = syscall_wire.SharedMemoryRevokeWireRequest;
+pub const TimeQueryWireRequest = syscall_wire.TimeQueryWireRequest;
+pub const ResourceQueryWireRequest = syscall_wire.ResourceQueryWireRequest;
+pub const AccountingQueryWireRequest = syscall_wire.AccountingQueryWireRequest;
+pub const InputRecvWireRequest = syscall_wire.InputRecvWireRequest;
+pub const SurfacePresentWireRequest = syscall_wire.SurfacePresentWireRequest;
+pub const DeviceDescribeWireRequest = syscall_wire.DeviceDescribeWireRequest;
+pub const DeviceMmioWindowWireRequest = syscall_wire.DeviceMmioWindowWireRequest;
+pub const SurfaceTextWire = syscall_wire.SurfaceTextWire;
+pub const TaskCreateWireRequest = @import("task_create_wire.zig").TaskCreateWireRequest;
+pub const ExecutableImageWireSpec = @import("task_create_wire.zig").ExecutableImageWireSpec;
+pub const CapabilityMintWireRequest = @import("capability_wire.zig").CapabilityMintWireRequest;
+pub const CapabilityDeriveWireRequest = @import("capability_wire.zig").CapabilityDeriveWireRequest;
+pub const CapabilityPassWireRequest = @import("capability_wire.zig").CapabilityPassWireRequest;
+
+pub const ENDPOINT_SEND_MOVE_ATTACHMENT: u16 = 1;
+
+// The syscall boundary copies only scalar representations. Trusted Port calls
+// construct their slice, optional capability and bool after staging the payload.
+pub const EndpointSendWireRequest = extern struct {
+    header: RequestHeader,
+    correlation_id: u64 = 0,
+    endpoint_capability_id: u64,
+    payload_address: u64,
+    payload_bytes: u32,
     flags: u16 = 0,
-    subject_task_id: u64 = 0,
+    reserved: u16 = 0,
+    reply_endpoint_id: u64 = 0,
+    attached_capability_id: u64 = 0,
+
+    pub inline fn validEncoding(self: @This()) bool {
+        return self.header.operation == opcode(.endpoint_send) and self.header.flags == 0 and self.header.reserved == 0 and
+            self.header.subject_task_id != 0 and self.flags & ~ENDPOINT_SEND_MOVE_ATTACHMENT == 0 and
+            self.reserved == 0 and self.payload_bytes <= ENDPOINT_INLINE_BYTES and
+            (self.flags & ENDPOINT_SEND_MOVE_ATTACHMENT == 0 or self.attached_capability_id != 0);
+    }
+};
+
+pub const EndpointRecvWireRequest = extern struct {
+    header: RequestHeader,
+    endpoint_capability_id: u64,
+    receiver_task_id: u64,
+    payload_address: u64,
+    payload_capacity: u32,
+    reserved: u32 = 0,
+    attached_capability_address: u64,
+
+    pub inline fn validEncoding(self: @This()) bool {
+        return self.header.operation == opcode(.endpoint_recv) and self.header.flags == 0 and self.header.reserved == 0 and
+            self.header.subject_task_id != 0 and self.reserved == 0 and self.payload_capacity <= ENDPOINT_INLINE_BYTES;
+    }
 };
 
 pub const CapabilityDescriptor = extern struct {
@@ -142,10 +198,12 @@ pub const CapabilityDescriptor = extern struct {
     target_id: u64,
     rights: u64,
     revocation_generation: u32,
+    _reserved_generation: u32 = 0,
     expires_at_ticks: u64,
     scope_task_id: u64,
     scope_workspace_id: u64,
     scope_flags: u32,
+    _reserved_tail: u32 = 0,
 };
 
 pub const TaskDescriptor = extern struct {
@@ -175,6 +233,7 @@ pub const EndpointMessageDescriptor = extern struct {
     attached_capability_id: u64,
     payload_len: u16,
     flags: u16,
+    _reserved: u32 = 0,
 };
 
 pub const SharedMemoryDescriptor = extern struct {
@@ -437,14 +496,47 @@ pub fn isCanonicalSurfacePresentation(presentation: *const SurfacePresentation) 
     return presentation.surface_id != 0 and presentation.revision != 0 and presentation.presentsByHandle();
 }
 
+test "native ABI23 keeps all 23 retained opcodes and rejects the removed wait opcode" {
+    const expected = [_]struct { operation: NativeOperation, opcode: u16 }{
+        .{ .operation = .task_create, .opcode = 0x100 },
+        .{ .operation = .task_terminate, .opcode = 0x101 },
+        .{ .operation = .endpoint_create, .opcode = 0x102 },
+        .{ .operation = .endpoint_connect, .opcode = 0x103 },
+        .{ .operation = .endpoint_send, .opcode = 0x104 },
+        .{ .operation = .endpoint_recv, .opcode = 0x105 },
+        .{ .operation = .endpoint_close, .opcode = 0x106 },
+        .{ .operation = .capability_mint, .opcode = 0x107 },
+        .{ .operation = .capability_derive, .opcode = 0x108 },
+        .{ .operation = .capability_pass, .opcode = 0x109 },
+        .{ .operation = .capability_revoke, .opcode = 0x10a },
+        .{ .operation = .capability_query, .opcode = 0x10b },
+        .{ .operation = .shared_memory_create, .opcode = 0x10c },
+        .{ .operation = .shared_memory_map, .opcode = 0x10d },
+        .{ .operation = .shared_memory_unmap, .opcode = 0x10e },
+        .{ .operation = .shared_memory_revoke, .opcode = 0x10f },
+        .{ .operation = .time_query, .opcode = 0x110 },
+        .{ .operation = .resource_query, .opcode = 0x111 },
+        .{ .operation = .accounting_query, .opcode = 0x112 },
+        .{ .operation = .device_describe, .opcode = 0x113 },
+        .{ .operation = .device_mmio_window, .opcode = 0x114 },
+        .{ .operation = .input_recv, .opcode = 0x115 },
+        .{ .operation = .surface_present, .opcode = 0x116 },
+    };
+    try std.testing.expectEqual(@as(usize, 23), @typeInfo(NativeOperation).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(u16, 23), ABI_VERSION);
+    for (expected) |entry| {
+        try std.testing.expectEqual(entry.opcode, opcode(entry.operation));
+        try std.testing.expectEqual(entry.operation, std.enums.fromInt(NativeOperation, entry.opcode).?);
+    }
+    try std.testing.expect(std.enums.fromInt(NativeOperation, 0x117) == null);
+}
+
 test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(opcode(.task_create) >= 0x100);
     try std.testing.expect(policyOpcode(.authorize_request) >= 0x200);
     try std.testing.expect(reviewOpcode(.review_bundle) >= 0x240);
-    try std.testing.expectEqual(@as(u16, 19), ABI_VERSION);
+    try std.testing.expectEqual(@as(u16, 23), ABI_VERSION);
     try std.testing.expect(SURFACE_PRESENT_IS_HANDLE_PLUS_FENCE);
-    try std.testing.expect(WAIT_PLUS_SEALED_RINGS);
-    try std.testing.expectEqual(@as(u16, opcode(.surface_present) + 1), opcode(.wait));
     try std.testing.expectEqual(@as(usize, 88), ENDPOINT_INLINE_BYTES);
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(TaskDescriptor));
@@ -473,6 +565,141 @@ test "native abi operation ids stay in a dedicated namespace" {
     try std.testing.expect(isCanonicalSurfacePresentation(&presentation));
     presentation.buffer_object_id = 0;
     try std.testing.expect(!isCanonicalSurfacePresentation(&presentation));
+}
+
+test "endpoint send wire has one scalar layout and rejects malformed encodings" {
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(EndpointSendWireRequest));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(EndpointSendWireRequest));
+    inline for (.{
+        .{ "header", 0 },
+        .{ "correlation_id", 16 },
+        .{ "endpoint_capability_id", 24 },
+        .{ "payload_address", 32 },
+        .{ "payload_bytes", 40 },
+        .{ "flags", 44 },
+        .{ "reserved", 46 },
+        .{ "reply_endpoint_id", 48 },
+        .{ "attached_capability_id", 56 },
+    }) |field| try std.testing.expectEqual(@as(usize, field[1]), @offsetOf(EndpointSendWireRequest, field[0]));
+
+    const valid = EndpointSendWireRequest{
+        .header = .{ .operation = opcode(.endpoint_send), .subject_task_id = 7 },
+        .endpoint_capability_id = 13,
+        .payload_address = 0x10000,
+        .payload_bytes = ENDPOINT_INLINE_BYTES,
+    };
+    try std.testing.expect(valid.validEncoding());
+    var request = valid;
+    request.header.operation = opcode(.endpoint_recv);
+    try std.testing.expect(!request.validEncoding());
+    request = valid;
+    request.header.flags = 1;
+    try std.testing.expect(!request.validEncoding());
+    request = valid;
+    request.header.subject_task_id = 0;
+    try std.testing.expect(!request.validEncoding());
+    request = valid;
+    for ([_]u16{ 2, 0x8000, std.math.maxInt(u16) }) |flags| {
+        request.flags = flags;
+        try std.testing.expect(!request.validEncoding());
+    }
+    request = valid;
+    for ([_]u16{ 1, 0x8000, std.math.maxInt(u16) }) |reserved| {
+        request.reserved = reserved;
+        try std.testing.expect(!request.validEncoding());
+    }
+    request = valid;
+    for ([_]u32{ ENDPOINT_INLINE_BYTES + 1, std.math.maxInt(u32) }) |bytes| {
+        request.payload_bytes = bytes;
+        try std.testing.expect(!request.validEncoding());
+    }
+    request = valid;
+    request.flags = ENDPOINT_SEND_MOVE_ATTACHMENT;
+    try std.testing.expect(!request.validEncoding());
+    request.attached_capability_id = 19;
+    try std.testing.expect(request.validEncoding());
+    // Empty payloads have no read authority, regardless of the address scalar.
+    request = valid;
+    request.payload_bytes = 0;
+    request.payload_address = std.math.maxInt(u64);
+    try std.testing.expect(request.validEncoding());
+}
+
+test "endpoint receive wire has one scalar layout and rejects malformed encodings" {
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(EndpointRecvWireRequest));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(EndpointRecvWireRequest));
+    inline for (.{
+        .{ "header", 0 },
+        .{ "endpoint_capability_id", 16 },
+        .{ "receiver_task_id", 24 },
+        .{ "payload_address", 32 },
+        .{ "payload_capacity", 40 },
+        .{ "reserved", 44 },
+        .{ "attached_capability_address", 48 },
+    }) |field| try std.testing.expectEqual(@as(usize, field[1]), @offsetOf(EndpointRecvWireRequest, field[0]));
+    const valid = EndpointRecvWireRequest{
+        .header = .{ .operation = opcode(.endpoint_recv), .subject_task_id = 7 },
+        .endpoint_capability_id = 13,
+        .receiver_task_id = 7,
+        .payload_address = 0x10000,
+        .payload_capacity = ENDPOINT_INLINE_BYTES,
+        .attached_capability_address = 0x20000,
+    };
+    try std.testing.expect(valid.validEncoding());
+    var wire = valid;
+    wire.header.operation = opcode(.endpoint_send);
+    try std.testing.expect(!wire.validEncoding());
+    wire = valid;
+    wire.header.flags = 1;
+    try std.testing.expect(!wire.validEncoding());
+    wire = valid;
+    wire.header.subject_task_id = 0;
+    try std.testing.expect(!wire.validEncoding());
+    wire = valid;
+    for ([_]u32{ 1, 0x8000_0000, std.math.maxInt(u32) }) |reserved| {
+        wire.reserved = reserved;
+        try std.testing.expect(!wire.validEncoding());
+    }
+    wire = valid;
+    for ([_]u32{ ENDPOINT_INLINE_BYTES + 1, std.math.maxInt(u32) }) |capacity| {
+        wire.payload_capacity = capacity;
+        try std.testing.expect(!wire.validEncoding());
+    }
+    wire = valid;
+    wire.payload_capacity = 0;
+    wire.payload_address = std.math.maxInt(u64);
+    try std.testing.expect(wire.validEncoding());
+}
+
+test "endpoint and capability wire descriptors explicitly initialize every reserved byte" {
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(CapabilityDescriptor));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(CapabilityDescriptor, "_reserved_generation"));
+    try std.testing.expectEqual(@as(usize, 60), @offsetOf(CapabilityDescriptor, "_reserved_tail"));
+    const capability = CapabilityDescriptor{
+        .capability_id = 1,
+        .target_id = 2,
+        .rights = 3,
+        .revocation_generation = 4,
+        .expires_at_ticks = 5,
+        .scope_task_id = 6,
+        .scope_workspace_id = 7,
+        .scope_flags = 8,
+    };
+    const capability_bytes = std.mem.asBytes(&capability);
+    try std.testing.expect(std.mem.allEqual(u8, capability_bytes[28..32], 0));
+    try std.testing.expect(std.mem.allEqual(u8, capability_bytes[60..64], 0));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(EndpointMessageDescriptor));
+    try std.testing.expectEqual(@as(usize, 44), @offsetOf(EndpointMessageDescriptor, "_reserved"));
+    const message = EndpointMessageDescriptor{
+        .endpoint_id = 1,
+        .sender_endpoint_id = 2,
+        .sender_task_id = 3,
+        .correlation_id = 4,
+        .attached_capability_id = 5,
+        .payload_len = 6,
+        .flags = 7,
+    };
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&message)[44..48], 0));
 }
 
 test "text surface rejects cursors inside scalars and grapheme clusters" {

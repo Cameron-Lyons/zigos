@@ -689,7 +689,7 @@ pub const StoragePort = struct {
                 .source_task_id = authority_context.task_id,
                 .broker_service_id = self.core.service_id,
             },
-        });
+        }, authority_context.now_ticks);
         errdefer capability_table.revokeGrant(derived.id) catch {};
 
         try self.core.shareWorkspace(key, effective_grant);

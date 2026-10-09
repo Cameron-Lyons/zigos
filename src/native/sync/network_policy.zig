@@ -1177,7 +1177,7 @@ test "egress broker requires a usable network policy capability before connectin
             .issued_at_ticks = 1,
             .expires_at_ticks = 90,
         },
-    });
+    }, 1);
     const local_capability = try capabilities.mintBootRoot(.{
         .holder = app,
         .issuer = .{ .kind = .policy_authority, .serial = 1 },

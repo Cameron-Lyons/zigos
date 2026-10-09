@@ -2,6 +2,8 @@ const builtin = @import("builtin");
 const std = @import("std");
 const boot_markers = @import("../../kernel/boot/markers.zig");
 const capability = @import("../kernel_api/capability.zig");
+const dispatch_ownership = @import("dispatch_ownership.zig");
+const dispatch_transport = @import("dispatch_transport.zig");
 const embedded_file = @import("embedded_file.zig");
 const indexed_arena = @import("../core/indexed_arena.zig");
 const native_util = @import("../core/util.zig");
@@ -13,6 +15,9 @@ const userspace_flags = @import("userspace_flags.zig");
 const userspace_loader = @import("userspace_loader.zig");
 const userspace_registry = @import("userspace_registry.zig");
 const smp = @import("../../kernel/smp.zig");
+const cpu_identity = @import("../../kernel/cpu_identity.zig");
+const interrupt_context = @import("../../kernel/interrupts/context.zig");
+const native_entry = @import("../../arch/x86_64/native_entry_state.zig");
 const xstate = @import("../../arch/xstate.zig");
 const timer = if (builtin.target.os.tag == .freestanding)
     @import("../../kernel/timer/timer.zig")
@@ -21,6 +26,8 @@ else
 const demand_paging = @import("../../kernel/memory/demand_paging.zig");
 const xhci_driver_task = @import("../drivers/xhci_driver_task.zig");
 const shared_memory = @import("../kernel_api/shared_memory.zig");
+const syscall_broker = @import("../kernel_api/syscall_broker.zig");
+const syscall_dispatch = @import("../kernel_api/syscall_dispatch.zig");
 const table_backing = @import("../core/table_backing.zig");
 const root = @import("root");
 
@@ -37,6 +44,7 @@ const x86 = if (builtin.target.os.tag == .freestanding)
     @import("../../arch/x86.zig")
 else
     struct {
+        pub const CR3_ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
         pub fn readCr2() usize {
             return 0;
         }
@@ -65,6 +73,120 @@ else
 const include_verification_evidence = kernel_config.includesVerificationEvidence();
 const NxProbeTarget = if (include_verification_evidence) u64 else void;
 
+// Keep resident invariant diagnostics in one immutable blob. Compile-time
+// concatenation preserves its address with the pinned compiler; independently
+// stored offsets avoid copying a locally filled array into an anonymous table.
+const ExecutorInvariant = enum(u8) {
+    dispatch_quantum_requires_an_active_task,
+    selected_cpu_trap_stack_must_be_provisioned_before_entry,
+    published_trap_stack_must_retain_its_backing,
+    one_runtime_cpu_owns_the_userspace_entry_state,
+    shared_executor_services_require_the_bsp_runtime_owner,
+    selected_cpu_executor_registration_requires_its_exact_owner,
+    executor_retirement_requires_its_exact_cpu_registration_owner,
+    active_userspace_mapping_handle_points_at_a_different_slot,
+    native_dispatch_acknowledges_its_exact_execution_lease,
+    executor_reset_requires_its_exact_cpu_registration_owner,
+    cannot_reset_userspace_executor_while_an_address_space_is_active,
+    executor_reset_must_release_its_exact_registration,
+    materialized_userspace_mapping_identity_changed_without_retirement,
+    native_dispatch_starts_its_exact_bound_execution_lease,
+    native_dispatch_acknowledges_only_its_cleared_kernel_continuation,
+    materialized_userspace_dispatch_metadata_changed_without_retirement,
+    reserved_userspace_mapping_handle_is_not_live,
+    executor_mapping_index_points_at_a_non_live_mapping,
+    executor_mapping_index_points_at_the_wrong_mapping,
+    executor_mapping_index_points_at_an_unclaimed_slot,
+    pending_userspace_retirement_retains_its_mapping_incarnation,
+    userspace_retirement_requires_a_quiescent_mapping_and_physical_root,
+    invalid_retired_stack_mapping_range,
+    invalid_retired_image_mapping_range,
+    attempted_to_destroy_the_active_userspace_address_space,
+    live_userspace_mapping_disappeared_during_release,
+    resolved_mailbox_authorities_require_a_nonzero_generation,
+    active_userspace_task_has_no_materialized_mapping,
+    userspace_exception_vector_exceeds_the_idt_range,
+    userspace_page_fault_code_exceeds_its_abi_width,
+    userspace_entry_requires_the_active_mapping_owner,
+    userspace_entry_requires_private_extended_state,
+};
+
+const executor_invariant_messages = [_][]const u8{
+    "dispatch quantum requires an active task",
+    "selected CPU trap stack must be provisioned before entry",
+    "published trap stack must retain its backing",
+    "one runtime CPU owns the userspace entry state",
+    "shared executor services require the BSP runtime owner",
+    "selected CPU executor registration requires its exact owner",
+    "executor retirement requires its exact CPU registration owner",
+    "active userspace mapping handle points at a different slot",
+    "native dispatch acknowledges its exact execution lease",
+    "executor reset requires its exact CPU registration owner",
+    "cannot reset userspace executor while an address space is active",
+    "executor reset must release its exact registration",
+    "materialized userspace mapping identity changed without retirement",
+    "native dispatch starts its exact bound execution lease",
+    "native dispatch acknowledges only its cleared kernel continuation",
+    "materialized userspace dispatch metadata changed without retirement",
+    "reserved userspace mapping handle is not live",
+    "executor mapping index points at a non-live mapping",
+    "executor mapping index points at the wrong mapping",
+    "executor mapping index points at an unclaimed slot",
+    "pending userspace retirement retains its mapping incarnation",
+    "userspace retirement requires a quiescent mapping and physical root",
+    "invalid retired stack mapping range",
+    "invalid retired image mapping range",
+    "attempted to destroy the active userspace address space",
+    "live userspace mapping disappeared during release",
+    "resolved mailbox authorities require a nonzero generation",
+    "active userspace task has no materialized mapping",
+    "userspace exception vector exceeds the IDT range",
+    "userspace page-fault code exceeds its ABI width",
+    "userspace entry requires the active mapping owner",
+    "userspace entry requires private extended state",
+};
+
+const executor_invariant_message_bytes: []const u8 = blk: {
+    if (executor_invariant_messages.len != @typeInfo(ExecutorInvariant).@"enum".field_names.len)
+        @compileError("executor invariant messages must cover every selector");
+    var bytes: []const u8 = "";
+    for (executor_invariant_messages) |message| bytes = bytes ++ message;
+    if (bytes.len > std.math.maxInt(u16)) @compileError("executor invariant message offsets must fit u16");
+    break :blk bytes;
+};
+
+const executor_invariant_message_offsets = blk: {
+    var offsets: [executor_invariant_messages.len + 1]u16 = undefined;
+    var cursor: usize = 0;
+    for (executor_invariant_messages, 0..) |message, index| {
+        offsets[index] = @intCast(cursor);
+        cursor += message.len;
+    }
+    offsets[executor_invariant_messages.len] = @intCast(cursor);
+    break :blk offsets;
+};
+
+fn executorInvariantMessage(selector: ExecutorInvariant) []const u8 {
+    const index: usize = @backingInt(selector);
+    return executor_invariant_message_bytes[executor_invariant_message_offsets[index]..executor_invariant_message_offsets[index + 1]];
+}
+
+fn executorInvariantFailure(selector: ExecutorInvariant) noreturn {
+    @branchHint(.cold);
+    native_util.impossibleByInvariant(@call(.always_inline, executorInvariantMessage, .{selector}));
+}
+
+test "executor invariant diagnostics retain every exact message under runtime selection" {
+    var index: usize = 0;
+    while (index < executor_invariant_messages.len) : (index += 1) {
+        std.mem.doNotOptimizeAway(&index);
+        const selector: ExecutorInvariant = @fromBackingInt(@intCast(index));
+        const message = @call(.never_inline, executorInvariantMessage, .{selector});
+        try std.testing.expectEqualStrings(executor_invariant_messages[index], message);
+    }
+    try std.testing.expectEqual(executor_invariant_message_bytes.len, executor_invariant_message_offsets[executor_invariant_messages.len]);
+}
+
 // A dispatch is bounded even when no other task is ready yet. This returns the
 // runtime owner to deferred device work before it can discover new runnable work.
 pub const DISPATCH_QUANTUM_TICKS: u64 = 2;
@@ -73,7 +195,7 @@ pub const DispatchQuantum = struct {
     deadline_tick: u64 = 0,
 
     pub fn begin(task_id: u64, now_ticks: u64) DispatchQuantum {
-        if (task_id == 0) native_util.impossibleByInvariant("dispatch quantum requires an active task");
+        if (task_id == 0) @call(.never_inline, executorInvariantFailure, .{.dispatch_quantum_requires_an_active_task});
         return .{ .task_id = task_id, .deadline_tick = now_ticks +| DISPATCH_QUANTUM_TICKS };
     }
 
@@ -82,16 +204,30 @@ pub const DispatchQuantum = struct {
     }
 };
 
-pub const ExecutionOutcome = enum(u8) {
-    unavailable,
-    yielded,
-    wait_for_event,
-    faulted,
+pub const ExecutionOutcome = dispatch_ownership.Outcome;
+pub const ReturnRecord = dispatch_ownership.ReturnRecord;
 
-    pub fn handedOff(self: ExecutionOutcome) bool {
-        return self != .unavailable;
-    }
+// BSP-owned preparation publishes only lease identity and private entry data.
+// No task, capability, catalog or Runtime pointer crosses the owner boundary.
+const PreparedDispatch = dispatch_transport.Command;
+
+const architecture_smp_proof = @hasDecl(root, "ARCHITECTURE_SMP_PROOF") and root.ARCHITECTURE_SMP_PROOF;
+pub const ArchitecturePreparedCommand = if (architecture_smp_proof) PreparedDispatch else void;
+pub const ArchitecturePreparedEntry = struct {
+    task_id: u64,
+    physical_root: u64,
+    trap_stack_top: usize,
+    user_context: *const UserContext64,
+    xstate_address: usize,
+    dispatch_quantum: DispatchQuantum,
 };
+pub const ArchitecturePreparedCallback = *const fn (*anyopaque, *const ArchitecturePreparedEntry) ReturnRecord;
+pub const ArchitecturePreparedBeforeRun = *const fn (*anyopaque) void;
+pub const ArchitecturePreparedAfterReturn = *const fn (*anyopaque, bool) void;
+
+comptime {
+    if (@sizeOf(PreparedDispatch) != 32) @compileError("prepared command must retain its compact scalar shell");
+}
 
 pub const UserException = struct {
     vector: u8,
@@ -121,7 +257,9 @@ else
         };
 
         pub const syscall64 = struct {
-            pub fn setKernelStack(_: usize) void {}
+            pub fn setKernelStack(_: usize) bool {
+                return true;
+            }
         };
 
         pub const isr = struct {
@@ -134,6 +272,7 @@ else
 
         pub const paging = struct {
             pub const PageDirectory = opaque {};
+            pub const WritableUserSegment = struct { address: usize, bytes: usize };
             pub const UserPermissions = struct {
                 writable: bool,
                 executable: bool = false,
@@ -144,6 +283,7 @@ else
             pub const UserAddressSpace = struct {
                 directory: *PageDirectory,
                 pcid: u16,
+                switch_cr3: u64 = 0,
             };
             pub const UserAddressSpaceCreateError = error{ OutOfMemory, ProcessContextExhausted };
             pub const UserMapError = error{
@@ -198,13 +338,22 @@ else
             pub fn readOwnedUserRange(_: *const UserAddressSpace, _: usize, _: []u8) UserWriteError!void {
                 return error.PageNotOwned;
             }
-            pub fn copyOwnedUserPageFromPhysical(_: *const UserAddressSpace, _: usize, _: u64) UserWriteError!void {
-                return error.PageNotOwned;
+            pub fn mapOwnedUserPageFromPhysical(_: *UserAddressSpace, _: usize, _: u64, _: UserPermissions) UserMapError!void {
+                return error.OutOfMemory;
             }
             pub fn ownedUserPageIsExecutable(_: *const UserAddressSpace, _: usize) ?bool {
                 return null;
             }
             pub fn destroyUserAddressSpace(_: *UserAddressSpace) UserAddressSpaceDestroyError!void {}
+            pub fn checkedUserAddressSpacePhysicalRoot(space: *const UserAddressSpace) ?u64 {
+                const physical = @intFromPtr(space.directory);
+                if (physical == 0 or physical % PAGE_SIZE != 0) return null;
+                if (space.switch_cr3 != 0 and space.switch_cr3 & x86.CR3_ADDRESS_MASK != physical) return null;
+                return physical;
+            }
+            pub fn userAddressSpaceQuiescent(_: *const UserAddressSpace) bool {
+                return true;
+            }
             pub fn unmapBorrowedCurrentPage(_: usize) bool {
                 return true;
             }
@@ -261,52 +410,145 @@ const MaterializationError = freestanding.paging.UserAddressSpaceCreateError || 
     AddressSpaceOwnerInvalid,
     AddressSpaceImageMismatch,
     AddressSpaceRetiring,
+    AddressSpaceLeased,
     InitialContextInvalid,
     LaunchPolicyInvalid,
 };
 
-var trap_stack: ?*align(PAGE_SIZE) [TRAP_STACK_TOTAL_BYTES]u8 = null;
-var trap_stack_guard_armed: bool = false;
+const TrapStackStorage = *align(PAGE_SIZE) [TRAP_STACK_TOTAL_BYTES]u8;
+const TrapStackSlot = struct {
+    storage: ?TrapStackStorage align(64) = null,
+    ready: bool = false,
+    failed: bool = false,
+};
+var trap_stacks: [cpu_identity.MAX_CPUS]TrapStackSlot = @splat(.{});
 
-pub fn reserveTrapStackStorage() error{OutOfMemory}!void {
+pub const TrapStackReserveError = error{
+    OutOfMemory,
+    InvalidCpu,
+    WrongCpu,
+    InterruptContext,
+    UserAddressSpaceActive,
+    ActiveTrapStack,
+    InvalidTrapStackGeometry,
+    InvalidTrapStackMapping,
+    TrapStackGuardFailure,
+};
+
+pub fn reserveTrapStackStorage() TrapStackReserveError!void {
     if (comptime builtin.target.os.tag != .freestanding) return;
-    if (trap_stack != null) return;
-    const storage = kernel_memory.claimEarly(TRAP_STACK_TOTAL_BYTES, PAGE_SIZE) orelse return error.OutOfMemory;
-    trap_stack = @ptrCast(@alignCast(storage));
+    return reserveTrapStackStorageForCpu(cpu_identity.currentIndex());
 }
 
-fn trapStackStorage() *align(PAGE_SIZE) [TRAP_STACK_TOTAL_BYTES]u8 {
-    return trap_stack orelse unreachable;
+// Provisioning is serialized by the BSP, outside entry/interrupt execution.
+// Only requested CPUs consume backing. Allocations remain retained after any
+// guard failure: a span containing an unmapped page must never enter kfree.
+pub fn reserveTrapStackStorageForCpu(index: u8) TrapStackReserveError!void {
+    if (index >= cpu_identity.MAX_CPUS) return error.InvalidCpu;
+    if (comptime builtin.target.os.tag != .freestanding) return;
+    if (!smp.isRuntimeOwner()) return error.WrongCpu;
+    if (@import("../../kernel/interrupts/context.zig").active()) return error.InterruptContext;
+    if (!freestanding.paging.kernelAddressSpaceActive()) return error.UserAddressSpaceActive;
+    const entry = native_entry.stateForCpu(index);
+    if (entry.active_task_id != 0 or entry.userspace_xstate != 0 or entry.kernel_xstate != 0 or
+        entry.resume_rsp != 0 or entry.resume_rip != 0 or entry.resume_requested != 0)
+        return error.ActiveTrapStack;
+    const slot = &trap_stacks[index];
+    if (@atomicLoad(bool, &slot.ready, .acquire)) return;
+    if (slot.failed) return error.TrapStackGuardFailure;
+    const allocation: struct { address: usize, bytes: usize } = if (kernel_memory.claimEarly(TRAP_STACK_TOTAL_BYTES, PAGE_SIZE)) |early|
+        .{ .address = @intFromPtr(early), .bytes = TRAP_STACK_TOTAL_BYTES }
+    else blk: {
+        const bytes = TRAP_STACK_TOTAL_BYTES + PAGE_SIZE - 1;
+        const backing = kernel_memory.kmalloc(bytes) orelse return error.OutOfMemory;
+        break :blk .{ .address = @intFromPtr(backing), .bytes = bytes };
+    };
+    const guard = checkedTrapStackGeometry(allocation.address, allocation.bytes) orelse {
+        slot.failed = true;
+        return error.InvalidTrapStackGeometry;
+    };
+    try initializeTrapStackSlot(slot, @ptrFromInt(guard), TrapStackPaging{});
+}
+
+fn checkedTrapStackGeometry(allocation: usize, bytes: usize) ?usize {
+    if (allocation == 0) return null;
+    const rounded = std.math.add(usize, allocation, PAGE_SIZE - 1) catch return null;
+    const guard = rounded & ~(PAGE_SIZE - 1);
+    const end = std.math.add(usize, allocation, bytes) catch return null;
+    const top = std.math.add(usize, guard, TRAP_STACK_TOTAL_BYTES) catch return null;
+    if (top > end) return null;
+    return guard;
+}
+
+const TrapStackPaging = struct {
+    fn permissions(_: @This(), address: usize) struct { user: bool, writable: bool, executable: bool } {
+        const page = freestanding.paging.currentPagePermissions(address) orelse return .{ .user = true, .writable = false, .executable = true };
+        return .{ .user = page.user, .writable = page.writable, .executable = page.executable };
+    }
+
+    fn unmap(_: @This(), address: usize) bool {
+        return freestanding.paging.unmapBorrowedCurrentPage(address);
+    }
+
+    fn guardAbsent(_: @This(), address: usize) bool {
+        return freestanding.paging.currentPagePermissions(address) == null;
+    }
+};
+
+fn initializeTrapStack(storage: TrapStackStorage, backend: anytype) error{ InvalidTrapStackMapping, TrapStackGuardFailure }!void {
+    const guard = @intFromPtr(storage);
+    var address = guard + TRAP_STACK_GUARD_BYTES;
+    while (address < guard + TRAP_STACK_TOTAL_BYTES) : (address += PAGE_SIZE) {
+        const permissions = backend.permissions(address);
+        if (permissions.user or !permissions.writable or permissions.executable) return error.InvalidTrapStackMapping;
+    }
+    if (!backend.unmap(guard) or !backend.guardAbsent(guard)) return error.TrapStackGuardFailure;
+    const words: []u32 = std.mem.bytesAsSlice(u32, storage[TRAP_STACK_GUARD_BYTES..]);
+    @memset(words, TRAP_STACK_PAINT_PATTERN);
+}
+
+fn initializeTrapStackSlot(slot: *TrapStackSlot, storage: TrapStackStorage, backend: anytype) error{ InvalidTrapStackMapping, TrapStackGuardFailure }!void {
+    slot.storage = storage;
+    initializeTrapStack(storage, backend) catch |err| {
+        slot.failed = true;
+        return err;
+    };
+    @atomicStore(bool, &slot.ready, true, .release);
+}
+
+fn trapStackStorage() TrapStackStorage {
+    return currentTrapStackStorage() orelse
+        @call(.never_inline, executorInvariantFailure, .{.selected_cpu_trap_stack_must_be_provisioned_before_entry});
+}
+
+fn currentTrapStackStorage() ?TrapStackStorage {
+    return trapStackStorageForCpu(cpu_identity.currentIndex());
+}
+
+inline fn trapStackStorageForCpu(index: u8) ?TrapStackStorage {
+    if (index >= cpu_identity.MAX_CPUS) return null;
+    const slot = &trap_stacks[index];
+    if (!@atomicLoad(bool, &slot.ready, .acquire)) return null;
+    return slot.storage orelse @call(.never_inline, executorInvariantFailure, .{.published_trap_stack_must_retain_its_backing});
+}
+
+pub inline fn preparedKernelStackForCpu(index: u8) ?usize {
+    const storage = trapStackStorageForCpu(index) orelse return null;
+    return @intFromPtr(storage) + TRAP_STACK_TOTAL_BYTES;
 }
 
 fn trapStackPaintableBase() usize {
     return @intFromPtr(trapStackStorage()) + TRAP_STACK_GUARD_BYTES;
 }
 
-fn armTrapStackGuard() void {
-    if (builtin.target.os.tag != .freestanding) return;
-    if (trap_stack_guard_armed) return;
-    const guard_address = @intFromPtr(trapStackStorage());
-    _ = freestanding.paging.unmapBorrowedCurrentPage(guard_address);
-    const base = trapStackPaintableBase();
-    const words: [*]u32 = @ptrFromInt(base);
-    const count = TRAP_STACK_USABLE_BYTES / @sizeOf(u32);
-    var index: usize = 0;
-    while (index < count) : (index += 1) {
-        words[index] = TRAP_STACK_PAINT_PATTERN;
-    }
-    trap_stack_guard_armed = true;
-}
-
 pub fn prepareKernelStack() usize {
     if (builtin.target.os.tag != .freestanding) return 0;
-    armTrapStackGuard();
     return @intFromPtr(trapStackStorage()) + TRAP_STACK_TOTAL_BYTES;
 }
 
 pub fn reportTrapStackPeak() void {
     if (builtin.target.os.tag != .freestanding) return;
-    if (!trap_stack_guard_armed) return;
+    if (!@atomicLoad(bool, &trap_stacks[cpu_identity.currentIndex()].ready, .acquire)) return;
     const base = trapStackPaintableBase();
     const top = @intFromPtr(trapStackStorage()) + TRAP_STACK_TOTAL_BYTES;
     var addr = base;
@@ -327,15 +569,12 @@ pub fn reportTrapStackPeak() void {
     common.printBootMarker(line);
 }
 
-pub export var zigos_userspace_resume_requested: u32 = 0;
 const PreemptCheck = *const fn (u64) bool;
 var preempt_check: ?PreemptCheck = null;
 
 pub fn setPreemptCheck(check: ?PreemptCheck) void {
     preempt_check = check;
 }
-pub export var zigos_userspace_resume_esp: usize = 0;
-pub export var zigos_userspace_resume_eip: usize = 0;
 
 pub const UserContext64 = extern struct {
     rax: u64 = 0,
@@ -371,8 +610,6 @@ comptime {
     }
 }
 
-extern var zigos_userspace_xstate: usize;
-extern var zigos_kernel_xstate: usize;
 extern fn zigos_enter_userspace(context: usize, state: usize) callconv(.c) u32;
 
 pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
@@ -384,12 +621,10 @@ pub fn enterPreparedUserContext(context: *const UserContext64) u32 {
 }
 
 fn enterUserContextWithState(context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
-    if (!smp.isRuntimeOwner()) native_util.impossibleByInvariant("one runtime CPU owns the userspace entry state");
+    if (!smp.isRuntimeOwner()) @call(.never_inline, executorInvariantFailure, .{.one_runtime_cpu_owns_the_userspace_entry_state});
     const result = zigos_enter_userspace(@intFromPtr(context), @intFromPtr(state));
-    zigos_userspace_resume_eip = 0;
-    zigos_userspace_resume_esp = 0;
-    zigos_userspace_xstate = 0;
-    zigos_kernel_xstate = 0;
+    requireIdleSyscallReturn();
+    native_entry.clearContinuation();
     return result;
 }
 
@@ -427,8 +662,8 @@ const MappingDispatchMetadata = struct {
 };
 
 const MAPPING_DISPATCH_METADATA_SIZE_CEILING_BYTES: usize = 40;
-const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 688 else 464;
-const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 98_304 else 66_560;
+const MAPPING_ENTRY_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 672 else 448;
+const MAPPING_ARENA_SIZE_CEILING_BYTES: usize = if (builtin.target.os.tag == .freestanding) 96_256 else 64_512;
 
 const MappedImageRegions = struct {
     const Range = struct { start: usize = 0, size: usize = 0 };
@@ -445,8 +680,7 @@ const MappingEntry = struct {
     owned_xstate: ?*xstate.Storage = null,
     dispatch_metadata: MappingDispatchMetadata = .{},
     resume_valid: bool = false,
-    resume_instruction_pointer: u64 = 0,
-    resume_stack_pointer: u64 = 0,
+    interrupted_before_yield: bool = false,
     user_context64: UserContext64 = .{},
     yield_count: u64 = 0,
     last_user_counter: u32 = 0,
@@ -505,7 +739,259 @@ const MappingResolution = struct {
 };
 
 var trap_handler_registered = false;
-var registered_executor: ?*Executor = null;
+const ExecutorRegistration = struct {
+    executor: ?*Executor align(64) = null,
+};
+var executor_registrations: [cpu_identity.MAX_CPUS]ExecutorRegistration = @splat(.{});
+
+fn currentExecutorSlot() *?*Executor {
+    return &executor_registrations[cpu_identity.currentIndex()].executor;
+}
+
+inline fn registeredExecutor(cpu: u8) ?*Executor {
+    if (cpu >= cpu_identity.MAX_CPUS) return null;
+    return @atomicLoad(?*Executor, &executor_registrations[cpu].executor, .acquire);
+}
+
+inline fn currentRegisteredExecutor() ?*Executor {
+    return registeredExecutor(cpu_identity.currentIndex());
+}
+
+inline fn bspMappingTransaction() bool {
+    if (cpu_identity.currentIndex() != 0) return false;
+    return if (comptime builtin.target.os.tag == .freestanding) !x86.interruptsEnabled() else true;
+}
+
+inline fn registeredDomainExecutor(cpu: u8, owner: *const anyopaque, runtime: *task_runtime.Runtime) ?*Executor {
+    const source = registeredExecutor(cpu) orelse return null;
+    if (source.registration_cpu != cpu or source.binding_owner != owner or source.bound_runtime != runtime) return null;
+    return source;
+}
+
+inline fn executionOwnershipOutstanding(runtime: *task_runtime.Runtime) bool {
+    return runtime.execution.hasLeases() or dispatch_transport.global.hasOutstandingForIssuer(&runtime.execution);
+}
+
+fn claimCurrentExecutor(executor: *Executor) bool {
+    const index = cpu_identity.currentIndex();
+    const current = currentRegisteredExecutor();
+    if (executor.registration_cpu) |owner| return owner == index and current == executor;
+    if (current != null) return false;
+    if (executor.bound_runtime) |runtime| if (executionOwnershipOutstanding(runtime)) return false;
+    executor.registration_cpu = index;
+    @atomicStore(?*Executor, currentExecutorSlot(), executor, .release);
+    return true;
+}
+
+fn releaseCurrentExecutor(executor: *Executor) bool {
+    if (executor.registration_cpu != cpu_identity.currentIndex() or currentRegisteredExecutor() != executor) return false;
+    if (executor.bound_runtime) |runtime| if (executionOwnershipOutstanding(runtime)) return false;
+    @atomicStore(?*Executor, currentExecutorSlot(), null, .release);
+    executor.registration_cpu = null;
+    return true;
+}
+
+const RetirementOwnerError = error{ WrongCpu, RegistrationMismatch };
+
+fn requireRetirementOwner(executor: *const Executor) RetirementOwnerError!void {
+    const index = cpu_identity.currentIndex();
+    if (executor.registration_cpu) |owner| {
+        if (registeredExecutor(owner) != executor) return error.RegistrationMismatch;
+        if (owner != index and !(index == 0 and executor.binding_owner != null and executor.bound_runtime != null)) return error.WrongCpu;
+    } else {
+        if (index != 0) return error.WrongCpu;
+        if (comptime builtin.target.os.tag == .freestanding) return error.RegistrationMismatch;
+    }
+    if (comptime builtin.target.os.tag == .freestanding) {
+        if (!smp.isRuntimeOwner()) return error.WrongCpu;
+    }
+}
+
+inline fn domainRoutesValid(owner: *const anyopaque, runtime: *task_runtime.Runtime) bool {
+    if (!bspMappingTransaction()) return false;
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const source = registeredExecutor(@intCast(index)) orelse continue;
+        if (source.binding_owner == owner and source.bound_runtime == runtime and source.registration_cpu != @as(u8, @intCast(index))) return false;
+    }
+    return true;
+}
+
+pub fn retireRegisteredAddressSpace(owner: *const anyopaque, runtime: *task_runtime.Runtime, event: task_runtime.AddressSpaceRetirementEvent) bool {
+    if (!domainRoutesValid(owner, runtime)) return false;
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const source = registeredDomainExecutor(@intCast(index), owner, runtime) orelse continue;
+        source.retireAddressSpaceChecked(event) catch return false;
+    }
+    return true;
+}
+
+pub fn collectRegisteredRetiredMappings(owner: *const anyopaque, runtime: *task_runtime.Runtime) bool {
+    if (!domainRoutesValid(owner, runtime)) return false;
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const source = registeredDomainExecutor(@intCast(index), owner, runtime) orelse continue;
+        source.collectRetiredMappings();
+    }
+    return true;
+}
+
+// All routes remain published throughout preflight and callback-driven mapping
+// release. Only the selected BSP anchor outlives this metadata teardown.
+pub fn releaseRegisteredDomain(owner: *const anyopaque, runtime: *task_runtime.Runtime) bool {
+    if (!domainRoutesValid(owner, runtime) or executionOwnershipOutstanding(runtime) or runtime.lifecycle_transition_active) return false;
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const source = registeredDomainExecutor(@intCast(index), owner, runtime) orelse continue;
+        if (source.active_task_id != 0 or source.active_mapping != null or source.active_dispatch_lease != null) return false;
+        if (source.mappingArena()) |mappings| for (0..mappings.claimedCount()) |slot_index| {
+            const slot = mappings.slotAt(slot_index);
+            if (slot.in_use and !source.mappingRetirementReady(&slot.mapping)) return false;
+        };
+    }
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const source = registeredDomainExecutor(@intCast(index), owner, runtime) orelse continue;
+        source.releaseAllMappings();
+        if (index != 0) {
+            if (!source.releaseMappingRegistration(@intCast(index), owner, runtime) or !source.releaseRuntimeBinding(owner, runtime)) unreachable;
+        }
+    }
+    return true;
+}
+
+const LifetimeMapping = struct { cpu: u8, handle: MappingHandle };
+comptime {
+    if (task_runtime.MAX_TASKS > 256 or cpu_identity.MAX_CPUS > 16) @compileError("mapping lifetime namespace exceeds token geometry");
+}
+
+inline fn mappingLifetimeToken(cpu: u8, handle: MappingHandle) ?u64 {
+    if (cpu >= cpu_identity.MAX_CPUS or handle.generation() == 0 or handle.slotIndex() >= task_runtime.MAX_TASKS) return null;
+    return handle.value | (@as(u64, cpu) << 8);
+}
+
+inline fn decodeMappingLifetimeToken(token: u64, out: *LifetimeMapping) bool {
+    if (token >> 32 == 0 or token & 0xffff_f000 != 0) return false;
+    const cpu: u8 = @intCast((token >> 8) & 0xf);
+    const handle = MappingHandle{ .value = token & ~@as(u64, 0xf00) };
+    if (cpu >= cpu_identity.MAX_CPUS or handle.slotIndex() >= task_runtime.MAX_TASKS) return false;
+    out.* = .{ .cpu = cpu, .handle = handle };
+    return true;
+}
+
+inline fn continuationCleared(state: *const volatile native_entry.State) bool {
+    return state.active_task_id == 0 and state.userspace_xstate == 0 and state.kernel_xstate == 0 and
+        state.resume_rsp == 0 and state.resume_rip == 0 and state.resume_requested == 0;
+}
+
+inline fn requireIdleSyscallReturn() void {
+    const executor = currentRegisteredExecutor() orelse return;
+    const ticket = executor.active_dispatch_lease orelse return;
+    if (!@constCast(ticket.issuer).syscallIdle(ticket))
+        @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_its_exact_execution_lease});
+}
+
+const RemoteSyscallHardware = struct {
+    inline fn mask(_: @This()) bool {
+        const enabled = x86.interruptsEnabled();
+        x86.cli();
+        return enabled;
+    }
+    inline fn restore(_: @This(), enabled: bool) void {
+        if (enabled) x86.sti();
+    }
+    inline fn switchToKernel(_: @This()) void {
+        freestanding.paging.switchToKernelAddressSpace();
+    }
+    inline fn kernelActive(_: @This()) bool {
+        return freestanding.paging.kernelAddressSpaceActive();
+    }
+    inline fn restoreUser(_: @This(), mapping: *MappingEntry) void {
+        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+    }
+    inline fn notify(_: @This()) bool {
+        return smp.notifySyscallRequest();
+    }
+    inline fn wait(_: @This()) void {
+        // Caller tested completion with IF clear. STI's interrupt shadow makes
+        // this HLT atomic with respect to the completion nudge; nested kernel
+        // gates preserve the parked frame/xstate and only service architecture.
+        x86.stiHlt();
+        x86.cli();
+    }
+    fn fail(_: @This()) noreturn {
+        x86.cli();
+        while (true) x86.hlt();
+    }
+};
+
+pub fn remoteSyscall(frame: *freestanding.isr.InterruptFrame) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    return remoteSyscallWithHardware(frame, RemoteSyscallHardware{});
+}
+
+// This owner path never reads Runtime/Kernel/Table records. The exact running
+// receipt pins its local Mapping and native continuation until BSP completion
+// is consumed (or pending work is cancelled) and the mailbox is idle again.
+fn remoteSyscallWithHardware(frame: *freestanding.isr.InterruptFrame, hardware: anytype) bool {
+    const previous_if = hardware.mask();
+    defer hardware.restore(previous_if);
+    if (previous_if or smp.isRuntimeOwner() or (frame.cs & 3) != 3) return false;
+    const executor = currentRegisteredExecutor() orelse return false;
+    const ticket = executor.active_dispatch_lease orelse return false;
+    if (executor.registration_cpu != cpu_identity.currentIndex() or ticket.cpu != cpu_identity.currentIndex() or
+        executor.bound_runtime == null or ticket.issuer != &executor.bound_runtime.?.execution) return false;
+    const execution = @constCast(ticket.issuer);
+    var bound: dispatch_ownership.BoundIdentity = undefined;
+    execution.boundIdentityInto(ticket, &bound) catch return false;
+    const mapping = activeUserMemoryMapping(executor, bound.identity.task_id) orelse return false;
+    if (executor.active_mapping_handle.value != bound.mapping_handle or mapping.address_space_id != bound.identity.address_space_id or
+        mappingPhysicalRoot(mapping) != bound.physical_root or mapping.owned_xstate == null) return false;
+    const entry = native_entry.current();
+    if (entry.active_task_id != bound.identity.task_id or entry.userspace_xstate != @intFromPtr(mapping.owned_xstate.?.state()) or
+        entry.kernel_xstate == 0 or entry.resume_rsp == 0 or entry.resume_rip == 0 or entry.resume_requested != 0 or
+        !execution.syscallIdle(ticket)) return false;
+
+    hardware.switchToKernel();
+    if (!hardware.kernelActive()) hardware.fail();
+    var key: dispatch_ownership.RequestKey = undefined;
+    execution.submitSyscallInto(ticket, .{
+        .opcode = @truncate(frame.eax),
+        .request_addr = frame.edi,
+        .response_addr = frame.esi,
+        .response_len = frame.edx,
+    }, &key) catch |err| {
+        if (err != error.StopRequested) hardware.fail();
+        if (!execution.syscallIdle(ticket)) hardware.fail();
+        handoffInterruptedUser(executor, mapping, frame);
+        return true;
+    };
+    if (!hardware.notify()) hardware.fail();
+    var reply: dispatch_ownership.Reply = undefined;
+    var cancelled = false;
+    while (true) {
+        if (execution.stopRequested(ticket) and execution.cancelPendingSyscall(key)) {
+            cancelled = true;
+            break;
+        }
+        if (execution.consumeSyscallInto(key, &reply)) |_| {
+            break;
+        } else |err| {
+            if (err != error.NotReady) hardware.fail();
+        }
+        hardware.wait();
+    }
+    if (!execution.syscallIdle(ticket) or !hardware.kernelActive()) hardware.fail();
+    if (!cancelled) {
+        frame.eax = reply.status;
+        frame.edx = reply.bytes_written;
+        frame.r10 = reply.denial_reason;
+    }
+    // A kernel-origin STOP interrupt only acknowledges the APIC. Decide using
+    // the exact lease here, before SYSRET/ERETU can resume the original user.
+    if (execution.stopRequested(ticket)) {
+        handoffInterruptedUser(executor, mapping, frame);
+    } else {
+        hardware.restoreUser(mapping);
+    }
+    return true;
+}
 
 fn activeUserMemoryMapping(executor: *Executor, caller_task_id: u64) ?*MappingEntry {
     if (caller_task_id == 0 or executor.active_task_id != caller_task_id) return null;
@@ -517,16 +1003,306 @@ fn activeUserMemoryMapping(executor: *Executor, caller_task_id: u64) ?*MappingEn
     return mapping;
 }
 
+// Shared Table and demand registrations belong to the BSP. Keep admission,
+// page preparation and the immediate physical-alias copy in one nonreentrant
+// interval; this authority must not survive a callback, yield or IRQ enable.
+fn serializedSharedMemoryExecutor(interrupts_enabled: bool) ?*Executor {
+    if (interrupts_enabled or !smp.isRuntimeOwner()) return null;
+    const executor = currentRegisteredExecutor() orelse return null;
+    if (executor.registration_cpu != cpu_identity.currentIndex()) return null;
+    return executor;
+}
+
+fn sharedUserAddress(addr: usize) bool {
+    return addr >= userspace_layout.shared_start and addr < userspace_layout.shared_end_exclusive;
+}
+
+const SharedUserMemory = struct {
+    space: *freestanding.paging.UserAddressSpace,
+    authority: demand_paging.SharedCopyAuthority,
+};
+
+fn sharedUserMemoryAuthority(executor: *Executor, caller_task_id: u64, addr: usize, len: usize, write: bool) ?SharedUserMemory {
+    if (!sharedUserAddress(addr)) return null;
+    const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return null;
+    return sharedMappingAuthority(executor, mapping, executor.active_mapping_handle, caller_task_id, addr, len, write);
+}
+
+fn sharedMappingAuthority(executor: *Executor, mapping: *MappingEntry, handle: MappingHandle, caller_task_id: u64, addr: usize, len: usize, write: bool) ?SharedUserMemory {
+    const table = executor.mapped_object_table orelse return null;
+    if (executor.mapped_object_count == 0) return null;
+    var span: shared_memory.TaskCopySpan = undefined;
+    table.taskCopySpanInto(@import("../core/ids.zig").task(caller_task_id), mappingLifetimeToken(executor.registration_cpu orelse 0, handle) orelse return null, addr, len, &span) catch return null;
+    const authority = demand_paging.SharedCopyAuthority{
+        .virtual_base = span.virtual_base,
+        .physical_base = span.physical_base,
+        .size_bytes = span.size_bytes,
+    };
+    const space = &mapping.address_space.?;
+    if (!demand_paging.validateSharedUserRangeRegistration(space, authority, addr, len, write, 0)) return null;
+    return .{ .space = space, .authority = authority };
+}
+
+inline fn mappingPhysicalRoot(mapping: *const MappingEntry) u64 {
+    const space = mapping.address_space orelse return 0;
+    return if (comptime builtin.target.os.tag == .freestanding)
+        space.switch_cr3 & x86.CR3_ADDRESS_MASK
+    else if (space.switch_cr3 != 0) space.switch_cr3 & x86.CR3_ADDRESS_MASK else @intFromPtr(space.directory);
+}
+
+// A processing mailbox keeps this exact lease alive. Resolve every callback
+// against that receipt again; no current-BSP active-task substitution and no
+// reusable user alias survives a copy, service callback or IRQ enable.
+const SyscallCopyMapping = struct { executor: *Executor, mapping: *MappingEntry };
+
+fn syscallCopyMappingInto(executor: *Executor, claim: *const dispatch_ownership.ClaimedSyscall, interrupts_enabled: bool, kernel_root_active: bool, out: *SyscallCopyMapping) bool {
+    if (interrupts_enabled or !kernel_root_active or !bspMappingTransaction() or
+        executor.registration_cpu != 0 or currentRegisteredExecutor() != executor) return false;
+    const runtime = executor.bound_runtime orelse return false;
+    const owner = executor.binding_owner orelse return false;
+    if (claim.key.ticket.issuer != &runtime.execution) return false;
+    var bound: dispatch_ownership.BoundIdentity = undefined;
+    var stopped: bool = undefined;
+    runtime.execution.validateClaimInto(claim, &bound, &stopped) catch return false;
+    if (stopped) return false;
+    const task = runtime.findConstByHandle(.{ .value = bound.identity.task_handle }, bound.identity.task_id) orelse return false;
+    const borrow = runtime.execution_borrows[claim.key.ticket.cpu] orelse return false;
+    if (task.state != .active or task.process_generation != bound.identity.process_generation or
+        task.address_space_id != bound.identity.address_space_id or borrow.runtime != runtime or
+        borrow.task_id != task.id or borrow.handle.value != bound.identity.task_handle) return false;
+    const source = registeredDomainExecutor(claim.key.ticket.cpu, owner, runtime) orelse return false;
+    const mappings = source.mappingArena() orelse return false;
+    const slot = mappings.getByHandle(.{ .value = bound.mapping_handle }) orelse return false;
+    const mapping = &slot.mapping;
+    if (mapping.state != .live or mapping.address_space_id != bound.identity.address_space_id or
+        mapping.dispatch_metadata.owner_task_id != bound.identity.task_id or mapping.address_space == null or
+        mappingPhysicalRoot(mapping) != bound.physical_root or
+        freestanding.paging.checkedUserAddressSpacePhysicalRoot(&mapping.address_space.?) != bound.physical_root) return false;
+    out.* = .{ .executor = source, .mapping = mapping };
+    return true;
+}
+
+fn readSyscallCopy(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, addr: usize, destination: []u8) bool {
+    const executor: *Executor = @ptrCast(@alignCast(context));
+    const interrupts_enabled = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+    const kernel_active = if (comptime builtin.target.os.tag == .freestanding) freestanding.paging.kernelAddressSpaceActive() else true;
+    var resolved: SyscallCopyMapping = undefined;
+    if (!syscallCopyMappingInto(executor, claim, interrupts_enabled, kernel_active, &resolved)) return false;
+    const source = resolved.executor;
+    const mapping = resolved.mapping;
+    if (sharedUserAddress(addr)) {
+        const memory = sharedMappingAuthority(source, mapping, .{ .value = claim.bound.mapping_handle }, claim.bound.identity.task_id, addr, destination.len, false) orelse return false;
+        if (comptime builtin.target.os.tag != .freestanding) {
+            return if (builtin.is_test) SyscallCopyTesting.read(memory.space, addr, destination) else false;
+        }
+        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, destination.len, false, 0) orelse return false;
+        @memcpy(destination, @as([*]const u8, @ptrFromInt(alias))[0..destination.len]);
+        return true;
+    }
+    const runtime = executor.bound_runtime.?;
+    const record = runtime.findAddressSpaceConst(claim.bound.identity.address_space_id) orelse return false;
+    if (record.owner_task_id != claim.bound.identity.task_id or record.region_count == 0) return false;
+    const memory = syscall_dispatch.UserMemoryContext{ .address_space = record, .caller_task_id = claim.bound.identity.task_id };
+    if (!syscall_dispatch.validateUserRange(memory, addr, destination.len, 1, .read)) return false;
+    const space = &mapping.address_space.?;
+    if (comptime builtin.target.os.tag != .freestanding) {
+        return if (builtin.is_test) SyscallCopyTesting.read(space, addr, destination) else false;
+    }
+    if (!demand_paging.prepareUserRange(space, addr, destination.len, false)) return false;
+    freestanding.paging.readOwnedUserRange(space, addr, destination) catch return false;
+    return true;
+}
+
+inline fn outputRangeGeometry(range: syscall_broker.OutputRange) bool {
+    if (range.prepared_bytes > range.declared_bytes or range.prepared_bytes > 88) return false;
+    if (range.declared_bytes == 0) return true;
+    if (range.alignment == 0 or !std.math.isPowerOfTwo(range.alignment) or
+        range.address < 0x10000 or range.address % range.alignment != 0) return false;
+    const end = std.math.add(usize, range.address, range.declared_bytes) catch return false;
+    return end <= 0x0000_8000_0000_0000;
+}
+
+inline fn privateCopyMetadata(executor: *Executor, claim: *const dispatch_ownership.ClaimedSyscall, address: usize, bytes: usize) bool {
+    const runtime = executor.bound_runtime orelse return false;
+    const record = runtime.findAddressSpaceConst(claim.bound.identity.address_space_id) orelse return false;
+    if (record.owner_task_id != claim.bound.identity.task_id or record.region_count == 0) return false;
+    return syscall_dispatch.validateUserRange(.{ .address_space = record, .caller_task_id = claim.bound.identity.task_id }, address, bytes, 1, .write);
+}
+
+fn prepareSyscallOutput(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, range: syscall_broker.OutputRange) bool {
+    const anchor: *Executor = @ptrCast(@alignCast(context));
+    const enabled = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+    const kernel_active = if (comptime builtin.target.os.tag == .freestanding) freestanding.paging.kernelAddressSpaceActive() else true;
+    var resolved: SyscallCopyMapping = undefined;
+    if (!syscallCopyMappingInto(anchor, claim, enabled, kernel_active, &resolved) or !outputRangeGeometry(range)) return false;
+    if (range.declared_bytes == 0) return true;
+    const space = &resolved.mapping.address_space.?;
+    if (sharedUserAddress(range.address)) {
+        const memory = sharedMappingAuthority(resolved.executor, resolved.mapping, .{ .value = claim.bound.mapping_handle }, claim.bound.identity.task_id, range.address, range.declared_bytes, true) orelse return false;
+        if (range.prepared_bytes == 0) return true;
+        if (comptime builtin.target.os.tag == .freestanding)
+            return demand_paging.prepareSharedUserRange(memory.space, memory.authority, range.address, range.prepared_bytes, true, 0) != null;
+    } else {
+        if (!privateCopyMetadata(anchor, claim, range.address, range.declared_bytes)) return false;
+        if (range.prepared_bytes == 0) return true;
+        if (comptime builtin.target.os.tag == .freestanding)
+            return demand_paging.prepareUserRange(space, range.address, range.prepared_bytes, true);
+    }
+    return if (builtin.is_test) SyscallCopyTesting.prepare(space, range.address, range.prepared_bytes) else false;
+}
+
+fn resolveSyscallOutputInto(anchor: *Executor, resolved: *const SyscallCopyMapping, claim: *const dispatch_ownership.ClaimedSyscall, address: usize, bytes: usize, out: *[2]freestanding.paging.WritableUserSegment, count: *u8) bool {
+    const space = &resolved.mapping.address_space.?;
+    if (sharedUserAddress(address)) {
+        const memory = sharedMappingAuthority(resolved.executor, resolved.mapping, .{ .value = claim.bound.mapping_handle }, claim.bound.identity.task_id, address, bytes, true) orelse return false;
+        if (comptime builtin.target.os.tag == .freestanding) {
+            const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, address, bytes, true, 0) orelse return false;
+            out[0] = .{ .address = alias, .bytes = bytes };
+            count.* = 1;
+            return true;
+        }
+    } else {
+        if (!privateCopyMetadata(anchor, claim, address, bytes)) return false;
+        if (comptime builtin.target.os.tag == .freestanding)
+            return freestanding.paging.resolveOwnedUserOutputInto(space, address, bytes, out, count);
+    }
+    return if (builtin.is_test) SyscallCopyTesting.resolveInto(space, address, bytes, out, count) else false;
+}
+
+inline fn byteRangesOverlap(first: usize, first_len: usize, second: usize, second_len: usize) bool {
+    return first < second + second_len and second < first + first_len;
+}
+
+fn writeSyscallOutputs(context: *anyopaque, claim: *const dispatch_ownership.ClaimedSyscall, outputs: []const syscall_broker.Output) bool {
+    const anchor: *Executor = @ptrCast(@alignCast(context));
+    const enabled = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+    const kernel_active = if (comptime builtin.target.os.tag == .freestanding) freestanding.paging.kernelAddressSpaceActive() else true;
+    var resolved: SyscallCopyMapping = undefined;
+    if (!syscallCopyMappingInto(anchor, claim, enabled, kernel_active, &resolved) or outputs.len > syscall_broker.MAX_OUTPUTS) return false;
+    var total: usize = 0;
+    // Reject all geometry before even preparing a shared absent leaf.
+    for (outputs, 0..) |output, index| {
+        if (!outputRangeGeometry(.{ .address = output.address, .declared_bytes = output.bytes.len, .prepared_bytes = output.bytes.len, .alignment = 1 })) return false;
+        total += output.bytes.len;
+        if (total > syscall_broker.MAX_OUTPUT_BYTES) return false;
+        if (output.bytes.len == 0) continue;
+        for (outputs[0..index]) |previous| {
+            if (previous.bytes.len != 0 and byteRangesOverlap(output.address, output.bytes.len, previous.address, previous.bytes.len)) return false;
+        }
+    }
+    const Commit = struct { address: usize, bytes: []const u8 };
+    var commits: [2 * syscall_broker.MAX_OUTPUTS]Commit = undefined;
+    var count: usize = 0;
+    for (outputs) |output| {
+        if (output.bytes.len == 0) continue;
+        var segments: [2]freestanding.paging.WritableUserSegment = undefined;
+        var segment_count: u8 = undefined;
+        if (!resolveSyscallOutputInto(anchor, &resolved, claim, output.address, output.bytes.len, &segments, &segment_count)) return false;
+        var offset: usize = 0;
+        for (segments[0..segment_count]) |segment| {
+            for (commits[0..count]) |previous| {
+                if (byteRangesOverlap(segment.address, segment.bytes, previous.address, previous.bytes.len)) return false;
+            }
+            commits[count] = .{ .address = segment.address, .bytes = output.bytes[offset..][0..segment.bytes] };
+            count += 1;
+            offset += segment.bytes;
+        }
+    }
+    // Reauthenticate after every destination is resolved, then perform only
+    // local copies. No callbacks, allocation, yield or IRQ enable follows.
+    var final: SyscallCopyMapping = undefined;
+    const final_enabled = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+    const final_kernel_active = if (comptime builtin.target.os.tag == .freestanding) freestanding.paging.kernelAddressSpaceActive() else true;
+    if (!syscallCopyMappingInto(anchor, claim, final_enabled, final_kernel_active, &final) or
+        final.executor != resolved.executor or final.mapping != resolved.mapping) return false;
+    for (commits[0..count]) |commit| @memcpy(@as([*]u8, @ptrFromInt(commit.address))[0..commit.bytes.len], commit.bytes);
+    return true;
+}
+
+// Hosted page storage substitutes only privileged page preparation/aliases. The public
+// session callback still performs real key/lease/Runtime/Mapping/Table admission
+// first; native builds retain the actual checked demand and page-walk readers.
+const SyscallCopyTesting = if (builtin.is_test) struct {
+    const Pages = struct {
+        directory: *freestanding.paging.PageDirectory,
+        virtual_base: usize,
+        bytes: []u8,
+        readable: bool = true,
+        writable: bool = true,
+        invalid_page: ?usize = null,
+        forced_alias_offset: ?usize = null,
+        before_resolve: ?*const fn () void = null,
+        reads: usize = 0,
+        preparations: usize = 0,
+    };
+    var pages: ?*Pages = null;
+
+    fn read(space: *const freestanding.paging.UserAddressSpace, address: usize, destination: []u8) bool {
+        const storage = pages orelse return false;
+        if (!storage.readable or space.directory != storage.directory or address < storage.virtual_base) return false;
+        const offset = address - storage.virtual_base;
+        if (offset > storage.bytes.len or destination.len > storage.bytes.len - offset) return false;
+        storage.reads += 1;
+        @memcpy(destination, storage.bytes[offset..][0..destination.len]);
+        return true;
+    }
+
+    fn prepare(space: *const freestanding.paging.UserAddressSpace, address: usize, bytes: usize) bool {
+        var segments: [2]freestanding.paging.WritableUserSegment = undefined;
+        var count: u8 = undefined;
+        if (!resolveInto(space, address, bytes, &segments, &count)) return false;
+        pages.?.preparations += 1;
+        return true;
+    }
+
+    fn resolveInto(space: *const freestanding.paging.UserAddressSpace, address: usize, bytes: usize, out: *[2]freestanding.paging.WritableUserSegment, count_out: *u8) bool {
+        const storage = pages orelse return false;
+        if (storage.before_resolve) |callback| callback();
+        if (!storage.writable or space.directory != storage.directory or address < storage.virtual_base) return false;
+        const offset = address - storage.virtual_base;
+        if (bytes == 0 or bytes > 88 or offset > storage.bytes.len or bytes > storage.bytes.len - offset) return false;
+        if (storage.invalid_page) |page| {
+            if (offset / PAGE_SIZE <= page and (offset + bytes - 1) / PAGE_SIZE >= page) return false;
+        }
+        const first = @min(bytes, PAGE_SIZE - address % PAGE_SIZE);
+        const alias_offset = storage.forced_alias_offset orelse offset;
+        if (alias_offset > storage.bytes.len or bytes > storage.bytes.len - alias_offset) return false;
+        out[0] = .{ .address = @intFromPtr(storage.bytes.ptr) + alias_offset, .bytes = first };
+        if (first < bytes) out[1] = .{ .address = @intFromPtr(storage.bytes.ptr) + alias_offset + first, .bytes = bytes - first };
+        count_out.* = if (first < bytes) 2 else 1;
+        return true;
+    }
+} else struct {};
+
+pub fn validateSharedUserMemory(caller_task_id: u64, addr: usize, len: usize, write: bool) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
+    return sharedUserMemoryAuthority(executor, caller_task_id, addr, len, write) != null;
+}
+
 pub fn prepareUserMemory(caller_task_id: u64, addr: usize, len: usize, write: bool) bool {
     if (comptime builtin.target.os.tag != .freestanding) return false;
-    const executor = registered_executor orelse return false;
+    if (sharedUserAddress(addr)) {
+        const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
+        const memory = sharedUserMemoryAuthority(executor, caller_task_id, addr, len, write) orelse return false;
+        return demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, len, write, 0) != null;
+    }
+    const executor = currentRegisteredExecutor() orelse return false;
     const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
     return demand_paging.prepareUserRange(&mapping.address_space.?, addr, len, write);
 }
 
 pub fn readUserMemory(caller_task_id: u64, addr: usize, destination: []u8) bool {
     if (comptime builtin.target.os.tag != .freestanding) return false;
-    const executor = registered_executor orelse return false;
+    if (sharedUserAddress(addr)) {
+        const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
+        const memory = sharedUserMemoryAuthority(executor, caller_task_id, addr, destination.len, false) orelse return false;
+        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, destination.len, false, 0) orelse return false;
+        const source: [*]const u8 = @ptrFromInt(alias);
+        @memcpy(destination, source[0..destination.len]);
+        return true;
+    }
+    const executor = currentRegisteredExecutor() orelse return false;
     const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
     const space = &mapping.address_space.?;
     if (!demand_paging.prepareUserRange(space, addr, destination.len, false)) return false;
@@ -536,7 +1312,15 @@ pub fn readUserMemory(caller_task_id: u64, addr: usize, destination: []u8) bool 
 
 pub fn writeUserMemory(caller_task_id: u64, addr: usize, source: []const u8) bool {
     if (comptime builtin.target.os.tag != .freestanding) return false;
-    const executor = registered_executor orelse return false;
+    if (sharedUserAddress(addr)) {
+        const executor = serializedSharedMemoryExecutor(x86.interruptsEnabled()) orelse return false;
+        const memory = sharedUserMemoryAuthority(executor, caller_task_id, addr, source.len, true) orelse return false;
+        const alias = demand_paging.prepareSharedUserRange(memory.space, memory.authority, addr, source.len, true, 0) orelse return false;
+        const destination: [*]u8 = @ptrFromInt(alias);
+        @memcpy(destination[0..source.len], source);
+        return true;
+    }
+    const executor = currentRegisteredExecutor() orelse return false;
     const mapping = activeUserMemoryMapping(executor, caller_task_id) orelse return false;
     const space = &mapping.address_space.?;
     if (!demand_paging.prepareUserRange(space, addr, source.len, true)) return false;
@@ -544,18 +1328,499 @@ pub fn writeUserMemory(caller_task_id: u64, addr: usize, source: []const u8) boo
     return true;
 }
 
-pub fn activeTaskId() u64 {
-    const executor = registered_executor orelse return 0;
-    return executor.activeTaskId();
+// Called only by the isolated privileged architecture image. This constructs
+// real executor lifetime registrations and uses the freestanding syscall-copy
+// helpers and endpoint handlers. It supplies no evidence of native user traps,
+// opcode dispatch, wake callbacks or execution of a userspace image.
+pub fn proveSharedSyscallCopyPath() bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    if (comptime !@hasDecl(root, "ARCHITECTURE_SMP_PROOF")) @compileError("shared-copy proof requires the isolated architecture image");
+    if (comptime !root.ARCHITECTURE_SMP_PROOF) @compileError("shared-copy proof requires the isolated architecture image");
+    const ids = @import("../core/ids.zig");
+    const abi = @import("../core/abi.zig");
+    const dispatch = @import("../kernel_api/syscall_dispatch.zig");
+    const endpoint = @import("../kernel_api/endpoint.zig");
+    const endpoint_syscalls = @import("../kernel_api/endpoint_syscalls.zig");
+    const component_port = @import("../kernel_api/component_port.zig");
+    const native_kernel = @import("../kernel_api/native_kernel.zig");
+    const page_table = @import("../../kernel/memory/page_table64.zig");
+    // Keep every helper inside this guarded entry: the production image must
+    // not retain fixture metadata or another callable proof namespace.
+    const Fixture = struct {
+        const request_offset = 0;
+        const capability_offset = 256;
+        const response_offset = 512;
+        const payload_offset = PAGE_SIZE - 16;
+        const payload_bytes = 32;
+        const Negative = enum {
+            padding,
+            foreign_response,
+            foreign_payload,
+            short_response,
+            short_payload,
+            primary_payload,
+            primary_capability,
+            payload_capability,
+            advertised_tail,
+            forged_late_leaf,
+        };
+
+        executor: *Executor,
+        mappings: *MappingArena,
+        handles: [2]MappingHandle,
+        tasks: [2]*task_runtime.TaskRecord,
+        capabilities: *capability.CapabilityTable,
+        endpoints: *endpoint.Table,
+        port: *component_port.KernelPort,
+        aliases: [2]usize,
+        object: shared_memory.Object,
+        backing: []u8,
+        saved: *[2 * PAGE_SIZE]u8,
+        source: ids.EndpointId,
+        destination: ids.EndpointId,
+        sending_id: u64,
+        receiving_id: u64,
+        gift_id: u64,
+
+        fn fail(message: []const u8) bool {
+            common.printBootMarker(message);
+            return false;
+        }
+
+        fn select(self: *@This(), index: usize) dispatch.UserMemoryContext {
+            self.executor.active_task_id = self.tasks[index].id;
+            self.executor.active_mapping_handle = self.handles[index];
+            self.executor.active_mapping = &self.mappings.getByHandle(self.handles[index]).?.mapping;
+            self.port.syscall_caller_task_id = self.tasks[index].id;
+            return dispatch.UserMemoryContext.init(self.port, self.tasks[index].id);
+        }
+
+        fn leafSlot(self: *@This(), address: usize) ?*page_table.Entry {
+            var table: *page_table.Table = self.executor.active_mapping.?.address_space.?.directory;
+            for ([_]u6{ page_table.PML4_SHIFT, page_table.PDPT_SHIFT, page_table.PAGE_DIRECTORY_SHIFT }) |shift| {
+                const entry = @atomicLoad(page_table.Entry, &table[page_table.index(address, shift)], .acquire);
+                const required = page_table.PRESENT | page_table.USER | page_table.WRITABLE;
+                if (entry & required != required or page_table.isLargePage(entry)) return null;
+                const alias = freestanding.paging.mappedRamSpan(page_table.address(entry), PAGE_SIZE) orelse return null;
+                table = @ptrFromInt(alias);
+            }
+            return &table[page_table.index(address, page_table.PAGE_TABLE_SHIFT)];
+        }
+
+        fn receiveRequest(self: *@This()) abi.EndpointRecvWireRequest {
+            return .{
+                .header = component_port.makeHeader(.endpoint_recv, self.tasks[1].id),
+                .endpoint_capability_id = self.receiving_id,
+                .receiver_task_id = self.tasks[1].id,
+                .payload_address = self.aliases[1] + payload_offset,
+                .payload_capacity = payload_bytes,
+                .attached_capability_address = self.aliases[1] + capability_offset,
+            };
+        }
+
+        fn rejectReceive(self: *@This(), which: Negative) bool {
+            const memory = self.select(1);
+            defer self.port.syscall_caller_task_id = 0;
+            @memset(self.backing, 0xa5);
+            var request = self.receiveRequest();
+            var response = self.aliases[1] + response_offset;
+            var response_len: usize = @sizeOf(abi.EndpointRecvResponse);
+            switch (which) {
+                .padding => response_len = self.object.size_bytes - response_offset + 1,
+                .foreign_response => response = self.aliases[0] + response_offset,
+                .foreign_payload => request.payload_address = self.aliases[0] + payload_offset,
+                .short_response => response_len -= 1,
+                .short_payload => request.payload_capacity -= 1,
+                .primary_payload => request.payload_address = response + 8,
+                .primary_capability => request.attached_capability_address = response,
+                .payload_capability => {
+                    request.payload_address = self.aliases[1] + capability_offset;
+                    request.attached_capability_address = self.aliases[1] + capability_offset;
+                },
+                .advertised_tail => {
+                    response_len = 128;
+                    request.payload_address = response + 64;
+                },
+                .forged_late_leaf => {},
+            }
+            if (!dispatch.writeUserValue(memory, self.aliases[1] + request_offset, request)) return false;
+            @memcpy(self.saved, self.backing);
+            const queued = self.endpoints.descriptor(self.destination) catch return false;
+            const gift = self.capabilities.query(self.gift_id) orelse return false;
+            const grant_count = self.capabilities.activeCount();
+            const grant_generation = self.capabilities.mutationGeneration();
+            var attachments: [2][task_runtime.MAX_TASK_CAPABILITIES]u64 = @splat(@splat(0));
+            const generations = [_]u64{ self.tasks[0].capabilityGeneration(), self.tasks[1].capabilityGeneration() };
+            const counts = [_]u8{ self.tasks[0].capability_count, self.tasks[1].capability_count };
+            for (self.tasks, &attachments) |task, *out| @memcpy(out[0..task.capability_count], task.capabilityIds());
+            if (queued.queued_messages != 1 or self.tasks[0].hasCapability(self.gift_id) or
+                self.tasks[1].hasCapability(self.gift_id) or !self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id)) or
+                self.endpoints.hasPendingForTask(ids.task(self.tasks[0].id))) return false;
+
+            // This root is inactive: the deliberate physical forgery is never
+            // used by hardware, and exact restoration precedes any next case.
+            var forged_slot: ?*page_table.Entry = null;
+            var original: page_table.Entry = 0;
+            var forged: page_table.Entry = 0;
+            if (which == .forged_late_leaf) {
+                forged_slot = self.leafSlot(self.aliases[1] + PAGE_SIZE) orelse return false;
+                original = @atomicLoad(page_table.Entry, forged_slot.?, .acquire);
+                if (!page_table.isPresent(original) or page_table.address(original) != self.object.page_base + PAGE_SIZE) return false;
+                forged = (original ^ @as(u64, @intCast(page_table.address(original)))) | self.object.page_base;
+                @atomicStore(page_table.Entry, forged_slot.?, forged, .release);
+            }
+            defer if (forged_slot) |slot| @atomicStore(page_table.Entry, slot, original, .release);
+            const result = endpoint_syscalls.dispatchEndpointRecv(self.port, memory, 12, self.aliases[1] + request_offset, response, response_len);
+            const expected = if (which == .short_response or which == .short_payload)
+                abi.SyscallStatus.buffer_too_small
+            else
+                abi.SyscallStatus.invalid_response_buffer;
+            if (result.status != expected or result.bytes_written != 0 or
+                !std.mem.eql(u8, self.saved, self.backing) or self.capabilities.activeCount() != grant_count or
+                self.capabilities.mutationGeneration() != grant_generation or
+                !std.meta.eql(queued, self.endpoints.descriptor(self.destination) catch return false) or
+                !std.meta.eql(gift, self.capabilities.query(self.gift_id) orelse return false) or
+                !self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id)) or
+                self.endpoints.hasPendingForTask(ids.task(self.tasks[0].id))) return false;
+            for (self.tasks, attachments, generations, counts) |task, before, generation, count| {
+                if (task.capability_count != count or task.capabilityGeneration() != generation or
+                    !std.mem.eql(u64, task.capabilityIds(), before[0..count])) return false;
+            }
+            if (forged_slot) |slot| if (@atomicLoad(page_table.Entry, slot, .acquire) != forged) return false;
+            // Preparation can materialize valid pages before rejecting output
+            // overlap. Queue/authority/payload preservation does not promise
+            // rollback of that retained page-table progress.
+            return true;
+        }
+
+        fn endpointFlow(self: *@This()) bool {
+            const sender_memory = self.select(0);
+            const payload_address = self.aliases[0] + payload_offset;
+            var payload: [payload_bytes]u8 = undefined;
+            for (&payload, 0..) |*byte, index| byte.* = @intCast(0x40 + index * 3);
+            if (!dispatch.writeUserValue(sender_memory, payload_address, payload)) return fail("shared endpoint source payload");
+            const request = abi.EndpointSendWireRequest{
+                .header = component_port.makeHeader(.endpoint_send, self.tasks[0].id),
+                .endpoint_capability_id = self.sending_id,
+                .correlation_id = 91,
+                .payload_address = payload_address,
+                .payload_bytes = payload.len,
+                .attached_capability_id = self.gift_id,
+                .flags = abi.ENDPOINT_SEND_MOVE_ATTACHMENT,
+            };
+            if (!dispatch.writeUserValue(sender_memory, self.aliases[0] + request_offset, request)) return fail("shared endpoint send request");
+            const sent = endpoint_syscalls.dispatchEndpointSend(self.port, sender_memory, 11, self.aliases[0] + request_offset, 0, 0);
+            self.port.syscall_caller_task_id = 0;
+            if (sent.status != .success or sent.bytes_written != 0 or
+                self.tasks[0].hasCapability(self.gift_id) or self.capabilities.query(self.gift_id) == null or
+                (self.endpoints.descriptor(self.destination) catch return false).queued_messages != 1 or
+                !self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id))) return fail("shared endpoint moved publication");
+            const overwritten: [payload_bytes]u8 = @splat(0xee);
+            if (!dispatch.writeUserValue(sender_memory, payload_address, overwritten)) return fail("shared endpoint source reuse");
+            for (std.enums.values(Negative)) |which| {
+                if (!self.rejectReceive(which)) {
+                    common.printBootMarker(@tagName(which));
+                    return fail("shared endpoint rejected output preservation");
+                }
+            }
+
+            const memory = self.select(1);
+            defer self.port.syscall_caller_task_id = 0;
+            @memset(self.backing, 0xa5);
+            if (!dispatch.writeUserValue(memory, self.aliases[1] + request_offset, self.receiveRequest())) return fail("shared endpoint receive request");
+            @memcpy(self.saved, self.backing);
+            const grants_before = self.capabilities.activeCount();
+            const receiver_grants = self.tasks[1].capability_count;
+            const received = endpoint_syscalls.dispatchEndpointRecv(self.port, memory, 13, self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
+            const response = dispatch.readUserValue(abi.EndpointRecvResponse, memory, self.aliases[1] + response_offset) orelse return false;
+            const attached = dispatch.readUserValue(abi.CapabilityDescriptor, memory, self.aliases[1] + capability_offset) orelse return false;
+            const copied = dispatch.readUserValue([payload_bytes]u8, memory, self.aliases[1] + payload_offset) orelse return false;
+            const transferred = self.capabilities.query(attached.capability_id) orelse return false;
+            if (received.status != .success or received.bytes_written != @sizeOf(abi.EndpointRecvResponse) or
+                response.present != 1 or response.has_attached_capability != 1 or response.message.payload_len != payload.len or
+                response.message.endpoint_id != self.destination.raw() or response.message.sender_endpoint_id != self.source.raw() or
+                response.message.sender_task_id != self.tasks[0].id or response.message.correlation_id != 91 or
+                response.message.attached_capability_id != self.gift_id or !std.mem.eql(u8, &copied, &payload) or
+                attached.capability_id == self.gift_id or attached.scope_task_id != self.tasks[1].id or attached.target_id != 900 or
+                !transferred.holder.eql(self.tasks[1].owner) or transferred.scope.task_id != self.tasks[1].id or
+                !transferred.scope.local_only or !transferred.rights.has(.time_query) or !transferred.rights.has(.capability_pass) or
+                self.capabilities.query(self.gift_id) != null or !self.tasks[1].hasCapability(attached.capability_id) or
+                self.tasks[0].hasCapability(attached.capability_id) or self.tasks[1].capability_count != receiver_grants + 1 or
+                self.capabilities.activeCount() != grants_before or
+                (self.endpoints.descriptor(self.destination) catch return false).queued_messages != 0 or
+                self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id))) return fail("shared endpoint consume and retarget");
+            @memcpy(self.saved[payload_offset..][0..payload.len], &payload);
+            @memcpy(self.saved[capability_offset..][0..@sizeOf(abi.CapabilityDescriptor)], std.mem.asBytes(&attached));
+            @memcpy(self.saved[response_offset..][0..@sizeOf(abi.EndpointRecvResponse)], std.mem.asBytes(&response));
+            if (!std.mem.eql(u8, self.saved, self.backing)) return fail("shared endpoint exact output publication");
+            const generation = self.tasks[1].capabilityGeneration();
+            const sender_generation = self.tasks[0].capabilityGeneration();
+            const grant_generation = self.capabilities.mutationGeneration();
+            const empty = endpoint_syscalls.dispatchEndpointRecv(self.port, memory, 14, self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
+            const empty_response = dispatch.readUserValue(abi.EndpointRecvResponse, memory, self.aliases[1] + response_offset) orelse return false;
+            if (empty.status != .success or empty.bytes_written != @sizeOf(abi.EndpointRecvResponse) or
+                !std.meta.eql(empty_response, std.mem.zeroes(abi.EndpointRecvResponse)) or
+                self.capabilities.activeCount() != grants_before or self.tasks[1].capability_count != receiver_grants + 1 or
+                self.capabilities.mutationGeneration() != grant_generation or
+                !std.meta.eql(transferred, self.capabilities.query(attached.capability_id) orelse return false) or
+                self.tasks[0].capabilityGeneration() != sender_generation or self.tasks[1].capabilityGeneration() != generation or
+                self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id)))
+                return fail("shared endpoint empty retry");
+            @memcpy(self.saved[response_offset..][0..@sizeOf(abi.EndpointRecvResponse)], std.mem.asBytes(&empty_response));
+            if (!std.mem.eql(u8, self.saved, self.backing)) return fail("shared endpoint empty output preservation");
+            // A second message reaches the distinct postdequeue failure path:
+            // endpoint authority remains live, but its moved gift has expired.
+            // The failed transfer disposes the move without publishing output.
+            const expired = self.capabilities.mintBootRoot(.{
+                .holder = self.tasks[0].owner,
+                .issuer = self.port.kernel.policy_authority,
+                .target = .{ .kind = .service, .id = 901 },
+                .rights = .{ .service = .{ .capability_pass = true, .time_query = true } },
+                .scope = .{ .task_id = self.tasks[0].id, .local_only = true },
+                .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 30 },
+            }) catch return fail("shared endpoint expiring gift");
+            self.port.kernel.runtime.grantCapability(self.tasks[0].id, expired.id) catch return false;
+            const late_sender = self.select(0);
+            if (!dispatch.writeUserValue(late_sender, self.aliases[0] + payload_offset, payload)) return false;
+            const late_request = abi.EndpointSendWireRequest{
+                .header = component_port.makeHeader(.endpoint_send, self.tasks[0].id),
+                .endpoint_capability_id = self.sending_id,
+                .correlation_id = 92,
+                .payload_address = self.aliases[0] + payload_offset,
+                .payload_bytes = payload.len,
+                .attached_capability_id = expired.id,
+                .flags = abi.ENDPOINT_SEND_MOVE_ATTACHMENT,
+            };
+            if (!dispatch.writeUserValue(late_sender, self.aliases[0] + request_offset, late_request)) return false;
+            const late_sent = endpoint_syscalls.dispatchEndpointSend(self.port, late_sender, 20, self.aliases[0] + request_offset, 0, 0);
+            if (late_sent.status != .success or self.tasks[0].hasCapability(expired.id) or
+                self.capabilities.query(expired.id) == null or !self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id)) or
+                (self.endpoints.descriptor(self.destination) catch return false).queued_messages != 1)
+                return fail("shared endpoint expiring move publication");
+            const late_receiver = self.select(1);
+            @memset(self.backing, 0xa5);
+            if (!dispatch.writeUserValue(late_receiver, self.aliases[1] + request_offset, self.receiveRequest())) return false;
+            @memcpy(self.saved, self.backing);
+            var before_ids: [task_runtime.MAX_TASK_CAPABILITIES]u64 = @splat(0);
+            @memcpy(before_ids[0..self.tasks[1].capability_count], self.tasks[1].capabilityIds());
+            const before_generation = self.tasks[1].capabilityGeneration();
+            const before_count = self.capabilities.activeCount();
+            const failed_transfer = endpoint_syscalls.dispatchEndpointRecv(self.port, late_receiver, 31, self.aliases[1] + request_offset, self.aliases[1] + response_offset, @sizeOf(abi.EndpointRecvResponse));
+            if (failed_transfer.status != .denied or failed_transfer.denial_reason != .capability_revoked or failed_transfer.bytes_written != 0 or
+                !std.mem.eql(u8, self.saved, self.backing) or self.capabilities.query(expired.id) != null or
+                self.capabilities.activeCount() != before_count - 1 or self.tasks[1].capability_count != receiver_grants + 1 or
+                self.tasks[1].capabilityGeneration() != before_generation or
+                !std.mem.eql(u64, self.tasks[1].capabilityIds(), before_ids[0..self.tasks[1].capability_count]) or
+                self.endpoints.hasPendingForTask(ids.task(self.tasks[1].id)) or
+                (self.endpoints.descriptor(self.destination) catch return false).queued_messages != 0)
+                return fail("shared endpoint expired move disposal");
+            // Preconsume output rejection preserves the queue; operational
+            // failure after dequeue instead releases the undelivered move.
+            return true;
+        }
+    };
+    if (currentRegisteredExecutor() != null or !smp.isRuntimeOwner() or x86.interruptsEnabled()) return false;
+    freestanding.paging.drainFrameCachesForArchitectureProof();
+    const baseline = freestanding.paging.frameStats().allocated;
+    const kernel_cr3 = x86.readCr3();
+    var executor = Executor{};
+    if (!claimCurrentExecutor(&executor)) return false;
+    defer if (executor.registration_cpu != null) {
+        executor.active_task_id = 0;
+        executor.active_mapping = null;
+        executor.reset();
+    };
+    {
+        // The real runtime and authority tables exceed the early stack budget.
+        // Their storage and the Kernel callback address stay stable until reset.
+        const runtime = table_backing.alloc(task_runtime.Runtime) orelse return Fixture.fail("shared endpoint runtime allocation");
+        runtime.initializeAllocated();
+        defer table_backing.free(task_runtime.Runtime, runtime);
+        const capabilities = table_backing.alloc(capability.CapabilityTable) orelse return Fixture.fail("shared endpoint capability allocation");
+        capabilities.initializeAllocated();
+        defer table_backing.free(capability.CapabilityTable, capabilities);
+        const endpoints = table_backing.alloc(endpoint.Table) orelse return Fixture.fail("shared endpoint queue allocation");
+        endpoints.initializeAllocated();
+        defer {
+            endpoints.deinit();
+            table_backing.free(endpoint.Table, endpoints);
+        }
+        var table = shared_memory.Table.initWithMappingLifetime(.{
+            .context = &executor,
+            .register = registerMappedObject,
+            .unregister = unregisterMappedObject,
+        });
+        defer table.deinit();
+        const policy_authority = @import("../core/principal.zig").PrincipalId{ .kind = .policy_authority, .serial = 1 };
+        var kernel: native_kernel.Kernel = undefined;
+        kernel.initInPlace(policy_authority, runtime, capabilities, endpoints, &table);
+        defer kernel.deinit();
+        if (!executor.claimRuntimeBinding(&kernel, runtime)) return Fixture.fail("shared endpoint runtime binding");
+        defer {
+            executor.active_task_id = 0;
+            executor.active_mapping = null;
+            // Task retirement must run while Kernel, the queues, shared Table and
+            // exact mapping handles still live. It disposes queued moves as well
+            // as recipient grants; plain queue deinit cannot supply that proof.
+            runtime.reset();
+            if (endpoints.activeCount() != 0 or capabilities.activeCount() != 0 or executor.mapped_object_count != 0)
+                native_util.impossibleByInvariant("shared endpoint proof retires all task authority");
+            executor.releaseAllMappings();
+            if (!executor.releaseRuntimeBinding(&kernel, runtime))
+                native_util.impossibleByInvariant("shared endpoint proof releases its exact runtime binding");
+        }
+        var port = component_port.KernelPort.init(&kernel);
+        var tasks: [2]*task_runtime.TaskRecord = undefined;
+        for (&tasks, 0..) |*task, index| {
+            task.* = runtime.createTask(.{
+                .owner = .{ .kind = .app, .serial = index + 2 },
+                .component_class = .app_component,
+                .budget = .{ .cpu_time_ticks = 1000, .memory_bytes = 2 * PAGE_SIZE, .endpoint_slots = 2, .shared_memory_bytes = 2 * PAGE_SIZE },
+                .local_only = true,
+            }) catch return Fixture.fail("shared endpoint task construction");
+            if (runtime.findAddressSpaceConst(task.*.address_space_id) == null or task.*.hasLoadedExecutable())
+                return Fixture.fail("shared endpoint real empty runtime space");
+        }
+        const mappings = executor.ensureMappingArena() catch return false;
+        var handles: [2]MappingHandle = undefined;
+        for (&handles, 0..) |*handle, index| {
+            const space_id = tasks[index].address_space_id;
+            handle.* = mappings.reserveHandle(space_id) orelse return false;
+        }
+        const space = freestanding.paging.createUserAddressSpace() catch return false;
+        executor.group_spaces[0] = space;
+        executor.group_refs[0] = 2;
+        for (handles, tasks) |handle, task| {
+            mappings.getByHandle(handle).?.mapping = .{
+                .state = .live,
+                .address_space_id = task.address_space_id,
+                .address_space = space,
+                .dispatch_metadata = .{ .owner_task_id = task.id },
+            };
+        }
+        const object = table.createWithAccess(ids.task(tasks[0].id), PAGE_SIZE + 37, .{ .ring = true }) catch return false;
+        var aliases: [2]usize = undefined;
+        for (&aliases, 0..) |*alias, index| {
+            executor.active_task_id = tasks[index].id;
+            executor.active_mapping_handle = handles[index];
+            executor.active_mapping = &mappings.getByHandle(handles[index]).?.mapping;
+            table.map(object.id, ids.task(tasks[index].id)) catch return false;
+            const descriptor = table.freestandingTaskMappingDescriptor(object.id, ids.task(tasks[index].id)) catch return false;
+            alias.* = @intCast(descriptor.virtual_base);
+        }
+        table.seal(object.id) catch return false;
+        // Empty real records admit no private ELF range: shared authority still
+        // comes solely from the selected Executor, live Table and exact token.
+        const peer_context = dispatch.UserMemoryContext.init(&port, tasks[1].id);
+        const peer_address = aliases[1] + PAGE_SIZE - 16;
+        var bytes: [32]u8 = undefined;
+        for (&bytes, 0..) |*byte, index| byte.* = @intCast(0x80 + index);
+        const destination: [*]u8 = @ptrFromInt(peer_address);
+        if (!dispatch.copyToUser(peer_context, destination[0..bytes.len], &bytes)) return false;
+        const observed = dispatch.readUserValue([32]u8, peer_context, peer_address) orelse return false;
+        if (!std.mem.eql(u8, &bytes, &observed) or
+            dispatch.validateUserRange(peer_context, aliases[0], 1, 1, .read) or
+            dispatch.preflightResponse(peer_context, aliases[1], object.size_bytes + 1, 1) == null) return false;
+        executor.active_task_id = tasks[0].id;
+        executor.active_mapping_handle = handles[0];
+        executor.active_mapping = &mappings.getByHandle(handles[0]).?.mapping;
+        const owner_context = dispatch.UserMemoryContext.init(&port, tasks[0].id);
+        const owner_address = aliases[0] + PAGE_SIZE - 16;
+        const owner_observed = dispatch.readUserValue([32]u8, owner_context, owner_address) orelse return false;
+        if (!std.mem.eql(u8, &bytes, &owner_observed) or
+            dispatch.validateUserRange(owner_context, aliases[1], 1, 1, .write) or
+            dispatch.preflightResponse(owner_context, owner_address, bytes.len, bytes.len) != null) return false;
+        const replacement: [32]u8 = @splat(0x5a);
+        const published = dispatch.writeResponse(owner_context, owner_address, replacement.len, replacement);
+        if (published.status != .success or published.bytes_written != replacement.len) return false;
+        const reread = dispatch.readUserValue([32]u8, owner_context, owner_address) orelse return false;
+        if (!std.mem.eql(u8, &replacement, &reread)) return false;
+        const source = endpoints.create(ids.task(tasks[0].id), "shared-sender", .{ .local_only = true }) catch return false;
+        const target = endpoints.create(ids.task(tasks[1].id), "shared-receiver", .{ .local_only = true }) catch return false;
+        endpoints.connect(source.id, target.id) catch return false;
+        const sending = capabilities.mintBootRoot(.{
+            .holder = tasks[0].owner,
+            .issuer = policy_authority,
+            .target = .{ .kind = .endpoint, .id = source.id.raw() },
+            .rights = .{ .endpoint = .{ .endpoint_send = true } },
+            .scope = .{ .task_id = tasks[0].id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+        }) catch return false;
+        const receiving = capabilities.mintBootRoot(.{
+            .holder = tasks[1].owner,
+            .issuer = policy_authority,
+            .target = .{ .kind = .endpoint, .id = target.id.raw() },
+            .rights = .{ .endpoint = .{ .endpoint_recv = true, .endpoint_close = true } },
+            .scope = .{ .task_id = tasks[1].id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+        }) catch return false;
+        const gift = capabilities.mintBootRoot(.{
+            .holder = tasks[0].owner,
+            .issuer = policy_authority,
+            .target = .{ .kind = .service, .id = 900 },
+            .rights = .{ .service = .{ .capability_pass = true, .time_query = true } },
+            .scope = .{ .task_id = tasks[0].id, .local_only = true },
+            .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+        }) catch return false;
+        runtime.grantCapability(tasks[0].id, sending.id) catch return false;
+        runtime.grantCapability(tasks[0].id, gift.id) catch return false;
+        runtime.grantCapability(tasks[1].id, receiving.id) catch return false;
+        const saved = table_backing.alloc([2 * PAGE_SIZE]u8) orelse return false;
+        defer table_backing.free([2 * PAGE_SIZE]u8, saved);
+        const backing_base = freestanding.paging.mappedRamSpan(object.page_base, object.page_count * PAGE_SIZE) orelse return false;
+        var fixture = Fixture{
+            .executor = &executor,
+            .mappings = mappings,
+            .handles = handles,
+            .tasks = tasks,
+            .capabilities = capabilities,
+            .endpoints = endpoints,
+            .port = &port,
+            .aliases = aliases,
+            .object = object,
+            .backing = @as([*]u8, @ptrFromInt(backing_base))[0 .. object.page_count * PAGE_SIZE],
+            .saved = saved,
+            .source = source.id,
+            .destination = target.id,
+            .sending_id = sending.id,
+            .receiving_id = receiving.id,
+            .gift_id = gift.id,
+        };
+        if (!fixture.endpointFlow()) return false;
+        const stale_memory = fixture.select(0);
+        const stale_send = abi.EndpointSendWireRequest{
+            .header = component_port.makeHeader(.endpoint_send, tasks[0].id),
+            .endpoint_capability_id = sending.id,
+            .payload_address = owner_address,
+            .payload_bytes = bytes.len,
+        };
+        if (!dispatch.writeUserValue(stale_memory, aliases[0], stale_send)) return false;
+        _ = table.revoke(object.id) catch return false;
+        if (dispatch.writeResponse(owner_context, owner_address, bytes.len, bytes).status != .invalid_response_buffer or
+            dispatch.readUserValue([32]u8, owner_context, owner_address) != null) return false;
+        const grants_after = capabilities.activeCount();
+        const stale = endpoint_syscalls.dispatchEndpointSend(&port, stale_memory, 32, aliases[0], 0, 0);
+        port.syscall_caller_task_id = 0;
+        if (stale.status != .invalid_request_pointer or stale.bytes_written != 0 or capabilities.activeCount() != grants_after or
+            (endpoints.descriptor(target.id) catch return false).queued_messages != 0 or endpoints.hasPendingForTask(ids.task(tasks[1].id)))
+            return Fixture.fail("shared endpoint retired request consumption");
+        if (x86.readCr3() != kernel_cr3 or x86.interruptsEnabled() or !smp.isRuntimeOwner()) return false;
+    }
+    executor.active_task_id = 0;
+    executor.active_mapping = null;
+    executor.reset();
+    freestanding.paging.drainFrameCachesForArchitectureProof();
+    return freestanding.paging.frameStats().allocated == baseline and x86.readCr3() == kernel_cr3;
 }
 
-pub fn requestEventWait() void {
-    const executor = registered_executor orelse return;
-    executor.last_yield_disposition = .wait_for_event;
+pub fn activeTaskId() u64 {
+    const executor = currentRegisteredExecutor() orelse return 0;
+    return executor.activeTaskId();
 }
 
 pub const Executor = struct {
     initialized: bool = false,
+    registration_cpu: ?u8 = null,
     binding_owner: ?*const anyopaque = null,
     bound_runtime: ?*task_runtime.Runtime = null,
     mapped_object_table: ?*shared_memory.Table = null,
@@ -566,10 +1831,8 @@ pub const Executor = struct {
     dispatch_quantum: DispatchQuantum = .{},
     active_mapping: ?*MappingEntry = null,
     active_mapping_handle: MappingHandle = .{},
+    active_dispatch_lease: ?dispatch_ownership.Ticket = null,
     handoff_completed: bool = false,
-    pending_user_context64: UserContext64 = .{},
-    last_trap_instruction_pointer: u64 = 0,
-    last_trap_stack_pointer: u64 = 0,
     last_trap_counter: u32 = 0,
     last_yield_disposition: userspace_bootstrap_mailbox.YieldDisposition = .runnable,
     last_yield_ui_revision: u64 = 0,
@@ -583,6 +1846,7 @@ pub const Executor = struct {
     mappings: MappingArenaBacking = if (heap_backed_mappings) null else MappingArena.init(),
     group_spaces: [GROUP_SPACE_COUNT]?freestanding.paging.UserAddressSpace = @splat(null),
     group_refs: [GROUP_SPACE_COUNT]u8 = @splat(0),
+    pending_retirements: [(task_runtime.MAX_TASKS + 63) / 64]u64 = @splat(0),
 
     comptime {
         if (heap_backed_mappings and @sizeOf(@This()) > units.kibibytes(1)) {
@@ -621,13 +1885,11 @@ pub const Executor = struct {
     }
 
     pub fn init(self: *Executor) void {
-        if (comptime builtin.target.os.tag == .freestanding) shared_memory.setMappedObjectLifetime(.{
-            .context = self,
-            .register = registerMappedObject,
-            .unregister = unregisterMappedObject,
-        });
+        if (comptime builtin.target.os.tag == .freestanding) {
+            if (!smp.isRuntimeOwner()) @call(.never_inline, executorInvariantFailure, .{.shared_executor_services_require_the_bsp_runtime_owner});
+            if (!claimCurrentExecutor(self)) @call(.never_inline, executorInvariantFailure, .{.selected_cpu_executor_registration_requires_its_exact_owner});
+        }
         if (builtin.target.os.tag != .freestanding) return;
-        registered_executor = self;
         if (self.initialized) return;
         if (!trap_handler_registered) {
             freestanding.isr.registerHandler(USERSPACE_TRAP_VECTOR, userspaceTrapHandler);
@@ -639,8 +1901,8 @@ pub const Executor = struct {
             trap_handler_registered = true;
         }
         const trap_stack_top = prepareKernelStack();
-        freestanding.gdt.setKernelStack(trap_stack_top);
-        freestanding.syscall64.setKernelStack(trap_stack_top);
+        if (!freestanding.syscall64.setKernelStack(trap_stack_top))
+            @call(.never_inline, executorInvariantFailure, .{.selected_cpu_trap_stack_must_be_provisioned_before_entry});
         self.initialized = true;
     }
 
@@ -649,9 +1911,194 @@ pub const Executor = struct {
         owner: *const anyopaque,
         runtime: *task_runtime.Runtime,
     ) bool {
-        if (self.binding_owner != null or self.bound_runtime != null) return false;
+        if (!bspMappingTransaction() or runtime.lifecycle_transition_active or executionOwnershipOutstanding(runtime) or self.binding_owner != null or self.bound_runtime != null) return false;
         self.binding_owner = owner;
         self.bound_runtime = runtime;
+        return true;
+    }
+
+    // The BSP provisions a mapping route, never AP native entry. Publication
+    // happens before any lease; a lease pins every member of its Runtime domain.
+    pub fn claimMappingRegistration(self: *Executor, cpu: u8, owner: *const anyopaque, runtime: *task_runtime.Runtime) bool {
+        if (!bspMappingTransaction() or cpu >= cpu_identity.MAX_CPUS or runtime.lifecycle_transition_active or executionOwnershipOutstanding(runtime) or
+            self.binding_owner != owner or self.bound_runtime != runtime) return false;
+        if (self.registration_cpu) |selected| return selected == cpu and registeredExecutor(cpu) == self;
+        if (registeredExecutor(cpu) != null) return false;
+        self.registration_cpu = cpu;
+        @atomicStore(?*Executor, &executor_registrations[cpu].executor, self, .release);
+        return true;
+    }
+
+    pub inline fn releaseMappingRegistration(self: *Executor, cpu: u8, owner: *const anyopaque, runtime: *task_runtime.Runtime) bool {
+        if (!bspMappingTransaction() or runtime.lifecycle_transition_active or executionOwnershipOutstanding(runtime) or registeredDomainExecutor(cpu, owner, runtime) != self or
+            self.active_task_id != 0 or self.active_mapping != null or self.active_dispatch_lease != null or self.materializedCount() != 0 or
+            self.mapped_object_count != 0 or self.mappedObjectLifetimeIsBound()) return false;
+        @atomicStore(?*Executor, &executor_registrations[cpu].executor, null, .release);
+        self.registration_cpu = null;
+        return true;
+    }
+
+    fn mappedObjectLifetime(self: *Executor) shared_memory.MappingLifetime {
+        return .{ .context = self, .register = registerMappedObject, .unregister = unregisterMappedObject };
+    }
+
+    pub fn bindMappedObjectLifetime(self: *Executor) bool {
+        const runtime = self.bound_runtime orelse return false;
+        if (!bspMappingTransaction() or self.binding_owner == null or executionOwnershipOutstanding(runtime) or
+            self.registration_cpu != 0 or currentRegisteredExecutor() != self) return false;
+        return shared_memory.bindMappedObjectLifetime(self.mappedObjectLifetime());
+    }
+
+    pub fn mappedObjectLifetimeIsBound(self: *Executor) bool {
+        return shared_memory.mappedObjectLifetimeIsBound(self.mappedObjectLifetime());
+    }
+
+    pub fn unbindMappedObjectLifetime(self: *Executor) bool {
+        const runtime = self.bound_runtime orelse return false;
+        if (!bspMappingTransaction() or runtime.lifecycle_transition_active or executionOwnershipOutstanding(runtime)) return false;
+        return shared_memory.unbindMappedObjectLifetime(self.mappedObjectLifetime());
+    }
+
+    // Isolated CPL0 fixture admission uses the real arena/root/lifetime checks,
+    // without AP native-entry setup, executable images or fabricated xstate.
+    pub fn installPreparedMappingForArchitectureProof(self: *Executor, task: *const task_runtime.TaskRecord, space: freestanding.paging.UserAddressSpace, out: *MappingHandle) bool {
+        if (comptime builtin.target.os.tag != .freestanding) return false;
+        if (comptime !@hasDecl(root, "ARCHITECTURE_SMP_PROOF") or !root.ARCHITECTURE_SMP_PROOF)
+            @compileError("prepared architecture mappings require an isolated proof root");
+        const runtime = self.bound_runtime orelse return false;
+        const owner = self.binding_owner orelse return false;
+        const cpu = self.registration_cpu orelse return false;
+        if (!bspMappingTransaction() or runtime.lifecycle_transition_active or executionOwnershipOutstanding(runtime) or registeredDomainExecutor(cpu, owner, runtime) != self or
+            runtime.findConst(task.id) != task or task.state != .active or self.findMapping(task.address_space_id) != null) return false;
+        const record = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
+        if (record.owner_task_id != task.id or freestanding.paging.checkedUserAddressSpacePhysicalRoot(&space) == null) return false;
+        const mappings = self.ensureMappingArena() catch return false;
+        const handle = mappings.reserveHandle(task.address_space_id) orelse return false;
+        mappings.getByHandle(handle).?.mapping = .{
+            .state = .live,
+            .address_space_id = task.address_space_id,
+            .address_space = space,
+            .dispatch_metadata = .{ .owner_task_id = task.id },
+        };
+        out.* = handle;
+        return true;
+    }
+
+    // The isolated CPL0 callback needs the same pinned context/private storage
+    // as the production runner. This fixture never admits native user entry.
+    pub fn installPreparedExecutionMappingForArchitectureProof(
+        self: *Executor,
+        task: *const task_runtime.TaskRecord,
+        space: freestanding.paging.UserAddressSpace,
+        context: UserContext64,
+        out: *MappingHandle,
+    ) bool {
+        if (comptime builtin.target.os.tag != .freestanding) return false;
+        if (comptime !architecture_smp_proof) @compileError("prepared execution fixtures require an isolated proof root");
+        if (!bspMappingTransaction() or !freestanding.paging.kernelAddressSpaceActive() or
+            self.active_task_id != 0 or self.active_mapping != null or self.active_dispatch_lease != null or
+            context.instruction_pointer == 0 or context.stack_pointer == 0) return false;
+        const storage = table_backing.alloc(xstate.Storage) orelse return false;
+        storage.initialize();
+        var handle: MappingHandle = undefined;
+        if (!self.installPreparedMappingForArchitectureProof(task, space, &handle)) {
+            storage.erase();
+            table_backing.free(xstate.Storage, storage);
+            return false;
+        }
+        const mapping = self.findMappingByHandle(handle, task.address_space_id).?;
+        mapping.owned_xstate = storage;
+        mapping.user_context64 = context;
+        mapping.dispatch_metadata.initial_instruction_pointer = context.instruction_pointer;
+        mapping.dispatch_metadata.initial_stack_pointer = context.stack_pointer;
+        self.initialized = true;
+        self.probe_marker_printed = true;
+        self.resume_marker_printed = true;
+        out.* = handle;
+        return true;
+    }
+
+    pub fn bindPreparedExecutionForArchitectureProof(
+        self: *Executor,
+        task: *const task_runtime.TaskRecord,
+        handle: MappingHandle,
+        ticket: dispatch_ownership.Ticket,
+        out: *ArchitecturePreparedCommand,
+    ) bool {
+        if (comptime builtin.target.os.tag != .freestanding) return false;
+        if (comptime !architecture_smp_proof) @compileError("prepared execution binding requires an isolated proof root");
+        if (!bspMappingTransaction() or !freestanding.paging.kernelAddressSpaceActive() or
+            !self.initialized or self.active_task_id != 0 or self.active_mapping != null or self.active_dispatch_lease != null) return false;
+        const runtime = self.bound_runtime orelse return false;
+        const owner = self.binding_owner orelse return false;
+        const cpu = self.registration_cpu orelse return false;
+        if (cpu == 0 or ticket.cpu != cpu or registeredDomainExecutor(cpu, owner, runtime) != self or
+            runtime.findConst(task.id) != task or task.state != .active) return false;
+        var identity: dispatch_ownership.Identity = undefined;
+        runtime.execution.identityInto(ticket, &identity) catch return false;
+        if (identity.task_handle != runtime.taskHandleForResolved(task).value or identity.task_id != task.id or
+            identity.process_generation != task.process_generation or identity.address_space_id != task.address_space_id) return false;
+        const mapping = self.findMappingByHandle(handle, task.address_space_id) orelse return false;
+        const space = if (mapping.address_space) |*value| value else return false;
+        if (mapping.dispatch_metadata.owner_task_id != task.id or mapping.owned_xstate == null or
+            !self.userAddressSpacePreparationReady(space)) return false;
+        const physical_root = freestanding.paging.checkedUserAddressSpacePhysicalRoot(space) orelse return false;
+        const top = preparedKernelStackForCpu(cpu) orelse return false;
+        const candidate: PreparedDispatch = .{ .ticket = ticket, .trap_stack_top = top };
+        runtime.execution.bindPrepared(ticket, handle.value, physical_root) catch return false;
+        out.* = candidate;
+        return true;
+    }
+
+    pub fn runPreparedExecutionForArchitectureProof(
+        self: *Executor,
+        command: *const ArchitecturePreparedCommand,
+        callback: ArchitecturePreparedCallback,
+        callback_context: *anyopaque,
+    ) bool {
+        if (comptime builtin.target.os.tag != .freestanding) return false;
+        if (comptime !architecture_smp_proof) @compileError("prepared execution owner requires an isolated proof root");
+        return self.runPreparedTaskSlice(command, ArchitecturePreparedBackend{
+            .callback = callback,
+            .callback_context = callback_context,
+        });
+    }
+
+    pub fn publishPreparedExecutionForArchitectureProof(
+        self: *Executor,
+        command: *const ArchitecturePreparedCommand,
+        out: *dispatch_transport.Key,
+    ) bool {
+        if (comptime builtin.target.os.tag != .freestanding) return false;
+        if (comptime !architecture_smp_proof) @compileError("queued execution fixtures require an isolated proof root");
+        return self.publishPreparedCommandInto(command, out);
+    }
+
+    fn publishPreparedCommandInto(self: *Executor, command: *const PreparedDispatch, out: *dispatch_transport.Key) bool {
+        if (!bspMappingTransaction() or !freestanding.paging.kernelAddressSpaceActive() or !self.initialized or
+            self.active_task_id != 0 or self.active_mapping != null or self.active_dispatch_lease != null) return false;
+        const runtime = self.bound_runtime orelse return false;
+        const owner = self.binding_owner orelse return false;
+        const ticket = command.ticket;
+        if (ticket.issuer != &runtime.execution or self.registration_cpu != ticket.cpu or
+            registeredDomainExecutor(ticket.cpu, owner, runtime) != self or
+            preparedKernelStackForCpu(ticket.cpu) != command.trap_stack_top) return false;
+        runtime.execution.preparedReady(ticket) catch return false;
+        var identity: dispatch_ownership.Identity = undefined;
+        runtime.execution.identityInto(ticket, &identity) catch return false;
+        const mapping = self.findMapping(identity.address_space_id) orelse return false;
+        if (mapping.dispatch_metadata.owner_task_id != identity.task_id or mapping.owned_xstate == null or
+            mappingPhysicalRoot(mapping) == 0) return false;
+        dispatch_transport.global.publishInto(command.*, out) catch return false;
+        return true;
+    }
+
+    pub fn prepareSyscallCopySession(self: *Executor, claim: *const dispatch_ownership.ClaimedSyscall, out: *syscall_broker.CopySession) bool {
+        const interrupts_enabled = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        const kernel_active = if (comptime builtin.target.os.tag == .freestanding) freestanding.paging.kernelAddressSpaceActive() else true;
+        var resolved: SyscallCopyMapping = undefined;
+        if (!syscallCopyMappingInto(self, claim, interrupts_enabled, kernel_active, &resolved)) return false;
+        out.* = .{ .context = self, .key = claim.key, .bound = claim.bound, .read = readSyscallCopy, .prepare_output = prepareSyscallOutput, .write_outputs = writeSyscallOutputs };
         return true;
     }
 
@@ -662,7 +2109,9 @@ pub const Executor = struct {
     ) bool {
         const owner = self.binding_owner orelse return false;
         const runtime = self.bound_runtime orelse return false;
-        if (owner != expected_owner or runtime != expected_runtime) return false;
+        if (!bspMappingTransaction() or runtime.lifecycle_transition_active or executionOwnershipOutstanding(runtime) or owner != expected_owner or runtime != expected_runtime or
+            self.materializedCount() != 0 or self.mapped_object_count != 0 or self.active_task_id != 0 or self.active_mapping != null or
+            self.active_dispatch_lease != null or self.mappedObjectLifetimeIsBound()) return false;
         self.binding_owner = null;
         self.bound_runtime = null;
         return true;
@@ -677,6 +2126,17 @@ pub const Executor = struct {
     }
 
     pub fn retireAddressSpace(self: *Executor, event: task_runtime.AddressSpaceRetirementEvent) void {
+        self.retireAddressSpaceChecked(event) catch
+            @call(.never_inline, executorInvariantFailure, .{.executor_retirement_requires_its_exact_cpu_registration_owner});
+    }
+
+    fn retireAddressSpaceChecked(self: *Executor, event: task_runtime.AddressSpaceRetirementEvent) RetirementOwnerError!void {
+        try requireRetirementOwner(self);
+        const restore_interrupts = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_interrupts) x86.sti();
+        };
         if (self.last_fault_address_space_id == event.address_space_id) {
             self.clearUserPageFaultObservation();
         }
@@ -684,11 +2144,23 @@ pub const Executor = struct {
         const mapping = resolution.entry;
         if (self.active_task_id != 0 and self.active_mapping == mapping) {
             if (!resolution.handle.eql(self.active_mapping_handle)) {
-                native_util.impossibleByInvariant("active userspace mapping handle points at a different slot");
+                @call(.never_inline, executorInvariantFailure, .{.active_userspace_mapping_handle_points_at_a_different_slot});
             }
-            mapping.state = .retire_pending;
+            self.queueMappingRetirement(resolution.slot_index, mapping);
+            if (self.active_dispatch_lease) |ticket| {
+                const runtime = self.bound_runtime orelse
+                    @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_its_exact_execution_lease});
+                runtime.requestExecutionStop(ticket) catch
+                    @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_its_exact_execution_lease});
+            }
             self.handoff_completed = true;
-            zigos_userspace_resume_requested = 1;
+            if (self.registration_cpu == cpu_identity.currentIndex() or
+                (builtin.target.os.tag != .freestanding and self.registration_cpu == null and cpu_identity.currentIndex() == 0))
+                native_entry.current().resume_requested = 1;
+            return;
+        }
+        if (!self.mappingRetirementReady(mapping)) {
+            self.queueMappingRetirement(resolution.slot_index, mapping);
             return;
         }
         releaseMapping(self, resolution.mappings, resolution.slot_index, mapping);
@@ -700,8 +2172,27 @@ pub const Executor = struct {
     }
 
     pub fn reset(self: *Executor) void {
+        self.resetChecked() catch @call(.never_inline, executorInvariantFailure, .{.executor_reset_requires_its_exact_cpu_registration_owner});
+    }
+
+    fn resetChecked(self: *Executor) error{ WrongCpu, RegistrationMismatch, ExecutionLeased, AddressSpaceActive }!void {
+        try requireRetirementOwner(self);
+        if ((self.registration_cpu == null and currentRegisteredExecutor() == self) or self.mappedObjectLifetimeIsBound()) return error.RegistrationMismatch;
+        const restore_interrupts = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_interrupts) x86.sti();
+        };
         if (self.active_task_id != 0) {
-            native_util.impossibleByInvariant("cannot reset userspace executor while an address space is active");
+            @call(.never_inline, executorInvariantFailure, .{.cannot_reset_userspace_executor_while_an_address_space_is_active});
+        }
+        if (self.bound_runtime) |runtime| if (runtime.lifecycle_transition_active or executionOwnershipOutstanding(runtime)) return error.ExecutionLeased;
+        if (self.mappingArena()) |mappings| {
+            for (0..mappings.claimedCount()) |index| {
+                const slot = mappings.slotAt(index);
+                if (!slot.in_use) continue;
+                if (!self.mappingRetirementReady(&slot.mapping)) return error.AddressSpaceActive;
+            }
         }
         self.releaseAllMappings();
         self.initialized = false;
@@ -711,10 +2202,8 @@ pub const Executor = struct {
         self.dispatch_quantum = .{};
         self.active_mapping = null;
         self.active_mapping_handle = .{};
+        self.active_dispatch_lease = null;
         self.handoff_completed = false;
-        self.pending_user_context64 = .{};
-        self.last_trap_instruction_pointer = 0;
-        self.last_trap_stack_pointer = 0;
         self.last_trap_counter = 0;
         self.last_user_exception = null;
         self.last_fault_task_id = 0;
@@ -723,13 +2212,13 @@ pub const Executor = struct {
         self.last_fault_error_code = 0;
         self.user_page_fault_count = 0;
         if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
-        zigos_userspace_resume_requested = 0;
-        zigos_userspace_resume_esp = 0;
-        zigos_userspace_resume_eip = 0;
-        publishRootActiveTaskId(0);
-        if (registered_executor == self) {
-            shared_memory.clearMappedObjectLifetime(self);
-            registered_executor = null;
+        if (self.registration_cpu) |cpu| {
+            if (cpu == cpu_identity.currentIndex()) {
+                native_entry.clearContinuation();
+                publishRootActiveTaskId(0);
+            }
+            @atomicStore(?*Executor, &executor_registrations[cpu].executor, null, .release);
+            self.registration_cpu = null;
         }
     }
 
@@ -775,10 +2264,6 @@ pub const Executor = struct {
     ) bool {
         const mapping = self.findMapping(address_space_id) orelse return false;
         return mapping.last_user_counter == expected_counter;
-    }
-
-    pub fn lastYieldUiRevision(self: *const Executor) u64 {
-        return self.last_yield_ui_revision;
     }
 
     pub fn lastUserException(self: *const Executor) ?UserException {
@@ -868,7 +2353,9 @@ pub const Executor = struct {
         const image = catalog.findById(task.launch.image_id) orelse return false;
         if (!image.elf_file.isPresent() or image.bootstrap_mailbox_address == 0) return false;
         self.init();
-        const mapping = (self.ensureMaterialized(address_space, image) catch return false).entry;
+        var resolution: MappingResolution = undefined;
+        self.ensureMaterializedInto(address_space, image, &resolution) catch return false;
+        const mapping = resolution.entry;
         if (mapping.resume_valid or mapping.initial_mailbox_prepared or mapping.mailbox_publication_cache.initialized) return false;
         var update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks) orelse return false;
         update.document = binding;
@@ -929,7 +2416,9 @@ pub const Executor = struct {
         const image = catalog.findById(task.launch.image_id) orelse return false;
         if (!image.elf_file.isPresent() or image.bootstrap_mailbox_address == 0) return false;
         self.init();
-        const mapping = (self.ensureMaterialized(address_space, image) catch return false).entry;
+        var resolution: MappingResolution = undefined;
+        self.ensureMaterializedInto(address_space, image, &resolution) catch return false;
+        const mapping = resolution.entry;
         var update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks) orelse return false;
         update.preserve_runtime_state = mapping.resume_valid or mapping.initial_mailbox_prepared;
         const preserved = preservedMailboxForUpdate(mapping, readUserspaceMailboxFromMapping(mapping, update.address), update);
@@ -975,110 +2464,182 @@ pub const Executor = struct {
         task: *const task_runtime.TaskRecord,
         mapping_handle: *MappingHandle,
         now_ticks: u64,
-    ) ExecutionOutcome {
-        if (builtin.target.os.tag != .freestanding) return .unavailable;
-        if (!smp.isRuntimeOwner()) return .unavailable;
-        if (!self.initialized) return .unavailable;
-        if (self.bound_runtime != runtime) return .unavailable;
-        var task_borrow = runtime.borrowResolvedTask(task);
-        defer task_borrow.release();
-        _ = xhci_driver_task.dispatchForTask(task.id);
+        ticket: dispatch_ownership.Ticket,
+    ) ReturnRecord {
+        if (builtin.target.os.tag != .freestanding) return .{};
+        if (!smp.isRuntimeOwner()) return .{};
+        // BSP preparation and synchronous receipt collection share the same
+        // nonreentrant transaction; entry independently restores the user's IF.
+        const restore_interrupts = x86.interruptsEnabled();
+        x86.cli();
+        defer if (restore_interrupts) x86.sti();
+        var prepared: PreparedDispatch = undefined;
+        if (!self.prepareTaskDispatchInto(catalog, runtime, capability_table, task, mapping_handle, now_ticks, ticket, &prepared, NativePreparedDispatch{})) return .{};
+        if (!self.runPreparedTaskSlice(&prepared, NativePreparedDispatch{})) {
+            runtime.execution.cancelUnstarted(ticket) catch
+                @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_its_exact_execution_lease});
+        }
+        var returned: ReturnRecord = undefined;
+        runtime.execution.consumePreparedReturnInto(ticket, &returned) catch
+            @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_its_exact_execution_lease});
+        return returned;
+    }
+
+    // BSP materialization remains serialized. The image-static channel keeps
+    // the resulting lease and route owned until the selected CPU completes.
+    pub fn prepareQueuedTaskInto(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *task_runtime.Runtime,
+        capability_table: *const capability.CapabilityTable,
+        task: *const task_runtime.TaskRecord,
+        mapping_handle: *MappingHandle,
+        now_ticks: u64,
+        ticket: dispatch_ownership.Ticket,
+        out: *dispatch_transport.Key,
+    ) bool {
+        if (comptime builtin.target.os.tag != .freestanding) return false;
+        if (!smp.isRuntimeOwner()) return false;
+        const restore_interrupts = x86.interruptsEnabled();
+        x86.cli();
+        defer if (restore_interrupts) x86.sti();
+        var command: PreparedDispatch = undefined;
+        if (!self.prepareTaskDispatchInto(catalog, runtime, capability_table, task, mapping_handle, now_ticks, ticket, &command, NativePreparedDispatch{})) return false;
+        return self.publishPreparedCommandInto(&command, out);
+    }
+
+    fn prepareTaskDispatchInto(
+        self: *Executor,
+        catalog: *userspace_loader.Catalog,
+        runtime: *task_runtime.Runtime,
+        capability_table: *const capability.CapabilityTable,
+        task: *const task_runtime.TaskRecord,
+        mapping_handle: *MappingHandle,
+        now_ticks: u64,
+        ticket: dispatch_ownership.Ticket,
+        out: *PreparedDispatch,
+        backend: anytype,
+    ) bool {
+        if (!bspMappingTransaction() or !backend.preparationReady()) return false;
+        if (!self.initialized or self.bound_runtime != runtime or self.registration_cpu != ticket.cpu or
+            registeredExecutor(ticket.cpu) != self or self.active_task_id != 0 or self.active_dispatch_lease != null) return false;
+        var identity: dispatch_ownership.Identity = undefined;
+        runtime.execution.identityInto(ticket, &identity) catch return false;
+        if (identity.task_handle != runtime.taskHandleForResolved(task).value or identity.task_id != task.id or
+            identity.process_generation != task.process_generation or identity.address_space_id != task.address_space_id) return false;
+        backend.dispatchService(task.id);
         if (debugIndexChecksEnabled()) {
             const bound_task = runtime.findConst(task.id) orelse
                 native_util.impossibleByInvariant("prepared userspace task is absent from the bound runtime");
             if (bound_task != task) native_util.impossibleByInvariant("prepared userspace task does not belong to the bound runtime");
         }
-        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return .unavailable;
-
+        if (task.state != .active or !task.runsAsUserspaceProcess() or !task.hasLoadedExecutable()) return false;
         const mapping = self.resolveMappingForDispatch(mapping_handle, task.address_space_id) orelse blk: {
-            const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return .unavailable;
-            if (address_space.owner_task_id != task.id or address_space.image_id != task.launch.image_id) return .unavailable;
-            const image = catalog.findById(task.launch.image_id) orelse return .unavailable;
-            if (!image.elf_file.isPresent()) return .unavailable;
-            const resolution = self.ensureMaterialized(address_space, image) catch return .unavailable;
+            const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
+            if (address_space.owner_task_id != task.id or address_space.image_id != task.launch.image_id) return false;
+            const image = catalog.findById(task.launch.image_id) orelse return false;
+            if (!image.elf_file.isPresent()) return false;
+            var resolution: MappingResolution = undefined;
+            self.ensureMaterializedInto(address_space, image, &resolution) catch return false;
             mapping_handle.* = resolution.handle;
             break :blk resolution.entry;
         };
-        if (mapping.dispatch_metadata.owner_task_id != task.id or
-            mapping.dispatch_metadata.image_id != task.launch.image_id)
-        {
-            native_util.impossibleByInvariant("materialized userspace mapping identity changed without retirement");
-        }
-
+        if (mapping.dispatch_metadata.owner_task_id != task.id or mapping.dispatch_metadata.image_id != task.launch.image_id)
+            @call(.never_inline, executorInvariantFailure, .{.materialized_userspace_mapping_identity_changed_without_retirement});
+        const space = if (mapping.address_space) |*value| value else return false;
+        if (!self.userAddressSpacePreparationReady(space) or mapping.owned_xstate == null) return false;
+        const physical_root = freestanding.paging.checkedUserAddressSpacePhysicalRoot(space) orelse return false;
+        const trap_stack_top = backend.stackTop(ticket.cpu) orelse return false;
         const mailbox_update = self.prepareBootstrapMailbox(mapping, task, capability_table, now_ticks);
-        const kernel_page_directory = freestanding.paging.getCurrentPageDirectory();
-        const instruction_pointer = if (mapping.resume_valid)
-            mapping.resume_instruction_pointer
-        else
-            mapping.dispatch_metadata.initial_instruction_pointer;
-        const stack_pointer = if (mapping.resume_valid)
-            mapping.resume_stack_pointer
-        else
-            mapping.dispatch_metadata.initial_stack_pointer;
-        self.pending_user_context64 = if (mapping.resume_valid)
-            mapping.user_context64
-        else
-            .{
-                .instruction_pointer = instruction_pointer,
-                .stack_pointer = stack_pointer,
-            };
-
-        const nx_probe_target = if (include_verification_evidence and
-            (mapping.dispatch_metadata.contractFlags() & userspace_flags.FLAG_NX_PROOF_PROBE) != 0)
-            mapping.dispatch_metadata.bootstrap_mailbox_address
-        else
-            0;
-
-        self.active_mapping = mapping;
-        self.active_mapping_handle = mapping_handle.*;
-        self.active_task_id = task.id;
-        if (comptime include_verification_evidence) self.active_nx_probe_target = nx_probe_target;
-        publishRootActiveTaskId(task.id);
-        self.handoff_completed = false;
-        self.last_yield_disposition = .runnable;
-        self.last_yield_ui_revision = 0;
-        self.last_user_exception = null;
-        zigos_userspace_resume_requested = 0;
-
-        activateMappingForDispatch(mapping, mailbox_update);
-        _ = @call(.never_inline, enterUserspace, .{
-            self,
-        });
-
-        if (freestanding.paging.getCurrentPageDirectory() != kernel_page_directory) {
-            freestanding.paging.switchToKernelAddressSpace();
-        }
-
-        const completed_mapping_handle = self.active_mapping_handle;
-        self.active_task_id = 0;
-        self.dispatch_quantum = .{};
-        self.active_mapping = null;
-        self.active_mapping_handle = .{};
-        if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
-        publishRootActiveTaskId(0);
-        zigos_userspace_resume_requested = 0;
-
-        const user_faulted = self.last_user_exception != null;
-        if (!user_faulted and self.handoff_completed and !self.probe_marker_printed) {
-            common.printBootMarker(boot_markers.userspace_exec_probe_ok);
-            self.probe_marker_printed = true;
-        }
-        if (!user_faulted and
-            self.handoff_completed and
-            mapping.yield_count >= 2 and
-            mapping.last_user_counter >= 2 and
-            !self.resume_marker_printed)
-        {
-            common.printBootMarker(boot_markers.userspace_resume_ok);
-            self.resume_marker_printed = true;
-        }
-        self.releaseRetiredMappingAfterHandoff(completed_mapping_handle, mapping);
-        if (!self.handoff_completed) return .unavailable;
-        if (user_faulted) return .faulted;
-        return switch (self.last_yield_disposition) {
-            .runnable => .yielded,
-            .wait_for_event => .wait_for_event,
+        if (!publishMailboxForDispatch(mapping, mailbox_update, backend)) return false;
+        // The lease makes this mapping's prepared context immutable until the
+        // selected owner captures its next user frame. Preserve resumed state.
+        if (!mapping.resume_valid) mapping.user_context64 = .{
+            .instruction_pointer = mapping.dispatch_metadata.initial_instruction_pointer,
+            .stack_pointer = mapping.dispatch_metadata.initial_stack_pointer,
         };
+        const candidate: PreparedDispatch = .{ .ticket = ticket, .trap_stack_top = trap_stack_top };
+        // Publication follows all materialization, authority and mailbox work.
+        runtime.execution.bindPrepared(ticket, mapping_handle.value, physical_root) catch return false;
+        // The synchronous caller owns this shell; queued publication copies it
+        // into image-owned transport before another CPU can claim it.
+        out.* = candidate;
+        return true;
+    }
+
+    fn runPreparedTaskSlice(self: *Executor, prepared: *const PreparedDispatch, backend: anytype) bool {
+        const ticket = prepared.ticket;
+        const coordinator = @constCast(ticket.issuer);
+        const restore_interrupts = backend.mask();
+        defer backend.restore(restore_interrupts);
+        if (!backend.ownerAvailable()) return false;
+        var bound: dispatch_ownership.BoundIdentity = undefined;
+        // Claim before touching entry payload, Executor or local arena backing.
+        coordinator.startPreparedInto(ticket, &bound) catch return false;
+        const authenticated_mapping: ?*MappingEntry = blk: {
+            if (self.bound_runtime == null or &self.bound_runtime.?.execution != coordinator or
+                self.registration_cpu != ticket.cpu or currentRegisteredExecutor() != self or !self.initialized or
+                self.active_task_id != 0 or self.active_dispatch_lease != null or !backend.entryReady(prepared.trap_stack_top)) break :blk null;
+            const selected = self.findMappingByHandle(.{ .value = bound.mapping_handle }, bound.identity.address_space_id) orelse break :blk null;
+            if (selected.dispatch_metadata.owner_task_id != bound.identity.task_id or mappingPhysicalRoot(selected) != bound.physical_root or
+                selected.owned_xstate == null) break :blk null;
+            break :blk selected;
+        };
+        var returned: ReturnRecord = .{};
+        if (authenticated_mapping) |mapping| {
+            self.active_mapping = mapping;
+            self.active_mapping_handle = .{ .value = bound.mapping_handle };
+            self.active_dispatch_lease = ticket;
+            self.active_task_id = bound.identity.task_id;
+            if (comptime include_verification_evidence) self.active_nx_probe_target = if ((mapping.dispatch_metadata.contractFlags() & userspace_flags.FLAG_NX_PROOF_PROBE) != 0) mapping.dispatch_metadata.bootstrap_mailbox_address else 0;
+            publishRootActiveTaskId(bound.identity.task_id);
+            self.handoff_completed = false;
+            self.last_yield_disposition = .runnable;
+            self.last_yield_ui_revision = 0;
+            self.last_user_exception = null;
+            native_entry.current().resume_requested = 0;
+            backend.activate(mapping);
+            backend.enter(self);
+            requireIdleSyscallReturn();
+            backend.switchToKernel();
+            self.active_task_id = 0;
+            self.dispatch_quantum = .{};
+            self.active_mapping = null;
+            self.active_mapping_handle = .{};
+            if (comptime include_verification_evidence) self.active_nx_probe_target = 0;
+            publishRootActiveTaskId(0);
+            native_entry.current().resume_requested = 0;
+            const user_faulted = self.last_user_exception != null;
+            if (!user_faulted and self.handoff_completed and !self.probe_marker_printed) {
+                common.printBootMarker(boot_markers.userspace_exec_probe_ok);
+                self.probe_marker_printed = true;
+            }
+            if (!user_faulted and self.handoff_completed and mapping.yield_count >= 2 and
+                mapping.last_user_counter >= 2 and !self.resume_marker_printed)
+            {
+                common.printBootMarker(boot_markers.userspace_resume_ok);
+                self.resume_marker_printed = true;
+            }
+            returned.outcome = if (!self.handoff_completed) .unavailable else if (user_faulted) .faulted else switch (self.last_yield_disposition) {
+                .runnable => .yielded,
+                .wait_for_event => .wait_for_event,
+            };
+            returned.ui_revision = self.last_yield_ui_revision;
+            if (self.last_user_exception) |fault| {
+                returned.fault_vector = fault.vector;
+                returned.fault_error_code = fault.error_code;
+                returned.fault_instruction_pointer = fault.instruction_pointer;
+                returned.fault_address = fault.fault_address;
+            }
+            if (!continuationCleared(native_entry.current()) or !backend.kernelActive())
+                @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_only_its_cleared_kernel_continuation});
+            self.active_dispatch_lease = null;
+        }
+        // This release ends owner access to Executor, Mapping, Runtime and the
+        // prepared payload. Only local scalars and interrupt restoration remain.
+        coordinator.ackPreparedReturn(ticket, returned) catch
+            @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_its_exact_execution_lease});
+        return true;
     }
 
     pub fn materializeTaskForProof(
@@ -1095,7 +2656,8 @@ pub const Executor = struct {
         const address_space = runtime.findAddressSpaceConst(task.address_space_id) orelse return false;
         const image = catalog.findById(task.launch.image_id) orelse return false;
         if (!image.elf_file.isPresent()) return false;
-        _ = self.ensureMaterialized(address_space, image) catch return false;
+        var resolution: MappingResolution = undefined;
+        self.ensureMaterializedInto(address_space, image, &resolution) catch return false;
         return true;
     }
 
@@ -1124,7 +2686,7 @@ pub const Executor = struct {
         self.active_task_id = task_id;
         publishRootActiveTaskId(task_id);
         self.handoff_completed = false;
-        zigos_userspace_resume_requested = 0;
+        native_entry.current().resume_requested = 0;
         freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
 
         const rehosted = runtime.rehostTask(task_id, now_ticks) catch false;
@@ -1132,7 +2694,7 @@ pub const Executor = struct {
             freestanding.paging.getCurrentPageDirectory() == user_page_directory and
             mapping.state == .retire_pending and
             self.handoff_completed and
-            zigos_userspace_resume_requested == 1 and
+            native_entry.current().resume_requested == 1 and
             freestanding.paging.frameStats().allocated == frames_before;
 
         freestanding.paging.switchToKernelAddressSpace();
@@ -1141,7 +2703,7 @@ pub const Executor = struct {
         self.active_mapping = null;
         self.active_mapping_handle = .{};
         publishRootActiveTaskId(0);
-        zigos_userspace_resume_requested = 0;
+        native_entry.current().resume_requested = 0;
         self.releaseRetiredMappingAfterHandoff(completed_mapping_handle, mapping);
         return deferred and self.findMapping(retired_address_space_id) == null;
     }
@@ -1169,11 +2731,12 @@ pub const Executor = struct {
         );
     }
 
-    fn ensureMaterialized(
+    fn ensureMaterializedInto(
         self: *Executor,
         address_space: *const task_runtime.AddressSpaceRecord,
         image: *const userspace_loader.ImageRecord,
-    ) MaterializationError!MappingResolution {
+        out: *MappingResolution,
+    ) MaterializationError!void {
         const dispatch_metadata = try prepareMappingDispatchMetadata(
             address_space.owner_task_id,
             address_space.image_id,
@@ -1187,16 +2750,26 @@ pub const Executor = struct {
         );
         if (self.findMappingWithHandle(address_space.id)) |resolution| {
             if (resolution.entry.state != .live) return error.AddressSpaceRetiring;
+            const space = if (resolution.entry.address_space) |*value| value else return error.AddressSpaceOwnerInvalid;
+            if (!self.userAddressSpacePreparationReady(space)) return error.AddressSpaceLeased;
             if (!mappingDispatchMetadataCompatible(resolution.entry.dispatch_metadata, dispatch_metadata)) {
-                native_util.impossibleByInvariant("materialized userspace dispatch metadata changed without retirement");
+                @call(.never_inline, executorInvariantFailure, .{.materialized_userspace_dispatch_metadata_changed_without_retirement});
             }
-            return resolution;
+            out.* = resolution;
+            return;
         }
 
+        if (comptime SHARES_GROUP_PAGE_TABLES) {
+            if (userspace_registry.addressSpaceGroupForBundle(image.bundleIdSlice())) |group| {
+                const index = @backingInt(group);
+                if (self.group_refs[index] != 0 and !self.userAddressSpacePreparationReady(&self.group_spaces[index].?))
+                    return error.AddressSpaceLeased;
+            }
+        }
         const mappings = try self.ensureMappingArena();
         const handle = mappings.reserveHandle(address_space.id) orelse return error.MappingTableFull;
         const slot = mappings.getByHandle(handle) orelse
-            native_util.impossibleByInvariant("reserved userspace mapping handle is not live");
+            @call(.never_inline, executorInvariantFailure, .{.reserved_userspace_mapping_handle_is_not_live});
         const entry = &slot.mapping;
         entry.* = .{
             .state = .building,
@@ -1238,7 +2811,7 @@ pub const Executor = struct {
         }
 
         entry.state = .live;
-        return .{
+        out.* = .{
             .mappings = mappings,
             .slot_index = handle.slotIndex(),
             .entry = entry,
@@ -1263,11 +2836,11 @@ pub const Executor = struct {
         const slot = mappings.slotAt(slot_index);
         const entry = &slot.mapping;
         if (entry.state != .live and entry.state != .retire_pending) {
-            native_util.impossibleByInvariant("executor mapping index points at a non-live mapping");
+            @call(.never_inline, executorInvariantFailure, .{.executor_mapping_index_points_at_a_non_live_mapping});
         }
-        if (entry.address_space_id != address_space_id) native_util.impossibleByInvariant("executor mapping index points at the wrong mapping");
+        if (entry.address_space_id != address_space_id) @call(.never_inline, executorInvariantFailure, .{.executor_mapping_index_points_at_the_wrong_mapping});
         const handle = mappings.handleForIndex(slot_index) orelse
-            native_util.impossibleByInvariant("executor mapping index points at an unclaimed slot");
+            @call(.never_inline, executorInvariantFailure, .{.executor_mapping_index_points_at_an_unclaimed_slot});
         return .{
             .mappings = mappings,
             .slot_index = slot_index,
@@ -1276,7 +2849,7 @@ pub const Executor = struct {
         };
     }
 
-    fn findMappingByHandle(self: *Executor, handle: MappingHandle, expected_address_space_id: u64) ?*MappingEntry {
+    inline fn findMappingByHandle(self: *Executor, handle: MappingHandle, expected_address_space_id: u64) ?*MappingEntry {
         const mappings = self.mappingArena() orelse return null;
         const slot = mappings.getByHandle(handle) orelse return null;
         const entry = &slot.mapping;
@@ -1310,8 +2883,18 @@ pub const Executor = struct {
             self.group_refs[index] = 1;
             return space;
         }
+        if (!self.userAddressSpacePreparationReady(&self.group_spaces[index].?)) return error.AddressSpaceLeased;
         self.group_refs[index] += 1;
         return self.group_spaces[index].?;
+    }
+
+    inline fn userAddressSpacePreparationReady(self: *Executor, space: *const freestanding.paging.UserAddressSpace) bool {
+        const runtime = self.bound_runtime orelse return true;
+        const physical_root = if (comptime builtin.target.os.tag == .freestanding)
+            space.switch_cr3 & x86.CR3_ADDRESS_MASK
+        else
+            @intFromPtr(space.directory);
+        return runtime.execution.rootAvailable(physical_root);
     }
 
     fn releaseSharedGroupSpace(self: *Executor, space: *freestanding.paging.UserAddressSpace) bool {
@@ -1328,26 +2911,86 @@ pub const Executor = struct {
         return false;
     }
 
+    fn queueMappingRetirement(self: *Executor, index: usize, mapping: *MappingEntry) void {
+        mapping.state = .retire_pending;
+        self.pending_retirements[index / 64] |= @as(u64, 1) << @as(u6, @intCast(index % 64));
+    }
+
+    fn mappingRetirementReady(self: *Executor, entry: *const MappingEntry) bool {
+        if (self.active_task_id != 0 and self.active_mapping == entry) return false;
+        if (entry.state != .building) {
+            if (self.bound_runtime) |runtime| {
+                if (!runtime.execution.canRetireMapping(entry.address_space_id)) return false;
+                if (entry.address_space) |space| {
+                    const physical = if (comptime builtin.target.os.tag == .freestanding)
+                        space.switch_cr3 & x86.CR3_ADDRESS_MASK
+                    else
+                        @intFromPtr(space.directory);
+                    if (!runtime.execution.canRetireRoot(physical)) return false;
+                }
+            }
+        }
+        if (entry.address_space) |*space| if (!freestanding.paging.userAddressSpaceQuiescent(space)) return false;
+        return true;
+    }
+
+    // A bitmap records only queued incarnations; a claimed slot cannot be
+    // recycled until its pending bit is cleared by releaseMapping. Empty steady
+    // dispatches do not scan the mapping arena, and busy shared roots stay held.
+    pub fn collectRetiredMappings(self: *Executor) void {
+        requireRetirementOwner(self) catch
+            @call(.never_inline, executorInvariantFailure, .{.executor_retirement_requires_its_exact_cpu_registration_owner});
+        const restore_interrupts = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_interrupts) x86.sti();
+        };
+        const mappings = self.mappingArena() orelse return;
+        for (self.pending_retirements, 0..) |bits, word_index| {
+            var remaining = bits;
+            while (remaining != 0) {
+                const bit = @ctz(remaining);
+                remaining &= remaining - 1;
+                const index = word_index * 64 + bit;
+                const handle = mappings.handleForIndex(index) orelse
+                    @call(.never_inline, executorInvariantFailure, .{.pending_userspace_retirement_retains_its_mapping_incarnation});
+                const slot = mappings.getByHandle(handle) orelse unreachable;
+                if (slot.mapping.state != .retire_pending)
+                    @call(.never_inline, executorInvariantFailure, .{.pending_userspace_retirement_retains_its_mapping_incarnation});
+                if (self.mappingRetirementReady(&slot.mapping)) self.releaseMapping(mappings, index, &slot.mapping);
+            }
+        }
+    }
+
     fn releaseMapping(
         self: *Executor,
         mappings: *MappingArena,
         slot_index: usize,
         entry: *MappingEntry,
     ) void {
+        requireRetirementOwner(self) catch
+            @call(.never_inline, executorInvariantFailure, .{.executor_retirement_requires_its_exact_cpu_registration_owner});
+        const restore_interrupts = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_interrupts) x86.sti();
+        };
+        const handle = mappings.handleForIndex(slot_index) orelse
+            @call(.never_inline, executorInvariantFailure, .{.pending_userspace_retirement_retains_its_mapping_incarnation});
+        if (!self.mappingRetirementReady(entry))
+            @call(.never_inline, executorInvariantFailure, .{.userspace_retirement_requires_a_quiescent_mapping_and_physical_root});
         if (builtin.mode == .debug) {
             std.debug.assert(&mappings.slotAt(slot_index).mapping == entry);
         }
         if (self.mapped_object_table) |table| {
-            const handle = mappings.handleForIndex(slot_index) orelse
-                native_util.impossibleByInvariant("shared-memory retirement retains its materialized mapping handle");
-            table.retireMappingLifetime(handle.value);
+            table.retireTaskMappingLifetime(@import("../core/ids.zig").task(entry.dispatch_metadata.owner_task_id), mappingLifetimeToken(self.registration_cpu orelse 0, handle) orelse unreachable);
         }
         if (entry.address_space) |*space| {
             if (entry.image_regions) |regions| {
                 const stack = regions.stack;
                 if (stack.size != 0 and !demand_paging.unregisterRegionForSpace(space, stack.start, stack.start + stack.size)) {
                     freestanding.paging.releaseUserRange(space, stack.start, stack.size) catch
-                        native_util.impossibleByInvariant("invalid retired stack mapping range");
+                        @call(.never_inline, executorInvariantFailure, .{.invalid_retired_stack_mapping_range});
                 }
             }
             const retain_shared = self.releaseSharedGroupSpace(space);
@@ -1356,11 +2999,11 @@ pub const Executor = struct {
                 if (entry.image_regions) |image_regions| {
                     for (image_regions.ranges[0..image_regions.count]) |range| {
                         freestanding.paging.releaseUserRange(space, range.start, range.size) catch
-                            native_util.impossibleByInvariant("invalid retired image mapping range");
+                            @call(.never_inline, executorInvariantFailure, .{.invalid_retired_image_mapping_range});
                     }
                 }
                 freestanding.paging.destroyUserAddressSpace(space) catch
-                    native_util.impossibleByInvariant("attempted to destroy the active userspace address space");
+                    @call(.never_inline, executorInvariantFailure, .{.attempted_to_destroy_the_active_userspace_address_space});
             }
             entry.address_space = null;
         }
@@ -1374,8 +3017,9 @@ pub const Executor = struct {
             entry.owned_xstate = null;
         }
         if (!mappings.removeIndex(slot_index)) {
-            native_util.impossibleByInvariant("live userspace mapping disappeared during release");
+            @call(.never_inline, executorInvariantFailure, .{.live_userspace_mapping_disappeared_during_release});
         }
+        self.pending_retirements[slot_index / 64] &= ~(@as(u64, 1) << @as(u6, @intCast(slot_index % 64)));
     }
 
     fn releaseAllMappings(self: *Executor) void {
@@ -1389,6 +3033,7 @@ pub const Executor = struct {
         }
         self.group_spaces = @splat(null);
         self.group_refs = @splat(0);
+        self.pending_retirements = @splat(0);
         self.releaseMappingArena();
     }
 
@@ -1403,12 +3048,13 @@ pub const Executor = struct {
         if (completed_mapping.state != .retire_pending) return;
         const mappings = self.mappingArena() orelse
             native_util.impossibleByInvariant("completed userspace mapping has no arena");
-        if (builtin.mode == .debug) {
-            const slot = mappings.getByHandle(completed_mapping_handle) orelse
-                native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
-            std.debug.assert(&slot.mapping == completed_mapping);
-        }
-        releaseMapping(self, mappings, completed_mapping_handle.slotIndex(), completed_mapping);
+        const slot = mappings.getByHandle(completed_mapping_handle) orelse
+            native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
+        if (&slot.mapping != completed_mapping)
+            native_util.impossibleByInvariant("completed userspace mapping handle is no longer live");
+        if (self.mappingRetirementReady(completed_mapping)) {
+            releaseMapping(self, mappings, completed_mapping_handle.slotIndex(), completed_mapping);
+        } else self.queueMappingRetirement(completed_mapping_handle.slotIndex(), completed_mapping);
     }
 
     fn clearUserPageFaultObservation(self: *Executor) void {
@@ -1523,7 +3169,7 @@ fn prepareCachedBootstrapMailboxUpdate(
     authorities: MailboxAuthorities,
     authority_generation: u64,
 ) ?BootstrapMailboxUpdate {
-    if (authority_generation == 0) native_util.impossibleByInvariant("resolved mailbox authorities require a nonzero generation");
+    if (authority_generation == 0) @call(.never_inline, executorInvariantFailure, .{.resolved_mailbox_authorities_require_a_nonzero_generation});
     const update = prepareBootstrapMailboxUpdate(
         address,
         preserve_runtime_state,
@@ -1570,18 +3216,270 @@ fn prepareBootstrapMailboxUpdate(
     };
 }
 
-fn activateMappingForDispatch(mapping: *MappingEntry, mailbox_update: ?BootstrapMailboxUpdate) void {
-    freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
-    const update = mailboxWriteForDispatch(mapping, mailbox_update);
-    if (writeUserspaceMailboxThroughMapping(mapping, update)) return;
-    writeBootstrapMailbox(update);
+const NativePreparedDispatch = struct {
+    inline fn preparationReady(_: @This()) bool {
+        return smp.isRuntimeOwner() and freestanding.paging.kernelAddressSpaceActive();
+    }
+    inline fn dispatchService(_: @This(), task_id: u64) void {
+        _ = xhci_driver_task.dispatchForTask(task_id);
+    }
+    inline fn stackTop(_: @This(), cpu: u8) ?usize {
+        return preparedKernelStackForCpu(cpu);
+    }
+    inline fn writeMailbox(_: @This(), mapping: *MappingEntry, update: ?BootstrapMailboxUpdate) bool {
+        return writeUserspaceMailboxThroughMapping(mapping, update);
+    }
+    inline fn ownerAvailable(_: @This()) bool {
+        // AP native entry remains gated until hardware admission is proven.
+        return smp.isRuntimeOwner() and continuationCleared(native_entry.current()) and freestanding.paging.kernelAddressSpaceActive();
+    }
+    inline fn entryReady(_: @This(), stack_top: usize) bool {
+        return stack_top != 0 and preparedKernelStackForCpu(cpu_identity.currentIndex()) == stack_top and
+            native_entry.current().kernel_stack_top == stack_top and continuationCleared(native_entry.current()) and
+            freestanding.paging.kernelAddressSpaceActive();
+    }
+    inline fn mask(_: @This()) bool {
+        const enabled = x86.interruptsEnabled();
+        x86.cli();
+        return enabled;
+    }
+    inline fn restore(_: @This(), enabled: bool) void {
+        if (enabled) x86.sti();
+    }
+    inline fn activate(_: @This(), mapping: *MappingEntry) void {
+        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+    }
+    inline fn enter(_: @This(), executor: *Executor) void {
+        _ = @call(.never_inline, enterUserspace, .{executor});
+    }
+    inline fn switchToKernel(_: @This()) void {
+        freestanding.paging.switchToKernelAddressSpace();
+    }
+    inline fn kernelActive(_: @This()) bool {
+        return freestanding.paging.kernelAddressSpaceActive();
+    }
+};
+
+// After interrupt return, the selected CPU consumes its prompt and claims
+// image-owned storage before resolving a registered route. Runtime collection
+// pins that route until this independent completion.
+pub fn runQueuedPreparedTask() bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    return runQueuedPreparedTaskSlice(true, NativePreparedDispatch{}, null, null, null, null);
 }
 
-fn mailboxWriteForDispatch(mapping: *MappingEntry, update: ?BootstrapMailboxUpdate) ?BootstrapMailboxUpdate {
+pub fn runQueuedPreparedExecutionForArchitectureProof(
+    callback: ArchitecturePreparedCallback,
+    callback_context: *anyopaque,
+    saved_entry: *const native_entry.State,
+    before_run: ?ArchitecturePreparedBeforeRun,
+    after_return: ?ArchitecturePreparedAfterReturn,
+    hook_context: *anyopaque,
+) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    if (comptime !architecture_smp_proof) @compileError("queued owner fixtures require an isolated proof root");
+    return runQueuedPreparedTaskSlice(false, ArchitecturePreparedBackend{
+        .callback = callback,
+        .callback_context = callback_context,
+    }, saved_entry, before_run, after_return, hook_context);
+}
+
+pub fn runPromptedPreparedExecutionForArchitectureProof(
+    callback: ArchitecturePreparedCallback,
+    callback_context: *anyopaque,
+    saved_entry: *const native_entry.State,
+    before_run: ?ArchitecturePreparedBeforeRun,
+    after_return: ?ArchitecturePreparedAfterReturn,
+    hook_context: *anyopaque,
+) bool {
+    if (comptime builtin.target.os.tag != .freestanding) return false;
+    if (comptime !architecture_smp_proof) @compileError("prompted owner fixtures require an isolated proof root");
+    return runQueuedPreparedTaskSlice(true, ArchitecturePreparedBackend{
+        .callback = callback,
+        .callback_context = callback_context,
+    }, saved_entry, before_run, after_return, hook_context);
+}
+
+fn runQueuedPreparedTaskSlice(
+    comptime require_prompt: bool,
+    backend: anytype,
+    saved_entry: ?*const native_entry.State,
+    before_run: ?ArchitecturePreparedBeforeRun,
+    after_return: ?ArchitecturePreparedAfterReturn,
+    hook_context: ?*anyopaque,
+) bool {
+    const restore_interrupts = backend.mask();
+    defer backend.restore(restore_interrupts);
+    if (require_prompt) {
+        if (interrupt_context.active()) return false;
+        if (!(dispatch_transport.global.takePrompt(cpu_identity.currentIndex()) catch return false)) return false;
+    }
+    var claimed: dispatch_transport.ClaimedCommand = undefined;
+    dispatch_transport.global.claimInto(cpu_identity.currentIndex(), &claimed) catch return false;
+    const key = claimed.key;
+    if (before_run) |hook| hook(hook_context.?);
+    const source = currentRegisteredExecutor();
+    const ran = if (source) |executor| executor.runPreparedTaskSlice(&claimed.command, backend) else false;
+    // ACK ended every issuer/source/command access. Only retained GS backing,
+    // permanent fixture hooks and captured scalars precede static completion.
+    if (saved_entry) |state| native_entry.current().* = state.*;
+    if (after_return) |hook| hook(hook_context.?, ran);
+    dispatch_transport.global.complete(key, if (ran) .owner_returned else .unstarted) catch
+        @call(.never_inline, executorInvariantFailure, .{.native_dispatch_acknowledges_its_exact_execution_lease});
+    return true;
+}
+
+// This backend is absent from native images. The isolated guest keeps its
+// existing CPL0 stack and standard xstate policy; only user entry is replaced.
+const ArchitecturePreparedBackend = if (architecture_smp_proof) struct {
+    callback: ArchitecturePreparedCallback,
+    callback_context: *anyopaque,
+
+    fn ownerAvailable(_: @This()) bool {
+        return !smp.isRuntimeOwner() and native_entry.current().native_entry_modes == 0 and
+            continuationCleared(native_entry.current()) and freestanding.paging.kernelAddressSpaceActive();
+    }
+    fn entryReady(_: @This(), top: usize) bool {
+        return top != 0 and preparedKernelStackForCpu(cpu_identity.currentIndex()) == top and
+            native_entry.current().kernel_stack_top == top and native_entry.current().native_entry_modes == 0 and
+            continuationCleared(native_entry.current()) and freestanding.paging.kernelAddressSpaceActive();
+    }
+    fn mask(_: @This()) bool {
+        const enabled = x86.interruptsEnabled();
+        x86.cli();
+        return enabled;
+    }
+    fn restore(_: @This(), enabled: bool) void {
+        if (enabled) x86.sti();
+    }
+    fn activate(_: @This(), mapping: *MappingEntry) void {
+        freestanding.paging.activateUserDomain(&mapping.address_space.?, mapping.dispatch_metadata.protectionKey());
+    }
+    fn enter(self: @This(), executor: *Executor) void {
+        _ = enterUserspaceWithClock(executor, timer, Entry{ .backend = self, .executor = executor });
+        native_entry.clearContinuation();
+    }
+    fn switchToKernel(_: @This()) void {
+        freestanding.paging.switchToKernelAddressSpace();
+    }
+    fn kernelActive(_: @This()) bool {
+        return freestanding.paging.kernelAddressSpaceActive();
+    }
+    const Entry = struct {
+        backend: ArchitecturePreparedBackend,
+        executor: *Executor,
+
+        fn enter(self: @This(), context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+            const entry: ArchitecturePreparedEntry = .{
+                .task_id = self.executor.active_task_id,
+                .physical_root = x86.readCr3() & x86.CR3_ADDRESS_MASK,
+                .trap_stack_top = native_entry.current().kernel_stack_top,
+                .user_context = context,
+                .xstate_address = @intFromPtr(state),
+                .dispatch_quantum = self.executor.dispatch_quantum,
+            };
+            const record = self.backend.callback(self.backend.callback_context, &entry);
+            if (record.reserved != 0) @panic("isolated prepared callback returned reserved bits");
+            var frame = architecturePreparedFrame(context);
+            switch (record.outcome) {
+                .unavailable => {},
+                .yielded, .wait_for_event => {
+                    frame.eax = 1;
+                    frame.edx = record.ui_revision;
+                    frame.esi = @backingInt(if (record.outcome == .wait_for_event)
+                        userspace_bootstrap_mailbox.YieldDisposition.wait_for_event
+                    else
+                        userspace_bootstrap_mailbox.YieldDisposition.runnable);
+                    frame.eip = context.instruction_pointer + 4;
+                    handleUserspaceYield(self.executor, &frame);
+                },
+                .faulted => {
+                    frame.int_no = record.fault_vector;
+                    frame.err_code = record.fault_error_code;
+                    frame.eip = record.fault_instruction_pointer;
+                    if (record.fault_vector == PAGE_FAULT_VECTOR) {
+                        if (record.fault_error_code & 4 == 0) @panic("isolated prepared fault must describe a user frame");
+                        handleUserspacePageFaultWith(&frame, ArchitecturePreparedFault{ .address = record.fault_address });
+                    } else {
+                        requestUserExceptionHandoff(self.executor, .{
+                            .vector = record.fault_vector,
+                            .error_code = record.fault_error_code,
+                            .instruction_pointer = record.fault_instruction_pointer,
+                            .fault_address = record.fault_address,
+                        });
+                    }
+                },
+            }
+            return 1;
+        }
+    };
+} else struct {};
+
+fn architecturePreparedFrame(context: *const UserContext64) freestanding.isr.InterruptFrame {
+    if (comptime !architecture_smp_proof) @compileError("prepared frames require an isolated proof root");
+    return .{
+        .ds = freestanding.gdt.USER_DATA_SEG | 3,
+        .r15 = context.r15,
+        .r14 = context.r14,
+        .r13 = context.r13,
+        .r12 = context.r12,
+        .r11 = context.r11,
+        .r10 = context.r10,
+        .r9 = context.r9,
+        .r8 = context.r8,
+        .edi = context.rdi,
+        .esi = context.rsi,
+        .ebp = context.rbp,
+        .esp = 0,
+        .ebx = context.rbx,
+        .edx = context.rdx,
+        .ecx = context.rcx,
+        .eax = context.rax,
+        .int_no = USERSPACE_TRAP_VECTOR,
+        .err_code = 0,
+        .eip = context.instruction_pointer,
+        .cs = freestanding.gdt.USER_CODE_SEG | 3,
+        .eflags = context.flags,
+        .useresp = context.stack_pointer,
+        .ss = freestanding.gdt.USER_DATA_SEG | 3,
+    };
+}
+
+const ArchitecturePreparedFault = if (architecture_smp_proof) struct {
+    address: u64,
+    fn kernelFault(_: @This(), _: *freestanding.isr.InterruptFrame) void {
+        @panic("isolated prepared callback escaped its user fault owner");
+    }
+    fn faultAddress(self: @This()) u64 {
+        return self.address;
+    }
+    fn resolve(_: @This(), _: *freestanding.paging.UserAddressSpace, _: u64, _: u32) bool {
+        @panic("AP prepared fault entered BSP demand mutation");
+    }
+    fn recover(_: @This(), _: *const Executor, _: *MappingEntry, _: *freestanding.isr.InterruptFrame, _: u64, _: u32) bool {
+        @panic("AP prepared fault entered BSP NX recovery");
+    }
+    fn restoreKernel(_: @This()) void {
+        freestanding.paging.switchToKernelAddressSpace();
+    }
+} else struct {};
+
+inline fn publishMailboxForDispatch(mapping: *MappingEntry, update: ?BootstrapMailboxUpdate, backend: anytype) bool {
+    const previous = mapping.mailbox_publication_cache;
+    const publication = mailboxWriteForDispatch(mapping, update);
+    if (!backend.writeMailbox(mapping, publication)) {
+        mapping.mailbox_publication_cache = previous;
+        return false;
+    }
+    if (publication != null) mapping.initial_mailbox_prepared = true;
+    return true;
+}
+
+inline fn mailboxWriteForDispatch(mapping: *MappingEntry, update: ?BootstrapMailboxUpdate) ?BootstrapMailboxUpdate {
     const candidate = update orelse return null;
     const cache = &mapping.mailbox_publication_cache;
     const generation = mapping.mailbox_authority_cache.authority_generation;
-    if (generation == 0) native_util.impossibleByInvariant("resolved mailbox authorities require a nonzero generation");
+    if (generation == 0) @call(.never_inline, executorInvariantFailure, .{.resolved_mailbox_authorities_require_a_nonzero_generation});
     const unchanged = candidate.preserve_runtime_state and
         cache.initialized and
         cache.published_authority_generation == generation;
@@ -1593,7 +3491,7 @@ fn mailboxWriteForDispatch(mapping: *MappingEntry, update: ?BootstrapMailboxUpda
     return candidate;
 }
 
-fn liveMailboxBelongsToTask(mapping: *MappingEntry, task_id: u64) bool {
+inline fn liveMailboxBelongsToTask(mapping: *MappingEntry, task_id: u64) bool {
     if (comptime builtin.target.os.tag != .freestanding) return true;
     const mailbox = readUserspaceMailboxFromMapping(mapping, mapping.dispatch_metadata.bootstrap_mailbox_address) orelse
         return false;
@@ -1641,6 +3539,7 @@ fn writeUserspaceMailboxThroughMapping(mapping: *MappingEntry, prepared: ?Bootst
 }
 
 fn writeBootstrapMailbox(prepared: ?BootstrapMailboxUpdate) void {
+    if (!builtin.is_test) @compileError("direct mailbox writes are hosted fixtures only");
     const update = prepared orelse return;
     x86.allowSupervisorUserMemory();
     defer x86.forbidSupervisorUserMemory();
@@ -1911,15 +3810,20 @@ fn scanMailboxAuthorities(
 
 fn shouldPreemptUserDispatch(executor: *const Executor, from_userspace: bool, now_ticks: u64, check: ?PreemptCheck) bool {
     if (executor.active_task_id == 0 or !from_userspace or executor.active_mapping == null) return false;
+    if (executor.active_dispatch_lease) |ticket| {
+        const runtime = executor.bound_runtime orelse return true;
+        if (runtime.execution.stopRequested(ticket)) return true;
+    }
     // A missing policy callback never disables the finite dispatch watchdog.
     if (executor.dispatch_quantum.expired(executor.active_task_id, now_ticks)) return true;
-    return if (check) |priority_check| priority_check(executor.active_task_id) else false;
+    return if (smp.isRuntimeOwner()) (if (check) |priority_check| priority_check(executor.active_task_id) else false) else false;
 }
 
 fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
     if (comptime builtin.target.os.tag != .freestanding) return;
-    const executor = registered_executor orelse return;
-    if (!shouldPreemptUserDispatch(executor, (frame.cs & 0x3) == 0x3, timer.getTicks(), preempt_check)) return;
+    const executor = currentRegisteredExecutor() orelse return;
+    const priority_check = if (smp.isRuntimeOwner()) preempt_check else null;
+    if (!shouldPreemptUserDispatch(executor, (frame.cs & 0x3) == 0x3, timer.getTicks(), priority_check)) return;
     const mapping = executor.active_mapping orelse return;
     handoffInterruptedUser(executor, mapping, frame);
 }
@@ -1927,13 +3831,42 @@ fn userspaceTimerPreemption(frame: *freestanding.isr.InterruptFrame) void {
 fn userspaceInterruptPreemption(frame: *freestanding.isr.InterruptFrame) void {
     if (frame.int_no == @import("../../kernel/timer/timer.zig").INTERRUPT_VECTOR) {
         userspaceTimerPreemption(frame);
+    } else if (frame.int_no == smp.EXECUTION_STOP_IPI_VECTOR) {
+        userspaceExecutionStopPreemption(frame);
+    } else if (frame.int_no == smp.SYSCALL_REQUEST_IPI_VECTOR) {
+        userspaceBrokerPreemption(frame);
     } else {
         userspaceDevicePreemption(frame);
     }
 }
 
+fn userspaceBrokerPreemption(frame: *freestanding.isr.InterruptFrame) void {
+    if (!smp.isRuntimeOwner() or (frame.cs & 3) != 3) return;
+    const executor = currentRegisteredExecutor() orelse return;
+    if (executor.registration_cpu != cpu_identity.currentIndex()) return;
+    const mapping = activeUserMemoryMapping(executor, executor.active_task_id) orelse return;
+    if (mapping.owned_xstate == null) return;
+    handoffInterruptedUser(executor, mapping, frame);
+}
+
+fn userspaceExecutionStopPreemption(frame: *freestanding.isr.InterruptFrame) void {
+    if ((frame.cs & 0x3) != 0x3) return;
+    const index = cpu_identity.currentIndex();
+    const executor = currentRegisteredExecutor() orelse return;
+    if (executor.registration_cpu != index or executor.active_task_id == 0) return;
+    const runtime = executor.bound_runtime orelse return;
+    const ticket = executor.active_dispatch_lease orelse return;
+    // The vector carries no authority. Authenticate the currently owned lease
+    // on every delivery; a stale nudge must not yield a replacement execution.
+    if (ticket.cpu != index or ticket.issuer != &runtime.execution or
+        !runtime.execution.stopRequested(ticket)) return;
+    const mapping = activeUserMemoryMapping(executor, executor.active_task_id) orelse return;
+    if (mapping.owned_xstate == null) return;
+    handoffInterruptedUser(executor, mapping, frame);
+}
+
 fn userspaceDevicePreemption(frame: *freestanding.isr.InterruptFrame) void {
-    const executor = registered_executor orelse return;
+    const executor = currentRegisteredExecutor() orelse return;
     if ((frame.cs & 0x3) != 0x3 or executor.active_task_id == 0 or
         executor.dispatch_quantum.task_id != executor.active_task_id) return;
     // Dispatch pins this task until handoff. Monotonic task IDs and the exact
@@ -1946,47 +3879,44 @@ fn userspaceDevicePreemption(frame: *freestanding.isr.InterruptFrame) void {
 fn handoffInterruptedUser(executor: *Executor, mapping: *MappingEntry, frame: anytype) void {
     // Multiple device interrupts may be queued for one user frame. Preserve an
     // earlier retirement/exception handoff and charge/capture this resume once.
-    if (executor.handoff_completed or zigos_userspace_resume_requested != 0) return;
+    if (executor.handoff_completed or native_entry.current().resume_requested != 0) return;
     mapping.resume_valid = true;
-    mapping.resume_instruction_pointer = frame.eip;
-    mapping.resume_stack_pointer = frame.useresp;
+    mapping.interrupted_before_yield = true;
     captureUserContext64(mapping, frame);
     mapping.yield_count += 1;
     executor.last_yield_disposition = .runnable;
     executor.handoff_completed = true;
-    zigos_userspace_resume_requested = 1;
+    native_entry.current().resume_requested = 1;
     captureMailbox(mapping);
     freestanding.paging.switchToKernelAddressSpace();
 }
 
 fn userspaceTrapHandler(frame: *freestanding.isr.InterruptFrame) void {
-    const executor = registered_executor orelse return;
+    const executor = currentRegisteredExecutor() orelse return;
     handleUserspaceYield(executor, frame);
 }
 
 fn handleUserspaceYield(executor: *Executor, frame: anytype) void {
     if (executor.active_task_id == 0) return;
+    if (executor.handoff_completed or native_entry.current().resume_requested != 0) return;
     const mapping = executor.active_mapping orelse
-        native_util.impossibleByInvariant("active userspace task has no materialized mapping");
-    const instruction_pointer = frame.eip;
-    const stack_pointer = frame.useresp;
+        @call(.never_inline, executorInvariantFailure, .{.active_userspace_task_has_no_materialized_mapping});
     const counter = std.math.cast(u32, frame.eax) orelse
         return containMalformedYield(executor, frame.eip);
     const disposition_raw = std.math.cast(u32, frame.esi) orelse
         return containMalformedYield(executor, frame.eip);
     const disposition = userspace_bootstrap_mailbox.yieldDisposition(disposition_raw) orelse
         return containMalformedYield(executor, frame.eip);
+    const interrupted_before_yield = mapping.interrupted_before_yield;
+    mapping.interrupted_before_yield = false;
+    // An IRQ continuation may carry a parking decision made before new work
+    // arrived. Return through SYSRET/ERETU for a fresh loop in this same quantum,
+    // without another Scheduler dispatch charge or a new context handoff.
+    if (disposition == .wait_for_event and interrupted_before_yield) return;
     const ui_revision: u64 = @intCast(frame.edx);
-    @call(.never_inline, recordTrapState, .{
-        executor,
-        instruction_pointer,
-        stack_pointer,
-        counter,
-    });
+    executor.last_trap_counter = counter;
 
     mapping.resume_valid = true;
-    mapping.resume_instruction_pointer = executor.last_trap_instruction_pointer;
-    mapping.resume_stack_pointer = executor.last_trap_stack_pointer;
     captureUserContext64(mapping, frame);
     mapping.yield_count += 1;
     mapping.last_user_counter = executor.last_trap_counter;
@@ -1994,13 +3924,13 @@ fn handleUserspaceYield(executor: *Executor, frame: anytype) void {
     executor.last_yield_ui_revision = ui_revision;
 
     executor.handoff_completed = true;
-    zigos_userspace_resume_requested = 1;
+    native_entry.current().resume_requested = 1;
 
     captureMailbox(mapping);
     freestanding.paging.switchToKernelAddressSpace();
 }
 
-fn containMalformedYield(executor: *Executor, instruction_pointer: u64) void {
+inline fn containMalformedYield(executor: *Executor, instruction_pointer: u64) void {
     requestUserExceptionHandoff(executor, .{
         .vector = GENERAL_PROTECTION_FAULT_VECTOR,
         .error_code = 0,
@@ -2008,22 +3938,22 @@ fn containMalformedYield(executor: *Executor, instruction_pointer: u64) void {
     });
 }
 
-fn requestUserExceptionHandoff(executor: *Executor, exception: UserException) void {
+inline fn requestUserExceptionHandoff(executor: *Executor, exception: UserException) void {
     executor.last_user_exception = exception;
     executor.handoff_completed = true;
-    zigos_userspace_resume_requested = 1;
+    native_entry.current().resume_requested = 1;
     freestanding.paging.switchToKernelAddressSpace();
 }
 
 fn userspaceExceptionHandler(frame: *freestanding.isr.InterruptFrame) void {
-    const executor = registered_executor orelse freestanding.isr.haltUnhandledException(frame);
+    const executor = currentRegisteredExecutor() orelse freestanding.isr.haltUnhandledException(frame);
     if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) {
         freestanding.isr.haltUnhandledException(frame);
     }
     _ = executor.active_mapping orelse
-        native_util.impossibleByInvariant("active userspace task has no materialized mapping");
+        @call(.never_inline, executorInvariantFailure, .{.active_userspace_task_has_no_materialized_mapping});
     const vector = std.math.cast(u8, frame.int_no) orelse
-        native_util.impossibleByInvariant("userspace exception vector exceeds the IDT range");
+        @call(.never_inline, executorInvariantFailure, .{.userspace_exception_vector_exceeds_the_idt_range});
     if (!containUserException(executor, vector, @intCast(frame.err_code), @intCast(frame.eip))) {
         freestanding.isr.haltUnhandledException(frame);
     }
@@ -2041,7 +3971,7 @@ fn containUserException(executor: *Executor, vector: u8, error_code: u32, instru
 
 pub export fn zigos_handle_invalid_interrupt_return(frame: *freestanding.isr.InterruptFrame) void {
     if (comptime builtin.target.os.tag != .freestanding) return;
-    const executor = registered_executor orelse
+    const executor = currentRegisteredExecutor() orelse
         @call(.never_inline, freestanding.isr.haltUnhandledException, .{frame});
     if (executor.active_task_id == 0 or (frame.cs & 0x3) != 0x3) {
         @call(.never_inline, freestanding.isr.haltUnhandledException, .{frame});
@@ -2056,7 +3986,7 @@ pub export fn zigos_handle_invalid_interrupt_return(frame: *freestanding.isr.Int
         .instruction_pointer = frame.eip,
     };
     executor.handoff_completed = true;
-    zigos_userspace_resume_requested = 1;
+    native_entry.current().resume_requested = 1;
     freestanding.paging.switchToKernelAddressSpace();
 }
 
@@ -2067,22 +3997,53 @@ fn isContainableUserExceptionVector(vector: u8) bool {
 }
 
 fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
-    const executor = registered_executor orelse {
+    handleUserspacePageFaultWith(frame, UserPageFaultHardware{});
+}
+
+const UserPageFaultHardware = struct {
+    inline fn kernelFault(_: @This(), frame: *freestanding.isr.InterruptFrame) void {
         freestanding.paging.page_fault_handler(frame);
+    }
+
+    inline fn faultAddress(_: @This()) u64 {
+        return x86.readCr2();
+    }
+
+    inline fn resolve(_: @This(), space: *freestanding.paging.UserAddressSpace, address: u64, code: u32) bool {
+        return demand_paging.resolveFault(space, address, code);
+    }
+
+    inline fn recover(_: @This(), executor: *const Executor, mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame, address: u64, code: u32) bool {
+        return nxProbeRecoveryContext(executor, mapping, frame, address, code);
+    }
+
+    inline fn restoreKernel(_: @This()) void {
+        freestanding.paging.switchToKernelAddressSpace();
+    }
+};
+
+inline fn handleUserspacePageFaultWith(frame: *freestanding.isr.InterruptFrame, hardware: anytype) void {
+    const executor = currentRegisteredExecutor() orelse {
+        hardware.kernelFault(frame);
         return;
     };
     if (executor.active_task_id == 0 or (frame.err_code & 0x4) == 0) {
-        freestanding.paging.page_fault_handler(frame);
+        hardware.kernelFault(frame);
         return;
     }
     const mapping = executor.active_mapping orelse
-        native_util.impossibleByInvariant("active userspace task has no materialized mapping");
+        @call(.never_inline, executorInvariantFailure, .{.active_userspace_task_has_no_materialized_mapping});
 
-    const faulting_address = x86.readCr2();
+    const runtime_owner = smp.isRuntimeOwner();
+    const faulting_address = hardware.faultAddress();
     const error_code = std.math.cast(u32, frame.err_code) orelse
-        native_util.impossibleByInvariant("userspace page-fault code exceeds its ABI width");
-    if (mapping.address_space) |*space| {
-        if (demand_paging.resolveFault(space, faulting_address, error_code)) return;
+        @call(.never_inline, executorInvariantFailure, .{.userspace_page_fault_code_exceeds_its_abi_width});
+    // Remote entry owns only its pinned local mapping and continuation. Demand
+    // registry/COW mutation and verification Runtime lookups remain BSP work.
+    if (runtime_owner) {
+        if (mapping.address_space) |*space| {
+            if (hardware.resolve(space, faulting_address, error_code)) return;
+        }
     }
     @call(.never_inline, recordUserPageFault, .{
         executor,
@@ -2096,10 +4057,8 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     mapping.last_fault_address = faulting_address;
     mapping.last_fault_error_code = error_code;
 
-    if (nxProbeRecoveryContext(executor, mapping, frame, faulting_address, error_code)) {
+    if (runtime_owner and hardware.recover(executor, mapping, frame, faulting_address, error_code)) {
         mapping.resume_valid = true;
-        mapping.resume_instruction_pointer = @intCast(frame.eip);
-        mapping.resume_stack_pointer = @intCast(frame.useresp);
         captureUserContext64(mapping, frame);
     } else {
         executor.last_user_exception = .{
@@ -2111,9 +4070,9 @@ fn userspacePageFaultHandler(frame: *freestanding.isr.InterruptFrame) void {
     }
 
     executor.handoff_completed = true;
-    zigos_userspace_resume_requested = 1;
+    native_entry.current().resume_requested = 1;
 
-    freestanding.paging.switchToKernelAddressSpace();
+    hardware.restoreKernel();
 }
 
 fn nxProbeRecoveryContext(
@@ -2251,6 +4210,37 @@ fn mapUniqueZeroedStack(
     return error.AlreadyMapped;
 }
 
+fn mappingRegistrationSource(anchor: *Executor, task_id: u64) ?*Executor {
+    if (!bspMappingTransaction()) return null;
+    const runtime = anchor.bound_runtime orelse return if (comptime builtin.target.os.tag == .freestanding) null else anchor;
+    const owner = anchor.binding_owner orelse return if (comptime builtin.target.os.tag == .freestanding) null else anchor;
+    if (registeredDomainExecutor(0, owner, runtime) != anchor) return null;
+    const task = runtime.findConst(task_id) orelse return null;
+    if (task.state == .terminated) return null;
+    if (runtime.execution.taskTicket(task_id)) |ticket| return registeredDomainExecutor(ticket.cpu, owner, runtime);
+    var selected: ?*Executor = null;
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const source = registeredDomainExecutor(@intCast(index), owner, runtime) orelse continue;
+        const mapping = source.findMapping(task.address_space_id) orelse continue;
+        if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != task_id) continue;
+        if (selected != null) return null;
+        selected = source;
+    }
+    return selected;
+}
+
+inline fn lifetimeMappingSource(anchor: *Executor, decoded: LifetimeMapping) ?*Executor {
+    if (!bspMappingTransaction()) return null;
+    if (anchor.bound_runtime) |runtime| {
+        if (anchor.binding_owner) |owner| {
+            if (registeredDomainExecutor(0, owner, runtime) != anchor) return null;
+            return registeredDomainExecutor(decoded.cpu, owner, runtime);
+        }
+    }
+    if (comptime builtin.target.os.tag == .freestanding) return null;
+    return if (decoded.cpu == (anchor.registration_cpu orelse 0)) anchor else null;
+}
+
 fn registerMappedObject(
     context: *anyopaque,
     table: *shared_memory.Table,
@@ -2258,10 +4248,8 @@ fn registerMappedObject(
     writable: bool,
     copy_on_write: bool,
 ) ?u64 {
-    const executor: *Executor = @ptrCast(@alignCast(context));
-    if (comptime builtin.target.os.tag == .freestanding) {
-        if (registered_executor != executor) return null;
-    }
+    const anchor: *Executor = @ptrCast(@alignCast(context));
+    const executor = mappingRegistrationSource(anchor, descriptor.task_id.raw()) orelse return null;
     if (descriptor.size_bytes == 0 or descriptor.task_id.raw() == 0 or descriptor.target != null) return null;
     if (executor.mapped_object_table) |bound_table| {
         if (bound_table != table) return null;
@@ -2273,16 +4261,22 @@ fn registerMappedObject(
     const end = std.math.add(u64, descriptor.virtual_base, descriptor.size_bytes) catch return null;
     const task_id = descriptor.task_id.raw();
     const mapping = blk: {
-        if (executor.active_mapping) |active| {
+        if (executor.bound_runtime) |runtime| {
+            const task = runtime.findConst(task_id) orelse return null;
+            break :blk executor.findMapping(task.address_space_id) orelse return null;
+        }
+        if (comptime builtin.target.os.tag != .freestanding) {
+            // Custom hosted fixtures have no Runtime; production always resolves
+            // BSP-owned task metadata rather than another CPU's native state.
+            const active = executor.active_mapping orelse return null;
             if (active.dispatch_metadata.owner_task_id == task_id) break :blk active;
         }
-        const runtime = executor.bound_runtime orelse return null;
-        const task = runtime.findConst(task_id) orelse return null;
-        break :blk executor.findMapping(task.address_space_id) orelse return null;
+        return null;
     };
     if (mapping.state != .live or mapping.dispatch_metadata.owner_task_id != task_id) return null;
     const resolution = executor.findMappingWithHandle(mapping.address_space_id) orelse return null;
     if (resolution.entry != mapping) return null;
+    const token = mappingLifetimeToken(executor.registration_cpu orelse 0, resolution.handle) orelse return null;
     const space = if (mapping.address_space) |*address_space| address_space else return null;
     if (demand_paging.regionOverlapsSpace(space, descriptor.virtual_base, mapped_end)) return null;
     freestanding.paging.validateUserRangeAvailable(space, @intCast(descriptor.virtual_base), mapped_size) catch return null;
@@ -2290,12 +4284,12 @@ fn registerMappedObject(
         .virt_start = descriptor.virtual_base,
         .virt_end_exclusive = end,
         .writable = writable,
-        .kind = if (copy_on_write) .object_cow else .object_physical,
+        .kind = if (copy_on_write) .object_cow else .shared_ram,
         .physical_base = descriptor.physical_base,
     })) return null;
     executor.mapped_object_table = table;
     executor.mapped_object_count += 1;
-    return resolution.handle.value;
+    return token;
 }
 
 fn unregisterMappedObject(
@@ -2304,11 +4298,20 @@ fn unregisterMappedObject(
     registration_token: u64,
     descriptor: shared_memory.FreestandingMappingDescriptor,
 ) bool {
-    const executor: *Executor = @ptrCast(@alignCast(context));
+    const anchor: *Executor = @ptrCast(@alignCast(context));
+    var decoded: LifetimeMapping = undefined;
+    if (!decodeMappingLifetimeToken(registration_token, &decoded)) return false;
+    const executor = lifetimeMappingSource(anchor, decoded) orelse return false;
+    requireRetirementOwner(executor) catch return false;
+    const restore_interrupts = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+    if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+    defer if (comptime builtin.target.os.tag == .freestanding) {
+        if (restore_interrupts) x86.sti();
+    };
     if (registration_token == 0 or descriptor.size_bytes == 0 or descriptor.target != null) return false;
     if (executor.mapped_object_table != table or executor.mapped_object_count == 0) return false;
     const mappings = executor.mappingArena() orelse return false;
-    const slot = mappings.getByHandle(MappingHandle{ .value = registration_token }) orelse return false;
+    const slot = mappings.getByHandle(decoded.handle) orelse return false;
     const mapping = &slot.mapping;
     if (mapping.state != .live and mapping.state != .retire_pending) return false;
     if (mapping.dispatch_metadata.owner_task_id != descriptor.task_id.raw()) return false;
@@ -2335,12 +4338,15 @@ const UserEntry = struct {
 // the user quantum after materialization/mailbox work has completed.
 fn enterUserspaceWithClock(executor: *Executor, clock: anytype, entry: anytype) u32 {
     const mapping = executor.active_mapping orelse
-        native_util.impossibleByInvariant("userspace entry requires the active mapping owner");
+        @call(.never_inline, executorInvariantFailure, .{.userspace_entry_requires_the_active_mapping_owner});
     const storage = mapping.owned_xstate orelse
-        native_util.impossibleByInvariant("userspace entry requires private extended state");
+        @call(.never_inline, executorInvariantFailure, .{.userspace_entry_requires_private_extended_state});
     clock.armSchedulerTick();
     executor.dispatch_quantum = DispatchQuantum.begin(executor.active_task_id, clock.getTicks());
-    return entry.enter(&executor.pending_user_context64, storage.state());
+    // The active execution lease retains this stable arena slot through entry
+    // and frame capture. Entry consumes the context before capture replaces it;
+    // this borrow ends before the owner publishes its return acknowledgement.
+    return entry.enter(&mapping.user_context64, storage.state());
 }
 
 fn captureUserContext64(mapping: *MappingEntry, frame: anytype) void {
@@ -2366,12 +4372,6 @@ fn captureUserContext64(mapping: *MappingEntry, frame: anytype) void {
     };
 }
 
-fn recordTrapState(self: *Executor, instruction_pointer: u64, stack_pointer: u64, counter: u32) void {
-    self.last_trap_instruction_pointer = instruction_pointer;
-    self.last_trap_stack_pointer = stack_pointer;
-    self.last_trap_counter = counter;
-}
-
 fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, faulting_address: u64, error_code: u32) void {
     self.last_fault_task_id = task_id;
     self.last_fault_address_space_id = address_space_id;
@@ -2381,7 +4381,10 @@ fn recordUserPageFault(self: *Executor, task_id: u64, address_space_id: u64, fau
 }
 
 fn publishRootActiveTaskId(task_id: u64) void {
-    if (builtin.target.os.tag != .freestanding) return;
+    if (builtin.target.os.tag != .freestanding) {
+        native_entry.current().active_task_id = task_id;
+        return;
+    }
     if (@hasDecl(root, "publishUserspaceActiveTaskId")) {
         root.publishUserspaceActiveTaskId(task_id);
     }
@@ -2921,6 +4924,113 @@ test "executor runtime binding has one owner and compare-release semantics" {
     try std.testing.expect(executor.releaseRuntimeBinding(&second_owner, &second_runtime));
 }
 
+test "mapping lifetime CPU namespace retains full generations and rejects malformed tokens" {
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const cpu: u8 = @intCast(index);
+        for ([_]u32{ 1, 0x8000_0000, std.math.maxInt(u32) }) |generation| {
+            for ([_]u32{ 0, task_runtime.MAX_TASKS - 1 }) |slot| {
+                const handle = MappingHandle{ .value = (@as(u64, generation) << 32) | slot };
+                const token = mappingLifetimeToken(cpu, handle).?;
+                var decoded: LifetimeMapping = undefined;
+                try std.testing.expect(decodeMappingLifetimeToken(token, &decoded));
+                try std.testing.expectEqual(cpu, decoded.cpu);
+                try std.testing.expect(handle.eql(decoded.handle));
+                try std.testing.expectEqual(generation, decoded.handle.generation());
+            }
+        }
+    }
+    const handle = MappingHandle{ .value = 0x0000_0001_0000_0000 };
+    try std.testing.expect(mappingLifetimeToken(cpu_identity.MAX_CPUS, handle) == null);
+    try std.testing.expect(mappingLifetimeToken(0, .{}) == null);
+    try std.testing.expect(mappingLifetimeToken(0, .{ .value = (@as(u64, 1) << 32) | task_runtime.MAX_TASKS }) == null);
+    var out = LifetimeMapping{ .cpu = 9, .handle = handle };
+    const sentinel = out;
+    for ([_]u64{ 0, 0xf00, handle.value | task_runtime.MAX_TASKS, handle.value | 0x1000, handle.value | 0x8000_0000 }) |invalid| {
+        try std.testing.expect(!decodeMappingLifetimeToken(invalid, &out));
+        try std.testing.expectEqualDeep(sentinel, out);
+    }
+}
+
+test "mapping domain binding remains pinned by mappings tokens callbacks and every lease phase" {
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    cpu_identity.setIndexForTest(0);
+    executor_registrations = @splat(.{});
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    var anchor = Executor{};
+    var source = Executor{};
+    var owner: u8 = 0;
+    var foreign_owner: u8 = 0;
+    var replacement = Executor{};
+    try std.testing.expect(anchor.claimRuntimeBinding(&owner, runtime));
+    try std.testing.expect(source.claimRuntimeBinding(&owner, runtime));
+    try std.testing.expect(anchor.claimMappingRegistration(0, &owner, runtime));
+    try std.testing.expect(source.claimMappingRegistration(15, &owner, runtime));
+    defer {
+        cpu_identity.setIndexForTest(0);
+        source.reset();
+        anchor.reset();
+        executor_registrations = previous_registrations;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    try std.testing.expect(anchor.bindMappedObjectLifetime());
+    const bound_anchor = anchor;
+    try std.testing.expect(!anchor.releaseRuntimeBinding(&owner, runtime));
+    try std.testing.expect(!anchor.releaseMappingRegistration(0, &owner, runtime));
+    try std.testing.expectError(error.RegistrationMismatch, anchor.resetChecked());
+    try std.testing.expectEqualDeep(bound_anchor, anchor);
+    try std.testing.expect(anchor.mappedObjectLifetimeIsBound());
+    try std.testing.expect(anchor.unbindMappedObjectLifetime());
+    const mapping_handle = installTestMappingAt(&source, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+    });
+    const before_source = source;
+    try std.testing.expect(!source.releaseRuntimeBinding(&owner, runtime));
+    try std.testing.expect(!source.releaseMappingRegistration(15, &owner, runtime));
+    try std.testing.expectEqualDeep(before_source, source);
+    const ticket = try runtime.execution.prepare(15, .{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 });
+    for ([_]dispatch_ownership.Phase{ .reserved, .ready, .running, .returned, .collecting }) |phase| {
+        switch (phase) {
+            .ready => try runtime.execution.bindOwnedRoot(ticket, mapping_handle.value, 0x1000),
+            .running => {
+                cpu_identity.setIndexForTest(15);
+                _ = try runtime.execution.start(ticket);
+                cpu_identity.setIndexForTest(0);
+            },
+            .returned => {
+                cpu_identity.setIndexForTest(15);
+                try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+                cpu_identity.setIndexForTest(0);
+            },
+            .collecting => _ = try runtime.execution.beginCollect(ticket),
+            else => {},
+        }
+        try std.testing.expect(!source.releaseRuntimeBinding(&owner, runtime));
+        try std.testing.expect(!anchor.releaseRuntimeBinding(&owner, runtime));
+        try std.testing.expect(!source.releaseMappingRegistration(15, &owner, runtime));
+        try std.testing.expect(!replacement.claimRuntimeBinding(&foreign_owner, runtime));
+        try std.testing.expect(!releaseRegisteredDomain(&owner, runtime));
+        try std.testing.expectError(error.ExecutionLeased, source.resetChecked());
+        try std.testing.expectEqualDeep(before_source, source);
+        try std.testing.expect(registeredExecutor(15) == &source);
+    }
+    try runtime.execution.finishCollect(ticket);
+    runtime.lifecycle_transition_active = true;
+    try std.testing.expect(!releaseRegisteredDomain(&owner, runtime));
+    try std.testing.expect(!anchor.releaseRuntimeBinding(&owner, runtime));
+    try std.testing.expectError(error.ExecutionLeased, source.resetChecked());
+    runtime.lifecycle_transition_active = false;
+    try std.testing.expect(releaseRegisteredDomain(&owner, runtime));
+    try std.testing.expect(registeredExecutor(15) == null);
+    try std.testing.expect(source.bound_runtime == null);
+    try std.testing.expect(registeredExecutor(0) == &anchor);
+    try std.testing.expectEqual(@as(usize, 0), source.materializedCount());
+}
+
 test "user memory copies require the live active owner and exact mapping generation" {
     var executor = Executor{};
     const handle = installTestMappingAt(&executor, 0, .{
@@ -2954,6 +5064,128 @@ test "user memory copies require the live active owner and exact mapping generat
     try std.testing.expect(activeUserMemoryMapping(&executor, 8) == null);
     executor.active_mapping_handle = replacement;
     try std.testing.expect(activeUserMemoryMapping(&executor, 8) == mapping);
+}
+
+test "shared copy admission requires the registered BSP executor and IRQ exclusion" {
+    const previous_index = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    defer {
+        executor_registrations = previous_registrations;
+        cpu_identity.setIndexForTest(previous_index);
+    }
+    executor_registrations = @splat(.{});
+    cpu_identity.setIndexForTest(smp.runtimeOwnerCpu());
+    var executor = Executor{};
+    try std.testing.expect(serializedSharedMemoryExecutor(false) == null);
+    try std.testing.expect(claimCurrentExecutor(&executor));
+    try std.testing.expect(serializedSharedMemoryExecutor(false) == &executor);
+    try std.testing.expect(serializedSharedMemoryExecutor(true) == null);
+    executor.registration_cpu = null;
+    try std.testing.expect(serializedSharedMemoryExecutor(false) == null);
+    executor.registration_cpu = smp.runtimeOwnerCpu();
+    const other_cpu = (smp.runtimeOwnerCpu() + 1) % cpu_identity.MAX_CPUS;
+    cpu_identity.setIndexForTest(@intCast(other_cpu));
+    var remote_executor = Executor{};
+    try std.testing.expect(claimCurrentExecutor(&remote_executor));
+    try std.testing.expect(serializedSharedMemoryExecutor(false) == null);
+}
+
+test "shared copy authority isolates grouped peers and matches the current demand registration" {
+    const ids = @import("../core/ids.zig");
+    demand_paging.reset();
+    defer demand_paging.reset();
+    var executor = Executor{};
+    defer {
+        executor.active_task_id = 0;
+        executor.active_mapping = null;
+        executor.reset();
+    }
+    const space = freestanding.paging.UserAddressSpace{ .directory = @ptrFromInt(0x1000), .pcid = 1 };
+    const owner_handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = 42,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 7 },
+    });
+    const peer_handle = installTestMappingAt(&executor, 1, .{
+        .state = .live,
+        .address_space_id = 43,
+        .address_space = space,
+        .dispatch_metadata = .{ .owner_task_id = 8 },
+    });
+    const owner_mapping = &executor.mappingArena().?.getByHandle(owner_handle).?.mapping;
+    const peer_mapping = &executor.mappingArena().?.getByHandle(peer_handle).?.mapping;
+    executor.active_mapping = owner_mapping;
+    executor.active_mapping_handle = owner_handle;
+    executor.active_task_id = 7;
+    var table = shared_memory.Table.initWithMappingLifetime(.{
+        .context = &executor,
+        .register = registerMappedObject,
+        .unregister = unregisterMappedObject,
+    });
+    defer table.deinit();
+    const object = try table.createWithAccess(ids.task(7), PAGE_SIZE + 37, .{ .ring = true });
+    try table.map(object.id, ids.task(7));
+    const owner = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
+    executor.active_mapping = peer_mapping;
+    executor.active_mapping_handle = peer_handle;
+    executor.active_task_id = 8;
+    try table.map(object.id, ids.task(8));
+    const peer = try table.freestandingTaskMappingDescriptor(object.id, ids.task(8));
+    try table.seal(object.id);
+
+    const address: usize = @intCast(peer.virtual_base + PAGE_SIZE - 16);
+    const accepted = sharedUserMemoryAuthority(&executor, 8, address, 32, true).?;
+    try std.testing.expectEqual(peer.physical_base, accepted.authority.physical_base);
+    try std.testing.expectEqual(object.size_bytes, accepted.authority.size_bytes);
+    try std.testing.expect(accepted.space.directory == space.directory);
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, address, 32, true) == null);
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 8, @intCast(owner.virtual_base), 1, false) == null);
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 8, @intCast(peer.virtual_base), object.size_bytes + 1, false) == null);
+
+    // Both tasks share a hardware directory; only the selected task's Table
+    // membership authorizes a supervisor copy of its own registered alias.
+    executor.active_mapping = owner_mapping;
+    executor.active_mapping_handle = owner_handle;
+    executor.active_task_id = 7;
+    const owner_address: usize = @intCast(owner.virtual_base);
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, owner_address, object.size_bytes, true) != null);
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, @intCast(peer.virtual_base), 1, false) == null);
+    const owner_end = owner.virtual_base + owner.size_bytes;
+    const bad_regions = [_]demand_paging.Region{
+        .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = true, .kind = .anonymous_zero, .physical_base = owner.physical_base },
+        .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = true, .kind = .shared_ram, .physical_base = owner.physical_base + PAGE_SIZE },
+        .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = false, .kind = .shared_ram, .physical_base = owner.physical_base },
+        .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end, .writable = true, .kind = .shared_ram, .physical_base = owner.physical_base, .protection_key = 1 },
+        .{ .virt_start = owner.virtual_base, .virt_end_exclusive = owner_end + 1, .writable = true, .kind = .shared_ram, .physical_base = owner.physical_base },
+    };
+    for (bad_regions) |region| {
+        try std.testing.expect(demand_paging.unregisterRegionForSpace(&space, owner.virtual_base, owner_end));
+        try std.testing.expect(demand_paging.registerForSpace(&space, region));
+        try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, owner_address, 1, false) == null);
+        try std.testing.expect(demand_paging.unregisterRegionForSpace(&space, region.virt_start, region.virt_end_exclusive));
+        try std.testing.expect(demand_paging.registerForSpace(&space, .{
+            .virt_start = owner.virtual_base,
+            .virt_end_exclusive = owner_end,
+            .writable = true,
+            .kind = .shared_ram,
+            .physical_base = owner.physical_base,
+        }));
+    }
+    var foreign_table = shared_memory.Table.init();
+    defer foreign_table.deinit();
+    executor.mapped_object_table = &foreign_table;
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, owner_address, 1, false) == null);
+    executor.mapped_object_table = &table;
+    owner_mapping.state = .retire_pending;
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, owner_address, 1, false) == null);
+    owner_mapping.state = .live;
+    executor.active_mapping_handle = peer_handle;
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, owner_address, 1, false) == null);
+    executor.active_mapping_handle = owner_handle;
+    _ = try table.revoke(object.id);
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 7, owner_address, 1, false) == null);
+    try std.testing.expect(sharedUserMemoryAuthority(&executor, 8, @intCast(peer.virtual_base), 1, false) == null);
 }
 
 test "zero-initialized mapping arenas preserve generational reuse" {
@@ -3026,6 +5258,8 @@ test "executor retires inactive address spaces with mailbox caches and reuses sl
 
 test "executor defers active address-space retirement until kernel handoff" {
     var executor = Executor{};
+    const previous_entry = native_entry.current().*;
+    defer native_entry.current().* = previous_entry;
     const active_handle = installTestMappingAt(&executor, 0, .{ .state = .live, .address_space_id = 42 });
     const active_entry = &executor.mappings.slotAt(0).mapping;
     executor.active_mapping = active_entry;
@@ -3038,7 +5272,7 @@ test "executor defers active address-space retirement until kernel handoff" {
     try std.testing.expect(executor.mappingHandle(42) == null);
     try std.testing.expect(executor.findMappingByHandle(active_handle, 42) == null);
     try std.testing.expect(executor.handoff_completed);
-    try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+    try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
 
     executor.active_task_id = 0;
     executor.active_mapping = null;
@@ -3049,6 +5283,225 @@ test "executor defers active address-space retirement until kernel handoff" {
     try std.testing.expect(executor.findMappingByHandle(active_handle, 42) == null);
     try std.testing.expectEqual(@as(u8, 0), STEADY_RETIREMENT_SLOT_SCANS_PER_DISPATCH);
     executor.reset();
+}
+
+test "foreign executor retirement rejects before mapping observations or selected GS mutation" {
+    const previous_index = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    const previous_entry = native_entry.stateForCpu(1).*;
+    defer {
+        cpu_identity.setIndexForTest(0);
+        executor_registrations = previous_registrations;
+        native_entry.stateForCpu(1).* = previous_entry;
+        cpu_identity.setIndexForTest(previous_index);
+    }
+    executor_registrations = @splat(.{});
+    cpu_identity.setIndexForTest(0);
+    var executor = Executor{};
+    try std.testing.expect(claimCurrentExecutor(&executor));
+    const handle = installTestMappingAt(&executor, 0, .{ .state = .live, .address_space_id = 42 });
+    const entry = &executor.mappings.getByHandle(handle).?.mapping;
+    executor.active_mapping = entry;
+    executor.active_mapping_handle = handle;
+    executor.active_task_id = 7;
+    executor.last_fault_address_space_id = 42;
+    executor.last_fault_task_id = 7;
+    native_entry.stateForCpu(1).* = .{ .active_task_id = 8, .resume_requested = 19, .userspace_xstate = 0x1234 };
+    const neighbor = native_entry.stateForCpu(1).*;
+    cpu_identity.setIndexForTest(1);
+    try std.testing.expectError(error.WrongCpu, executor.retireAddressSpaceChecked(.{ .address_space_id = 42, .reason = .terminate }));
+    try std.testing.expectEqual(MappingState.live, entry.state);
+    try std.testing.expectEqual(@as(u64, 42), executor.last_fault_address_space_id);
+    try std.testing.expectEqual(@as(u64, 7), executor.last_fault_task_id);
+    try std.testing.expectEqualDeep(neighbor, native_entry.stateForCpu(1).*);
+    try std.testing.expect(!executor.handoff_completed);
+    try std.testing.expectEqual(@as(u64, 0), executor.pending_retirements[0]);
+    cpu_identity.setIndexForTest(0);
+    executor.active_task_id = 0;
+    executor.active_mapping = null;
+    executor.active_mapping_handle = .{};
+    try executor.resetChecked();
+}
+
+test "foreign unregistered executor reset preserves metadata and every continuation" {
+    const previous_index = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    var previous_entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (&previous_entries, 0..) |*entry, index| entry.* = native_entry.stateForCpu(@intCast(index)).*;
+    defer {
+        executor_registrations = previous_registrations;
+        for (previous_entries, 0..) |entry, index| native_entry.stateForCpu(@intCast(index)).* = entry;
+        cpu_identity.setIndexForTest(previous_index);
+    }
+    executor_registrations = @splat(.{});
+    var executor = Executor{
+        .initialized = true,
+        .probe_marker_printed = true,
+        .resume_marker_printed = true,
+        .last_trap_counter = 19,
+        .last_fault_task_id = 27,
+        .last_fault_address_space_id = 42,
+        .last_fault_address = 0x2000,
+        .last_fault_error_code = 7,
+        .user_page_fault_count = 11,
+    };
+    const expected = executor;
+    for (1..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        try std.testing.expectError(error.WrongCpu, executor.resetChecked());
+        try std.testing.expectEqualDeep(expected, executor);
+        for (previous_entries, 0..) |entry, neighbor| {
+            try std.testing.expectEqualDeep(entry, native_entry.stateForCpu(@intCast(neighbor)).*);
+            try std.testing.expect(executor_registrations[neighbor].executor == null);
+        }
+    }
+    cpu_identity.setIndexForTest(0);
+    try executor.resetChecked();
+    try std.testing.expect(!executor.initialized);
+    try std.testing.expectEqual(@as(u64, 0), executor.last_fault_address_space_id);
+}
+
+test "executor pending group retirement waits for lease collection and coalesces its bitmap" {
+    const previous_index = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_index);
+    cpu_identity.setIndexForTest(0);
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    var executor = Executor{ .bound_runtime = runtime };
+    defer executor.reset();
+    const space = freestanding.paging.UserAddressSpace{ .directory = @ptrFromInt(0x1000), .pcid = 1 };
+    executor.group_spaces[0] = space;
+    executor.group_refs[0] = 2;
+    const first = installTestMappingAt(&executor, 0, .{ .state = .live, .address_space_id = 42, .address_space = space });
+    const peer = installTestMappingAt(&executor, 1, .{ .state = .live, .address_space_id = 43, .address_space = space });
+    const ticket = try runtime.execution.prepare(0, .{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 });
+    try runtime.execution.bindOwnedRoot(ticket, first.value, 0x1000);
+    _ = try runtime.execution.start(ticket);
+    try std.testing.expectError(error.ExecutionLeased, executor.resetChecked());
+    const retirement = task_runtime.AddressSpaceRetirementEvent{ .address_space_id = 43, .reason = .terminate };
+    try executor.retireAddressSpaceChecked(retirement);
+    try executor.retireAddressSpaceChecked(retirement);
+    try std.testing.expectEqual(MappingState.retire_pending, executor.mappings.getByHandle(peer).?.mapping.state);
+    try std.testing.expectEqual(@as(u64, 2), executor.pending_retirements[0]);
+    executor.collectRetiredMappings();
+    try std.testing.expectEqual(@as(usize, 2), executor.materializedCount());
+    try std.testing.expectEqual(@as(u8, 2), executor.group_refs[0]);
+    try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+    executor.collectRetiredMappings();
+    try std.testing.expectEqual(@as(usize, 2), executor.materializedCount());
+    _ = try runtime.execution.beginCollect(ticket);
+    executor.collectRetiredMappings();
+    try std.testing.expect(executor.mappings.getByHandle(peer) == null);
+    try std.testing.expect(executor.mappings.getByHandle(first) != null);
+    try std.testing.expectEqual(@as(u8, 1), executor.group_refs[0]);
+    try std.testing.expectEqual(@as(u64, 0), executor.pending_retirements[0]);
+    try runtime.execution.finishCollect(ticket);
+}
+
+test "executor leased group roots reject preparation before refs mappings and mailbox change" {
+    const previous_index = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_index);
+    cpu_identity.setIndexForTest(0);
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    var executor = Executor{ .bound_runtime = runtime };
+    defer executor.reset();
+    const space = freestanding.paging.UserAddressSpace{ .directory = @ptrFromInt(0x1000), .pcid = 1 };
+    const group = @backingInt(userspace_registry.addressSpaceGroupForBundle("app.notes").?);
+    executor.group_spaces[group] = space;
+    executor.group_refs[group] = 1;
+    var image = std.mem.zeroes(userspace_loader.ImageRecord);
+    image.id = 41;
+    image.heartbeat_increment = 1;
+    image.bootstrap_mailbox_address = 0x4000_3000;
+    image.bundle_id_len = "app.notes".len;
+    @memcpy(image.bundle_id[0..image.bundle_id_len], "app.notes");
+    var address_space = std.mem.zeroes(task_runtime.AddressSpaceRecord);
+    address_space.id = 42;
+    address_space.owner_task_id = 7;
+    address_space.image_id = image.id;
+    address_space.entry_point = 0x4000_1000;
+    address_space.stack_pointer = 0x7fff_f000;
+    const metadata = try prepareMappingDispatchMetadata(7, image.id, address_space.entry_point, address_space.stack_pointer, image.id, image.bootstrap_mailbox_address, 0, 1, userspace_registry.protectionKeyForBundle("app.notes"));
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = address_space.id,
+        .address_space = space,
+        .dispatch_metadata = metadata,
+        .mailbox_captured = true,
+    });
+    const entry = &executor.mappings.getByHandle(handle).?.mapping;
+    const expected = executor;
+    const ticket = try runtime.execution.prepare(0, .{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 });
+    try runtime.execution.bindOwnedRoot(ticket, handle.value, 0x1000);
+    var out = MappingResolution{ .mappings = &executor.mappings, .slot_index = 99, .entry = entry, .handle = .{ .value = 77 } };
+    const unchanged = out;
+    for ([_]dispatch_ownership.Phase{ .ready, .running, .returned, .collecting }) |phase| {
+        switch (phase) {
+            .running => _ = try runtime.execution.start(ticket),
+            .returned => try runtime.execution.acknowledgeOwnedRootReturn(ticket),
+            .collecting => _ = try runtime.execution.beginCollect(ticket),
+            else => {},
+        }
+        try std.testing.expect(!executor.userAddressSpacePreparationReady(&space));
+        try std.testing.expectError(error.AddressSpaceLeased, executor.acquireUserAddressSpace("app.notes"));
+        try std.testing.expectError(error.AddressSpaceLeased, executor.ensureMaterializedInto(&address_space, &image, &out));
+        address_space.id = 43;
+        address_space.owner_task_id = 8;
+        try std.testing.expectError(error.AddressSpaceLeased, executor.ensureMaterializedInto(&address_space, &image, &out));
+        address_space.id = 42;
+        address_space.owner_task_id = 7;
+        try std.testing.expectEqualDeep(unchanged, out);
+        try std.testing.expectEqualDeep(expected, executor);
+    }
+    try runtime.execution.finishCollect(ticket);
+    try std.testing.expect(executor.userAddressSpacePreparationReady(&space));
+    try executor.ensureMaterializedInto(&address_space, &image, &out);
+    try std.testing.expectEqual(handle.value, out.handle.value);
+    try std.testing.expectEqualDeep(expected, executor);
+}
+
+test "executor owner stop preempts without invoking foreign shared scheduling policy" {
+    const Policy = struct {
+        var called = false;
+        fn preempt(_: u64) bool {
+            called = true;
+            return true;
+        }
+    };
+    const previous_index = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_index);
+    cpu_identity.setIndexForTest(0);
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    const ticket = try runtime.execution.prepare(1, .{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 });
+    try runtime.execution.bindOwnedRoot(ticket, 2, 0x1000);
+    cpu_identity.setIndexForTest(1);
+    _ = try runtime.execution.start(ticket);
+    var mapping = MappingEntry{};
+    var executor = Executor{
+        .bound_runtime = runtime,
+        .active_task_id = 7,
+        .active_mapping = &mapping,
+        .active_dispatch_lease = ticket,
+        .dispatch_quantum = DispatchQuantum.begin(7, 100),
+    };
+    Policy.called = false;
+    try std.testing.expect(!shouldPreemptUserDispatch(&executor, true, 100, Policy.preempt));
+    try std.testing.expect(!Policy.called);
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expect(try runtime.execution.requestStop(ticket));
+    cpu_identity.setIndexForTest(1);
+    try std.testing.expect(!shouldPreemptUserDispatch(&executor, false, 100, Policy.preempt));
+    try std.testing.expect(shouldPreemptUserDispatch(&executor, true, 100, Policy.preempt));
+    try std.testing.expect(!Policy.called);
+    try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+    cpu_identity.setIndexForTest(0);
+    _ = try runtime.execution.beginCollect(ticket);
+    try runtime.execution.finishCollect(ticket);
 }
 
 test "executor mapping arena enforces capacity and invalidates reused handles" {
@@ -3185,18 +5638,14 @@ const YieldTestFrame = struct {
 
 fn expectYieldHandler(counter: u64, disposition: u64, expected: ?userspace_bootstrap_mailbox.YieldDisposition) !void {
     var executor = Executor{};
-    const previous_executor = registered_executor;
-    const previous_requested = zigos_userspace_resume_requested;
-    const previous_esp = zigos_userspace_resume_esp;
-    const previous_eip = zigos_userspace_resume_eip;
+    const previous_executor = currentRegisteredExecutor();
+    const previous_entry = native_entry.current().*;
     defer {
         executor.active_task_id = 0;
         executor.active_mapping = null;
         executor.reset();
-        registered_executor = previous_executor;
-        zigos_userspace_resume_requested = previous_requested;
-        zigos_userspace_resume_esp = previous_esp;
-        zigos_userspace_resume_eip = previous_eip;
+        currentExecutorSlot().* = previous_executor;
+        native_entry.current().* = previous_entry;
     }
     const handle = installTestMappingAt(&executor, 0, .{
         .state = .live,
@@ -3208,15 +5657,17 @@ fn expectYieldHandler(counter: u64, disposition: u64, expected: ?userspace_boots
     executor.active_mapping = mapping;
     executor.active_mapping_handle = handle;
     executor.active_task_id = 7;
-    zigos_userspace_resume_requested = 0;
+    native_entry.current().resume_requested = 0;
     var frame = YieldTestFrame{ .eax = counter, .esi = disposition };
+    // The explicit owner yield frame replaces any previous dispatch outcome.
+    executor.last_yield_disposition = if (expected == .wait_for_event) .runnable else .wait_for_event;
     const before = frame;
     // This is the production handler body; only the compiler-known frame type
     // differs from the entry assembly's Registers pointer.
     handleUserspaceYield(&executor, &frame);
     try std.testing.expectEqualDeep(before, frame);
     try std.testing.expect(executor.handoff_completed);
-    try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+    try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
     try std.testing.expectEqual(@as(u64, 7), executor.active_task_id);
     try std.testing.expect(executor.active_mapping == mapping);
     if (expected) |valid| {
@@ -3225,8 +5676,8 @@ fn expectYieldHandler(counter: u64, disposition: u64, expected: ?userspace_boots
         try std.testing.expectEqual(@as(u32, @intCast(counter)), mapping.last_user_counter);
         try std.testing.expectEqual(@as(u64, 9), mapping.yield_count);
         try std.testing.expect(mapping.resume_valid);
-        try std.testing.expectEqual(frame.eip, mapping.resume_instruction_pointer);
-        try std.testing.expectEqual(frame.useresp, mapping.resume_stack_pointer);
+        try std.testing.expectEqual(frame.eip, mapping.user_context64.instruction_pointer);
+        try std.testing.expectEqual(frame.useresp, mapping.user_context64.stack_pointer);
         try std.testing.expectEqual(frame.eax, mapping.user_context64.rax);
         try std.testing.expectEqual(frame.esi, mapping.user_context64.rsi);
         try std.testing.expectEqual(frame.r12, mapping.user_context64.r12);
@@ -3270,23 +5721,769 @@ test "yield handler preserves maximum valid counters and both dispositions" {
 
 test "owned state exceptions use user containment without lazy retry" {
     var executor = Executor{ .active_task_id = 7 };
-    const previous_requested = zigos_userspace_resume_requested;
-    defer zigos_userspace_resume_requested = previous_requested;
+    const previous_entry = native_entry.current().*;
+    defer native_entry.current().* = previous_entry;
     for ([_]u8{ 7, GENERAL_PROTECTION_FAULT_VECTOR }) |vector| {
-        zigos_userspace_resume_requested = 0;
+        native_entry.current().resume_requested = 0;
         executor.handoff_completed = false;
         try std.testing.expect(containUserException(&executor, vector, 0, 0x4000_1008));
         try std.testing.expectEqual(vector, executor.last_user_exception.?.vector);
         try std.testing.expect(executor.handoff_completed);
-        try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+        try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
     }
     executor.last_user_exception = null;
     executor.handoff_completed = false;
-    zigos_userspace_resume_requested = 0;
+    native_entry.current().resume_requested = 0;
     try std.testing.expect(!containUserException(&executor, 2, 0, 0x4000_1008));
     try std.testing.expect(executor.last_user_exception == null);
     try std.testing.expect(!executor.handoff_completed);
-    try std.testing.expectEqual(@as(u32, 0), zigos_userspace_resume_requested);
+    try std.testing.expectEqual(@as(u32, 0), native_entry.current().resume_requested);
+}
+
+const RemoteSyscallTestHardware = if (builtin.is_test) struct {
+    const Mode = enum { complete, stop_pending, stop_processing };
+    runtime: *task_runtime.Runtime,
+    ticket: dispatch_ownership.Ticket,
+    mode: Mode,
+    enabled: bool = false,
+    kernel: bool = false,
+    notified: u8 = 0,
+    waits: u8 = 0,
+    restored_user: bool = false,
+    claim: ?dispatch_ownership.ClaimedSyscall = null,
+
+    fn mask(self: *@This()) bool {
+        const previous = self.enabled;
+        self.enabled = false;
+        return previous;
+    }
+    fn restore(self: *@This(), enabled: bool) void {
+        self.enabled = enabled;
+    }
+    fn switchToKernel(self: *@This()) void {
+        self.kernel = true;
+    }
+    fn kernelActive(self: *@This()) bool {
+        return self.kernel;
+    }
+    fn restoreUser(self: *@This(), _: *MappingEntry) void {
+        std.testing.expect(!self.enabled and self.runtime.execution.syscallIdle(self.ticket)) catch @panic("restore only drained user");
+        self.kernel = false;
+        self.restored_user = true;
+    }
+    fn notify(self: *@This()) bool {
+        std.testing.expect(self.kernel and !self.enabled) catch @panic("publish only parked kernel");
+        std.testing.expectError(error.SyscallInFlight, self.runtime.execution.acknowledgeOwnedRootReturn(self.ticket)) catch @panic("pending request blocks return ACK");
+        self.notified += 1;
+        const owner = cpu_identity.currentIndex();
+        cpu_identity.setIndexForTest(0);
+        defer cpu_identity.setIndexForTest(owner);
+        if (self.mode == .stop_pending) {
+            _ = self.runtime.execution.requestStop(self.ticket) catch @panic("publish pending STOP");
+        } else if (self.mode == .stop_processing) {
+            var claim: dispatch_ownership.ClaimedSyscall = undefined;
+            self.runtime.execution.claimSyscallInto(owner, &claim) catch @panic("claim before STOP");
+            self.claim = claim;
+            _ = self.runtime.execution.requestStop(self.ticket) catch @panic("publish processing STOP");
+        }
+        return true;
+    }
+    fn wait(self: *@This()) void {
+        std.testing.expect(!self.enabled and self.kernel) catch @panic("wait must start parked IF0");
+        self.enabled = true;
+        self.waits += 1;
+        // The real owner body allows architecture interrupts while waiting.
+        // This hardware callback models BSP progress, using the real protocol.
+        const owner = cpu_identity.currentIndex();
+        cpu_identity.setIndexForTest(0);
+        var claim: dispatch_ownership.ClaimedSyscall = undefined;
+        if (self.claim) |prior| claim = prior else self.runtime.execution.claimSyscallInto(owner, &claim) catch @panic("claim queued syscall");
+        self.runtime.execution.completeSyscall(claim.key, .{ .status = 9, .denial_reason = 4, .bytes_written = 17 }) catch @panic("complete exact syscall");
+        cpu_identity.setIndexForTest(owner);
+        self.enabled = false;
+        std.testing.expectError(error.SyscallInFlight, self.runtime.execution.acknowledgeOwnedRootReturn(self.ticket)) catch @panic("unconsumed reply blocks return ACK");
+    }
+    fn fail(_: *@This()) noreturn {
+        @panic("unexpected remote syscall ownership failure");
+    }
+
+    fn expectRejected(self: *@This(), fixture: *DeviceInterruptFixture) !void {
+        const before_frame = fixture.frame;
+        const before_entry = native_entry.current().*;
+        const before_context = fixture.mapping.user_context64;
+        const before_if = self.enabled;
+        try std.testing.expect(!remoteSyscallWithHardware(&fixture.frame, self));
+        try std.testing.expectEqual(before_if, self.enabled);
+        try std.testing.expect(!self.kernel and !self.restored_user);
+        try std.testing.expectEqual(@as(u8, 0), self.notified);
+        try std.testing.expectEqual(@as(u8, 0), self.waits);
+        try std.testing.expectEqualDeep(before_frame, fixture.frame);
+        try std.testing.expectEqualDeep(before_entry, native_entry.current().*);
+        try std.testing.expectEqualDeep(before_context, fixture.mapping.user_context64);
+        try std.testing.expect(!fixture.executor.handoff_completed);
+    }
+} else struct {};
+
+test "broker copy session authenticates processing receipt without BSP active-task substitution" {
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    cpu_identity.setIndexForTest(0);
+    executor_registrations = @splat(.{});
+    const runtime = table_backing.alloc(task_runtime.Runtime) orelse return error.OutOfMemory;
+    runtime.initializeAllocated();
+    var executor = Executor{};
+    var anchor = Executor{};
+    const owner: *const anyopaque = runtime;
+    try std.testing.expect(anchor.claimRuntimeBinding(owner, runtime));
+    try std.testing.expect(anchor.claimMappingRegistration(0, owner, runtime));
+    try std.testing.expect(executor.claimRuntimeBinding(owner, runtime));
+    try std.testing.expect(executor.claimMappingRegistration(1, owner, runtime));
+    defer {
+        cpu_identity.setIndexForTest(0);
+        executor.active_mapping = null;
+        executor.active_task_id = 0;
+        executor.reset();
+        anchor.reset();
+        runtime.reset();
+        table_backing.free(task_runtime.Runtime, runtime);
+        executor_registrations = previous_registrations;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+
+    const task = try runtime.createTask(.{
+        .owner = .{ .kind = .app, .serial = 41 },
+        .component_class = .app_component,
+        .budget = .{ .cpu_time_ticks = 100, .memory_bytes = units.kibibytes(64), .endpoint_slots = 2, .shared_memory_bytes = units.kibibytes(4) },
+        .ui_surface_id = 7,
+        .local_only = true,
+    });
+    const handle = installTestMappingAt(&executor, 0, .{
+        .state = .live,
+        .address_space_id = task.address_space_id,
+        .address_space = .{ .directory = @ptrFromInt(0x1000), .pcid = 1 },
+        .dispatch_metadata = .{ .owner_task_id = task.id },
+    });
+    const mapping = &executor.mappingArena().?.getByHandle(handle).?.mapping;
+    const record = runtime.findAddressSpace(task.address_space_id).?;
+    record.region_count = 1;
+    record.regions[0] = .{ .kind = .load_segment, .virtual_address = 0x4000_0000, .size_bytes = 8192, .file_offset = 0, .file_size = 0, .access = .{ .read = true } };
+    var backing: [8192]u8 = undefined;
+    for (&backing, 0..) |*byte, index| byte.* = @truncate(index * 13);
+    var pages = SyscallCopyTesting.Pages{ .directory = mapping.address_space.?.directory, .virtual_base = 0x4000_0000, .bytes = &backing };
+    const previous_pages = SyscallCopyTesting.pages;
+    SyscallCopyTesting.pages = &pages;
+    defer SyscallCopyTesting.pages = previous_pages;
+    executor.active_task_id = task.id + 1;
+    // The BSP has an unrelated active identity. Only the claimed receipt may
+    // select the remote mapping; changing that incidental identity is irrelevant.
+    const ticket = try runtime.reserveExecution(task, 1);
+    try runtime.execution.bindOwnedRoot(ticket, handle.value, 0x1000);
+    cpu_identity.setIndexForTest(1);
+    _ = try runtime.execution.start(ticket);
+    var key: dispatch_ownership.RequestKey = undefined;
+    try runtime.execution.submitSyscallInto(ticket, .{ .opcode = 0x101, .request_addr = 0x4000_1000, .response_addr = 0, .response_len = 0 }, &key);
+    cpu_identity.setIndexForTest(0);
+    var claim: dispatch_ownership.ClaimedSyscall = undefined;
+    try runtime.execution.claimSyscallInto(1, &claim);
+    var session: syscall_broker.CopySession = undefined;
+    try std.testing.expect(anchor.prepareSyscallCopySession(&claim, &session));
+    try std.testing.expect(session.context == @as(*anyopaque, &anchor));
+    try std.testing.expectEqualDeep(claim.key, session.key);
+    var bytes: [16]u8 = @splat(0x5a);
+    try std.testing.expect(session.read(session.context, &claim, 0x4000_0ff8, &bytes));
+    try std.testing.expectEqualSlices(u8, backing[4088..4104], &bytes);
+    try std.testing.expectEqual(@as(usize, 1), pages.reads);
+    pages.readable = false;
+    bytes = @splat(0x5a);
+    try std.testing.expect(!session.read(session.context, &claim, 0x4000_0ff8, &bytes));
+    try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0x5a)), &bytes);
+    pages.readable = true;
+    try std.testing.expect(!session.read(session.context, &claim, 0x4000_1ff8, &bytes));
+    try std.testing.expectEqual(@as(usize, 1), pages.reads);
+    var denied: SyscallCopyMapping = undefined;
+    try std.testing.expect(!syscallCopyMappingInto(&anchor, &claim, true, true, &denied));
+    try std.testing.expect(!syscallCopyMappingInto(&anchor, &claim, false, false, &denied));
+    cpu_identity.setIndexForTest(1);
+    try std.testing.expect(!anchor.prepareSyscallCopySession(&claim, &session));
+    cpu_identity.setIndexForTest(0);
+    const original_session = session;
+    inline for (.{ "mapping_handle", "physical_root" }) |field| {
+        var forged = claim;
+        @field(forged.bound, field) += 4096;
+        try std.testing.expect(!anchor.prepareSyscallCopySession(&forged, &session));
+        try std.testing.expectEqualDeep(original_session, session);
+    }
+    inline for (.{ "task_handle", "task_id", "process_generation", "address_space_id" }) |field| {
+        var forged = claim;
+        @field(forged.bound.identity, field) += 1;
+        try std.testing.expect(!anchor.prepareSyscallCopySession(&forged, &session));
+        try std.testing.expectEqualDeep(original_session, session);
+    }
+    mapping.dispatch_metadata.owner_task_id += 1;
+    try std.testing.expect(!anchor.prepareSyscallCopySession(&claim, &session));
+    mapping.dispatch_metadata.owner_task_id -= 1;
+    mapping.address_space.?.directory = @ptrFromInt(0x2000);
+    try std.testing.expect(!anchor.prepareSyscallCopySession(&claim, &session));
+    mapping.address_space.?.directory = @ptrFromInt(0x1000);
+    mapping.state = .retire_pending;
+    try std.testing.expect(!anchor.prepareSyscallCopySession(&claim, &session));
+    mapping.state = .live;
+    task.process_generation += 1;
+    try std.testing.expect(!anchor.prepareSyscallCopySession(&claim, &session));
+    task.process_generation -= 1;
+    try std.testing.expect(anchor.prepareSyscallCopySession(&claim, &session));
+    demand_paging.reset();
+    defer demand_paging.reset();
+    var table = shared_memory.Table.initWithMappingLifetime(.{ .context = &anchor, .register = registerMappedObject, .unregister = unregisterMappedObject });
+    defer table.deinit();
+    const object = try table.createWithAccess(@import("../core/ids.zig").task(task.id), PAGE_SIZE + 37, .{ .ring = true });
+    try table.map(object.id, @import("../core/ids.zig").task(task.id));
+    try table.seal(object.id);
+    const shared = try table.freestandingTaskMappingDescriptor(object.id, @import("../core/ids.zig").task(task.id));
+    pages.virtual_base = @intCast(shared.virtual_base);
+    bytes = @splat(0x5a);
+    try std.testing.expect(session.read(session.context, &claim, pages.virtual_base + PAGE_SIZE - 8, &bytes));
+    try std.testing.expectEqualSlices(u8, backing[4088..4104], &bytes);
+    const successful_reads = pages.reads;
+    bytes = @splat(0x5a);
+    try std.testing.expect(!session.read(session.context, &claim, pages.virtual_base + object.size_bytes - 8, &bytes));
+    try std.testing.expectEqual(successful_reads, pages.reads);
+    try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0x5a)), &bytes);
+    _ = try table.revoke(object.id);
+    try std.testing.expect(!session.read(session.context, &claim, pages.virtual_base, &bytes));
+    try std.testing.expectEqual(successful_reads, pages.reads);
+    try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0x5a)), &bytes);
+    try runtime.execution.completeSyscall(key, .{ .status = 0, .denial_reason = 0, .bytes_written = 0 });
+    bytes = @splat(0x5a);
+    try std.testing.expect(!session.read(session.context, &claim, 0x4000_1000, &bytes));
+    try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0x5a)), &bytes);
+    try std.testing.expect(!anchor.prepareSyscallCopySession(&claim, &session));
+    cpu_identity.setIndexForTest(1);
+    var reply: dispatch_ownership.Reply = undefined;
+    try runtime.execution.consumeSyscallInto(key, &reply);
+    try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+    cpu_identity.setIndexForTest(0);
+    try runtime.collectExecution(ticket);
+}
+
+test "broker mapping domain routes all sixteen colliding handles and retains exact shared tokens" {
+    const ids = @import("../core/ids.zig");
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    cpu_identity.setIndexForTest(0);
+    executor_registrations = @splat(.{});
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    const sources = try std.testing.allocator.alloc(Executor, cpu_identity.MAX_CPUS);
+    defer std.testing.allocator.free(sources);
+    var owner: u8 = 0;
+    var foreign_owner: u8 = 0;
+    var tasks: [cpu_identity.MAX_CPUS]*task_runtime.TaskRecord = undefined;
+    var tickets: [cpu_identity.MAX_CPUS]?dispatch_ownership.Ticket = @splat(null);
+    var keys: [cpu_identity.MAX_CPUS]?dispatch_ownership.RequestKey = @splat(null);
+    var handles: [cpu_identity.MAX_CPUS]MappingHandle = undefined;
+    for (sources, 0..) |*source, index| {
+        source.* = .{};
+        try std.testing.expect(source.claimRuntimeBinding(&owner, runtime));
+        try std.testing.expect(source.claimMappingRegistration(@intCast(index), &owner, runtime));
+        const task = try runtime.createTask(.{
+            .owner = .{ .kind = .app, .serial = index + 1 },
+            .component_class = .app_component,
+            .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 8192, .endpoint_slots = 2, .shared_memory_bytes = 8192 },
+            .local_only = true,
+        });
+        tasks[index] = task;
+        const physical: usize = (index + 1) * PAGE_SIZE;
+        handles[index] = installTestMappingAt(source, 0, .{
+            .state = .live,
+            .address_space_id = task.address_space_id,
+            .address_space = .{ .directory = @ptrFromInt(physical), .pcid = @intCast(index), .switch_cr3 = physical | index },
+            .dispatch_metadata = .{ .owner_task_id = task.id },
+        });
+        try std.testing.expect(handles[index].eql(handles[0]));
+        const record = runtime.findAddressSpace(task.address_space_id).?;
+        record.region_count = 1;
+        record.regions[0] = .{ .kind = .load_segment, .virtual_address = 0x4000_0000, .size_bytes = 8192, .file_offset = 0, .file_size = 0, .access = .{ .read = true, .write = true } };
+    }
+    defer {
+        for (tickets, 0..) |optional, index| if (optional) |ticket| {
+            cpu_identity.setIndexForTest(0);
+            if (keys[index]) |key| runtime.execution.completeSyscall(key, .{ .status = 0, .denial_reason = 0, .bytes_written = 0 }) catch {};
+            cpu_identity.setIndexForTest(ticket.cpu);
+            if (keys[index]) |key| {
+                _ = runtime.execution.cancelPendingSyscall(key);
+                var reply: dispatch_ownership.Reply = undefined;
+                runtime.execution.consumeSyscallInto(key, &reply) catch {};
+            }
+            runtime.execution.acknowledgeOwnedRootReturn(ticket) catch {};
+            cpu_identity.setIndexForTest(0);
+            runtime.collectExecution(ticket) catch {};
+        };
+        cpu_identity.setIndexForTest(0);
+        _ = releaseRegisteredDomain(&owner, runtime);
+        sources[0].reset();
+        runtime.reset();
+        executor_registrations = previous_registrations;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    demand_paging.reset();
+    defer demand_paging.reset();
+    var table = shared_memory.Table.initWithMappingLifetime(sources[0].mappedObjectLifetime());
+    defer table.deinit();
+    const objects = [_]shared_memory.Object{
+        try table.createWithAccess(ids.task(tasks[0].id), PAGE_SIZE + 37, .{ .ring = true }),
+        try table.createWithAccess(ids.task(tasks[8].id), PAGE_SIZE + 37, .{ .ring = true }),
+    };
+    // A task's live lease resolves the otherwise coincident arena-local handle.
+    for (tasks, 0..) |task, index| {
+        const cpu: u8 = @intCast(index);
+        const ticket = try runtime.reserveExecution(task, cpu);
+        tickets[index] = ticket;
+        try runtime.execution.bindOwnedRoot(ticket, handles[index].value, (index + 1) * PAGE_SIZE);
+        cpu_identity.setIndexForTest(cpu);
+        _ = try runtime.execution.start(ticket);
+        var key: dispatch_ownership.RequestKey = undefined;
+        try runtime.execution.submitSyscallInto(ticket, .{ .opcode = 0x101, .request_addr = 0x4000_0010, .response_addr = 0, .response_len = 0 }, &key);
+        keys[index] = key;
+        cpu_identity.setIndexForTest(0);
+        try table.map(objects[index / shared_memory.MAX_MAPPINGS_PER_OBJECT].id, ids.task(task.id));
+    }
+    for (objects) |object| try table.seal(object.id);
+    var backing: [8192]u8 = undefined;
+    var pages = SyscallCopyTesting.Pages{ .directory = @ptrFromInt(PAGE_SIZE), .virtual_base = 0x4000_0000, .bytes = &backing };
+    const previous_pages = SyscallCopyTesting.pages;
+    SyscallCopyTesting.pages = &pages;
+    defer SyscallCopyTesting.pages = previous_pages;
+    for (tasks, 0..) |task, index| {
+        const source = &sources[index];
+        const mapping = &source.mappingArena().?.getByHandle(handles[index]).?.mapping;
+        var claim: dispatch_ownership.ClaimedSyscall = undefined;
+        try runtime.execution.claimSyscallInto(@intCast(index), &claim);
+        var session: syscall_broker.CopySession = undefined;
+        try std.testing.expect(sources[0].prepareSyscallCopySession(&claim, &session));
+        const expected_session = session;
+        pages.directory = mapping.address_space.?.directory;
+        pages.virtual_base = 0x4000_0000;
+        @memset(&backing, @intCast(index + 1));
+        var output: [16]u8 = @splat(0x5a);
+        try std.testing.expect(session.read(session.context, &claim, 0x4000_0010, &output));
+        try std.testing.expectEqualSlices(u8, backing[16..32], &output);
+        const private_base = pages.virtual_base;
+        const before_preparation = pages.preparations;
+        try std.testing.expect(session.prepare_output(session.context, &claim, .{ .address = private_base, .declared_bytes = backing.len, .prepared_bytes = 0, .alignment = 8 }));
+        try std.testing.expectEqual(before_preparation, pages.preparations);
+        try std.testing.expect(!session.prepare_output(session.context, &claim, .{ .address = private_base, .declared_bytes = backing.len + 1, .prepared_bytes = 32, .alignment = 1 }));
+        try std.testing.expectEqual(before_preparation, pages.preparations);
+        try std.testing.expect(session.prepare_output(session.context, &claim, .{ .address = private_base + PAGE_SIZE - 16, .declared_bytes = 88, .prepared_bytes = 88, .alignment = 1 }));
+        const first_payload: [88]u8 = @splat(0x31);
+        const second_payload: [64]u8 = @splat(0x62);
+        const third_payload: [56]u8 = @splat(0x93);
+        const outputs = [_]syscall_broker.Output{
+            .{ .address = private_base + PAGE_SIZE - 16, .bytes = &first_payload },
+            .{ .address = private_base + PAGE_SIZE + 128, .bytes = &second_payload },
+            .{ .address = private_base + 128, .bytes = &third_payload },
+        };
+        const saved_payload = backing;
+        pages.invalid_page = 1;
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &outputs));
+        try std.testing.expectEqualSlices(u8, &saved_payload, &backing);
+        // A valid early output must remain untouched when a later output's
+        // second page is invalid, rather than copying one output at a time.
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &.{ outputs[2], outputs[0], outputs[1] }));
+        try std.testing.expectEqualSlices(u8, &saved_payload, &backing);
+        pages.invalid_page = null;
+        var overlapping = outputs;
+        overlapping[2].address = outputs[1].address;
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &overlapping));
+        try std.testing.expectEqualSlices(u8, &saved_payload, &backing);
+        const oversized: [89]u8 = @splat(0);
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &.{.{ .address = private_base, .bytes = &oversized }}));
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &.{ outputs[0], outputs[1], outputs[2], outputs[2] }));
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &.{ outputs[0], .{ .address = private_base + 512, .bytes = &first_payload }, .{ .address = private_base + 1024, .bytes = &first_payload } }));
+        inline for (.{
+            syscall_broker.OutputRange{ .address = private_base + 1, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 8 },
+            syscall_broker.OutputRange{ .address = private_base, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 3 },
+            syscall_broker.OutputRange{ .address = private_base, .declared_bytes = 64, .prepared_bytes = 65, .alignment = 1 },
+            syscall_broker.OutputRange{ .address = private_base, .declared_bytes = 89, .prepared_bytes = 89, .alignment = 1 },
+            syscall_broker.OutputRange{ .address = std.math.maxInt(usize) - 7, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 1 },
+            syscall_broker.OutputRange{ .address = 0x0000_8000_0000_0000, .declared_bytes = 64, .prepared_bytes = 64, .alignment = 1 },
+        }) |range| try std.testing.expect(!session.prepare_output(session.context, &claim, range));
+        try std.testing.expect(session.prepare_output(session.context, &claim, .{ .address = std.math.maxInt(usize), .declared_bytes = 0, .prepared_bytes = 0, .alignment = 0 }));
+        pages.forced_alias_offset = 0;
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &outputs));
+        try std.testing.expectEqualSlices(u8, &saved_payload, &backing);
+        pages.forced_alias_offset = null;
+        try std.testing.expect(session.write_outputs(session.context, &claim, &outputs));
+        var expected = saved_payload;
+        for (outputs) |destination| @memcpy(expected[destination.address - private_base ..][0..destination.bytes.len], destination.bytes);
+        try std.testing.expectEqualSlices(u8, &expected, &backing);
+        const successful_reads = pages.reads;
+        const saved_space = mapping.address_space.?;
+        mapping.address_space.?.directory = @ptrFromInt((cpu_identity.MAX_CPUS + 1) * PAGE_SIZE);
+        try std.testing.expect(!sources[0].prepareSyscallCopySession(&claim, &session));
+        try std.testing.expectEqualDeep(expected_session, session);
+        mapping.address_space = saved_space;
+        mapping.address_space.?.switch_cr3 += PAGE_SIZE;
+        try std.testing.expect(!session.read(session.context, &claim, 0x4000_0010, &output));
+        mapping.address_space = saved_space;
+        if (index != 0) {
+            source.binding_owner = &foreign_owner;
+            try std.testing.expect(!session.read(session.context, &claim, 0x4000_0010, &output));
+            source.binding_owner = &owner;
+        }
+        source.registration_cpu = @intCast((index + 1) % cpu_identity.MAX_CPUS);
+        try std.testing.expect(!session.read(session.context, &claim, 0x4000_0010, &output));
+        source.registration_cpu = @intCast(index);
+        try std.testing.expectEqual(successful_reads, pages.reads);
+        const object = objects[index / shared_memory.MAX_MAPPINGS_PER_OBJECT];
+        const shared = try table.freestandingTaskMappingDescriptor(object.id, ids.task(task.id));
+        pages.virtual_base = @intCast(shared.virtual_base);
+        var span: shared_memory.TaskCopySpan = undefined;
+        const token = mappingLifetimeToken(@intCast(index), handles[index]).?;
+        try table.taskCopySpanInto(ids.task(task.id), token, pages.virtual_base, 1, &span);
+        const wrong_cpu: u8 = @intCast((index + 1) % cpu_identity.MAX_CPUS);
+        try std.testing.expectError(error.StaleMappingDescriptor, table.taskCopySpanInto(ids.task(task.id), mappingLifetimeToken(wrong_cpu, handles[index]).?, pages.virtual_base, 1, &span));
+        try std.testing.expect(session.read(session.context, &claim, pages.virtual_base + PAGE_SIZE - 8, &output));
+        try std.testing.expectEqualSlices(u8, backing[PAGE_SIZE - 8 .. PAGE_SIZE + 8], &output);
+        const shared_address = pages.virtual_base;
+        const shared_preparations = pages.preparations;
+        try std.testing.expect(session.prepare_output(session.context, &claim, .{ .address = shared_address, .declared_bytes = object.size_bytes, .prepared_bytes = 0, .alignment = 1 }));
+        try std.testing.expectEqual(shared_preparations, pages.preparations);
+        try std.testing.expect(!session.prepare_output(session.context, &claim, .{ .address = shared_address, .declared_bytes = object.size_bytes + 1, .prepared_bytes = 16, .alignment = 1 }));
+        try std.testing.expectEqual(shared_preparations, pages.preparations);
+        const shared_payload: [32]u8 = @splat(0xC4);
+        const shared_outputs = [_]syscall_broker.Output{
+            .{ .address = shared_address + PAGE_SIZE - 16, .bytes = &shared_payload },
+            .{ .address = shared_address + 128, .bytes = &shared_payload },
+        };
+        try std.testing.expect(session.prepare_output(session.context, &claim, .{ .address = shared_outputs[0].address, .declared_bytes = 32, .prepared_bytes = 32, .alignment = 1 }));
+        const shared_before = backing;
+        pages.invalid_page = 1;
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &shared_outputs));
+        try std.testing.expectEqualSlices(u8, &shared_before, &backing);
+        pages.invalid_page = null;
+        try std.testing.expect(session.write_outputs(session.context, &claim, &shared_outputs));
+        @memcpy(expected[0..], &shared_before);
+        for (shared_outputs) |destination| @memcpy(expected[destination.address - shared_address ..][0..destination.bytes.len], destination.bytes);
+        try std.testing.expectEqualSlices(u8, &expected, &backing);
+        const before_source = source.*;
+        try std.testing.expect(!source.releaseRuntimeBinding(&owner, runtime));
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before_source), std.mem.asBytes(source));
+        const StopDuringResolution = struct {
+            var selected_runtime: *task_runtime.Runtime = undefined;
+            var selected_source: *Executor = undefined;
+            var selected_ticket: dispatch_ownership.Ticket = undefined;
+            var observed_retention = false;
+            fn run() void {
+                const prior = selected_source.*;
+                const selected_owner = selected_source.binding_owner.?;
+                observed_retention = !selected_source.releaseRuntimeBinding(selected_owner, selected_runtime);
+                selected_source.resetChecked() catch {};
+                observed_retention = observed_retention and std.mem.eql(u8, std.mem.asBytes(&prior), std.mem.asBytes(selected_source));
+                _ = selected_runtime.execution.requestStop(selected_ticket) catch unreachable;
+            }
+        };
+        StopDuringResolution.selected_runtime = runtime;
+        StopDuringResolution.selected_source = source;
+        StopDuringResolution.selected_ticket = tickets[index].?;
+        StopDuringResolution.observed_retention = false;
+        pages.before_resolve = StopDuringResolution.run;
+        const stopped_before = backing;
+        try std.testing.expect(!session.write_outputs(session.context, &claim, &shared_outputs));
+        try std.testing.expect(StopDuringResolution.observed_retention);
+        try std.testing.expectEqualSlices(u8, &stopped_before, &backing);
+        pages.before_resolve = null;
+        try runtime.execution.completeSyscall(keys[index].?, .{ .status = 0, .denial_reason = 0, .bytes_written = 0 });
+        try std.testing.expect(!session.read(session.context, &claim, pages.virtual_base, &output));
+        cpu_identity.setIndexForTest(@intCast(index));
+        var reply: dispatch_ownership.Reply = undefined;
+        try runtime.execution.consumeSyscallInto(keys[index].?, &reply);
+        try runtime.execution.acknowledgeOwnedRootReturn(tickets[index].?);
+        cpu_identity.setIndexForTest(0);
+        try runtime.collectExecution(tickets[index].?);
+        tickets[index] = null;
+        keys[index] = null;
+        // Releasing this exact task/token leaves every foreign CPU's equal
+        // numeric MappingHandle membership and demand registration intact.
+        source.retireAddressSpace(.{ .address_space_id = task.address_space_id, .reason = .terminate });
+        try std.testing.expect(!table.hasMapping(object.id, ids.task(task.id)));
+        for (tasks[index + 1 ..], index + 1..) |neighbor, cpu| {
+            try std.testing.expect(table.hasMapping(objects[cpu / shared_memory.MAX_MAPPINGS_PER_OBJECT].id, ids.task(neighbor.id)));
+            try std.testing.expectEqual(@as(u16, 1), sources[cpu].mapped_object_count);
+        }
+    }
+    for (objects) |object| try std.testing.expectEqual(@as(u16, 0), (try table.descriptor(object.id)).mapped_task_count);
+    try std.testing.expect(releaseRegisteredDomain(&owner, runtime));
+    for (sources[1..]) |*source| {
+        try std.testing.expect(source.registration_cpu == null and source.bound_runtime == null);
+        try std.testing.expectEqual(@as(usize, 0), source.materializedCount());
+    }
+}
+
+test "scheduler broker drain services exact remote mappings and excludes callback reentry" {
+    const abi = @import("../core/abi.zig");
+    const component_port = @import("../kernel_api/component_port.zig");
+    const endpoint = @import("../kernel_api/endpoint.zig");
+    const native_kernel = @import("../kernel_api/native_kernel.zig");
+    const userspace_scheduler = @import("userspace_scheduler.zig");
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    cpu_identity.setIndexForTest(0);
+    executor_registrations = @splat(.{});
+    const runtime = table_backing.alloc(task_runtime.Runtime) orelse return error.OutOfMemory;
+    runtime.initializeAllocated();
+    const foreign_runtime = table_backing.alloc(task_runtime.Runtime) orelse return error.OutOfMemory;
+    foreign_runtime.initializeAllocated();
+    var executor = Executor{};
+    var sources: [3]Executor = @splat(.{});
+    var scheduler = userspace_scheduler.Scheduler.init(&executor);
+    var catalog = userspace_loader.Catalog.init();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    var shared = shared_memory.Table.init();
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(.{ .kind = .policy_authority, .serial = 1 }, runtime, &capabilities, &endpoints, &shared);
+    var port = component_port.KernelPort.init(&kernel);
+    scheduler.bind(&catalog, runtime, &capabilities);
+    try std.testing.expect(executor.claimMappingRegistration(0, &scheduler, runtime));
+    for (&sources, 0..) |*source, index| {
+        try std.testing.expect(source.claimRuntimeBinding(&scheduler, runtime));
+        try std.testing.expect(source.claimMappingRegistration(@intCast(index + 1), &scheduler, runtime));
+    }
+    var tickets: [3]?dispatch_ownership.Ticket = @splat(null);
+    var keys: [3]?dispatch_ownership.RequestKey = @splat(null);
+    defer {
+        for (tickets, 0..) |optional_ticket, index| if (optional_ticket) |ticket| {
+            cpu_identity.setIndexForTest(ticket.cpu);
+            if (keys[index]) |key| {
+                _ = runtime.execution.cancelPendingSyscall(key);
+                cpu_identity.setIndexForTest(0);
+                runtime.execution.completeSyscall(key, .{ .status = 0, .denial_reason = 0, .bytes_written = 0 }) catch {};
+                cpu_identity.setIndexForTest(ticket.cpu);
+                var reply: dispatch_ownership.Reply = undefined;
+                runtime.execution.consumeSyscallInto(key, &reply) catch {};
+            }
+            runtime.execution.acknowledgeOwnedRootReturn(ticket) catch {};
+            cpu_identity.setIndexForTest(0);
+            runtime.collectExecution(ticket) catch {};
+        };
+        cpu_identity.setIndexForTest(0);
+        scheduler.deinit();
+        runtime.reset();
+        endpoints.deinit();
+        shared.deinit();
+        kernel.deinit();
+        table_backing.free(task_runtime.Runtime, foreign_runtime);
+        table_backing.free(task_runtime.Runtime, runtime);
+        executor_registrations = previous_registrations;
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    const Reentry = struct {
+        scheduler: *userspace_scheduler.Scheduler,
+        port: *component_port.KernelPort,
+        calls: usize = 0,
+        fn notify(context: *anyopaque, _: dispatch_ownership.Ticket) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            std.testing.expectEqual(@as(u8, 0), self.scheduler.servicePendingSyscalls(self.port, 10)) catch @panic("broker callback cannot recursively claim work");
+        }
+    };
+    var reentry = Reentry{ .scheduler = &scheduler, .port = &port };
+    const sink = task_runtime.ExecutionStopSink{ .context = &reentry, .notify = Reentry.notify };
+    try std.testing.expect(runtime.bindExecutionStopSink(sink));
+    var tasks: [3]*task_runtime.TaskRecord = undefined;
+    var first_mapping: *MappingEntry = undefined;
+    for (&tasks, 0..) |*task_out, index| {
+        const cpu: u8 = @intCast(index + 1);
+        const task = try runtime.createTask(.{
+            .owner = .{ .kind = .app, .serial = @as(u64, cpu) + 1 },
+            .component_class = .app_component,
+            .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 8192, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+            .local_only = true,
+        });
+        task_out.* = task;
+        const physical_root: usize = (@as(usize, cpu) + 1) * PAGE_SIZE;
+        var handle = MappingHandle{ .value = 0xffff };
+        if (index < 2) {
+            handle = installTestMappingAt(&sources[index], 0, .{
+                .state = .live,
+                .address_space_id = task.address_space_id,
+                .address_space = .{ .directory = @ptrFromInt(physical_root), .pcid = cpu },
+                .dispatch_metadata = .{ .owner_task_id = task.id },
+            });
+            if (index == 0) first_mapping = &sources[index].mappingArena().?.getByHandle(handle).?.mapping;
+        }
+        const record = runtime.findAddressSpace(task.address_space_id).?;
+        record.region_count = 1;
+        record.regions[0] = .{ .kind = .load_segment, .virtual_address = 0x4000_0000, .size_bytes = 8192, .file_offset = 0, .file_size = 0, .access = .{ .read = true } };
+        const ticket = try runtime.reserveExecution(task, cpu);
+        tickets[index] = ticket;
+        try runtime.execution.bindOwnedRoot(ticket, handle.value, physical_root);
+        cpu_identity.setIndexForTest(cpu);
+        _ = try runtime.execution.start(ticket);
+        var key: dispatch_ownership.RequestKey = undefined;
+        try runtime.execution.submitSyscallInto(ticket, .{ .opcode = if (index == 1) 0xffff else abi.opcode(.task_terminate), .request_addr = 0x4000_0ff8, .response_addr = 0, .response_len = 0 }, &key);
+        keys[index] = key;
+        cpu_identity.setIndexForTest(0);
+    }
+    const authority = try capabilities.mintBootRoot(.{
+        .holder = tasks[0].owner,
+        .issuer = kernel.policy_authority,
+        .target = .{ .kind = .task, .id = tasks[0].id },
+        .rights = .{ .task = .{ .task_terminate = true } },
+        .scope = .{ .task_id = tasks[0].id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = 1000 },
+    });
+    try runtime.grantCapability(tasks[0].id, authority.id);
+    const request = abi.TaskTerminateWireRequest{ .header = component_port.makeHeader(.task_terminate, tasks[0].id), .task_capability_id = authority.id };
+    var backing: [8192]u8 = @splat(0x7a);
+    @memcpy(backing[4088..][0..@sizeOf(@TypeOf(request))], std.mem.asBytes(&request));
+    const before_backing = backing;
+    var pages = SyscallCopyTesting.Pages{ .directory = first_mapping.address_space.?.directory, .virtual_base = 0x4000_0000, .bytes = &backing };
+    const previous_pages = SyscallCopyTesting.pages;
+    SyscallCopyTesting.pages = &pages;
+    defer SyscallCopyTesting.pages = previous_pages;
+    var foreign_kernel = kernel;
+    foreign_kernel.runtime = foreign_runtime;
+    var foreign_port = port;
+    foreign_port.kernel = &foreign_kernel;
+    try std.testing.expectEqual(@as(u8, 0), scheduler.servicePendingSyscalls(&foreign_port, 10));
+    scheduler.initialized = false;
+    try std.testing.expectEqual(@as(u8, 0), scheduler.servicePendingSyscalls(&port, 10));
+    scheduler.initialized = true;
+    cpu_identity.setIndexForTest(1);
+    try std.testing.expectEqual(@as(u8, 0), scheduler.servicePendingSyscalls(&port, 10));
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expectEqual(@as(u8, 3), scheduler.servicePendingSyscalls(&port, 10));
+    try std.testing.expectEqual(@as(u8, 0), scheduler.servicePendingSyscalls(&port, 10));
+    try std.testing.expectEqual(@as(usize, 1), pages.reads);
+    try std.testing.expectEqual(@as(usize, 1), reentry.calls);
+    try std.testing.expectEqualSlices(u8, &before_backing, &backing);
+    try std.testing.expectEqual(task_runtime.TaskState.terminated, tasks[0].state);
+    try std.testing.expect(capabilities.resolve(authority.id) != null);
+    inline for (.{ abi.SyscallStatus.success, abi.SyscallStatus.unsupported_operation, abi.SyscallStatus.unavailable }, 0..) |status, index| {
+        const ticket = tickets[index].?;
+        cpu_identity.setIndexForTest(ticket.cpu);
+        try std.testing.expectError(error.SyscallInFlight, runtime.execution.acknowledgeOwnedRootReturn(ticket));
+        var reply: dispatch_ownership.Reply = undefined;
+        try runtime.execution.consumeSyscallInto(keys[index].?, &reply);
+        try std.testing.expectEqual(@as(u16, @intCast(@backingInt(status))), reply.status);
+        try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+        cpu_identity.setIndexForTest(0);
+        try runtime.collectExecution(ticket);
+        tickets[index] = null;
+    }
+    try std.testing.expect(capabilities.resolve(authority.id) == null);
+    try std.testing.expect(runtime.unbindExecutionStopSink(sink));
+}
+
+test "remote syscall real owner path parks drains STOP and preserves all CPU neighbors" {
+    const previous_cpu = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    const runtime = table_backing.alloc(task_runtime.Runtime) orelse return error.OutOfMemory;
+    runtime.initializeAllocated();
+    defer {
+        executor_registrations = previous_registrations;
+        cpu_identity.setIndexForTest(0);
+        runtime.reset();
+        table_backing.free(task_runtime.Runtime, runtime);
+        cpu_identity.setIndexForTest(previous_cpu);
+    }
+    executor_registrations = @splat(.{});
+    for (1..cpu_identity.MAX_CPUS) |index| {
+        inline for (std.meta.tags(RemoteSyscallTestHardware.Mode)) |mode| {
+            const cpu: u8 = @intCast(index);
+            cpu_identity.setIndexForTest(cpu);
+            var fixture = DeviceInterruptFixture{};
+            try fixture.init();
+            fixture.executor.bound_runtime = runtime;
+            native_entry.current().active_task_id = 7;
+            native_entry.current().userspace_xstate = @intFromPtr(fixture.mapping.owned_xstate.?.state());
+            cpu_identity.setIndexForTest(0);
+            const ticket = try runtime.execution.prepare(cpu, .{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 });
+            try runtime.execution.bindOwnedRoot(ticket, fixture.executor.active_mapping_handle.value, 0x1000);
+            cpu_identity.setIndexForTest(cpu);
+            _ = try runtime.execution.start(ticket);
+            fixture.executor.active_dispatch_lease = ticket;
+            var neighbors: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+            for (&neighbors, 0..) |*entry, neighbor| entry.* = native_entry.stateForCpu(@intCast(neighbor)).*;
+            const before = fixture.frame;
+            if (mode == .complete) {
+                var guard = RemoteSyscallTestHardware{ .runtime = runtime, .ticket = ticket, .mode = mode };
+                guard.enabled = true;
+                try guard.expectRejected(&fixture);
+                guard.enabled = false;
+                cpu_identity.setIndexForTest(0);
+                try guard.expectRejected(&fixture);
+                cpu_identity.setIndexForTest(cpu);
+                fixture.frame.cs = 8;
+                try guard.expectRejected(&fixture);
+                fixture.frame = before;
+                fixture.executor.registration_cpu = 0;
+                try guard.expectRejected(&fixture);
+                fixture.executor.registration_cpu = cpu;
+                fixture.executor.active_dispatch_lease.?.epoch += 1;
+                try guard.expectRejected(&fixture);
+                fixture.executor.active_dispatch_lease = ticket;
+                fixture.executor.active_dispatch_lease.?.issuer = @ptrFromInt(@intFromPtr(ticket.issuer) + 64);
+                try guard.expectRejected(&fixture);
+                fixture.executor.active_dispatch_lease = ticket;
+                fixture.executor.active_mapping_handle.value += 1;
+                try guard.expectRejected(&fixture);
+                fixture.executor.active_mapping_handle.value -= 1;
+                fixture.mapping.address_space.?.directory = @ptrFromInt(0x2000);
+                try guard.expectRejected(&fixture);
+                fixture.mapping.address_space.?.directory = @ptrFromInt(0x1000);
+                inline for (.{ "active_task_id", "userspace_xstate", "kernel_xstate", "resume_rsp", "resume_rip" }) |field| {
+                    const original = @field(native_entry.current(), field);
+                    @field(native_entry.current(), field) = 0;
+                    try guard.expectRejected(&fixture);
+                    @field(native_entry.current(), field) = original;
+                }
+                native_entry.current().resume_requested = 1;
+                try guard.expectRejected(&fixture);
+                native_entry.current().resume_requested = 0;
+                var pending_key: dispatch_ownership.RequestKey = undefined;
+                try runtime.execution.submitSyscallInto(ticket, .{ .opcode = 0x101, .request_addr = 0, .response_addr = 0, .response_len = 0 }, &pending_key);
+                try guard.expectRejected(&fixture);
+                try std.testing.expect(runtime.execution.cancelPendingSyscall(pending_key));
+            }
+            var hardware = RemoteSyscallTestHardware{ .runtime = runtime, .ticket = ticket, .mode = mode };
+            try std.testing.expect(remoteSyscallWithHardware(&fixture.frame, &hardware));
+            try std.testing.expect(!hardware.enabled);
+            try std.testing.expectEqual(@as(u8, 1), hardware.notified);
+            try std.testing.expect(runtime.execution.syscallIdle(ticket));
+            if (mode == .complete) {
+                try std.testing.expect(hardware.restored_user and !hardware.kernel);
+                try std.testing.expectEqual(@as(u8, 1), hardware.waits);
+                var expected = before;
+                expected.eax = 9;
+                expected.edx = 17;
+                expected.r10 = 4;
+                try std.testing.expectEqualDeep(expected, fixture.frame);
+                try std.testing.expect(!fixture.executor.handoff_completed);
+                try std.testing.expectEqualDeep(neighbors[cpu], native_entry.current().*);
+            } else {
+                try std.testing.expect(hardware.kernel and !hardware.restored_user);
+                try std.testing.expectEqual(@as(u8, if (mode == .stop_pending) 0 else 1), hardware.waits);
+                try fixture.expectResumeWithXstate(neighbors[cpu].userspace_xstate);
+                if (mode == .stop_pending) try std.testing.expectEqualDeep(before, fixture.frame);
+            }
+            for (neighbors, 0..) |entry, neighbor| {
+                if (neighbor != cpu) try std.testing.expectEqualDeep(entry, native_entry.stateForCpu(@intCast(neighbor)).*);
+            }
+            requireIdleSyscallReturn();
+            try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+            cpu_identity.setIndexForTest(0);
+            _ = try runtime.execution.beginCollect(ticket);
+            try runtime.execution.finishCollect(ticket);
+            cpu_identity.setIndexForTest(cpu);
+            fixture.executor.active_dispatch_lease = null;
+            fixture.executor.bound_runtime = null;
+            fixture.deinit();
+        }
+    }
 }
 
 const DeviceInterruptFixture = struct {
@@ -3296,18 +6493,14 @@ const DeviceInterruptFixture = struct {
     mapping: *MappingEntry = undefined,
     frame: isr.Registers = undefined,
     previous_executor: ?*Executor = null,
-    previous_requested: u32 = 0,
-    previous_esp: usize = 0,
-    previous_eip: usize = 0,
+    previous_entry: native_entry.State = .{},
     previous_wakes: wake.Pending = .{},
 
     fn init(self: *@This()) !void {
         const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
         storage.initialize();
-        self.previous_executor = registered_executor;
-        self.previous_requested = zigos_userspace_resume_requested;
-        self.previous_esp = zigos_userspace_resume_esp;
-        self.previous_eip = zigos_userspace_resume_eip;
+        self.previous_executor = currentRegisteredExecutor();
+        self.previous_entry = native_entry.current().*;
         self.previous_wakes = wake.take();
         const handle = installTestMappingAt(&self.executor, 0, .{
             .state = .live,
@@ -3323,10 +6516,13 @@ const DeviceInterruptFixture = struct {
         self.executor.active_mapping = self.mapping;
         self.executor.active_mapping_handle = handle;
         self.executor.dispatch_quantum = DispatchQuantum.begin(7, 100);
-        registered_executor = &self.executor;
-        zigos_userspace_resume_requested = 0;
-        zigos_userspace_resume_esp = 0xfeed_1000;
-        zigos_userspace_resume_eip = 0xfeed_2000;
+        self.executor.registration_cpu = cpu_identity.currentIndex();
+        currentExecutorSlot().* = &self.executor;
+        native_entry.clearContinuation();
+        native_entry.current().resume_rsp = 0xfeed_1000;
+        native_entry.current().resume_rip = 0xfeed_2000;
+        native_entry.current().userspace_xstate = 0xfeed_3000;
+        native_entry.current().kernel_xstate = 0xfeed_4000;
         self.frame = std.mem.zeroes(isr.Registers);
         inline for (.{ "eax", "ebx", "ecx", "edx", "ebp", "esi", "edi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }, 0..) |field, index|
             @field(self.frame, field) = 0x1234_0000 + index * 0x101;
@@ -3340,11 +6536,10 @@ const DeviceInterruptFixture = struct {
     fn deinit(self: *@This()) void {
         self.executor.active_task_id = 0;
         self.executor.active_mapping = null;
+        currentExecutorSlot().* = &self.executor;
         self.executor.reset();
-        registered_executor = self.previous_executor;
-        zigos_userspace_resume_requested = self.previous_requested;
-        zigos_userspace_resume_esp = self.previous_esp;
-        zigos_userspace_resume_eip = self.previous_eip;
+        currentExecutorSlot().* = self.previous_executor;
+        native_entry.current().* = self.previous_entry;
         _ = wake.take();
         inline for (.{ "timer", "xhci", "network", "nvme", "scheduler" }) |field|
             if (@field(self.previous_wakes, field)) wake.raise(@field(wake.Kind, field));
@@ -3380,13 +6575,15 @@ const DeviceInterruptFixture = struct {
     }
 
     fn expectResume(self: *const @This()) !void {
+        return self.expectResumeWithXstate(0xfeed_3000);
+    }
+
+    fn expectResumeWithXstate(self: *const @This(), userspace_xstate: usize) !void {
         try std.testing.expect(self.executor.handoff_completed);
-        try std.testing.expectEqual(@as(u32, 1), zigos_userspace_resume_requested);
+        try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
         try std.testing.expect(self.mapping.resume_valid);
         try std.testing.expectEqual(@as(u64, 9), self.mapping.yield_count);
         try std.testing.expectEqual(@as(u32, 9), self.mapping.last_user_counter);
-        try std.testing.expectEqual(self.frame.eip, self.mapping.resume_instruction_pointer);
-        try std.testing.expectEqual(self.frame.useresp, self.mapping.resume_stack_pointer);
         inline for (.{ "rax", "rbx", "rcx", "rdx", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }, .{ "eax", "ebx", "ecx", "edx", "ebp", "esi", "edi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }) |user_field, frame_field|
             try std.testing.expectEqual(@field(self.frame, frame_field), @field(self.mapping.user_context64, user_field));
         try std.testing.expectEqual(self.frame.eflags, self.mapping.user_context64.flags);
@@ -3394,18 +6591,449 @@ const DeviceInterruptFixture = struct {
         try std.testing.expectEqual(self.frame.useresp, self.mapping.user_context64.stack_pointer);
         try std.testing.expectEqual(userspace_bootstrap_mailbox.YieldDisposition.runnable, self.executor.last_yield_disposition);
         try std.testing.expect(self.executor.last_user_exception == null);
-        try std.testing.expectEqual(DispatchQuantum.begin(7, 100), self.executor.dispatch_quantum);
-        try std.testing.expectEqual(@as(usize, 0xfeed_1000), zigos_userspace_resume_esp);
-        try std.testing.expectEqual(@as(usize, 0xfeed_2000), zigos_userspace_resume_eip);
+        try std.testing.expectEqual(DispatchQuantum.begin(self.executor.active_task_id, 100), self.executor.dispatch_quantum);
+        try std.testing.expectEqual(@as(usize, 0xfeed_1000), native_entry.current().resume_rsp);
+        try std.testing.expectEqual(@as(usize, 0xfeed_2000), native_entry.current().resume_rip);
+        try std.testing.expectEqual(userspace_xstate, native_entry.current().userspace_xstate);
+        try std.testing.expectEqual(@as(usize, 0xfeed_4000), native_entry.current().kernel_xstate);
     }
 
     fn expectNoResume(self: *const @This()) !void {
         try std.testing.expect(!self.executor.handoff_completed);
-        try std.testing.expectEqual(@as(u32, 0), zigos_userspace_resume_requested);
+        try std.testing.expectEqual(@as(u32, 0), native_entry.current().resume_requested);
         try std.testing.expect(!self.mapping.resume_valid);
         try std.testing.expectEqual(@as(u64, 8), self.mapping.yield_count);
     }
 };
+
+const UserPageFaultObserver = if (builtin.is_test) struct {
+    fixture: *DeviceInterruptFixture,
+    address: u64,
+    resolves: bool = false,
+    recovers: bool = false,
+    address_reads: usize = 0,
+    registry_calls: usize = 0,
+    recovery_calls: usize = 0,
+    kernel_faults: usize = 0,
+    kernel_switches: usize = 0,
+
+    fn kernelFault(self: *@This(), _: *freestanding.isr.InterruptFrame) void {
+        self.kernel_faults += 1;
+    }
+
+    fn faultAddress(self: *@This()) u64 {
+        self.address_reads += 1;
+        return self.address;
+    }
+
+    fn resolve(self: *@This(), space: *freestanding.paging.UserAddressSpace, address: u64, code: u32) bool {
+        std.debug.assert(space == &self.fixture.mapping.address_space.?);
+        std.debug.assert(address == self.address and code == self.fixture.frame.err_code);
+        self.registry_calls += 1;
+        return self.resolves;
+    }
+
+    fn recover(self: *@This(), executor: *const Executor, mapping: *MappingEntry, frame: *freestanding.isr.InterruptFrame, address: u64, code: u32) bool {
+        std.debug.assert(executor == &self.fixture.executor and mapping == self.fixture.mapping);
+        std.debug.assert(address == self.address and code == self.fixture.frame.err_code);
+        self.recovery_calls += 1;
+        if (self.recovers) frame.eip = 0x4000_1040;
+        return self.recovers;
+    }
+
+    fn restoreKernel(self: *@This()) void {
+        // The native adapter switches CR3 here. Observe the actual handler's
+        // completed local fault publication before that handoff boundary.
+        std.debug.assert(self.fixture.executor.handoff_completed);
+        std.debug.assert(native_entry.current().resume_requested == 1);
+        self.kernel_switches += 1;
+    }
+
+    fn dispatch(self: *@This()) !void {
+        const Case = struct {
+            var observer: ?*UserPageFaultObserver = null;
+
+            fn receive(frame: *freestanding.isr.InterruptFrame) void {
+                std.debug.assert(@import("../../kernel/interrupts/context.zig").active());
+                handleUserspacePageFaultWith(frame, observer.?);
+            }
+
+            fn run(active: *UserPageFaultObserver) !void {
+                const previous = observer;
+                defer observer = previous;
+                observer = active;
+                DeviceInterruptFixture.isr.registerHandler(PAGE_FAULT_VECTOR, receive);
+                active.fixture.frame.int_no = PAGE_FAULT_VECTOR;
+                DeviceInterruptFixture.isr.isrHandler(&active.fixture.frame);
+            }
+        };
+        try DeviceInterruptFixture.isr.withTestHandlers(self, Case.run);
+        try std.testing.expect(!@import("../../kernel/interrupts/context.zig").active());
+    }
+} else struct {};
+
+test "remote user page faults contain locally without registry COW or verification lookups on all APs" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    var entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (&entries, 0..) |*entry, index| entry.* = native_entry.stateForCpu(@intCast(index)).*;
+    defer for (entries, 0..) |entry, index| {
+        native_entry.stateForCpu(@intCast(index)).* = entry;
+    };
+    // Absent data, present COW write, instruction-fetch and protection-key
+    // failures must all avoid the foreign BSP mutation/recovery paths.
+    for (1..cpu_identity.MAX_CPUS) |cpu| {
+        cpu_identity.setIndexForTest(@intCast(cpu));
+        for ([_]u32{ 0x4, 0x7, 0x15, 0x25 }) |code| {
+            var fixture = DeviceInterruptFixture{};
+            try fixture.init();
+            defer fixture.deinit();
+            fixture.frame.int_no = PAGE_FAULT_VECTOR;
+            fixture.frame.err_code = code;
+            fixture.mapping.user_context64 = .{ .instruction_pointer = 0x4000_0200, .stack_pointer = 0x7000_0200 };
+            fixture.mapping.interrupted_before_yield = true;
+            const neighbor_handle = installTestMappingAt(&fixture.executor, 1, .{
+                .state = .live,
+                .address_space_id = 43,
+                .dispatch_metadata = .{ .owner_task_id = 8, .image_id = 42 },
+                .page_fault_count = 11,
+            });
+            const neighbor = &fixture.executor.mappingArena().?.getByHandle(neighbor_handle).?.mapping;
+            const neighbor_before = neighbor.*;
+            const context_before = fixture.mapping.user_context64;
+            const frame_before = fixture.frame;
+            const xstate_before = fixture.mapping.owned_xstate.?.*;
+            var states_before: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+            for (&states_before, 0..) |*entry, index| entry.* = native_entry.stateForCpu(@intCast(index)).*;
+            var observer = UserPageFaultObserver{ .fixture = &fixture, .address = 0x7000_0FF0 + cpu * PAGE_SIZE, .resolves = true, .recovers = true };
+            try observer.dispatch();
+            try std.testing.expectEqual(@as(usize, 1), observer.address_reads);
+            try std.testing.expectEqual(@as(usize, 0), observer.registry_calls);
+            try std.testing.expectEqual(@as(usize, 0), observer.recovery_calls);
+            try std.testing.expectEqual(@as(usize, 0), observer.kernel_faults);
+            try std.testing.expectEqual(@as(usize, 1), observer.kernel_switches);
+            try std.testing.expectEqualDeep(frame_before, fixture.frame);
+            try std.testing.expectEqualDeep(context_before, fixture.mapping.user_context64);
+            try std.testing.expectEqualDeep(xstate_before, fixture.mapping.owned_xstate.?.*);
+            try std.testing.expectEqualDeep(neighbor_before, neighbor.*);
+            try std.testing.expectEqual(@as(u64, 1), fixture.executor.user_page_fault_count);
+            try std.testing.expectEqual(@as(u64, 7), fixture.executor.last_fault_task_id);
+            try std.testing.expectEqual(@as(u64, 42), fixture.executor.last_fault_address_space_id);
+            try std.testing.expectEqual(observer.address, fixture.executor.last_fault_address);
+            try std.testing.expectEqual(code, fixture.executor.last_fault_error_code);
+            try std.testing.expectEqual(@as(u64, 1), fixture.mapping.page_fault_count);
+            try std.testing.expectEqual(observer.address, fixture.mapping.last_fault_address);
+            try std.testing.expectEqual(code, fixture.mapping.last_fault_error_code);
+            try std.testing.expectEqualDeep(UserException{ .vector = PAGE_FAULT_VECTOR, .error_code = code, .instruction_pointer = frame_before.eip, .fault_address = observer.address }, fixture.executor.last_user_exception.?);
+            try std.testing.expect(fixture.executor.handoff_completed);
+            try std.testing.expect(!fixture.mapping.resume_valid);
+            try std.testing.expect(fixture.mapping.interrupted_before_yield);
+            try std.testing.expectEqual(@as(u64, 8), fixture.mapping.yield_count);
+            try std.testing.expectEqual(@as(u32, 9), fixture.mapping.last_user_counter);
+            try std.testing.expectEqual(DispatchQuantum.begin(7, 100), fixture.executor.dispatch_quantum);
+            for (states_before, 0..) |before, index| {
+                var expected = before;
+                if (index == cpu) expected.resume_requested = 1;
+                try std.testing.expectEqualDeep(expected, native_entry.stateForCpu(@intCast(index)).*);
+            }
+        }
+    }
+}
+
+test "user page fault BSP resolution recovery and containment retain their native ordering" {
+    const previous_cpu = cpu_identity.currentIndex();
+    cpu_identity.setIndexForTest(0);
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    for ([_]enum { resolved, recovered, contained }{ .resolved, .recovered, .contained }) |mode| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        fixture.frame.int_no = PAGE_FAULT_VECTOR;
+        fixture.frame.err_code = 0x7;
+        const frame_before = fixture.frame;
+        var observer = UserPageFaultObserver{ .fixture = &fixture, .address = 0x7000_0FF0, .resolves = mode == .resolved, .recovers = mode == .recovered };
+        try observer.dispatch();
+        try std.testing.expectEqual(@as(usize, 1), observer.registry_calls);
+        try std.testing.expectEqual(@as(usize, 0), observer.kernel_faults);
+        if (mode == .resolved) {
+            try std.testing.expectEqual(@as(usize, 0), observer.recovery_calls);
+            try std.testing.expectEqual(@as(usize, 0), observer.kernel_switches);
+            try std.testing.expectEqual(@as(u64, 0), fixture.executor.user_page_fault_count);
+            try std.testing.expectEqual(@as(u64, 0), fixture.mapping.page_fault_count);
+            try std.testing.expectEqualDeep(frame_before, fixture.frame);
+            try fixture.expectNoResume();
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), observer.recovery_calls);
+            try std.testing.expectEqual(@as(usize, 1), observer.kernel_switches);
+            try std.testing.expectEqual(@as(u64, 1), fixture.executor.user_page_fault_count);
+            try std.testing.expectEqual(@as(u64, 1), fixture.mapping.page_fault_count);
+            try std.testing.expect(fixture.executor.handoff_completed);
+            try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
+            if (mode == .recovered) {
+                var expected = frame_before;
+                expected.eip = 0x4000_1040;
+                try std.testing.expectEqualDeep(expected, fixture.frame);
+                try std.testing.expect(fixture.mapping.resume_valid);
+                try std.testing.expectEqual(@as(u64, 0x4000_1040), fixture.mapping.user_context64.instruction_pointer);
+                try std.testing.expectEqual(frame_before.eax, fixture.mapping.user_context64.rax);
+                try std.testing.expectEqual(frame_before.r15, fixture.mapping.user_context64.r15);
+                try std.testing.expect(fixture.executor.last_user_exception == null);
+            } else {
+                try std.testing.expectEqualDeep(frame_before, fixture.frame);
+                try std.testing.expect(!fixture.mapping.resume_valid);
+                try std.testing.expectEqualDeep(UserException{ .vector = PAGE_FAULT_VECTOR, .error_code = 0x7, .instruction_pointer = frame_before.eip, .fault_address = observer.address }, fixture.executor.last_user_exception.?);
+            }
+        }
+    }
+}
+
+test "user page fault kernel fallback precedes local CR2 and owner state access" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    for ([_]u8{ 0, 15 }) |cpu| {
+        cpu_identity.setIndexForTest(cpu);
+        for ([_]enum { kernel, inactive, unregistered }{ .kernel, .inactive, .unregistered }) |mode| {
+            var fixture = DeviceInterruptFixture{};
+            try fixture.init();
+            defer fixture.deinit();
+            fixture.frame.int_no = PAGE_FAULT_VECTOR;
+            fixture.frame.err_code = if (mode == .kernel) 0x2 else 0x4;
+            if (mode == .kernel) fixture.frame.cs = 0x8;
+            if (mode == .inactive) fixture.executor.active_task_id = 0;
+            if (mode == .unregistered) currentExecutorSlot().* = null;
+            const frame_before = fixture.frame;
+            const entry_before = native_entry.current().*;
+            var observer = UserPageFaultObserver{ .fixture = &fixture, .address = 0x7000_0FF0, .resolves = true, .recovers = true };
+            try observer.dispatch();
+            try std.testing.expectEqual(@as(usize, 1), observer.kernel_faults);
+            try std.testing.expectEqual(@as(usize, 0), observer.address_reads);
+            try std.testing.expectEqual(@as(usize, 0), observer.registry_calls);
+            try std.testing.expectEqual(@as(usize, 0), observer.recovery_calls);
+            try std.testing.expectEqual(@as(usize, 0), observer.kernel_switches);
+            try std.testing.expectEqualDeep(frame_before, fixture.frame);
+            try std.testing.expectEqualDeep(entry_before, native_entry.current().*);
+            try std.testing.expectEqual(@as(u64, 0), fixture.executor.user_page_fault_count);
+            try std.testing.expectEqual(@as(u64, 0), fixture.mapping.page_fault_count);
+            try fixture.expectNoResume();
+        }
+    }
+}
+
+const ExecutionStopInterruptFixture = struct {
+    const isr = @import("../../kernel/interrupts/isr.zig");
+    const x2apic = @import("../../kernel/interrupts/x2apic.zig");
+    var eois: [cpu_identity.MAX_CPUS]usize = @splat(0);
+
+    fn observeWrite(msr: u32, value: u64) void {
+        if (msr != x2apic.Testing.EOI_MSR or value != 0 or
+            !@import("../../kernel/interrupts/context.zig").active())
+            @panic("execution stop fixture observes one real in-context EOI");
+        eois[cpu_identity.currentIndex()] += 1;
+    }
+
+    fn dispatch(fixture: *DeviceInterruptFixture) !void {
+        const Case = struct {
+            fixture: *DeviceInterruptFixture,
+            fn run(self: *@This()) !void {
+                isr.setRuntimePreemption(userspaceInterruptPreemption);
+                self.fixture.frame.int_no = smp.EXECUTION_STOP_IPI_VECTOR;
+                isr.isrHandler(&self.fixture.frame);
+            }
+        };
+        const before = eois;
+        var case = Case{ .fixture = fixture };
+        try isr.withTestHandlers(&case, Case.run);
+        try std.testing.expect(!@import("../../kernel/interrupts/context.zig").active());
+        for (eois, 0..) |count, index|
+            try std.testing.expectEqual(before[index] + @intFromBool(index == cpu_identity.currentIndex()), count);
+    }
+};
+
+test "execution stop real ISR authenticates all CPU leases without foreign policy or acknowledgements" {
+    const Policy = struct {
+        fn preempt(_: u64) bool {
+            @panic("execution stop must not consult BSP scheduling policy");
+        }
+    };
+    const previous_index = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_index);
+    const previous_policy = preempt_check;
+    preempt_check = Policy.preempt;
+    defer preempt_check = previous_policy;
+    const previous_observer = ExecutionStopInterruptFixture.x2apic.Testing.swapWriteObserver(ExecutionStopInterruptFixture.observeWrite);
+    defer _ = ExecutionStopInterruptFixture.x2apic.Testing.swapWriteObserver(previous_observer);
+    ExecutionStopInterruptFixture.eois = @splat(0);
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    const fixtures = try std.testing.allocator.alloc(DeviceInterruptFixture, cpu_identity.MAX_CPUS);
+    defer std.testing.allocator.free(fixtures);
+    var initialized: usize = 0;
+    defer {
+        // The fixture uses Coordinator identities, not Runtime TaskBorrows.
+        // Detach its fake bindings before releasing hosted mapping storage.
+        var index = initialized;
+        while (index != 0) {
+            index -= 1;
+            cpu_identity.setIndexForTest(@intCast(index));
+            fixtures[index].executor.bound_runtime = null;
+            fixtures[index].executor.active_dispatch_lease = null;
+            fixtures[index].deinit();
+        }
+    }
+    var tickets: [cpu_identity.MAX_CPUS]dispatch_ownership.Ticket = undefined;
+    var expected_entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (fixtures, 0..) |*fixture, index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        fixture.* = .{};
+        try fixture.init();
+        initialized += 1;
+        const task_id: u64 = 7 + index;
+        fixture.executor.active_task_id = task_id;
+        fixture.executor.dispatch_quantum = DispatchQuantum.begin(task_id, 100);
+        fixture.mapping.dispatch_metadata.owner_task_id = task_id;
+        fixture.mapping.address_space_id = 42 + index;
+        fixture.executor.bound_runtime = runtime;
+        native_entry.current().active_task_id = task_id;
+        native_entry.current().kernel_stack_top = 0xabcd_0000 + index * 0x1000;
+        native_entry.current().kernel_port = 0xabcd_8000 + index * 64;
+        expected_entries[index] = native_entry.current().*;
+        cpu_identity.setIndexForTest(0);
+        tickets[index] = try runtime.execution.prepare(@intCast(index), .{
+            .task_handle = 1 + index,
+            .task_id = task_id,
+            .process_generation = 1,
+            .address_space_id = fixture.mapping.address_space_id,
+        });
+        try runtime.execution.bindOwnedRoot(tickets[index], fixture.executor.active_mapping_handle.value, (index + 1) * PAGE_SIZE);
+        cpu_identity.setIndexForTest(@intCast(index));
+        _ = try runtime.execution.start(tickets[index]);
+        fixture.executor.active_dispatch_lease = tickets[index];
+        // A bare or delayed vector has no stop authority.
+        try ExecutionStopInterruptFixture.dispatch(fixture);
+        try fixture.expectNoResume();
+    }
+    cpu_identity.setIndexForTest(0);
+    for (tickets) |ticket| try std.testing.expect(try runtime.execution.requestStop(ticket));
+    var foreign: dispatch_ownership.Coordinator = .{};
+    const Invalid = enum { no_ticket, foreign_issuer, foreign_cpu, stale_epoch, no_registration, foreign_registration, kernel, no_mapping, wrong_mapping_owner, no_xstate };
+    for (fixtures, 0..) |*fixture, index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        const xstate_before = fixture.mapping.owned_xstate.?.*;
+        for (std.enums.values(Invalid)) |invalid| {
+            const lease = fixture.executor.active_dispatch_lease;
+            const owner = fixture.executor.registration_cpu;
+            const mapping = fixture.executor.active_mapping;
+            const task_owner = fixture.mapping.dispatch_metadata.owner_task_id;
+            const storage = fixture.mapping.owned_xstate;
+            const cs = fixture.frame.cs;
+            defer {
+                fixture.executor.active_dispatch_lease = lease;
+                fixture.executor.registration_cpu = owner;
+                fixture.executor.active_mapping = mapping;
+                fixture.mapping.dispatch_metadata.owner_task_id = task_owner;
+                fixture.mapping.owned_xstate = storage;
+                fixture.frame.cs = cs;
+            }
+            switch (invalid) {
+                .no_ticket => fixture.executor.active_dispatch_lease = null,
+                .foreign_issuer => fixture.executor.active_dispatch_lease.?.issuer = &foreign,
+                .foreign_cpu => fixture.executor.active_dispatch_lease.?.cpu = @intCast((index + 1) % cpu_identity.MAX_CPUS),
+                .stale_epoch => fixture.executor.active_dispatch_lease.?.epoch += 1,
+                .no_registration => fixture.executor.registration_cpu = null,
+                .foreign_registration => fixture.executor.registration_cpu = @intCast((index + 1) % cpu_identity.MAX_CPUS),
+                .kernel => fixture.frame.cs = 0x08,
+                .no_mapping => fixture.executor.active_mapping = null,
+                .wrong_mapping_owner => fixture.mapping.dispatch_metadata.owner_task_id += 1,
+                .no_xstate => fixture.mapping.owned_xstate = null,
+            }
+            try ExecutionStopInterruptFixture.dispatch(fixture);
+            try fixture.expectNoResume();
+            fixture.executor.active_dispatch_lease = lease;
+            fixture.executor.registration_cpu = owner;
+            fixture.executor.active_mapping = mapping;
+            fixture.mapping.dispatch_metadata.owner_task_id = task_owner;
+            fixture.mapping.owned_xstate = storage;
+            fixture.frame.cs = cs;
+        }
+        try ExecutionStopInterruptFixture.dispatch(fixture);
+        try fixture.expectResume();
+        const captured = fixture.mapping.user_context64;
+        fixture.frame.eax += 1;
+        fixture.frame.eip += 4;
+        try ExecutionStopInterruptFixture.dispatch(fixture);
+        try std.testing.expectEqual(captured, fixture.mapping.user_context64);
+        try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+        try std.testing.expectEqualDeep(xstate_before, fixture.mapping.owned_xstate.?.*);
+        expected_entries[index] = native_entry.current().*;
+        cpu_identity.setIndexForTest(0);
+        try std.testing.expectEqual(dispatch_ownership.Phase.running, try runtime.execution.phase(tickets[index]));
+        for (fixtures, 0..) |*neighbor, neighbor_index| {
+            cpu_identity.setIndexForTest(@intCast(neighbor_index));
+            try std.testing.expectEqual(expected_entries[neighbor_index], native_entry.current().*);
+            try std.testing.expectEqual(neighbor_index <= index, neighbor.executor.handoff_completed);
+            try std.testing.expectEqual(@as(u64, if (neighbor_index <= index) 9 else 8), neighbor.mapping.yield_count);
+        }
+    }
+    try std.testing.expect(!DeviceInterruptFixture.wake.any());
+}
+
+test "execution stop real ISR ignores returned and replacement leases until their own stop" {
+    const previous_index = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_index);
+    const previous_observer = ExecutionStopInterruptFixture.x2apic.Testing.swapWriteObserver(ExecutionStopInterruptFixture.observeWrite);
+    defer _ = ExecutionStopInterruptFixture.x2apic.Testing.swapWriteObserver(previous_observer);
+    ExecutionStopInterruptFixture.eois = @splat(0);
+    const runtime = try std.testing.allocator.create(task_runtime.Runtime);
+    defer std.testing.allocator.destroy(runtime);
+    runtime.* = .{};
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(@intCast(index));
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer {
+            cpu_identity.setIndexForTest(@intCast(index));
+            fixture.executor.bound_runtime = null;
+            fixture.executor.active_dispatch_lease = null;
+            fixture.deinit();
+        }
+        fixture.executor.bound_runtime = runtime;
+        cpu_identity.setIndexForTest(0);
+        const identity = dispatch_ownership.Identity{ .task_handle = 1, .task_id = 7, .process_generation = 1, .address_space_id = 42 };
+        const old = try runtime.execution.prepare(@intCast(index), identity);
+        try runtime.execution.bindOwnedRoot(old, fixture.executor.active_mapping_handle.value, PAGE_SIZE);
+        cpu_identity.setIndexForTest(@intCast(index));
+        _ = try runtime.execution.start(old);
+        fixture.executor.active_dispatch_lease = old;
+        cpu_identity.setIndexForTest(0);
+        try std.testing.expect(try runtime.execution.requestStop(old));
+        cpu_identity.setIndexForTest(@intCast(index));
+        try runtime.execution.acknowledgeOwnedRootReturn(old);
+        try ExecutionStopInterruptFixture.dispatch(&fixture);
+        try fixture.expectNoResume();
+        cpu_identity.setIndexForTest(0);
+        _ = try runtime.execution.beginCollect(old);
+        try runtime.execution.finishCollect(old);
+        const replacement = try runtime.execution.prepare(@intCast(index), identity);
+        try runtime.execution.bindOwnedRoot(replacement, fixture.executor.active_mapping_handle.value, PAGE_SIZE);
+        try std.testing.expectError(error.StaleTicket, runtime.execution.requestStop(old));
+        cpu_identity.setIndexForTest(@intCast(index));
+        _ = try runtime.execution.start(replacement);
+        fixture.executor.active_dispatch_lease = replacement;
+        try ExecutionStopInterruptFixture.dispatch(&fixture);
+        try fixture.expectNoResume();
+        cpu_identity.setIndexForTest(0);
+        try std.testing.expect(try runtime.execution.requestStop(replacement));
+        cpu_identity.setIndexForTest(@intCast(index));
+        try ExecutionStopInterruptFixture.dispatch(&fixture);
+        try fixture.expectResume();
+        try runtime.execution.acknowledgeOwnedRootReturn(replacement);
+        cpu_identity.setIndexForTest(0);
+        _ = try runtime.execution.beginCollect(replacement);
+        try runtime.execution.finishCollect(replacement);
+        cpu_identity.setIndexForTest(@intCast(index));
+    }
+}
 
 test "device IRQ real ISR hands off allowlisted users before their watchdog" {
     inline for (.{ .{ @as(u8, 65), DeviceInterruptFixture.wake.Kind.network }, .{ @as(u8, 66), DeviceInterruptFixture.wake.Kind.nvme }, .{ @as(u8, 67), DeviceInterruptFixture.wake.Kind.xhci } }) |case| {
@@ -3425,6 +7053,114 @@ test "device IRQ real ISR hands off allowlisted users before their watchdog" {
             else => false,
         });
         try std.testing.expect(shouldPreemptUserDispatch(&fixture.executor, true, 102, null));
+    }
+}
+
+test "device IRQ continuation skips its first stale event yield in the same quantum and isolates other mappings" {
+    var fixture = DeviceInterruptFixture{};
+    try fixture.init();
+    defer fixture.deinit();
+    const neighbor_handle = installTestMappingAt(&fixture.executor, 1, .{
+        .state = .live,
+        .address_space_id = 43,
+        .dispatch_metadata = .{ .owner_task_id = 8, .image_id = 42 },
+    });
+    const neighbor = &fixture.executor.mappingArena().?.getByHandle(neighbor_handle).?.mapping;
+    const neighbor_before = neighbor.*;
+    try std.testing.expect(!fixture.mapping.interrupted_before_yield);
+    try fixture.dispatch(67, null);
+    try fixture.expectNoResume();
+    try std.testing.expect(!fixture.mapping.interrupted_before_yield);
+    try fixture.dispatch(67, .xhci);
+    try fixture.expectResume();
+    try std.testing.expect(fixture.mapping.interrupted_before_yield);
+    const captured = fixture.mapping.user_context64;
+    fixture.frame.eip += 4;
+    try fixture.dispatch(67, .xhci);
+    try std.testing.expectEqualDeep(captured, fixture.mapping.user_context64);
+    try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+    try std.testing.expect(fixture.mapping.interrupted_before_yield);
+    // Redispatch resets the owner handoff fields, retaining the cached mapping.
+    fixture.executor.handoff_completed = false;
+    native_entry.current().resume_requested = 0;
+    fixture.frame.eax = 10;
+    fixture.frame.esi = @backingInt(userspace_bootstrap_mailbox.YieldDisposition.wait_for_event);
+    const frame_before = fixture.frame;
+    const quantum_before = fixture.executor.dispatch_quantum;
+    const context_before = fixture.mapping.user_context64;
+    const counter_before = fixture.executor.last_trap_counter;
+    const ui_before = fixture.executor.last_yield_ui_revision;
+    const user_counter_before = fixture.mapping.last_user_counter;
+    handleUserspaceYield(&fixture.executor, &fixture.frame);
+    try std.testing.expectEqualDeep(frame_before, fixture.frame);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.YieldDisposition.runnable, fixture.executor.last_yield_disposition);
+    try std.testing.expect(!fixture.mapping.interrupted_before_yield);
+    try std.testing.expect(!fixture.executor.handoff_completed);
+    try std.testing.expectEqual(@as(u32, 0), native_entry.current().resume_requested);
+    try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+    try std.testing.expectEqualDeep(context_before, fixture.mapping.user_context64);
+    try std.testing.expectEqualDeep(quantum_before, fixture.executor.dispatch_quantum);
+    try std.testing.expectEqual(counter_before, fixture.executor.last_trap_counter);
+    try std.testing.expectEqual(ui_before, fixture.executor.last_yield_ui_revision);
+    try std.testing.expectEqual(user_counter_before, fixture.mapping.last_user_counter);
+    try std.testing.expectEqualDeep(neighbor_before, neighbor.*);
+    fixture.executor.handoff_completed = false;
+    native_entry.current().resume_requested = 0;
+    fixture.frame.eax = 11;
+    handleUserspaceYield(&fixture.executor, &fixture.frame);
+    try std.testing.expectEqual(userspace_bootstrap_mailbox.YieldDisposition.wait_for_event, fixture.executor.last_yield_disposition);
+    try std.testing.expect(!fixture.mapping.interrupted_before_yield);
+    try std.testing.expect(fixture.executor.handoff_completed);
+    try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
+    try std.testing.expectEqual(@as(u64, 10), fixture.mapping.yield_count);
+    try std.testing.expectEqual(fixture.frame.eip, fixture.mapping.user_context64.instruction_pointer);
+    try std.testing.expectEqual(fixture.frame.useresp, fixture.mapping.user_context64.stack_pointer);
+    try std.testing.expectEqualDeep(neighbor_before, neighbor.*);
+}
+
+test "IRQ continuation retry is consumed by runnable yields and retained by malformed frames" {
+    for ([_]struct { counter: u64, disposition: u64, valid: bool }{
+        .{ .counter = 10, .disposition = 0, .valid = true },
+        .{ .counter = @as(u64, std.math.maxInt(u32)) + 1, .disposition = 1, .valid = false },
+        .{ .counter = 10, .disposition = 2, .valid = false },
+        .{ .counter = 10, .disposition = @as(u64, std.math.maxInt(u32)) + 1, .valid = false },
+    }) |case| {
+        var fixture = DeviceInterruptFixture{};
+        try fixture.init();
+        defer fixture.deinit();
+        fixture.frame.cs = 0x08;
+        try fixture.dispatch(67, .xhci);
+        try fixture.expectNoResume();
+        try std.testing.expect(!fixture.mapping.interrupted_before_yield);
+        fixture.frame.cs = 0x23;
+        try fixture.dispatch(67, .xhci);
+        try fixture.expectResume();
+        const captured = fixture.mapping.user_context64;
+        fixture.executor.handoff_completed = false;
+        native_entry.current().resume_requested = 0;
+        fixture.frame.eax = case.counter;
+        fixture.frame.esi = case.disposition;
+        handleUserspaceYield(&fixture.executor, &fixture.frame);
+        try std.testing.expectEqual(!case.valid, fixture.mapping.interrupted_before_yield);
+        try std.testing.expect(fixture.executor.handoff_completed);
+        try std.testing.expectEqual(@as(u32, 1), native_entry.current().resume_requested);
+        if (case.valid) {
+            try std.testing.expect(fixture.executor.last_user_exception == null);
+            try std.testing.expectEqual(userspace_bootstrap_mailbox.YieldDisposition.runnable, fixture.executor.last_yield_disposition);
+            try std.testing.expectEqual(@as(u64, 10), fixture.mapping.yield_count);
+        } else {
+            try std.testing.expectEqual(GENERAL_PROTECTION_FAULT_VECTOR, fixture.executor.last_user_exception.?.vector);
+            try std.testing.expectEqualDeep(captured, fixture.mapping.user_context64);
+            try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+            const exception = fixture.executor.last_user_exception.?;
+            fixture.frame.eax = 11;
+            fixture.frame.esi = 1;
+            handleUserspaceYield(&fixture.executor, &fixture.frame);
+            try std.testing.expect(fixture.mapping.interrupted_before_yield);
+            try std.testing.expectEqualDeep(exception, fixture.executor.last_user_exception.?);
+            try std.testing.expectEqualDeep(captured, fixture.mapping.user_context64);
+            try std.testing.expectEqual(@as(u64, 9), fixture.mapping.yield_count);
+        }
     }
 }
 
@@ -3456,7 +7192,7 @@ test "device IRQ real ISR preserves kernel continuation and missing active dispa
         defer fixture.mapping.owned_xstate = storage;
         switch (absent) {
             .kernel => fixture.frame.cs = 0x08,
-            .executor => registered_executor = null,
+            .executor => currentExecutorSlot().* = null,
             .task => fixture.executor.active_task_id = 0,
             .quantum => fixture.executor.dispatch_quantum = .{},
             .mapping => fixture.executor.active_mapping = null,
@@ -3547,15 +7283,6 @@ test "production address-space groups share page tables" {
     try std.testing.expectEqual(@as(usize, 8), GROUP_SPACE_COUNT);
 }
 
-test "syscall failure wait response validation preserves the executor disposition" {
-    var executor = Executor{};
-    const previous = registered_executor;
-    defer registered_executor = previous;
-    registered_executor = &executor;
-    const failure_tests = if (builtin.is_test) @import("../kernel_api/syscall_failure_test.zig") else struct {};
-    try failure_tests.expectWaitResponseFailures(&executor);
-}
-
 test "shared lifetime registration rejects foreign tail ownership before publication" {
     const ids = @import("../core/ids.zig");
     demand_paging.reset();
@@ -3594,6 +7321,15 @@ test "shared lifetime registration rejects foreign tail ownership before publica
     try table.map(object.id, ids.task(7));
     const registered = try table.freestandingTaskMappingDescriptor(object.id, ids.task(7));
     try std.testing.expectEqual(first, registered.virtual_base);
+    {
+        const previous_index = cpu_identity.currentIndex();
+        cpu_identity.setIndexForTest(1);
+        defer cpu_identity.setIndexForTest(previous_index);
+        try std.testing.expect(!unregisterMappedObject(&executor, &table, handle.value, registered));
+        try std.testing.expectEqual(@as(u16, 1), executor.mapped_object_count);
+        try std.testing.expect(table.hasMapping(object.id, ids.task(7)));
+        try std.testing.expect(demand_paging.regionOverlapsSpace(&mapping.address_space.?, first, first + shared_memory.PAGE_SIZE));
+    }
     try std.testing.expect(try table.unmap(object.id, ids.task(7)));
     try std.testing.expect(!demand_paging.resolveFault(&mapping.address_space.?, first, 4));
     try std.testing.expect(executor.mapped_object_table == null);
@@ -3684,11 +7420,15 @@ test "userspace quantum arms at actual entry after idle and retains private exte
     const Entry = struct {
         executor: *Executor,
         clock: *Clock,
+        expected_mapping: *MappingEntry,
+        expected_context: UserContext64,
         expected_state: *align(xstate.alignment) xstate.State,
         called: bool = false,
         fn enter(self: *@This(), context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
-            if (!self.clock.armed or state != self.expected_state or context != &self.executor.pending_user_context64)
+            if (!self.clock.armed or state != self.expected_state or self.executor.active_mapping != self.expected_mapping or
+                context != &self.expected_mapping.user_context64)
                 @panic("user entry requires its armed timer and owned context");
+            std.testing.expectEqualDeep(self.expected_context, context.*) catch @panic("user entry borrows its complete current mapping context");
             if (shouldPreemptUserDispatch(self.executor, true, self.clock.now, null) or
                 !shouldPreemptUserDispatch(self.executor, true, self.clock.now + DISPATCH_QUANTUM_TICKS, null) or
                 shouldPreemptUserDispatch(self.executor, false, self.clock.now + DISPATCH_QUANTUM_TICKS, null))
@@ -3699,18 +7439,95 @@ test "userspace quantum arms at actual entry after idle and retains private exte
     };
     var storage: xstate.Storage = .{};
     storage.initialize();
-    var mapping = MappingEntry{ .owned_xstate = &storage };
-    var executor = Executor{ .active_task_id = 42, .active_mapping = &mapping };
+    const initial_context = UserContext64{
+        .rax = 0x101,
+        .rbx = 0x102,
+        .rcx = 0x103,
+        .rdx = 0x104,
+        .rbp = 0x105,
+        .rsi = 0x106,
+        .rdi = 0x107,
+        .r8 = 0x108,
+        .r9 = 0x109,
+        .r10 = 0x10a,
+        .r11 = 0x10b,
+        .r12 = 0x10c,
+        .r13 = 0x10d,
+        .r14 = 0x10e,
+        .r15 = 0x10f,
+        .instruction_pointer = 0x4000_1234,
+        .flags = 0x202,
+        .stack_pointer = 0x7fff_8880,
+    };
+    var mappings = [_]MappingEntry{
+        .{ .owned_xstate = &storage, .user_context64 = initial_context },
+        .{ .address_space_id = 73, .resume_valid = true, .user_context64 = initial_context },
+    };
+    const mapping = &mappings[0];
+    const neighbor = &mappings[1];
+    neighbor.user_context64.rax = 0xfeed_1234;
+    const neighbor_before = neighbor.*;
+    var executor = Executor{ .active_task_id = 42, .active_mapping = mapping };
     var clock = Clock{ .now = 500 };
-    var entry = Entry{ .executor = &executor, .clock = &clock, .expected_state = storage.state() };
+    var entry = Entry{
+        .executor = &executor,
+        .clock = &clock,
+        .expected_mapping = mapping,
+        .expected_context = initial_context,
+        .expected_state = storage.state(),
+    };
     try std.testing.expectEqual(@as(u32, 7), enterUserspaceWithClock(&executor, &clock, &entry));
     try std.testing.expect(entry.called);
-    // A later dispatch does not inherit the prior task's deadline.
+    const resumed_context = UserContext64{
+        .rax = 0x201,
+        .rbx = 0x202,
+        .rcx = 0x203,
+        .rdx = 0x204,
+        .rbp = 0x205,
+        .rsi = 0x206,
+        .rdi = 0x207,
+        .r8 = 0x208,
+        .r9 = 0x209,
+        .r10 = 0x20a,
+        .r11 = 0x20b,
+        .r12 = 0x20c,
+        .r13 = 0x20d,
+        .r14 = 0x20e,
+        .r15 = 0x20f,
+        .instruction_pointer = 0x4000_5678,
+        .flags = 0x246,
+        .stack_pointer = 0x7fff_9990,
+    };
+    var frame = std.mem.zeroes(freestanding.isr.InterruptFrame);
+    frame.eax = 0x201;
+    frame.ebx = 0x202;
+    frame.ecx = 0x203;
+    frame.edx = 0x204;
+    frame.ebp = 0x205;
+    frame.esi = 0x206;
+    frame.edi = 0x207;
+    frame.r8 = 0x208;
+    frame.r9 = 0x209;
+    frame.r10 = 0x20a;
+    frame.r11 = 0x20b;
+    frame.r12 = 0x20c;
+    frame.r13 = 0x20d;
+    frame.r14 = 0x20e;
+    frame.r15 = 0x20f;
+    frame.eip = 0x4000_5678;
+    frame.eflags = 0x246;
+    frame.useresp = 0x7fff_9990;
+    captureUserContext64(mapping, &frame);
+    try std.testing.expectEqualDeep(resumed_context, mapping.user_context64);
+    try std.testing.expectEqualDeep(neighbor_before, neighbor.*);
+    // A later entry borrows the captured context and starts a fresh quantum.
     clock.armed = false;
     clock.now = 1000;
+    entry.expected_context = resumed_context;
     entry.called = false;
     try std.testing.expectEqual(@as(u32, 7), enterUserspaceWithClock(&executor, &clock, &entry));
     try std.testing.expect(entry.called);
+    try std.testing.expectEqualDeep(neighbor_before, neighbor.*);
     try std.testing.expectEqual(@as(u64, 1002), executor.dispatch_quantum.deadline_tick);
     try std.testing.expect(!executor.dispatch_quantum.expired(43, 1002));
     const Priority = struct {
@@ -3736,4 +7553,795 @@ test "userspace mapping retirement releases its private extended state allocatio
     executor.releaseMapping(mappings, handle.slotIndex(), mapping);
     try std.testing.expect(mappings.getByHandle(handle) == null);
     try std.testing.expect(mapping.owned_xstate == null);
+}
+
+test "executor CPU registrations reject replacement and reset only their selected continuation" {
+    const previous_index = cpu_identity.currentIndex();
+    const previous_registrations = executor_registrations;
+    var previous_entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (&previous_entries, 0..) |*state, index| state.* = native_entry.stateForCpu(@intCast(index)).*;
+    defer {
+        executor_registrations = previous_registrations;
+        for (&previous_entries, 0..) |*state, index| native_entry.stateForCpu(@intCast(index)).* = state.*;
+        cpu_identity.setIndexForTest(previous_index);
+    }
+    executor_registrations = @splat(.{});
+    const executors = try std.testing.allocator.alloc(Executor, cpu_identity.MAX_CPUS);
+    defer std.testing.allocator.free(executors);
+    var expected_entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (executors, &expected_entries, 0..) |*executor, *state, index| {
+        executor.* = .{};
+        state.* = .{
+            .kernel_stack_top = 0xffff_8000_1000_0000 + index * PAGE_SIZE,
+            .user_stack_pointer = 0x7000_0000 + index * PAGE_SIZE,
+            .kernel_port = 0xffff_8000_2000_0000 + index * 64,
+            .active_task_id = 100 + index,
+            .native_entry_modes = native_entry.ENTRY_READY | @as(u8, @intCast(index & 3)),
+            .userspace_xstate = 0xffff_8000_3000_0000 + index * PAGE_SIZE,
+            .kernel_xstate = 0xffff_8000_4000_0000 + index * PAGE_SIZE,
+            .resume_rsp = 0xffff_8000_5000_0000 + index * PAGE_SIZE,
+            .resume_rip = 0xffff_ffff_8000_0000 + index * 64,
+            .resume_requested = @intCast(200 + index),
+        };
+        native_entry.stateForCpu(@intCast(index)).* = state.*;
+    }
+    var admitted: [cpu_identity.MAX_CPUS]bool = @splat(false);
+    var unrelated = Executor{};
+    for (0..cpu_identity.MAX_CPUS) |position| {
+        const index: u8 = @intCast(if (position % 2 == 0) cpu_identity.MAX_CPUS - 1 - position / 2 else position / 2);
+        cpu_identity.setIndexForTest(index);
+        try std.testing.expect(claimCurrentExecutor(&executors[index]));
+        try std.testing.expect(claimCurrentExecutor(&executors[index]));
+        try std.testing.expect(!claimCurrentExecutor(&unrelated));
+        try std.testing.expect(!releaseCurrentExecutor(&unrelated));
+        admitted[index] = true;
+        for (0..cpu_identity.MAX_CPUS) |neighbor| {
+            const expected: ?*Executor = if (admitted[neighbor]) &executors[neighbor] else null;
+            try std.testing.expectEqual(expected, executor_registrations[neighbor].executor);
+            try std.testing.expectEqualDeep(expected_entries[neighbor], native_entry.stateForCpu(@intCast(neighbor)).*);
+        }
+    }
+    const handle = installTestMappingAt(&executors[0], 0, .{ .state = .live, .address_space_id = 42 });
+    cpu_identity.setIndexForTest(1);
+    try std.testing.expect(!claimCurrentExecutor(&executors[0]));
+    try std.testing.expect(!releaseCurrentExecutor(&executors[0]));
+    try std.testing.expectError(error.WrongCpu, executors[0].resetChecked());
+    try std.testing.expect(executors[0].findMappingByHandle(handle, 42) != null);
+    try std.testing.expectEqual(@as(usize, 1), executors[0].materializedCount());
+    try std.testing.expectError(error.WrongCpu, unrelated.resetChecked());
+    for (&expected_entries, 0..) |*state, index| {
+        try std.testing.expectEqualDeep(state.*, native_entry.stateForCpu(@intCast(index)).*);
+        try std.testing.expectEqual(@as(?*Executor, &executors[index]), executor_registrations[index].executor);
+    }
+    var retired: [cpu_identity.MAX_CPUS]bool = @splat(false);
+    for (0..cpu_identity.MAX_CPUS) |position| {
+        const index: u8 = @intCast(if (position % 2 == 0) position / 2 else cpu_identity.MAX_CPUS - 1 - position / 2);
+        cpu_identity.setIndexForTest(index);
+        try executors[index].resetChecked();
+        retired[index] = true;
+        expected_entries[index].active_task_id = 0;
+        expected_entries[index].userspace_xstate = 0;
+        expected_entries[index].kernel_xstate = 0;
+        expected_entries[index].resume_rsp = 0;
+        expected_entries[index].resume_rip = 0;
+        expected_entries[index].resume_requested = 0;
+        for (0..cpu_identity.MAX_CPUS) |neighbor| {
+            const expected: ?*Executor = if (retired[neighbor]) null else &executors[neighbor];
+            try std.testing.expectEqual(expected, executor_registrations[neighbor].executor);
+            try std.testing.expectEqualDeep(expected_entries[neighbor], native_entry.stateForCpu(@intCast(neighbor)).*);
+        }
+        try std.testing.expect(executors[index].registration_cpu == null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), executors[0].materializedCount());
+    try std.testing.expect(executors[0].findMappingByHandle(handle, 42) == null);
+    cpu_identity.setIndexForTest(0);
+    try std.testing.expect(claimCurrentExecutor(&unrelated));
+    try std.testing.expect(releaseCurrentExecutor(&unrelated));
+}
+
+test "trap stack geometry bounds the complete guard and usable extent" {
+    try std.testing.expectEqual(@as(?usize, 0x1000), checkedTrapStackGeometry(0x1000, TRAP_STACK_TOTAL_BYTES));
+    try std.testing.expectEqual(@as(?usize, 0x2000), checkedTrapStackGeometry(0x1001, TRAP_STACK_TOTAL_BYTES + PAGE_SIZE - 1));
+    try std.testing.expect(checkedTrapStackGeometry(0x1001, TRAP_STACK_TOTAL_BYTES + PAGE_SIZE - 2) == null);
+    try std.testing.expect(checkedTrapStackGeometry(0x1000, TRAP_STACK_TOTAL_BYTES - 1) == null);
+    try std.testing.expect(checkedTrapStackGeometry(0, TRAP_STACK_TOTAL_BYTES) == null);
+    try std.testing.expect(checkedTrapStackGeometry(std.math.maxInt(usize) - PAGE_SIZE + 1, TRAP_STACK_TOTAL_BYTES) == null);
+    try std.testing.expect(checkedTrapStackGeometry(0x1000, std.math.maxInt(usize)) == null);
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        const allocation = 0xffff_8000_1000_0000 + index * 16 * PAGE_SIZE + index * 31;
+        const guard = checkedTrapStackGeometry(allocation, TRAP_STACK_TOTAL_BYTES + PAGE_SIZE - 1).?;
+        try std.testing.expectEqual(@as(usize, 0), guard % PAGE_SIZE);
+        try std.testing.expect(guard >= allocation and guard + TRAP_STACK_TOTAL_BYTES <= allocation + TRAP_STACK_TOTAL_BYTES + PAGE_SIZE - 1);
+    }
+    try std.testing.expectError(error.InvalidCpu, reserveTrapStackStorageForCpu(@intCast(cpu_identity.MAX_CPUS)));
+}
+
+const TrapStackTestBackend = struct {
+    const Permissions = struct { user: bool = false, writable: bool = true, executable: bool = false };
+    guard: usize,
+    bad_page: ?usize = null,
+    bad_permissions: Permissions = .{},
+    checked: usize = 0,
+    unmapped: usize = 0,
+    unmap_succeeds: bool = true,
+    guard_absent: bool = true,
+
+    fn permissions(self: *@This(), address: usize) Permissions {
+        if (address != self.guard + (self.checked + 1) * PAGE_SIZE) @panic("trap stack preflight must validate every usable leaf in order");
+        self.checked += 1;
+        return if (self.bad_page == address) self.bad_permissions else .{};
+    }
+
+    fn unmap(self: *@This(), address: usize) bool {
+        if (address != self.guard or self.checked != TRAP_STACK_USABLE_BYTES / PAGE_SIZE) @panic("trap guard retirement requires complete usable-leaf preflight");
+        self.unmapped += 1;
+        return self.unmap_succeeds;
+    }
+
+    fn guardAbsent(self: *@This(), address: usize) bool {
+        if (address != self.guard or self.unmapped != 1) @panic("trap guard absence follows one unmap");
+        return self.guard_absent;
+    }
+};
+
+test "trap stack provisioning validates every leaf before retiring its guard and retains failures" {
+    const Buffer = struct { bytes: [TRAP_STACK_TOTAL_BYTES]u8 align(PAGE_SIZE) };
+    const buffer = try std.testing.allocator.create(Buffer);
+    defer std.testing.allocator.destroy(buffer);
+    const guard = @intFromPtr(&buffer.bytes);
+    for (0..TRAP_STACK_USABLE_BYTES / PAGE_SIZE) |page| {
+        for ([_]TrapStackTestBackend.Permissions{
+            .{ .user = true },
+            .{ .writable = false },
+            .{ .executable = true },
+            .{ .user = true, .writable = false, .executable = true },
+        }) |permissions| {
+            @memset(&buffer.bytes, 0xa5);
+            var slot = TrapStackSlot{};
+            var backend = TrapStackTestBackend{ .guard = guard, .bad_page = guard + (page + 1) * PAGE_SIZE, .bad_permissions = permissions };
+            try std.testing.expectError(error.InvalidTrapStackMapping, initializeTrapStackSlot(&slot, &buffer.bytes, &backend));
+            try std.testing.expectEqual(@as(usize, 0), backend.unmapped);
+            try std.testing.expect(slot.storage == &buffer.bytes and slot.failed and !@atomicLoad(bool, &slot.ready, .acquire));
+            try std.testing.expect(std.mem.allEqual(u8, &buffer.bytes, 0xa5));
+        }
+    }
+    for ([_]bool{ false, true }) |unmap_succeeds| {
+        @memset(&buffer.bytes, 0xa5);
+        var slot = TrapStackSlot{};
+        var backend = TrapStackTestBackend{ .guard = guard, .unmap_succeeds = unmap_succeeds, .guard_absent = false };
+        try std.testing.expectError(error.TrapStackGuardFailure, initializeTrapStackSlot(&slot, &buffer.bytes, &backend));
+        try std.testing.expectEqual(@as(usize, 1), backend.unmapped);
+        try std.testing.expect(slot.storage == &buffer.bytes and slot.failed and !@atomicLoad(bool, &slot.ready, .acquire));
+        try std.testing.expect(std.mem.allEqual(u8, &buffer.bytes, 0xa5));
+    }
+    @memset(&buffer.bytes, 0xa5);
+    var slot = TrapStackSlot{};
+    var backend = TrapStackTestBackend{ .guard = guard };
+    try initializeTrapStackSlot(&slot, &buffer.bytes, &backend);
+    try std.testing.expect(@atomicLoad(bool, &slot.ready, .acquire) and !slot.failed);
+    try std.testing.expectEqual(@as(usize, 1), backend.unmapped);
+    try std.testing.expect(std.mem.allEqual(u8, buffer.bytes[0..TRAP_STACK_GUARD_BYTES], 0xa5));
+    try std.testing.expect(std.mem.allEqual(u32, std.mem.bytesAsSlice(u32, buffer.bytes[TRAP_STACK_GUARD_BYTES..]), TRAP_STACK_PAINT_PATTERN));
+}
+
+test "trap stack slots publish only requested CPUs and preserve every neighbor" {
+    const previous_index = cpu_identity.currentIndex();
+    const previous_stacks = trap_stacks;
+    defer {
+        trap_stacks = previous_stacks;
+        cpu_identity.setIndexForTest(previous_index);
+    }
+    trap_stacks = @splat(.{});
+    const Buffer = struct { bytes: [TRAP_STACK_TOTAL_BYTES]u8 align(PAGE_SIZE) };
+    const buffers = try std.testing.allocator.alloc(Buffer, cpu_identity.MAX_CPUS);
+    defer std.testing.allocator.free(buffers);
+    var admitted: [cpu_identity.MAX_CPUS]bool = @splat(false);
+    for (0..cpu_identity.MAX_CPUS) |position| {
+        const index: u8 = @intCast(if (position % 2 == 0) cpu_identity.MAX_CPUS - 1 - position / 2 else position / 2);
+        cpu_identity.setIndexForTest(index);
+        try std.testing.expect(currentTrapStackStorage() == null);
+        try std.testing.expect(preparedKernelStackForCpu(index) == null);
+        var backend = TrapStackTestBackend{ .guard = @intFromPtr(&buffers[index].bytes) };
+        try initializeTrapStackSlot(&trap_stacks[index], &buffers[index].bytes, &backend);
+        admitted[index] = true;
+        for (0..cpu_identity.MAX_CPUS) |neighbor| {
+            cpu_identity.setIndexForTest(@intCast(neighbor));
+            if (admitted[neighbor]) {
+                try std.testing.expect(currentTrapStackStorage() == &buffers[neighbor].bytes);
+                const selected_top = @intFromPtr(trapStackStorage()) + TRAP_STACK_TOTAL_BYTES;
+                try std.testing.expectEqual(@intFromPtr(&buffers[neighbor].bytes) + TRAP_STACK_TOTAL_BYTES, selected_top);
+                try std.testing.expectEqual(@as(?usize, selected_top), preparedKernelStackForCpu(@intCast(neighbor)));
+                try std.testing.expect(std.mem.allEqual(u32, std.mem.bytesAsSlice(u32, buffers[neighbor].bytes[TRAP_STACK_GUARD_BYTES..]), TRAP_STACK_PAINT_PATTERN));
+            } else {
+                try std.testing.expect(currentTrapStackStorage() == null);
+                try std.testing.expect(trap_stacks[neighbor].storage == null);
+                try std.testing.expect(preparedKernelStackForCpu(@intCast(neighbor)) == null);
+            }
+        }
+    }
+    try std.testing.expect(preparedKernelStackForCpu(@intCast(cpu_identity.MAX_CPUS)) == null);
+    try std.testing.expect(preparedKernelStackForCpu(std.math.maxInt(u8)) == null);
+}
+
+const PreparedDispatchTestBackend = if (builtin.is_test) struct {
+    coordinator: *dispatch_ownership.Coordinator,
+    ticket: dispatch_ownership.Ticket,
+    expected_context: UserContext64 = .{},
+    expected_state: ?*align(xstate.alignment) xstate.State = null,
+    fault: UserException = .{ .vector = 14, .error_code = 0x8000_0017, .instruction_pointer = 0x4000_1234, .fault_address = 0x4000_5678 },
+    outcome: ExecutionOutcome = .yielded,
+    writes: usize = 0,
+    entered: usize = 0,
+    activated: usize = 0,
+    restored: usize = 0,
+    queue_key: ?dispatch_transport.Key = null,
+    expected_completion: dispatch_transport.Completion = .owner_returned,
+    fail_write: bool = false,
+    stack_ready: bool = true,
+    kernel: bool = true,
+    mailbox: userspace_bootstrap_mailbox.Mailbox = undefined,
+
+    fn preparationReady(_: *@This()) bool {
+        return true;
+    }
+    fn dispatchService(_: *@This(), _: u64) void {}
+    fn stackTop(self: *@This(), cpu: u8) ?usize {
+        return if (self.stack_ready) 0x8000_0000 + @as(usize, cpu) * 0x10000 else null;
+    }
+    fn writeMailbox(self: *@This(), _: *MappingEntry, update: ?BootstrapMailboxUpdate) bool {
+        std.testing.expectEqual(dispatch_ownership.Phase.reserved, self.coordinator.phase(self.ticket) catch @panic("exact preparation ticket")) catch @panic("mailbox must finish before lease publication");
+        const publication = update orelse return true;
+        self.writes += 1;
+        if (self.fail_write) return false;
+        self.mailbox = kernelPublishedMailbox(publication, null);
+        return true;
+    }
+    fn ownerAvailable(_: *@This()) bool {
+        return true;
+    }
+    fn entryReady(self: *@This(), stack_top: usize) bool {
+        return self.stackTop(cpu_identity.currentIndex()) == stack_top and self.kernel and continuationCleared(native_entry.current());
+    }
+    fn mask(_: *@This()) bool {
+        return true;
+    }
+    fn restore(self: *@This(), enabled: bool) void {
+        if (!enabled) @panic("fixture restores the local saved interrupt state");
+        if (self.queue_key) |key| {
+            const owner_cpu = cpu_identity.currentIndex();
+            cpu_identity.setIndexForTest(0);
+            defer cpu_identity.setIndexForTest(owner_cpu);
+            var completion: dispatch_transport.Completion = undefined;
+            if (self.restored == 0) {
+                std.testing.expectError(error.WrongPhase, dispatch_transport.global.completionInto(key, &completion)) catch
+                    @panic("inner runner return must precede independent completion");
+            } else {
+                dispatch_transport.global.completionInto(key, &completion) catch @panic("outer interrupt restoration follows transport completion");
+                std.testing.expectEqual(self.expected_completion, completion) catch @panic("queued outcome has the exact completion kind");
+            }
+        }
+        self.restored += 1;
+    }
+    fn activate(self: *@This(), _: *MappingEntry) void {
+        var bound: dispatch_ownership.BoundIdentity = undefined;
+        self.coordinator.boundIdentityInto(self.ticket, &bound) catch @panic("activation requires the claimed prepared lease");
+        self.kernel = false;
+        self.activated += 1;
+    }
+    fn enter(self: *@This(), executor: *Executor) void {
+        var clock = Clock{};
+        var entry = Entry{ .backend = self, .executor = executor };
+        _ = enterUserspaceWithClock(executor, &clock, &entry);
+        std.testing.expectEqual(@as(u8, 1), clock.armed) catch @panic("actual entry arms the quantum once");
+        std.testing.expectEqual(DispatchQuantum.begin(executor.active_task_id, 100), executor.dispatch_quantum) catch @panic("quantum begins after preparation");
+        native_entry.clearContinuation();
+    }
+    fn switchToKernel(self: *@This()) void {
+        self.kernel = true;
+    }
+    fn kernelActive(self: *@This()) bool {
+        return self.kernel;
+    }
+    const Clock = struct {
+        armed: u8 = 0,
+        fn armSchedulerTick(self: *@This()) void {
+            self.armed += 1;
+        }
+        fn getTicks(_: *@This()) u64 {
+            return 100;
+        }
+    };
+    const Entry = struct {
+        backend: *PreparedDispatchTestBackend,
+        executor: *Executor,
+        fn enter(self: *@This(), context: *const UserContext64, state: *align(xstate.alignment) xstate.State) u32 {
+            std.testing.expect(context == &self.executor.active_mapping.?.user_context64) catch @panic("prepared entry borrows its exact selected mapping context");
+            std.testing.expectEqualDeep(self.backend.expected_context, context.*) catch @panic("entry uses the immutable prepared context");
+            std.testing.expect(state == self.backend.expected_state.?) catch @panic("entry uses private selected mapping xstate");
+            self.backend.entered += 1;
+            native_entry.current().resume_rsp = 0xfeed_1000;
+            native_entry.current().resume_rip = 0xfeed_2000;
+            native_entry.current().userspace_xstate = @intFromPtr(state);
+            native_entry.current().kernel_xstate = 0xfeed_3000;
+            switch (self.backend.outcome) {
+                .unavailable => {},
+                .faulted => requestUserExceptionHandoff(self.executor, self.backend.fault),
+                .yielded, .wait_for_event => {
+                    var frame = std.mem.zeroes(freestanding.isr.InterruptFrame);
+                    frame.eax = 37;
+                    frame.edx = 71;
+                    frame.esi = @backingInt(if (self.backend.outcome == .wait_for_event)
+                        userspace_bootstrap_mailbox.YieldDisposition.wait_for_event
+                    else
+                        userspace_bootstrap_mailbox.YieldDisposition.runnable);
+                    frame.eip = context.instruction_pointer + 4;
+                    frame.useresp = context.stack_pointer;
+                    frame.eflags = context.flags;
+                    handleUserspaceYield(self.executor, &frame);
+                },
+            }
+            return 37;
+        }
+    };
+} else struct {};
+
+const PreparedDispatchTestFixture = if (builtin.is_test) struct {
+    runtime: *task_runtime.Runtime = undefined,
+    executor: Executor = .{},
+    task: *task_runtime.TaskRecord = undefined,
+    mapping: *MappingEntry = undefined,
+    handle: MappingHandle = .{},
+    ticket: dispatch_ownership.Ticket = undefined,
+    previous_registration: ?*Executor = null,
+    cpu: u8 = 0,
+    catalog: userspace_loader.Catalog = userspace_loader.Catalog.init(),
+    capabilities: capability.CapabilityTable = capability.CapabilityTable.init(),
+
+    fn init(self: *@This(), cpu: u8) !void {
+        self.cpu = cpu;
+        self.runtime = table_backing.alloc(task_runtime.Runtime) orelse return error.OutOfMemory;
+        self.runtime.initializeAllocated();
+        errdefer table_backing.free(task_runtime.Runtime, self.runtime);
+        var image = try @import("generated_image_fixtures.zig").appImage();
+        self.task = try self.runtime.createTask(.{
+            .owner = .{ .kind = .app, .serial = @as(u64, cpu) + 1 },
+            .component_class = .app_component,
+            .budget = .{ .cpu_time_ticks = 100, .memory_bytes = 8192, .endpoint_slots = 2, .shared_memory_bytes = 0 },
+            .local_only = true,
+            .launch = .{ .boundary = .userspace_process, .image_id = 41, .component_abi_version = 1, .signed = true, .bundle_id = "app.notes" },
+            .userspace_image = &image,
+        });
+        const storage = table_backing.alloc(xstate.Storage) orelse return error.OutOfMemory;
+        storage.initialize();
+        self.handle = installTestMappingAt(&self.executor, 0, .{
+            .state = .live,
+            .address_space_id = self.task.address_space_id,
+            .address_space = .{ .directory = @ptrFromInt((@as(usize, cpu) + 1) * PAGE_SIZE), .pcid = cpu + 1 },
+            .dispatch_metadata = .{ .owner_task_id = self.task.id, .image_id = 41, .initial_instruction_pointer = 0x4000_1000, .initial_stack_pointer = 0x7fff_fff0, .bootstrap_mailbox_address = 0x4000_4000 },
+            .owned_xstate = storage,
+        });
+        self.mapping = self.executor.findMappingByHandle(self.handle, self.task.address_space_id).?;
+        self.executor.initialized = true;
+        self.executor.bound_runtime = self.runtime;
+        self.executor.registration_cpu = cpu;
+        self.previous_registration = registeredExecutor(cpu);
+        executor_registrations[cpu].executor = &self.executor;
+        self.ticket = try self.runtime.reserveExecution(self.task, cpu);
+    }
+    fn prepare(self: *@This(), out: *PreparedDispatch, backend: *PreparedDispatchTestBackend) bool {
+        return self.executor.prepareTaskDispatchInto(&self.catalog, self.runtime, &self.capabilities, self.task, &self.handle, 10, self.ticket, out, backend);
+    }
+    fn makeBackend(self: *@This()) PreparedDispatchTestBackend {
+        return .{ .coordinator = &self.runtime.execution, .ticket = self.ticket, .expected_state = self.mapping.owned_xstate.?.state() };
+    }
+    fn collect(self: *@This(), out: *ReturnRecord) !void {
+        try std.testing.expectError(error.WrongPhase, self.runtime.collectExecution(self.ticket));
+        try self.runtime.execution.consumePreparedReturnInto(self.ticket, out);
+        try self.runtime.collectExecution(self.ticket);
+    }
+    fn deinit(self: *@This()) void {
+        if (self.runtime.execution.hasLeases()) @panic("fixture must collect its exact lease before cleanup");
+        executor_registrations[self.cpu].executor = self.previous_registration;
+        self.executor.registration_cpu = null;
+        self.executor.bound_runtime = null;
+        self.executor.reset();
+        self.runtime.reset();
+        table_backing.free(task_runtime.Runtime, self.runtime);
+    }
+} else struct {};
+
+test "prepared owner boundary runs all selected private contexts and consumes exact receipts" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    var previous_entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (&previous_entries, 0..) |*entry, cpu| entry.* = native_entry.stateForCpu(@intCast(cpu)).*;
+    defer for (previous_entries, 0..) |entry, cpu| {
+        native_entry.stateForCpu(@intCast(cpu)).* = entry;
+    };
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        for ([_]ExecutionOutcome{ .unavailable, .yielded, .wait_for_event, .faulted }) |outcome| {
+            cpu_identity.setIndexForTest(0);
+            var fixture = PreparedDispatchTestFixture{};
+            try fixture.init(@intCast(index));
+            defer fixture.deinit();
+            if (index % 2 != 0) {
+                fixture.mapping.resume_valid = true;
+                fixture.mapping.user_context64 = .{ .rax = 91, .r15 = 93, .instruction_pointer = 0x4000_9876, .stack_pointer = 0x7fff_8880 };
+            }
+            var backend = fixture.makeBackend();
+            backend.outcome = outcome;
+            var prepared: PreparedDispatch = undefined;
+            try std.testing.expect(fixture.prepare(&prepared, &backend));
+            backend.expected_context = fixture.mapping.user_context64;
+            try std.testing.expectEqual(@as(usize, 1), backend.writes);
+            try std.testing.expectEqual(fixture.task.id, backend.mailbox.task_id);
+            try std.testing.expectEqual(dispatch_ownership.Phase.ready, try fixture.runtime.execution.phase(fixture.ticket));
+            const context_before = fixture.mapping.user_context64;
+            const command_before = prepared;
+            try std.testing.expect(!fixture.executor.userAddressSpacePreparationReady(&fixture.mapping.address_space.?));
+            try std.testing.expect(!fixture.prepare(&prepared, &backend));
+            try std.testing.expectEqualDeep(context_before, fixture.mapping.user_context64);
+            try std.testing.expectEqual(command_before, prepared);
+
+            var neighbors: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+            for (&neighbors, 0..) |*entry, cpu| entry.* = native_entry.stateForCpu(@intCast(cpu)).*;
+            cpu_identity.setIndexForTest(@intCast(index));
+            native_entry.current().active_task_id = 0;
+            native_entry.clearContinuation();
+            try std.testing.expect(fixture.executor.runPreparedTaskSlice(&prepared, &backend));
+            try std.testing.expectEqual(@as(usize, 1), backend.activated);
+            try std.testing.expectEqual(@as(usize, 1), backend.entered);
+            try std.testing.expectEqual(@as(usize, 1), backend.restored);
+            try std.testing.expectEqual(@as(usize, 1), backend.writes);
+            try std.testing.expect(continuationCleared(native_entry.current()));
+            try std.testing.expectEqual(@as(u64, 0), fixture.executor.active_task_id);
+            try std.testing.expect(fixture.executor.active_mapping == null and fixture.executor.active_dispatch_lease == null);
+            for (neighbors, 0..) |neighbor, cpu| if (cpu != index)
+                try std.testing.expectEqualDeep(neighbor, native_entry.stateForCpu(@intCast(cpu)).*);
+            cpu_identity.setIndexForTest(0);
+            var record: ReturnRecord = undefined;
+            try fixture.collect(&record);
+            try std.testing.expectEqual(outcome, record.outcome);
+            try std.testing.expectEqual(@as(u64, if (outcome == .yielded or outcome == .wait_for_event) 71 else 0), record.ui_revision);
+            if (outcome == .faulted) {
+                try std.testing.expectEqual(backend.fault.vector, record.fault_vector);
+                try std.testing.expectEqual(backend.fault.error_code, record.fault_error_code);
+                try std.testing.expectEqual(backend.fault.instruction_pointer, record.fault_instruction_pointer);
+                try std.testing.expectEqual(backend.fault.fault_address, record.fault_address);
+            }
+        }
+    }
+}
+
+test "queued prepared owner completes durable transport after ACK on every CPU" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    var previous_entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (&previous_entries, 0..) |*state, cpu| state.* = native_entry.stateForCpu(@intCast(cpu)).*;
+    defer for (previous_entries, 0..) |state, cpu| {
+        native_entry.stateForCpu(@intCast(cpu)).* = state;
+    };
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        for ([_]ExecutionOutcome{ .unavailable, .yielded, .wait_for_event, .faulted }) |outcome| {
+            cpu_identity.setIndexForTest(0);
+            var fixture = PreparedDispatchTestFixture{};
+            try fixture.init(@intCast(index));
+            defer fixture.deinit();
+            var backend = fixture.makeBackend();
+            backend.outcome = outcome;
+            var command: PreparedDispatch = undefined;
+            try std.testing.expect(fixture.prepare(&command, &backend));
+            backend.expected_context = fixture.mapping.user_context64;
+            var key: dispatch_transport.Key = undefined;
+            try dispatch_transport.global.publishInto(command, &key);
+            backend.queue_key = key;
+            try std.testing.expectError(error.Busy, fixture.runtime.collectExecution(fixture.ticket));
+            var neighbors: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+            for (&neighbors, 0..) |*state, cpu| state.* = native_entry.stateForCpu(@intCast(cpu)).*;
+            cpu_identity.setIndexForTest(@intCast(index));
+            native_entry.current().active_task_id = 0;
+            native_entry.clearContinuation();
+            try std.testing.expect(runQueuedPreparedTaskSlice(false, &backend, null, null, null, null));
+            try std.testing.expectEqual(@as(usize, 1), backend.activated);
+            try std.testing.expectEqual(@as(usize, 1), backend.entered);
+            try std.testing.expectEqual(@as(usize, 2), backend.restored);
+            try std.testing.expect(!runQueuedPreparedTaskSlice(false, &backend, null, null, null, null));
+            try std.testing.expect(continuationCleared(native_entry.current()));
+            try std.testing.expect(fixture.executor.active_mapping == null and fixture.executor.active_dispatch_lease == null);
+            for (neighbors, 0..) |neighbor, cpu| if (cpu != index)
+                try std.testing.expectEqualDeep(neighbor, native_entry.stateForCpu(@intCast(cpu)).*);
+            cpu_identity.setIndexForTest(0);
+            try std.testing.expect(executionOwnershipOutstanding(fixture.runtime));
+            var record: ReturnRecord = undefined;
+            // The first collection fails receipt admission and must return the
+            // channel to completed before exact receipt consumption and retry.
+            try fixture.collect(&record);
+            try std.testing.expectEqual(outcome, record.outcome);
+            if (outcome == .faulted) {
+                try std.testing.expectEqual(backend.fault.vector, record.fault_vector);
+                try std.testing.expectEqual(backend.fault.error_code, record.fault_error_code);
+                try std.testing.expectEqual(backend.fault.fault_address, record.fault_address);
+            }
+            try std.testing.expect(!executionOwnershipOutstanding(fixture.runtime));
+            var completion: dispatch_transport.Completion = undefined;
+            try std.testing.expectError(error.StaleKey, dispatch_transport.global.completionInto(key, &completion));
+        }
+    }
+}
+
+test "prompted queued owner waits for interrupt return and authenticates delayed replacement hints" {
+    const prompted_isr = @import("../../kernel/interrupts/isr.zig");
+    const prompted_gdt = @import("../../kernel/interrupts/gdt64.zig");
+    const Case = struct {
+        fn prompt() void {
+            var frame = std.mem.zeroes(prompted_isr.InterruptFrame);
+            frame.int_no = smp.PREPARED_EXECUTION_IPI_VECTOR;
+            frame.cs = prompted_gdt.KERNEL_CODE_SEG;
+            prompted_isr.isrHandler(&frame);
+        }
+        fn run(_: void) !void {
+            for (0..cpu_identity.MAX_CPUS) |index| {
+                const cpu: u8 = @intCast(index);
+                cpu_identity.setIndexForTest(cpu);
+                _ = try dispatch_transport.global.takePrompt(cpu);
+                cpu_identity.setIndexForTest(0);
+                var fixture = PreparedDispatchTestFixture{};
+                try fixture.init(cpu);
+                defer fixture.deinit();
+                var backend = fixture.makeBackend();
+                var command: PreparedDispatch = undefined;
+                try std.testing.expect(fixture.prepare(&command, &backend));
+                backend.expected_context = fixture.mapping.user_context64;
+                var key: dispatch_transport.Key = undefined;
+                try dispatch_transport.global.publishInto(command, &key);
+                const context_before = fixture.mapping.user_context64;
+                cpu_identity.setIndexForTest(cpu);
+                native_entry.current().active_task_id = 0;
+                native_entry.clearContinuation();
+                try std.testing.expect(!runQueuedPreparedTaskSlice(true, &backend, null, null, null, null));
+                try std.testing.expectEqual(@as(usize, 0), backend.activated);
+                try std.testing.expectEqual(@as(usize, 1), backend.restored);
+                try std.testing.expectEqualDeep(context_before, fixture.mapping.user_context64);
+                // A received prompt is retained during interrupt context. Its
+                // immutable handler never claims the pending command itself.
+                prompt();
+                prompt();
+                cpu_identity.setIndexForTest(0);
+                try std.testing.expectEqual(dispatch_ownership.Phase.ready, try fixture.runtime.execution.phase(fixture.ticket));
+                cpu_identity.setIndexForTest(cpu);
+                try std.testing.expectEqual(@as(usize, 0), backend.entered);
+                interrupt_context.enter();
+                const entered_in_interrupt = runQueuedPreparedTaskSlice(true, &backend, null, null, null, null);
+                interrupt_context.leave();
+                try std.testing.expect(!entered_in_interrupt);
+                try std.testing.expectEqual(@as(usize, 0), backend.entered);
+                backend.restored = 0;
+                backend.queue_key = key;
+                try std.testing.expect(runQueuedPreparedTaskSlice(true, &backend, null, null, null, null));
+                try std.testing.expectEqual(@as(usize, 1), backend.activated);
+                try std.testing.expectEqual(@as(usize, 1), backend.entered);
+                try std.testing.expectEqual(@as(usize, 2), backend.restored);
+                try std.testing.expect(!runQueuedPreparedTaskSlice(true, &backend, null, null, null, null));
+                // A duplicate doorbell can inspect only the completed channel;
+                // it cannot repeat the callback or acknowledge the lease.
+                prompt();
+                try std.testing.expect(!runQueuedPreparedTaskSlice(true, &backend, null, null, null, null));
+                try std.testing.expectEqual(@as(usize, 1), backend.entered);
+                cpu_identity.setIndexForTest(0);
+                var record: ReturnRecord = undefined;
+                try fixture.collect(&record);
+                try std.testing.expectEqual(ExecutionOutcome.yielded, record.outcome);
+                const old_key = key;
+                // Retain a delayed hint while the channel is idle. A later
+                // publication must keep it and authenticate its own new epoch.
+                cpu_identity.setIndexForTest(cpu);
+                prompt();
+                cpu_identity.setIndexForTest(0);
+                fixture.ticket = try fixture.runtime.reserveExecution(fixture.task, cpu);
+                backend = fixture.makeBackend();
+                try std.testing.expect(fixture.prepare(&command, &backend));
+                backend.expected_context = fixture.mapping.user_context64;
+                try dispatch_transport.global.publishInto(command, &key);
+                try std.testing.expect(key.sequence > old_key.sequence);
+                backend.queue_key = key;
+                cpu_identity.setIndexForTest(cpu);
+                try std.testing.expect(runQueuedPreparedTaskSlice(true, &backend, null, null, null, null));
+                try std.testing.expectEqual(@as(usize, 1), backend.entered);
+                try std.testing.expectEqual(@as(usize, 2), backend.restored);
+                cpu_identity.setIndexForTest(0);
+                var completion: dispatch_transport.Completion = undefined;
+                try std.testing.expectError(error.StaleKey, dispatch_transport.global.completionInto(old_key, &completion));
+                try fixture.collect(&record);
+                try std.testing.expectEqual(ExecutionOutcome.yielded, record.outcome);
+                try std.testing.expect(!executionOwnershipOutstanding(fixture.runtime));
+                backend.queue_key = null;
+                cpu_identity.setIndexForTest(cpu);
+                prompt();
+                try std.testing.expect(!runQueuedPreparedTaskSlice(true, &backend, null, null, null, null));
+                try std.testing.expectEqual(@as(usize, 1), backend.entered);
+                cpu_identity.setIndexForTest(0);
+            }
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    var previous_entries: [cpu_identity.MAX_CPUS]native_entry.State = undefined;
+    for (&previous_entries, 0..) |*state, cpu| state.* = native_entry.stateForCpu(@intCast(cpu)).*;
+    defer for (previous_entries, 0..) |state, cpu| {
+        native_entry.stateForCpu(@intCast(cpu)).* = state;
+    };
+    try prompted_isr.withTestHandlers({}, Case.run);
+}
+
+test "queued claimed cancellation retains the source until unstarted owner completion" {
+    const Hook = struct {
+        fixture: *PreparedDispatchTestFixture,
+        receipt: ReturnRecord = .{},
+        fn cancel(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const owner_cpu = cpu_identity.currentIndex();
+            cpu_identity.setIndexForTest(0);
+            defer cpu_identity.setIndexForTest(owner_cpu);
+            self.fixture.runtime.cancelUnstartedExecution(self.fixture.ticket) catch @panic("cancel exact claimed ready lease");
+            self.fixture.runtime.execution.consumePreparedReturnInto(self.fixture.ticket, &self.receipt) catch @panic("consume canceled prepared receipt");
+            std.testing.expectEqual(ExecutionOutcome.unavailable, self.receipt.outcome) catch @panic("cancellation returns unavailable");
+            std.testing.expectError(error.Busy, self.fixture.runtime.collectExecution(self.fixture.ticket)) catch @panic("claimed reader retains its source after cancellation");
+            std.testing.expectError(error.TaskRuntimeBorrowed, self.fixture.runtime.requireExecutionQuiescent()) catch @panic("reset retains a claimed reader");
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    for (0..cpu_identity.MAX_CPUS) |index| {
+        cpu_identity.setIndexForTest(0);
+        var fixture = PreparedDispatchTestFixture{};
+        try fixture.init(@intCast(index));
+        defer fixture.deinit();
+        const previous_entry = native_entry.stateForCpu(@intCast(index)).*;
+        defer native_entry.stateForCpu(@intCast(index)).* = previous_entry;
+        var backend = fixture.makeBackend();
+        var command: PreparedDispatch = undefined;
+        try std.testing.expect(fixture.prepare(&command, &backend));
+        var key: dispatch_transport.Key = undefined;
+        try dispatch_transport.global.publishInto(command, &key);
+        backend.queue_key = key;
+        backend.expected_completion = .unstarted;
+        var hook = Hook{ .fixture = &fixture };
+        cpu_identity.setIndexForTest(@intCast(index));
+        native_entry.current().active_task_id = 0;
+        native_entry.clearContinuation();
+        try std.testing.expect(runQueuedPreparedTaskSlice(false, &backend, null, Hook.cancel, null, &hook));
+        try std.testing.expectEqual(@as(usize, 0), backend.activated);
+        try std.testing.expectEqual(@as(usize, 0), backend.entered);
+        try std.testing.expectEqual(@as(usize, 2), backend.restored);
+        cpu_identity.setIndexForTest(0);
+        var completion: dispatch_transport.Completion = undefined;
+        try dispatch_transport.global.completionInto(key, &completion);
+        try std.testing.expectEqual(dispatch_transport.Completion.unstarted, completion);
+        try fixture.runtime.collectExecution(fixture.ticket);
+        try std.testing.expect(!executionOwnershipOutstanding(fixture.runtime));
+    }
+}
+
+test "prepared BSP boundary preserves failed output and retries mailbox publication" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var fixture = PreparedDispatchTestFixture{};
+    try fixture.init(3);
+    defer fixture.deinit();
+    var backend = fixture.makeBackend();
+    var prepared: PreparedDispatch = .{ .ticket = fixture.ticket, .trap_stack_top = 0x98000 };
+    const canary = prepared;
+    const original_cache = fixture.mapping.mailbox_publication_cache;
+    backend.stack_ready = false;
+    try std.testing.expect(!fixture.prepare(&prepared, &backend));
+    try std.testing.expectEqualDeep(canary, prepared);
+    try std.testing.expectEqual(@as(usize, 0), backend.writes);
+    backend.stack_ready = true;
+    backend.fail_write = true;
+    try std.testing.expect(!fixture.prepare(&prepared, &backend));
+    try std.testing.expectEqualDeep(canary, prepared);
+    try std.testing.expectEqual(original_cache, fixture.mapping.mailbox_publication_cache);
+    try std.testing.expect(!fixture.mapping.initial_mailbox_prepared);
+    try std.testing.expectEqual(dispatch_ownership.Phase.reserved, try fixture.runtime.execution.phase(fixture.ticket));
+    backend.fail_write = false;
+    try std.testing.expect(fixture.prepare(&prepared, &backend));
+    try std.testing.expectEqual(@as(usize, 2), backend.writes);
+    try std.testing.expect(fixture.mapping.initial_mailbox_prepared);
+    try fixture.runtime.execution.cancelUnstarted(fixture.ticket);
+    var record: ReturnRecord = undefined;
+    try fixture.collect(&record);
+    try std.testing.expectEqualDeep(ReturnRecord{}, record);
+}
+
+test "prepared owner rejects wrong local authority and stale commands before user activation" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    const previous_entry = native_entry.stateForCpu(3).*;
+    defer native_entry.stateForCpu(3).* = previous_entry;
+    for ([_]enum { domain, handle, root, owner, stack, missing_xstate }{ .domain, .handle, .root, .owner, .stack, .missing_xstate }) |failure| {
+        cpu_identity.setIndexForTest(0);
+        var fixture = PreparedDispatchTestFixture{};
+        try fixture.init(3);
+        defer fixture.deinit();
+        var backend = fixture.makeBackend();
+        var prepared: PreparedDispatch = undefined;
+        try std.testing.expect(fixture.prepare(&prepared, &backend));
+        const valid = prepared;
+        const storage = fixture.mapping.owned_xstate;
+        const owner = fixture.mapping.dispatch_metadata.owner_task_id;
+        const directory = fixture.mapping.address_space.?.directory;
+        const runtime_binding = fixture.executor.bound_runtime;
+        const saved_mapping = fixture.mapping.*;
+        switch (failure) {
+            .domain => fixture.executor.bound_runtime = null,
+            .handle => {
+                fixture.executor.mappingArena().?.getByHandle(fixture.handle).?.mapping.state = .retire_pending;
+            },
+            .root => fixture.mapping.address_space.?.directory = @ptrFromInt(0x99000),
+            .owner => fixture.mapping.dispatch_metadata.owner_task_id += 1,
+            .stack => prepared.trap_stack_top += PAGE_SIZE,
+            .missing_xstate => fixture.mapping.owned_xstate = null,
+        }
+        cpu_identity.setIndexForTest(3);
+        native_entry.current().active_task_id = 0;
+        native_entry.clearContinuation();
+        try std.testing.expect(fixture.executor.runPreparedTaskSlice(&prepared, &backend));
+        try std.testing.expectEqual(@as(usize, 0), backend.activated);
+        try std.testing.expectEqual(@as(usize, 0), backend.entered);
+        fixture.mapping.owned_xstate = storage;
+        fixture.mapping.dispatch_metadata.owner_task_id = owner;
+        fixture.mapping.address_space.?.directory = directory;
+        fixture.mapping.state = saved_mapping.state;
+        fixture.executor.bound_runtime = runtime_binding;
+        cpu_identity.setIndexForTest(0);
+        var record: ReturnRecord = undefined;
+        try fixture.collect(&record);
+        try std.testing.expectEqualDeep(ReturnRecord{}, record);
+        fixture.ticket = try fixture.runtime.reserveExecution(fixture.task, 3);
+        backend.ticket = fixture.ticket;
+        try std.testing.expect(fixture.prepare(&prepared, &backend));
+        cpu_identity.setIndexForTest(3);
+        try std.testing.expect(!fixture.executor.runPreparedTaskSlice(&valid, &backend));
+        cpu_identity.setIndexForTest(0);
+        try std.testing.expectEqual(dispatch_ownership.Phase.ready, try fixture.runtime.execution.phase(fixture.ticket));
+        try fixture.runtime.execution.cancelUnstarted(fixture.ticket);
+        try fixture.collect(&record);
+    }
+}
+
+test "prepared owner rejects a foreign Coordinator despite colliding bound mapping authority" {
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    const previous_entry = native_entry.stateForCpu(3).*;
+    defer native_entry.stateForCpu(3).* = previous_entry;
+    cpu_identity.setIndexForTest(0);
+    var fixture = PreparedDispatchTestFixture{};
+    try fixture.init(3);
+    defer fixture.deinit();
+    var backend = fixture.makeBackend();
+    var prepared: PreparedDispatch = undefined;
+    try std.testing.expect(fixture.prepare(&prepared, &backend));
+    var foreign = dispatch_ownership.Coordinator{};
+    const identity = try fixture.runtime.execution.identity(fixture.ticket);
+    const foreign_ticket = try foreign.prepare(3, identity);
+    try foreign.bindPrepared(foreign_ticket, fixture.handle.value, mappingPhysicalRoot(fixture.mapping));
+    const before = fixture.mapping.*;
+    const command = PreparedDispatch{ .ticket = foreign_ticket, .trap_stack_top = prepared.trap_stack_top };
+    cpu_identity.setIndexForTest(3);
+    native_entry.current().active_task_id = 0;
+    native_entry.clearContinuation();
+    try std.testing.expect(fixture.executor.runPreparedTaskSlice(&command, &backend));
+    try std.testing.expectEqual(@as(usize, 0), backend.activated);
+    try std.testing.expectEqual(@as(usize, 0), backend.entered);
+    try std.testing.expectEqualDeep(before, fixture.mapping.*);
+    cpu_identity.setIndexForTest(0);
+    var record: ReturnRecord = undefined;
+    try foreign.consumePreparedReturnInto(foreign_ticket, &record);
+    try std.testing.expectEqualDeep(ReturnRecord{}, record);
+    _ = try foreign.beginCollect(foreign_ticket);
+    try foreign.finishCollect(foreign_ticket);
+    try std.testing.expectEqual(dispatch_ownership.Phase.ready, try fixture.runtime.execution.phase(fixture.ticket));
+    try fixture.runtime.execution.cancelUnstarted(fixture.ticket);
+    try fixture.collect(&record);
 }

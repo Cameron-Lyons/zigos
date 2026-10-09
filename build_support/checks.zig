@@ -57,12 +57,25 @@ pub fn addCheckSteps(
     spec_tests_step.dependOn(&test_artifacts.run_spec_tests.step);
 
     const prod_readiness_cmd = addHostToolRun(b, optimize, "check-production-readiness", "tools/check_production_readiness.zig");
+    const prod_readiness_tests = b.addTest(.{
+        .name = "check-production-readiness-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_production_readiness.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const prod_readiness_test_cmd = b.addRunArtifact(prod_readiness_tests);
+    prod_readiness_test_cmd.setCwd(b.path("."));
+    b.step("production-readiness-tests", "Test production-readiness source and ownership gates").dependOn(&prod_readiness_test_cmd.step);
+    host_tests_step.dependOn(&prod_readiness_test_cmd.step);
     const hardware_proof_checker_cmd = host_tools.addRun(b, "test-nuc15crsu7-hardware-proof-checker");
     const hardware_proof_checker_step = b.step("hardware-proof-checker-test", "Exercise the RNUC15CRSU7 proof-bundle checker with synthetic pass/fail fixtures");
     hardware_proof_checker_step.dependOn(&hardware_proof_checker_cmd.step);
 
     const prod_readiness_step = b.step("prod-readiness", "Validate production-readiness tracking and the secure-by-design release gate");
     prod_readiness_step.dependOn(&prod_readiness_cmd.step);
+    prod_readiness_step.dependOn(&prod_readiness_test_cmd.step);
     prod_readiness_step.dependOn(&hardware_proof_checker_cmd.step);
     prod_readiness_step.dependOn(&production_boot_log_checker_cmd.step);
 
