@@ -258,6 +258,11 @@ pub fn kfree(ptr: ?*anyopaque) void {
     const payload = @intFromPtr(ptr.?);
     const cpu = currentCpu();
     if (freeRecentToMagazine(cpu, payload)) return;
+    freeSlow(payload);
+}
+
+// Local magazine frees do not need the shared metadata/coalescing prologue.
+noinline fn freeSlow(payload: usize) void {
     lockAllocator();
     defer unlockAllocator();
     const span_id = findSpan(payload) orelse return;

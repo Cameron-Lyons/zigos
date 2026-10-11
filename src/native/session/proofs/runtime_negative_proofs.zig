@@ -290,29 +290,11 @@ fn userGeneralProtectionFaultIsContained(
         .local_only = true,
     }) catch return false;
 
-    // Exercise resource retirement through the real userspace exception path,
-    // independently of the capability-authorized task-termination syscall.
-    const authority = kernel.capability_table.mintBootRoot(.{
-        .holder = launched.owner,
-        .issuer = kernel.policy_authority,
-        .target = .{ .kind = .service, .id = 0xF047 },
-        .rights = .{ .service = .{ .endpoint_create = true, .shared_memory_create = true } },
-        .scope = .{ .task_id = launched.id, .local_only = true },
-        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
-    }) catch return false;
-    runtime.grantCapability(launched.id, authority.id) catch return false;
-    const context = native_kernel.KernelCallContext{
-        .caller_task_id = launched.id,
-        .presented_capability_id = authority.id,
-        .target = .none,
-    };
-    const owned_endpoint = kernel.endpointCreate(context, launched.id, "fault-owned", .{ .local_only = true }, 0) catch return false;
-    const owned_memory = kernel.sharedMemoryCreate(context, launched.id, shared_memory.PAGE_SIZE, 0) catch return false;
-    const baseline_frames = paging.frameStats().allocated;
+    const resources = createGeneralProtectionProofResources(runtime, kernel, launched.id, launched.owner, NativeProofFrameCounter{}) orelse return false;
     if (!scheduler.executor.materializeTaskForProof(catalog, runtime, launched.id)) return false;
     _ = kernel.sharedMemoryMap(.{
         .caller_task_id = launched.id,
-        .presented_capability_id = owned_memory.capability_id,
+        .presented_capability_id = resources.memory_capability_id,
         .target = .none,
     }, launched.id, 0) catch return false;
 
@@ -330,16 +312,64 @@ fn userGeneralProtectionFaultIsContained(
     const provenance = terminated.latestProvenanceEvent() orelse return false;
     if (provenance.kind != .crash_report) return false;
     if (terminated.capability_count != 0) return false;
-    if (kernel.capability_table.query(authority.id) != null or
-        kernel.capability_table.query(owned_endpoint.capability_id) != null or
-        kernel.capability_table.query(owned_memory.capability_id) != null) return false;
+    if (kernel.capability_table.query(resources.authority_id) != null or
+        kernel.capability_table.query(resources.endpoint_capability_id) != null or
+        kernel.capability_table.query(resources.memory_capability_id) != null) return false;
     if (kernel.capability_table.activeCount() != baseline_grants or
         kernel.endpoint_table.activeCount() != baseline_endpoints or
         kernel.shared_memory_table.activeCount() != baseline_objects) return false;
     if (kernel.shared_memory_table.mappingsForTask(@import("../../core/ids.zig").task(launched.id)) != 0) return false;
     if (scheduler.executor.materializedCount() != baseline_mappings) return false;
-    if (paging.frameStats().allocated != baseline_frames) return false;
+    if (paging.frameStats().allocated != resources.baseline_frames) return false;
     return true;
+}
+
+const GeneralProtectionProofResources = struct {
+    baseline_frames: u32,
+    authority_id: u64,
+    endpoint_capability_id: u64,
+    memory_capability_id: u64,
+};
+
+const NativeProofFrameCounter = struct {
+    fn allocated(_: @This()) u32 {
+        return paging.frameStats().allocated;
+    }
+};
+
+fn createGeneralProtectionProofResources(
+    runtime: *task_runtime.Runtime,
+    kernel: *native_kernel.Kernel,
+    task_id: u64,
+    owner: principal.PrincipalId,
+    frame_counter: anytype,
+) ?GeneralProtectionProofResources {
+    // Fault retirement releases both the image and its owned shared memory.
+    // Capture the frame baseline before either allocation, including in hosted
+    // fixtures that own real backing instead of metadata-only physical IDs.
+    const baseline_frames = frame_counter.allocated();
+    const authority = kernel.capability_table.mintBootRoot(.{
+        .holder = owner,
+        .issuer = kernel.policy_authority,
+        .target = .{ .kind = .service, .id = 0xF047 },
+        .rights = .{ .service = .{ .endpoint_create = true, .shared_memory_create = true } },
+        .scope = .{ .task_id = task_id, .local_only = true },
+        .lease = .{ .issued_at_ticks = 0, .expires_at_ticks = std.math.maxInt(u64) },
+    }) catch return null;
+    runtime.grantCapability(task_id, authority.id) catch return null;
+    const context = native_kernel.KernelCallContext{
+        .caller_task_id = task_id,
+        .presented_capability_id = authority.id,
+        .target = .none,
+    };
+    const owned_endpoint = kernel.endpointCreate(context, task_id, "fault-owned", .{ .local_only = true }, 0) catch return null;
+    const owned_memory = kernel.sharedMemoryCreate(context, task_id, shared_memory.PAGE_SIZE, 0) catch return null;
+    return .{
+        .baseline_frames = baseline_frames,
+        .authority_id = authority.id,
+        .endpoint_capability_id = owned_endpoint.capability_id,
+        .memory_capability_id = owned_memory.capability_id,
+    };
 }
 
 pub fn processIsolationBlocksForeignSharedMemory() bool {
@@ -575,4 +605,93 @@ test "runtime negative proofs reject modeled bypasses" {
     try std.testing.expect(rawNetworkSendBypassIsDenied());
     try std.testing.expect(driverAuthorityEscapeIsRejected());
     try std.testing.expect(checkpointAuthorityIsNotReplayed());
+}
+
+test "GP proof frame baseline includes owned shared memory retirement after execution collection" {
+    const frame_allocator = @import("../../../kernel/memory/frame_allocator.zig");
+    const cpu_identity = @import("../../../kernel/cpu_identity.zig");
+    const ids = @import("../../core/ids.zig");
+    const Frames = struct {
+        const Allocator = frame_allocator.Fixed(8 * shared_memory.PAGE_SIZE, shared_memory.PAGE_SIZE);
+        const physical_base: u64 = 0x400000;
+        storage: Allocator.Storage = undefined,
+        allocator: Allocator = undefined,
+        memory: [8 * shared_memory.PAGE_SIZE]u8 = @splat(0xa5),
+        releases: u32 = 0,
+
+        fn allocated(self: *const @This()) u32 {
+            return self.allocator.stats().allocated;
+        }
+
+        fn allocate(raw: *anyopaque, count: u32) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const run = self.allocator.allocate(count) orelse return null;
+            return physical_base + run.base;
+        }
+
+        fn bytes(raw: *anyopaque, address: u64, count: u32) ?[]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (address < physical_base) return null;
+            const start: usize = @intCast(address - physical_base);
+            const end = start + count * shared_memory.PAGE_SIZE;
+            if (end > self.memory.len) return null;
+            return self.memory[start..end];
+        }
+
+        fn release(raw: *anyopaque, address: u64, count: u32) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(std.mem.allEqual(u8, bytes(raw, address, count).?, 0));
+            self.allocator.release(.{ .base = address - physical_base, .count = count }) catch unreachable;
+            self.releases += 1;
+        }
+    };
+    const previous_cpu = cpu_identity.currentIndex();
+    defer cpu_identity.setIndexForTest(previous_cpu);
+    cpu_identity.setIndexForTest(0);
+    var frames = Frames{};
+    frames.allocator = Frames.Allocator.init(&frames.storage);
+    var runtime = task_runtime.Runtime.init();
+    defer runtime.reset();
+    var capabilities = capability.CapabilityTable.init();
+    var endpoints = endpoint.Table.init();
+    defer endpoints.deinit();
+    var shared = shared_memory.Table.initWithHostedPhysicalBacking(.{
+        .context = &frames,
+        .allocate = Frames.allocate,
+        .bytes = Frames.bytes,
+        .release = Frames.release,
+    }, null);
+    defer shared.deinit();
+    var kernel: native_kernel.Kernel = undefined;
+    kernel.initInPlace(policyAuthority(1), &runtime, &capabilities, &endpoints, &shared);
+    defer kernel.deinit();
+    const peer = try shared.create(ids.task(999), shared_memory.PAGE_SIZE);
+    const task = try runtime.createTask(.{ .owner = app(61), .component_class = .app_component, .budget = budget(), .local_only = true });
+    const resources = createGeneralProtectionProofResources(&runtime, &kernel, task.id, task.owner, &frames) orelse return error.ProofResourceCreationFailed;
+    try std.testing.expectEqual(@as(u32, 1), resources.baseline_frames);
+    try std.testing.expectEqual(resources.baseline_frames + 1, frames.allocated());
+    _ = try kernel.sharedMemoryMap(.{ .caller_task_id = task.id, .presented_capability_id = resources.memory_capability_id, .target = .none }, task.id, 0);
+    const object_id = ids.sharedMemory(capabilities.query(resources.memory_capability_id).?.target.id);
+    const mapping = try shared.freestandingTaskMappingDescriptor(object_id, ids.task(task.id));
+    @memset(Frames.bytes(&frames, mapping.physical_base, @intCast(mapping.page_count)).?, 0xa5);
+    Frames.bytes(&frames, peer.page_base, 1).?[0] = 0x5a;
+    const ticket = try runtime.reserveExecution(task, 0);
+    try runtime.execution.bindOwnedRoot(ticket, 1, 0x1000);
+    _ = try runtime.execution.start(ticket);
+    runtime.recordCrashReportForResolved(task, 0xf047, 1, 13, 1, 0x13, true);
+    try std.testing.expect(runtime.terminateResolvedTask(task, 1));
+    try std.testing.expectEqual(resources.baseline_frames + 1, frames.allocated());
+    try std.testing.expectEqual(@as(u32, 0), frames.releases);
+    try runtime.execution.acknowledgeOwnedRootReturn(ticket);
+    try runtime.collectExecution(ticket);
+    try std.testing.expectEqual(resources.baseline_frames, frames.allocated());
+    try std.testing.expectEqual(@as(u32, 1), frames.releases);
+    try std.testing.expectEqual(@as(u16, 0), shared.mappingsForTask(ids.task(task.id)));
+    try std.testing.expectEqual(@as(usize, 1), shared.activeCount());
+    _ = try shared.descriptor(peer.id);
+    try std.testing.expectEqual(@as(u8, 0x5a), Frames.bytes(&frames, peer.page_base, 1).?[0]);
+    try std.testing.expect(capabilities.query(resources.authority_id) == null);
+    try std.testing.expect(capabilities.query(resources.endpoint_capability_id) == null);
+    try std.testing.expect(capabilities.query(resources.memory_capability_id) == null);
+    try std.testing.expectEqual(@as(u16, 0), endpoints.activeForTask(ids.task(task.id)));
 }
