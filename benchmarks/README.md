@@ -54,10 +54,36 @@ quality gates. Values are cycles per complete create/claim/release/revoke:
 The standard 50% regression allowance remains; the 10000-cycle hard ceiling
 is tighter than that allowance and leaves about 21% above the slowest measured
 invocation. Allocation initialization and secure erasure remain part of the
-measured work. All quality gates remain enforced. Other workloads retain their existing baselines and
-ceilings, including the unchanged heap and syscall workloads. Attempt 2 exceeded
+measured work. All quality gates remain enforced. Other workloads retained their existing baselines and
+ceilings at that calibration, including the heap and syscall workloads. Attempt 2 exceeded
 the heap allowance and attempt 3 exceeded the syscall allowance; these samples
 calibrate only the changed accelerator lifecycle.
+
+`syscall.fast_entry_roundtrip` now executes the upper-half runtime with per-CPU
+entry ownership and preserves x87, SSE and AVX/YMM state. Its xstate image grew
+from 576 to 832 bytes; the previous 800.10-cycle baseline covered the earlier
+SSE-only runtime. The replacement calibration measures the current complete
+entry/dispatch/return path without removing state preservation or owner checks.
+
+Three consecutive KVM invocations on 2026-10-11 used pinned Zig 0.17.0 `fast`,
+GitHub-hosted Ubuntu 24.04 and the same revision,
+`2e61575224b25250c68361ae3537ebd53d3f3e1a`, in
+[CI run 38153681506](https://github.com/Cameron-Lyons/zigos/actions/runs/38153681506).
+Each invocation reports its best of three timed passes; calibration takes the
+slowest invocation. All three reported all 34 cases and passed all 10 quality
+gates. Values are cycles per native syscall roundtrip:
+
+| Workload | Attempt 1 (westcentralus) | Attempt 2 (centralus) | Attempt 3 (eastus) | Baseline | Ceiling |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Upper-half syscall with YMM preservation | 1271.21 | 1271.91 | 1265.21 | 1271.91 | 1600 |
+
+The standard 50% regression allowance remains. The 1600-cycle hard ceiling
+leaves about 26% above the slowest invocation and is tighter than that allowance.
+These samples calibrate only the changed syscall runtime. Each also exceeded
+the unchanged 48-cycle frame ceiling (48.87, 48.51 and 49.07 cycles/op);
+the frame baseline and ceiling remain unchanged while allocation validation
+reuses its existing immutable reservation cache. Every other case passed its
+existing timing limits in all three invocations.
 
 `zig build ipc-ring-benchmark` measures an eight-slot ring with
 the native `x86_64_v3+aes+pclmul+sha` CPU floor and the host OS/ABI;
