@@ -1198,6 +1198,12 @@ pub const Scheduler = struct {
     }
 
     fn finishTaskDispatch(self: *Scheduler, runtime: *task_runtime.Runtime, ticket: dispatch_ownership.Ticket) void {
+        const x86 = @import("../../arch/x86.zig");
+        const restore_if = if (comptime builtin.target.os.tag == .freestanding) x86.interruptsEnabled() else false;
+        if (comptime builtin.target.os.tag == .freestanding) x86.cli();
+        defer if (comptime builtin.target.os.tag == .freestanding) {
+            if (restore_if) x86.sti();
+        };
         const active = self.active_dispatch_lease orelse
             @call(.never_inline, schedulerInvariantFailure, .{.scheduler_dispatch_retains_its_execution_lease});
         if (active.issuer != ticket.issuer or active.cpu != ticket.cpu or active.epoch != ticket.epoch or self.active_dispatch_task_id == 0)
@@ -1222,6 +1228,8 @@ pub const Scheduler = struct {
             },
             else => @call(.never_inline, schedulerInvariantFailure, .{.scheduler_cancels_only_its_unstarted_reservation}),
         }
+        // Runtime collection may restore its caller's interrupt state. Keep
+        // the BSP transaction held until every registered mapping is drained.
         runtime.collectExecution(ticket) catch
             @call(.never_inline, schedulerInvariantFailure, .{.scheduler_collects_its_exact_quiescent_execution});
         if (!userspace_executor.collectRegisteredRetiredMappings(self, runtime))

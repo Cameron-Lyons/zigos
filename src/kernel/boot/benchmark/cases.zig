@@ -3,6 +3,7 @@ pub const BenchmarkCase = struct {
     iterations: u32,
     operations_per_iteration: u32 = 1,
     runIteration: *const fn (iteration: u32) u64,
+    teardown: ?*const fn () void = null,
 };
 
 pub const QualityGateCase = struct {
@@ -47,7 +48,7 @@ pub fn benchmarkCases(handlers: anytype) [34]BenchmarkCase {
         .{ .name = "recovery_environment.reinstall_restore_repair", .iterations = 4, .runIteration = handlers.recovery_lifecycle },
         .{ .name = "update_health.validate_pending_activation", .iterations = 8, .runIteration = handlers.update_health_validation },
         .{ .name = "driver_recovery.restart_driver", .iterations = 512, .runIteration = handlers.driver_recovery_restart },
-        .{ .name = SLO_IRQ_TO_TASK, .iterations = 8_000, .runIteration = handlers.slo_irq_to_task },
+        .{ .name = SLO_IRQ_TO_TASK, .iterations = 8_000, .runIteration = handlers.slo_irq_to_task, .teardown = handlers.slo_irq_teardown },
         .{ .name = SLO_NVME_QUEUED_IO, .iterations = 4_000, .runIteration = handlers.slo_nvme_queued_io },
         .{ .name = SLO_ENDPOINT_RTT, .iterations = 40_000, .runIteration = handlers.slo_endpoint_rtt },
         .{ .name = SLO_FOCUSED_INPUT, .iterations = 12_000, .runIteration = handlers.slo_focused_input },

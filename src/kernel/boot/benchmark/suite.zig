@@ -285,6 +285,7 @@ const cases = benchmark_cases.benchmarkCases(.{
     .update_health_validation = benchmarkUpdateHealthValidation,
     .driver_recovery_restart = benchmarkDriverRecoveryRestart,
     .slo_irq_to_task = benchmarkSloIrqToTask,
+    .slo_irq_teardown = releaseSloIrqFixture,
     .slo_nvme_queued_io = benchmarkSloNvmeQueuedIo,
     .slo_endpoint_rtt = benchmarkSloEndpointRtt,
     .slo_focused_input = benchmarkSloFocusedInput,
@@ -1096,6 +1097,9 @@ fn prepareOverlaySessionFixture() void {
 const BENCH_MEASUREMENT_PASSES: u32 = 3;
 
 fn runCase(case: BenchmarkCase) u64 {
+    // Fixture ownership spans the measurement passes, then releases before
+    // another case or quality gate binds the BSP executor domain.
+    defer if (case.teardown) |teardown| teardown();
     if (case.operations_per_iteration == 0 or case.iterations % case.operations_per_iteration != 0) {
         benchmark_reporting.benchStepFailure("benchmark operation batching", error.InvalidRange);
     }
@@ -2516,6 +2520,15 @@ fn prepareSloIrqFixture() void {
     }
     slo_irq_context.task_id = task.id;
     slo_irq_context.ready = true;
+}
+
+fn releaseSloIrqFixture() void {
+    if (!slo_irq_context.ready) return;
+    slo_irq_context.scheduler.deinit();
+    slo_irq_runtime.reset();
+    slo_irq_context.task_id = 0;
+    slo_irq_context.tick = 1;
+    slo_irq_context.ready = false;
 }
 
 fn benchmarkSloIrqToTask(iteration: u32) u64 {
