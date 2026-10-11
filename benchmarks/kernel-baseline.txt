@@ -13,7 +13,7 @@ paging.address_space_roundtrip 25786.03 50
 memory.heap_allocate_free 31.22 50
 memory.frame_allocate_release 37.48 50
 syscall.fast_entry_roundtrip 800.10 50
-accelerator_scheduler.claim_release 4138.79 50
+accelerator_scheduler.claim_release 8268.46 50
 storage.object.resolve_workspace_entry 281.54 50
 storage.workspace.commit_overlay 6592.62 50
 storage.volume.replay_segmented_log 600666.08 50

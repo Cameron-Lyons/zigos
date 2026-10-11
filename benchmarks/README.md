@@ -30,8 +30,34 @@ ReleaseFast build and KVM. All values are cycles per complete operation:
 | Software | 139.62 | 136.55 | 132.75 | 139.62 | 300 |
 | Sealed | 5288.63 | 5353.70 | 5313.16 | 5353.70 | 8000 |
 
-The standard 50% regression allowance applies to both baselines. Other
-workloads retain their existing baselines and ceilings.
+The standard 50% regression allowance applies to both baselines.
+
+`accelerator_scheduler.claim_release` creates, claims, releases and revokes a
+64 KiB CPU/GPU shared-memory object on every iteration. Owned physical backing
+now allocates 16 frames, initializes all 64 KiB before publication, and securely
+erases all 64 KiB before returning the frames. The previous implementation only
+advanced a physical-address metadata cursor, so its 4138.79-cycle baseline and
+7200-cycle ceiling did not cover this memory lifecycle.
+
+The replacement baseline was captured on 2026-10-11 with pinned Zig 0.17.0
+`fast` and GitHub-hosted Ubuntu 24.04 KVM. Three consecutive invocations used
+the same revision, `95bd2fbc3d5178884a36de3ae969e13b2af2e52c`, in
+[CI run 38151161073](https://github.com/Cameron-Lyons/zigos/actions/runs/38151161073).
+Each invocation reports its best of three timed passes; calibration takes the
+slowest invocation. Every invocation reported all 34 cases and passed all 10
+quality gates. Values are cycles per complete create/claim/release/revoke:
+
+| Workload | Attempt 1 (centralus) | Attempt 2 (westus3) | Attempt 3 (westus2) | Baseline | Ceiling |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Backed accelerator lifecycle | 6865.38 | 8268.46 | 4481.98 | 8268.46 | 10000 |
+
+The standard 50% regression allowance remains; the 10000-cycle hard ceiling
+is tighter than that allowance and leaves about 21% above the slowest measured
+invocation. Allocation initialization, secure erasure and quality checks remain
+part of the measured work. Other workloads retain their existing baselines and
+ceilings, including the unchanged heap and syscall workloads. Attempt 2 exceeded
+the heap allowance and attempt 3 exceeded the syscall allowance; these samples
+calibrate only the changed accelerator lifecycle.
 
 `zig build ipc-ring-benchmark` measures an eight-slot ring with
 the native `x86_64_v3+aes+pclmul+sha` CPU floor and the host OS/ABI;

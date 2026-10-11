@@ -330,7 +330,7 @@ fn freeRecentToMagazine(cpu: usize, payload: usize) bool {
     return true;
 }
 
-fn popMagazine(cpu: usize, class_index: usize) ?*anyopaque {
+inline fn popMagazine(cpu: usize, class_index: usize) ?*anyopaque {
     const class_bytes = heap_geometry.sizeClassBytes(class_index) orelse return null;
     const heap = cpuHeap(cpu);
     const mask = @as(u8, 1) << @as(u3, @intCast(class_index));
