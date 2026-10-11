@@ -52,7 +52,8 @@ pub fn verify(inputs: *const [3]Image, outputs: *const [3]Image) bool {
         if (!std.mem.eql(u8, before[160..416], after[160..416]) or
             !std.mem.eql(u8, before[576..832], after[576..832]) or
             std.mem.readInt(u64, after[512..520], .little) != xstate.enabled_mask or
-            std.mem.readInt(u64, after[520..528], .little) != 0) return false;
+            std.mem.readInt(u64, after[520..528], .little) != 0 or
+            !std.mem.eql(u8, before[528..576], after[528..576])) return false;
         for (std.mem.asBytes(output)[@sizeOf(xstate.State)..]) |byte| {
             if (byte != 0xa5) return false;
         }

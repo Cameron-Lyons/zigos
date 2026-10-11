@@ -333,6 +333,31 @@ pub inline fn mapKernelDeviceRange(virtual_start: usize, physical_start: u64, si
     try mapKernelPhysicalRange(virtual_start, physical_start, size_bytes, .device, writable);
 }
 
+/// Only the checksummed firmware MCFG allocation can authorize its reserved
+/// ECAM aperture. Ordinary reserved RAM retains the device-mapping rejection.
+pub inline fn registerPciEcam(allocation: @import("../platform/mcfg.zig").Allocation) DeviceMapError!void {
+    if (cpu_identity.currentIndex() != 0) return error.WrongCpu;
+    if (@import("../interrupts/context.zig").active()) return error.InterruptContext;
+    if (comptime builtin.target.os.tag != .freestanding) return error.Unavailable;
+    if (!kernelAddressSpaceActive()) return error.WrongAddressSpace;
+    const firmware_allocation = @import("../platform/hardware_proof.zig").pciEcamAllocation() orelse
+        return error.PhysicalOwnershipConflict;
+    if (allocation.base_address != firmware_allocation.base_address or
+        allocation.segment_group != firmware_allocation.segment_group or
+        allocation.start_bus != firmware_allocation.start_bus or
+        allocation.end_bus != firmware_allocation.end_bus) return error.PhysicalOwnershipConflict;
+    if (allocation.start_bus > allocation.end_bus) return error.InvalidRange;
+    const bytes = std.math.mul(u64, allocation.busCount(), @import("../platform/mcfg.zig").ECAM_BUS_BYTES) catch
+        return error.InvalidRange;
+    const end = std.math.add(u64, allocation.base_address, bytes) catch return error.InvalidRange;
+    const physical_bits = cache_policy.admittedPhysicalAddressBits() orelse return error.PhysicalOwnershipConflict;
+    if (end > (@as(u64, 1) << @as(u6, @intCast(physical_bits)))) return error.InvalidRange;
+    const authority = if (kernel_mapping_authority) |*authority| authority else return error.PhysicalOwnershipConflict;
+    acquireFrameLock();
+    defer releaseFrameLock();
+    try authority.registerPciEcam(&physical_frames, allocation);
+}
+
 /// Firmware table aliases remain RO/NX/WB and retain their WB direct aliases.
 pub inline fn mapKernelFirmwareRange(virtual_start: usize, physical_start: u64, size_bytes: usize) DeviceMapError!void {
     try mapKernelPhysicalRange(virtual_start, physical_start, size_bytes, .firmware, false);
@@ -428,18 +453,26 @@ const KernelPhysicalMapping = struct {
 
 test "typed physical mapping rejects foreign CPUs and interrupt context before hardware or allocation" {
     const context = @import("../interrupts/context.zig");
+    const ecam = @import("../platform/mcfg.zig").Allocation{
+        .base_address = 0xB0000000,
+        .segment_group = 0,
+        .start_bus = 0,
+        .end_bus = 0xFF,
+    };
     const previous_cpu = cpu_identity.currentIndex();
     defer cpu_identity.setIndexForTest(previous_cpu);
     for (1..cpu_identity.MAX_CPUS) |index| {
         cpu_identity.setIndexForTest(@intCast(index));
         try std.testing.expectError(error.WrongCpu, mapKernelDeviceRange(virtual_layout.device_memory.base, 0xF0000000, PAGE_SIZE, true));
         try std.testing.expectError(error.WrongCpu, mapKernelFirmwareRange(virtual_layout.device_memory.base, 0x100000, PAGE_SIZE));
+        try std.testing.expectError(error.WrongCpu, registerPciEcam(ecam));
     }
     cpu_identity.setIndexForTest(0);
     context.enter();
     defer context.leave();
     try std.testing.expectError(error.InterruptContext, mapKernelDeviceRange(virtual_layout.device_memory.base, 0xF0000000, PAGE_SIZE, true));
     try std.testing.expectError(error.InterruptContext, mapKernelFirmwareRange(virtual_layout.device_memory.base, 0x100000, PAGE_SIZE));
+    try std.testing.expectError(error.InterruptContext, registerPciEcam(ecam));
 }
 
 fn invalidateUserContext(space: *const UserAddressSpace) void {
@@ -1149,10 +1182,24 @@ inline fn releasePhysicalFrames(base: frame_allocator.PhysicalAddress, count: u3
 }
 
 fn releasePhysicalFramesLocked(base: frame_allocator.PhysicalAddress, count: u32) FrameReleaseError!void {
-    try releaseRunTo(&physical_frames, &high_memory_zone_has_free_frames, .{
+    try releaseRunWithCursorTo(&physical_frames, &high_memory_zone_has_free_frames, &low_identity_frame_cursor, .{
         .base = base,
         .count = count,
     }, LOW_IDENTITY_PHYSICAL_LIMIT);
+}
+
+inline fn releaseRunWithCursorTo(
+    allocator: anytype,
+    high_zone_has_free_frames: *bool,
+    low_cursor: *frame_allocator.AllocationCursor,
+    run: FrameRun,
+    low_identity_limit: frame_allocator.PhysicalAddress,
+) FrameReleaseError!void {
+    try releaseRunTo(allocator, high_zone_has_free_frames, run, low_identity_limit);
+    // Low allocations use their own cursor, so the allocator's release hint
+    // alone would keep walking fresh RAM instead of reusing the returned run.
+    // The caller holds the frame lock across bitmap and cursor publication.
+    if (run.base < low_identity_limit) low_cursor.next_frame = allocator.search_frame_hint;
 }
 
 fn releaseRunTo(
@@ -4136,6 +4183,67 @@ test "general contiguous allocation prefers high memory" {
     try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, low_identity_limit), run.base);
     try std.testing.expectEqual(@as(u32, 2), run.count);
     try std.testing.expect(high_zone_has_free_frames);
+}
+
+test "released low-memory runs are reused before fresh sparse RAM" {
+    const saved = FrameCacheTestSnapshot.captureAndClear();
+    defer saved.restore();
+    const managed_bytes = 24 * PAGE_SIZE;
+    const low_identity_limit = 20 * PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
+    // Model unavailable holes and an exhausted high zone. The fresh low run
+    // beyond the hole must stay available while a released run is recycled.
+    try allocator.reserve(.{ .base = 0, .count = 2 });
+    try allocator.reserve(.{ .base = 9 * PAGE_SIZE, .count = 2 });
+    try allocator.reserve(.{ .base = low_identity_limit, .count = 4 });
+    var high_zone_has_free_frames = false;
+    var low_cursor = frame_allocator.AllocationCursor{};
+    const first = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, 3, low_identity_limit, managed_bytes).?;
+    const survivor = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, 3, low_identity_limit, managed_bytes).?;
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 2 * PAGE_SIZE), first.base);
+    try std.testing.expectEqual(@as(frame_allocator.PhysicalAddress, 5 * PAGE_SIZE), survivor.base);
+    const live_stats = allocator.stats();
+
+    for (0..4) |_| {
+        try releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, first, low_identity_limit);
+        const replacement = allocGeneralRunFrom(&allocator, &high_zone_has_free_frames, &low_cursor, first.count, low_identity_limit, managed_bytes).?;
+        try std.testing.expectEqual(first, replacement);
+        try std.testing.expectEqual(live_stats, allocator.stats());
+        try std.testing.expect(allocator.isAllocated(survivor.base));
+        try std.testing.expect(allocator.isAllocated(survivor.base + 2 * PAGE_SIZE));
+        try std.testing.expect(!allocator.isAllocated(11 * PAGE_SIZE));
+        try std.testing.expect(allocator.isReserved(9 * PAGE_SIZE));
+        try std.testing.expect(!high_zone_has_free_frames);
+    }
+}
+
+test "run releases preserve low allocation progress when high or rejected" {
+    const saved = FrameCacheTestSnapshot.captureAndClear();
+    defer saved.restore();
+    const managed_bytes = 12 * PAGE_SIZE;
+    const low_identity_limit = 8 * PAGE_SIZE;
+    const TestAllocator = frame_allocator.Fixed(managed_bytes, PAGE_SIZE);
+    var storage: TestAllocator.Storage = undefined;
+    var allocator = TestAllocator.init(&storage);
+    _ = allocator.allocate(12).?;
+    var high_zone_has_free_frames = false;
+    var low_cursor = frame_allocator.AllocationCursor{ .next_frame = 6 };
+    const high_run = FrameRun{ .base = low_identity_limit, .count = 2 };
+    try releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, high_run, low_identity_limit);
+    try std.testing.expectEqual(@as(u32, 6), low_cursor.next_frame);
+    try std.testing.expect(high_zone_has_free_frames);
+
+    const before = allocator.stats();
+    try std.testing.expectError(error.NotAllocated, releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, high_run, low_identity_limit));
+    try std.testing.expectError(error.Unaligned, releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, .{ .base = PAGE_SIZE + 1, .count = 1 }, low_identity_limit));
+    try std.testing.expect(stashCpuCachedFrameLocked(FRAME_CACHE_CPUS - 1, 3 * PAGE_SIZE));
+    try std.testing.expectError(error.NotAllocated, releaseRunWithCursorTo(&allocator, &high_zone_has_free_frames, &low_cursor, .{ .base = 2 * PAGE_SIZE, .count = 2 }, low_identity_limit));
+    try std.testing.expectEqual(@as(u32, 6), low_cursor.next_frame);
+    try std.testing.expectEqual(before, allocator.stats());
+    try std.testing.expect(allocator.isAllocated(2 * PAGE_SIZE));
+    try std.testing.expect(allocator.isAllocated(3 * PAGE_SIZE));
 }
 
 test "general allocation progress survives low-memory allocation activity" {

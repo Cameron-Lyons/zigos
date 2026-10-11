@@ -4,6 +4,7 @@ const endian = @import("../utils/endian.zig");
 const frame_allocator = @import("frame_allocator.zig");
 const cache_policy = @import("../../arch/cache_policy.zig");
 const paging_info = @import("../../boot/paging_info.zig");
+const mcfg = @import("../platform/mcfg.zig");
 
 pub const Error = handoff.Error || frame_allocator.Error || cache_policy.MtrrError || error{
     InvalidHandoffRange,
@@ -428,6 +429,25 @@ pub const KernelMappingAuthority = struct {
     image: PhysicalSpan,
     heap: PhysicalSpan,
     managed_bytes: u64,
+    pci_ecam: ?PhysicalSpan = null,
+
+    // The caller authenticates this allocation against the checksummed MCFG.
+    // Reserved firmware descriptors alone never grant device-mapping authority.
+    pub inline fn registerPciEcam(self: *@This(), allocator: anytype, allocation: mcfg.Allocation) error{ InvalidRange, PhysicalOwnershipConflict }!void {
+        if (allocation.segment_group != 0 or allocation.start_bus != 0 or
+            allocation.start_bus > allocation.end_bus or allocation.base_address == 0 or
+            allocation.base_address % mcfg.ECAM_BUS_BYTES != 0) return error.InvalidRange;
+        const bytes = std.math.mul(u64, allocation.busCount(), mcfg.ECAM_BUS_BYTES) catch return error.InvalidRange;
+        const end = std.math.add(u64, allocation.base_address, bytes) catch return error.InvalidRange;
+        const span = PhysicalSpan{ .start = allocation.base_address, .end = end };
+        if (self.pci_ecam) |registered| {
+            if (registered.start != span.start or registered.end != span.end) return error.PhysicalOwnershipConflict;
+        }
+        var candidate = self.*;
+        candidate.pci_ecam = span;
+        if (!candidate.permits(allocator, span.start, span.end, true)) return error.PhysicalOwnershipConflict;
+        self.pci_ecam = span;
+    }
 
     pub inline fn permits(self: @This(), allocator: anytype, start: u64, end: u64, device: bool) bool {
         if (start == 0 or start % 4096 != 0 or end % 4096 != 0 or end <= start or overlaps(start, end, self.image) or overlaps(start, end, self.heap) or
@@ -448,12 +468,14 @@ pub const KernelMappingAuthority = struct {
             if (!allocator.isReserved(physical) or allocator.isAllocated(physical)) return false;
         }
         const framebuffer = device and self.framebufferSpanPermits(start, end);
+        const pci_ecam = device and if (self.pci_ecam) |span| start >= span.start and end <= span.end else false;
         var iterator = self.memory_map.iterator();
         while (iterator.next() catch return false) |entry| {
             if (entry.length == 0 or !overlaps(start, end, .{ .start = entry.base, .end = entry.end })) continue;
             if (device) {
                 if (entry.kind != @backingInt(handoff.MemoryKind.device_mmio) and
-                    !(framebuffer and (entry.kind == 1 or entry.kind == 2))) return false;
+                    !(framebuffer and (entry.kind == 1 or entry.kind == 2)) and
+                    !(pci_ecam and entry.kind == 2 and !describedRamEntry(entry))) return false;
             } else if (entry.kind != 3 and entry.kind != 4 and entry.kind != @backingInt(handoff.MemoryKind.firmware_runtime_ram)) return false;
         }
         // Explicit MMIO and unlisted reserved gaps are both device apertures.
@@ -1731,6 +1753,135 @@ test "device authority rejects every RAM class live range and allocated or unres
     try std.testing.expect(!authority.permits(&allocator, 16 * TEST_PAGE_SIZE, 17 * TEST_PAGE_SIZE, true));
     try std.testing.expect(!authority.permits(&allocator, 0, TEST_PAGE_SIZE, true));
     try std.testing.expect(!authority.permits(&allocator, 16 * TEST_PAGE_SIZE + 1, 17 * TEST_PAGE_SIZE, true));
+}
+
+test "validated MCFG authority admits reserved ECAM pages without opening neighboring reserved RAM" {
+    const memory_bytes = 8 * mcfg.ECAM_BUS_BYTES;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 0, .count = Allocator.total_frames });
+    const allocation = mcfg.Allocation{ .base_address = 4 * mcfg.ECAM_BUS_BYTES, .segment_group = 0, .start_bus = 0, .end_bus = 0 };
+    const start = allocation.base_address;
+    const end = start + mcfg.ECAM_BUS_BYTES;
+    var bytes: [24]u8 = undefined;
+    _ = appendEntry(&bytes, 0, start - TEST_PAGE_SIZE, mcfg.ECAM_BUS_BYTES + 2 * TEST_PAGE_SIZE, 2);
+    var authority = KernelMappingAuthority{
+        .memory_map = handoff.multiboot2MemoryMap(&bytes, 24),
+        .info_address = TEST_PAGE_SIZE,
+        .info = testInfo(FLAG_FOR_TEST_MMAP, 2 * TEST_PAGE_SIZE, bytes.len, 0),
+        .image = .{ .start = 4 * TEST_PAGE_SIZE, .end = 8 * TEST_PAGE_SIZE },
+        .heap = .{ .start = 8 * TEST_PAGE_SIZE, .end = 12 * TEST_PAGE_SIZE },
+        .managed_bytes = memory_bytes,
+    };
+    try std.testing.expect(!authority.permits(&allocator, start, end, true));
+    try authority.registerPciEcam(&allocator, allocation);
+    try authority.registerPciEcam(&allocator, allocation);
+    try std.testing.expect(authority.permits(&allocator, start, start + TEST_PAGE_SIZE, true));
+    try std.testing.expect(authority.permits(&allocator, end - TEST_PAGE_SIZE, end, true));
+    try std.testing.expect(!authority.permits(&allocator, start - TEST_PAGE_SIZE, start + TEST_PAGE_SIZE, true));
+    try std.testing.expect(!authority.permits(&allocator, end - TEST_PAGE_SIZE, end + TEST_PAGE_SIZE, true));
+    try std.testing.expect(!authority.permits(&allocator, start, end, false));
+    var replacement = allocation;
+    replacement.end_bus = 1;
+    try std.testing.expectError(error.PhysicalOwnershipConflict, authority.registerPciEcam(&allocator, replacement));
+    try std.testing.expectEqual(end, authority.pci_ecam.?.end);
+
+    try allocator.makeAvailable(.{ .base = start + TEST_PAGE_SIZE, .count = 1 });
+    try std.testing.expect(!authority.permits(&allocator, start, end, true));
+    try std.testing.expectError(error.PhysicalOwnershipConflict, authority.registerPciEcam(&allocator, allocation));
+    _ = allocator.allocateBetween(1, start + TEST_PAGE_SIZE, start + 2 * TEST_PAGE_SIZE).?;
+    try std.testing.expect(!authority.permits(&allocator, start, end, true));
+}
+
+test "MCFG authority registration rejects malformed allocations protected backing and conflicting RAM classes" {
+    const memory_bytes = 8 * mcfg.ECAM_BUS_BYTES;
+    const Allocator = frame_allocator.Fixed(memory_bytes, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 0, .count = Allocator.total_frames });
+    const allocation = mcfg.Allocation{ .base_address = 4 * mcfg.ECAM_BUS_BYTES, .segment_group = 0, .start_bus = 0, .end_bus = 0 };
+    const start = allocation.base_address;
+    var bytes: [48]u8 = undefined;
+    _ = appendEntry(&bytes, 0, start, mcfg.ECAM_BUS_BYTES, 2);
+    _ = appendEntry(&bytes, 24, start + 2 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, 2);
+    const original = KernelMappingAuthority{
+        .memory_map = handoff.multiboot2MemoryMap(&bytes, 24),
+        .info_address = TEST_PAGE_SIZE,
+        .info = testInfo(FLAG_FOR_TEST_MMAP, 2 * TEST_PAGE_SIZE, bytes.len, 0),
+        .image = .{ .start = 4 * TEST_PAGE_SIZE, .end = 8 * TEST_PAGE_SIZE },
+        .heap = .{ .start = 8 * TEST_PAGE_SIZE, .end = 12 * TEST_PAGE_SIZE },
+        .managed_bytes = memory_bytes,
+    };
+    for ([_]u32{ 1, 3, 4, 5, 7, 0, 99 }) |kind| {
+        _ = appendEntry(&bytes, 24, start + 2 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, kind);
+        var authority = original;
+        try std.testing.expectError(error.PhysicalOwnershipConflict, authority.registerPciEcam(&allocator, allocation));
+        try std.testing.expect(authority.pci_ecam == null);
+    }
+    _ = appendEntry(&bytes, 24, start + 2 * TEST_PAGE_SIZE, TEST_PAGE_SIZE, 2);
+    for (0..3) |protected| {
+        var authority = original;
+        const protected_span = PhysicalSpan{ .start = start + TEST_PAGE_SIZE, .end = start + 2 * TEST_PAGE_SIZE };
+        switch (protected) {
+            0 => authority.image = protected_span,
+            1 => authority.heap = protected_span,
+            else => authority.info_address = protected_span.start,
+        }
+        try std.testing.expectError(error.PhysicalOwnershipConflict, authority.registerPciEcam(&allocator, allocation));
+        try std.testing.expect(authority.pci_ecam == null);
+    }
+    const Attack = enum { zero, misaligned, other_segment, other_start_bus, reversed_bus, overflow };
+    for (std.enums.values(Attack)) |attack| {
+        var forged = allocation;
+        switch (attack) {
+            .zero => forged.base_address = 0,
+            .misaligned => forged.base_address += TEST_PAGE_SIZE,
+            .other_segment => forged.segment_group = 1,
+            .other_start_bus => {
+                forged.start_bus = 1;
+                forged.end_bus = 1;
+            },
+            .reversed_bus => forged.start_bus = 1,
+            .overflow => {
+                forged.base_address = std.math.maxInt(u64) & ~(mcfg.ECAM_BUS_BYTES - 1);
+                forged.end_bus = 1;
+            },
+        }
+        var authority = original;
+        try std.testing.expectError(error.InvalidRange, authority.registerPciEcam(&allocator, forged));
+        try std.testing.expect(authority.pci_ecam == null);
+    }
+}
+
+test "MCFG authority never treats native EFI reserved RAM as an ECAM device aperture" {
+    const Allocator = frame_allocator.Fixed(64 * TEST_PAGE_SIZE, TEST_PAGE_SIZE);
+    var storage: Allocator.Storage = undefined;
+    var allocator = Allocator.init(&storage);
+    try allocator.reserve(.{ .base = 0, .count = Allocator.total_frames });
+    // This aperture is above the allocator's managed range. EFI provenance must
+    // still exclude positively classified RAM despite its kind2 reservation.
+    const allocation = mcfg.Allocation{ .base_address = 4 * mcfg.ECAM_BUS_BYTES, .segment_group = 0, .start_bus = 0, .end_bus = 0 };
+    var bytes: [32]u8 = undefined;
+    _ = appendNativeEntry(&bytes, 0, allocation.base_address, mcfg.ECAM_BUS_BYTES, 2, 0);
+    const original = KernelMappingAuthority{
+        .memory_map = handoff.multiboot2MemoryMap(&bytes, 32),
+        .info_address = TEST_PAGE_SIZE,
+        .info = testInfo(FLAG_FOR_TEST_MMAP, 2 * TEST_PAGE_SIZE, bytes.len, 0),
+        .image = .{ .start = 4 * TEST_PAGE_SIZE, .end = 8 * TEST_PAGE_SIZE },
+        .heap = .{ .start = 8 * TEST_PAGE_SIZE, .end = 12 * TEST_PAGE_SIZE },
+        .managed_bytes = 64 * TEST_PAGE_SIZE,
+    };
+    var reserved = original;
+    try reserved.registerPciEcam(&allocator, allocation);
+    try std.testing.expect(reserved.permits(&allocator, allocation.base_address, allocation.base_address + TEST_PAGE_SIZE, true));
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 9, 10, 14 }) |firmware_type| {
+        _ = appendNativeEntry(&bytes, 0, allocation.base_address, mcfg.ECAM_BUS_BYTES, 2, firmware_type);
+        var authority = original;
+        try std.testing.expectError(error.PhysicalOwnershipConflict, authority.registerPciEcam(&allocator, allocation));
+        try std.testing.expect(authority.pci_ecam == null);
+        try std.testing.expect(!reserved.permits(&allocator, allocation.base_address, allocation.base_address + TEST_PAGE_SIZE, true));
+    }
 }
 
 const FLAG_FOR_TEST_MMAP: u32 = 1 << 6;

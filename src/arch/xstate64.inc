@@ -21,6 +21,10 @@
     clts
 .endif
 #endif
+    # Persistent prepared images initialize their reserved header bytes once.
+    # XSAVES overwrites XSTATE_BV and XCOMP_BV on every save; clearing them
+    # again adds a string-operation startup to every userspace syscall.
+.if \full || !\prepared
     leaq 512(\pointer), %rdi
     xorl %eax, %eax
     movl $8, %ecx
@@ -31,6 +35,7 @@
     movq %rax, 520(\pointer)
 .endif
 #endif
+.endif
     movl $XSTATE_MASK, %eax
     xorl %edx, %edx
 #ifdef ZIGOS_XSTATE_HOST_TEST

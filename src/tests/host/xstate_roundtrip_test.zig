@@ -22,7 +22,7 @@ test "prepared xstate assembly preserves complete kernel and userspace FP owners
     try std.testing.expect(model.verify(&inputs, &outputs));
 }
 
-test "wide xstate proof detects corruption of every upper register and allocation canary" {
+test "wide xstate proof detects corruption of every upper register, reserved header and canary" {
     var inputs: [3]Image = undefined;
     for (&inputs, 0..) |*input, owner| model.initialize(input, owner);
     var outputs = inputs;
@@ -30,6 +30,11 @@ test "wide xstate proof detects corruption of every upper register and allocatio
     for (&outputs) |*output| {
         for (0..16) |register| {
             const offset = 576 + register * 16;
+            output.state.image[offset] ^= 1;
+            try std.testing.expect(!model.verify(&inputs, &outputs));
+            output.state.image[offset] ^= 1;
+        }
+        for (528..576) |offset| {
             output.state.image[offset] ^= 1;
             try std.testing.expect(!model.verify(&inputs, &outputs));
             output.state.image[offset] ^= 1;

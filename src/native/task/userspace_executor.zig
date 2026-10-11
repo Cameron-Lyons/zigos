@@ -921,7 +921,8 @@ const RemoteSyscallHardware = struct {
     }
 };
 
-pub fn remoteSyscall(frame: *freestanding.isr.InterruptFrame) bool {
+// Keep the remote receipt/mailbox transaction out of the BSP entry prologue.
+pub noinline fn remoteSyscall(frame: *freestanding.isr.InterruptFrame) bool {
     if (comptime builtin.target.os.tag != .freestanding) return false;
     return remoteSyscallWithHardware(frame, RemoteSyscallHardware{});
 }

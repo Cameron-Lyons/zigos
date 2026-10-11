@@ -190,7 +190,7 @@ pub const inventory_layout = .{
     .heap_backs_inventory_on_freestanding = HEAP_BACKED_PCI_INVENTORY_ON_FREESTANDING,
 };
 
-pub const InitError = error{InvalidEcamAllocation};
+pub const InitError = error{InvalidEcamAllocation} || paging.DeviceMapError;
 pub const QuiesceError = error{
     MalformedCapabilityList,
     InterruptDisableFailed,
@@ -220,6 +220,8 @@ pub fn init(allocation: mcfg.Allocation) InitError!void {
     const last_address = std.math.add(u64, allocation.base_address, span - 1) catch
         return error.InvalidEcamAllocation;
     _ = std.math.cast(usize, last_address) orelse return error.InvalidEcamAllocation;
+
+    if (comptime builtin.target.os.tag == .freestanding) try paging.registerPciEcam(allocation);
 
     releaseBootInventory();
     ecam_allocation = allocation;
